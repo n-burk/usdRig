@@ -17,7 +17,7 @@ import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()
 
-from pxr import Gf, Sdf, Usd  # noqa: E402
+from pxr import Gf, Sdf, Usd, Vt  # noqa: E402
 
 import layerOpinionsModel as lom  # noqa: E402
 
@@ -706,6 +706,281 @@ def TestDeletingAWholeLayerGroupIgnoresItsLayerArcs():
            % list(root.subLayerPaths))
 
 
+def TestShorthandIsAccepted():
+    '''
+    The value column takes what anyone would type, not only exact usda:
+    each shorthand parses to the same value its usda spelling does.
+    '''
+    V = Sdf.ValueTypeNames
+    cases = [
+        (V.Token, "ik", "ik"),
+        (V.String, "hello world", "hello world"),
+        (V.Asset, "tex/bar.png", Sdf.AssetPath("tex/bar.png")),
+        (V.Bool, "false", False),
+        (V.Bool, "On", True),
+        (V.Float3, "4 5 6", Gf.Vec3f(4, 5, 6)),
+        (V.Float3, "4, 5, 6", Gf.Vec3f(4, 5, 6)),
+        (V.DoubleArray, "1, 2.5", [1.0, 2.5]),
+        (V.TokenArray, "a, b", ["a", "b"]),
+        (V.Matrix4d, " ".join(str(v) for v in
+                              [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 5, 6, 1]),
+         Gf.Matrix4d(1.0).SetTranslate(Gf.Vec3d(4, 5, 6))),
+    ]
+    for typeName, text, want in cases:
+        got = lom.ParseValue(typeName, text)
+        _Check(got == want, "%s %r parsed to %r, want %r"
+               % (typeName, text, got, want))
+    # Exact usda still means exactly what it says.
+    _Check(lom.ParseValue(V.String, '"quoted"') == "quoted",
+           "a quoted string is not quoted twice")
+
+
+def TestRefusalsAreOneLine():
+    '''
+    A refusal is a status line, not Sdf's multi-line parser dump; the
+    dump is kept in `detail` for the tooltip.
+    '''
+    try:
+        lom.ParseValue(Sdf.ValueTypeNames.Double, "not a number")
+    except lom.ValueParseError as error:
+        _Check("\n" not in str(error), "one line: %r" % str(error))
+        _Check(error.detail, "the parser's own diagnostics are kept")
+        return
+    raise AssertionError("garbage must still be refused")
+
+
+_PATH_STAGE = '''#usda 1.0
+def Xform "Asset"
+{
+    def Xform "Arm"
+    {
+        def Xform "Wrist"
+        {
+            double out = 1
+        }
+        def Xform "IK"
+        {
+            rel joints = [ </Asset/Arm/Wrist>, </Elsewhere> ]
+            double blend = 2
+            double blend.connect = </Asset/Arm/Wrist.out>
+        }
+    }
+}
+def "Elsewhere"
+{
+}
+'''
+
+
+def _PathStage():
+    layer = Sdf.Layer.CreateAnonymous("paths.usda")
+    layer.ImportFromString(_PATH_STAGE)
+    return Usd.Stage.Open(layer), layer
+
+
+def _PathRows(stage, layer):
+    groups = lom.OpinionGroups(stage.GetPrimAtPath("/Asset/Arm/IK"))
+    return {row.key: row for row in lom.WalkRows(
+        [r for g in groups if g.layer == layer for r in g.rows])}
+
+
+def TestTargetsReadRelativeToTheirPrim():
+    '''
+    A target reads relative to the prim that owns it -- including one
+    in another root prim, so `../../../Elsewhere` reads back the way it
+    was typed. The text shown is text the editor accepts back unchanged.
+    '''
+    stage, layer = _PathStage()
+    row = _PathRows(stage, layer)["joints"]
+    _Check(row.valueText == "[ <../Wrist>, <../../../Elsewhere> ]",
+           "shown relative: %r" % row.valueText)
+    lom.SetRowValue(row, row.valueText)
+    _Check(list(layer.GetRelationshipAtPath(
+        "/Asset/Arm/IK.joints").targetPathList.explicitItems)
+        == [Sdf.Path("/Asset/Arm/Wrist"), Sdf.Path("/Elsewhere")],
+        "and the shown text round-trips to the same targets")
+
+
+def TestRelativeTargetsAnchorToTheOwningPrim():
+    '''
+    Relative text resolves against the prim the relationship is on --
+    not the scratch prim it is parsed in -- bare or in <>, with `./`
+    accepted for a child.
+    '''
+    stage, layer = _PathStage()
+    edit = lom.SetRowValue(_PathRows(stage, layer)["joints"],
+                           "../Wrist, ./Child, <.blend>")
+    _Check(list(layer.GetRelationshipAtPath(
+        "/Asset/Arm/IK.joints").targetPathList.explicitItems)
+        == [Sdf.Path("/Asset/Arm/Wrist"), Sdf.Path("/Asset/Arm/IK/Child"),
+            Sdf.Path("/Asset/Arm/IK.blend")],
+        "anchored at /Asset/Arm/IK")
+    edit.Undo()
+    _Check(len(layer.GetRelationshipAtPath(
+        "/Asset/Arm/IK.joints").targetPathList.explicitItems) == 2,
+        "and undo puts the original targets back")
+
+
+def TestConnectionsAreTheirOwnRow():
+    '''
+    An attribute connection is shown, edited and removed as a row of
+    its own -- relative like a target -- and removing it leaves the
+    attribute's default alone.
+    '''
+    stage, layer = _PathStage()
+    rows = _PathRows(stage, layer)
+    row = rows.get("blend.connect")
+    _Check(row is not None and row.kind == "connection",
+           "the connection has a row: %s" % sorted(rows))
+    _Check(row.valueText == "[ <../Wrist.out> ]",
+           "shown relative: %r" % row.valueText)
+    lom.SetRowValue(row, "../Wrist.out, .blend2")
+    attr = layer.GetAttributeAtPath("/Asset/Arm/IK.blend")
+    _Check(list(attr.connectionPathList.explicitItems)
+           == [Sdf.Path("/Asset/Arm/Wrist.out"),
+               Sdf.Path("/Asset/Arm/IK.blend2")],
+           "retyped relative, anchored at the prim")
+    edit = lom.DeleteRow(_PathRows(stage, layer)["blend.connect"])
+    attr = layer.GetAttributeAtPath("/Asset/Arm/IK.blend")
+    _Check(not attr.HasInfo("connectionPaths") and attr.default == 2.0,
+           "removal takes the connection and keeps the default")
+    edit.Undo()
+    _Check(layer.GetAttributeAtPath(
+        "/Asset/Arm/IK.blend").HasInfo("connectionPaths"),
+        "undo restores the connection")
+
+
+def TestTargetCandidatesAreNearestFirstAndRelative():
+    stage, layer = _PathStage()
+    prims = lom.TargetCandidates(stage, "/Asset/Arm/IK")
+    _Check(prims[:2] == ["<..>", "<../Wrist>"],
+           "parent and siblings first, relative: %s" % prims)
+    _Check("<../../../Elsewhere>" in prims
+           and prims.index("<../../../Elsewhere>")
+           > prims.index("<../Wrist>"),
+           "another root prim is reachable, after the near ones: %s"
+           % prims)
+    props = lom.TargetCandidates(stage, "/Asset/Arm/IK", properties=True)
+    _Check("<../Wrist.out>" in props,
+           "connections are offered attributes: %s" % props)
+
+
+def TestInlineArcsAndSublayersTakeBarePaths():
+    '''
+    A reference or sublayer typed without its @@ is taken when it
+    plainly names a layer (a file extension), and a lone absolute prim
+    path is an internal reference.
+    '''
+    ref = lom.ParseListOpItem("references", "references",
+                              "./hand.usda</Hand> (offset = 2)")
+    _Check(ref.assetPath == "./hand.usda" and ref.primPath == "/Hand"
+           and ref.layerOffset == Sdf.LayerOffset(2),
+           "bare external reference: %s" % ref)
+    internal = lom.ParseListOpItem("references", "references", "/Class")
+    _Check(internal.assetPath == "" and internal.primPath == "/Class",
+           "bare internal reference: %s" % internal)
+    inherit = lom.ParseListOpItem("inheritPaths", "inherits", "/_class_Ctrl")
+    _Check(inherit == Sdf.Path("/_class_Ctrl"), "bare inherit: %s" % inherit)
+    _Check(lom.ParseSublayer("./base.usda")[0] == "./base.usda",
+           "bare sublayer")
+    _Check(lom.ParseRelocate("/A/B: /A/C")
+           == (Sdf.Path("/A/B"), Sdf.Path("/A/C")), "bare relocate")
+
+
+def TestHeavyValuesAreSummarized():
+    '''
+    A heavy array is shown as its size and first items -- never
+    formatted whole, which on a real mesh cost seconds per rebuild and
+    per paint -- and is not edited inline. A small array still is, and
+    the full value stays reachable on demand.
+    '''
+    layer = Sdf.Layer.CreateAnonymous("heavy.usda")
+    prim = Sdf.CreatePrimInLayer(layer, "/Mesh")
+    prim.specifier = Sdf.SpecifierDef
+    n = lom.MAX_INLINE_ITEMS + 1
+    big = Sdf.AttributeSpec(prim, "points", Sdf.ValueTypeNames.Point3fArray)
+    big.default = Vt.Vec3fArray(n, Gf.Vec3f(1, 2, 3))
+    small = Sdf.AttributeSpec(prim, "ws", Sdf.ValueTypeNames.DoubleArray)
+    small.default = Vt.DoubleArray([0.5] * 8)
+    stage = Usd.Stage.Open(layer)
+    rows = {r.key: r for r in
+            lom.OpinionGroups(stage.GetPrimAtPath("/Mesh"))[0].rows}
+
+    heavy = rows["points"]
+    _Check(heavy.summarized and not heavy.editable,
+           "a heavy array is a summary, not an inline edit")
+    _Check(heavy.valueText.startswith("point3f[%s]" % "{:,}".format(n))
+           and heavy.valueText.endswith(", ...]")
+           and len(heavy.valueText) < 200,
+           "shown as size plus a preview: %r" % heavy.valueText)
+    full = lom.FullValueText(heavy)
+    _Check(lom.ParseValue(Sdf.ValueTypeNames.Point3fArray, full)
+           == big.default, "and the full value is there on demand")
+
+    light = rows["ws"]
+    _Check(light.editable and not light.summarized,
+           "a small array is still shown and edited whole: %r"
+           % light.valueText)
+
+
+_VARIANT_STAGE = '''#usda 1.0
+def "Asset" (
+    variants = { string look = "a" }
+    prepend variantSets = "look"
+)
+{
+    variantSet "look" = {
+        "a" {
+            def "Geo"
+            {
+                def "Body"
+                {
+                    rel material:binding = </Asset/Material/Old>
+                }
+            }
+        }
+    }
+    def "Material"
+    {
+        def "Cloth"
+        {
+        }
+        def "Old"
+        {
+        }
+    }
+}
+'''
+
+
+def TestRelativeTargetsInsideAVariant():
+    '''
+    An opinion authored inside a variant has a spec path that names the
+    variant, which a target may not. Relative text still anchors at the
+    prim -- `../../Material/Cloth` from Body is /Asset/Material/Cloth,
+    not something off the root -- and the picker still offers paths.
+    '''
+    layer = Sdf.Layer.CreateAnonymous("variant.usda")
+    layer.ImportFromString(_VARIANT_STAGE)
+    stage = Usd.Stage.Open(layer)
+    prim = stage.GetPrimAtPath("/Asset/Geo/Body")
+    rows = {r.key: r for g in lom.OpinionGroups(prim)
+            for r in lom.WalkRows(g.rows)}
+    row = rows["material:binding"]
+    _Check(row.specPath.ContainsPrimVariantSelection(),
+           "the fixture authors the target inside the variant: %s"
+           % row.specPath)
+    _Check(row.valueText == "[ <../../Material/Old> ]",
+           "shown relative to the prim: %r" % row.valueText)
+    lom.SetRowValue(row, "../../Material/Cloth")
+    _Check(prim.GetRelationship("material:binding").GetTargets()
+           == [Sdf.Path("/Asset/Material/Cloth")],
+           "anchored at /Asset/Geo/Body, not off the root: %s"
+           % prim.GetRelationship("material:binding").GetTargets())
+    _Check("<../../Material/Cloth>" in lom.TargetCandidates(
+        stage, "/Asset/Geo/Body"), "and the picker offers it")
+
+
 def main():
     groups = [
         ("enumeration", TestEnumeration),
@@ -739,6 +1014,18 @@ def main():
          TestArcTextIsParsedNotEvaluated),
         ("deleting a group ignores its layer arcs",
          TestDeletingAWholeLayerGroupIgnoresItsLayerArcs),
+        ("shorthand is accepted", TestShorthandIsAccepted),
+        ("refusals are one line", TestRefusalsAreOneLine),
+        ("targets read relative", TestTargetsReadRelativeToTheirPrim),
+        ("relative targets anchor to the owner",
+         TestRelativeTargetsAnchorToTheOwningPrim),
+        ("connections are their own row", TestConnectionsAreTheirOwnRow),
+        ("target candidates", TestTargetCandidatesAreNearestFirstAndRelative),
+        ("bare arc and sublayer paths",
+         TestInlineArcsAndSublayersTakeBarePaths),
+        ("heavy values are summarized", TestHeavyValuesAreSummarized),
+        ("relative targets inside a variant",
+         TestRelativeTargetsInsideAVariant),
     ]
     for name, fn in groups:
         fn()

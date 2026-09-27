@@ -48,22 +48,53 @@ RigExecTriggerLeafToken()
     return leaf;
 }
 
-namespace {
-
-// A dirty that drives live evaluation: it touches the rigExec/time trigger
-// leaf on an ACTIVE rig root (rigAdapter.cpp). The root check is what keeps
-// this from re-entering: binding-epoch swaps dirty outputs universally, and
-// a universal locator intersects everything.
-bool
-_IsTimeTriggerDirty(
-    const HdSceneIndexObserver::DirtiedPrimEntries::value_type &entry)
+const TfToken &
+RigExecStageKeyLeafToken()
 {
-    static const HdDataSourceLocator trigger(
-        RigExecTriggerContainerToken(), RigExecTriggerLeafToken());
-    return entry.dirtyLocators.Intersects(trigger) &&
-        RigExecImagingRegistry::GetInstance().IsActiveRigRoot(
-            entry.primPath);
+    static const TfToken leaf("stageKey");
+    return leaf;
 }
+
+uint64_t
+RigExecStageKeyFromAddedEntries(
+    const HdSceneIndexBaseRefPtr &input,
+    const HdSceneIndexObserver::AddedPrimEntries &entries)
+{
+    if (!input) {
+        return 0;
+    }
+    for (const auto &entry : entries) {
+        // Top-level prims only: the adapter contributes the leaf nowhere
+        // else, so a descendant costs one element-count compare.
+        if (entry.primPath.GetPathElementCount() != 1 ||
+            !entry.primPath.IsPrimPath()) {
+            continue;
+        }
+        const HdSceneIndexPrim prim = input->GetPrim(entry.primPath);
+        if (!prim.dataSource) {
+            continue;
+        }
+        const HdContainerDataSourceHandle rigExec =
+            HdContainerDataSource::Cast(
+                prim.dataSource->Get(RigExecTriggerContainerToken()));
+        if (!rigExec) {
+            continue;
+        }
+        const HdTypedSampledDataSource<uint64_t>::Handle leaf =
+            HdTypedSampledDataSource<uint64_t>::Cast(
+                rigExec->Get(RigExecStageKeyLeafToken()));
+        if (!leaf) {
+            continue;
+        }
+        const uint64_t key = leaf->GetTypedValue(0.0f);
+        if (key != 0) {
+            return key;
+        }
+    }
+    return 0;
+}
+
+namespace {
 
 // The frame the trigger leaf names, pulled from upstream. False when the
 // leaf is absent or unreadable, in which case the caller leaves the
@@ -328,7 +359,7 @@ RigExecResultsSceneIndex::RigExecResultsSceneIndex(
     // believe it announced them or a later drop to zero sends no removals
     // and the stale guides survive downstream.
     if (const RigExecImagingSnapshotConstPtr snapshot =
-            _store ? _store->Get() : nullptr) {
+            _CurrentSnapshot()) {
         for (const auto &[path, published] : snapshot->prims) {
             if (published.hasXform) {
                 _announcedDrivenXforms.insert(path);
@@ -343,6 +374,15 @@ RigExecResultsSceneIndex::RigExecResultsSceneIndex(
             _RefreshAnnouncedVolumeGuides(path);
         }
     }
+}
+
+RigExecResultsSceneIndex::~RigExecResultsSceneIndex()
+{
+    // Identity only: the directory forgets the record by pointer, and the
+    // weak pointers it holds still resolve while this body runs. No context
+    // lock is held on any path that destroys a chain (contexts and the
+    // directory hold chains weakly), so the release may deactivate.
+    RigExecImagingRegistry::ReleaseChain(this);
 }
 
 namespace {
@@ -1641,7 +1681,7 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
             _GetInputSceneIndex()->GetPrim(primPath.GetParentPath());
         if (parent.dataSource) {
             if (const RigExecImagingSnapshotConstPtr snapshot =
-                    _store->Get()) {
+                    _CurrentSnapshot()) {
                 const auto it =
                     snapshot->prims.find(primPath.GetParentPath());
                 if (it != snapshot->prims.end() && it->second.hasGuides &&
@@ -1676,7 +1716,7 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
             _GetInputSceneIndex()->GetPrim(primPath.GetParentPath());
         if (parent.dataSource) {
             if (const RigExecImagingSnapshotConstPtr snapshot =
-                    _store->Get()) {
+                    _CurrentSnapshot()) {
                 const auto it =
                     snapshot->prims.find(primPath.GetParentPath());
                 if (it != snapshot->prims.end() &&
@@ -1712,7 +1752,7 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
             _GetInputSceneIndex()->GetPrim(primPath.GetParentPath());
         if (parent.dataSource) {
             if (const RigExecImagingSnapshotConstPtr snapshot =
-                    _store->Get()) {
+                    _CurrentSnapshot()) {
                 const auto it =
                     snapshot->prims.find(primPath.GetParentPath());
                 if (it != snapshot->prims.end() &&
@@ -1742,7 +1782,7 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
     if (!prim.dataSource) {
         return prim;
     }
-    const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
     if (!snapshot) {
         return prim;
     }
@@ -1829,7 +1869,7 @@ RigExecResultsSceneIndex::GetChildPrimPaths(const SdfPath &primPath) const
 {
     SdfPathVector children =
         _GetInputSceneIndex()->GetChildPrimPaths(primPath);
-    const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
     if (!snapshot) {
         return children;
     }
@@ -1888,7 +1928,7 @@ constexpr uint8_t _GuideConeBit = 2u;
 std::vector<uint8_t>
 RigExecResultsSceneIndex::_DesiredGuideTopology(const SdfPath &path) const
 {
-    const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
     if (!snapshot) {
         return {};
     }
@@ -1930,7 +1970,7 @@ RigExecResultsSceneIndex::_RefreshAnnouncedGuides(const SdfPath &path)
 TfToken
 RigExecResultsSceneIndex::_DesiredControlGuideType(const SdfPath &path) const
 {
-    const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
     if (!snapshot) {
         return TfToken();
     }
@@ -1972,7 +2012,7 @@ RigExecResultsSceneIndex::_RefreshAnnouncedControlGuide(const SdfPath &path)
 std::vector<TfToken>
 RigExecResultsSceneIndex::_DesiredVolumeGuideTypes(const SdfPath &path) const
 {
-    const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
     if (!snapshot) {
         return {};
     }
@@ -2283,7 +2323,7 @@ RigExecResultsSceneIndex::_ResolveAssetRootWorld(
 bool
 RigExecResultsSceneIndex::_IsDrivenXform(const SdfPath &path) const
 {
-    const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
+    const RigExecImagingSnapshotConstPtr snapshot = _CurrentSnapshot();
     if (!snapshot) {
         return false;
     }
@@ -2353,7 +2393,7 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                     _announcedWeightOverlays.count(entry.path) != 0;
                 bool isOverlaid = false;
                 if (const RigExecImagingSnapshotConstPtr snapshot =
-                        _store ? _store->Get() : nullptr) {
+                        _CurrentSnapshot()) {
                     const auto it = snapshot->prims.find(entry.path);
                     isOverlaid = it != snapshot->prims.end() &&
                                  it->second.hasWeightOverlay &&
@@ -2660,6 +2700,77 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
 }
 
 void
+RigExecResultsSceneIndex::SetStore(std::shared_ptr<RigExecSnapshotStore> store)
+{
+    const std::shared_ptr<RigExecSnapshotStore> previous = GetStore();
+    if (previous == store) {
+        return;
+    }
+    const RigExecImagingSnapshotConstPtr before =
+        previous ? previous->Get() : nullptr;
+    std::atomic_store(&_store, std::move(store));
+    const RigExecImagingSnapshotConstPtr after = _CurrentSnapshot();
+    // Everything either generation publishes is structural across a store
+    // swap: the two stores describe different stages, so nothing about a
+    // prim's previous overlay can be assumed to survive. Reset boundaries
+    // ride along exactly as a publication diffs them.
+    std::map<SdfPath, uint8_t> changes;
+    for (const RigExecImagingSnapshotConstPtr &snapshot : {before, after}) {
+        if (!snapshot) {
+            continue;
+        }
+        for (const auto &entry : snapshot->prims) {
+            changes[entry.first] |= RigExecChangeStructural;
+        }
+        for (const SdfPath &path : snapshot->xformResetPaths) {
+            changes[path] |= RigExecChangeXform;
+        }
+    }
+    RigExecPublishedDirtyVector dirtied;
+    dirtied.reserve(changes.size());
+    for (const auto &[path, change] : changes) {
+        dirtied.push_back({path, change});
+    }
+    NotifyGenerationPublished(dirtied);
+}
+
+void
+RigExecResultsSceneIndex::_BindToStageContext(
+    const HdSceneIndexObserver::AddedPrimEntries &entries)
+{
+    const uint64_t key =
+        RigExecStageKeyFromAddedEntries(_GetInputSceneIndex(), entries);
+    if (key == 0 || key == GetContextKey()) {
+        return;
+    }
+    // The directory seeds this chain from the context (store, scopes,
+    // deltas, epoch) and records the key; a chain it does not know -- a
+    // hand-built one -- stays exactly as it was built.
+    RigExecImagingRegistry::BindChain(this, key);
+}
+
+bool
+RigExecResultsSceneIndex::_IsTimeTriggerDirty(
+    const HdSceneIndexObserver::DirtiedPrimEntries::value_type &entry) const
+{
+    // A dirty that drives live evaluation: it touches the rigExec/time
+    // trigger leaf on an ACTIVE rig root of THIS chain's context
+    // (rigAdapter.cpp). The root check is what keeps this from re-entering:
+    // binding-epoch swaps dirty outputs universally, and a universal
+    // locator intersects everything. The locator test runs first, so the
+    // xform-preview dirties sent while a context holds its lock never
+    // reach the context lookup.
+    static const HdDataSourceLocator trigger(
+        RigExecTriggerContainerToken(), RigExecTriggerLeafToken());
+    if (!entry.dirtyLocators.Intersects(trigger)) {
+        return false;
+    }
+    const RigExecImagingRegistry::Ptr context =
+        RigExecImagingRegistry::ForKey(GetContextKey());
+    return context && context->IsActiveRigRoot(entry.primPath);
+}
+
+void
 RigExecResultsSceneIndex::_PrimsAdded(
     const HdSceneIndexBase &,
     const HdSceneIndexObserver::AddedPrimEntries &entries)
@@ -2671,6 +2782,9 @@ RigExecResultsSceneIndex::_PrimsAdded(
     // that, a later observer traverses N guides we believe we never
     // announced, and the next drop to zero emits no removals at all.
     if (!_IsObserved()) {
+        // Binding runs unobserved too: the store swap's history refresh is
+        // exactly the unobserved branch of NotifyGenerationPublished.
+        _BindToStageContext(entries);
         for (const auto &entry : entries) {
             _RefreshDrivenXform(entry.primPath);
             _RefreshAnnouncedGuides(entry.primPath);
@@ -2680,6 +2794,11 @@ RigExecResultsSceneIndex::_PrimsAdded(
         return;
     }
     _SendPrimsAdded(entries);
+    // Chain -> context binding (registry.h): the first population of a
+    // stage, or a stage replaced under the same engine, names the context
+    // this chain serves. After the forward, so the store swap's structural
+    // notices and guide announcements follow their parents downstream.
+    _BindToStageContext(entries);
     // Eager activation for hosts with no explicit call (usdrecord): a noted
     // rig root appearing here means populate sighted a rig nobody activated.
     // Pulling its trigger leaf forces the adapter to build the rig's data --
@@ -2692,9 +2811,10 @@ RigExecResultsSceneIndex::_PrimsAdded(
     // re-add while active still pulls, but the activation it forces is a
     // no-op inside EnsureActivated, so live authoring neither recompiles
     // nor republishes here.
+    const RigExecImagingRegistry::Ptr context =
+        RigExecImagingRegistry::ForKey(GetContextKey());
     for (const auto &entry : entries) {
-        if (!RigExecImagingRegistry::GetInstance().IsNotedRigRoot(
-                entry.primPath)) {
+        if (!context || !context->IsNotedRigRoot(entry.primPath)) {
             continue;
         }
         UsdTimeCode time;
@@ -2873,9 +2993,13 @@ RigExecResultsSceneIndex::_PrimsDirtied(
         }
         UsdTimeCode time;
         if (_TriggerTime(_GetInputSceneIndex(), entry.primPath, &time)) {
-            // One SetTime evaluates every session: the first readable
-            // trigger names the frame for all of them.
-            RigExecImagingRegistry::GetInstance().SetTime(time);
+            // One SetTime evaluates every session of this chain's context:
+            // the first readable trigger names the frame for all of them.
+            // Other stages' contexts keep their own clocks.
+            if (const RigExecImagingRegistry::Ptr context =
+                    RigExecImagingRegistry::ForKey(GetContextKey())) {
+                context->SetTime(time);
+            }
             break;
         }
     }

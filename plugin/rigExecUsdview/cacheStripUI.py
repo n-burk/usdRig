@@ -21,6 +21,14 @@ import sys
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import sessionRegistry
+
+try:
     import cacheStripModel
     import cacheStripPanel
 except ImportError:  # pragma: no cover - plugin path, not test path
@@ -83,17 +91,21 @@ class _StripWidget(QtWidgets.QWidget):
 
 class CacheStripPanel(QtWidgets.QDialog):
 
-    _instance = None
+    # One strip per usdview session, filed under its main window: several
+    # sessions can share this module in one process, and each strip reads
+    # its own session's stage through its own container.
+    _sessions = sessionRegistry.SessionRegistry("cache strips")
 
     @classmethod
     def GetInstance(cls, usdviewApi, controller=None):
-        if cls._instance is None:
-            cls._instance = cls(usdviewApi, controller)
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi, controller))
         else:
-            cls._instance._api = usdviewApi
+            panel._api = usdviewApi
             if controller is not None:
-                cls._instance._controller = controller
-        return cls._instance
+                panel._controller = controller
+        return panel
 
     def __init__(self, usdviewApi, controller=None, parent=None):
         super(CacheStripPanel, self).__init__(

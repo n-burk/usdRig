@@ -24,6 +24,14 @@ if __name__ != "__main__":
 import pickerModel
 import pickerScene
 
+try:
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import sessionRegistry
+
 
 _DIM = 0.22
 
@@ -409,15 +417,18 @@ def _load_font():
 class PickerPanel(QtWidgets.QDialog):
     """Dockable-ish dialog holding one tab per picker panel."""
 
-    _instance = None
+    # One panel per usdview session, filed under its main window: several
+    # sessions can share this module in one process.
+    _sessions = sessionRegistry.SessionRegistry("picker panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi):
-        if cls._instance is None:
-            cls._instance = cls(usdviewApi)
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi))
         else:
-            cls._instance._api = usdviewApi
-        return cls._instance
+            panel._api = usdviewApi
+        return panel
 
     def __init__(self, usdviewApi, parent=None):
         super(PickerPanel, self).__init__(parent or usdviewApi.qMainWindow)
@@ -606,8 +617,9 @@ class PickerPanel(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         # Revoke before Qt deletes the C++ side, or the notice fires into
-        # a dead widget. `_instance` is deliberately kept: reopening goes
-        # through `OpenPickerPanel` -> `Reload`, which re-observes.
+        # a dead widget. The session's panel is deliberately kept:
+        # reopening goes through `OpenPickerPanel` -> `Reload`, which
+        # re-observes.
         if self._noticeKey is not None:
             self._noticeKey.Revoke()
             self._noticeKey = None
@@ -879,7 +891,7 @@ class PickerPanel(QtWidgets.QDialog):
         """
         try:
             import gizmoUI
-            controller = gizmoUI.GetController()
+            controller = gizmoUI.GetController(self._api)
             if controller is None:
                 return
             controller.SetTool({

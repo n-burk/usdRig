@@ -21,7 +21,8 @@ if [ ${#TESTS[@]} -eq 0 ]; then
            test_graph_screen test_layer_opinions_model
            test_composition_arcs_model test_gizmo_preview
            test_touchpose_model test_gizmo_marquee
-           test_picker_scene test_picker_layout)
+           test_picker_scene test_picker_layout
+           test_imaging_handle test_session_state)
 fi
 
 # Only the tests listed here read argv[1], to Plug-register the generated

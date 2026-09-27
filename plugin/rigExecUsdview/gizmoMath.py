@@ -27,6 +27,14 @@ from collections import OrderedDict
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom
 
+try:
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import sessionRegistry
+
 ROTATION_ORDERS = ("XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX")
 
 _AXES = (Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 1, 0), Gf.Vec3d(0, 0, 1))
@@ -265,11 +273,36 @@ class _EvalContext(object):
         return self._xformCache
 
 
-# The MemoScope currently open, or None. See MemoScope.
-_ambientScope = None
+# The MemoScopes open on the call stack, innermost last. Not anybody's
+# state between calls: a scope is only ever open for the duration of a
+# `with` block. Each serves only the stage it was opened for (see MemoScope),
+# so a scope one session opened can never answer another session's stage --
+# the same prim paths in two stages are exactly what a shared memo would mix
+# up.
+_openScopes = []
 
 
-def _Context(cache, time):
+def _AmbientScope(prim):
+    """The innermost open MemoScope that serves `prim`'s stage, or None."""
+    if not _openScopes:
+        return None
+    stage = None
+    for scope in reversed(_openScopes):
+        if scope.stage is None:
+            return scope
+        if stage is None:
+            if prim is None:
+                continue
+            try:
+                stage = prim.GetStage()
+            except Exception:
+                return None
+        if scope.stage == stage:
+            return scope
+    return None
+
+
+def _Context(cache, time, prim=None):
     """
     The evaluation context for a call: `cache` if it already is one, a
     throwaway around it otherwise.
@@ -277,6 +310,9 @@ def _Context(cache, time):
     This is what keeps every entry point callable exactly as before --
     with no context, with None, or with the plain dict that _frameCache
     used to be, which then goes on holding the frames.
+
+    `prim` is the prim the call is about; an open MemoScope bound to a
+    stage shares its context only with calls about that stage.
     """
     if isinstance(cache, _EvalContext):
         # None of the memos key on time -- a context IS one time code --
@@ -287,7 +323,7 @@ def _Context(cache, time):
                 "gizmo evaluation context built for time %s reused at %s"
                 % (cache.time, time))
         return cache
-    scope = _ambientScope
+    scope = _AmbientScope(prim)
     if scope is not None:
         shared = scope.Context(time, cache)
         if shared is not None:
@@ -319,11 +355,17 @@ class MemoScope(object):
     a throwaway context exactly as it would outside the scope: the scope
     is a convenience and never a reason to answer from the wrong time,
     which is the contract _Context enforces for an explicit context.
+
+    `stage` binds the scope to one stage: only calls about prims of that
+    stage share its context. Several usdview sessions can run in one
+    process, and a memo keyed by prim path must never answer for another
+    session's stage. Without a stage the scope serves any call, as it
+    always did.
     """
 
-    def __init__(self):
+    def __init__(self, stage=None):
+        self.stage = stage
         self._context = None
-        self._previous = None
 
     def Context(self, time, cache):
         """The shared context for `time`, or None when a call cannot use it."""
@@ -338,14 +380,16 @@ class MemoScope(object):
         return ctx
 
     def __enter__(self):
-        global _ambientScope
-        self._previous = _ambientScope
-        _ambientScope = self
+        _openScopes.append(self)
         return self
 
     def __exit__(self, *args):
-        global _ambientScope
-        _ambientScope = self._previous
+        # Removed by identity, not popped: exits always nest, but a scope
+        # that is not on top must still never be left behind.
+        for index in range(len(_openScopes) - 1, -1, -1):
+            if _openScopes[index] is self:
+                del _openScopes[index]
+                break
         self._context = None
         return False
 
@@ -581,7 +625,8 @@ def NoticeAffectsTarget(resyncedPaths, changedPaths, targetPath,
     return False
 
 
-# Uncommitted manipulation values, by attribute path: {Sdf.Path: value}.
+# Uncommitted manipulation values, per STAGE, by attribute path:
+# {stage: {Sdf.Path: value}}.
 #
 # A drag in progress is not authored (see Writer and the design note at
 # docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md), so
@@ -591,26 +636,90 @@ def NoticeAffectsTarget(resyncedPaths, changedPaths, targetPath,
 # the evaluator, and both sides reading the same place is what keeps the
 # manipulator on the geometry it is moving.
 #
-# Module-level, like _publishedControlFrameReader above it, because the frame
-# maths is a tree of free functions that no drag object is threaded through.
+# Module-level because the frame maths is a tree of free functions that no
+# drag object is threaded through -- but keyed by the stage the values belong
+# to, because several usdview sessions can share this module in one process
+# and the same prim path in two of their stages is two different attributes.
+# A read only ever sees its own stage's values. The None key holds values
+# installed with no stage (SetPreviewValues(values) as it was always called),
+# which stand in for every stage exactly as before.
 _previewValues = {}
 
 
-def SetPreviewValues(values):
-    """Install the uncommitted values; {} during normal operation."""
-    global _previewValues
-    _previewValues = dict(values) if values else {}
+def _PreviewBucket(stage):
+    """The {path: value} map for `stage`, created on first use."""
+    bucket = _previewValues.get(stage)
+    if bucket is None:
+        bucket = {}
+        _previewValues[stage] = bucket
+    return bucket
 
 
-def PreviewValues():
-    return dict(_previewValues)
+def _DropFromPreview(stage, paths):
+    bucket = _previewValues.get(stage)
+    if bucket is None:
+        return
+    for path in paths:
+        bucket.pop(path, None)
+    if not bucket:
+        del _previewValues[stage]
+
+
+def SetPreviewValues(values, stage=None):
+    """
+    Install `stage`'s uncommitted values; {} drops them.
+
+    Without a stage, this is the old whole-process call: {} drops every
+    preview, and a non-empty map replaces every preview with values that
+    stand in for any stage.
+    """
+    if stage is None:
+        _previewValues.clear()
+        if values:
+            _previewValues[None] = dict(values)
+        return
+    if values:
+        _previewValues[stage] = dict(values)
+    else:
+        _previewValues.pop(stage, None)
+
+
+def SetPreviewValue(path, value, stage=None):
+    """Add one uncommitted value for `stage` (None: for every stage)."""
+    _PreviewBucket(stage)[path] = value
+
+
+def PreviewValues(stage=None):
+    """
+    `stage`'s uncommitted values (plus any installed with no stage), or,
+    without a stage, every uncommitted value in the process.
+    """
+    if stage is None:
+        merged = {}
+        for bucket in _previewValues.values():
+            merged.update(bucket)
+        return merged
+    merged = dict(_previewValues.get(None, {}))
+    merged.update(_previewValues.get(stage, {}))
+    return merged
 
 
 def _Previewed(attr):
-    """The uncommitted value for `attr`, or None."""
+    """The uncommitted value for `attr` in ITS stage, or None."""
     if not _previewValues or not attr:
         return None
-    return _previewValues.get(attr.GetPath())
+    path = attr.GetPath()
+    stage = None
+    for key, bucket in _previewValues.items():
+        if path not in bucket:
+            continue
+        if key is None:
+            return bucket[path]
+        if stage is None:
+            stage = attr.GetStage()
+        if key == stage:
+            return bucket[path]
+    return None
 
 
 def _ScalarAvarValue(prim, name, time):
@@ -716,7 +825,7 @@ def InterveningXform(prim, time, rigRoot=None, _ctx=None):
     from the anchor entirely -- again matching the evaluator, which
     reports that case rather than guessing at it.
     """
-    _ctx = _Context(_ctx, time)
+    _ctx = _Context(_ctx, time, prim)
     rigRoot = FindRigRoot(prim, _ctx) if rigRoot is None else rigRoot
     if rigRoot is None:
         return Gf.Matrix4d(1.0)
@@ -752,7 +861,7 @@ def RestSpace(prim, time, _ctx=None):
     keep. Orthonormalizing the local factor first is what keeps an
     invalid ancestor's NaN from being scrubbed by the multiply.
     """
-    _ctx = _Context(_ctx, time)
+    _ctx = _Context(_ctx, time, prim)
 
     def Compute():
         rigRoot = FindRigRoot(prim, _ctx)
@@ -804,7 +913,7 @@ def _ComputedSpace(prim, name, time, solverPosed, visiting=None,
     enters `visiting` after the memo has missed, and only enters the
     memo once its computation has RETURNED, so no key is ever in both.
     """
-    ctx = _Context(frameCache, time)
+    ctx = _Context(frameCache, time, prim)
     key = (prim.GetPath(), name)
     if key in ctx.spaces:
         return Gf.Matrix4d(ctx.spaces[key])
@@ -974,13 +1083,53 @@ def _RefuseBothModes(frames, message):
     return frames
 
 
-_publishedControlFrameReader = None
+# The hosts' snapshot readers, one per usdview session: (stage, path, time)
+# -> matrix/None. Each reader answers for its own session's stage only and
+# None for any other, so a read asks them all and takes the answer; with the
+# same prim path in two sessions' stages, only the reader whose stage it is
+# answers. Filed under the session's main window, and dropped with it.
+_publishedControlFrameReaders = sessionRegistry.SessionRegistry(
+    "gizmoMath published control frame readers")
+
+# A reader installed with no session: the old one-reader-per-process call,
+# still what a headless caller (tests/python/test_gizmo_math.py) makes.
+_keylessControlFrameReader = None
 
 
-def SetPublishedControlFrameReader(reader):
-    """Install the host's snapshot reader: (stage, path, time) -> matrix/None."""
-    global _publishedControlFrameReader
-    _publishedControlFrameReader = reader
+def SetPublishedControlFrameReader(reader, session=None):
+    """
+    Install `session`'s snapshot reader: (stage, path, time) -> matrix/None.
+
+    `session` is the usdview api (or its main window) the reader belongs
+    to; None removes it. Without a session, installs the one keyless
+    reader, as this always did.
+    """
+    global _keylessControlFrameReader
+    if session is None:
+        _keylessControlFrameReader = reader
+        return
+    if reader is None:
+        _publishedControlFrameReaders.Pop(session)
+    else:
+        _publishedControlFrameReaders.Set(session, reader)
+
+
+def _HasPublishedControlFrameReader():
+    return (_keylessControlFrameReader is not None or
+            len(_publishedControlFrameReaders) > 0)
+
+
+def _ReadPublishedControlFrame(stage, path, time):
+    """The published frame of `path` in `stage`, from whichever session's
+    reader owns that stage; None when none does."""
+    for reader in _publishedControlFrameReaders.Values():
+        matrix = reader(stage, path, time)
+        if matrix is not None:
+            return matrix
+    reader = _keylessControlFrameReader
+    if reader is not None:
+        return reader(stage, path, time)
+    return None
 
 
 def ComputeRigFrames(stage, prim, time, solverPosed=None, _frameCache=None):
@@ -994,7 +1143,7 @@ def ComputeRigFrames(stage, prim, time, solverPosed=None, _frameCache=None):
     dict is still accepted and is still used as the frame memo, so the
     older contract holds for anything that passes one.
     """
-    ctx = _Context(_frameCache, time)
+    ctx = _Context(_frameCache, time, prim)
     memo = ctx.frames
     if prim.GetPath() in memo:
         cached = memo[prim.GetPath()]
@@ -1062,11 +1211,11 @@ def _PreferPublishedFrame(stage, prim, time, solverPosed, frames, ctx):
     no reader at all; every one of those falls back to the composition,
     which is the behaviour that was correct for them all along.
     """
-    if _publishedControlFrameReader is None or not solverPosed:
+    if not solverPosed or not _HasPublishedControlFrameReader():
         return frames
     if prim.GetPath() not in solverPosed:
         return frames
-    published = _publishedControlFrameReader(stage, prim.GetPath(), time)
+    published = _ReadPublishedControlFrame(stage, prim.GetPath(), time)
     if published is None:
         return frames
     published = Gf.Matrix4d(published)
@@ -1098,8 +1247,7 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
         # The adjustment scope depends on preceding point revisions. Its
         # cached native frame is the authority; authored USD alone cannot
         # reconstruct it without evaluating those revisions a second time.
-        matrix = (_publishedControlFrameReader(stage, prim.GetPath(), time)
-                  if _publishedControlFrameReader is not None else None)
+        matrix = _ReadPublishedControlFrame(stage, prim.GetPath(), time)
         if matrix is None:
             return _RefuseBothModes(
                 frames,
@@ -1372,7 +1520,7 @@ class Writer(object):
             return
         path = attr.GetPath()
         self._pending[path] = value
-        _previewValues[path] = value
+        _PreviewBucket(self.stage)[path] = value
 
     def Pending(self):
         """{Sdf.Path: value} collected so far, for the preview channel."""
@@ -1380,8 +1528,7 @@ class Writer(object):
 
     def Clear(self):
         """Drop the collected values without authoring any of them."""
-        for path in self._pending:
-            _previewValues.pop(path, None)
+        _DropFromPreview(self.stage, list(self._pending))
         self._pending.clear()
 
     def CommitToStage(self):
@@ -1404,8 +1551,7 @@ class Writer(object):
         # in for. Dropped here rather than left for the caller: a value that
         # stayed in the preview map would shadow the authored one, and the next
         # reader could not tell which it was looking at.
-        for path in authored:
-            _previewValues.pop(path, None)
+        _DropFromPreview(self.stage, authored)
         self._pending.clear()
         return authored
 
@@ -1892,8 +2038,8 @@ class _RigTarget(Target):
                 frames.reason):
             self.Refresh()
             return
-        frames.posed = AvarsMatrix(self.prim, self.time,
-                                   _Context(None, self.time)) * frames.P
+        context = _Context(None, self.time, self.prim)
+        frames.posed = AvarsMatrix(self.prim, self.time, context) * frames.P
 
     def RigRootPath(self):
         root = self.frames.rigRoot if self.frames is not None else None

@@ -21,6 +21,8 @@ from pxr import Tf, Usd
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 import layerOpinionsModel as model
+import panelIcons
+import sessionRegistry
 
 
 # Column layout. VALUE is the only editable one.
@@ -41,11 +43,58 @@ _EXPAND_ROLE = QtCore.Qt.UserRole + 3
 _KIND_TEXT = {"info": "metadata",
               "attribute": "attr",
               "relationship": "rel",
+              "connection": "conn",
               "arcItem": "arc",
               "sublayer": "arc",
               "relocate": "arc",
               "variantSelection": "variant",
               "layerInfo": "layer"}
+
+
+# The rows whose value is a list of paths, and so get the target picker.
+_PATH_LIST_KINDS = ("relationship", "connection")
+
+# The panel's own look. Scoped by object name so none of it leaks into
+# usdview's chrome, and written for usdview's dark palette -- which is
+# the only one it ships.
+_STYLE = """
+#opinionsHeader { background: #2b3038; border: 1px solid #3a404a;
+                  border-radius: 8px; }
+#opinionsTitle { font-size: 15px; font-weight: 600; color: #eef1f5; }
+#opinionsSubtitle { color: #8e98a6; }
+#opinionsFilter { background: #1f2329; border: 1px solid #3a404a;
+                  border-radius: 12px; padding: 3px 10px; color: #dfe4ea; }
+#opinionsFilter:focus { border-color: #5b8fd0; }
+#opinionsTree { background: #1f2329; alternate-background-color: #23282f;
+                border: 1px solid #3a404a; border-radius: 8px;
+                color: #dfe4ea; }
+#opinionsTree::item { padding: 3px 2px; }
+#opinionsTree::item:selected { background: #34537a; color: #ffffff; }
+#opinionsTree QHeaderView::section { background: #2b3038; color: #8e98a6;
+                border: none; border-bottom: 1px solid #3a404a;
+                padding: 4px 8px; font-weight: 600; }
+#opinionsStatus { border-radius: 10px; padding: 3px 10px; color: #cfd6de; }
+#opinionsStatus[state="ok"] { background: #1f3a2c; color: #9be0b5; }
+#opinionsStatus[state="error"] { background: #45232a; color: #ffb4bd; }
+#opinionsHint { color: #6f7988; }
+QToolButton#opinionsAction { background: #2b3038; border: 1px solid #3a404a;
+                border-radius: 6px; padding: 4px 10px; color: #dfe4ea; }
+QToolButton#opinionsAction:hover { background: #34537a;
+                border-color: #5b8fd0; }
+QToolButton#opinionsAction:disabled { color: #5d6572; }
+"""
+
+# Row tints: an edit-target group, any other group, and the ink of a
+# value that is overridden by a stronger layer.
+_GROUP_BG = QtGui.QColor(43, 48, 56)
+_TARGET_BG = QtGui.QColor(38, 61, 92)
+_SHADOWED_INK = QtGui.QColor(118, 126, 138)
+_MUTED_INK = QtGui.QColor(142, 152, 166)
+
+
+def _MonoFont():
+    font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+    return font
 
 
 def _Muted(stage, layer):
@@ -59,11 +108,104 @@ def _GroupLabel(group, isEditTarget):
     """
     badges = []
     if isEditTarget:
-        badges.append("edit target")
+        badges.append("\u25cf edit target")
     if not group.editable:
         badges.append("read-only")
+    if not group.local:
+        badges.append("via arc")
     name = group.displayName or group.layer.identifier
-    return "%s  [%s]" % (name, ", ".join(badges)) if badges else name
+    return "%s     %s" % (name, "   \u00b7   ".join(badges)) if badges \
+        else name
+
+
+class _PathLineEdit(QtWidgets.QLineEdit):
+    """
+    The line edit inside a _PathListEditor. It answers Return and Escape
+    itself: the delegate's own key handling watches the COMPOSITE editor,
+    which never sees them, and QLineEdit would otherwise pass Return up
+    past it to the dialog.
+    """
+
+    submitted = QtCore.Signal()
+    cancelled = QtCore.Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self.submitted.emit()
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key_Escape:
+            self.cancelled.emit()
+            event.accept()
+            return
+        super(_PathLineEdit, self).keyPressEvent(event)
+
+
+class _PathListEditor(QtWidgets.QWidget):
+    """
+    The editor for a relationship's targets or an attribute's
+    connections: the usda text, plus a picker of the paths nearby.
+
+    The picker offers what model.TargetCandidates ranks -- siblings and
+    children first, each written RELATIVE to the owning prim (`<../Wrist>`,
+    `<Child.out>`) -- and choosing one adds it to the list rather than
+    replacing it. The text stays the source of truth, so anything the
+    picker does not list can still be typed.
+    """
+
+    submitted = QtCore.Signal()
+    cancelled = QtCore.Signal()
+
+    def __init__(self, parent, candidates, connection):
+        super(_PathListEditor, self).__init__(parent)
+        self.setAutoFillBackground(True)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self._edit = _PathLineEdit(self)
+        self._edit.setFont(_MonoFont())
+        self._edit.setPlaceholderText(
+            "[ <../Other.out> ]" if connection else "[ <../Sibling> ]")
+        self._edit.submitted.connect(self.submitted)
+        self._edit.cancelled.connect(self.cancelled)
+        layout.addWidget(self._edit, 1)
+
+        pick = QtWidgets.QToolButton(self)
+        pick.setIcon(panelIcons.Icon("target", QtGui.QColor(120, 200, 255)))
+        pick.setToolTip(
+            "Add a %s -- nearby paths first, written relative to this prim"
+            % ("connection source" if connection else "target"))
+        pick.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        pick.setFocusPolicy(QtCore.Qt.NoFocus)
+        menu = QtWidgets.QMenu(pick)
+        if candidates:
+            for candidate in candidates:
+                action = menu.addAction(candidate)
+                action.triggered.connect(
+                    lambda checked=False, c=candidate: self._Add(c))
+        else:
+            empty = menu.addAction("Nothing nearby to offer")
+            empty.setEnabled(False)
+        pick.setMenu(menu)
+        layout.addWidget(pick)
+        self.setFocusProxy(self._edit)
+
+    def text(self):
+        return self._edit.text()
+
+    def setText(self, text):
+        self._edit.setText(text)
+        self._edit.selectAll()
+
+    def _Add(self, candidate):
+        body = self._edit.text().strip()
+        if body.startswith("[") and body.endswith("]"):
+            body = body[1:-1]
+        items = [item.strip() for item in body.split(",") if item.strip()]
+        if candidate not in items:
+            items.append(candidate)
+        self._edit.setText("[ %s ]" % ", ".join(items))
+        self._edit.setFocus()
 
 
 class _ValueDelegate(QtWidgets.QStyledItemDelegate):
@@ -71,19 +213,44 @@ class _ValueDelegate(QtWidgets.QStyledItemDelegate):
     A plain line edit over the value column.
 
     Plain on purpose: every type is entered as the usda text the model
-    round-trips, so there is one editor rather than a widget per Sdf
-    type, and a typo is reported as a parse error instead of being
-    coerced into something that silently differs.
+    round-trips (or the shorthand it accepts for it), so there is one
+    editor rather than a widget per Sdf type, and a typo is reported as
+    a parse error instead of being coerced into something that silently
+    differs.
     """
+
+    def __init__(self, panel):
+        super(_ValueDelegate, self).__init__(panel)
+        self._panel = panel
 
     def createEditor(self, parent, option, index):
         row = index.data(_ROW_ROLE)
         if row is None or not row.editable:
             return None
-        return QtWidgets.QLineEdit(parent)
+        if row.kind in _PATH_LIST_KINDS:
+            editor = _PathListEditor(
+                parent, self._panel.TargetCandidates(row),
+                row.kind == "connection")
+            editor.submitted.connect(lambda: self._Finish(editor, True))
+            editor.cancelled.connect(lambda: self._Finish(editor, False))
+            return editor
+        editor = QtWidgets.QLineEdit(parent)
+        editor.setFont(_MonoFont())
+        return editor
+
+    def _Finish(self, editor, commit):
+        if commit:
+            self.commitData.emit(editor)
+        hint = (QtWidgets.QAbstractItemDelegate.NoHint if commit
+                else QtWidgets.QAbstractItemDelegate.RevertModelCache)
+        self.closeEditor.emit(editor, hint)
 
     def setEditorData(self, editor, index):
-        editor.setText(index.data(QtCore.Qt.DisplayRole) or "")
+        # A refused edit reopens on the text that was refused, so fixing
+        # a typo does not mean retyping the whole value.
+        retry = self._panel.TakeRetryText(index.data(_ROW_ROLE))
+        editor.setText(retry if retry is not None
+                       else index.data(QtCore.Qt.DisplayRole) or "")
 
     def setModelData(self, editor, itemModel, index):
         # Written by the panel, not here: applying the edit needs the
@@ -91,16 +258,26 @@ class _ValueDelegate(QtWidgets.QStyledItemDelegate):
         itemModel.setData(index, editor.text(), QtCore.Qt.EditRole)
 
 
-class LayerOpinionsPanel(QtWidgets.QDialog):
-    """The panel window. One per usdview session."""
+class LayerOpinionsPanel(QtWidgets.QDialog,
+                         metaclass=sessionRegistry.PerSessionInstanceMeta(
+                             QtWidgets.QDialog)):
+    """The panel window. One per usdview session.
 
-    _instance = None
+    Filed under the session's main window: several usdview sessions can
+    share this module in one process. `LayerOpinionsPanel._instance` is
+    the current session's panel (see
+    sessionRegistry.PerSessionInstanceMeta); assigning None forgets it.
+    """
+
+    _sessions = sessionRegistry.SessionRegistry("layer opinion panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi, undoStack):
-        if cls._instance is None:
-            cls._instance = LayerOpinionsPanel(usdviewApi, undoStack)
-        return cls._instance
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(
+                usdviewApi, LayerOpinionsPanel(usdviewApi, undoStack))
+        return panel
 
     def __init__(self, usdviewApi, undoStack, parent=None):
         super(LayerOpinionsPanel, self).__init__(parent)
@@ -111,17 +288,35 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         self._seeded = set()
         self._rebuilding = False
         self._noticeKey = None
+        # A stage change that arrived while an editor was open. The
+        # rebuild waits for the editor to close: rebuilding under it
+        # deletes the item being typed into and throws the text away.
+        self._staleWhileEditing = False
+        # (row identity, text) of an edit the model just refused.
+        self._retry = None
+        # Set while an itemChanged is being handled: a rebuild then is
+        # queued instead of run, see _RequestRebuild.
+        self._inItemChanged = False
+        self._rebuildQueued = False
+        # The prim the tree is showing, for filtering stage notices.
+        self._shownPath = None
+        # (row, text) to reopen an editor on once the tree is rebuilt.
+        self._reopen = None
 
         self.setWindowTitle("Layer Opinions")
-        self.resize(720, 520)
+        self.setWindowIcon(panelIcons.Icon("layer"))
+        self.resize(760, 560)
+        self.setStyleSheet(_STYLE)
 
         layout = QtWidgets.QVBoxLayout(self)
-        self._header = QtWidgets.QLabel("")
-        self._header.setTextInteractionFlags(
-            QtCore.Qt.TextSelectableByMouse)
-        layout.addWidget(self._header)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._BuildHeader())
 
         self._tree = QtWidgets.QTreeWidget()
+        self._tree.setObjectName("opinionsTree")
+        self._tree.setIconSize(QtCore.QSize(16, 16))
+        self._tree.setUniformRowHeights(False)
         self._tree.setColumnCount(len(_COLUMNS))
         self._tree.setHeaderLabels(_COLUMNS)
         self._tree.setRootIsDecorated(True)
@@ -131,7 +326,9 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         self._tree.setEditTriggers(
             QtWidgets.QAbstractItemView.DoubleClicked
             | QtWidgets.QAbstractItemView.EditKeyPressed)
-        self._tree.setItemDelegateForColumn(COL_VALUE, _ValueDelegate(self))
+        delegate = _ValueDelegate(self)
+        delegate.closeEditor.connect(self._OnEditorClosed)
+        self._tree.setItemDelegateForColumn(COL_VALUE, delegate)
         self._tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._OnContextMenu)
         self._tree.itemChanged.connect(self._OnItemChanged)
@@ -141,15 +338,35 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             COL_VALUE, QtWidgets.QHeaderView.Stretch)
         layout.addWidget(self._tree, 1)
 
-        self._status = QtWidgets.QLabel("")
-        layout.addWidget(self._status)
+        hint = QtWidgets.QLabel(
+            "Double-click a value to edit. Shorthand is fine: ik, 4 5 6, "
+            "bar.png, ../Wrist -- paths are written relative to the prim.")
+        hint.setObjectName("opinionsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         buttons = QtWidgets.QHBoxLayout()
-        self._deleteButton = QtWidgets.QPushButton("Delete Opinion")
+        buttons.setSpacing(6)
+        self._arcButton = self._ActionButton(
+            "Add Arc", "arcAdd", QtGui.QColor(200, 140, 240))
+        self._arcButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self._arcButton.setToolTip(
+            "Add a composition arc to the selected prim")
+        # Filled when it opens, so it always reflects the current prim
+        # and the group under the selection.
+        self._arcMenu = QtWidgets.QMenu(self._arcButton)
+        self._arcMenu.aboutToShow.connect(self._FillArcButtonMenu)
+        self._arcButton.setMenu(self._arcMenu)
+        buttons.addWidget(self._arcButton)
+        self._deleteButton = self._ActionButton(
+            "Delete Opinion", "delete", QtGui.QColor(240, 130, 140))
         self._deleteButton.clicked.connect(self._OnDeleteSelected)
         buttons.addWidget(self._deleteButton)
         buttons.addStretch(1)
-        refresh = QtWidgets.QPushButton("Refresh")
+        self._status = QtWidgets.QLabel("")
+        self._status.setObjectName("opinionsStatus")
+        buttons.addWidget(self._status)
+        refresh = self._ActionButton("Refresh", "refresh")
         refresh.clicked.connect(self.Rebuild)
         buttons.addWidget(refresh)
         layout.addLayout(buttons)
@@ -161,6 +378,80 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         # and by an undo from anywhere else in the plugin).
         self._Connect()
         self.Rebuild()
+
+    def _BuildHeader(self):
+        """The card over the tree: which prim, what it is, and a filter."""
+        card = QtWidgets.QFrame()
+        card.setObjectName("opinionsHeader")
+        row = QtWidgets.QHBoxLayout(card)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(10)
+        self._headerIcon = QtWidgets.QLabel()
+        self._headerIcon.setPixmap(panelIcons.Icon(
+            "layer", QtGui.QColor(120, 170, 240)).pixmap(28, 28))
+        row.addWidget(self._headerIcon)
+        text = QtWidgets.QVBoxLayout()
+        text.setSpacing(0)
+        # The name reads large; `_header` keeps the full path, which is
+        # what the usdview tests (and a copy-paste) want from it.
+        self._title = QtWidgets.QLabel("")
+        self._title.setObjectName("opinionsTitle")
+        self._header = QtWidgets.QLabel("")
+        self._header.setObjectName("opinionsSubtitle")
+        for label in (self._title, self._header):
+            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            text.addWidget(label)
+        row.addLayout(text, 1)
+        self._filter = QtWidgets.QLineEdit()
+        self._filter.setObjectName("opinionsFilter")
+        self._filter.setPlaceholderText("Filter opinions...")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.setFixedWidth(200)
+        self._filter.textChanged.connect(lambda *_: self._ApplyFilter())
+        row.addWidget(self._filter)
+        return card
+
+    def _ActionButton(self, text, glyph, color=None):
+        button = QtWidgets.QToolButton()
+        button.setObjectName("opinionsAction")
+        button.setText(text)
+        button.setIcon(panelIcons.Icon(glyph, color))
+        button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        button.setAutoRaise(False)
+        return button
+
+    def _SetStatus(self, text, state="", detail=""):
+        """The status pill: `state` is "ok", "error" or "" (neutral)."""
+        self._status.setText(text)
+        self._status.setToolTip(detail)
+        self._status.setProperty("state", state)
+        # A dynamic property does not restyle by itself.
+        self._status.style().unpolish(self._status)
+        self._status.style().polish(self._status)
+
+    def TargetCandidates(self, row):
+        """
+        The picker's paths for a relationship or connection row, found
+        around the prim as the STAGE has it -- the one on screen.
+
+        That is right even for a row whose spec lives in a referenced
+        layer or inside a variant, where the spec path differs from the
+        stage path: the candidates are offered RELATIVE, and a relative
+        path means the same thing in the asset's namespace as in the
+        stage's, because the reference maps the whole subtree together.
+        """
+        prim = self._SelectedPrim()
+        if prim is None:
+            return []
+        try:
+            return model.TargetCandidates(
+                self._api.stage, prim.GetPath(),
+                properties=(row.kind == "connection"), limit=60)
+        except Exception as error:
+            # Said, not swallowed: an empty picker with no reason is
+            # indistinguishable from a prim with nothing near it.
+            self._SetStatus("target picker failed: %s" % error, "error")
+            return []
 
     # -- wiring ------------------------------------------------------
 
@@ -174,8 +465,68 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             self._api.stage)
 
     def _OnObjectsChanged(self, notice, sender):
-        if not self._rebuilding:
+        if self._rebuilding or not self._Concerns(notice):
+            return
+        if self._Editing():
+            self._staleWhileEditing = True
+            return
+        # Queued, not run: a drag or a script authors in bursts, and one
+        # rebuild at the end of the burst shows the same thing as fifty.
+        self._QueueRebuild()
+
+    def _Concerns(self, notice):
+        """
+        Whether `notice` can change what the panel shows.
+
+        Only the shown prim's own opinions are listed, so a change to any
+        OTHER prim -- a gizmo drag on a control, a script writing a
+        different mesh -- cannot. What can: the prim or one of its
+        properties, a resync of it or an ancestor (which includes the
+        pseudo-root, where sublayer and relocate edits land).
+        """
+        shown = self._shownPath
+        if shown is None:
+            return False
+        for path in (list(notice.GetResyncedPaths())
+                     + list(notice.GetChangedInfoOnlyPaths())):
+            if shown.HasPrefix(path) or path.GetPrimPath() == shown:
+                return True
+        return False
+
+    def _RequestRebuild(self):
+        """
+        Rebuild now -- or, inside an itemChanged, on the next turn of the
+        event loop. itemChanged is emitted from inside the item's own
+        setData, and a rebuild clears the tree, deleting that item while
+        its setData is still on the stack. The EDIT is still applied
+        synchronously; only the tree waits.
+        """
+        if not self._inItemChanged:
             self.Rebuild()
+            return
+        self._QueueRebuild()
+
+    def _QueueRebuild(self):
+        """Rebuild on the next turn of the event loop, once however
+        many times this is asked for before then."""
+        if not self._rebuildQueued:
+            self._rebuildQueued = True
+            QtCore.QTimer.singleShot(0, self._RunQueuedRebuild)
+
+    def _RunQueuedRebuild(self):
+        if self._rebuildQueued:
+            self.Rebuild()
+
+    def _Editing(self):
+        return (self._tree.state()
+                == QtWidgets.QAbstractItemView.EditingState)
+
+    def _OnEditorClosed(self, *args):
+        if self._staleWhileEditing:
+            self._staleWhileEditing = False
+            # Deferred: the view is still inside closeEditor, and the
+            # rebuild deletes the item it is closing.
+            QtCore.QTimer.singleShot(0, self.Rebuild)
 
     def closeEvent(self, event):
         # Revoke before Qt deletes the C++ side, or the notice fires
@@ -183,7 +534,8 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         if self._noticeKey is not None:
             self._noticeKey.Revoke()
             self._noticeKey = None
-        LayerOpinionsPanel._instance = None
+        if LayerOpinionsPanel._sessions.Get(self._api) is self:
+            LayerOpinionsPanel._sessions.Pop(self._api)
         super(LayerOpinionsPanel, self).closeEvent(event)
 
     # -- state -------------------------------------------------------
@@ -209,15 +561,23 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
     # -- build -------------------------------------------------------
 
     def Rebuild(self, *args):
+        self._rebuildQueued = False
         self._rebuilding = True
         try:
             self._tree.clear()
             prim = self._SelectedPrim()
+            self._shownPath = prim.GetPath() if prim is not None else None
             if prim is None:
-                self._header.setText("No prim selected.")
+                self._title.setText("No prim selected")
+                self._header.setText(
+                    "Select a prim in the hierarchy or the viewport.")
                 self._groups = []
                 self._SyncButtons()
                 return
+            self._title.setText("%s   <span style='color:#8e98a6; "
+                                "font-size:11px; font-weight:400'>%s</span>"
+                                % (prim.GetName(),
+                                   prim.GetTypeName() or "untyped"))
             self._header.setText(str(prim.GetPath()))
             self._groups = model.OpinionGroups(prim)
             editTarget = self._EditTargetLayer()
@@ -228,9 +588,11 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             for group in self._groups:
                 self._AddGroup(group, stage)
             self._tree.resizeColumnToContents(COL_NAME)
+            self._ApplyFilter()
         finally:
             self._rebuilding = False
             self._SyncButtons()
+        self._ReopenRefused()
 
     def _SeedExpansion(self):
         """
@@ -267,6 +629,12 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         font = item.font(COL_NAME)
         font.setBold(True)
         item.setFont(COL_NAME, font)
+        item.setIcon(COL_NAME, panelIcons.Icon(
+            "target" if group.isEditTarget else "layer",
+            QtGui.QColor(120, 200, 255) if group.isEditTarget else None))
+        band = QtGui.QBrush(_TARGET_BG if group.isEditTarget else _GROUP_BG)
+        for column in range(len(_COLUMNS)):
+            item.setBackground(column, band)
         if _Muted(stage, group.layer):
             item.setForeground(COL_NAME, QtGui.QBrush(QtCore.Qt.gray))
         item.setToolTip(COL_NAME, group.layer.identifier)
@@ -275,6 +643,9 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             self._AddRow(item, row)
 
         item.setExpanded(group.layer.identifier in self._expanded)
+        # Spanned so the layer name and its badges are never cut off by
+        # the name column's width.
+        item.setFirstColumnSpanned(True)
 
     def _AddRow(self, parent, row):
         item = QtWidgets.QTreeWidgetItem(
@@ -282,6 +653,19 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
                      _KIND_TEXT.get(row.kind, row.kind)])
         item.setData(COL_VALUE, _ROW_ROLE, row)
         item.setData(COL_NAME, _ROW_ROLE, row)
+        item.setIcon(COL_NAME, panelIcons.KindIcon(row.kind))
+        item.setFont(COL_VALUE, _MonoFont())
+        item.setForeground(COL_KIND, QtGui.QBrush(_MUTED_INK))
+        if row.summarized:
+            # A summary, not the value: say so, and where the value is.
+            font = _MonoFont()
+            font.setItalic(True)
+            item.setFont(COL_VALUE, font)
+            item.setToolTip(
+                COL_VALUE, "Too large to show or edit inline. "
+                "Right-click > Copy Full Value for all of it.")
+        elif row.editable:
+            item.setToolTip(COL_VALUE, "Double-click to edit")
         flags = item.flags()
         if row.editable:
             flags |= QtCore.Qt.ItemIsEditable
@@ -294,6 +678,8 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             font = item.font(COL_NAME)
             font.setStrikeOut(True)
             item.setFont(COL_NAME, font)
+            item.setForeground(COL_NAME, QtGui.QBrush(_SHADOWED_INK))
+            item.setForeground(COL_VALUE, QtGui.QBrush(_SHADOWED_INK))
             item.setToolTip(
                 COL_NAME,
                 "overridden by a stronger layer above")
@@ -367,14 +753,22 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         arc = self._ArcFor(row)
         if arc is not None:
             action = menu.addAction(
+                panelIcons.Icon("arc", panelIcons.KIND_COLORS["arcItem"]),
                 "Edit %s..." % arc.title.replace("Add ", ""))
             action.setToolTip(arc.summary)
             action.triggered.connect(lambda: self._EditArc(row))
+        if row.summarized:
+            copy = menu.addAction("Copy Full Value")
+            copy.triggered.connect(
+                lambda: QtWidgets.QApplication.clipboard().setText(
+                    model.FullValueText(row)))
         if row.editable:
             inline = menu.addAction("Edit Value")
             inline.triggered.connect(
                 lambda: self._tree.editItem(item, COL_VALUE))
-        delete = menu.addAction(_DeleteLabel(row))
+        delete = menu.addAction(
+            panelIcons.Icon("delete", QtGui.QColor(240, 130, 140)),
+            _DeleteLabel(row))
         delete.setEnabled(model.CanDeleteRow(row, self._GroupFor(row.layer)))
         delete.triggered.connect(
             lambda: self._Apply(lambda: model.DeleteRow(row),
@@ -437,6 +831,8 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         # ownership, so the submenu is collected the moment this
         # function returns and the items open onto a deleted C++ object.
         submenu = QtWidgets.QMenu("Add Composition Arc", menu)
+        submenu.setIcon(panelIcons.Icon(
+            "arcAdd", panelIcons.KIND_COLORS["arcItem"]))
         menu.addMenu(submenu)
         compositionArcsUI.PopulateArcMenu(
             submenu, self._api, self._SelectedPrim(),
@@ -453,8 +849,9 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         if edit is not None and self._undo is not None:
             self._undo.Push(edit)
         self.Rebuild()
-        self._status.setText(
-            "%s  (%s)" % (label, "; ".join(warnings)) if warnings else label)
+        self._SetStatus(
+            "%s  (%s)" % (label, "; ".join(warnings)) if warnings else label,
+            "ok")
 
     def _OnExpansionChanged(self, item):
         # Keyed off the role rather than off the item's kind, so a layer
@@ -478,8 +875,12 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         text = item.text(COL_VALUE)
         if text == row.valueText:
             return
-        self._Apply(lambda: model.SetRowValue(row, text),
-                    "Set %s" % row.key)
+        self._inItemChanged = True
+        try:
+            self._Apply(lambda: model.SetRowValue(row, text),
+                        "Set %s" % row.key, retry=(row, text))
+        finally:
+            self._inItemChanged = False
 
     def _OnDeleteSelected(self):
         items = self._tree.selectedItems()
@@ -507,27 +908,112 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         self._Apply(lambda: model.DeletePrimSpec(group),
                     "Delete %s opinions" % group.displayName)
 
-    def _Apply(self, operation, label):
+    def _Apply(self, operation, label, retry=None):
         """
         Run one model operation, push its Edit, rebuild.
 
         A parse error is reported in the status line and leaves the
         stage untouched -- the model raises before it authors anything.
+        When `retry` is (row, text), a refused edit reopens that row's
+        editor on the refused text, so the fix is one keystroke away
+        rather than a retype.
         """
         try:
             edit = operation()
         except model.ValueParseError as error:
-            self._status.setText(str(error))
-            self.Rebuild()
+            self._Refused(str(error), error.detail, retry)
             return
         except Tf.ErrorException as error:
-            self._status.setText(str(error))
-            self.Rebuild()
+            detail = str(error).strip()
+            self._Refused(_FirstLine(detail), detail, retry)
             return
         if edit is not None and self._undo is not None:
             self._undo.Push(edit)
-        self._status.setText(label)
-        self.Rebuild()
+        self._SetStatus(label, "ok")
+        self._RequestRebuild()
+
+    def _Refused(self, message, detail, retry):
+        self._SetStatus(message, "error", detail)
+        self._reopen = retry
+        self._RequestRebuild()
+
+    def _ReopenRefused(self):
+        """After a rebuild, reopen the editor a refused edit came from."""
+        if self._reopen is None:
+            return
+        row, text = self._reopen
+        self._reopen = None
+        item = self._ItemFor(row)
+        if item is None:
+            return
+        self._retry = (_RowIdentity(row), text)
+        self._tree.setCurrentItem(item)
+        self._tree.editItem(item, COL_VALUE)
+
+    def TakeRetryText(self, row):
+        """The refused text to reopen `row`'s editor on, once, or None."""
+        if row is None or self._retry is None:
+            return None
+        identity, text = self._retry
+        self._retry = None
+        return text if identity == _RowIdentity(row) else None
+
+    def _ItemFor(self, row):
+        """The rebuilt tree's item for the row `row` was, or None."""
+        identity = _RowIdentity(row)
+        iterator = QtWidgets.QTreeWidgetItemIterator(self._tree)
+        while iterator.value():
+            item = iterator.value()
+            candidate = item.data(COL_VALUE, _ROW_ROLE)
+            if (candidate is not None
+                    and _RowIdentity(candidate) == identity):
+                return item
+            iterator += 1
+        return None
+
+    def _ApplyFilter(self):
+        """
+        Hide the rows whose name and value both miss the filter text.
+        A parent stays visible while any child matches, so a match inside
+        `references` still shows under its heading and its layer.
+        """
+        needle = self._filter.text().strip().lower()
+
+        def _Visit(item):
+            own = (not needle
+                   or needle in item.text(COL_NAME).lower()
+                   or needle in item.text(COL_VALUE).lower())
+            anyChild = False
+            for i in range(item.childCount()):
+                anyChild = _Visit(item.child(i)) or anyChild
+            isGroup = item.data(0, _GROUP_ROLE) is not None
+            visible = anyChild or (own and not (isGroup and needle))
+            item.setHidden(not visible)
+            if needle and anyChild:
+                item.setExpanded(True)
+            return visible
+
+        for i in range(self._tree.topLevelItemCount()):
+            _Visit(self._tree.topLevelItem(i))
+
+    def _FillArcButtonMenu(self):
+        self._arcMenu.clear()
+        try:
+            import compositionArcsUI
+        except ImportError as error:
+            self._SetStatus("composition arcs unavailable: %s" % error,
+                            "error")
+            return
+        group = None
+        items = self._tree.selectedItems()
+        if items:
+            row = items[0].data(COL_NAME, _ROW_ROLE)
+            group = (self._GroupFor(row.layer) if row is not None
+                     else items[0].data(0, _GROUP_ROLE))
+        compositionArcsUI.PopulateArcMenu(
+            self._arcMenu, self._api, self._SelectedPrim(),
+            group.layer if group is not None else None,
+            self._OnArcAuthored, self)
 
     def _SyncButtons(self):
         items = self._tree.selectedItems()
@@ -550,6 +1036,22 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             if group.layer == layer:
                 return group
         return None
+
+
+def _RowIdentity(row):
+    """
+    What makes a row the same row across a rebuild. The OpinionRow
+    objects are rebuilt on every stage notice, so identity is by value.
+    """
+    return (row.layer.identifier, str(row.specPath), row.kind, row.key)
+
+
+def _FirstLine(text):
+    """The first non-empty line of a multi-line diagnostic."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return text
 
 
 def _DeleteLabel(row):

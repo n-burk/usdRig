@@ -22,6 +22,14 @@
 from pxr import Gf, Sdf, Tf, Ts, Usd, UsdGeom
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
+try:
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import sessionRegistry
+
 
 # The concrete volume weight types this panel can create and edit.  The
 # order is the order of the Create buttons.
@@ -1605,7 +1613,10 @@ class VolumeWeightPanel(QtWidgets.QWidget):
     volume weight is selected.
     """
 
-    __instance = None
+    # One panel per usdview session, filed under its main window: several
+    # sessions can share this module in one process, and each panel paints
+    # its overlay through its own session's container.
+    _sessions = sessionRegistry.SessionRegistry("volume weight panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi, setWeightOverlay=None,
@@ -1613,10 +1624,11 @@ class VolumeWeightPanel(QtWidgets.QWidget):
         """
         Returns the single panel for this session, creating it once.
         """
-        if cls.__instance is None:
-            cls.__instance = VolumeWeightPanel(
-                usdviewApi, setWeightOverlay, hasWeightOverlay)
-        return cls.__instance
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, VolumeWeightPanel(
+                usdviewApi, setWeightOverlay, hasWeightOverlay))
+        return panel
 
     def __init__(self, usdviewApi, setWeightOverlay=None,
                  hasWeightOverlay=None):

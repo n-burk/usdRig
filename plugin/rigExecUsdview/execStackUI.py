@@ -38,9 +38,21 @@ import sys
 from pxr import Usd
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
+try:
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import sessionRegistry
+
 
 # Cache the twin so a repopulate does not reopen the stage on every
-# selection change; keyed on the root layer's identity.
+# selection change; keyed on the root AND session layers' identities. Two
+# usdview sessions in one process can open the same root file -- and then
+# share its root layer -- but each stage has its own session layer, so the
+# root alone would hand one session a twin composed over another's session
+# layer.
 _TWIN = {}
 
 
@@ -60,10 +72,12 @@ def _CompilableStage(stage):
     script.
     """
     root = stage.GetRootLayer()
-    key = root.identifier
+    session = stage.GetSessionLayer()
+    key = (root.identifier, session.identifier if session else None)
     twin = _TWIN.get(key)
-    if twin is None or twin.GetRootLayer() != root:
-        twin = Usd.Stage.Open(root, stage.GetSessionLayer())
+    if (twin is None or twin.GetRootLayer() != root or
+            twin.GetSessionLayer() != session):
+        twin = Usd.Stage.Open(root, session)
         _TWIN[key] = twin
     return twin
 
@@ -102,15 +116,18 @@ def _tail(path, keep=1):
 class ExecStackPanel(QtWidgets.QDialog):
     """Dockable-ish dialog listing the execution stack of the open stage."""
 
-    _instance = None
+    # One panel per usdview session, filed under its main window: several
+    # sessions can share this module in one process.
+    _sessions = sessionRegistry.SessionRegistry("execution stack panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi):
-        if cls._instance is None:
-            cls._instance = cls(usdviewApi)
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi))
         else:
-            cls._instance._api = usdviewApi
-        return cls._instance
+            panel._api = usdviewApi
+        return panel
 
     def __init__(self, usdviewApi, parent=None):
         super(ExecStackPanel, self).__init__(

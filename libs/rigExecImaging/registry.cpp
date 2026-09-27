@@ -146,26 +146,443 @@ _SweepTimes(UsdTimeCode playhead)
 
 }  // namespace
 
-RigExecImagingRegistry &
-RigExecImagingRegistry::GetInstance()
-{
-    static RigExecImagingRegistry instance;
-    return instance;
-}
+// ---------------------------------------------------------------------------
+// The directory: stage -> imaging context (registry.h, "PER-STAGE CONTEXTS").
+// ---------------------------------------------------------------------------
 
-RigExecImagingRegistry::RigExecImagingRegistry()
-    : _store(std::make_shared<RigExecSnapshotStore>())
-    , _scheduler(std::make_unique<RigExecBackgroundScheduler>())
-    , _warmIndex(std::make_shared<RigExecWarmFrameIndex>())
+namespace {
+
+// The warming pool a context owns while it has an active rig. The hook holds
+// the index shared: transitions record into shared state past whatever the
+// sessions do next, and a shutdown purge during destruction still lands (the
+// hook keeps the index alive).
+std::shared_ptr<RigExecBackgroundScheduler>
+_MakeScheduler(const std::shared_ptr<RigExecWarmFrameIndex> &warmIndex)
 {
-    // The hook holds the index shared: transitions record into shared
-    // state past whatever the sessions do next, and a shutdown purge
-    // during destruction still lands (the hook keeps the index alive).
-    std::shared_ptr<RigExecWarmFrameIndex> index = _warmIndex;
-    _scheduler->SetTransitionHook(
+    auto scheduler = std::make_shared<RigExecBackgroundScheduler>();
+    std::shared_ptr<RigExecWarmFrameIndex> index = warmIndex;
+    scheduler->SetTransitionHook(
         [index](const RigExecWarmTransition &transition) {
             index->NoteTransition(transition);
         });
+    return scheduler;
+}
+
+// Whether the directory (a function-local static) exists right now. A
+// results scene index released during static destruction -- an engine a
+// host leaks until exit -- must not resurrect or touch a destroyed
+// directory. Constant-initialized and trivially destructible, so it stays
+// readable after the directory is gone.
+std::atomic<bool> _directoryAlive{false};
+
+// Adds \p from's counters into \p into. Gauges (queue depth, running) are
+// instantaneous, so they are added only when \p gauges is set -- a stopped
+// scheduler has none.
+void
+_AddSchedulerStats(RigExecBackgroundSchedulerStats *into,
+                   const RigExecBackgroundSchedulerStats &from, bool gauges)
+{
+    if (gauges) {
+        into->queuedDepth += from.queuedDepth;
+        into->running += from.running;
+    }
+    into->completed += from.completed;
+    into->published += from.published;
+    into->declinedInvalid += from.declinedInvalid;
+    into->declinedGeneration += from.declinedGeneration;
+    into->droppedStale += from.droppedStale;
+    into->canceled += from.canceled;
+    into->shed += from.shed;
+    into->coalesced += from.coalesced;
+    into->upgraded += from.upgraded;
+    into->declined += from.declined;
+    into->declinedFreezeRefused += from.declinedFreezeRefused;
+    into->declinedUnsampleable += from.declinedUnsampleable;
+    into->declinedD7Exempt += from.declinedD7Exempt;
+    into->droppedAtShutdown += from.droppedAtShutdown;
+    into->factoryInvocations += from.factoryInvocations;
+}
+
+// An overlay selection string, checked before it reaches SdfPath (whose
+// constructor is loud about a malformed one). Empty turns the overlay off.
+bool
+_ParseOverlayPath(const std::string &text, SdfPath *path)
+{
+    *path = SdfPath();
+    if (text.empty()) {
+        return true;
+    }
+    if (!SdfPath::IsValidPathString(text)) {
+        return false;
+    }
+    const SdfPath resolved(text);
+    if (!resolved.IsAbsolutePath() || !resolved.IsPrimPath()) {
+        return false;
+    }
+    *path = resolved;
+    return true;
+}
+
+}  // namespace
+
+/// Process-level map from a stage to its imaging context, the chain
+/// registrations, and the legacy current context.
+///
+/// Its mutex is a LEAF (registry.h, LOCK ORDER): it may be taken while a
+/// context holds its own _mutex, and while it is held nothing calls into a
+/// context and no context is destroyed -- contexts it lets go of are handed
+/// back to the caller and released after unlocking.
+class RigExecImagingDirectory {
+public:
+    using Ctx = RigExecImagingRegistry;
+    using Ptr = Ctx::Ptr;
+    using Chain = Ctx::Chain;
+
+    static RigExecImagingDirectory &Get()
+    {
+        static RigExecImagingDirectory directory;
+        return directory;
+    }
+
+    Ctx &LegacyHandle() { return _legacyHandle; }
+
+    Ptr ForStage(const UsdStageRefPtr &stage, bool create)
+    {
+        if (!stage) {
+            return nullptr;
+        }
+        std::vector<Ptr> released;
+        Ptr result;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _PruneLocked(&released);
+            const UsdStage *raw = get_pointer(stage);
+            const auto found = _keyByStage.find(raw);
+            if (found != _keyByStage.end()) {
+                const auto entry = _entries.find(found->second);
+                // Pruning dropped every expired entry, so a surviving one
+                // whose raw pointer matches IS this stage -- but compare the
+                // weak identities anyway: an address is never an identity.
+                if (entry != _entries.end() &&
+                    entry->second.stage == UsdStageWeakPtr(stage)) {
+                    result = entry->second.context;
+                }
+            }
+            if (!result && create) {
+                const uint64_t key = ++_nextKey;
+                result = Ptr(new Ctx(key, stage));
+                _entries[key] = Entry{UsdStageWeakPtr(stage), result};
+                _keyByStage[raw] = key;
+            }
+        }
+        return result;  // `released` dies here, after the unlock
+    }
+
+    Ptr ForKey(uint64_t key)
+    {
+        if (key == 0) {
+            return nullptr;
+        }
+        std::vector<Ptr> released;
+        std::lock_guard<std::mutex> lock(_mutex);
+        _PruneLocked(&released);
+        const auto entry = _entries.find(key);
+        Ptr result = entry == _entries.end() ? nullptr : entry->second.context;
+        // `released` is declared before the guard, so it is destroyed after
+        // the guard unlocks.
+        return result;
+    }
+
+    size_t ContextCount()
+    {
+        std::vector<Ptr> released;
+        std::lock_guard<std::mutex> lock(_mutex);
+        _PruneLocked(&released);
+        return _entries.size();
+    }
+
+    Ptr Current()
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _current;
+    }
+
+    /// A legacy activation succeeded on \p context: it is current now.
+    void SetCurrent(const Ptr &context)
+    {
+        Ptr previous;
+        std::lock_guard<std::mutex> lock(_mutex);
+        previous = std::move(_current);
+        _current = context;
+    }
+
+    /// An automatic activation succeeded on \p context: it becomes current
+    /// only when no current context is live, so it never takes the legacy
+    /// surface away from an explicit activation.
+    void OfferCurrent(const Ptr &context)
+    {
+        Ptr previous;
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_current && _current->_active.load()) {
+            return;
+        }
+        previous = std::move(_current);
+        _current = context;
+    }
+
+    void RegisterChain(const Chain &chain, uint64_t key)
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _PruneChainsLocked();
+        _chains.push_back(ChainRecord{chain, key});
+    }
+
+    /// Records that the chain whose results index is \p results is bound to
+    /// \p key now, and reports the key it was bound to in \p previous.
+    /// False (and \p chain untouched) for an unknown chain or one already
+    /// bound to \p key.
+    bool Rebind(const RigExecResultsSceneIndex *results, uint64_t key,
+                Chain *chain, uint64_t *previous)
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _PruneChainsLocked();
+        for (ChainRecord &record : _chains) {
+            if (get_pointer(record.chain.results) != results) {
+                continue;
+            }
+            if (record.key == key) {
+                return false;
+            }
+            *previous = record.key;
+            record.key = key;
+            *chain = record.chain;
+            return true;
+        }
+        return false;
+    }
+
+    /// Forgets the chain whose results index is \p results -- by identity:
+    /// it is called from that index's destructor, while its weak pointers
+    /// still resolve -- and returns the key it was bound to (0 when unknown
+    /// or unbound).
+    uint64_t Unregister(const RigExecResultsSceneIndex *results)
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        uint64_t key = 0;
+        for (auto it = _chains.begin(); it != _chains.end();) {
+            if (get_pointer(it->chain.results) == results) {
+                key = it->key;
+                it = _chains.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        _PruneChainsLocked();
+        return key;
+    }
+
+    /// The live chains bound to \p key.
+    std::vector<Chain> ChainsFor(uint64_t key)
+    {
+        std::vector<Chain> chains;
+        std::lock_guard<std::mutex> lock(_mutex);
+        _PruneChainsLocked();
+        for (const ChainRecord &record : _chains) {
+            if (record.key == key) {
+                chains.push_back(record.chain);
+            }
+        }
+        return chains;
+    }
+
+    ~RigExecImagingDirectory() { _directoryAlive.store(false); }
+
+private:
+    RigExecImagingDirectory()
+        : _legacyHandle(Ctx::_LegacyHandleTag{})
+    {
+        _directoryAlive.store(true);
+    }
+
+    struct Entry {
+        UsdStageWeakPtr stage;
+        Ptr context;
+    };
+    struct ChainRecord {
+        Chain chain;
+        uint64_t key = 0;
+    };
+
+    /// Drops contexts whose stage has expired, handing them to \p released
+    /// so their destructors run after the caller unlocks. An expired stage
+    /// means an inactive context: an active one holds its stage.
+    void _PruneLocked(std::vector<Ptr> *released)
+    {
+        for (auto it = _entries.begin(); it != _entries.end();) {
+            if (it->second.stage) {
+                ++it;
+                continue;
+            }
+            for (auto raw = _keyByStage.begin(); raw != _keyByStage.end();) {
+                raw = raw->second == it->first ? _keyByStage.erase(raw)
+                                               : std::next(raw);
+            }
+            released->push_back(std::move(it->second.context));
+            it = _entries.erase(it);
+        }
+    }
+
+    void _PruneChainsLocked()
+    {
+        _chains.erase(
+            std::remove_if(_chains.begin(), _chains.end(),
+                           [](const ChainRecord &record) {
+                               return !record.chain.results;
+                           }),
+            _chains.end());
+    }
+
+    std::mutex _mutex;
+    uint64_t _nextKey = 0;
+    std::map<uint64_t, Entry> _entries;
+    std::map<const UsdStage *, uint64_t> _keyByStage;
+    std::vector<ChainRecord> _chains;
+    /// The legacy current context, held STRONGLY: the legacy handle hands
+    /// out references into it (GetStore), exactly as the old singleton
+    /// lived for the process. Replaced only by the next legacy (or, when
+    /// none is live, automatic) activation.
+    Ptr _current;
+    /// Declared last: destroyed first at exit, while the map still stands.
+    Ctx _legacyHandle;
+};
+
+RigExecImagingRegistry &
+RigExecImagingRegistry::GetInstance()
+{
+    return RigExecImagingDirectory::Get().LegacyHandle();
+}
+
+RigExecImagingRegistry::Ptr
+RigExecImagingRegistry::ForStage(const UsdStageRefPtr &stage, bool create)
+{
+    return RigExecImagingDirectory::Get().ForStage(stage, create);
+}
+
+RigExecImagingRegistry::Ptr
+RigExecImagingRegistry::ForStageCacheId(long long id, bool create)
+{
+    const UsdStageRefPtr stage = UsdUtilsStageCache::Get().Find(
+        UsdStageCache::Id::FromLongInt(static_cast<long int>(id)));
+    return stage ? ForStage(stage, create) : nullptr;
+}
+
+RigExecImagingRegistry::Ptr
+RigExecImagingRegistry::ForKey(uint64_t key)
+{
+    return RigExecImagingDirectory::Get().ForKey(key);
+}
+
+RigExecImagingRegistry::Ptr
+RigExecImagingRegistry::Current()
+{
+    return RigExecImagingDirectory::Get().Current();
+}
+
+size_t
+RigExecImagingRegistry::ContextCount()
+{
+    return RigExecImagingDirectory::Get().ContextCount();
+}
+
+RigExecImagingRegistry::RigExecImagingRegistry(
+    uint64_t key, const UsdStageRefPtr &stage)
+    : _key(key)
+    , _boundStage(stage)
+    , _legacyHandle(false)
+    , _store(std::make_shared<RigExecSnapshotStore>())
+    , _warmIndex(std::make_shared<RigExecWarmFrameIndex>())
+{
+    // No scheduler: a context without an active rig owns no threads. The
+    // first activation starts one (see Activate).
+}
+
+RigExecImagingRegistry::RigExecImagingRegistry(_LegacyHandleTag)
+    : _key(0)
+    , _legacyHandle(true)
+    , _store(std::make_shared<RigExecSnapshotStore>())
+    , _warmIndex(std::make_shared<RigExecWarmFrameIndex>())
+{
+}
+
+RigExecImagingRegistry::~RigExecImagingRegistry() = default;
+
+RigExecImagingRegistry::Ptr
+RigExecImagingRegistry::_Routed() const
+{
+    return _legacyHandle ? RigExecImagingDirectory::Get().Current() : nullptr;
+}
+
+const std::shared_ptr<RigExecSnapshotStore> &
+RigExecImagingRegistry::GetStore() const
+{
+    if (const Ptr routed = _Routed()) {
+        // The directory holds the current context strongly, so the member
+        // reference stays valid after `routed` goes out of scope.
+        return routed->_store;
+    }
+    return _store;
+}
+
+bool
+RigExecImagingRegistry::IsActive() const
+{
+    if (const Ptr routed = _Routed()) {
+        return routed->IsActive();
+    }
+    return _active.load();
+}
+
+UsdStageRefPtr
+RigExecImagingRegistry::GetBoundStage() const
+{
+    return UsdStageRefPtr(_boundStage);
+}
+
+UsdStageRefPtr
+RigExecImagingRegistry::_PreviewStageLocked() const
+{
+    if (_stage) {
+        return _stage;
+    }
+    return UsdStageRefPtr(_boundStage);
+}
+
+std::vector<RigExecImagingRegistry::Chain>
+RigExecImagingRegistry::_BoundChains() const
+{
+    if (_legacyHandle) {
+        // The handle owns no stage, so no chain is ever bound to it.
+        return {};
+    }
+    return RigExecImagingDirectory::Get().ChainsFor(_key);
+}
+
+void
+RigExecImagingRegistry::RegisterUnboundChain(
+    const RigExecInternalPrimPruningSceneIndexRefPtr &pruning,
+    const RigExecBindingResolvingSceneIndexRefPtr &binding,
+    const RigExecResultsSceneIndexRefPtr &results,
+    const RigExecXformOverrideSceneIndexRefPtr &xforms)
+{
+    if (results) {
+        results->SetContextKey(0);
+    }
+    RigExecImagingDirectory::Get().RegisterChain(
+        {TfWeakPtr<RigExecInternalPrimPruningSceneIndex>(get_pointer(pruning)),
+         TfWeakPtr<RigExecBindingResolvingSceneIndex>(get_pointer(binding)),
+         TfWeakPtr<RigExecResultsSceneIndex>(get_pointer(results)),
+         TfWeakPtr<RigExecXformOverrideSceneIndex>(get_pointer(xforms))},
+        0);
 }
 
 void
@@ -175,23 +592,162 @@ RigExecImagingRegistry::RegisterChain(
     const RigExecResultsSceneIndexRefPtr &results,
     const RigExecXformOverrideSceneIndexRefPtr &xforms)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    _chains.push_back(
-        {TfWeakPtr<RigExecInternalPrimPruningSceneIndex>(
-             get_pointer(pruning)),
-         TfWeakPtr<RigExecBindingResolvingSceneIndex>(get_pointer(binding)),
-         TfWeakPtr<RigExecResultsSceneIndex>(get_pointer(results)),
-         TfWeakPtr<RigExecXformOverrideSceneIndex>(get_pointer(xforms))});
-    // A chain built mid-manipulation -- a second viewport opened during a drag
-    // -- starts out holding the deltas the others already have, or it would
-    // draw the un-previewed prim until the next mouse sample.
-    if (xforms && !_previewXformDeltas.empty()) {
-        xforms->SetWorldDeltas(_previewXformDeltas);
+    if (const Ptr routed = _Routed()) {
+        routed->RegisterChain(pruning, binding, results, xforms);
+        return;
     }
-    // A chain constructed after activation adopts every active rig's scope.
-    if (!_generatedScopes.empty()) {
-        pruning->SetOwnedScopes(_generatedScopes);
+    if (_legacyHandle) {
+        RegisterUnboundChain(pruning, binding, results, xforms);
+        return;
     }
+    const Chain chain{
+        TfWeakPtr<RigExecInternalPrimPruningSceneIndex>(get_pointer(pruning)),
+        TfWeakPtr<RigExecBindingResolvingSceneIndex>(get_pointer(binding)),
+        TfWeakPtr<RigExecResultsSceneIndex>(get_pointer(results)),
+        TfWeakPtr<RigExecXformOverrideSceneIndex>(get_pointer(xforms))};
+    RigExecImagingDirectory::Get().RegisterChain(chain, _key);
+    // A chain built mid-manipulation -- a second viewport opened during a
+    // drag -- starts out holding the deltas the others already have, and a
+    // chain constructed after activation adopts every active rig's scope.
+    _AdoptChain(chain);
+}
+
+void
+RigExecImagingRegistry::BindChain(const RigExecResultsSceneIndex *results,
+                                  uint64_t key)
+{
+    Chain chain;
+    uint64_t previous = 0;
+    if (!results ||
+        !RigExecImagingDirectory::Get().Rebind(results, key, &chain,
+                                               &previous)) {
+        return;
+    }
+    if (const Ptr context = ForKey(key)) {
+        context->_AdoptChain(chain);
+    } else {
+        // Unbound (or bound to a context whose stage is gone): nothing
+        // stage-specific. Seeded as a fresh chain is.
+        if (chain.results) {
+            chain.results->SetContextKey(key);
+        }
+        if (chain.pruning) {
+            chain.pruning->SetOwnedScopes({});
+        }
+        if (chain.xforms) {
+            chain.xforms->SetWorldDeltas({});
+        }
+        if (chain.binding) {
+            chain.binding->SetBindingEpoch(nullptr);
+        }
+        if (chain.results) {
+            chain.results->SetStore(std::make_shared<RigExecSnapshotStore>());
+        }
+    }
+    // The stage this chain showed was replaced under its engine: when that
+    // was the last chain of an automatic activation, nothing images the old
+    // stage any more, and nothing else would release it.
+    _ReleaseIfUnbound(previous);
+}
+
+void
+RigExecImagingRegistry::ReleaseChain(const RigExecResultsSceneIndex *results)
+{
+    if (!results || !_directoryAlive.load()) {
+        return;
+    }
+    _ReleaseIfUnbound(RigExecImagingDirectory::Get().Unregister(results));
+}
+
+void
+RigExecImagingRegistry::_ReleaseIfUnbound(uint64_t key)
+{
+    if (const Ptr context = ForKey(key)) {
+        context->_Deactivate(/* byHost = */ false);
+    }
+}
+
+void
+RigExecImagingRegistry::_AdoptChain(const Chain &chain)
+{
+    if (chain.results) {
+        chain.results->SetContextKey(_key);
+    }
+    std::set<SdfPath> scopes;
+    std::map<SdfPath, GfMatrix4d> deltas;
+    RigExecBindingResolvingSceneIndex::BindingEpochConstPtr epoch;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        scopes = _generatedScopes;
+        deltas = _previewXformDeltas;
+        epoch = _publishedEpoch;
+    }
+    // Unlocked: every one of these sends scene index notices, and the
+    // results index's time trigger re-enters this context on them.
+    if (chain.pruning) {
+        chain.pruning->SetOwnedScopes(scopes);
+    }
+    if (chain.xforms) {
+        chain.xforms->SetWorldDeltas(deltas);
+    }
+    if (chain.binding) {
+        chain.binding->SetBindingEpoch(epoch);
+    }
+    if (chain.results) {
+        chain.results->SetStore(_store);
+    }
+}
+
+bool
+RigExecImagingRegistry::_LegacyActivate(
+    const UsdStageRefPtr &stage, const SdfPath &rigPath,
+    UsdTimeCode initialTime, std::vector<std::string> *errors)
+{
+    if (!stage) {
+        if (errors) {
+            errors->push_back("no stage to activate");
+        }
+        return false;
+    }
+    RigExecImagingRegistry &handle =
+        RigExecImagingDirectory::Get().LegacyHandle();
+    const Ptr target = ForStage(stage, /* create = */ true);
+    if (!target) {
+        if (errors) {
+            errors->push_back("no imaging context for the stage");
+        }
+        return false;
+    }
+    // The legacy overlay selection is the old singleton's process-wide
+    // viewer mode: a legacy activation carries it into its target, before
+    // the first evaluation when the target is inactive (so the initial
+    // generation already has it), through SetWeightOverlay otherwise.
+    SdfPath overlay;
+    bool overlaySet = false;
+    {
+        std::lock_guard<std::mutex> lock(handle._mutex);
+        overlay = handle._weightOverlay;
+        overlaySet = handle._legacyOverlaySet;
+    }
+    if (overlaySet && !target->IsActive()) {
+        std::lock_guard<std::mutex> lock(target->_mutex);
+        target->_weightOverlay = overlay;
+    }
+    if (!target->Activate(stage, rigPath, initialTime, errors)) {
+        return false;
+    }
+    RigExecImagingDirectory::Get().SetCurrent(target);
+    if (overlaySet) {
+        bool differs = false;
+        {
+            std::lock_guard<std::mutex> lock(target->_mutex);
+            differs = target->_weightOverlay != overlay;
+        }
+        if (differs) {
+            target->SetWeightOverlay(overlay.GetString());
+        }
+    }
+    return true;
 }
 
 void
@@ -397,6 +953,9 @@ RigExecImagingRegistry::_PrepareWarmBurst(RigSession *session)
 bool
 RigExecImagingRegistry::GetWarmBurstUsable(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetWarmBurstUsable(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (const RigSession &session : _sessions) {
         if (session.rigPath == rig) {
@@ -409,6 +968,10 @@ RigExecImagingRegistry::GetWarmBurstUsable(const SdfPath &rig)
 void
 RigExecImagingRegistry::SetWarmBurstPrepSliceMs(double ms)
 {
+    if (const Ptr routed = _Routed()) {
+        routed->SetWarmBurstPrepSliceMs(ms);
+        return;
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     _warmBurstPrepSliceMs = ms;
     // A new slice re-times every verdict: an overrun latched under the
@@ -423,6 +986,9 @@ RigExecImagingRegistry::SetWarmBurstPrepSliceMs(double ms)
 double
 RigExecImagingRegistry::GetWarmBurstPrepSliceMs()
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetWarmBurstPrepSliceMs();
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     return _warmBurstPrepSliceMs;
 }
@@ -430,6 +996,9 @@ RigExecImagingRegistry::GetWarmBurstPrepSliceMs()
 RigExecWarmSkipReason
 RigExecImagingRegistry::GetLastWarmSkipReason(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetLastWarmSkipReason(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (const RigSession &session : _sessions) {
         if (session.rigPath == rig) {
@@ -442,6 +1011,9 @@ RigExecImagingRegistry::GetLastWarmSkipReason(const SdfPath &rig)
 std::string
 RigExecImagingRegistry::GetLastWarmSkipDetail(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetLastWarmSkipDetail(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (const RigSession &session : _sessions) {
         if (session.rigPath == rig) {
@@ -455,6 +1027,10 @@ void
 RigExecImagingRegistry::SetWarmSamplingBudget(size_t maxFactoryInvocations,
                                               double maxMs)
 {
+    if (const Ptr routed = _Routed()) {
+        routed->SetWarmSamplingBudget(maxFactoryInvocations, maxMs);
+        return;
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     _warmSamplingMaxInvocations = maxFactoryInvocations;
     _warmSamplingMaxMs = maxMs;
@@ -463,6 +1039,9 @@ RigExecImagingRegistry::SetWarmSamplingBudget(size_t maxFactoryInvocations,
 size_t
 RigExecImagingRegistry::GetWarmSamplingMaxInvocations()
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetWarmSamplingMaxInvocations();
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     return _warmSamplingMaxInvocations;
 }
@@ -470,6 +1049,9 @@ RigExecImagingRegistry::GetWarmSamplingMaxInvocations()
 double
 RigExecImagingRegistry::GetWarmSamplingMaxMs()
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetWarmSamplingMaxMs();
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     return _warmSamplingMaxMs;
 }
@@ -609,6 +1191,7 @@ RigExecImagingRegistry::_Publish(
     if (epoch && epoch->id != _publishedEpochId) {
         result.epoch = epoch;
         _publishedEpochId = epoch->id;
+        _publishedEpoch = epoch;
     }
     result.ok = true;
     return result;
@@ -619,6 +1202,34 @@ RigExecImagingRegistry::Activate(
     const UsdStageRefPtr &stage, const SdfPath &rigPath,
     UsdTimeCode initialTime, std::vector<std::string> *errors)
 {
+    return _Activate(stage, rigPath, initialTime, errors,
+                     /* automatic = */ false);
+}
+
+bool
+RigExecImagingRegistry::_Activate(
+    const UsdStageRefPtr &stage, const SdfPath &rigPath,
+    UsdTimeCode initialTime, std::vector<std::string> *errors,
+    bool automatic)
+{
+    if (_legacyHandle) {
+        return _LegacyActivate(stage, rigPath, initialTime, errors);
+    }
+    if (stage && UsdStageWeakPtr(stage) != _boundStage) {
+        // A context only ever evaluates its own stage. Another stage is
+        // forwarded to ITS context (created when it has none), which is
+        // exactly what the old singleton's "activate replaces" becomes when
+        // every stage has its own registry: nothing here is replaced.
+        const Ptr target = ForStage(stage, /* create = */ true);
+        if (!target || target.get() == this) {
+            if (errors) {
+                errors->push_back("no imaging context for the stage");
+            }
+            return false;
+        }
+        return target->_Activate(stage, rigPath, initialTime, errors,
+                                 automatic);
+    }
     // unique_lock, not lock_guard: the broadcast at the end runs WITHOUT the
     // lock (see _Broadcast), because scene indices call back into the
     // registry -- the results index's time trigger evaluates through
@@ -630,6 +1241,19 @@ RigExecImagingRegistry::Activate(
             errors->push_back("no stage to activate");
         }
         return false;
+    }
+    if (automatic) {
+        // EnsureActivated tested these unlocked. Two rigs populating at
+        // once both get here; the first commits and the second is a no-op
+        // instead of a recompile -- and it never downgrades an explicit
+        // activation that landed in between to an automatic one. A host
+        // deactivation in between still wins.
+        if (!_sessions.empty()) {
+            return true;
+        }
+        if (_deactivatedByHost) {
+            return false;
+        }
     }
 
     std::vector<SdfPath> rigPaths;
@@ -799,6 +1423,18 @@ RigExecImagingRegistry::Activate(
     TfNotice::Revoke(_changeKey);
     _changeKey = candidateChangeKey;
     _sessions = std::move(candidate);
+    _active = !_sessions.empty();
+    _deactivatedByHost = false;
+    // Who owns the activation's lifetime: the host (explicit), or the
+    // library, which releases it with its last bound chain (ReleaseChain).
+    _autoActivated = automatic;
+    // The warming pool starts with the first activation (a context without
+    // an active rig owns no threads) and stops with Deactivate. It serves
+    // this context only, so its per-rig-path keys never meet another
+    // stage's equal paths.
+    if (!_scheduler) {
+        _scheduler = _MakeScheduler(_warmIndex);
+    }
     // Fresh sessions retire every queued or running job for their rigs:
     // a completion holds its sampled cache, so this drops work, never
     // results, and a re-activation never inherits another stage's warming.
@@ -826,7 +1462,7 @@ RigExecImagingRegistry::Activate(
         _assetRoots.insert(session.assetRoot);
     }
     _RefreshReadRoots();
-    for (Chain &chain : _chains) {
+    for (const Chain &chain : _BoundChains()) {
         if (chain.pruning) {
             chain.pruning->SetOwnedScopes(_generatedScopes);
         }
@@ -845,21 +1481,37 @@ bool
 RigExecImagingRegistry::EnsureActivated(
     const UsdStageRefPtr &stage, UsdTimeCode time)
 {
+    if (!stage) {
+        return false;
+    }
+    if (_legacyHandle || UsdStageWeakPtr(stage) != _boundStage) {
+        // The stage's own context decides; there is no other stage to
+        // refuse on account of.
+        const Ptr target = ForStage(stage, /* create = */ true);
+        return target && target.get() != this &&
+               target->EnsureActivated(stage, time);
+    }
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (!_sessions.empty()) {
-            // Already active: a no-op on this stage, a silent refusal on any
-            // other (the automatic path never steals a live activation).
-            return _stage == stage;
+            // Already active on this (its only) stage: a no-op.
+            return true;
+        }
+        if (_deactivatedByHost) {
+            // The host turned this stage off; only its explicit Activate
+            // turns it back on (see the header).
+            return false;
         }
     }
     // Outside the lock: Activate takes the same non-recursive mutex (the
     // rule SetWeightOverlay documents). Two rigs populating at once can both
-    // reach here; the activations serialize inside Activate and the second
-    // transactionally replaces the first, so the race costs a compile, not
-    // correctness.
+    // reach here; the activations serialize inside _Activate, which
+    // re-checks both tests above under the lock, so the second is a no-op.
+    // Automatic: the library releases this activation with the last chain
+    // bound to this context (ReleaseChain).
     std::vector<std::string> errors;
-    if (!Activate(stage, SdfPath::EmptyPath(), time, &errors)) {
+    if (!_Activate(stage, SdfPath::EmptyPath(), time, &errors,
+                   /* automatic = */ true)) {
         // One line, not silent: a broken rig in a batch host (usdrecord)
         // otherwise renders its rest pose with no explanation. During live
         // authoring this fires at most once per root definition -- defining
@@ -872,12 +1524,20 @@ RigExecImagingRegistry::EnsureActivated(
                 errors.empty() ? "unknown error" : errors.front().c_str());
         return false;
     }
+    // A host with no explicit activation (usdrecord, a test driving the
+    // real chain) reaches the legacy surface through this context -- but
+    // only when no current context is live, so the automatic path never
+    // takes the legacy surface away from an explicit activation.
+    RigExecImagingDirectory::Get().OfferCurrent(ForKey(_key));
     return true;
 }
 
 bool
 RigExecImagingRegistry::IsActiveRigRoot(const SdfPath &path)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->IsActiveRigRoot(path);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (const RigSession &session : _sessions) {
         if (session.rigPath == path) {
@@ -890,6 +1550,10 @@ RigExecImagingRegistry::IsActiveRigRoot(const SdfPath &path)
 void
 RigExecImagingRegistry::NoteRigRoot(const SdfPath &rigPath)
 {
+    if (const Ptr routed = _Routed()) {
+        routed->NoteRigRoot(rigPath);
+        return;
+    }
     if (rigPath.IsEmpty()) {
         return;
     }
@@ -902,6 +1566,9 @@ RigExecImagingRegistry::NoteRigRoot(const SdfPath &rigPath)
 bool
 RigExecImagingRegistry::IsNotedRigRoot(const SdfPath &path)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->IsNotedRigRoot(path);
+    }
     std::lock_guard<std::mutex> lock(_notedMutex);
     return _notedRigRoots.count(path) != 0;
 }
@@ -909,6 +1576,9 @@ RigExecImagingRegistry::IsNotedRigRoot(const SdfPath &path)
 bool
 RigExecImagingRegistry::SetTime(UsdTimeCode time)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->SetTime(time);
+    }
     // unique_lock: both broadcasts below run unlocked (see Activate), because
     // the notices they send re-enter this registry through the results
     // index's time trigger.
@@ -966,6 +1636,7 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
         // The next good generation must re-announce its epoch; the one the
         // binding index holds names prims this clear just removed.
         _publishedEpochId = 0;
+        _publishedEpoch.reset();
         lock.unlock();
         _Broadcast(cleared);
         return false;
@@ -981,7 +1652,7 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     const bool advanced =
         previousTime.IsNumeric() && time.IsNumeric() &&
         time.GetValue() > previousTime.GetValue();
-    if (advanced) {
+    if (advanced && _scheduler) {
         for (const RigSession &session : _sessions) {
             if (!session.playback) {
                 _scheduler->NotePlaybackAdvanced(session.rigPath, time);
@@ -1027,6 +1698,9 @@ RigExecImagingRegistry::_RefreshReadRoots()
 size_t
 RigExecImagingRegistry::GetSessionEvaluationCount(const SdfPath &rigPath)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetSessionEvaluationCount(rigPath);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (const RigSession &session : _sessions) {
         if (session.rigPath == rigPath) return session.evaluationCount;
@@ -1040,6 +1714,9 @@ RigExecImagingRegistry::BuildWarmWork(
     RigExecFrameGeneration generation, RigExecFrozenStepRunner runner,
     RigExecBurstSampleCache *burst)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->BuildWarmWork(rig, time, generation, runner, burst);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     // Production-ness is read BEFORE the runner resolves: a null runner
     // means "warm for real", and real execution needs the session's
@@ -1076,7 +1753,7 @@ RigExecImagingRegistry::BuildWarmWork(
         result.detail = detail;
         return result;
     };
-    if (!_scheduler->IsGenerationCurrent(rig, generation)) {
+    if (!_scheduler || !_scheduler->IsGenerationCurrent(rig, generation)) {
         return RigExecWarmFactoryResult();
     }
     const RigExecRigEvaluator &evaluator = session->bridge->GetEvaluator();
@@ -1230,7 +1907,9 @@ RigExecImagingRegistry::BuildWarmWork(
     // context points at: the job's own shared_ptr keeps it alive past a
     // deactivation or a refresh that swaps the session's entry out. The
     // cache is shared (a completion for a dead session lands in a dead
-    // cache); the scheduler outlives the pool (registry singleton).
+    // cache); the scheduler outlives every job it runs -- it owns the pool,
+    // and its destructor (Deactivate stopping the context's pool) joins
+    // the workers before it goes.
     std::shared_ptr<const RigExecFrozenProgram> frozen = session->frozen;
     // Retained-state publish (plan 2.0): the source snapshot and the
     // dependency record ride with the pose. Built here, on the UI thread:
@@ -1310,12 +1989,19 @@ RigExecImagingRegistry::BuildWarmWork(
 RigExecProfiler *
 RigExecImagingRegistry::MutableSchedulerProfiler()
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->MutableSchedulerProfiler();
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
     return _scheduler ? _scheduler->MutableProfiler() : nullptr;
 }
 
 RigExecProfiler *
 RigExecImagingRegistry::MutableBridgeProfiler(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->MutableBridgeProfiler(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (RigSession &session : _sessions) {
         if (session.rigPath == rig && !session.playback && session.bridge) {
@@ -1371,16 +2057,23 @@ RigExecImagingRegistry::_CursorSweepTimes(const RigSession &session,
 size_t
 RigExecImagingRegistry::OnEditCommitted(RigExecFrozenStepRunner runner)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->OnEditCommitted(runner);
+    }
     // Snapshot the rigs and the playhead under a short lock; the triggers
     // below sample outside it (their factories re-resolve each session, so
     // a Deactivate mid-trigger only skips frames, never dangles).
     std::vector<SdfPath> rigs;
     UsdTimeCode playhead;
+    // Held across the unlocked trigger below: a Deactivate in between stops
+    // the context's pool, and the last holder is what destroys it.
+    std::shared_ptr<RigExecBackgroundScheduler> scheduler;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_sessions.empty() || !_scheduler) {
             return 0;
         }
+        scheduler = _scheduler;
         for (const RigSession &session : _sessions) {
             if (!session.playback) {
                 rigs.push_back(session.rigPath);
@@ -1398,7 +2091,7 @@ RigExecImagingRegistry::OnEditCommitted(RigExecFrozenStepRunner runner)
     size_t enqueued = 0;
     for (const SdfPath &rig : rigs) {
         const RigExecFrameGeneration generation =
-            _scheduler->CurrentGeneration(rig);
+            scheduler->CurrentGeneration(rig);
         // The session's standing burst: rebuilt when its pins moved,
         // served across ticks while current. Usable takes the cached
         // route; overrun takes the plain per-frame route (null burst),
@@ -1449,7 +2142,7 @@ RigExecImagingRegistry::OnEditCommitted(RigExecFrozenStepRunner runner)
                 return BuildWarmWork(rig, time, generation, runner, route);
             };
         }
-        enqueued += _scheduler->OnEditCommitted(
+        enqueued += scheduler->OnEditCommitted(
             rig, playhead, generation, std::move(sweepTimes),
             std::move(factory), kRigExecFrameCacheDefaultNeighborRadius,
             budget);
@@ -1460,13 +2153,20 @@ RigExecImagingRegistry::OnEditCommitted(RigExecFrozenStepRunner runner)
 size_t
 RigExecImagingRegistry::OnIdle(RigExecFrozenStepRunner runner)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->OnIdle(runner);
+    }
     std::vector<SdfPath> rigs;
     UsdTimeCode playhead;
+    // Held across the unlocked trigger below: a Deactivate in between stops
+    // the context's pool, and the last holder is what destroys it.
+    std::shared_ptr<RigExecBackgroundScheduler> scheduler;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_sessions.empty() || !_scheduler) {
             return 0;
         }
+        scheduler = _scheduler;
         for (const RigSession &session : _sessions) {
             if (!session.playback) {
                 rigs.push_back(session.rigPath);
@@ -1484,7 +2184,7 @@ RigExecImagingRegistry::OnIdle(RigExecFrozenStepRunner runner)
     size_t enqueued = 0;
     for (const SdfPath &rig : rigs) {
         const RigExecFrameGeneration generation =
-            _scheduler->CurrentGeneration(rig);
+            scheduler->CurrentGeneration(rig);
         // The standing burst, as in OnEditCommitted: cached route when
         // usable, plain per-frame route on overrun, no factory on a
         // shape decline.
@@ -1529,7 +2229,7 @@ RigExecImagingRegistry::OnIdle(RigExecFrozenStepRunner runner)
                 return BuildWarmWork(rig, time, generation, runner, route);
             };
         }
-        enqueued += _scheduler->OnIdle(
+        enqueued += scheduler->OnIdle(
             rig, playhead, generation, std::move(sweepTimes),
             std::move(factory), budget);
     }
@@ -1539,6 +2239,9 @@ RigExecImagingRegistry::OnIdle(RigExecFrozenStepRunner runner)
 RigExecFrameGeneration
 RigExecImagingRegistry::CurrentFrameGeneration(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->CurrentFrameGeneration(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     if (_sessions.empty() || !_scheduler) {
         return 0;
@@ -1554,6 +2257,9 @@ RigExecImagingRegistry::CurrentFrameGeneration(const SdfPath &rig)
 RigExecWarmFenceToken
 RigExecImagingRegistry::CurrentFenceToken(const SdfPath &rig, UsdTimeCode time)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->CurrentFenceToken(rig, time);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     if (_sessions.empty() || !_scheduler) {
         return 0;
@@ -1868,6 +2574,10 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
 void
 RigExecImagingRegistry::CancelFrameGeneration(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        routed->CancelFrameGeneration(rig);
+        return;
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     _CancelGenerationLocked(rig);
 }
@@ -1875,20 +2585,28 @@ RigExecImagingRegistry::CancelFrameGeneration(const SdfPath &rig)
 RigExecBackgroundSchedulerStats
 RigExecImagingRegistry::GetBackgroundStats()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (!_scheduler) {
-        return RigExecBackgroundSchedulerStats();
+    if (const Ptr routed = _Routed()) {
+        return routed->GetBackgroundStats();
     }
-    return _scheduler->Stats();
+    std::lock_guard<std::mutex> lock(_mutex);
+    RigExecBackgroundSchedulerStats stats = _retiredStats;
+    if (_scheduler) {
+        _AddSchedulerStats(&stats, _scheduler->Stats(), /* gauges = */ true);
+    }
+    return stats;
 }
 
 void
 RigExecImagingRegistry::WaitUntilBackgroundIdle()
 {
-    RigExecBackgroundScheduler *scheduler = nullptr;
+    if (const Ptr routed = _Routed()) {
+        routed->WaitUntilBackgroundIdle();
+        return;
+    }
+    std::shared_ptr<RigExecBackgroundScheduler> scheduler;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        scheduler = _scheduler.get();
+        scheduler = _scheduler;
     }
     // Outside _mutex: workers never take it, but idleness can outlast a
     // caller's patience for holding it.
@@ -1900,6 +2618,9 @@ RigExecImagingRegistry::WaitUntilBackgroundIdle()
 RigExecFrameCacheStats
 RigExecImagingRegistry::GetFrameCacheStats(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetFrameCacheStats(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (const RigSession &session : _sessions) {
         if (session.rigPath == rig && session.bridge) {
@@ -1912,14 +2633,20 @@ RigExecImagingRegistry::GetFrameCacheStats(const SdfPath &rig)
 void
 RigExecImagingRegistry::ClearFrameCache(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        routed->ClearFrameCache(rig);
+        return;
+    }
     // The fence is outermost: read the scheduler under a short lock, then
     // hold the fence across the whole cancel-THEN-clear below. Lock order
     // fence, then registry, then scheduler, then cache shards, then the
     // warm index -- never inverted.
-    RigExecBackgroundScheduler *scheduler = nullptr;
+    // Held, not borrowed: a Deactivate while the fence is held stops the
+    // pool, and the scheduler (and its fence mutex) must outlive the lock.
+    std::shared_ptr<RigExecBackgroundScheduler> scheduler;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        scheduler = _scheduler.get();
+        scheduler = _scheduler;
     }
     std::unique_lock<std::mutex> fenceLock;
     if (scheduler) {
@@ -1949,6 +2676,9 @@ bool
 RigExecImagingRegistry::SetWarmRange(const SdfPath &rig,
                                      const std::vector<double> &frames)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->SetWarmRange(rig, frames);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (RigSession &session : _sessions) {
         if (session.rigPath == rig && !session.playback && session.bridge) {
@@ -1973,6 +2703,9 @@ std::vector<RigExecWarmFrameState>
 RigExecImagingRegistry::GetFrameStates(const SdfPath &rig,
                                        const std::vector<double> &frames)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetFrameStates(rig, frames);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     if (frames.empty() || frames.size() > 100000) {
         return {};
@@ -1998,6 +2731,9 @@ RigExecImagingRegistry::GetFrameStates(const SdfPath &rig,
 RigExecImagingBridge *
 RigExecImagingRegistry::GetBridge(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetBridge(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (RigSession &session : _sessions) {
         if (session.rigPath == rig && !session.playback && session.bridge) {
@@ -2010,6 +2746,9 @@ RigExecImagingRegistry::GetBridge(const SdfPath &rig)
 std::vector<std::pair<UsdTimeCode, RigExecFrameCacheKey>>
 RigExecImagingRegistry::GetCompletedKeys(const SdfPath &rig)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->GetCompletedKeys(rig);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     for (const RigSession &session : _sessions) {
         if (session.rigPath == rig && !session.playback && session.bridge &&
@@ -2023,14 +2762,35 @@ RigExecImagingRegistry::GetCompletedKeys(const SdfPath &rig)
 bool
 RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
 {
+    if (_legacyHandle) {
+        // The legacy selection is remembered on the handle whatever it
+        // routes to -- the old singleton's viewer mode outlived every
+        // activation, so the next legacy activation carries it (see
+        // _LegacyActivate) -- and applied to the current context now.
+        SdfPath resolved;
+        if (!_ParseOverlayPath(weightPrimPath, &resolved)) {
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _weightOverlay = resolved;
+            _legacyOverlaySet = true;
+        }
+        if (const Ptr routed = _Routed()) {
+            return routed->SetWeightOverlay(weightPrimPath);
+        }
+        return true;
+    }
     UsdTimeCode time;
     // Fenced cancel-THEN-clear like ClearFrameCache (plan 3.3): the fence
     // is outermost, so it is taken before the registry lock below and held
     // across every session's cancel plus clear.
-    RigExecBackgroundScheduler *scheduler = nullptr;
+    // Held, not borrowed: a Deactivate while the fence is held stops the
+    // pool, and the scheduler (and its fence mutex) must outlive the lock.
+    std::shared_ptr<RigExecBackgroundScheduler> scheduler;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        scheduler = _scheduler.get();
+        scheduler = _scheduler;
     }
     std::unique_lock<std::mutex> fenceLock;
     if (scheduler) {
@@ -2038,18 +2798,12 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
     }
     {
         std::lock_guard<std::mutex> lock(_mutex);
+        // An arbitrary caller-supplied string reaches SdfPath here and its
+        // constructor is loud about a malformed one. Ask first -- the same
+        // guard RigExecImaging_GetGuideBoundsAssetSpace uses.
         SdfPath resolved;
-        if (!weightPrimPath.empty()) {
-            // An arbitrary caller-supplied string reaches SdfPath here and
-            // its constructor is loud about a malformed one. Ask first --
-            // the same guard RigExecImaging_GetGuideBoundsAssetSpace uses.
-            if (!SdfPath::IsValidPathString(weightPrimPath)) {
-                return false;
-            }
-            resolved = SdfPath(weightPrimPath);
-            if (!resolved.IsAbsolutePath() || !resolved.IsPrimPath()) {
-                return false;
-            }
+        if (!_ParseOverlayPath(weightPrimPath, &resolved)) {
+            return false;
         }
         _weightOverlay = resolved;
         if (_sessions.empty()) {
@@ -2184,8 +2938,14 @@ _SplitLines(const std::string &packed)
 int
 RigExecImagingRegistry::BeginPreview(const std::string &packedAttributePaths)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->BeginPreview(packedAttributePaths);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
-    if (!_stage) {
+    // The active stage, else the one this context belongs to: a stage with
+    // no rig still previews its Xforms, through this context's chains only.
+    const UsdStageRefPtr stage = _PreviewStageLocked();
+    if (!stage) {
         return -1;
     }
     std::vector<PreviewSlot> slots;
@@ -2200,7 +2960,7 @@ RigExecImagingRegistry::BeginPreview(const std::string &packedAttributePaths)
         if (!path.IsAbsolutePath() || !path.IsPropertyPath()) {
             return -1;
         }
-        const UsdAttribute attribute = _stage->GetAttributeAtPath(path);
+        const UsdAttribute attribute = stage->GetAttributeAtPath(path);
         if (!attribute) {
             return -1;
         }
@@ -2236,6 +2996,7 @@ RigExecImagingRegistry::BeginPreview(const std::string &packedAttributePaths)
         slots.push_back(std::move(slot));
     }
     _previewSlots = std::move(slots);
+    _previewStage = stage;
     _previewActive = true;
     return int(total);
 }
@@ -2243,6 +3004,9 @@ RigExecImagingRegistry::BeginPreview(const std::string &packedAttributePaths)
 bool
 RigExecImagingRegistry::IsPreviewActive() const
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->IsPreviewActive();
+    }
     return _previewActive;
 }
 
@@ -2330,7 +3094,9 @@ RigExecImagingRegistry::_ResolvePreviewSample(
     if (!xformOps.empty()) {
         UsdGeomXformCache cache(_lastTime);
         for (const auto &[primPath, opValues] : xformOps) {
-            const UsdPrim prim = _stage->GetPrimAtPath(primPath);
+            const UsdStageRefPtr stage(_previewStage);
+            const UsdPrim prim =
+                stage ? stage->GetPrimAtPath(primPath) : UsdPrim();
             GfMatrix4d delta(1.0);
             if (!prim ||
                 !_ComposeXformDelta(prim, opValues, &cache, &delta)) {
@@ -2347,26 +3113,28 @@ RigExecImagingRegistry::_SetChainXformDeltas(
     const std::map<SdfPath, GfMatrix4d> &deltas)
 {
     _previewXformDeltas = deltas;
-    for (auto it = _chains.begin(); it != _chains.end();) {
-        if (!it->results) {
-            it = _chains.erase(it);
-            continue;
+    // This context's chains only: a preview on one stage never moves the
+    // same path in another stage's viewport. (Sent under _mutex, as
+    // before; the xform dirties never intersect the time trigger, so the
+    // results index does not re-enter.)
+    for (const Chain &chain : _BoundChains()) {
+        if (chain.xforms) {
+            chain.xforms->SetWorldDeltas(deltas);
         }
-        if (it->xforms) {
-            it->xforms->SetWorldDeltas(deltas);
-        }
-        ++it;
     }
 }
 
 bool
 RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->UpdatePreview(values, count);
+    }
     UsdTimeCode time;
     bool needsRigPublish = false;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        if (!_previewActive || !_stage || (!values && count)) {
+        if (!_previewActive || !_previewStage || (!values && count)) {
             return false;
         }
         std::map<SdfPath, std::vector<RigExecValueOverride>> byRig;
@@ -2412,6 +3180,9 @@ RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
 bool
 RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->WriteProfileSummary(path);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     std::ofstream out(path);
     if (!out) {
@@ -2448,12 +3219,16 @@ RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
 bool
 RigExecImagingRegistry::EndPreview()
 {
+    if (const Ptr routed = _Routed()) {
+        return routed->EndPreview();
+    }
     UsdTimeCode time;
     bool hadRigOverrides = false;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _previewSlots.clear();
         _previewActive = false;
+        _previewStage = UsdStageWeakPtr();
         _SetChainXformDeltas({});
         for (RigSession &session : _sessions) {
             if (session.bridge) {
@@ -2656,10 +3431,49 @@ RigExecImagingRegistry::_OnObjectsChanged(
 void
 RigExecImagingRegistry::Deactivate()
 {
+    if (const Ptr routed = _Routed()) {
+        routed->Deactivate();
+        return;
+    }
+    _Deactivate(/* byHost = */ true);
+}
+
+bool
+RigExecImagingRegistry::IsAutoActivated() const
+{
+    if (const Ptr routed = _Routed()) {
+        return routed->IsAutoActivated();
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _autoActivated && !_sessions.empty();
+}
+
+void
+RigExecImagingRegistry::_Deactivate(bool byHost)
+{
+    if (_legacyHandle) {
+        return;
+    }
+    // Stopped outside every lock, below: the scheduler's destructor joins
+    // its workers, and a fenced clear may be holding its fence while it
+    // waits for _mutex.
+    std::shared_ptr<RigExecBackgroundScheduler> scheduler;
     // unique_lock: the broadcast below runs unlocked (see Activate), because
     // the notices it sends re-enter this registry through the results
     // index's time trigger.
     std::unique_lock<std::mutex> lock(_mutex);
+    if (!byHost) {
+        // The library releasing an automatic activation: only while it is
+        // still automatic (an explicit Activate took it over otherwise) and
+        // no chain is bound any more. Tested under _mutex -- the directory
+        // lock nests inside it -- so a chain binding meanwhile either shows
+        // up here or adopts the cleared state and re-activates through its
+        // own population.
+        if (!_autoActivated || _sessions.empty() ||
+            !_BoundChains().empty()) {
+            return;
+        }
+    }
     TfNotice::Revoke(_changeKey);
     _changeKey = TfNotice::Key();
     _assetRoots.clear();
@@ -2673,14 +3487,25 @@ RigExecImagingRegistry::Deactivate()
         }
     }
     _sessions.clear();
+    _active = false;
+    // A library release is not a host decision: a later engine on the same
+    // stage activates it again (EnsureActivated). A host deactivation of an
+    // inactive context still counts -- it keeps the automatic path off.
+    if (byHost) {
+        _deactivatedByHost = true;
+    }
+    _autoActivated = false;
     _stage.Reset();
+    // A context without an active rig owns no threads.
+    scheduler = std::move(_scheduler);
     {
         // Nested _mutex -> _notedMutex: the documented lock order.
         std::lock_guard<std::mutex> notedLock(_notedMutex);
         _notedRigRoots.clear();
     }
     _publishedEpochId = 0;
-    for (Chain &chain : _chains) {
+    _publishedEpoch.reset();
+    for (const Chain &chain : _BoundChains()) {
         if (chain.pruning) {
             chain.pruning->SetOwnedScopes({});
         }
@@ -2690,6 +3515,20 @@ RigExecImagingRegistry::Deactivate()
     cleared.dirtied = _store->Publish(nullptr);
     lock.unlock();
     _Broadcast(cleared);
+    if (scheduler) {
+        // The stopped scheduler's totals stay part of this context's
+        // warming counters (GetBackgroundStats): the cache strip's repaint
+        // gate and its "completed" label must not fall back to zero on
+        // every re-activation. Read as late as possible, unlocked (the
+        // scheduler's own lock is a leaf); completions of jobs still
+        // running past this point are not counted.
+        const RigExecBackgroundSchedulerStats stats = scheduler->Stats();
+        std::lock_guard<std::mutex> relock(_mutex);
+        _AddSchedulerStats(&_retiredStats, stats, /* gauges = */ false);
+    }
+    // The last holder joins the workers; running jobs finish, queued ones
+    // drop (RigExecBackgroundScheduler's destructor).
+    scheduler.reset();
 }
 
 void
@@ -2706,17 +3545,10 @@ RigExecImagingRegistry::_Broadcast(
     // assumes the lock is held. A chain whose graph dies between the snapshot
     // and its send simply fails its weak-pointer check and is pruned on the
     // next broadcast.
-    std::vector<Chain> chains;
-    {
-        std::lock_guard<std::mutex> lock(_mutex);
-        // Prune chains whose scene index graphs were destroyed.
-        _chains.erase(
-            std::remove_if(_chains.begin(), _chains.end(),
-                           [](const Chain &c) { return !c.results; }),
-            _chains.end());
-        chains = _chains;
-    }
-    for (Chain &chain : chains) {
+    // This context's chains only, snapshotted under the directory's leaf
+    // lock (which also prunes chains whose graphs were destroyed).
+    const std::vector<Chain> chains = _BoundChains();
+    for (const Chain &chain : chains) {
         if (result.epoch && chain.binding) {
             chain.binding->SetBindingEpoch(result.epoch);
         }
@@ -3358,14 +4190,18 @@ _ComputeRigExecGuideExtent(
 
     // The live generation wins -- but ONLY if it describes this stage at
     // this time. USD calls this with a stage and a time of its own
-    // choosing, and the store is a process-global singleton, so an
-    // ungated lookup by path answers a query about stage A frame 12 with
-    // stage B's frame 30 pose: plausible, wrong, and undetectable
-    // downstream. Identity is the stage OBJECT -- two stages commonly share
-    // a root layer and differ only by session layer. Anything else falls through to the rest pose, which
-    // makes this callback a pure function of (stage, time).
+    // choosing, so the generation consulted is the one of the queried
+    // stage's OWN imaging context (never another stage's, even with equal
+    // paths), and it must still describe that stage at that time: a query
+    // at frame 12 is not answered from the frame-30 generation. Identity is
+    // the stage OBJECT -- two stages commonly share a root layer and differ
+    // only by session layer. Anything else falls through to the rest pose,
+    // which makes this callback a pure function of (stage, time).
+    const RigExecImagingRegistry::Ptr context =
+        RigExecImagingRegistry::ForStage(prim.GetStage(),
+                                         /* create = */ false);
     if (const rigExec::RigExecImagingSnapshotConstPtr snapshot =
-            RigExecImagingRegistry::GetInstance().GetStore()->Get()) {
+            context ? context->GetStore()->Get() : nullptr) {
         if (snapshot->Describes(prim.GetStage(), time)) {
             found = _AccumulateSubtreeGuideBounds(
                 *snapshot, prim.GetPath(), _ResolvedPurpose(prim), &range);
@@ -3448,101 +4284,43 @@ TF_REGISTRY_FUNCTION(UsdGeomBoundable)
 
 PXR_NAMESPACE_CLOSE_SCOPE
 
-extern "C" {
+namespace {
 
-int
-RigExecImaging_Activate(
-    long long stageCacheId, const char *rigPath, double initialFrame)
+using RegistryPtr = RigExecImagingRegistry::Ptr;
+
+// The legacy surface: the stage-less C functions route through the legacy
+// handle, i.e. to the current context (registry.h, "LEGACY SURFACE").
+RigExecImagingRegistry &
+_Legacy()
 {
-    PXR_NS::UsdStageRefPtr stage = PXR_NS::UsdUtilsStageCache::Get().Find(
-        PXR_NS::UsdStageCache::Id::FromLongInt(
-            static_cast<long int>(stageCacheId)));
-    if (!stage) {
-        std::printf("rigExecImaging: no stage for cache id %lld\n",
-                    stageCacheId);
-        return 1;
-    }
-
-    PXR_NS::SdfPath path;
-    if (rigPath && rigPath[0]) {
-        if (!PXR_NS::SdfPath::IsValidPathString(rigPath)) {
-            std::printf("rigExecImaging: invalid rig path '%s'\n", rigPath);
-            return 2;
-        }
-        path = PXR_NS::SdfPath(rigPath);
-    }
-
-    std::vector<std::string> errors;
-    if (!RigExecImagingRegistry::GetInstance().Activate(
-            stage, path, PXR_NS::UsdTimeCode(initialFrame), &errors)) {
-        for (const std::string &e : errors) {
-            std::printf("rigExecImaging: %s\n", e.c_str());
-        }
-        return 3;
-    }
-    if (path.IsEmpty()) {
-        std::printf("rigExecImaging: activated all RigExecRoot prims\n");
-    } else {
-        std::printf("rigExecImaging: activated %s\n", path.GetText());
-    }
-    return 0;
+    return rigExec::RigExecImagingDirectory::Get().LegacyHandle();
 }
 
-int
-RigExecImaging_SetTime(double frame)
+// A stage-scoped call's context: the one of the stage the stage cache holds
+// under \p id. Never created here except where the call documents it.
+RegistryPtr
+_ForStage(long long id, bool create = false)
 {
-    return RigExecImagingRegistry::GetInstance().SetTime(
-               PXR_NS::UsdTimeCode(frame))
-        ? 0 : 1;
-}
-
-void
-RigExecImaging_Deactivate()
-{
-    RigExecImagingRegistry::GetInstance().Deactivate();
-}
-
-int
-RigExecImaging_OnEditCommitted()
-{
-    RigExecImagingRegistry &registry =
-        RigExecImagingRegistry::GetInstance();
-    if (!registry.IsActive()) {
-        return 1;
-    }
-    registry.OnEditCommitted();
-    return 0;
-}
-
-int
-RigExecImaging_OnIdle()
-{
-    RigExecImagingRegistry &registry =
-        RigExecImagingRegistry::GetInstance();
-    if (!registry.IsActive()) {
-        return 1;
-    }
-    registry.OnIdle();
-    return 0;
+    return RigExecImagingRegistry::ForStageCacheId(id, create);
 }
 
 long long
-RigExecImaging_GetGeneration()
+_Generation(const RigExecImagingRegistry &registry)
 {
     const rigExec::RigExecImagingSnapshotConstPtr snapshot =
-        RigExecImagingRegistry::GetInstance().GetStore()->Get();
+        registry.GetStore()->Get();
     return snapshot ? static_cast<long long>(snapshot->generation) : 0;
 }
 
 int
-RigExecImaging_GetMovedFloats(
-    const char *packedPaths, float *out, int count)
+_MovedFloats(const RigExecImagingRegistry &registry,
+             const char *packedPaths, float *out, int count)
 {
     if (!packedPaths || !out || count <= 0) {
         return 0;
     }
     const rigExec::RigExecImagingSnapshotConstPtr snapshot =
-        RigExecImagingRegistry::GetInstance().GetStore()->Get();
+        registry.GetStore()->Get();
     if (!snapshot) {
         return 0;
     }
@@ -3577,33 +4355,14 @@ RigExecImaging_GetMovedFloats(
 }
 
 int
-RigExecImaging_GetControlFrameAssetSpace(
-    long long stageCacheId, const char *primPath, double frame,
-    int isDefault, double outMatrix[16])
-{
-    if (!primPath || !outMatrix || !PXR_NS::SdfPath::IsValidPathString(primPath) ||
-        (!isDefault && !std::isfinite(frame))) return 0;
-    const auto stage = PXR_NS::UsdUtilsStageCache::Get().Find(
-        PXR_NS::UsdStageCache::Id::FromLongInt(stageCacheId));
-    const auto snapshot = RigExecImagingRegistry::GetInstance().GetStore()->Get();
-    const auto time = isDefault ? PXR_NS::UsdTimeCode::Default() : PXR_NS::UsdTimeCode(frame);
-    if (!stage || !snapshot || !snapshot->Describes(stage, time)) return 0;
-    const auto it = snapshot->prims.find(PXR_NS::SdfPath(primPath));
-    if (it == snapshot->prims.end() || !it->second.hasControlFrame) return 0;
-    for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c)
-        outMatrix[r*4+c] = it->second.controlFrame[r][c];
-    return 1;
-}
-
-int
-RigExecImaging_GetGuideBoundsAssetSpace(
-    const char *primPath, double outMinMax[6])
+_GuideBounds(const RigExecImagingRegistry &registry, const char *primPath,
+             double outMinMax[6])
 {
     if (!primPath || !primPath[0] || !outMinMax) {
         return 0;
     }
     const rigExec::RigExecImagingSnapshotConstPtr snapshot =
-        RigExecImagingRegistry::GetInstance().GetStore()->Get();
+        registry.GetStore()->Get();
     if (!snapshot) {
         return 0;
     }
@@ -3624,135 +4383,14 @@ RigExecImaging_GetGuideBoundsAssetSpace(
     return 1;
 }
 
-// Viewport profiling. With RIGEXEC_IMAGING_PROFILE set, every active rig's
-// evaluator records its own phases and the imaging layer's publish phases;
-// this writes the per-phase totals as tab-separated text and clears them,
-// so a caller can bracket exactly the interaction it wants to measure.
 int
-RigExecImaging_WriteProfileSummary(const char *path)
-{
-    return RigExecImagingRegistry::GetInstance().WriteProfileSummary(
-               path ? std::string(path) : std::string())
-        ? 0 : 1;
-}
-
-int
-RigExecImaging_SetWeightOverlay(const char *weightPrimPath)
-{
-    return RigExecImagingRegistry::GetInstance().SetWeightOverlay(
-               weightPrimPath ? std::string(weightPrimPath) : std::string())
-        ? 0 : 1;
-}
-
-int
-RigExecImaging_GetFrameStates(const char *rigPath, const double *frames,
-                              int *statesOut, int count)
-{
-    if (!rigPath || !frames || !statesOut || count < 0) {
-        return -1;
-    }
-    if (!SdfPath::IsValidPathString(rigPath)) {
-        return -1;
-    }
-    std::vector<double> times;
-    times.reserve(size_t(count));
-    for (int i = 0; i < count; ++i) {
-        if (!std::isfinite(frames[i])) {
-            return -1;
-        }
-        times.push_back(frames[i]);
-    }
-    const std::vector<rigExec::RigExecWarmFrameState> states =
-        RigExecImagingRegistry::GetInstance().GetFrameStates(
-            SdfPath(rigPath), times);
-    if (states.empty() && count > 0) {
-        return -1;
-    }
-    for (size_t i = 0; i < states.size(); ++i) {
-        statesOut[i] = int(states[i]);
-    }
-    return int(states.size());
-}
-
-int
-RigExecImaging_ClearFrameCache(const char *rigPath)
-{
-    if (!rigPath) {
-        return -1;
-    }
-    if (!SdfPath::IsValidPathString(rigPath)) {
-        return -1;
-    }
-    RigExecImagingRegistry::GetInstance().ClearFrameCache(SdfPath(rigPath));
-    return 0;
-}
-
-int
-RigExecImaging_WarmRange(const char *rigPath, const double *frames, int count)
-{
-    if (!rigPath || count < 0 || (!frames && count > 0)) {
-        return -1;
-    }
-    if (!SdfPath::IsValidPathString(rigPath)) {
-        return -1;
-    }
-    std::vector<double> times;
-    times.reserve(size_t(count));
-    for (int i = 0; i < count; ++i) {
-        if (!std::isfinite(frames[i])) {
-            return -1;
-        }
-        times.push_back(frames[i]);
-    }
-    return RigExecImagingRegistry::GetInstance().SetWarmRange(
-               SdfPath(rigPath), times)
-        ? 0
-        : -1;
-}
-
-long long
-RigExecImaging_GetWarmingCompletedCount()
-{
-    return static_cast<long long>(
-        RigExecImagingRegistry::GetInstance().GetBackgroundStats().completed);
-}
-
-// Manipulation preview (docs/superpowers/specs/
-// 2026-09-10-hydra-preview-manipulation-design.md). Three calls, and only the
-// middle one runs per mouse sample: strings are marshalled once per drag and
-// every sample after that is an array of doubles.
-int
-RigExecImaging_BeginPreview(const char *packedAttributePaths)
-{
-    return RigExecImagingRegistry::GetInstance().BeginPreview(
-        packedAttributePaths ? std::string(packedAttributePaths)
-                             : std::string());
-}
-
-int
-RigExecImaging_UpdatePreview(const double *values, int count)
-{
-    if (count < 0) {
-        return 1;
-    }
-    return RigExecImagingRegistry::GetInstance().UpdatePreview(
-               values, size_t(count)) ? 0 : 1;
-}
-
-int
-RigExecImaging_EndPreview()
-{
-    return RigExecImagingRegistry::GetInstance().EndPreview() ? 0 : 1;
-}
-
-int
-RigExecImaging_GetAllGuideBoundsAssetSpace(double outMinMax[6])
+_AllGuideBounds(const RigExecImagingRegistry &registry, double outMinMax[6])
 {
     if (!outMinMax) {
         return 0;
     }
     const rigExec::RigExecImagingSnapshotConstPtr snapshot =
-        RigExecImagingRegistry::GetInstance().GetStore()->Get();
+        registry.GetStore()->Get();
     if (!snapshot) {
         return 0;
     }
@@ -3785,6 +4423,510 @@ RigExecImaging_GetAllGuideBoundsAssetSpace(double outMinMax[6])
     }
     _WriteBounds(range, outMinMax);
     return 1;
+}
+
+int
+_FrameStates(RigExecImagingRegistry &registry, const char *rigPath,
+             const double *frames, int *statesOut, int count)
+{
+    if (!rigPath || !frames || !statesOut || count < 0) {
+        return -1;
+    }
+    if (!SdfPath::IsValidPathString(rigPath)) {
+        return -1;
+    }
+    std::vector<double> times;
+    times.reserve(size_t(count));
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(frames[i])) {
+            return -1;
+        }
+        times.push_back(frames[i]);
+    }
+    const std::vector<rigExec::RigExecWarmFrameState> states =
+        registry.GetFrameStates(SdfPath(rigPath), times);
+    if (states.empty() && count > 0) {
+        return -1;
+    }
+    for (size_t i = 0; i < states.size(); ++i) {
+        statesOut[i] = int(states[i]);
+    }
+    return int(states.size());
+}
+
+int
+_ClearFrameCache(RigExecImagingRegistry &registry, const char *rigPath)
+{
+    if (!rigPath) {
+        return -1;
+    }
+    if (!SdfPath::IsValidPathString(rigPath)) {
+        return -1;
+    }
+    registry.ClearFrameCache(SdfPath(rigPath));
+    return 0;
+}
+
+int
+_WarmRange(RigExecImagingRegistry &registry, const char *rigPath,
+           const double *frames, int count)
+{
+    if (!rigPath || count < 0 || (!frames && count > 0)) {
+        return -1;
+    }
+    if (!SdfPath::IsValidPathString(rigPath)) {
+        return -1;
+    }
+    std::vector<double> times;
+    times.reserve(size_t(count));
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(frames[i])) {
+            return -1;
+        }
+        times.push_back(frames[i]);
+    }
+    return registry.SetWarmRange(SdfPath(rigPath), times) ? 0 : -1;
+}
+
+int
+_UpdatePreview(RigExecImagingRegistry &registry, const double *values,
+               int count)
+{
+    if (count < 0) {
+        return 1;
+    }
+    return registry.UpdatePreview(values, size_t(count)) ? 0 : 1;
+}
+
+// RigExecImaging_Activate and RigExecImaging_ActivateForStage: the same
+// arguments and return codes; \p legacy picks the legacy activation (THAT
+// stage's context, made current, carrying the legacy overlay selection)
+// over the stage-scoped one (that context only).
+int
+_ActivateC(long long stageCacheId, const char *rigPath, double initialFrame,
+           bool legacy)
+{
+    PXR_NS::UsdStageRefPtr stage = PXR_NS::UsdUtilsStageCache::Get().Find(
+        PXR_NS::UsdStageCache::Id::FromLongInt(
+            static_cast<long int>(stageCacheId)));
+    if (!stage) {
+        std::printf("rigExecImaging: no stage for cache id %lld\n",
+                    stageCacheId);
+        return 1;
+    }
+
+    PXR_NS::SdfPath path;
+    if (rigPath && rigPath[0]) {
+        if (!PXR_NS::SdfPath::IsValidPathString(rigPath)) {
+            std::printf("rigExecImaging: invalid rig path '%s'\n", rigPath);
+            return 2;
+        }
+        path = PXR_NS::SdfPath(rigPath);
+    }
+
+    // THAT stage's context (created on demand). The legacy activation also
+    // makes it the current context. Other stages' contexts are untouched.
+    std::vector<std::string> errors;
+    bool activated = false;
+    if (legacy) {
+        activated = _Legacy().Activate(
+            stage, path, PXR_NS::UsdTimeCode(initialFrame), &errors);
+    } else {
+        const RegistryPtr context =
+            RigExecImagingRegistry::ForStage(stage, /* create = */ true);
+        activated = context &&
+            context->Activate(stage, path, PXR_NS::UsdTimeCode(initialFrame),
+                              &errors);
+        if (!context) {
+            errors.push_back("no imaging context for the stage");
+        }
+    }
+    if (!activated) {
+        for (const std::string &e : errors) {
+            std::printf("rigExecImaging: %s\n", e.c_str());
+        }
+        return 3;
+    }
+    if (path.IsEmpty()) {
+        std::printf("rigExecImaging: activated all RigExecRoot prims\n");
+    } else {
+        std::printf("rigExecImaging: activated %s\n", path.GetText());
+    }
+    return 0;
+}
+
+}  // namespace
+
+extern "C" {
+
+int
+RigExecImaging_Activate(
+    long long stageCacheId, const char *rigPath, double initialFrame)
+{
+    return _ActivateC(stageCacheId, rigPath, initialFrame, /* legacy = */ true);
+}
+
+int
+RigExecImaging_ActivateForStage(
+    long long stageCacheId, const char *rigPath, double initialFrame)
+{
+    return _ActivateC(stageCacheId, rigPath, initialFrame,
+                      /* legacy = */ false);
+}
+
+int
+RigExecImaging_SetTime(double frame)
+{
+    return _Legacy().SetTime(PXR_NS::UsdTimeCode(frame)) ? 0 : 1;
+}
+
+void
+RigExecImaging_Deactivate()
+{
+    _Legacy().Deactivate();
+}
+
+int
+RigExecImaging_OnEditCommitted()
+{
+    RigExecImagingRegistry &registry = _Legacy();
+    if (!registry.IsActive()) {
+        return 1;
+    }
+    registry.OnEditCommitted();
+    return 0;
+}
+
+int
+RigExecImaging_OnIdle()
+{
+    RigExecImagingRegistry &registry = _Legacy();
+    if (!registry.IsActive()) {
+        return 1;
+    }
+    registry.OnIdle();
+    return 0;
+}
+
+long long
+RigExecImaging_GetGeneration()
+{
+    return _Generation(_Legacy());
+}
+
+int
+RigExecImaging_GetMovedFloats(
+    const char *packedPaths, float *out, int count)
+{
+    return _MovedFloats(_Legacy(), packedPaths, out, count);
+}
+
+int
+RigExecImaging_GetControlFrameAssetSpace(
+    long long stageCacheId, const char *primPath, double frame,
+    int isDefault, double outMatrix[16])
+{
+    if (!primPath || !outMatrix || !PXR_NS::SdfPath::IsValidPathString(primPath) ||
+        (!isDefault && !std::isfinite(frame))) return 0;
+    const auto stage = PXR_NS::UsdUtilsStageCache::Get().Find(
+        PXR_NS::UsdStageCache::Id::FromLongInt(
+            static_cast<long int>(stageCacheId)));
+    if (!stage) return 0;
+    // THAT stage's own context: a second stage with the same paths never
+    // answers for this one.
+    const RegistryPtr context =
+        RigExecImagingRegistry::ForStage(stage, /* create = */ false);
+    const auto snapshot = context ? context->GetStore()->Get() : nullptr;
+    const auto time = isDefault ? PXR_NS::UsdTimeCode::Default() : PXR_NS::UsdTimeCode(frame);
+    if (!snapshot || !snapshot->Describes(stage, time)) return 0;
+    const auto it = snapshot->prims.find(PXR_NS::SdfPath(primPath));
+    if (it == snapshot->prims.end() || !it->second.hasControlFrame) return 0;
+    for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c)
+        outMatrix[r*4+c] = it->second.controlFrame[r][c];
+    return 1;
+}
+
+int
+RigExecImaging_GetGuideBoundsAssetSpace(
+    const char *primPath, double outMinMax[6])
+{
+    return _GuideBounds(_Legacy(), primPath, outMinMax);
+}
+
+// Viewport profiling. With RIGEXEC_IMAGING_PROFILE set, every active rig's
+// evaluator records its own phases and the imaging layer's publish phases;
+// this writes the per-phase totals as tab-separated text and clears them,
+// so a caller can bracket exactly the interaction it wants to measure.
+int
+RigExecImaging_WriteProfileSummary(const char *path)
+{
+    return _Legacy().WriteProfileSummary(
+               path ? std::string(path) : std::string())
+        ? 0 : 1;
+}
+
+int
+RigExecImaging_SetWeightOverlay(const char *weightPrimPath)
+{
+    return _Legacy().SetWeightOverlay(
+               weightPrimPath ? std::string(weightPrimPath) : std::string())
+        ? 0 : 1;
+}
+
+int
+RigExecImaging_GetFrameStates(const char *rigPath, const double *frames,
+                              int *statesOut, int count)
+{
+    return _FrameStates(_Legacy(), rigPath, frames, statesOut, count);
+}
+
+int
+RigExecImaging_ClearFrameCache(const char *rigPath)
+{
+    return _ClearFrameCache(_Legacy(), rigPath);
+}
+
+int
+RigExecImaging_WarmRange(const char *rigPath, const double *frames, int count)
+{
+    return _WarmRange(_Legacy(), rigPath, frames, count);
+}
+
+long long
+RigExecImaging_GetWarmingCompletedCount()
+{
+    return static_cast<long long>(
+        _Legacy().GetBackgroundStats().completed);
+}
+
+// Manipulation preview (docs/superpowers/specs/
+// 2026-09-10-hydra-preview-manipulation-design.md). Three calls, and only the
+// middle one runs per mouse sample: strings are marshalled once per drag and
+// every sample after that is an array of doubles.
+int
+RigExecImaging_BeginPreview(const char *packedAttributePaths)
+{
+    return _Legacy().BeginPreview(
+        packedAttributePaths ? std::string(packedAttributePaths)
+                             : std::string());
+}
+
+int
+RigExecImaging_UpdatePreview(const double *values, int count)
+{
+    return _UpdatePreview(_Legacy(), values, count);
+}
+
+int
+RigExecImaging_EndPreview()
+{
+    return _Legacy().EndPreview() ? 0 : 1;
+}
+
+int
+RigExecImaging_GetAllGuideBoundsAssetSpace(double outMinMax[6])
+{
+    return _AllGuideBounds(_Legacy(), outMinMax);
+}
+
+// ---------------------------------------------------------------------------
+// Stage-scoped surface: each twin acts on its stage's context only and never
+// moves the legacy current context (registry.h).
+// ---------------------------------------------------------------------------
+
+int
+RigExecImaging_SetTimeForStage(long long stageCacheId, double frame)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return context && context->SetTime(PXR_NS::UsdTimeCode(frame)) ? 0 : 1;
+}
+
+int
+RigExecImaging_OnEditCommittedForStage(long long stageCacheId)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    if (!context || !context->IsActive()) {
+        return 1;
+    }
+    context->OnEditCommitted();
+    return 0;
+}
+
+int
+RigExecImaging_OnIdleForStage(long long stageCacheId)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    if (!context || !context->IsActive()) {
+        return 1;
+    }
+    context->OnIdle();
+    return 0;
+}
+
+int
+RigExecImaging_WriteProfileSummaryForStage(long long stageCacheId,
+                                           const char *path)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    if (!context) {
+        // Exactly what an inactive registry writes: the header, no rows.
+        std::ofstream out(path ? std::string(path) : std::string());
+        if (!out) {
+            return 1;
+        }
+        out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\tmode\n";
+        return 0;
+    }
+    return context->WriteProfileSummary(
+               path ? std::string(path) : std::string())
+        ? 0 : 1;
+}
+
+void
+RigExecImaging_DeactivateForStage(long long stageCacheId)
+{
+    if (const RegistryPtr context = _ForStage(stageCacheId)) {
+        context->Deactivate();
+    }
+}
+
+long long
+RigExecImaging_GetGenerationForStage(long long stageCacheId)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return context ? _Generation(*context) : 0;
+}
+
+int
+RigExecImaging_GetMovedFloatsForStage(
+    long long stageCacheId, const char *packedPaths, float *out, int count)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    if (!context) {
+        return 0;
+    }
+    return _MovedFloats(*context, packedPaths, out, count);
+}
+
+int
+RigExecImaging_GetGuideBoundsAssetSpaceForStage(
+    long long stageCacheId, const char *primPath, double outMinMax[6])
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return context ? _GuideBounds(*context, primPath, outMinMax) : 0;
+}
+
+int
+RigExecImaging_GetAllGuideBoundsAssetSpaceForStage(
+    long long stageCacheId, double outMinMax[6])
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return context ? _AllGuideBounds(*context, outMinMax) : 0;
+}
+
+int
+RigExecImaging_SetWeightOverlayForStage(long long stageCacheId,
+                                        const char *weightPrimPath)
+{
+    // Created on demand: a selection made before the stage's rig activates
+    // is remembered for its first generation, as the legacy one is.
+    const RegistryPtr context = _ForStage(stageCacheId, /* create = */ true);
+    if (!context) {
+        return 1;
+    }
+    return context->SetWeightOverlay(
+               weightPrimPath ? std::string(weightPrimPath) : std::string())
+        ? 0 : 1;
+}
+
+int
+RigExecImaging_GetFrameStatesForStage(
+    long long stageCacheId, const char *rigPath, const double *frames,
+    int *statesOut, int count)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    if (!context) {
+        return -1;
+    }
+    return _FrameStates(*context, rigPath, frames, statesOut, count);
+}
+
+int
+RigExecImaging_ClearFrameCacheForStage(long long stageCacheId,
+                                       const char *rigPath)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    if (!context) {
+        // Nothing to drop is still dropped (the legacy convention), but a
+        // malformed path is still refused.
+        return rigPath && SdfPath::IsValidPathString(rigPath) ? 0 : -1;
+    }
+    return _ClearFrameCache(*context, rigPath);
+}
+
+int
+RigExecImaging_WarmRangeForStage(long long stageCacheId, const char *rigPath,
+                                 const double *frames, int count)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    if (!context) {
+        return -1;
+    }
+    return _WarmRange(*context, rigPath, frames, count);
+}
+
+long long
+RigExecImaging_GetWarmingCompletedCountForStage(long long stageCacheId)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return context ? static_cast<long long>(
+                         context->GetBackgroundStats().completed)
+                   : 0;
+}
+
+int
+RigExecImaging_BeginPreviewForStage(long long stageCacheId,
+                                    const char *packedAttributePaths)
+{
+    // Created on demand: a stage with no rig -- so possibly no context yet
+    // -- still previews its Xforms, through its own chains.
+    const RegistryPtr context = _ForStage(stageCacheId, /* create = */ true);
+    if (!context) {
+        return -1;
+    }
+    return context->BeginPreview(
+        packedAttributePaths ? std::string(packedAttributePaths)
+                             : std::string());
+}
+
+int
+RigExecImaging_UpdatePreviewForStage(long long stageCacheId,
+                                     const double *values, int count)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return context ? _UpdatePreview(*context, values, count) : 1;
+}
+
+int
+RigExecImaging_EndPreviewForStage(long long stageCacheId)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    // Ending a preview that never began is what an inactive registry does:
+    // nothing to drop, success.
+    return !context || context->EndPreview() ? 0 : 1;
+}
+
+int
+RigExecImaging_IsActiveForStage(long long stageCacheId)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return context && context->IsActive() ? 1 : 0;
+}
+
+int
+RigExecImaging_ContextCount()
+{
+    return static_cast<int>(RigExecImagingRegistry::ContextCount());
 }
 
 }  // extern "C"

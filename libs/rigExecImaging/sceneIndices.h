@@ -21,6 +21,7 @@
 
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -62,6 +63,22 @@ bool RigExecControlGuideIsDrawn(
 /// (usdrecord) record a live evaluation.
 const TfToken &RigExecTriggerContainerToken();
 const TfToken &RigExecTriggerLeafToken();
+
+/// The leaf, in the same `rigExec` container, naming the imaging context a
+/// TOP-LEVEL prim's stage belongs to: `rigExec/stageKey`, a
+/// HdRetainedTypedSampledDataSource<uint64_t> the rig adapter contributes
+/// (rigAdapter.cpp). It is how a chain built with no stage learns which
+/// per-stage context to bind to -- see registry.h, "Chain -> context
+/// binding" -- and the TouchPose highlight index binds through it too.
+const TfToken &RigExecStageKeyLeafToken();
+
+/// The stage key carried by the first top-level prim of \p entries that
+/// has one, read from \p input; 0 when no top-level prim in the batch
+/// carries it (a batch of descendants, or a chain over a scene that is not
+/// a UsdImaging stage scene index).
+uint64_t RigExecStageKeyFromAddedEntries(
+    const HdSceneIndexBaseRefPtr &input,
+    const HdSceneIndexObserver::AddedPrimEntries &entries);
 
 /// Removes only the derived __RigExecGenerated application paths owned by
 /// the current system (spec §10.1). The predicate is deliberately narrow:
@@ -257,6 +274,11 @@ public:
             new RigExecResultsSceneIndex(inputSceneIndex, std::move(store)));
     }
 
+    /// Tells the directory this chain is gone (RigExecImagingRegistry::
+    /// ReleaseChain): the last chain of an automatically activated context
+    /// releases that activation, its stage and its worker threads.
+    ~RigExecResultsSceneIndex() override;
+
     /// Called by the publisher after a complete generation swap: sends
     /// coalesced dirtied notices from the per-prim changed-leaf sets
     /// (spec §10.4). Value changes start from the narrowest logical
@@ -338,6 +360,25 @@ public:
     void NotifyGenerationPublished(
         const RigExecPublishedDirtyVector &dirtied);
 
+    /// The store this index reads (atomically swappable, see SetStore).
+    std::shared_ptr<RigExecSnapshotStore> GetStore() const {
+        return std::atomic_load(&_store);
+    }
+
+    /// Rebinds this index to another store -- its chain bound to a new
+    /// imaging context -- and announces the swap exactly as a generation
+    /// swap is announced: every prim published before or after is
+    /// structural, so values, driven subtrees, guide children and overlays
+    /// all reconcile. Hydra pulls on other threads see either store, never
+    /// a torn one.
+    void SetStore(std::shared_ptr<RigExecSnapshotStore> store);
+
+    /// The imaging context this index's chain is bound to (0 = unbound).
+    /// Written by the registry directory when it (re)binds the chain; the
+    /// time trigger and eager activation resolve their context through it.
+    uint64_t GetContextKey() const { return _contextKey.load(); }
+    void SetContextKey(uint64_t key) { _contextKey.store(key); }
+
     HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override;
     SdfPathVector GetChildPrimPaths(const SdfPath &primPath) const override;
 
@@ -356,6 +397,24 @@ private:
     RigExecResultsSceneIndex(
         const HdSceneIndexBaseRefPtr &inputSceneIndex,
         std::shared_ptr<RigExecSnapshotStore> store);
+
+    /// The current generation of the bound store (null when none).
+    RigExecImagingSnapshotConstPtr _CurrentSnapshot() const {
+        const std::shared_ptr<RigExecSnapshotStore> store = GetStore();
+        return store ? store->Get() : nullptr;
+    }
+
+    /// Pulls the batch's rigExec/stageKey and asks the directory to
+    /// (re)bind this chain when it names another context than the bound
+    /// one. Runs whether or not this index is observed.
+    void _BindToStageContext(
+        const HdSceneIndexObserver::AddedPrimEntries &entries);
+
+    /// Whether \p entry dirties the rigExec/time trigger of an active rig
+    /// root of this chain's context.
+    bool _IsTimeTriggerDirty(
+        const HdSceneIndexObserver::DirtiedPrimEntries::value_type &entry)
+        const;
 
     /// Reconciles the announced synthesized guide children of one
     /// published prim against the current snapshot, emitting exact
@@ -380,7 +439,10 @@ private:
         HdSceneIndexObserver::AddedPrimEntries *added,
         HdSceneIndexObserver::RemovedPrimEntries *removed);
 
+    /// Swapped atomically by SetStore (chain rebinding); every read goes
+    /// through GetStore().
     std::shared_ptr<RigExecSnapshotStore> _store;
+    std::atomic<uint64_t> _contextKey{0};
     /// Guide topology already announced per published prim: one sphere/cone
     /// bit mask per payload element (mutated only on the serialized
     /// publication path).

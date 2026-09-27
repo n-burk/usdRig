@@ -56,6 +56,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -84,6 +85,16 @@ using RigExecTouchPoseSceneIndexRefPtr = TfRefPtr<RigExecTouchPoseSceneIndex>;
 /// Process-global rendezvous between the TouchPose C surface (which the
 /// usdview plugin drives) and every TouchPose scene index (one per imaging
 /// chain). Mirrors RigExecImagingRegistry's role for the rig itself.
+///
+/// Meshes are keyed by (imaging context key, path) -- docs/
+/// multistage-imaging.md. A handle opened on a stage attaches under that
+/// stage's context key, and only scene indices bound to the same context
+/// (through the rig adapter's rigExec/stageKey leaf, like the rig's own
+/// chains) light it: the same mesh path in another stage's viewport stays
+/// dark. Key 0 is UNSCOPED -- a topology-only handle, or a caller that
+/// names no stage -- and lights every chain, which is the behaviour every
+/// key-less caller always had. A keyed mesh wins over an unscoped one of
+/// the same path.
 class RigExecTouchPoseHighlights {
 public:
     static RigExecTouchPoseHighlights &GetInstance();
@@ -94,23 +105,30 @@ public:
     /// changes is re-announced as an attach, because a constant array's
     /// length is part of the shader's layout.
     void SetMesh(const SdfPath &path, const VtFloatArray &faceSlots,
-                 const VtVec4fArray &table);
+                 const VtVec4fArray &table, uint64_t contextKey = 0);
 
     /// Replaces only the colours. Same size required; returns false (and
     /// changes nothing) otherwise. Identical values notify nobody.
-    bool SetTable(const SdfPath &path, const VtVec4fArray &table);
+    bool SetTable(const SdfPath &path, const VtVec4fArray &table,
+                  uint64_t contextKey = 0);
 
     /// Replaces only the per-face slots (a paint stroke). Same size required.
-    bool SetFaceSlots(const SdfPath &path, const VtFloatArray &faceSlots);
+    bool SetFaceSlots(const SdfPath &path, const VtFloatArray &faceSlots,
+                      uint64_t contextKey = 0);
 
-    void RemoveMesh(const SdfPath &path);
+    void RemoveMesh(const SdfPath &path, uint64_t contextKey = 0);
 
-    RigExecTouchPoseHighlightMeshConstPtr Find(const SdfPath &path) const;
+    /// The mesh a scene index bound to \p contextKey draws for \p path:
+    /// the one attached under that key, else the unscoped one.
+    RigExecTouchPoseHighlightMeshConstPtr Find(
+        const SdfPath &path, uint64_t contextKey = 0) const;
 
     /// Cheap test the scene index makes on every GetPrim.
     bool HasMeshes() const { return _count.load() != 0; }
 
-    std::vector<SdfPath> GetMeshPaths() const;
+    /// The mesh paths a scene index bound to \p contextKey sees: the ones
+    /// attached under that key plus the unscoped ones.
+    std::vector<SdfPath> GetMeshPaths(uint64_t contextKey = 0) const;
 
     /// Called by each scene index at construction; held weakly.
     void RegisterSceneIndex(const RigExecTouchPoseSceneIndexRefPtr &index);
@@ -125,10 +143,14 @@ public:
 private:
     RigExecTouchPoseHighlights() = default;
 
-    void _Notify(const SdfPath &path, Change change);
+    using _Key = std::pair<uint64_t, SdfPath>;
+
+    /// Tells the scene indices that can see (\p contextKey, \p path): the
+    /// ones bound to that key, or every one for an unscoped mesh.
+    void _Notify(uint64_t contextKey, const SdfPath &path, Change change);
 
     mutable std::mutex _mutex;
-    std::map<SdfPath, RigExecTouchPoseHighlightMeshConstPtr> _meshes;
+    std::map<_Key, RigExecTouchPoseHighlightMeshConstPtr> _meshes;
     std::atomic<size_t> _count{0};
     std::atomic<uint64_t> _tableUpdates{0};
     std::vector<TfWeakPtr<RigExecTouchPoseSceneIndex>> _indices;
@@ -164,6 +186,12 @@ public:
     /// The materials currently wrapped because of \p meshPath (tests).
     std::set<SdfPath> GetWrappedMaterials(const SdfPath &meshPath) const;
 
+    /// The imaging context this index is bound to (0 = unbound: it lights
+    /// unscoped meshes only). Bound, and rebound when the stage under the
+    /// engine is replaced, from the rig adapter's rigExec/stageKey leaf on
+    /// population -- the same transport the rig's own chains bind through.
+    uint64_t GetContextKey() const { return _contextKey.load(); }
+
 protected:
     void _PrimsAdded(
         const HdSceneIndexBase &sender,
@@ -190,6 +218,12 @@ private:
                            HdSceneIndexObserver::DirtiedPrimEntries *dirty);
 
     bool _IsWrapped(const SdfPath &materialPath) const;
+
+    /// Adopts \p key: every mesh visible under the old or the new key is
+    /// re-attached or detached to match what the new key sees.
+    void _Rebind(uint64_t key);
+
+    std::atomic<uint64_t> _contextKey{0};
 
     mutable std::mutex _mutex;
     std::map<SdfPath, std::set<SdfPath>> _materialsByMesh;

@@ -34,6 +34,11 @@ except ImportError:
 
 import shapeEditorModel as model
 
+# One panel per usdview session lives in rigExecUsdview's registry: the
+# Shape Editor reads rigExecImaging through rigExecUsdview already, so its
+# directory is on the module search path wherever this panel can work.
+import sessionRegistry
+
 
 # How often the generation counter is read. Not how often the rig is
 # evaluated -- that happens only when the counter has actually moved.
@@ -78,6 +83,22 @@ def _Imaging():
         return None
 
 
+def _StageHandle(lib, stage):
+    """`lib` bound to `stage`: rigExecUsdview's imagingHandle.
+
+    Every read goes to THAT stage's imaging context -- its generation, its
+    published weights -- never to whichever stage another usdview session
+    in the same process activated last. None without the library.
+    """
+    if lib is None:
+        return None
+    try:
+        import imagingHandle
+    except ImportError:
+        return None
+    return imagingHandle.ImagingHandle(lib, stage)
+
+
 class _WeightBar(QtWidgets.QStyledItemDelegate):
     """Draws a pose's weight as a bar behind its number.
 
@@ -107,17 +128,22 @@ class _WeightBar(QtWidgets.QStyledItemDelegate):
 
 
 class ShapeEditorPanel(QtWidgets.QDialog):
-    """Interpolators and their poses, with live weights and mutes."""
+    """Interpolators and their poses, with live weights and mutes.
 
-    _instance = None
+    One per usdview session, filed under the session's main window:
+    several sessions can share this module in one process.
+    """
+
+    _sessions = sessionRegistry.SessionRegistry("shape editor panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi):
-        if cls._instance is None:
-            cls._instance = cls(usdviewApi)
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi))
         else:
-            cls._instance._api = usdviewApi
-        return cls._instance
+            panel._api = usdviewApi
+        return panel
 
     def __init__(self, usdviewApi, parent=None):
         super(ShapeEditorPanel, self).__init__(
@@ -127,6 +153,7 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         self._rig = None
         self._rigStage = None
         self._lib = _Imaging()
+        self._imaging = None      # _lib bound to the stage shown
         self._generation = None
         self._items = {}          # pose path -> QTreeWidgetItem
         self._packed = None       # the path list handed to the bridge
@@ -197,6 +224,15 @@ class ShapeEditorPanel(QtWidgets.QDialog):
     def _Stage(self):
         return getattr(self._api, "stage", None)
 
+    def _StageImaging(self):
+        """The imaging library bound to this session's current stage."""
+        stage = self._Stage()
+        handle = self._imaging
+        if handle is None or handle.stage is not stage:
+            handle = _StageHandle(self._lib, stage)
+            self._imaging = handle
+        return handle
+
     # -- the private evaluator -------------------------------------------
 
     def _Rig(self):
@@ -249,10 +285,11 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         one. An idle viewport moves it not at all, and then this is one
         integer read and a comparison -- no evaluate, no Qt, nothing.
         """
-        if self._lib is None:
+        imaging = self._StageImaging()
+        if imaging is None:
             return
         try:
-            generation = int(self._lib.RigExecImaging_GetGeneration())
+            generation = int(imaging.GetGeneration())
         except Exception:
             return
         if generation == self._generation:
@@ -302,9 +339,10 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         Returns False when the entry point is missing or published
         nothing, so the caller falls back to the private evaluator.
         """
-        if self._lib is None or not self._interpolators:
+        imaging = self._StageImaging()
+        if imaging is None or not self._interpolators:
             return False
-        get = getattr(self._lib, "RigExecImaging_GetMovedFloats", None)
+        get = getattr(imaging, "RigExecImaging_GetMovedFloats", None)
         if get is None:
             return False
         if self._packed is None:

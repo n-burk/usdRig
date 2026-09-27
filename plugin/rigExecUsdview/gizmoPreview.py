@@ -28,37 +28,163 @@
 # on every push and re-declared when it differs -- which is rare, and cheap
 # when it happens.
 #
+# ONE CHANNEL PER SESSION. Several usdview sessions can share this module in
+# one process (usdOrchestrate's host), and each previews into its own stage's
+# imaging context through its own sink. So the sink and the declaration state
+# live on a PreviewChannel filed under the session (the usdview main window),
+# and every entry point below takes the session it is for. A call with no
+# session is the old single-session call: it reaches the one session there is
+# (or the one owning the active window), and before any session has installed
+# a sink -- headless, the tests -- a keyless channel of its own.
+#
 try:
     import gizmoMath
+    import sessionRegistry
 except ImportError:                    # loader that did not add our dir
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import gizmoMath
+    import sessionRegistry
 
 
-# The installed sink: an object with Begin(packedPaths) -> int,
-# Update(values) -> bool and End() -> bool. None means no Hydra preview.
-_sink = None
+class PreviewChannel(object):
+    """
+    One session's route to Hydra: its sink, and what that sink was told.
 
-# What the sink was last told this manipulation would change, so a push only
-# re-declares when the answer has changed.
-_declared = ()
-# How many doubles the sink said it expects for _declared, as a check that the
-# two sides agree about arity before any value is sent.
-_expected = 0
+    `keyless` marks the channel callers without a session reach before
+    any session exists; its End() drops every stage's preview values, as
+    the module-level End() always did.
+    """
+
+    def __init__(self, keyless=False):
+        # The installed sink: an object with Begin(packedPaths) -> int,
+        # Update(values) -> bool and End() -> bool. None means no Hydra
+        # preview.
+        self._sink = None
+        # What the sink was last told this manipulation would change, so a
+        # push only re-declares when the answer has changed.
+        self._declared = ()
+        # How many doubles the sink said it expects for _declared, as a
+        # check that the two sides agree about arity before any value is
+        # sent.
+        self._expected = 0
+        # The stages this manipulation pushed values for, so End() drops
+        # exactly their uncommitted values and no other session's.
+        self._stages = []
+        self._keyless = keyless
+
+    def SetSink(self, sink):
+        self._sink = sink
+        self._declared = ()
+        self._expected = 0
+
+    def HasSink(self):
+        return self._sink is not None
+
+    def IsPreviewing(self):
+        return bool(self._declared)
+
+    def _NoteStage(self, stage):
+        if stage is None:
+            return
+        for known in self._stages:
+            if known is stage:
+                return
+        self._stages.append(stage)
+
+    def Push(self, pending, stage=None):
+        """See the module-level Push."""
+        self._NoteStage(stage)
+        # gizmoMath already holds these: Writer.Set put them in the preview
+        # map as it collected them, so the handles and the frame maths are
+        # reading them before this is called. What is left to do is tell
+        # Hydra.
+        if self._sink is None or not pending:
+            return False
+        keys = tuple(str(path) for path in pending.keys())
+        values = []
+        for value in pending.values():
+            flat = Flatten(value)
+            if flat is None:
+                # An unpreviewable value would desynchronize every slot
+                # after it, so the sample is dropped whole rather than sent
+                # misaligned. The release still authors it.
+                return False
+            values.extend(flat)
+        if keys != self._declared:
+            expected = self._sink.Begin("\n".join(keys))
+            if expected is None or expected < 0:
+                self._declared = ()
+                self._expected = 0
+                return False
+            self._declared = keys
+            self._expected = int(expected)
+        if len(values) != self._expected:
+            # The two sides disagree about arity -- a value whose type is
+            # not the attribute's. Sending it would shift every later slot.
+            return False
+        return bool(self._sink.Update(values))
+
+    def End(self, stage=None):
+        """See the module-level End."""
+        if self._keyless and stage is None and not self._stages:
+            gizmoMath.SetPreviewValues({})
+        else:
+            self._NoteStage(stage)
+            for known in self._stages:
+                gizmoMath.SetPreviewValues({}, stage=known)
+        self._stages = []
+        declared = bool(self._declared)
+        self._declared = ()
+        self._expected = 0
+        if self._sink is None:
+            return False
+        if not declared:
+            # Nothing was ever begun on the host side, so there is nothing
+            # to drop. The host's End republishes the rig (about 10 ms on
+            # the biped), and every selection change aborts a drag and
+            # lands here.
+            return True
+        return bool(self._sink.End())
 
 
-def SetSink(sink):
-    """Install the host's preview sink, or None to preview nothing."""
-    global _sink, _declared, _expected
-    _sink = sink
-    _declared = ()
-    _expected = 0
+# Every session's channel, filed under its main window.
+_channels = sessionRegistry.SessionRegistry("gizmoPreview channels")
+
+# What a caller without a session reaches while no session has a channel:
+# the headless tests, and a process where no session installed its tools.
+_keylessChannel = PreviewChannel(keyless=True)
 
 
-def HasSink():
-    return _sink is not None
+def Channel(session=None, create=False):
+    """
+    `session`'s channel (created with `create`), or None.
+
+    Without a session: the current session's channel (see
+    sessionRegistry.SessionRegistry.Current), or the keyless one while no
+    session has a channel at all.
+    """
+    if session is None:
+        if len(_channels) == 0:
+            return _keylessChannel
+        return _channels.Current()
+    channel = _channels.Get(session)
+    if channel is None and create:
+        channel = _channels.Set(session, PreviewChannel())
+    return channel
+
+
+def SetSink(sink, session=None):
+    """Install `session`'s preview sink, or None to preview nothing."""
+    channel = Channel(session, create=True)
+    if channel is not None:
+        channel.SetSink(sink)
+
+
+def HasSink(session=None):
+    channel = Channel(session)
+    return channel is not None and channel.HasSink()
 
 
 def Flatten(value):
@@ -95,68 +221,40 @@ def Flatten(value):
     return None
 
 
-def Push(pending):
+def Push(pending, session=None, stage=None):
     """
     One mouse sample: `pending` is {Sdf.Path: value} from the Writer.
 
-    Tells Hydra what the artist is doing. The gizmo's own handles are already
-    following it -- Writer.Set publishes each value into gizmoMath's preview
-    map as it collects it -- so this call is what puts the same values in front
-    of the renderer. Returns True when the sink took them.
+    Tells `session`'s Hydra what the artist is doing; `stage` is the stage
+    the values belong to, so End() can drop exactly them. The gizmo's own
+    handles are already following it -- Writer.Set publishes each value
+    into gizmoMath's preview map as it collects it -- so this call is what
+    puts the same values in front of the renderer. Returns True when the
+    sink took them.
     """
-    global _declared, _expected
-    # gizmoMath already holds these: Writer.Set put them in the preview map as
-    # it collected them, so the handles and the frame maths are reading them
-    # before this is called. What is left to do is tell Hydra.
-    if _sink is None or not pending:
+    channel = Channel(session)
+    if channel is None:
         return False
-    keys = tuple(str(path) for path in pending.keys())
-    values = []
-    for value in pending.values():
-        flat = Flatten(value)
-        if flat is None:
-            # An unpreviewable value would desynchronize every slot after it,
-            # so the sample is dropped whole rather than sent misaligned. The
-            # release still authors it.
-            return False
-        values.extend(flat)
-    if keys != _declared:
-        expected = _sink.Begin("\n".join(keys))
-        if expected is None or expected < 0:
-            _declared = ()
-            _expected = 0
-            return False
-        _declared = keys
-        _expected = int(expected)
-    if len(values) != _expected:
-        # The two sides disagree about arity -- a value whose type is not the
-        # attribute's. Sending it would shift every later slot.
-        return False
-    return bool(_sink.Update(values))
+    return channel.Push(pending, stage)
 
 
-def End():
+def End(session=None, stage=None):
     """
     The manipulation is over: drop the preview on both sides.
 
     Idempotent, and safe to call after a push that failed or never happened,
     because an abort and a commit both arrive here and neither knows which
-    samples the sink accepted.
+    samples the sink accepted. Drops the uncommitted values of the stages
+    this session pushed for (and of `stage`), never another session's.
     """
-    global _declared, _expected
-    gizmoMath.SetPreviewValues({})
-    declared = bool(_declared)
-    _declared = ()
-    _expected = 0
-    if _sink is None:
+    channel = Channel(session)
+    if channel is None:
+        if stage is not None:
+            gizmoMath.SetPreviewValues({}, stage=stage)
         return False
-    if not declared:
-        # Nothing was ever begun on the host side, so there is nothing to
-        # drop. The host's End republishes the rig (about 10 ms on the
-        # biped), and every selection change aborts a drag and lands here.
-        return True
-    return bool(_sink.End())
+    return channel.End(stage)
 
 
-def IsPreviewing():
-    return bool(_declared)
+def IsPreviewing(session=None):
+    channel = Channel(session)
+    return channel is not None and channel.IsPreviewing()

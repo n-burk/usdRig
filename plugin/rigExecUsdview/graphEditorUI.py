@@ -60,11 +60,13 @@ try:
     import graphModel
     import graphScreen
     import rigExecUndo
+    import sessionRegistry
 except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import graphModel
     import graphScreen
     import rigExecUndo
+    import sessionRegistry
 
 
 SIDE_IN = graphModel.SIDE_IN
@@ -1021,10 +1023,11 @@ class GraphEditorPanel(QtWidgets.QWidget):
 
     One instance per usdview session, parented to the main window
     exactly like VolumeWeightPanel, so it floats over usdview and shares
-    its lifetime.
+    its lifetime. Filed under the session's main window: several sessions
+    can share this module in one process, and each gets its own editor.
     """
 
-    __instance = None
+    _sessions = sessionRegistry.SessionRegistry("graph editors")
 
     HOTKEYS = (QtCore.Qt.Key_A, QtCore.Qt.Key_F, QtCore.Qt.Key_I,
                QtCore.Qt.Key_Home, QtCore.Qt.Key_Delete,
@@ -1032,13 +1035,19 @@ class GraphEditorPanel(QtWidgets.QWidget):
 
     @classmethod
     def GetInstance(cls, usdviewApi, undoStack):
-        if cls.__instance is None:
-            cls.__instance = GraphEditorPanel(usdviewApi, undoStack)
-        return cls.__instance
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(
+                usdviewApi, GraphEditorPanel(usdviewApi, undoStack))
+        return panel
 
     @classmethod
-    def Instance(cls):
-        return cls.__instance
+    def Instance(cls, usdviewApi=None):
+        """`usdviewApi`'s session's editor; without one, the current
+        session's (see sessionRegistry.SessionRegistry.Current)."""
+        if usdviewApi is None:
+            return cls._sessions.Current()
+        return cls._sessions.Get(usdviewApi)
 
     def __init__(self, usdviewApi, undoStack):
         super(GraphEditorPanel, self).__init__(
@@ -1329,7 +1338,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
             import gizmoUI
         except Exception:
             return None
-        controller = gizmoUI.GetController()
+        controller = gizmoUI.GetController(self.usdviewApi)
         if controller is None or controller.undoStack is not self.undoStack:
             return None
         undo = getattr(controller.toolbar, "undoAction", None)
@@ -2675,6 +2684,7 @@ def OpenGraphEditor(usdviewApi, undoStack=None):
     return panel
 
 
-def GetGraphEditor():
-    """The open Graph Editor, or None."""
-    return GraphEditorPanel.Instance()
+def GetGraphEditor(usdviewApi=None):
+    """The open Graph Editor of `usdviewApi`'s session (without one: the
+    current session's), or None."""
+    return GraphEditorPanel.Instance(usdviewApi)

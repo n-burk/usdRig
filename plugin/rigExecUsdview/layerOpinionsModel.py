@@ -36,13 +36,197 @@
 # relocate by hand, so what the panel shows is what the file would say,
 # and a typo is a parse error rather than a value that quietly differs.
 #
+# SHORTHAND IS ACCEPTED ON THE WAY IN. Exact usda is the first thing
+# tried, but a value column that only takes exact usda refuses what
+# anyone would type: `ik` for a token, `bar.png` for an asset, `4 5 6`
+# for a float3, `/Rig/Arm` for a target. When the exact text does not
+# parse, it is rewritten ONCE into the usda it clearly means -- quoted,
+# wrapped in @@ or <> or () or [] -- and that is parsed by the same
+# import. Nothing is guessed that Sdf then cannot check: a bare prim
+# path must be absolute and a bare layer must carry a file extension, so
+# `not_a_path` and `not a reference at all` are still refused.
+#
+# TARGETS READ RELATIVE. A relationship's targets and an attribute's
+# connections are shown relative to the prim that owns them (`<../Arm>`,
+# `<.x>`, `<../../Material/Cloth>`), and relative text typed back is
+# anchored to that same prim -- its path with any variant selection
+# stripped (TargetAnchor), because a target path may not carry one. Sdf itself stores them absolute -- it anchors a relative
+# target the moment it is authored, and usda is written that way -- so
+# this is how they are READ and TYPED, which is where a rig is built:
+# `<../Wrist>` says what the rig means, `</Asset/Rig/Arm/L/Wrist>` says
+# where it happens to sit today.
+#
+import os
+import re
+
 from pxr import Sdf
 
 import rigExecUndo
 
 
 class ValueParseError(Exception):
-    """The text in the value editor is not a value of the row's type."""
+    """
+    The text in the value editor is not a value of the row's type.
+
+    The message is one line fit for a status bar; Sdf's own parser
+    diagnostics, which run to several lines of source locations, are
+    kept in `detail` for a tooltip.
+    """
+
+    def __init__(self, message, detail=""):
+        super(ValueParseError, self).__init__(message)
+        self.detail = detail
+
+
+def _FirstParse(parse, candidates, message):
+    """
+    The first of `candidates` that `parse` accepts.
+
+    Tried in order and each only once: the exact text first, so any
+    valid usda keeps meaning exactly what it says, and the shorthand
+    rewrite after it. Raises one ValueParseError carrying the exact
+    text's diagnostics -- the rewrite's would describe text the user
+    never typed.
+    """
+    first = None
+    seen = set()
+    for candidate in candidates:
+        if candidate is None or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return parse(candidate)
+        except ValueParseError as error:
+            if first is None:
+                first = error
+    raise ValueParseError(message, first.detail if first else "")
+
+
+def _SplitTopLevel(text):
+    """
+    `text` split at the commas that are not inside (), [], quotes or
+    an @asset@ -- so `(1, 2), (3, 4)` is two items, not four.
+    """
+    items, depth, quote, start = [], 0, None, 0
+    for i, char in enumerate(text):
+        if quote:
+            if char == quote and text[i - 1] != "\\":
+                quote = None
+        elif char in "\"'@":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(text[start:i])
+            start = i + 1
+    items.append(text[start:])
+    return [item.strip() for item in items if item.strip()]
+
+
+def _Quote(text):
+    """`text` as a usda string literal."""
+    return '"%s"' % (text.replace("\\", "\\\\").replace('"', '\\"')
+                     .replace("\n", "\\n"))
+
+
+def _AssetLiteral(text):
+    """`text` as a usda asset literal: @...@, or @@@...@@@ if it has an @."""
+    return ("@@@%s@@@" if "@" in text else "@%s@") % text
+
+
+def _LooksLikeLayerPath(text):
+    """
+    Whether bare `text` is plainly a layer's path: a file extension at
+    the end (Sdf picks the file format from it, so every layer has one),
+    optionally followed by Sdf's format arguments.
+    """
+    return bool(re.search(r"\.\w+(:SDF_FORMAT_ARGS:.*)?$", text))
+
+
+def _BareNumbers(text):
+    """`1, 2, 3` or `1 2 3` as a list of the numbers' texts."""
+    return [n for n in re.split(r"[\s,]+", text.strip()) if n]
+
+
+def _ScalarShorthand(typeName, text):
+    """The usda one scalar of `typeName` is plainly meant by `text`."""
+    text = text.strip()
+    default = typeName.defaultValue
+    if isinstance(default, bool):
+        return {"true": "1", "yes": "1", "on": "1",
+                "false": "0", "no": "0", "off": "0"}.get(text.lower(), text)
+    if isinstance(default, str):
+        return text if text[:1] in "\"'" else _Quote(text)
+    if isinstance(default, Sdf.AssetPath):
+        return text if text.startswith("@") else _AssetLiteral(text)
+    if text.startswith("("):
+        return text
+    dimension = getattr(default, "dimension", None)
+    if isinstance(dimension, tuple):
+        # A matrix typed flat, row by row.
+        rows, cols = dimension
+        numbers = _BareNumbers(text)
+        if len(numbers) != rows * cols:
+            return text
+        return "(%s)" % ", ".join(
+            "(%s)" % ", ".join(numbers[r * cols:(r + 1) * cols])
+            for r in range(rows))
+    if isinstance(dimension, int) or hasattr(default, "imaginary"):
+        # A vector, color or quaternion typed without its parentheses.
+        return "(%s)" % ", ".join(_BareNumbers(text))
+    return text
+
+
+def _ValueShorthand(typeName, text):
+    """The usda a value of `typeName` is plainly meant by `text`."""
+    if not typeName.isArray:
+        return _ScalarShorthand(typeName, text)
+    body = text.strip()
+    if body.startswith("[") and body.endswith("]"):
+        body = body[1:-1]
+    return "[%s]" % ", ".join(
+        _ScalarShorthand(typeName.scalarType, item)
+        for item in _SplitTopLevel(body))
+
+
+def AnchoredAssetPath(layer, assetPath):
+    """
+    `assetPath` as an arc authored into `layer` should carry it:
+    relative to `layer`'s own file (`./rig.usda`, `../shared/hand.usda`)
+    whenever it can be.
+
+    A file browser hands back an absolute path, and authoring that
+    verbatim pins the arc to one machine's disk -- the asset stops
+    composing the moment the directory is moved, copied or opened from
+    another checkout. A relative path moves with the layers it joins.
+
+    Spelled with a leading `./` rather than bare: `rig.usda` is a
+    SEARCH path to Ar, which may resolve somewhere other than beside the
+    layer, while `./rig.usda` is anchored to it. The repo's own layers
+    use the same spelling.
+
+    Left as given when there is nothing to anchor to (an anonymous or
+    unsaved layer), when the path is not an absolute file path (already
+    relative, a search path, a URI, an anonymous identifier), or when no
+    relative form exists (another drive on Windows).
+    """
+    assetPath = (assetPath or "").strip()
+    if not assetPath or layer is None or layer.anonymous:
+        return assetPath
+    anchor = layer.realPath
+    if not anchor or "://" in assetPath or not os.path.isabs(assetPath):
+        return assetPath
+    try:
+        relative = os.path.relpath(os.path.normpath(assetPath),
+                                   os.path.dirname(os.path.normpath(anchor)))
+    except ValueError:
+        return assetPath
+    relative = relative.replace(os.sep, "/")
+    if relative.startswith("../"):
+        return relative
+    return "./" + relative
 
 
 # Info fields that describe the spec's own existence rather than an
@@ -90,6 +274,75 @@ def FormatValue(value, typeName=None):
     return _ExtractValueText(layer.ExportToString())
 
 
+# How much of a value a row formats. A mesh's points are a few hundred
+# thousand elements, and formatting them whole costs twice: usda export
+# of megabytes of text on every rebuild, and then Qt laying that text
+# out on every paint and every column measure -- seconds per frame for
+# a line nobody can read. Past these sizes a row shows a SUMMARY, the
+# element count and the first few items, and is not edited inline; the
+# full text is still one right-click away (FullValueText).
+MAX_INLINE_ITEMS = 1000
+MAX_INLINE_CHARS = 4000
+_PREVIEW_ITEMS = 4
+_PREVIEW_CHARS = 200
+
+
+def SummarizedValueText(value, typeName=None):
+    """
+    (text, summarized) for a row's value column.
+
+    An array past MAX_INLINE_ITEMS is never formatted whole -- only its
+    first _PREVIEW_ITEMS are, which is what makes a heavy prim cheap.
+    Any other text past MAX_INLINE_CHARS is clipped after formatting.
+    """
+    if value is None:
+        return "", False
+    arrayType = typeName
+    if arrayType is None and hasattr(value, "__len__") \
+            and not isinstance(value, str):
+        arrayType = Sdf.GetValueTypeNameForValue(value) or None
+    if (arrayType is not None and arrayType.isArray
+            and len(value) > MAX_INLINE_ITEMS):
+        head = FormatValue(value[:_PREVIEW_ITEMS], arrayType)
+        return ("%s[%s]  %s, ...]" % (
+            _TypeAlias(arrayType.scalarType), "{:,}".format(len(value)),
+            head.rstrip().rstrip("]")), True)
+    return _Clipped(FormatValue(value, typeName))
+
+
+def _Clipped(text):
+    if len(text) <= MAX_INLINE_CHARS:
+        return text, False
+    return text[:_PREVIEW_CHARS] + " ...", True
+
+
+def FullValueText(row):
+    """
+    The whole value a summarized row stands for, formatted on demand --
+    for "Copy Full Value". Slow for a heavy value by nature, which is
+    why it is only ever asked for, never shown.
+    """
+    if row.kind == "attribute":
+        spec = row.layer.GetAttributeAtPath(row.specPath)
+        return FormatValue(spec.default, row.typeName) if spec is not None \
+            and spec.HasDefaultValue() else ""
+    if row.kind == "relationship":
+        spec = row.layer.GetRelationshipAtPath(row.specPath)
+        return _FormatTargets(spec.targetPathList,
+                              TargetAnchor(row.specPath)) \
+            if spec is not None else ""
+    if row.kind == "connection":
+        spec = row.layer.GetAttributeAtPath(row.specPath)
+        return _FormatTargets(spec.connectionPathList,
+                              TargetAnchor(row.specPath)) \
+            if spec is not None else ""
+    if row.kind == "info":
+        spec = row.layer.GetPrimAtPath(row.specPath)
+        return FormatValue(spec.GetInfo(row.key)) if spec is not None \
+            else ""
+    return row.valueText
+
+
 def _ExtractValueText(usda):
     """
     The right-hand side of the single `v = ...` assignment in `usda`.
@@ -115,47 +368,121 @@ def _ExtractValueText(usda):
 
 def ParseValue(typeName, text):
     """
-    `text` parsed as a value of `typeName`, via usda syntax.
+    `text` parsed as a value of `typeName`, via usda syntax -- exactly
+    as typed, or failing that as the shorthand it plainly means (see the
+    header: `ik` for a token, `4 5 6` for a float3).
 
     Deliberately a layer import and never eval(): the value field takes
     whatever a user types, and typing a python expression into it must
     produce a parse error, not execute.
     """
+    return _FirstParse(
+        lambda candidate: _ParseValueText(typeName, candidate),
+        [text, _ValueShorthand(typeName, text)],
+        "not a valid %s: %r" % (_TypeAlias(typeName), text))
+
+
+def _ParseValueText(typeName, text):
     source = '#usda 1.0\ndef "P"\n{\n    %s v = %s\n}\n' % (
         _TypeAlias(typeName), text)
     layer = _ScratchLayer()
     try:
         if not layer.ImportFromString(source):
-            raise ValueParseError("not a valid %s: %r" % (typeName, text))
-    except Exception as error:
-        raise ValueParseError("not a valid %s: %r (%s)"
-                              % (typeName, text, error))
-    attr = layer.GetAttributeAtPath("/P.v")
-    if attr is None or not attr.HasDefaultValue():
-        raise ValueParseError("not a valid %s: %r" % (typeName, text))
-    return attr.default
-
-
-def ParseTargets(text):
-    """
-    `text` parsed as a relationship target list.
-
-    Same usda round trip as ParseValue -- the paths are validated by
-    Sdf's own parser, so `[ not_a_path ]` is a parse error rather than
-    a relationship that silently targets nothing.
-    """
-    source = '#usda 1.0\ndef "P"\n{\n    rel r = %s\n}\n' % text
-    layer = _ScratchLayer()
-    try:
-        if not layer.ImportFromString(source):
-            raise ValueParseError("not a target list: %r" % text)
+            raise ValueParseError("not a valid %s" % typeName)
     except ValueParseError:
         raise
     except Exception as error:
-        raise ValueParseError("not a target list: %r (%s)" % (text, error))
-    rel = layer.GetRelationshipAtPath("/P.r")
+        raise ValueParseError("not a valid %s" % typeName, str(error))
+    attr = layer.GetAttributeAtPath("/P.v")
+    if attr is None or not attr.HasDefaultValue():
+        raise ValueParseError("not a valid %s" % typeName)
+    return attr.default
+
+
+def ParseTargets(text, owner=None):
+    """
+    `text` parsed as a relationship target list (or a connection list,
+    which is spelled the same), anchored at the prim path `owner`.
+
+    Same usda round trip as ParseValue -- the paths are validated by
+    Sdf's own parser, so `[ not_a_path ]` is a parse error rather than
+    a relationship that silently targets nothing. The shorthand is bare
+    ABSOLUTE paths, with or without the brackets: `/Rig/A, /Rig/B`,
+    or explicitly relative ones: `../B`, `./C`, `.x`. A bare relative
+    name is not rewritten, because `not_a_path` is one.
+
+    Relative paths -- bare or in <> -- resolve against `owner`, the
+    prim the relationship or attribute belongs to, which is what they
+    mean in a usda file. Returned absolute, as Sdf stores them.
+    """
+    return _FirstParse(lambda candidate: _ParseTargetsText(candidate, owner),
+                       [text, _TargetsShorthand(text)],
+                       "not a target list: %r" % text)
+
+
+def _TargetsShorthand(text):
+    body = text.strip()
+    if body.startswith("[") and body.endswith("]"):
+        body = body[1:-1]
+    items = [_TargetShorthand(item)
+             for item in re.split(r"[\s,]+", body.strip()) if item]
+    return "[ %s ]" % ", ".join(items)
+
+
+def _TargetShorthand(item):
+    """
+    One bare target in <>. `./Child` is how a file path says "child" but
+    not how Sdf does -- to Sdf that is just `Child` -- so both spellings
+    are taken.
+    """
+    if item.startswith("./") and len(item) > 2:
+        return "<%s>" % item[2:]
+    if item.startswith(("/", ".")):
+        return "<%s>" % item
+    return item
+
+
+def TargetAnchor(specPath):
+    """
+    The prim a relative target or connection on `specPath` resolves
+    against: the owning prim, with any variant selection stripped.
+
+    Stripped because a target may not name a variant -- Sdf refuses
+    `</Asset{look=a}Material>` even from its own usda parser -- so an
+    opinion authored INSIDE a variant still targets `/Asset/Material`,
+    and `../../Material` from `/Asset{look=a}Geo/Body` has to mean that.
+    """
+    return Sdf.Path(specPath).GetPrimPath().StripAllVariantSelections()
+
+
+def _OwnerSource(owner, body):
+    """
+    usda holding `body` inside `over`s spelling out the prim `owner`,
+    so relative paths in it anchor exactly where they will be authored.
+    Only a missing owner falls back to a stand-in prim, /P; a variant
+    selection is stripped (TargetAnchor), never replaced.
+    """
+    owner = TargetAnchor(owner) if owner else Sdf.Path("/P")
+    if not owner.IsAbsolutePath() or not owner.IsPrimPath():
+        owner = Sdf.Path("/P")
+    names = [prefix.name for prefix in owner.GetPrefixes()]
+    head = "".join('over "%s"\n{\n' % name for name in names)
+    return owner, "#usda 1.0\n%s%s\n%s" % (head, body, "}\n" * len(names))
+
+
+def _ParseTargetsText(text, owner=None):
+    owner, source = _OwnerSource(owner, "    rel r = %s" % text)
+    layer = _ScratchLayer()
+    try:
+        if not layer.ImportFromString(source):
+            raise ValueParseError("not a target list")
+    except ValueParseError:
+        raise
+    except Exception as error:
+        raise ValueParseError("not a target list", str(error))
+    rel = layer.GetRelationshipAtPath(owner.AppendProperty("r"))
     if rel is None:
-        raise ValueParseError("not a target list: %r" % text)
+        raise ValueParseError("not a target list")
     return list(rel.targetPathList.explicitItems)
 
 
@@ -288,7 +615,7 @@ def FormatListOpItem(key, value, item):
     return _SoleMetadataAssignment(layer.ExportToString())
 
 
-def ParseListOpItem(key, keyword, text):
+def ParseListOpItem(key, keyword, text, current=None):
     """
     `text` parsed as ONE item of the list-op field written `keyword`.
 
@@ -300,28 +627,78 @@ def ParseListOpItem(key, keyword, text):
     A text holding two items is refused rather than taking the first.
     The row addresses one position in one arm; writing two arcs into it
     would silently drop one of them.
+
+    `current` is the item the row holds now. It decides the shorthand:
+    a bare layer path for a reference or payload, a bare `/Prim` for a
+    path, a bare word for a string or token list.
     """
-    source = ('#usda 1.0\ndef "P" (\n    %s = %s\n)\n{\n}\n'
-              % (keyword, text))
-    layer = _ScratchLayer()
-    try:
-        if not layer.ImportFromString(source):
-            raise ValueParseError("not a %s: %r" % (keyword, text))
-    except ValueParseError:
-        raise
-    except Exception as error:
-        raise ValueParseError("not a %s: %r (%s)" % (keyword, text, error))
-    spec = layer.GetPrimAtPath("/P")
-    value = spec.GetInfo(key) if spec is not None and spec.HasInfo(key) \
-        else None
-    if value is None or not IsListOp(value):
-        raise ValueParseError("not a %s: %r" % (keyword, text))
-    items = list(value.explicitItems)
+    items = _FirstParse(
+        lambda candidate: _ParseListOpText(key, keyword, candidate),
+        [text, _ListOpItemShorthand(keyword, text, current)],
+        "not a %s: %r" % (keyword, text))
     if len(items) != 1:
         raise ValueParseError(
             "%r is %d items; this row is one %s"
             % (text, len(items), keyword))
     return items[0]
+
+
+def _ParseListOpText(key, keyword, text):
+    source = ('#usda 1.0\ndef "P" (\n    %s = %s\n)\n{\n}\n'
+              % (keyword, text))
+    layer = _ScratchLayer()
+    try:
+        if not layer.ImportFromString(source):
+            raise ValueParseError("not a %s" % keyword)
+    except ValueParseError:
+        raise
+    except Exception as error:
+        raise ValueParseError("not a %s" % keyword, str(error))
+    spec = layer.GetPrimAtPath("/P")
+    value = spec.GetInfo(key) if spec is not None and spec.HasInfo(key) \
+        else None
+    if value is None or not IsListOp(value):
+        raise ValueParseError("not a %s" % keyword)
+    return list(value.explicitItems)
+
+
+# `layer.usda</Prim> (offset = 5)`, every part but the first optional.
+_BARE_ARC = re.compile(
+    r"^(?P<asset>[^<(]*?)\s*(?P<prim><[^>]*>)?\s*(?P<offset>\(.*\))?\s*$")
+
+
+def _ListOpItemShorthand(keyword, text, current):
+    text = text.strip()
+    if not text or text[0] in "@<\"'[":
+        return text
+    if isinstance(current, (Sdf.Reference, Sdf.Payload)) or (
+            current is None and keyword in ("references", "payload")):
+        return _ArcShorthand(text)
+    if isinstance(current, Sdf.Path) or (
+            current is None and keyword in ("inherits", "specializes")):
+        return "<%s>" % text if text.startswith("/") else text
+    if isinstance(current, str):
+        return _Quote(text)
+    return text
+
+
+def _ArcShorthand(text):
+    """
+    A reference or payload typed without its @@: `./hand.usda</Hand>`
+    is external, and a lone `/Class` is internal. Anything else is left
+    to fail, so a sentence is not taken for a file name.
+    """
+    match = _BARE_ARC.match(text)
+    if match is None:
+        return text
+    asset = match.group("asset").strip()
+    prim = match.group("prim") or ""
+    offset = match.group("offset") or ""
+    if _LooksLikeLayerPath(asset):
+        return _AssetLiteral(asset) + prim + (" " + offset if offset else "")
+    if asset.startswith("/") and not prim:
+        return "<%s>%s" % (asset, " " + offset if offset else "")
+    return text
 
 
 def _WriteListOp(spec, key, value):
@@ -406,16 +783,36 @@ def FormatSublayer(path, offset):
 
 
 def ParseSublayer(text):
-    """(path, offset) from one `subLayers` entry."""
+    """
+    (path, offset) from one `subLayers` entry -- `@./a.usda@`, or the
+    bare `./a.usda` shorthand when it plainly names a layer.
+    """
+    return _FirstParse(_ParseSublayerText,
+                       [text, _SublayerShorthand(text)],
+                       "not a sublayer: %r" % text)
+
+
+def _SublayerShorthand(text):
+    match = _BARE_ARC.match(text.strip())
+    if match is None or match.group("prim"):
+        return text
+    asset = match.group("asset").strip()
+    if asset.startswith("@") or not _LooksLikeLayerPath(asset):
+        return text
+    offset = match.group("offset")
+    return _AssetLiteral(asset) + (" " + offset if offset else "")
+
+
+def _ParseSublayerText(text):
     source = '#usda 1.0\n(\n    subLayers = [\n        %s\n    ]\n)\n' % text
     layer = _ScratchLayer()
     try:
         if not layer.ImportFromString(source):
-            raise ValueParseError("not a sublayer: %r" % text)
+            raise ValueParseError("not a sublayer")
     except ValueParseError:
         raise
     except Exception as error:
-        raise ValueParseError("not a sublayer: %r (%s)" % (text, error))
+        raise ValueParseError("not a sublayer", str(error))
     if len(layer.subLayerPaths) != 1:
         raise ValueParseError(
             "%r is %d sublayers; this row is one"
@@ -432,16 +829,33 @@ def FormatRelocate(source, target):
 
 
 def ParseRelocate(text):
-    """(source, target) from one `relocates` entry."""
+    """
+    (source, target) from one `relocates` entry -- `</A>: </B>`, or the
+    bare `/A: /B` shorthand.
+    """
+    return _FirstParse(_ParseRelocateText,
+                       [text, _RelocateShorthand(text)],
+                       "not a relocate: %r" % text)
+
+
+def _RelocateShorthand(text):
+    match = re.match(r"^\s*<?(/[^<>:\s]*)>?\s*:\s*<?(/[^<>:\s]*)>?\s*$",
+                     text)
+    if match is None:
+        return text
+    return "<%s>: <%s>" % match.groups()
+
+
+def _ParseRelocateText(text):
     source = '#usda 1.0\n(\n    relocates = {\n        %s\n    }\n)\n' % text
     layer = _ScratchLayer()
     try:
         if not layer.ImportFromString(source):
-            raise ValueParseError("not a relocate: %r" % text)
+            raise ValueParseError("not a relocate")
     except ValueParseError:
         raise
     except Exception as error:
-        raise ValueParseError("not a relocate: %r (%s)" % (text, error))
+        raise ValueParseError("not a relocate", str(error))
     entries = list(layer.relocates)
     if len(entries) != 1:
         raise ValueParseError("%r is %d relocates; this row is one"
@@ -521,7 +935,7 @@ class OpinionRow(object):
     def __init__(self, layer, specPath, kind, key, valueText,
                  editable, winning, typeName=None, infoValue=None,
                  infoKey=None, keyword=None, arm=None, index=None,
-                 item=None, count=0):
+                 item=None, count=0, summarized=False):
         self.layer = layer
         self.specPath = Sdf.Path(specPath)
         # "info" | "attribute" | "relationship" | "arcItem"
@@ -544,6 +958,10 @@ class OpinionRow(object):
         # How many entries share this row's list, so the panel can tell
         # whether there is anywhere to move it.
         self.count = count
+        # The value column holds a summary, not the value: a heavy array
+        # or a very long text. Such a row is not edited inline -- the
+        # editor would open on the summary -- see SummarizedValueText.
+        self.summarized = summarized
         self.children = []
 
     @property
@@ -619,16 +1037,21 @@ def _RowsForSpec(spec, group, winners):
     rows = []
     for key in sorted(spec.ListInfoKeys()):
         value = spec.GetInfo(key)
+        listOp = IsListOp(value)
+        text, summarized = (("", False) if listOp
+                            else SummarizedValueText(value))
         row = OpinionRow(
             layer=spec.layer,
             specPath=spec.path,
             kind="info",
             key=key,
-            valueText=FormatValue(value),
-            editable=group.editable and IsInfoEditable(key, value),
+            valueText=text,
+            editable=(group.editable and IsInfoEditable(key, value)
+                      and not summarized),
             winning=_InfoWinning(winners, key, value),
-            infoValue=value)
-        if IsListOp(value):
+            infoValue=value,
+            summarized=summarized)
+        if listOp:
             row.valueText = _ListOpSummary(value)
             row.children = _ListOpRows(spec, group, key, value)
         elif key == "variantSelection":
@@ -636,17 +1059,35 @@ def _RowsForSpec(spec, group, winners):
             row.children = _VariantSelectionRows(spec, group, value)
         rows.append(row)
     for prop in spec.properties:
+        owner = TargetAnchor(prop.path)
         if isinstance(prop, Sdf.AttributeSpec):
             kind = "attribute"
             typeName = prop.typeName
-            text = (FormatValue(prop.default, typeName)
-                    if prop.HasDefaultValue() else "")
-            editable = group.editable
+            text, summarized = (SummarizedValueText(prop.default, typeName)
+                                if prop.HasDefaultValue() else ("", False))
+            editable = group.editable and not summarized
+            if prop.HasInfo("connectionPaths"):
+                # Its own row, not folded into the value: a connection
+                # and a default are separate opinions, removed and
+                # overridden separately.
+                connText, connSummarized = _SummarizedTargets(
+                    prop.connectionPathList, owner)
+                rows.append(OpinionRow(
+                    layer=spec.layer,
+                    specPath=prop.path,
+                    kind="connection",
+                    key="%s.connect" % prop.name,
+                    valueText=connText,
+                    editable=group.editable and not connSummarized,
+                    winning=_ClaimWinner(winners, "connection", prop.name),
+                    summarized=connSummarized))
+                if not prop.HasDefaultValue():
+                    continue
         else:
             kind = "relationship"
-            text = _FormatTargets(prop)
+            text, summarized = _SummarizedTargets(prop.targetPathList, owner)
             typeName = None
-            editable = group.editable
+            editable = group.editable and not summarized
         rows.append(OpinionRow(
             layer=spec.layer,
             specPath=prop.path,
@@ -655,7 +1096,8 @@ def _RowsForSpec(spec, group, winners):
             valueText=text,
             editable=editable,
             winning=_ClaimWinner(winners, kind, prop.name),
-            typeName=typeName))
+            typeName=typeName,
+            summarized=summarized))
     return rows
 
 
@@ -817,10 +1259,119 @@ def _LayerArcRows(group):
     return rows
 
 
-def _FormatTargets(relSpec):
-    targets = relSpec.targetPathList
-    items = list(targets.explicitItems) or list(targets.prependedItems)
-    return "[ %s ]" % ", ".join(str(p) for p in items)
+def _FormatTargets(pathList, owner):
+    """
+    A target or connection list as usda would spell it, each path made
+    relative to `owner` where PreferredPath says so: `[ <../B>, <.x> ]`.
+    The editor opens on this text and accepts it back unchanged.
+    """
+    items = list(pathList.explicitItems) or list(pathList.prependedItems)
+    return FormatPathList(items, owner)
+
+
+def _SummarizedTargets(pathList, owner):
+    """(text, summarized) for a target or connection list; see
+    SummarizedValueText -- a skinned mesh can carry thousands."""
+    items = list(pathList.explicitItems) or list(pathList.prependedItems)
+    if len(items) <= MAX_INLINE_ITEMS:
+        return _Clipped(FormatPathList(items, owner))
+    head = FormatPathList(items[:_PREVIEW_ITEMS], owner)
+    return ("%s paths  %s, ... ]" % ("{:,}".format(len(items)),
+                                     head.rstrip().rstrip("]").rstrip()),
+            True)
+
+
+def FormatPathList(paths, owner):
+    """`paths` as a usda list, relative to `owner` where they can be."""
+    return "[ %s ]" % ", ".join(
+        "<%s>" % PreferredPath(path, owner) for path in paths)
+
+
+def PreferredPath(path, owner):
+    """
+    `path` as the panel shows and offers it: relative to the prim
+    `owner`, always -- `<../../Material/Cloth>` reads back the way it
+    was typed, and it survives the asset being referenced under a new
+    root, which an absolute path does not describe.
+    """
+    path = Sdf.Path(path)
+    owner = TargetAnchor(owner) if owner else None
+    if (owner is None or not path.IsAbsolutePath()
+            or not owner.IsAbsolutePath() or owner.IsAbsoluteRootPath()):
+        return path
+    return path.MakeRelativePath(owner)
+
+
+def _RootPrim(path):
+    prefixes = path.GetPrimPath().GetPrefixes()
+    return prefixes[0] if prefixes else path
+
+
+def RelativizePathListText(text, owner):
+    """
+    `text` rewritten with every path in PreferredPath form -- the "make
+    these relative" helper. The text is parsed first, so a list that
+    would be refused comes back refused rather than half rewritten.
+    """
+    return FormatPathList(ParseTargets(text, owner), owner)
+
+
+def TargetCandidates(stage, owner, properties=False, limit=200,
+                     budget=5000):
+    """
+    Paths a relationship or connection on the stage prim `owner` would
+    plausibly target, in PreferredPath form and nearest first.
+
+    Searched in rings outward from the owner: its parent's subtree
+    (siblings, children, nephews), then the grandparent's, and so on up
+    to the whole stage -- so `../Wrist` comes before `../../Material/
+    Cloth`, which comes before a prim in another asset, and a
+    `/Material` scope at the root is still reachable. `budget` bounds
+    the prims visited, which is what keeps the picker instant on a
+    stage holding a whole shot: the far rings are the ones cut.
+
+    With `properties`, the authored ATTRIBUTES of those prims instead --
+    a connection targets a property, not a prim.
+    """
+    owner = Sdf.Path(owner)
+    if stage is None or not owner.IsAbsolutePath() \
+            or not stage.GetPrimAtPath(owner):
+        return []
+    from pxr import Usd
+    found = []
+    visited = 0
+    ring = owner.GetParentPath()
+    done = owner
+    while visited < budget:
+        top = stage.GetPrimAtPath(ring)
+        if not top:
+            break
+        walk = iter(Usd.PrimRange(top))
+        for prim in walk:
+            path = prim.GetPath()
+            if done != owner and path == done:
+                # The previous ring, already searched: skip its subtree.
+                walk.PruneChildren()
+                continue
+            visited += 1
+            if visited > budget:
+                break
+            if properties:
+                found.extend(attr.GetPath()
+                             for attr in prim.GetAuthoredAttributes())
+            elif path != owner and not path.IsAbsoluteRootPath():
+                found.append(path)
+        if ring.IsAbsoluteRootPath():
+            break
+        done = ring
+        ring = ring.GetParentPath()
+
+    def _Distance(path):
+        relative = str(PreferredPath(path, owner))
+        return (relative.count(".."), relative.count("/"), relative)
+
+    ranked = sorted(found, key=_Distance)[:limit]
+    return ["<%s>" % PreferredPath(path, owner) for path in ranked]
 
 
 def FindRow(groups, layer, kind, key):
@@ -1070,6 +1621,8 @@ def SetRowValue(row, text):
         return _SetAttribute(row, text)
     if row.kind == "relationship":
         return _SetTargets(row, text)
+    if row.kind == "connection":
+        return _SetConnections(row, text)
     if row.kind == "arcItem":
         return _SetArcItem(row, text)
     if row.kind == "variantSelection":
@@ -1089,7 +1642,8 @@ def _SetArcItem(row, text):
     occupied, so retyping a reference's asset path does not also change
     which arcs it wins over.
     """
-    item = ParseListOpItem(row.infoKey, row.keyword, text)
+    item = _Anchored(row.layer, ParseListOpItem(
+        row.infoKey, row.keyword, text, row.item))
     before = InfoSnapshot.Capture(row.layer, row.specPath, row.infoKey)
     with Sdf.ChangeBlock():
         SetListOpItem(row.layer.GetPrimAtPath(row.specPath), row.infoKey,
@@ -1097,6 +1651,21 @@ def _SetArcItem(row, text):
     after = InfoSnapshot.Capture(row.layer, row.specPath, row.infoKey)
     return _Commit("Set %s" % row.key, row.layer, row.specPath,
                    before, after)
+
+
+def _Anchored(layer, item):
+    """
+    A reference or payload with its asset path made relative to the
+    layer it is written into (AnchoredAssetPath); any other item as is.
+    """
+    if isinstance(item, Sdf.Reference) and item.assetPath:
+        return Sdf.Reference(AnchoredAssetPath(layer, item.assetPath),
+                             item.primPath, item.layerOffset,
+                             item.customData)
+    if isinstance(item, Sdf.Payload) and item.assetPath:
+        return Sdf.Payload(AnchoredAssetPath(layer, item.assetPath),
+                           item.primPath, item.layerOffset)
+    return item
 
 
 def _SetVariantSelection(row, text):
@@ -1117,6 +1686,7 @@ def _SetVariantSelection(row, text):
 
 def _SetSublayerRow(row, text):
     path, offset = ParseSublayer(text)
+    path = AnchoredAssetPath(row.layer, path)
     before = SublayerSnapshot.Capture(row.layer)
     with Sdf.ChangeBlock():
         SetSublayer(row.layer, row.index, path, offset)
@@ -1155,12 +1725,23 @@ def _SetAttribute(row, text):
 
 
 def _SetTargets(row, text):
-    targets = ParseTargets(text)
+    targets = ParseTargets(text, TargetAnchor(row.specPath))
     before = SpecCopySnapshot.Capture(row.layer, row.specPath)
     with Sdf.ChangeBlock():
         spec = row.layer.GetRelationshipAtPath(row.specPath)
         spec.targetPathList.ClearEdits()
         spec.targetPathList.explicitItems = targets
+    after = SpecCopySnapshot.Capture(row.layer, row.specPath)
+    return _Commit("Set %s" % row.key, row.layer, row.specPath, before, after)
+
+
+def _SetConnections(row, text):
+    sources = ParseTargets(text, TargetAnchor(row.specPath))
+    before = SpecCopySnapshot.Capture(row.layer, row.specPath)
+    with Sdf.ChangeBlock():
+        spec = row.layer.GetAttributeAtPath(row.specPath)
+        spec.connectionPathList.ClearEdits()
+        spec.connectionPathList.explicitItems = sources
     after = SpecCopySnapshot.Capture(row.layer, row.specPath)
     return _Commit("Set %s" % row.key, row.layer, row.specPath, before, after)
 
@@ -1173,6 +1754,17 @@ def DeleteRow(row):
         raise ValueParseError(
             "%s is the layer's own composition; delete its entries one at "
             "a time" % row.key)
+    if row.kind == "connection":
+        # The connection only: the attribute's default is a separate
+        # opinion and stays.
+        before = SpecCopySnapshot.Capture(row.layer, row.specPath)
+        with Sdf.ChangeBlock():
+            spec = row.layer.GetAttributeAtPath(row.specPath)
+            if spec is not None:
+                spec.connectionPathList.ClearEdits()
+        after = SpecCopySnapshot.Capture(row.layer, row.specPath)
+        return _Commit("Delete %s" % row.key, row.layer, row.specPath,
+                       before, after)
     if row.kind == "info":
         before = InfoSnapshot.Capture(row.layer, row.specPath, row.key)
         with Sdf.ChangeBlock():

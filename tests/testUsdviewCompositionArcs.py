@@ -195,6 +195,9 @@ def testUsdviewInputFunction(appController):
            % stagePaths[:6])
 
     assetPath = _AssetLayer(tmpdir)
+    # What an arc authored from that absolute path stores: the asset sits
+    # beside ArmRig.usda, so it is anchored ./ (AnchoredAssetPath).
+    relativeAsset = "./" + os.path.basename(assetPath)
     dialog._widgets["assetPath"].setText(assetPath)
     appController._processEvents()
     combo = dialog._widgets["primPath"]
@@ -385,8 +388,8 @@ def testUsdviewInputFunction(appController):
     _Check(arcRow is not None,
            "the reference is listed as an arc row of its own")
     _Check(arcRow.valueText
-           == "@%s@ (offset = 5; scale = 2)" % assetPath,
-           "shown as usda writes it, offset included: %r"
+           == "@%s@ (offset = 5; scale = 2)" % relativeAsset,
+           "shown as usda writes it, relative, offset included: %r"
            % arcRow.valueText)
     _Check(str(item.text(layerOpinionsUI.COL_KIND)) == "arc",
            "and the kind column says arc, not metadata")
@@ -450,7 +453,7 @@ def testUsdviewInputFunction(appController):
            % sorted(dialog._widgets.keys()))
     _Check("position" not in dialog._widgets,
            "and no position choice: retyping must not re-rank it")
-    _Check(str(dialog._widgets["assetPath"].text()) == assetPath,
+    _Check(str(dialog._widgets["assetPath"].text()) == relativeAsset,
            "the asset is prefilled: %r"
            % str(dialog._widgets["assetPath"].text()))
     _Check(str(dialog._widgets["offset"].text()) == "5"
@@ -521,6 +524,9 @@ def testUsdviewInputFunction(appController):
     _Check(references[0].primPath == Sdf.Path("/Grip")
            and references[0].layerOffset == Sdf.LayerOffset(1),
            "the typed usda was parsed and authored: %s" % references)
+    _Check(references[0].assetPath == relativeAsset,
+           "and the absolute path typed inline was anchored relative: %r"
+           % references[0].assetPath)
 
     panel.Rebuild()
     appController._processEvents()
@@ -562,8 +568,35 @@ def testUsdviewInputFunction(appController):
     _Check(not list(root.subLayerPaths),
            "and removal takes out that entry: %s" % list(root.subLayerPaths))
 
+    # --- 19. usdview's own prim menu offers the same flows --------------
+    # The hierarchy and the viewport both raise PrimContextMenu through
+    # appController._showPrimContextMenu, which the container replaced
+    # at configureView. exec_ is stubbed so the menu is built and
+    # inspected rather than left waiting for a click.
+    from pxr.Usdviewq import primContextMenu
+    _Check(getattr(appController, "_rigExecArcMenuInstalled", False),
+           "the container hooked usdview's prim context menu")
+    shown = []
+    realExec = primContextMenu.PrimContextMenu.exec_
+    primContextMenu.PrimContextMenu.exec_ = \
+        lambda self, *args: shown.append(self)
+    try:
+        item = appController._getItemAtPath(Sdf.Path(IK))
+        appController._showPrimContextMenu(item)
+    finally:
+        primContextMenu.PrimContextMenu.exec_ = realExec
+    _Check(shown, "the prim menu was built and shown")
+    arcs = _FindSubmenu(shown[0], "Add Composition Arc")
+    _Check(arcs is not None,
+           "with an Add Composition Arc submenu: %s" % _MenuLabels(shown[0]))
+    _Check("Reference..." in _MenuLabels(arcs)
+           and "Sublayer..." in _MenuLabels(arcs),
+           "offering every arc kind: %s" % _MenuLabels(arcs))
+    _Check(len(_MenuLabels(shown[0])) > len(_MenuLabels(arcs)),
+           "alongside usdview's own items, not instead of them")
+
     print("RIGEXEC_COMPOSITION_ARCS_OK menu, form, showIf, refusal, "
           "target prims from the asset, preview, author, undo, panel "
           "wiring, warning, menu routing, layer scope, arc rows, row "
           "menu, move, edit prefill, edit apply, edit routing, inline "
-          "retype, sublayer rows")
+          "retype, sublayer rows, prim menu")

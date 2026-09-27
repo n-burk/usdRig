@@ -70,6 +70,14 @@ if __name__ != "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import touchPoseModel
 
+# Per-session state (one controller and one panel per usdview window) lives
+# in rigExecUsdview's registry, like gizmoUI's controllers: several usdview
+# sessions can share this module in one process. rigExecUsdview's directory
+# is on the module search path wherever TouchPose runs (it is a RigExec
+# plugin: bin/_env.bat and the pipeline launchers put it there), which is
+# also how the gizmo helpers below reach gizmoUI.
+import sessionRegistry
+
 
 MESH = "/Biped/Geom/body_geo"
 
@@ -119,22 +127,24 @@ class _NullContext(object):
         return False
 
 
-def GizmoDragging():
-    """True while the viewport gizmo has a drag in flight.
+def GizmoDragging(usdviewApi=None):
+    """True while `usdviewApi`'s session's viewport gizmo has a drag in
+    flight (without an api: the current session's, see gizmoUI.GetController).
 
     Read-only through `gizmoUI`'s public surface, and any failure answers
     False so a session without the viewport tools behaves as it always did.
     """
     try:
         import gizmoUI
-        controller = gizmoUI.GetController()
+        controller = gizmoUI.GetController(usdviewApi)
         return controller is not None and controller.IsDragging()
     except Exception:
         return False
 
 
-def GizmoOwns(x, y, ratio=1.0):
-    """True when the viewport gizmo would take a press at this pixel.
+def GizmoOwns(x, y, ratio=1.0, usdviewApi=None):
+    """True when `usdviewApi`'s session's viewport gizmo (without an api:
+    the current session's) would take a press at this pixel.
 
     READ-ONLY, and through gizmoUI's public surface only. The conditions
     mirror `GizmoController._OnPress`. TouchPose DEFERS rather than
@@ -148,7 +158,7 @@ def GizmoOwns(x, y, ratio=1.0):
     except ImportError:
         return False
     try:
-        controller = gizmoUI.GetController()
+        controller = gizmoUI.GetController(usdviewApi)
         if controller is None or not controller.IsVisible():
             return False
         if controller.IsDragging():
@@ -272,21 +282,40 @@ class Highlight(object):
         return changed
 
 
-class TouchPoseController(QtCore.QObject):
-    """The mode: an event filter over the stage view, plus the highlight."""
+class TouchPoseController(QtCore.QObject,
+                          metaclass=sessionRegistry.PerSessionInstanceMeta(
+                              QtCore.QObject)):
+    """The mode: an event filter over the stage view, plus the highlight.
 
-    _instance = None
+    One per usdview session, filed under the session's main window.
+    `TouchPoseController._instance` reads the current session's controller
+    (see sessionRegistry.PerSessionInstanceMeta).
+    """
+
+    _sessions = sessionRegistry.SessionRegistry("touchPose controllers")
 
     statusChanged = QtCore.Signal(str)
     strokeFinished = QtCore.Signal()
 
     @classmethod
     def GetInstance(cls, usdviewApi):
-        if cls._instance is None or cls._instance._api is not usdviewApi:
-            if cls._instance is not None:
-                cls._instance.SetActive(False)
-            cls._instance = cls(usdviewApi)
-        return cls._instance
+        """This session's controller, created once.
+
+        A different api object of the SAME session (a script's own
+        UsdviewApi on the same window) still replaces the controller, as
+        it always did; another session's controller is never touched.
+        """
+        controller = cls._sessions.Get(usdviewApi)
+        if controller is None or controller._api is not usdviewApi:
+            if controller is not None:
+                controller.SetActive(False)
+            controller = cls._sessions.Set(usdviewApi, cls(usdviewApi))
+        return controller
+
+    @classmethod
+    def ForApi(cls, usdviewApi):
+        """This session's controller if one was built, else None."""
+        return cls._sessions.Get(usdviewApi)
 
     def __init__(self, usdviewApi, mesh_path=MESH):
         super(TouchPoseController, self).__init__()
@@ -817,7 +846,7 @@ class TouchPoseController(QtCore.QObject):
         """
         if not self._active or self._model is None:
             return
-        dragging = GizmoDragging()
+        dragging = GizmoDragging(self._api)
         if dragging == self._suspended:
             return
         self._suspended = dragging
@@ -921,7 +950,11 @@ class TouchPoseController(QtCore.QObject):
             import gizmoUI
         except Exception:
             return []
-        controller = getattr(gizmoUI, "_controller", None)
+        # THIS session's gizmo: its camera, viewport and posed cache are
+        # the ones that project this session's stage. (The module's
+        # `_controller` view answers for the active window's session, and
+        # for nobody when that is ambiguous.)
+        controller = gizmoUI.GetController(self._api)
         if controller is None:
             return []
         stage = self._Stage()
@@ -1122,13 +1155,13 @@ class TouchPoseController(QtCore.QObject):
             # transition instead of a poll.
             if self._suspended:
                 return False
-            if GizmoDragging():
+            if GizmoDragging(self._api):
                 # Stand down now rather than on the next poll tick, so the
                 # first hover of a drag already finds TouchPose suspended.
                 self._PollDrag()
                 return False
             x, y = self._Position(event)
-            if GizmoOwns(x, y, self._Ratio()):
+            if GizmoOwns(x, y, self._Ratio(), self._api):
                 # The gizmo is drawing its own pre-selection highlight on
                 # this pixel; lighting a region behind it as well reads
                 # as two things being aimed at.
@@ -1157,7 +1190,7 @@ class TouchPoseController(QtCore.QObject):
             # THE GIZMO WINS. Checked before anything else is done, so a
             # press over a handle costs TouchPose a hit test and nothing
             # else -- no cast, no selection change, no overlay edit.
-            if GizmoOwns(x, y, self._Ratio()):
+            if GizmoOwns(x, y, self._Ratio(), self._api):
                 self._consumedPress = False
                 return False
             # PAINT OWNS THE PLAIN DRAG while its box is ticked, and
@@ -1234,15 +1267,17 @@ class TouchPoseController(QtCore.QObject):
 class TouchPosePanel(QtWidgets.QDialog):
     """The toggle, the numbers, and a list of what is paintable."""
 
-    _instance = None
+    # One panel per usdview session, filed under its main window.
+    _sessions = sessionRegistry.SessionRegistry("touchPose panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi):
-        if cls._instance is None:
-            cls._instance = cls(usdviewApi)
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi))
         else:
-            cls._instance._api = usdviewApi
-        return cls._instance
+            panel._api = usdviewApi
+        return panel
 
     def __init__(self, usdviewApi, parent=None):
         super(TouchPosePanel, self).__init__(

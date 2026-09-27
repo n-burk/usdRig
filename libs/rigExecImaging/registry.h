@@ -1,10 +1,82 @@
 //
-// RigExec imaging registry: process-global rendezvous between the
-// UsdImaging scene-index plugin (which builds filter chains when engines
-// construct) and the application activation (which owns the stage,
-// evaluator, and time source). Order-independent: chains read the shared
-// snapshot store atomically, so activation may happen before or after
-// chain construction.
+// RigExec imaging registry: the rendezvous between the UsdImaging
+// scene-index plugin (which builds filter chains when engines construct)
+// and the application activation (which owns the stage, evaluator, and time
+// source). Order-independent: chains read their context's snapshot store
+// atomically, so activation may happen before or after chain construction.
+//
+// PER-STAGE CONTEXTS (docs/multistage-imaging.md). One
+// RigExecImagingRegistry object is one IMAGING CONTEXT: everything that
+// used to be process-global -- the snapshot store, the bound chains, the
+// rig sessions and their stage, noted roots, generated scopes, asset and
+// read roots, the last time, preview slots and deltas, the weight overlay,
+// the generation and published epoch, the warming scheduler, warm index
+// and budgets, and the stage-notice key -- belongs to exactly one UsdStage.
+// Several usdview sessions in one process therefore evaluate their own
+// rigs side by side, including two stages opened from the same file
+// (identical prim paths).
+//
+// THE DIRECTORY maps a stage to its context (ForStage / ForStageCacheId /
+// ForKey). It is keyed by stage IDENTITY -- the UsdStage object, validated
+// through a UsdStageWeakPtr, so an expired stage never aliases a new one
+// allocated at the same address -- and every context carries a
+// monotonically increasing KEY (never the raw pointer) that is what
+// anything outliving the stage holds. A context whose stage has expired is
+// dropped from the directory on the next directory call; an active context
+// holds its stage, so only inactive contexts ever expire. An AUTOMATIC
+// activation (the rig adapter's EnsureActivated) is released by the library
+// itself once the last chain bound to its context goes away (engine
+// destroyed, or the stage replaced under it); an explicit activation lasts
+// until its host deactivates it.
+//
+// CHAIN -> CONTEXT BINDING (the sanctioned transport; there is no stage at
+// AppendSceneIndex time). The scene-index plugin registers every new chain
+// with the directory UNBOUND (RegisterUnboundChain): an unbound chain reads
+// an empty store and receives nothing stage-specific. The keyless rig
+// adapter (rigAdapter.cpp) contributes a `rigExec/stageKey` leaf -- a
+// HdRetainedTypedSampledDataSource<uint64_t> holding
+// ForStage(prim.GetStage())->GetKey() -- on TOP-LEVEL prims only, merged
+// into the same `rigExec` container that carries the `rigExec/time`
+// trigger when a top-level prim is also a rig root. The results scene
+// index pulls that leaf from its input on each _PrimsAdded batch that holds
+// a top-level prim and, when the key differs from the one it is bound to
+// (first population, or a stage replaced under the same engine), asks the
+// directory to (re)bind it (BindChain): the chain then reads the context's
+// store, pruned scopes, preview deltas and binding epoch, and only that
+// context's publications reach it. Same mechanism as the time trigger: a
+// data-source leaf the stage scene index already builds, no side channel.
+//
+// LEGACY SURFACE. GetInstance() and the stage-less C functions keep their
+// signatures. GetInstance() is the process's LEGACY HANDLE: an unbound
+// context object that owns no stage and routes every call to the CURRENT
+// context -- the one most recently activated through a legacy entry point
+// (RigExecImaging_Activate, GetInstance().Activate) or, when no current
+// context is live, through the adapter's automatic activation. With no
+// current context it answers as an inactive context (an empty store,
+// SetTime false, ...). Its Activate(stage) forwards to that stage's
+// context -- creating it when the stage has none -- and makes it current.
+// A host that activates one stage at a time and deactivates before it
+// switches (usdview's plugin, usdrecord, every pre-existing test) sees the
+// old singleton's behavior. Differences a legacy caller can observe are
+// listed in docs/multistage-imaging.md ("Legacy surface"): a legacy
+// activation of a second stage does NOT deactivate the first (both keep
+// evaluating; the first is reachable through the ...ForStage functions),
+// and automatic activation evaluates every imaged stage instead of
+// refusing all but one. Stage-aware callers use ForStage* and the
+// ...ForStage C functions (RigExecImaging_ActivateForStage included) and
+// never touch the current designation.
+//
+// LOCK ORDER (never inverted):
+//   scheduler fence mutex (ClearFrameCache/SetWeightOverlay only)
+//     -> context _mutex
+//       -> context _notedMutex
+//       -> scheduler state / warm index / frame cache shards
+//       -> DIRECTORY mutex
+// The directory mutex is a LEAF: it is taken under a context's _mutex
+// (chain snapshots for broadcasts and preview deltas) and alone, and
+// nothing is ever called into a context -- and no context is destroyed --
+// while it is held. Contexts released by the directory are destroyed after
+// it unlocks.
 //
 #ifndef RIGEXEC_IMAGING_REGISTRY_H
 #define RIGEXEC_IMAGING_REGISTRY_H
@@ -22,6 +94,8 @@
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -32,16 +106,81 @@
 
 namespace rigExec {
 
+class RigExecImagingDirectory;
+
 class RigExecImagingRegistry : public TfWeakBase {
 public:
+    using Ptr = std::shared_ptr<RigExecImagingRegistry>;
+
+    // -- the directory (process level) --------------------------------------
+
+    /// The legacy handle (see the file comment): an unbound context that
+    /// routes every call to the current context. Kept for source
+    /// compatibility; no library code calls it.
     static RigExecImagingRegistry &GetInstance();
 
-    /// The shared store every results scene index reads from.
-    const std::shared_ptr<RigExecSnapshotStore> &GetStore() const {
-        return _store;
-    }
+    /// \p stage's context, created on demand when \p create is set. Null for
+    /// a null stage, or when the stage has none and \p create is false.
+    static Ptr ForStage(const UsdStageRefPtr &stage, bool create = true);
 
-    /// Called by the scene-index plugin for each constructed chain.
+    /// The context of the stage UsdUtilsStageCache::Get() holds under \p id.
+    static Ptr ForStageCacheId(long long id, bool create);
+
+    /// The context with \p key, or null when there is none or its stage has
+    /// expired (key 0 never names a context).
+    static Ptr ForKey(uint64_t key);
+
+    /// The current context the legacy surface routes to, or null.
+    static Ptr Current();
+
+    /// Contexts in the directory whose stage is still alive.
+    static size_t ContextCount();
+
+    /// Called by the scene-index plugin for each constructed chain: the
+    /// chain starts UNBOUND (an empty store, no scopes, no deltas) and
+    /// binds on its first population (see the file comment).
+    static void RegisterUnboundChain(
+        const RigExecInternalPrimPruningSceneIndexRefPtr &pruning,
+        const RigExecBindingResolvingSceneIndexRefPtr &binding,
+        const RigExecResultsSceneIndexRefPtr &results,
+        const RigExecXformOverrideSceneIndexRefPtr &xforms = nullptr);
+
+    /// (Re)binds the registered chain whose results index is \p results to
+    /// the context with \p key (0 unbinds). A no-op for a chain the
+    /// directory does not know (a hand-built chain) or one already bound to
+    /// \p key. Called by the results index from _PrimsAdded, never while a
+    /// context lock is held.
+    static void BindChain(const RigExecResultsSceneIndex *results,
+                          uint64_t key);
+
+    /// Forgets the chain whose results index is \p results. Called by that
+    /// index's destructor, never while a context lock is held. When it was
+    /// the last chain bound to a context whose rig was activated
+    /// AUTOMATICALLY (EnsureActivated), that context is deactivated: the
+    /// engine that imaged the stage is gone, so nothing would ever release
+    /// its stage and worker threads otherwise. The release does not count as
+    /// a host deactivation, so a later engine on the same stage activates it
+    /// again. Explicit activations are never touched. A no-op for a chain
+    /// the directory does not know.
+    static void ReleaseChain(const RigExecResultsSceneIndex *results);
+
+    /// This context's key (0 for the legacy handle).
+    uint64_t GetKey() const { return _key; }
+
+    /// The stage this context belongs to, or null (the legacy handle, or a
+    /// stage that has gone away).
+    UsdStageRefPtr GetBoundStage() const;
+
+    // -- the context --------------------------------------------------------
+
+    /// The store every results scene index bound to this context reads
+    /// from. On the legacy handle: the current context's store, or the
+    /// handle's own (empty) one when there is no current context.
+    const std::shared_ptr<RigExecSnapshotStore> &GetStore() const;
+
+    /// Registers a chain BOUND to this context (the legacy handle registers
+    /// it unbound), seeding it with this context's store, scopes, deltas and
+    /// epoch. The scene-index plugin uses RegisterUnboundChain instead.
     void RegisterChain(
         const RigExecInternalPrimPruningSceneIndexRefPtr &pruning,
         const RigExecBindingResolvingSceneIndexRefPtr &binding,
@@ -52,6 +191,11 @@ public:
     /// empty.  Compilation and the first evaluation complete off to the side;
     /// the active stage and Hydra generation change only after every rig has
     /// succeeded.
+    ///
+    /// A context only ever evaluates its own stage: called with another
+    /// stage, the call is forwarded to that stage's context (created when
+    /// the stage has none). On the legacy handle a successful activation
+    /// also makes the target the current context.
     bool Activate(
         const UsdStageRefPtr &stage, const SdfPath &rigPath,
         UsdTimeCode initialTime, std::vector<std::string> *errors);
@@ -126,7 +270,12 @@ public:
     /// notice; hosts call it directly only for edits the notice cannot see.
     void CancelFrameGeneration(const SdfPath &rig);
 
-    /// Lifetime warming counters (queue depth, completions, drops...).
+    /// Warming counters over the context's lifetime (completions, drops...)
+    /// plus the running scheduler's gauges (queue depth, running). The
+    /// counters survive Deactivate and re-activation: each stopped
+    /// scheduler's totals, as of its deactivation, are retained and summed
+    /// with the running one's. Per CONTEXT -- another stage's warming never
+    /// counts here. Gauges are zero while no rig is active.
     RigExecBackgroundSchedulerStats GetBackgroundStats();
 
     /// Blocks until no warming job is queued or running.
@@ -137,7 +286,9 @@ public:
     RigExecFrameCacheStats GetFrameCacheStats(const SdfPath &rig);
 
     /// The warming scheduler's profiler (per-sweep-time factory costs land
-    /// here), for benches and tests; null when the scheduler is off.
+    /// here), for benches and tests; null when the scheduler is off (no
+    /// active rig). Per ACTIVATION: a re-activation starts a new scheduler
+    /// with an empty profiler.
     RigExecProfiler *MutableSchedulerProfiler();
 
     /// One rig's bridge profiler (memoize and burst-prep scopes land here),
@@ -270,32 +421,59 @@ public:
 
     bool IsPreviewActive() const;
 
-    /// Drops the bridge; chains remain and read the (cleared) store.
+    /// Drops the bridge and stops the warming scheduler (a context without
+    /// an active rig owns no threads); bound chains remain and read the
+    /// (cleared) store. Other contexts are untouched. On the legacy handle:
+    /// deactivates the current context only. A HOST deactivation: the
+    /// automatic path never revives the context afterwards (see
+    /// EnsureActivated).
     void Deactivate();
 
-    bool IsActive() const { return !_sessions.empty(); }
+    /// Whether the active rig was activated automatically (EnsureActivated)
+    /// rather than by an explicit Activate. False while inactive.
+    bool IsAutoActivated() const;
 
-    /// Activates the stage's rigs unless this exact stage is already active
+    bool IsActive() const;
+
+    /// Activates the stage's rigs unless they are already active
     /// (adapter-driven discovery, docs/specs/imaging-datasource-redesign.md
     /// §3.2).
     ///
-    /// The stage scene index's rig adapter calls this the first time a
-    /// RigExecRoot prim's data is built, so a host with no explicit
-    /// activation (usdrecord) still evaluates. A no-op when already active
-    /// on \p stage -- hosts that activate explicitly (the usdview plugin)
-    /// are unaffected -- and otherwise exactly Activate with an empty rig
-    /// path: every RigExecRoot on the stage, compiled and published at
-    /// \p time.
+    /// The stage scene index's rig adapter calls this -- on
+    /// ForStage(prim.GetStage()) -- the first time a RigExecRoot prim's data
+    /// is built, so a host with no explicit activation (usdrecord) still
+    /// evaluates. A no-op when this context is already active -- hosts that
+    /// activate explicitly (the usdview plugin) are unaffected -- and
+    /// otherwise exactly Activate with an empty rig path: every RigExecRoot
+    /// on the stage, compiled and published at \p time.
     ///
     /// NOT a substitute for Activate: a rig authored into an already-active
     /// stage still needs an explicit re-activation, which is what the
     /// usdview plugin's root-set tracking does.
     ///
-    /// Refuses (silently returns false) while active on a DIFFERENT stage:
-    /// unlike an explicit Activate, the automatic path never steals a live
-    /// activation. The refusal is silent because the adapter calls this on
-    /// every data pull -- a second stage's rigs would otherwise warn once
-    /// per pull, forever.
+    /// Never refuses on account of another stage: each stage has its own
+    /// context, so there is nothing to steal, and a second stage's rigs
+    /// evaluate independently. (It used to refuse while the process-global
+    /// registry was active on a different stage.) A successful automatic
+    /// activation becomes the legacy current context only when no current
+    /// context is live, so it never takes the legacy surface away from an
+    /// explicit activation.
+    ///
+    /// Never revives a context its host explicitly Deactivate()d either --
+    /// only an explicit Activate does. Otherwise any stray pull of a rig
+    /// root (UsdImaging traverses the old stage while a stage scene index
+    /// announces a SetStage) would re-activate a closed stage, and its
+    /// context would then hold that stage alive for the life of the
+    /// process: nothing replaces it the way the old singleton was replaced.
+    ///
+    /// An activation made HERE is automatic, and the library owns its
+    /// lifetime: when the last chain bound to this context goes away (its
+    /// engine is destroyed, or a SetStage rebinds it to another stage) the
+    /// context deactivates itself and lets go of its stage and threads (see
+    /// ReleaseChain). That release is not a host deactivation, so a later
+    /// engine on the same stage activates it again. An explicit Activate on
+    /// an automatically active context takes the lifetime over: from then
+    /// on only the host deactivates it.
     bool EnsureActivated(
         const UsdStageRefPtr &stage, UsdTimeCode time);
 
@@ -319,31 +497,88 @@ public:
     /// bounded and harmless -- the activation it forces resolves to a no-op
     /// inside EnsureActivated. A rig authored into an already-active stage
     /// is still the usdview plugin's re-activation to make: the forced pull
-    /// builds its data but EnsureActivated refuses to replace a live stage
-    /// (see below). Cleared by Activate and Deactivate; a note that
-    /// outlives a failed activation retries on the next resync, like the
-    /// plugin's own retry.
+    /// builds its data but EnsureActivated leaves a live activation alone.
+    /// Cleared by Activate and Deactivate; a note that outlives a failed
+    /// activation retries on the next resync, like the plugin's own retry.
     ///
-    /// Paths only, no stage: the note is just the _PrimsAdded matcher, and
-    /// the activation it forces runs through the pulled prim's own adapter,
-    /// which always names the true stage. A path collision across two stages
-    /// therefore still activates the right one.
+    /// Paths only: the context IS the stage (the adapter notes on
+    /// ForStage(prim.GetStage())), and the chains that match notes are the
+    /// ones bound to this context, so a path collision across two stages
+    /// never crosses between them.
     void NoteRigRoot(const SdfPath &rigPath);
 
     /// Whether \p path was noted by NoteRigRoot and is still pending.
     bool IsNotedRigRoot(const SdfPath &path);
 
+    ~RigExecImagingRegistry();
+
 private:
-    RigExecImagingRegistry();
+    friend class RigExecImagingDirectory;
+
+    /// A context for \p stage under \p key (the directory creates these).
+    RigExecImagingRegistry(uint64_t key, const UsdStageRefPtr &stage);
+
+    /// The legacy handle (GetInstance).
+    struct _LegacyHandleTag {};
+    explicit RigExecImagingRegistry(_LegacyHandleTag);
+
+    RigExecImagingRegistry(const RigExecImagingRegistry &) = delete;
+    RigExecImagingRegistry &operator=(const RigExecImagingRegistry &) = delete;
 
     // Weak references: chains are owned by their scene index graphs and
-    // die with their engines; the registry prunes expired entries.
+    // die with their engines; the directory prunes expired entries.
     struct Chain {
         TfWeakPtr<RigExecInternalPrimPruningSceneIndex> pruning;
         TfWeakPtr<RigExecBindingResolvingSceneIndex> binding;
         TfWeakPtr<RigExecResultsSceneIndex> results;
         TfWeakPtr<RigExecXformOverrideSceneIndex> xforms;
     };
+
+    /// On the legacy handle, the context a call routes to: the current
+    /// context, or null (the call then answers from the handle's own
+    /// inactive state). Always null on a real context.
+    Ptr _Routed() const;
+
+    /// Activate, recording whether the activation is \p automatic
+    /// (EnsureActivated) or explicit. An automatic call re-checks under
+    /// _mutex and is a no-op (true) when the context became active meanwhile
+    /// and refused (false) when its host deactivated it.
+    bool _Activate(
+        const UsdStageRefPtr &stage, const SdfPath &rigPath,
+        UsdTimeCode initialTime, std::vector<std::string> *errors,
+        bool automatic);
+
+    /// Deactivate. \p byHost marks a host deactivation (Deactivate): the
+    /// automatic path never revives it. Otherwise it is the library's
+    /// release of an automatic activation (ReleaseChain / BindChain), which
+    /// only proceeds -- re-checked under _mutex -- while the activation is
+    /// still automatic and no chain is bound to this context.
+    void _Deactivate(bool byHost);
+
+    /// The context with \p key releases its automatic activation if no
+    /// chain is bound to it any more (see _Deactivate). Call with no lock
+    /// held.
+    static void _ReleaseIfUnbound(uint64_t key);
+
+    /// Legacy activation (the handle's Activate and RigExecImaging_Activate):
+    /// forwards to \p stage's context, created on demand and seeded with
+    /// the legacy overlay selection, and makes it current on success.
+    static bool _LegacyActivate(
+        const UsdStageRefPtr &stage, const SdfPath &rigPath,
+        UsdTimeCode initialTime, std::vector<std::string> *errors);
+
+    /// The chains bound to this context, live ones only (a snapshot taken
+    /// under the directory's leaf lock).
+    std::vector<Chain> _BoundChains() const;
+
+    /// Seeds a chain that just bound to this context with its store,
+    /// scopes, preview deltas and epoch. Takes _mutex briefly; the sends
+    /// run unlocked (they re-enter through the results index's trigger).
+    void _AdoptChain(const Chain &chain);
+
+    /// The stage a preview resolves attributes on: the active stage, else
+    /// the bound one (a stage with no rig still previews its Xforms).
+    UsdStageRefPtr _PreviewStageLocked() const;
 
     struct RigSession {
         SdfPath rigPath;
@@ -567,15 +802,55 @@ private:
 
     void _SetChainXformDeltas(const std::map<SdfPath, GfMatrix4d> &deltas);
 
-    std::mutex _mutex;
+    /// The scheduler under _mutex, shared so a trigger or a fenced clear
+    /// can keep using it after unlocking while a Deactivate stops it: the
+    /// last holder destroys it (which joins its workers) outside any lock.
+    std::shared_ptr<RigExecBackgroundScheduler> _SchedulerLocked() const {
+        return _scheduler;
+    }
+
+    /// The directory key (0 on the legacy handle) and the stage this
+    /// context belongs to (weak: a context never keeps its stage alive
+    /// unless it is active, see _stage).
+    const uint64_t _key = 0;
+    const UsdStageWeakPtr _boundStage;
+    const bool _legacyHandle = false;
+
+    /// Mirrors !_sessions.empty(), readable without _mutex (IsActive, and
+    /// the directory's live-current test, which must not lock a context).
+    std::atomic<bool> _active{false};
+
+    /// Set by an explicit Deactivate, cleared by the next successful
+    /// Activate: the automatic path (EnsureActivated) never revives a stage
+    /// its host turned off. _mutex held.
+    bool _deactivatedByHost = false;
+
+    /// Set by a successful automatic activation (EnsureActivated), cleared
+    /// by an explicit Activate and by every deactivation: the library, not
+    /// the host, releases an automatic activation once its last bound chain
+    /// is gone. _mutex held.
+    bool _autoActivated = false;
+
+    /// The totals of the schedulers this context stopped, as of their
+    /// deactivation (GetBackgroundStats adds the running one's). Gauges
+    /// (queue depth, running) stay zero here. _mutex held.
+    RigExecBackgroundSchedulerStats _retiredStats;
+
+    mutable std::mutex _mutex;
 
     /// Millisecond slice for one standing-burst rebuild; see
     /// SetWarmBurstPrepSliceMs. UI thread, _mutex held.
     double _warmBurstPrepSliceMs = 50.0;
-    std::shared_ptr<RigExecSnapshotStore> _store;
-    std::vector<Chain> _chains;
+    /// Never reassigned after construction: GetStore() reads it unlocked
+    /// (the compute-extent callback runs on arbitrary threads).
+    const std::shared_ptr<RigExecSnapshotStore> _store;
     RigSessions _sessions;
+    /// The active stage (strong while active, reset by Deactivate).
     UsdStageRefPtr _stage;
+    /// The stage a preview in progress resolves on (see BeginPreview).
+    /// Weak: the directory holds this context until its stage dies, so a
+    /// preview abandoned mid-drag must not keep that stage alive.
+    UsdStageWeakPtr _previewStage;
     /// Rig roots sighted by the rig adapter (see NoteRigRoot).
     ///
     /// Its own mutex, SEPARATE from _mutex on purpose: the adapter notes
@@ -600,14 +875,24 @@ private:
     /// The influence-overlay selection, held HERE rather than only on the
     /// bridge because it outlives one: a host may select before
     /// activation, and Deactivate/Activate must not silently drop it.
+    /// On the legacy handle: the legacy selection, which a legacy
+    /// activation carries into its target (the old singleton's
+    /// process-wide viewer mode); _legacyOverlaySet says one was made.
     SdfPath _weightOverlay;
+    bool _legacyOverlaySet = false;
     uint64_t _generation = 0;
     uint64_t _publishedEpochId = 0;
+    /// The binding epoch last announced to the bound chains, for seeding
+    /// a chain that binds later (_AdoptChain).
+    RigExecBindingResolvingSceneIndex::BindingEpochConstPtr _publishedEpoch;
     /// The frame-warming pool: below-normal workers draining neighbor and
     /// sweep jobs sampled on the UI thread. Its mutex is a LEAF: triggers
     /// take _mutex first and scheduler state second, and workers never take
-    /// _mutex at all, so no path inverts the order.
-    std::unique_ptr<RigExecBackgroundScheduler> _scheduler;
+    /// _mutex at all, so no path inverts the order. Created when the
+    /// context first activates and stopped by Deactivate: a context without
+    /// an active rig owns no threads. Jobs are keyed by rig path WITHIN the
+    /// context's own scheduler, so equal paths on two stages never meet.
+    std::shared_ptr<RigExecBackgroundScheduler> _scheduler;
     /// The shared warm-frame index: completions (worker closures,
     /// memoized publishes), evictions (cache callbacks), and queue
     /// transitions (scheduler hook) record here; the strip queries it.
@@ -748,11 +1033,97 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_ClearFrameCache(const char *rigPath);
 RIGEXEC_IMAGING_C_API int RigExecImaging_WarmRange(
     const char *rigPath, const double *frames, int count);
 
-/// Lifetime warming completions ("ran", see
-/// RigExecBackgroundSchedulerStats::completed): the cache strip's repaint
-/// gate. A poll whose counter is still, with unchanged states and playhead,
-/// skips the repaint. Never negative; 0 when the scheduler is off.
+/// Warming completions ("ran", see
+/// RigExecBackgroundSchedulerStats::completed) over the current context's
+/// lifetime -- they survive Deactivate and re-activation -- the cache
+/// strip's repaint gate. A poll whose counter is still, with unchanged
+/// states and playhead, skips the repaint. Never negative; 0 before the
+/// context's first activation (and with no current context).
 RIGEXEC_IMAGING_C_API long long RigExecImaging_GetWarmingCompletedCount();
+
+/// Manipulation preview (see RigExecImagingRegistry::BeginPreview /
+/// UpdatePreview / EndPreview). BeginPreview returns the double count
+/// UpdatePreview expects, or -1; the other two return 0 on success.
+RIGEXEC_IMAGING_C_API int RigExecImaging_BeginPreview(
+    const char *packedAttributePaths);
+RIGEXEC_IMAGING_C_API int RigExecImaging_UpdatePreview(
+    const double *values, int count);
+RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreview();
+
+// ---------------------------------------------------------------------------
+// Stage-scoped surface (docs/multistage-imaging.md).
+//
+// Every per-stage entry point above has a ...ForStage twin taking the stage's
+// UsdUtilsStageCache id FIRST and otherwise the same arguments and return
+// convention. A twin acts on THAT stage's context only -- several stages
+// evaluate side by side in one process -- and never changes the legacy
+// current context. The stage-less functions above keep routing to the
+// current context (the one most recently activated through
+// RigExecImaging_Activate). An unknown id, or a stage without a context,
+// answers exactly as an inactive registry would. SetWeightOverlayForStage
+// and BeginPreviewForStage create the stage's context when it has none (a
+// selection is remembered before activation; a stage with no rig still
+// previews its Xforms); the others never create one.
+// RigExecImaging_Activate and RigExecImaging_GetControlFrameAssetSpace
+// already take the id and use that stage's context; Activate also makes that
+// context current, RigExecImaging_ActivateForStage does not.
+// ---------------------------------------------------------------------------
+
+/// RigExecImaging_Activate on THAT stage's context (created when it has
+/// none) without making it the legacy current context, and without the
+/// legacy overlay selection (a stage's own selection is
+/// SetWeightOverlayForStage). An explicit activation: it lasts until
+/// DeactivateForStage. Same arguments and return codes as
+/// RigExecImaging_Activate (0 success, 1 no stage, 2 bad rig path,
+/// 3 activation failed).
+RIGEXEC_IMAGING_C_API int RigExecImaging_ActivateForStage(
+    long long stageCacheId, const char *rigPath, double initialFrame);
+
+RIGEXEC_IMAGING_C_API int RigExecImaging_SetTimeForStage(
+    long long stageCacheId, double frame);
+RIGEXEC_IMAGING_C_API int RigExecImaging_OnEditCommittedForStage(
+    long long stageCacheId);
+RIGEXEC_IMAGING_C_API int RigExecImaging_OnIdleForStage(
+    long long stageCacheId);
+RIGEXEC_IMAGING_C_API int RigExecImaging_WriteProfileSummaryForStage(
+    long long stageCacheId, const char *path);
+RIGEXEC_IMAGING_C_API void RigExecImaging_DeactivateForStage(
+    long long stageCacheId);
+RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGenerationForStage(
+    long long stageCacheId);
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetMovedFloatsForStage(
+    long long stageCacheId, const char *packedPaths, float *out, int count);
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetGuideBoundsAssetSpaceForStage(
+    long long stageCacheId, const char *primPath, double outMinMax[6]);
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetAllGuideBoundsAssetSpaceForStage(
+    long long stageCacheId, double outMinMax[6]);
+RIGEXEC_IMAGING_C_API int RigExecImaging_SetWeightOverlayForStage(
+    long long stageCacheId, const char *weightPrimPath);
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetFrameStatesForStage(
+    long long stageCacheId, const char *rigPath, const double *frames,
+    int *statesOut, int count);
+RIGEXEC_IMAGING_C_API int RigExecImaging_ClearFrameCacheForStage(
+    long long stageCacheId, const char *rigPath);
+RIGEXEC_IMAGING_C_API int RigExecImaging_WarmRangeForStage(
+    long long stageCacheId, const char *rigPath, const double *frames,
+    int count);
+RIGEXEC_IMAGING_C_API long long RigExecImaging_GetWarmingCompletedCountForStage(
+    long long stageCacheId);
+RIGEXEC_IMAGING_C_API int RigExecImaging_BeginPreviewForStage(
+    long long stageCacheId, const char *packedAttributePaths);
+RIGEXEC_IMAGING_C_API int RigExecImaging_UpdatePreviewForStage(
+    long long stageCacheId, const double *values, int count);
+RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreviewForStage(
+    long long stageCacheId);
+
+/// 1 when the stage's context has an active rig, 0 otherwise (including an
+/// unknown id).
+RIGEXEC_IMAGING_C_API int RigExecImaging_IsActiveForStage(
+    long long stageCacheId);
+
+/// How many imaging contexts the process holds for live stages (tests and
+/// diagnostics).
+RIGEXEC_IMAGING_C_API int RigExecImaging_ContextCount();
 
 }
 

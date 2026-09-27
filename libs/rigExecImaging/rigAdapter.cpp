@@ -23,9 +23,18 @@
 // would REPLACE the fallback data source a RigExecRoot prim gets today, while
 // an API schema adapter's contribution is OVERLAID onto it
 // (apiSchemaAdapter.h:71-74). The rig prim keeps the exact representation it
-// has always had; this file only adds one container to it. And the adapter
-// says nothing about prims that are not RigExecRoots, so stages without rigs
-// pay one type-name comparison per prim and nothing else.
+// has always had; this file only adds one container to it.
+//
+// THE STAGE KEY (docs/multistage-imaging.md). Several stages may be imaged in
+// one process, each with its own imaging context, and a scene-index chain is
+// built with no stage at all. So the same container also carries
+// rigExec/stageKey -- the key of ForStage(prim.GetStage()) -- on TOP-LEVEL
+// prims (the pseudo-root's children), merged with the trigger when a
+// top-level prim is also a rig root. The results index pulls it on
+// population to bind its chain to that context (registry.h, "Chain ->
+// context binding"). Every other prim is untouched: a prim that is neither a
+// RigExecRoot nor top-level pays one type-name and one path-length
+// comparison and gets no subprim data, exactly as before.
 //
 
 #include "registry.h"
@@ -85,11 +94,20 @@ private:
     const UsdImagingDataSourceStageGlobals &_stageGlobals;
 };
 
+/// Whether \p prim is a child of the pseudo-root. The path's element count
+/// answers without touching prim data: a top-level prim's path has exactly
+/// one element, and so does nothing else UsdImaging populates.
+bool
+_IsTopLevel(UsdPrim const& prim)
+{
+    return prim.GetPath().GetPathElementCount() == 1;
+}
+
 }  // namespace
 
-/// Contributes the rigExec/time trigger leaf to RigExecRoot prims, and
-/// activates the rig on first sight so hosts without explicit activation
-/// (usdrecord) evaluate.
+/// Contributes the rigExec/time trigger leaf to RigExecRoot prims and the
+/// rigExec/stageKey leaf to top-level prims, and activates the rig on first
+/// sight so hosts without explicit activation (usdrecord) evaluate.
 class RigExecImagingRigAdapter final : public UsdImagingAPISchemaAdapter {
 public:
     TfTokenVector GetImagingSubprims(
@@ -97,16 +115,24 @@ public:
         if (!appliedInstanceName.IsEmpty()) {
             return {};
         }
-        if (prim.GetTypeName() != _RigExecRootTypeName()) {
+        const bool rigRoot = prim.GetTypeName() == _RigExecRootTypeName();
+        if (!rigRoot && !_IsTopLevel(prim)) {
             return {};
         }
-        // Noted for eager activation: this runs during populate, before any
-        // data pull, so the results index's _PrimsAdded can activate the rig
-        // on the populate thread (see NoteRigRoot). Cheap and idempotent --
-        // ignored once active -- because this also runs on every traversal.
-        rigExec::RigExecImagingRegistry::GetInstance().NoteRigRoot(
-            prim.GetPath());
-        // The primary subprim only: this contributes DATA to the rig prim,
+        if (rigRoot) {
+            // Noted for eager activation: this runs during populate, before
+            // any data pull, so the results index's _PrimsAdded can activate
+            // the rig on the populate thread (see NoteRigRoot). Cheap and
+            // idempotent -- ignored once active -- because this also runs
+            // on every traversal. Noted on the prim's OWN stage's context:
+            // a chain only matches notes of the context it is bound to.
+            if (const rigExec::RigExecImagingRegistry::Ptr context =
+                    rigExec::RigExecImagingRegistry::ForStage(
+                        prim.GetStage())) {
+                context->NoteRigRoot(prim.GetPath());
+            }
+        }
+        // The primary subprim only: this contributes DATA to the prim,
         // never new prims.
         return {TfToken()};
     }
@@ -114,7 +140,7 @@ public:
     TfToken GetImagingSubprimType(
         UsdPrim const&, TfToken const&, TfToken const&) override {
         // No opinion: the prim adapter (or the fallback, for a rig prim
-        // nothing else adapted) owns the rig prim's Hydra type.
+        // nothing else adapted) owns the prim's Hydra type.
         return TfToken();
     }
 
@@ -125,37 +151,61 @@ public:
         if (!subprim.IsEmpty() || !appliedInstanceName.IsEmpty()) {
             return nullptr;
         }
-        if (prim.GetTypeName() != _RigExecRootTypeName()) {
+        const bool rigRoot = prim.GetTypeName() == _RigExecRootTypeName();
+        const bool topLevel = _IsTopLevel(prim);
+        if (!rigRoot && !topLevel) {
             return nullptr;
         }
-        // First sight of a rig in a host with no explicit activation:
-        // compile it and publish the first generation now, so the chain
-        // below already serves evaluated data. Idempotent -- a host that
-        // activates explicitly (the usdview plugin) is already active and
-        // this is a no-op -- and serialized inside the registry, so two
-        // rigs populating at once cost a compile, not correctness.
-        rigExec::RigExecImagingRegistry::GetInstance().EnsureActivated(
-            prim.GetStage(), stageGlobals.GetTime());
-        // The trigger itself: from now on every SetTime dirties rigExec/time
-        // on this prim, and the results index evaluates through it.
-        stageGlobals.FlagAsTimeVarying(
-            prim.GetPath(),
-            HdDataSourceLocator(rigExec::RigExecTriggerContainerToken(),
-                                rigExec::RigExecTriggerLeafToken()));
+        const rigExec::RigExecImagingRegistry::Ptr context =
+            rigExec::RigExecImagingRegistry::ForStage(prim.GetStage());
+        if (!context) {
+            return nullptr;
+        }
+        TfToken names[2];
+        HdDataSourceBaseHandle values[2];
+        size_t count = 0;
+        if (rigRoot) {
+            // First sight of a rig in a host with no explicit activation:
+            // compile it and publish the first generation now, so the chain
+            // below already serves evaluated data. Idempotent -- a host that
+            // activates explicitly (the usdview plugin) is already active
+            // and this is a no-op -- and serialized inside the context, so
+            // two rigs populating at once cost a compile, not correctness.
+            // Each stage activates its own context; none refuses another.
+            context->EnsureActivated(prim.GetStage(), stageGlobals.GetTime());
+            // The trigger itself: from now on every SetTime dirties
+            // rigExec/time on this prim, and the results index evaluates
+            // through it.
+            stageGlobals.FlagAsTimeVarying(
+                prim.GetPath(),
+                HdDataSourceLocator(rigExec::RigExecTriggerContainerToken(),
+                                    rigExec::RigExecTriggerLeafToken()));
+            names[count] = rigExec::RigExecTriggerLeafToken();
+            values[count] = _RigExecTimeDataSource::New(stageGlobals);
+            ++count;
+        }
+        if (topLevel) {
+            // The chain -> context binding transport: a constant, so it is
+            // never flagged time-varying and never invalidated -- a stage
+            // replaced under the engine re-adds its prims with new data.
+            names[count] = rigExec::RigExecStageKeyLeafToken();
+            values[count] =
+                HdRetainedTypedSampledDataSource<uint64_t>::New(
+                    context->GetKey());
+            ++count;
+        }
         return HdRetainedContainerDataSource::New(
             rigExec::RigExecTriggerContainerToken(),
-            HdRetainedContainerDataSource::New(
-                rigExec::RigExecTriggerLeafToken(),
-                _RigExecTimeDataSource::New(stageGlobals)));
+            HdRetainedContainerDataSource::New(count, names, values));
     }
 
     HdDataSourceLocatorSet InvalidateImagingSubprim(
         UsdPrim const&, TfToken const&, TfToken const&,
         TfTokenVector const&,
         UsdImagingPropertyInvalidationType) override {
-        // Authored edits reach the rig through the registry's own stage
+        // Authored edits reach the rig through its context's own stage
         // notice (_OnObjectsChanged), which re-evaluates and republishes; no
-        // USD property maps onto the trigger leaf.
+        // USD property maps onto the trigger or the stage key.
         return HdDataSourceLocatorSet();
     }
 };

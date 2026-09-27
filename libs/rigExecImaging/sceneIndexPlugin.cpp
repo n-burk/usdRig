@@ -26,9 +26,6 @@ public:
     HdSceneIndexBaseRefPtr AppendSceneIndex(
         HdSceneIndexBaseRefPtr const &inputScene) override
     {
-        rigExec::RigExecImagingRegistry &registry =
-            rigExec::RigExecImagingRegistry::GetInstance();
-
         auto pruning =
             rigExec::RigExecInternalPrimPruningSceneIndex::New(inputScene);
         // Between pruning and binding: pruned paths never reach it, and the
@@ -39,9 +36,15 @@ public:
             rigExec::RigExecXformOverrideSceneIndex::New(pruning);
         auto binding =
             rigExec::RigExecBindingResolvingSceneIndex::New(xforms);
+        // UNBOUND: there is no stage here. The chain reads an empty store
+        // until its first population names its stage's imaging context
+        // through the rig adapter's rigExec/stageKey leaf (registry.h,
+        // "Chain -> context binding"); the directory then swaps in that
+        // context's store, scopes and deltas.
         auto results = rigExec::RigExecResultsSceneIndex::New(
-            binding, registry.GetStore());
-        registry.RegisterChain(pruning, binding, results, xforms);
+            binding, std::make_shared<rigExec::RigExecSnapshotStore>());
+        rigExec::RigExecImagingRegistry::RegisterUnboundChain(
+            pruning, binding, results, xforms);
         return results;
     }
 };

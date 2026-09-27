@@ -30,6 +30,14 @@ from pxr import Usd
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import sessionRegistry
+
+try:
     import profilerModel
 except ImportError:  # pragma: no cover - plugin path, not test path
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -41,26 +49,33 @@ _TWIN = {}
 
 
 def _CompilableStage(stage):
+    # Keyed on the root AND session layers, like execStackUI's: two usdview
+    # sessions in one process can share a root layer, never a session layer.
     root = stage.GetRootLayer()
-    key = root.identifier
+    session = stage.GetSessionLayer()
+    key = (root.identifier, session.identifier if session else None)
     twin = _TWIN.get(key)
-    if twin is None or twin.GetRootLayer() != root:
-        twin = Usd.Stage.Open(root, stage.GetSessionLayer())
+    if (twin is None or twin.GetRootLayer() != root or
+            twin.GetSessionLayer() != session):
+        twin = Usd.Stage.Open(root, session)
         _TWIN[key] = twin
     return twin
 
 
 class ProfilerPanel(QtWidgets.QDialog):
 
-    _instance = None
+    # One panel per usdview session, filed under its main window: several
+    # sessions can share this module in one process.
+    _sessions = sessionRegistry.SessionRegistry("profiler panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi):
-        if cls._instance is None:
-            cls._instance = cls(usdviewApi)
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi))
         else:
-            cls._instance._api = usdviewApi
-        return cls._instance
+            panel._api = usdviewApi
+        return panel
 
     def __init__(self, usdviewApi, parent=None):
         super(ProfilerPanel, self).__init__(

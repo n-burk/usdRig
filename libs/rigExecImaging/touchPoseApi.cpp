@@ -29,6 +29,11 @@ namespace {
 
 struct _Context {
     UsdStageWeakPtr stage;
+    /// The imaging context key of `stage` (0 for a topology-only handle):
+    /// the pose is read from that context's generation, and the highlight
+    /// attaches under it, so the same mesh path on another stage is never
+    /// posed or lit from this one (docs/multistage-imaging.md).
+    uint64_t contextKey = 0;
     SdfPath meshPath;
     RigExecTouchPoseMesh geometry;
 
@@ -124,12 +129,14 @@ _Publish(_Context &context, bool slotsChanged)
         context.table = VtVec4fArray(_TableRows(context), GfVec4f(0.0f));
     }
     const RigExecTouchPoseHighlightMeshConstPtr current =
-        highlights.Find(context.meshPath);
+        highlights.Find(context.meshPath, context.contextKey);
     if (!current || slotsChanged ||
         current->table.size() != context.table.size()) {
-        highlights.SetMesh(context.meshPath, _FaceSlots(context), context.table);
+        highlights.SetMesh(context.meshPath, _FaceSlots(context), context.table,
+                           context.contextKey);
     } else {
-        highlights.SetTable(context.meshPath, context.table);
+        highlights.SetTable(context.meshPath, context.table,
+                            context.contextKey);
     }
 }
 
@@ -163,6 +170,13 @@ RigExecTouchPose_Open(long long stageCacheId, const char *meshPath)
     mesh.GetPointsAttr().Get(&points);
     auto context = std::make_shared<_Context>();
     context->stage = stage;
+    // The stage's imaging context, created on demand (it owns no threads
+    // until a rig activates): its key scopes the highlight to the chains
+    // that draw this stage.
+    if (const RigExecImagingRegistry::Ptr imaging =
+            RigExecImagingRegistry::ForStage(stage)) {
+        context->contextKey = imaging->GetKey();
+    }
     context->meshPath = path;
     if (!context->geometry.SetTopology(counts, indices, points.size())) {
         return 0;
@@ -210,7 +224,8 @@ RigExecTouchPose_Close(long long handle)
         _Handles().erase(it);
     }
     if (context->highlightOn && !context->meshPath.IsEmpty()) {
-        RigExecTouchPoseHighlights::GetInstance().RemoveMesh(context->meshPath);
+        RigExecTouchPoseHighlights::GetInstance().RemoveMesh(
+            context->meshPath, context->contextKey);
     }
 }
 
@@ -247,10 +262,12 @@ RigExecTouchPose_SyncPose(long long handle, double frame, int isDefault,
                            (!isDefault && context->syncedFrame != frame);
     bool moved = false;
 
-    // The points the viewport is drawing: the rig's, when this generation
-    // publishes them for this mesh on this stage.
+    // The points the viewport is drawing: the rig's, when this stage's own
+    // imaging context publishes them for this mesh.
+    const RigExecImagingRegistry::Ptr imaging =
+        RigExecImagingRegistry::ForStage(stage, /* create = */ false);
     const RigExecImagingSnapshotConstPtr snapshot =
-        RigExecImagingRegistry::GetInstance().GetStore()->Get();
+        imaging ? imaging->GetStore()->Get() : nullptr;
     const RigExecPublishedPrim *published = nullptr;
     if (snapshot && get_pointer(snapshot->stage) == get_pointer(stage)) {
         auto it = snapshot->prims.find(context->meshPath);
@@ -516,7 +533,8 @@ RigExecTouchPose_SetHighlightEnabled(long long handle, int enabled)
         context->table = VtVec4fArray(_TableRows(*context), GfVec4f(0.0f));
         _Publish(*context, true);
     } else {
-        RigExecTouchPoseHighlights::GetInstance().RemoveMesh(context->meshPath);
+        RigExecTouchPoseHighlights::GetInstance().RemoveMesh(
+            context->meshPath, context->contextKey);
     }
     return 0;
 }

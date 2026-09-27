@@ -30,9 +30,11 @@ from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
     import avarEditorModel as model
+    import sessionRegistry
 except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import avarEditorModel as model
+    import sessionRegistry
 
 
 # Slider resolution: a full-width drag is this many steps. A thousand
@@ -318,27 +320,42 @@ class ChannelRow(QtCore.QObject):
         # order shows the pre-drag pose for a frame before the authored one.
         if value is not None:
             self._Write(value, verb="Drag")
-        _EndPreview()
+        _EndPreview(self._Api(), self._PreviewStage())
+
+    def _Api(self):
+        """The usdview api of the session this row's panel belongs to."""
+        return getattr(self.panel, "_api", None)
+
+    def _PreviewStage(self):
+        attr = self.channel.attr
+        try:
+            return attr.GetStage() if attr else None
+        except Exception:
+            return None
 
     def _Preview(self, value):
-        """Place `value` on the viewport without authoring. True if taken."""
+        """Place `value` on the viewport without authoring. True if taken.
+
+        Through THIS session's preview channel, into THIS stage: another
+        usdview session in the process previews nothing of it.
+        """
         preview = _PreviewModule()
-        if preview is None or not preview.HasSink():
+        api = self._Api()
+        if preview is None or not preview.HasSink(api):
             return False
         attr = self.channel.attr
         if not attr:
             return False
         path = attr.GetPath()
+        stage = attr.GetStage()
         gizmoMath = _GizmoMathModule()
         if gizmoMath is not None:
             # The manipulators read uncommitted values from here, so a
             # control's gizmo follows the slider too.
-            values = gizmoMath.PreviewValues()
-            values[path] = value
-            gizmoMath.SetPreviewValues(values)
-        taken = bool(preview.Push({path: value}))
+            gizmoMath.SetPreviewValue(path, value, stage=stage)
+        taken = bool(preview.Push({path: value}, session=api, stage=stage))
         if taken:
-            _FollowPreviewInViewport(path.GetPrimPath())
+            _FollowPreviewInViewport(api, path.GetPrimPath())
         return taken
 
     def _ShowValue(self, value):
@@ -379,7 +396,7 @@ class ChannelRow(QtCore.QObject):
         """Drop an uncommitted slider drag without authoring it."""
         if self._previewing:
             self._previewing = False
-            _EndPreview()
+            _EndPreview(self._Api(), self._PreviewStage())
         self._dragging = False
         self._dragValue = None
 
@@ -415,9 +432,10 @@ def _GizmoMathModule():
         return None
 
 
-def _FollowPreviewInViewport(primPath=None):
+def _FollowPreviewInViewport(api, primPath=None):
     """
-    Redraw the viewport manipulators against the values being previewed.
+    Redraw `api`'s session's viewport manipulators against the values being
+    previewed.
 
     The gizmo refreshes itself on stage edits, and a preview is not one: it
     places values on the evaluator and Hydra without touching the stage, so
@@ -426,43 +444,51 @@ def _FollowPreviewInViewport(primPath=None):
     try:
         import gizmoUI
     except ImportError:
-        return
-    controller = gizmoUI.GetController()
+        gizmoUI = None
+    controller = (gizmoUI.GetController(api)
+                  if gizmoUI is not None and api is not None else None)
     if controller is not None:
         controller.FollowExternalPreview(primPath)
         return
     # No viewport tools at all: the preview still moved the rig, so ask the
     # viewport to repaint.
-    for api in (getattr(AvarEditorPanel._instance, "_api", None),):
-        update = getattr(api, "UpdateViewport", None)
-        if update is not None:
-            try:
-                update()
-            except Exception:
-                pass
+    update = getattr(api, "UpdateViewport", None)
+    if update is not None:
+        try:
+            update()
+        except Exception:
+            pass
 
 
-def _EndPreview():
+def _EndPreview(api, stage=None):
     preview = _PreviewModule()
     if preview is not None:
-        preview.End()
-    _FollowPreviewInViewport()
+        preview.End(session=api, stage=stage)
+    _FollowPreviewInViewport(api)
 
 
-class AvarEditorPanel(QtWidgets.QDialog):
-    """The Avar Editor window. One per usdview session."""
+class AvarEditorPanel(QtWidgets.QDialog,
+                      metaclass=sessionRegistry.PerSessionInstanceMeta(
+                          QtWidgets.QDialog)):
+    """The Avar Editor window. One per usdview session.
 
-    _instance = None
+    Filed under the session's main window: several usdview sessions can
+    share this module in one process. `AvarEditorPanel._instance` reads
+    the current session's panel (see sessionRegistry.PerSessionInstanceMeta).
+    """
+
+    _sessions = sessionRegistry.SessionRegistry("avar editors")
 
     @classmethod
     def GetInstance(cls, usdviewApi, undoStack):
-        if cls._instance is None:
-            cls._instance = cls(usdviewApi, undoStack)
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi, undoStack))
         else:
-            cls._instance._api = usdviewApi
+            panel._api = usdviewApi
             if undoStack is not None:
-                cls._instance._undo = undoStack
-        return cls._instance
+                panel._undo = undoStack
+        return panel
 
     def __init__(self, usdviewApi, undoStack, parent=None):
         super(AvarEditorPanel, self).__init__(
@@ -586,7 +612,8 @@ class AvarEditorPanel(QtWidgets.QDialog):
         if self._noticeKey is not None:
             self._noticeKey.Revoke()
             self._noticeKey = None
-        AvarEditorPanel._instance = None
+        if AvarEditorPanel._sessions.Get(self._api) is self:
+            AvarEditorPanel._sessions.Pop(self._api)
         super(AvarEditorPanel, self).closeEvent(event)
 
     # -- state -------------------------------------------------------

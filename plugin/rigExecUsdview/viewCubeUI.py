@@ -32,9 +32,11 @@ from pxr import Tf, UsdGeom
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
+    import sessionRegistry
     import viewCubeMath
 except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import sessionRegistry
     import viewCubeMath
 
 
@@ -799,7 +801,11 @@ class ViewCubeController(QtCore.QObject):
 # Installation
 # ---------------------------------------------------------------------------
 
-_controller = None
+# One view cube per usdview session, filed under the session's main window.
+# Several sessions can share this module in one process (usdOrchestrate's
+# host), and each window gets its own cube. An entry goes away with its
+# window.
+_controllers = sessionRegistry.SessionRegistry("view cube controllers")
 
 # usdview builds its stage view LONG after it loads plugins
 # (appController.py configures plugins at ~432 and constructs the
@@ -807,36 +813,50 @@ _controller = None
 # gets has no viewport to attach to. Rather than make every caller guess
 # at that ordering, an install that arrives too early re-tries itself
 # once the event loop turns. Bounded, so a genuinely headless session
-# stops asking instead of posting timers forever.
+# stops asking instead of posting timers forever. Per session, like the
+# controller.
 _INSTALL_RETRIES = 20
-_installPending = False
+_installPending = sessionRegistry.SessionRegistry("view cube pending installs")
 
 
 def InstallViewCube(usdviewApi, retries=_INSTALL_RETRIES):
     """
-    Put the view cube on usdview's stage view once.
+    Put the view cube on this session's stage view once.
 
     Returns the controller, or None when there is no stage view yet (in
     which case an install is queued) or none at all.
     """
-    global _controller, _installPending
-    if _controller is not None:
-        return _controller
+    controller = _controllers.Get(usdviewApi)
+    if controller is not None:
+        return controller
     if StageView(usdviewApi) is None:
-        if retries > 0 and not _installPending:
-            _installPending = True
+        if retries > 0 and not _installPending.Get(usdviewApi, False):
+            _installPending.Set(usdviewApi, True)
 
             def _Retry():
-                global _installPending
-                _installPending = False
+                _installPending.Pop(usdviewApi)
                 InstallViewCube(usdviewApi, retries - 1)
 
             QtCore.QTimer.singleShot(0, _Retry)
         return None
-    _controller = ViewCubeController(usdviewApi)
-    return _controller
+    return _controllers.Set(usdviewApi, ViewCubeController(usdviewApi))
 
 
-def GetController():
-    """The installed controller, or None."""
-    return _controller
+def GetController(usdviewApi=None):
+    """
+    The view cube installed for `usdviewApi`'s session, or None.
+
+    Without an api: the cube of the session that owns the active window,
+    else of the only session there is (a plain usdview), else None.
+    """
+    if usdviewApi is None:
+        return _controllers.Current()
+    return _controllers.Get(usdviewApi)
+
+
+def __getattr__(name):
+    # `_controller` was the process's single cube; now a view onto the
+    # per-session registry for scripts that read it.
+    if name == "_controller":
+        return _controllers.Current()
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))

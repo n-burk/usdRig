@@ -3,6 +3,8 @@
 //
 #include "touchPoseHighlight.h"
 
+#include "sceneIndices.h"
+
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
@@ -362,7 +364,7 @@ RigExecTouchPoseHighlights::GetInstance()
 void
 RigExecTouchPoseHighlights::SetMesh(
     const SdfPath &path, const VtFloatArray &faceSlots,
-    const VtVec4fArray &table)
+    const VtVec4fArray &table, uint64_t contextKey)
 {
     // The wrapper for the terminal everyone uses is built HERE, on the
     // caller's thread, so the first material GetPrim a render thread makes
@@ -378,7 +380,8 @@ RigExecTouchPoseHighlights::SetMesh(
     bool tableMoved = false;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _meshes.find(path);
+        const _Key key(contextKey, path);
+        auto it = _meshes.find(key);
         if (it != _meshes.end() && it->second->table.size() == table.size() &&
             it->second->faceSlots.size() == faceSlots.size()) {
             attach = false;
@@ -388,29 +391,29 @@ RigExecTouchPoseHighlights::SetMesh(
                 return;
             }
         }
-        _meshes[path] = mesh;
+        _meshes[key] = mesh;
         _count = _meshes.size();
     }
     if (attach) {
-        _Notify(path, Change::Attached);
+        _Notify(contextKey, path, Change::Attached);
         return;
     }
     if (slotsMoved) {
-        _Notify(path, Change::Slots);
+        _Notify(contextKey, path, Change::Slots);
     }
     if (tableMoved) {
         ++_tableUpdates;
-        _Notify(path, Change::Table);
+        _Notify(contextKey, path, Change::Table);
     }
 }
 
 bool
 RigExecTouchPoseHighlights::SetTable(
-    const SdfPath &path, const VtVec4fArray &table)
+    const SdfPath &path, const VtVec4fArray &table, uint64_t contextKey)
 {
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _meshes.find(path);
+        auto it = _meshes.find(_Key(contextKey, path));
         if (it == _meshes.end() || it->second->table.size() != table.size()) {
             return false;
         }
@@ -422,17 +425,17 @@ RigExecTouchPoseHighlights::SetTable(
         it->second = mesh;
     }
     ++_tableUpdates;
-    _Notify(path, Change::Table);
+    _Notify(contextKey, path, Change::Table);
     return true;
 }
 
 bool
 RigExecTouchPoseHighlights::SetFaceSlots(
-    const SdfPath &path, const VtFloatArray &faceSlots)
+    const SdfPath &path, const VtFloatArray &faceSlots, uint64_t contextKey)
 {
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _meshes.find(path);
+        auto it = _meshes.find(_Key(contextKey, path));
         if (it == _meshes.end() ||
             it->second->faceSlots.size() != faceSlots.size()) {
             return false;
@@ -444,40 +447,50 @@ RigExecTouchPoseHighlights::SetFaceSlots(
         mesh->faceSlots = faceSlots;
         it->second = mesh;
     }
-    _Notify(path, Change::Slots);
+    _Notify(contextKey, path, Change::Slots);
     return true;
 }
 
 void
-RigExecTouchPoseHighlights::RemoveMesh(const SdfPath &path)
+RigExecTouchPoseHighlights::RemoveMesh(const SdfPath &path,
+                                       uint64_t contextKey)
 {
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        if (!_meshes.erase(path)) {
+        if (!_meshes.erase(_Key(contextKey, path))) {
             return;
         }
         _count = _meshes.size();
     }
-    _Notify(path, Change::Detached);
+    _Notify(contextKey, path, Change::Detached);
 }
 
 RigExecTouchPoseHighlightMeshConstPtr
-RigExecTouchPoseHighlights::Find(const SdfPath &path) const
+RigExecTouchPoseHighlights::Find(const SdfPath &path,
+                                 uint64_t contextKey) const
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    auto it = _meshes.find(path);
+    if (contextKey != 0) {
+        auto it = _meshes.find(_Key(contextKey, path));
+        if (it != _meshes.end()) {
+            return it->second;
+        }
+    }
+    auto it = _meshes.find(_Key(0, path));
     return it == _meshes.end() ? nullptr : it->second;
 }
 
 std::vector<SdfPath>
-RigExecTouchPoseHighlights::GetMeshPaths() const
+RigExecTouchPoseHighlights::GetMeshPaths(uint64_t contextKey) const
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    std::vector<SdfPath> paths;
+    std::set<SdfPath> paths;
     for (const auto &entry : _meshes) {
-        paths.push_back(entry.first);
+        if (entry.first.first == 0 || entry.first.first == contextKey) {
+            paths.insert(entry.first.second);
+        }
     }
-    return paths;
+    return std::vector<SdfPath>(paths.begin(), paths.end());
 }
 
 void
@@ -504,13 +517,17 @@ RigExecTouchPoseHighlights::GetSceneIndexCount()
 }
 
 void
-RigExecTouchPoseHighlights::_Notify(const SdfPath &path, Change change)
+RigExecTouchPoseHighlights::_Notify(uint64_t contextKey, const SdfPath &path,
+                                    Change change)
 {
     std::vector<RigExecTouchPoseSceneIndexRefPtr> live;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         for (const auto &weak : _indices) {
-            if (weak) {
+            // An unscoped mesh concerns every chain; a keyed one only the
+            // chains bound to its stage's context.
+            if (weak && (contextKey == 0 ||
+                         weak->GetContextKey() == contextKey)) {
                 live.emplace_back(weak);
             }
         }
@@ -665,9 +682,10 @@ RigExecTouchPoseSceneIndex::New(const HdSceneIndexBaseRefPtr &input)
     RigExecTouchPoseHighlights::GetInstance().RegisterSceneIndex(result);
     // A chain built while TouchPose is already on (a renderer switch, a
     // second viewport) starts wrapped rather than waiting for the next
-    // attach.
+    // attach. Unbound at construction, so only unscoped meshes apply until
+    // the first population binds it (_Rebind picks the keyed ones up).
     for (const SdfPath &mesh :
-             RigExecTouchPoseHighlights::GetInstance().GetMeshPaths()) {
+             RigExecTouchPoseHighlights::GetInstance().GetMeshPaths(0)) {
         HdSceneIndexObserver::DirtiedPrimEntries ignored;
         result->_SetMeshMaterials(
             mesh, result->_ComputeBoundMaterials(mesh), &ignored);
@@ -692,7 +710,8 @@ RigExecTouchPoseSceneIndex::GetPrim(const SdfPath &primPath) const
     }
     if (prim.primType == HdPrimTypeTokens->mesh) {
         if (const RigExecTouchPoseHighlightMeshConstPtr mesh =
-                RigExecTouchPoseHighlights::GetInstance().Find(primPath)) {
+                RigExecTouchPoseHighlights::GetInstance().Find(
+                    primPath, GetContextKey())) {
             prim.dataSource = HdOverlayContainerDataSource::New(
                 _PrimvarsOverlay(*mesh), prim.dataSource);
         }
@@ -817,10 +836,14 @@ RigExecTouchPoseSceneIndex::HighlightChanged(
         // themselves (not their primvarValue) is what makes the adapter
         // scene delegate drop its cached descriptors and Storm re-filter
         // the mesh's primvars against the new material.
+        //
+        // Wrapped per what THIS index sees now rather than per the change's
+        // kind: detaching an unscoped mesh leaves a keyed one of the same
+        // path lit here, and vice versa.
+        const bool lit = RigExecTouchPoseHighlights::GetInstance().Find(
+                             mesh, GetContextKey()) != nullptr;
         _SetMeshMaterials(
-            mesh,
-            change == Change::Attached ? _ComputeBoundMaterials(mesh)
-                                       : std::set<SdfPath>(),
+            mesh, lit ? _ComputeBoundMaterials(mesh) : std::set<SdfPath>(),
             &dirty);
         HdDataSourceLocatorSet locators;
         locators.insert(_RegionLocator());
@@ -849,13 +872,18 @@ RigExecTouchPoseSceneIndex::_PrimsAdded(
     const HdSceneIndexBase &sender,
     const HdSceneIndexObserver::AddedPrimEntries &entries)
 {
+    // Chain -> context binding: the first population names the stage this
+    // index lights meshes for (and a replaced stage renames it).
+    const uint64_t key =
+        RigExecStageKeyFromAddedEntries(_GetInputSceneIndex(), entries);
     // A resync of an attached mesh (or of one of its subsets) may bring
     // different bindings with it.
     HdSceneIndexObserver::DirtiedPrimEntries dirty;
     if (RigExecTouchPoseHighlights::GetInstance().HasMeshes()) {
         std::set<SdfPath> meshes;
         for (const SdfPath &mesh :
-                 RigExecTouchPoseHighlights::GetInstance().GetMeshPaths()) {
+                 RigExecTouchPoseHighlights::GetInstance().GetMeshPaths(
+                     GetContextKey())) {
             for (const auto &entry : entries) {
                 if (entry.primPath.HasPrefix(mesh)) {
                     meshes.insert(mesh);
@@ -869,6 +897,37 @@ RigExecTouchPoseSceneIndex::_PrimsAdded(
     }
     _SendPrimsAdded(entries);
     if (!dirty.empty()) {
+        _SendPrimsDirtied(dirty);
+    }
+    if (key != 0 && key != GetContextKey()) {
+        _Rebind(key);
+    }
+}
+
+void
+RigExecTouchPoseSceneIndex::_Rebind(uint64_t key)
+{
+    RigExecTouchPoseHighlights &highlights =
+        RigExecTouchPoseHighlights::GetInstance();
+    const std::vector<SdfPath> before = highlights.GetMeshPaths(GetContextKey());
+    _contextKey.store(key);
+    const std::vector<SdfPath> after = highlights.GetMeshPaths(key);
+    std::set<SdfPath> meshes(before.begin(), before.end());
+    meshes.insert(after.begin(), after.end());
+    HdSceneIndexObserver::DirtiedPrimEntries dirty;
+    for (const SdfPath &mesh : meshes) {
+        const bool lit = highlights.Find(mesh, key) != nullptr;
+        _SetMeshMaterials(
+            mesh, lit ? _ComputeBoundMaterials(mesh) : std::set<SdfPath>(),
+            &dirty);
+        // The primvars' presence may have changed with the key (descriptor
+        // locators, as an attach dirties them).
+        HdDataSourceLocatorSet locators;
+        locators.insert(_RegionLocator());
+        locators.insert(_TableLocator());
+        dirty.emplace_back(mesh, locators);
+    }
+    if (!dirty.empty() && _IsObserved()) {
         _SendPrimsDirtied(dirty);
     }
 }
@@ -890,7 +949,8 @@ RigExecTouchPoseSceneIndex::_PrimsDirtied(
     if (RigExecTouchPoseHighlights::GetInstance().HasMeshes()) {
         std::set<SdfPath> meshes;
         for (const SdfPath &mesh :
-                 RigExecTouchPoseHighlights::GetInstance().GetMeshPaths()) {
+                 RigExecTouchPoseHighlights::GetInstance().GetMeshPaths(
+                     GetContextKey())) {
             for (const auto &entry : entries) {
                 if (entry.primPath.HasPrefix(mesh) &&
                     entry.dirtyLocators.Intersects(

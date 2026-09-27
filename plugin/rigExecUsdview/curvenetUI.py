@@ -26,6 +26,14 @@ from pxr import Gf, Sdf, Tf, Usd, UsdGeom, Vt
 
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
+try:
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import sessionRegistry
+
 
 # ---------------------------------------------------------------------------
 # stage helpers
@@ -575,13 +583,16 @@ MODE_HELP = {
 
 class CurvenetPanel(QtWidgets.QWidget):
 
-    _instance = None
+    # One panel per usdview session, filed under its main window: several
+    # sessions can share this module in one process.
+    _sessions = sessionRegistry.SessionRegistry("curvenet panels")
 
     @classmethod
     def GetInstance(cls, usdviewApi):
-        if cls._instance is None:
-            cls._instance = CurvenetPanel(usdviewApi)
-        return cls._instance
+        panel = cls._sessions.Get(usdviewApi)
+        if panel is None:
+            panel = cls._sessions.Set(usdviewApi, CurvenetPanel(usdviewApi))
+        return panel
 
     def __init__(self, usdviewApi, parent=None):
         super(CurvenetPanel, self).__init__(parent)

@@ -15,6 +15,14 @@ import sys
 from pxr import Gf, Tf, Usd, UsdUtils
 from pxr.Usdviewq.plugin import PluginContainer
 
+try:
+    import imagingHandle
+    import sessionRegistry
+except ImportError:                    # loader that did not add our dir
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import imagingHandle
+    import sessionRegistry
+
 
 
 def _LibraryFileName():
@@ -139,7 +147,10 @@ def _LoadRigExecImaging():
                 "RigExecImaging_SetWeightOverlay; the volume weight "
                 "influence overlay will be unavailable.")
 
-    return lib
+    # The per-stage (...ForStage) spellings of all of the above, where the
+    # library has them. Every call goes through an imagingHandle bound to
+    # this session's stage, which picks the spelling.
+    return imagingHandle.BindLibrary(lib)
 
 
 # The RigExec menu layout. Items sit at the top level or in one of these
@@ -213,20 +224,45 @@ def AddToRigExecMenu(plugUIBuilder, submenu, commandPlugin, rank):
     return action
 
 
-# usdview's plugin loader does not retain container instances that
-# register no commands; without a strong reference the container is
-# garbage collected and Qt disconnects its signals. Keep it alive here.
-_container = None
+# Every session's container, filed under its main window. usdview's plugin
+# loader does not retain container instances that register no commands;
+# without a strong reference the container is garbage collected and Qt
+# disconnects its signals. The registry is that reference, one per session
+# (a host runs several usdview sessions in one process), and it is how the
+# other plugin modules find THEIR session's container. It lets go when the
+# session's window is destroyed.
+_containers = sessionRegistry.SessionRegistry("rigExecUsdview containers")
+
+
+def ContainerFor(usdviewApi=None):
+    """
+    The RigExec container of `usdviewApi`'s session, or None.
+
+    Without an api: the session owning the active window, else the only
+    session (see sessionRegistry.SessionRegistry.Current).
+    """
+    if usdviewApi is None:
+        return _containers.Current()
+    return _containers.Get(usdviewApi)
+
+
+def __getattr__(name):
+    # `_container` was the process's single container. It is now a view
+    # onto the per-session registry, for scripts that read it (the
+    # testusdview harness): in a plain usdview it is the one container.
+    if name == "_container":
+        return _containers.Current()
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
 class RigExecUsdviewContainer(PluginContainer):
 
     def registerPlugins(self, plugRegistry, plugCtx):
-        global _container
-        _container = self
+        _containers.Set(plugCtx, self)
 
         self._api = plugCtx
         self._lib = None
+        self._imaging = None
         self._active = False
         self._warmingCommitPending = False
         self._warmingFlushArmed = False
@@ -384,6 +420,26 @@ class RigExecUsdviewContainer(PluginContainer):
                          self._volumeWeights, 50)
         AddToRigExecMenu(plugUIBuilder, "Animation Editors",
                          self._curvenets, 60)
+        self._InstallOutlinerArcMenu()
+
+    def _InstallOutlinerArcMenu(self):
+        """
+        Put "Add Composition Arc" on usdview's own prim menu (hierarchy
+        and viewport right-click), on the shared undo stack. Best effort:
+        a usdview this cannot hook keeps its menu as it was.
+        """
+        try:
+            try:
+                import outlinerArcMenu
+            except ImportError:
+                sys.path.insert(
+                    0, os.path.dirname(os.path.abspath(__file__)))
+                import outlinerArcMenu
+            outlinerArcMenu.InstallPrimContextMenuHook(
+                self._api, self._UndoStack())
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: prim menu arcs unavailable: %s"
+                    % error)
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring
@@ -400,6 +456,52 @@ class RigExecUsdviewContainer(PluginContainer):
             self._lib = None
         return self._lib
 
+    def _Imaging(self):
+        """
+        This session's handle on rigExecImaging, or None without a library.
+
+        Bound to the stage this container activated (or holds in the
+        StageCache), so every call reaches that stage's imaging context and
+        no other session's. getattr-tolerant like the rest of this class:
+        bare test containers carry only `_lib` (and maybe `_cachedStage`),
+        and get a handle over whatever they carry.
+        """
+        lib = getattr(self, "_lib", None)
+        if lib is None:
+            return None
+        handle = getattr(self, "_imaging", None)
+        stage = getattr(self, "_cachedStage", None)
+        if (handle is None or handle.lib is not lib or
+                handle.stage is not stage):
+            handle = imagingHandle.ImagingHandle(lib, stage)
+            self._imaging = handle
+        return handle
+
+    def ImagingHandle(self):
+        """This session's imaging handle, or None before a library loads."""
+        return self._Imaging()
+
+    def IsRigActive(self):
+        """Whether RigExec evaluates this session's stage right now."""
+        return bool(getattr(self, "_active", False))
+
+    def _DeactivateImaging(self):
+        """
+        Stop evaluating THIS session's stage -- never another session's.
+
+        A per-stage library deactivates only the stage this container
+        activated (and nothing when it activated none). An older library
+        has one process-wide context, and gets the unconditional global
+        Deactivate it always got.
+        """
+        lib = getattr(self, "_lib", None)
+        if not lib:
+            return
+        if imagingHandle.SupportsMultiStage(lib):
+            if getattr(self, "_cachedStage", None) is None:
+                return
+        self._Imaging().Deactivate()
+
     def _HasWeightOverlay(self):
         """
         True when rigExecImaging exports RigExecImaging_SetWeightOverlay.
@@ -407,7 +509,7 @@ class RigExecUsdviewContainer(PluginContainer):
         lib = self._EnsureLibrary()
         if lib is None:
             return False
-        return hasattr(lib, "RigExecImaging_SetWeightOverlay")
+        return self._Imaging().Has("SetWeightOverlay")
 
     def _SetWeightOverlay(self, primPath):
         """
@@ -417,7 +519,19 @@ class RigExecUsdviewContainer(PluginContainer):
         lib = self._EnsureLibrary()
         if lib is None:
             return False
-        entryPoint = getattr(lib, "RigExecImaging_SetWeightOverlay", None)
+        if (imagingHandle.SupportsMultiStage(lib) and
+                getattr(self, "_cachedStage", None) is None):
+            # The overlay can be chosen before the stage has a rig (that is
+            # how a rig gets built), and a per-stage library remembers it on
+            # THIS stage's context -- which it can only find through the
+            # cache. Cache the stage the way activation does; replacement
+            # and _Shutdown release it the same way.
+            stage = self._api.dataModel.stage
+            if stage:
+                UsdUtils.StageCache.Get().Insert(stage)
+                self._cachedStage = stage
+        entryPoint = getattr(self._Imaging(),
+                             "RigExecImaging_SetWeightOverlay", None)
         if entryPoint is None:
             return False
         status = entryPoint(primPath.encode("utf-8"))
@@ -501,8 +615,14 @@ class RigExecUsdviewContainer(PluginContainer):
         return panel
 
     def StripLibrary(self):
-        """The imaging library, or None before activation."""
-        return self._lib
+        """
+        This session's imaging handle, or None before the library loads.
+
+        A handle, not the raw library: it answers to the same
+        RigExecImaging_* names (cacheStripModel looks them up by name) and
+        routes every one of them to THIS session's stage.
+        """
+        return self._Imaging()
 
     def StripRigs(self):
         """Active rig paths as strings, for the strip chooser."""
@@ -622,8 +742,12 @@ class RigExecUsdviewContainer(PluginContainer):
                 import gizmoUI
             import gizmoMath
             import gizmoPreview
-            gizmoMath.SetPublishedControlFrameReader(self._ReadPublishedControlFrame)
-            gizmoPreview.SetSink(self._PreviewSink())
+            # Both are filed under THIS session: another window's gizmo
+            # reads its own session's frames and previews into its own
+            # stage's imaging context.
+            gizmoMath.SetPublishedControlFrameReader(
+                self._ReadPublishedControlFrame, session=self._api)
+            gizmoPreview.SetSink(self._PreviewSink(), session=self._api)
             self._viewportTools = gizmoUI.InstallViewportTools(
                 self._api, self._UndoStack(),
                 openGraphEditor=self._OpenGraphEditor)
@@ -648,6 +772,10 @@ class RigExecUsdviewContainer(PluginContainer):
         activated and is certainly before the stage is replaced the next time;
         a sink that captured the library at construction would preview against
         whichever one happened to be loaded then, or against none at all.
+
+        The same goes for the stage: every call goes through this session's
+        imaging handle, so a preview reaches the chains of the stage this
+        window shows and nothing in any other session's viewport.
         """
         container = self
 
@@ -656,7 +784,7 @@ class RigExecUsdviewContainer(PluginContainer):
                 lib = container._lib
                 if lib is None or not container._active:
                     return None
-                return getattr(lib, name, None)
+                return getattr(container._Imaging(), name, None)
 
             def Begin(self, packedPaths):
                 entry = self._Entry("RigExecImaging_BeginPreview")
@@ -680,6 +808,8 @@ class RigExecUsdviewContainer(PluginContainer):
         return _Sink()
 
     def _ReadPublishedControlFrame(self, stage, path, time):
+        # Answers for THIS session's stage only; gizmoMath asks every
+        # session's reader and takes the one that answers.
         if not self._active or self._lib is None or stage != self._cachedStage:
             return None
         read = getattr(self._lib, "RigExecImaging_GetControlFrameAssetSpace", None)
@@ -773,8 +903,7 @@ class RigExecUsdviewContainer(PluginContainer):
         traceback on quit teaches an artist nothing.
         """
         try:
-            if self._lib:
-                self._lib.RigExecImaging_Deactivate()
+            self._DeactivateImaging()
         except Exception:
             pass
         try:
@@ -943,8 +1072,10 @@ class RigExecUsdviewContainer(PluginContainer):
             # Deactivate BEFORE erasing: the imaging registry resolves the
             # stage out of the cache, so pulling it first would leave the
             # registry holding a handle to something it can no longer look up.
-            if self._lib:
-                self._lib.RigExecImaging_Deactivate()
+            #
+            # Only THIS session's previous stage: with several sessions in
+            # one process, each keeps its own imaging context evaluating.
+            self._DeactivateImaging()
             self._ReleaseCachedStage(stage)
             if not stage:
                 return
@@ -957,10 +1088,9 @@ class RigExecUsdviewContainer(PluginContainer):
             if self._EnsureLibrary() is None:
                 return
 
-            cacheId = UsdUtils.StageCache.Get().Insert(stage).ToLongInt()
+            UsdUtils.StageCache.Get().Insert(stage)
             self._cachedStage = stage
-            status = self._lib.RigExecImaging_Activate(
-                cacheId, b"", self._FrameValue())
+            status = self._Imaging().Activate(b"", self._FrameValue())
             if status == 0:
                 self._active = True
                 # Activate() installs the native evaluator's stage notice.
@@ -1032,7 +1162,7 @@ class RigExecUsdviewContainer(PluginContainer):
             return
         self._warmingCommitPending = False
         try:
-            self._lib.RigExecImaging_OnEditCommitted()
+            self._Imaging().OnEditCommitted()
         except AttributeError:
             pass
         self._WakeWarmingDriver()
@@ -1056,7 +1186,7 @@ class RigExecUsdviewContainer(PluginContainer):
         # frame-change-only warming rather than spinning a blind timer.
         if self._lib is None:
             return False
-        return getattr(self._lib, "RigExecImaging_GetFrameStates",
+        return getattr(self._Imaging(), "RigExecImaging_GetFrameStates",
                         None) is not None
 
     def _WarmRangeFrames(self, stage):
@@ -1088,7 +1218,7 @@ class RigExecUsdviewContainer(PluginContainer):
         except Exception:
             return
         for rigPath in self._rigPaths:
-            model.PushWarmRange(self._lib, str(rigPath), frames)
+            model.PushWarmRange(self._Imaging(), str(rigPath), frames)
 
     def _RepushWarmRangeIfChanged(self):
         # A stage-range edit leaves the pushed warm range stale: the
@@ -1245,7 +1375,7 @@ class RigExecUsdviewContainer(PluginContainer):
             return
         states = []
         for rigPath in self._rigPaths:
-            one = model.FetchFrameStates(self._lib, str(rigPath),
+            one = model.FetchFrameStates(self._Imaging(), str(rigPath),
                                        frames)
             if one is None:
                 self._SleepWarmingDriver()
@@ -1263,7 +1393,7 @@ class RigExecUsdviewContainer(PluginContainer):
             return
         self._warmingIdleLastStates = states
         try:
-            self._lib.RigExecImaging_OnIdle()
+            self._Imaging().OnIdle()
         except AttributeError:
             self._SleepWarmingDriver()
             self._NotifyStripTick(False)
@@ -1294,7 +1424,8 @@ class RigExecUsdviewContainer(PluginContainer):
         # resolves the untouched value and the overlay appears frozen.
         if not (self._active and self._lib):
             return
-        self._lib.RigExecImaging_SetTime(self._FrameValue(frame))
+        imaging = self._Imaging()
+        imaging.SetTime(self._FrameValue(frame))
         # Warming, from the frame loop: an edit since the last tick commits
         # (neighbors plus sweep re-center on the playhead), otherwise the
         # tick is an idle sweep -- unless the recurring driver is already
@@ -1307,9 +1438,9 @@ class RigExecUsdviewContainer(PluginContainer):
         try:
             if self._warmingCommitPending:
                 self._warmingCommitPending = False
-                self._lib.RigExecImaging_OnEditCommitted()
+                imaging.OnEditCommitted()
             elif not self._WarmingDriverTicking():
-                self._lib.RigExecImaging_OnIdle()
+                imaging.OnIdle()
         except AttributeError:
             pass
         # The recurring driver continues at the held playhead from here:

@@ -42,7 +42,6 @@
 # this makes drift impossible rather than merely unlikely.
 #
 import math
-import os
 
 from pxr import Pcp, Sdf, Tf, Usd
 
@@ -860,41 +859,9 @@ def _SublayersTransitively(layer, target, seen=None):
     return False
 
 
-def AnchoredAssetPath(layer, assetPath):
-    """
-    `assetPath` as the flows author it: relative to `layer`'s own file
-    (`./rig.usda`, `../shared/hand.usda`) whenever it can be.
-
-    A file browser hands back an absolute path, and authoring that
-    verbatim pins the arc to one machine's disk -- the asset stops
-    composing the moment the directory is moved, copied or opened from
-    another checkout. A relative path moves with the layers it joins.
-
-    Spelled with a leading `./` rather than bare: `rig.usda` is a
-    SEARCH path to Ar, which may resolve somewhere other than beside the
-    layer, while `./rig.usda` is anchored to it. The repo's own layers
-    use the same spelling.
-
-    Left as given when there is nothing to anchor to (an anonymous or
-    unsaved layer), when the path is not an absolute file path (already
-    relative, a search path, a URI, an anonymous identifier), or when no
-    relative form exists (another drive on Windows).
-    """
-    assetPath = (assetPath or "").strip()
-    if not assetPath or layer is None or layer.anonymous:
-        return assetPath
-    anchor = layer.realPath
-    if not anchor or "://" in assetPath or not os.path.isabs(assetPath):
-        return assetPath
-    try:
-        relative = os.path.relpath(os.path.normpath(assetPath),
-                                   os.path.dirname(os.path.normpath(anchor)))
-    except ValueError:
-        return assetPath
-    relative = relative.replace(os.sep, "/")
-    if relative.startswith("../"):
-        return relative
-    return "./" + relative
+# One rule for both halves of the panel: an arc typed inline in the tree
+# and one authored through a flow carry the same relative path.
+AnchoredAssetPath = layerOpinionsModel.AnchoredAssetPath
 
 
 def _AssetPathFrom(values):

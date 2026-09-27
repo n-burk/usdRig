@@ -54,16 +54,40 @@ def _AddToRigExecMenu(plugUIBuilder, submenu, commandPlugin, rank):
 
 # usdview's plugin loader does not retain a container that registers no
 # commands, and a garbage-collected container takes its Qt connections
-# with it. rigExecUsdview keeps a module-level reference for the same
-# reason; this is that, not a stray global.
-_container = None
+# with it. rigExecUsdview keeps its containers per session for the same
+# reason, and this files each session's container in a registry of the
+# same kind: several usdview sessions can share this module in one process,
+# and each has its own container. The command registered below anchors the
+# container too, so a process without rigExecUsdview's registry on the
+# module search path still keeps it.
+_containers = None
+
+
+def _Containers():
+    """The per-session container registry, or None without rigExecUsdview."""
+    global _containers
+    if _containers is None:
+        try:
+            import sessionRegistry
+        except ImportError:
+            return None
+        _containers = sessionRegistry.SessionRegistry("touchPose containers")
+    return _containers
+
+
+def ContainerFor(usdviewApi=None):
+    """The TouchPose container of `usdviewApi`'s session, or None."""
+    containers = _Containers()
+    if containers is None:
+        return None
+    if usdviewApi is None:
+        return containers.Current()
+    return containers.Get(usdviewApi)
 
 
 class TouchPoseContainer(PluginContainer):
 
     def registerPlugins(self, plugRegistry, plugCtx):
-        global _container
-        _container = self
         self._api = plugCtx
 
         # Importable from this directory without it being on PYTHONPATH:
@@ -73,6 +97,10 @@ class TouchPoseContainer(PluginContainer):
         here = os.path.dirname(os.path.abspath(__file__))
         if here not in sys.path:
             sys.path.insert(0, here)
+
+        containers = _Containers()
+        if containers is not None:
+            containers.Set(plugCtx, self)
 
         self._touchPose = plugRegistry.registerCommandPlugin(
             "TouchPoseContainer.touchPose",

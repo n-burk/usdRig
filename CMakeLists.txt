@@ -911,6 +911,17 @@ target_compile_definitions(testRigExecImaging PRIVATE
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
+# Several stages in one process through the real UsdImaging chain: per-stage
+# imaging contexts, chain -> context binding, the ...ForStage C surface
+# (docs/multistage-imaging.md).
+add_executable(testRigExecImagingMultiStage
+    tests/testRigExecImagingMultiStage.cpp)
+target_link_libraries(testRigExecImagingMultiStage PRIVATE rigExecImaging)
+target_compile_definitions(testRigExecImagingMultiStage PRIVATE
+    ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
+add_test(NAME testRigExecImagingMultiStage COMMAND testRigExecImagingMultiStage
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
 add_executable(testRigExecImagingPlayback tests/testRigExecImagingPlayback.cpp)
 target_link_libraries(testRigExecImagingPlayback PRIVATE rigExecImaging rigExecBake)
 target_include_directories(testRigExecImagingPlayback PRIVATE
@@ -1668,6 +1679,15 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testCacheStripPanel
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_cache_strip_panel.py")
+    # Several usdview sessions in one process: per-stage imaging handles,
+    # and per-session gizmo / view cube / editor state (docs/
+    # multistage-imaging.md).
+    add_test(NAME testImagingHandle
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_imaging_handle.py")
+    add_test(NAME testSessionState
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_session_state.py")
 
     # set_tests_properties takes exactly ONE value per property, so extra
     # assignments go through APPEND; ctest then splits the resulting list on
@@ -1692,7 +1712,8 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
                          testGraphModel testGraphScreen testCacheStripModel
-                         testCacheStripPanel)
+                         testCacheStripPanel testImagingHandle
+                         testSessionState)
         set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
