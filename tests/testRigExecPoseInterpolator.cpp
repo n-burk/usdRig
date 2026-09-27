@@ -63,6 +63,8 @@
 #include <string>
 #include <vector>
 
+using namespace rigExec;
+
 // A broken operation is set aside with a warning instead of failing the rig
 // (RigExecRigEvaluator::_CompileEpoch): the rest compiles and evaluates.
 // True when the compile succeeded and set aside every one of `operations`.
@@ -81,9 +83,6 @@ SkipsOperations(RigExecRigEvaluator &evaluator,
     }
     return !operations.empty();
 }
-
-
-using namespace rigExec;
 
 static int failures = 0;
 #define CHECK(condition) do { if (!(condition)) { ++failures; \
@@ -619,7 +618,8 @@ TestStructuralValidation()
             .AddConnection(PoseWeight("Back"));
         RigExecRigEvaluator evaluator(stage, kRig);
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        // Named through its pose, the error is still the interpolator's.
+        CHECK(SkipsOperations(evaluator, {kInterpolator}, &errors));
     }
 }
 

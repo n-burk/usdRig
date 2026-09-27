@@ -34,6 +34,8 @@
 #include <limits>
 #include <string>
 
+using namespace rigExec;
+
 // A broken operation is set aside with a warning instead of failing the rig
 // (RigExecRigEvaluator::_CompileEpoch): the rest compiles and evaluates.
 // True when the compile succeeded and set aside every one of `operations`.
@@ -52,9 +54,6 @@ SkipsOperations(RigExecRigEvaluator &evaluator,
     }
     return !operations.empty();
 }
-
-
-using namespace rigExec;
 
 static int failures = 0;
 
@@ -3827,11 +3826,14 @@ TestConnectedWeightsRewireAndValidate()
             RigExecRigEvaluator badEvaluator(
                 bad, SdfPath("/Asset/Rig"));
             std::vector<std::string> errors;
-            // Refused: set aside with a warning, the rig compiling on.
-            return SkipsOperations(badEvaluator,
-                                   {SdfPath("/Asset/Rig/Movers/M")},
-                                   &errors) &&
-                   !errors.empty();
+            // Refused: set aside with a warning while the rig compiles on,
+            // or -- when the mover is the rig's only output, so nothing is
+            // left once it goes -- the rig fails, still saying why.
+            const bool compiled = badEvaluator.Compile(&errors);
+            const bool refused =
+                !compiled || badEvaluator.GetSkippedOperations().count(
+                                 SdfPath("/Asset/Rig/Movers/M"));
+            return refused && !errors.empty();
         };
         CHECK(rejects(
             {SdfPath("/Asset/Inputs.a"), SdfPath("/Asset/Inputs.b")}));

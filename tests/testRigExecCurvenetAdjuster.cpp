@@ -287,7 +287,11 @@ int main() {
     CHECK(evaluator.Compile());
     const auto rejectsAdjustmentRead = [&]() {
         errors.clear();
-        CHECK(!evaluator.Compile(&errors));
+        // Refused: the reading operation is set aside with a warning while
+        // the rig compiles on, or -- when the error names no operation --
+        // the rig fails. Either way the reason is said.
+        const bool compiled = evaluator.Compile(&errors);
+        CHECK(!compiled || !evaluator.GetSkippedOperations().empty());
         bool diagnosed=false;
         for (const auto &error:errors)
             diagnosed=diagnosed || error.find("Adjustment frames are point-graph outputs")!=std::string::npos;
