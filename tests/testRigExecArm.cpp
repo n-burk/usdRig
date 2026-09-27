@@ -34,6 +34,26 @@
 #include <limits>
 #include <string>
 
+// A broken operation is set aside with a warning instead of failing the rig
+// (RigExecRigEvaluator::_CompileEpoch): the rest compiles and evaluates.
+// True when the compile succeeded and set aside every one of `operations`.
+static bool
+SkipsOperations(RigExecRigEvaluator &evaluator,
+                const std::vector<SdfPath> &operations,
+                std::vector<std::string> *errors)
+{
+    if (!evaluator.Compile(errors)) {
+        return false;
+    }
+    for (const SdfPath &operation : operations) {
+        if (!evaluator.GetSkippedOperations().count(operation)) {
+            return false;
+        }
+    }
+    return !operations.empty();
+}
+
+
 using namespace rigExec;
 
 static int failures = 0;
@@ -359,7 +379,7 @@ TestViewFreeValidation(const std::string &examplesDir)
             RigExecRigEvaluator eval(stage, rigPath);
             eval.cpuParityMode = true;
             std::vector<std::string> errors;
-            CHECK(!eval.Compile(&errors));
+            CHECK(SkipsOperations(eval, {blendPath}, &errors));
             CHECK(!errors.empty());
         }
     }
@@ -457,7 +477,8 @@ TestViewFreeValidation(const std::string &examplesDir)
             RigExecRigEvaluator eval(stage, rigPath);
             eval.cpuParityMode = true;
             std::vector<std::string> errors;
-            CHECK(!eval.Compile(&errors));
+            CHECK(SkipsOperations(
+                eval, {SdfPath("/ArmAsset/Rig/Solvers/Group")}, &errors));
             CHECK(!errors.empty());
         }
     }
@@ -2053,7 +2074,7 @@ TestDerivedTargetAndFanoutRejected(const std::string &examplesDir)
         RigExecRigEvaluator evaluator(stage, SdfPath("/ArmAsset/Rig"));
         evaluator.cpuParityMode = true;
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        CHECK(SkipsOperations(evaluator, {SdfPath("/ArmAsset/Rig/Movers/Geometry/BadSmooth")}, &errors));
         CHECK(!errors.empty());
     }
     mover.GetRelationship(TfToken("rigExec:moves"))
@@ -2063,7 +2084,7 @@ TestDerivedTargetAndFanoutRejected(const std::string &examplesDir)
         RigExecRigEvaluator evaluator(stage, SdfPath("/ArmAsset/Rig"));
         evaluator.cpuParityMode = true;
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        CHECK(SkipsOperations(evaluator, {SdfPath("/ArmAsset/Rig/Movers/Geometry/BadSmooth")}, &errors));
         CHECK(!errors.empty());
     }
     // A custom point3f[] "points" attribute on a non-PointBased prim is
@@ -2079,7 +2100,7 @@ TestDerivedTargetAndFanoutRejected(const std::string &examplesDir)
         RigExecRigEvaluator evaluator(stage, SdfPath("/ArmAsset/Rig"));
         evaluator.cpuParityMode = true;
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        CHECK(SkipsOperations(evaluator, {SdfPath("/ArmAsset/Rig/Movers/Geometry/BadSmooth")}, &errors));
         CHECK(!errors.empty());
     }
 }
@@ -2361,7 +2382,12 @@ TestSolverCycleRejected(const std::string &examplesDir)
 
     evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
-    CHECK(!evaluator.Compile(&errors));
+    // A cycle is no one member's fault: every member is set aside.
+    CHECK(SkipsOperations(
+        evaluator, {SdfPath("/SpineAsset/Rig/Solvers/SpineFK"),
+                    SdfPath("/SpineAsset/Rig/Solvers/SpineRibbon"),
+                    SdfPath("/SpineAsset/Rig/Solvers/SpineTwist")},
+        &errors));
     bool namedCycle = false;
     for (const std::string &e : errors) {
         if (e.find("solver dependency cycle") != std::string::npos) {
@@ -2440,7 +2466,11 @@ TestPureSolverToSolverCycleRejected(const std::string &examplesDir)
 
     evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
-    CHECK(!evaluator.Compile(&errors));
+    // A cycle is no one member's fault: every member is set aside.
+    CHECK(SkipsOperations(
+        evaluator, {SdfPath("/BlendArmAsset/Rig/Solvers/ArmFK"),
+                    SdfPath("/BlendArmAsset/Rig/Solvers/IKFKBlend")},
+        &errors));
     bool namedCycle = false;
     for (const std::string &e : errors) {
         if (e.find("solver dependency cycle") != std::string::npos) {
@@ -2831,7 +2861,8 @@ TestPropertyMoverTypeMismatchRejected(const std::string &examplesDir)
 
     evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
-    CHECK(!evaluator.Compile(&errors));
+    CHECK(SkipsOperations(
+        evaluator, {SdfPath("/PropMathAsset/Rig/Movers/ClampGain")}, &errors));
     CHECK(!errors.empty());
 }
 
@@ -3521,7 +3552,11 @@ TestBadReadPhasesRejected(const std::string &examplesDir)
         rel.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
         RigExecRigEvaluator evaluator(stage, SdfPath("/ReadPhaseAsset/Rig"));
         evaluator.cpuParityMode = true;
-        return evaluator.Compile(errors);
+        // Accepted means the lattice compiled with its phase; a bad phase
+        // sets the lattice aside (with a warning) and the rig compiles on.
+        return evaluator.Compile(errors) &&
+               !evaluator.GetSkippedOperations().count(
+                   SdfPath("/ReadPhaseAsset/Rig/Movers/Geometry/SlabLattice"));
     };
 
     // Not a phase keyword and not a path.
@@ -3792,7 +3827,11 @@ TestConnectedWeightsRewireAndValidate()
             RigExecRigEvaluator badEvaluator(
                 bad, SdfPath("/Asset/Rig"));
             std::vector<std::string> errors;
-            return !badEvaluator.Compile(&errors) && !errors.empty();
+            // Refused: set aside with a warning, the rig compiling on.
+            return SkipsOperations(badEvaluator,
+                                   {SdfPath("/Asset/Rig/Movers/M")},
+                                   &errors) &&
+                   !errors.empty();
         };
         CHECK(rejects(
             {SdfPath("/Asset/Inputs.a"), SdfPath("/Asset/Inputs.b")}));

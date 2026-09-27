@@ -290,8 +290,8 @@ def TestReferenceRefusals():
         base, source="internal", assetPath="", primPath="/Rig")),
         "a prim referencing its own ancestor is refused")
     _Raises(lambda: arcs.ReferenceArc.Author(context, dict(
-        base, source="internal", assetPath="", primPath="Rig/IK")),
-        "a relative target path is refused")
+        base, source="internal", assetPath="", primPath="../../../Rig")),
+        "a relative target path that climbs above the root is refused")
     _Raises(lambda: arcs.ReferenceArc.Author(context, dict(
         base, source="external", assetPath="./a.usda", primPath="",
         scale="0")),
@@ -391,6 +391,64 @@ def TestInheritAndSpecialize():
     _Raises(lambda: arcs.InheritArc.Author(context, {
         "layer": root, "primPath": "/Rig/IK", "position": "prepend"}),
         "inheriting from itself is refused")
+
+
+def TestFlowsTakeRelativePrimPaths():
+    """
+    A prim path typed into a flow may be relative, like one typed into
+    the panel's tree: anchored at the prim the arc goes on, and not
+    required to exist yet. The exception is an EXTERNAL arc's target,
+    which names a prim in another layer.
+    """
+    stage, root, sub = _Stage()
+    context = _Context(stage)
+    spec = root.GetPrimAtPath("/Rig/IK")
+
+    edit, _ = arcs.InheritArc.Author(context, {
+        "layer": root, "primPath": "../../_class_Ctrl",
+        "position": "prepend"})
+    _Check(list(spec.inheritPathList.prependedItems)
+           == [Sdf.Path("/_class_Ctrl")],
+           "a relative inherit is anchored at /Rig/IK: %s"
+           % spec.inheritPathList)
+    _Check(abs(stage.GetPrimAtPath("/Rig/IK").GetAttribute("gain").Get()
+               - 2.0) < 1e-9, "and composes")
+    edit.Undo()
+
+    edit, _ = arcs.SpecializeArc.Author(context, {
+        "layer": root, "primPath": "../Base", "position": "prepend"})
+    _Check(list(spec.specializesList.prependedItems)
+           == [Sdf.Path("/Rig/Base")], "a relative specialize too")
+    edit.Undo()
+
+    edit, warnings = arcs.ReferenceArc.Author(context, {
+        "layer": root, "source": "internal", "assetPath": "",
+        "primPath": "../NotYet", "offset": "0", "scale": "1",
+        "position": "prepend"})
+    _Check(list(spec.referenceList.prependedItems)
+           == [Sdf.Reference("", "/Rig/NotYet")],
+           "a relative internal reference to a prim not there yet is "
+           "authored: %s" % list(spec.referenceList.prependedItems))
+    _Check(warnings and "/Rig/NotYet" in warnings[0],
+           "with the warning naming the absolute path: %s" % warnings)
+    edit.Undo()
+
+    _Raises(lambda: arcs.ReferenceArc.Author(context, {
+        "layer": root, "source": "external", "assetPath": "./a.usda",
+        "primPath": "../Hand", "offset": "0", "scale": "1",
+        "position": "prepend"}),
+        "an external arc's target prim cannot be relative to this prim")
+
+    asset = _Asset()
+    stage.GetPrimAtPath("/Rig/IK").GetReferences().AddReference(
+        asset.identifier)
+    edit, _ = arcs.RelocateArc.Author(context, {
+        "layer": root, "source": "Thumb", "target": "./Pollex"})
+    _Check(list(root.relocates) == [(Sdf.Path("/Rig/IK/Thumb"),
+                                     Sdf.Path("/Rig/IK/Pollex"))],
+           "a relocate typed relative is anchored at the prim: %s"
+           % list(root.relocates))
+    edit.Undo()
 
 
 def TestVariantSet():
@@ -1707,6 +1765,7 @@ def main():
         ("internal reference", TestInternalReference),
         ("payload", TestPayload),
         ("inherit and specialize", TestInheritAndSpecialize),
+        ("flows take relative prim paths", TestFlowsTakeRelativePrimPaths),
         ("variant set", TestVariantSet),
         ("variant set refusals", TestVariantSetRefusals),
         ("variant set adds to an existing set",

@@ -50,6 +50,22 @@ def _persist_node_positions(view, stage, layer):
         stage.SetEditTarget(prev)
 
 
+def _save_layer_as_spelled(layer):
+    """Mirror of GraphView._saveLayerAsSpelled.
+
+    Saves through the RigExec plugin's pathSpelling when it is importable,
+    else plainly.  Either way the layer's own Save() is what runs for a
+    stand-in layer: pathSpelling saves anything that is not a .usda text
+    layer as is.
+    """
+    try:
+        import pathSpelling
+    except ImportError:
+        layer.Save()
+        return
+    pathSpelling.SaveLayer(layer)
+
+
 def _save_stage(view):
     """Mirror of GraphView._saveStage (graphView.py:5559).
 
@@ -76,7 +92,7 @@ def _save_stage(view):
             return
 
         _persist_node_positions(view, stage, layer)
-        layer.Save()
+        _save_layer_as_spelled(layer)
 
         unsaved = []
         try:

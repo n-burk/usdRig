@@ -19,7 +19,8 @@ if [ ${#TESTS[@]} -eq 0 ]; then
            test_gizmo_settings test_gizmo_drag test_gizmo_snap
            test_viewcube_math test_rigexec_stage_edits test_graph_model
            test_graph_screen test_layer_opinions_model
-           test_composition_arcs_model test_gizmo_preview
+           test_path_spelling test_composition_arcs_model
+           test_gizmo_preview
            test_touchpose_model test_gizmo_marquee
            test_picker_scene test_picker_layout
            test_imaging_handle test_session_state)

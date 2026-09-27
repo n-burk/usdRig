@@ -7438,6 +7438,27 @@ class GraphView(QGLWidget):
             finally:
                 stage.SetEditTarget(prev)
 
+    @staticmethod
+    def _saveLayerAsSpelled(layer):
+        """Save `layer`, keeping each path spelled as it was typed.
+
+        A plain ``layer.Save()`` writes every relationship target and
+        connection absolute -- USD anchors relative paths the moment they
+        are authored -- so a relative path typed in the RigExec Layer
+        Opinions panel, or read from the file, would be rewritten by this
+        save.  The RigExec plugin's pathSpelling module keeps the spelling;
+        it is on the path whenever that plugin is loaded, and without it
+        there is no spelling to keep.
+        """
+        try:
+            import pathSpelling
+        except ImportError:
+            layer.Save()
+            return
+        report = pathSpelling.SaveLayer(layer)
+        if report.note:
+            Tf.Warn("Save Stage: %s" % report)
+
     def _saveStage(self):
         """Save the current edit target layer to disk.
 
@@ -7463,7 +7484,7 @@ class GraphView(QGLWidget):
                 return
 
             self._persistNodePositions(stage, layer)
-            layer.Save()
+            self._saveLayerAsSpelled(layer)
 
             # Warn if other layers have unsaved edits that this save didn't cover.
             unsaved = []

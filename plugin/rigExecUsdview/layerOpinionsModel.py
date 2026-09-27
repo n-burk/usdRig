@@ -46,21 +46,39 @@
 # path must be absolute and a bare layer must carry a file extension, so
 # `not_a_path` and `not a reference at all` are still refused.
 #
-# TARGETS READ RELATIVE. A relationship's targets and an attribute's
-# connections are shown relative to the prim that owns them (`<../Arm>`,
-# `<.x>`, `<../../Material/Cloth>`), and relative text typed back is
-# anchored to that same prim -- its path with any variant selection
-# stripped (TargetAnchor), because a target path may not carry one. Sdf itself stores them absolute -- it anchors a relative
-# target the moment it is authored, and usda is written that way -- so
-# this is how they are READ and TYPED, which is where a rig is built:
-# `<../Wrist>` says what the rig means, `</Asset/Rig/Arm/L/Wrist>` says
-# where it happens to sit today.
+# PATHS READ AS WRITTEN. A relationship's targets, an attribute's
+# connections and a prim's inherits and specializes are shown the way
+# they are spelled -- `<../../Material/Cloth>` if that is what was typed
+# or what the file says, `</Material/Cloth>` if that is -- and the panel's
+# Save Layer writes them back the same way. Nothing is rewritten in
+# either direction. Sdf keeps no spelling (it anchors a relative path
+# the moment it is authored, and again on every read), so pathSpelling
+# keeps it beside the layer; see that module for what it can and cannot
+# keep. Relative text is anchored at the prim that owns it -- its path
+# with any variant selection stripped (TargetAnchor), because a target
+# path may not carry one -- which is the prim the usda reader anchors
+# the spelling at when the file is read back.
+#
+# EVERY PATH TYPES RELATIVE. The same anchoring applies wherever a prim
+# path is typed into the panel -- an inherit, a specialize, an internal
+# reference, a relocate -- not only to targets (AnchorPathLiterals).
+# Sdf refuses a relative path in most of those places, or anchors it to
+# whatever prim the scratch parse happened to use, so the panel anchors
+# it first, against the prim it will be authored on. Nothing checks the
+# path exists: a target or class authored before the prim it names is
+# legal, and is how a rig is often built. What IS refused is a relative
+# path with no absolute form -- one that climbs above the root -- which
+# Sdf would otherwise turn into an empty path without a word. Where usda
+# cannot keep a relative spelling -- a reference, a relocate, anything
+# inside a variant -- the row shows the absolute path it was anchored
+# to, because that is what the file will say.
 #
 import os
 import re
 
 from pxr import Sdf
 
+import pathSpelling
 import rigExecUndo
 
 
@@ -78,6 +96,15 @@ class ValueParseError(Exception):
         self.detail = detail
 
 
+class _PathAnchorError(ValueParseError):
+    """
+    A relative path that has no absolute form where it was typed.
+
+    Its own message already says exactly what is wrong, so _FirstParse
+    reports it as is rather than as the generic "not a ...".
+    """
+
+
 def _FirstParse(parse, candidates, message):
     """
     The first of `candidates` that `parse` accepts.
@@ -86,9 +113,11 @@ def _FirstParse(parse, candidates, message):
     valid usda keeps meaning exactly what it says, and the shorthand
     rewrite after it. Raises one ValueParseError carrying the exact
     text's diagnostics -- the rewrite's would describe text the user
-    never typed.
+    never typed -- unless a path in it could not be anchored, which is
+    the more useful thing to say.
     """
     first = None
+    anchorError = None
     seen = set()
     for candidate in candidates:
         if candidate is None or candidate in seen:
@@ -96,9 +125,13 @@ def _FirstParse(parse, candidates, message):
         seen.add(candidate)
         try:
             return parse(candidate)
+        except _PathAnchorError as error:
+            anchorError = anchorError or error
         except ValueParseError as error:
             if first is None:
                 first = error
+    if anchorError is not None:
+        raise anchorError
     raise ValueParseError(message, first.detail if first else "")
 
 
@@ -328,14 +361,14 @@ def FullValueText(row):
             and spec.HasDefaultValue() else ""
     if row.kind == "relationship":
         spec = row.layer.GetRelationshipAtPath(row.specPath)
-        return _FormatTargets(spec.targetPathList,
-                              TargetAnchor(row.specPath)) \
-            if spec is not None else ""
+        return _FormatTargets(spec.targetPathList, _Speller(
+            pathSpelling.Spellings(row.layer), row.specPath,
+            "targetPaths")) if spec is not None else ""
     if row.kind == "connection":
         spec = row.layer.GetAttributeAtPath(row.specPath)
-        return _FormatTargets(spec.connectionPathList,
-                              TargetAnchor(row.specPath)) \
-            if spec is not None else ""
+        return _FormatTargets(spec.connectionPathList, _Speller(
+            pathSpelling.Spellings(row.layer), row.specPath,
+            "connectionPaths")) if spec is not None else ""
     if row.kind == "info":
         spec = row.layer.GetPrimAtPath(row.specPath)
         return FormatValue(spec.GetInfo(row.key)) if spec is not None \
@@ -415,8 +448,23 @@ def ParseTargets(text, owner=None):
     prim the relationship or attribute belongs to, which is what they
     mean in a usda file. Returned absolute, as Sdf stores them.
     """
-    return _FirstParse(lambda candidate: _ParseTargetsText(candidate, owner),
-                       [text, _TargetsShorthand(text)],
+    return [path for path, _ in ParseSpelledTargets(text, owner)]
+
+
+def ParseSpelledTargets(text, owner=None):
+    """
+    ParseTargets, with each path paired with the text it was typed as:
+    [(path, spelling)] -- `(/Rig/Wrist, "../Wrist")` for a relative one,
+    `(/Rig/Wrist, "/Rig/Wrist")` for an absolute one. The spelling is
+    what the row goes on showing, and what a save writes.
+    """
+    def _Parse(candidate):
+        spelled = {}
+        paths = _ParseTargetsText(
+            AnchorPathLiterals(candidate, owner, spelled), owner)
+        return [(path, spelled.get(path, str(path))) for path in paths]
+
+    return _FirstParse(_Parse, [text, _TargetsShorthand(text)],
                        "not a target list: %r" % text)
 
 
@@ -453,6 +501,87 @@ def TargetAnchor(specPath):
     and `../../Material` from `/Asset{look=a}Geo/Body` has to mean that.
     """
     return Sdf.Path(specPath).GetPrimPath().StripAllVariantSelections()
+
+
+def AnchorPath(text, owner):
+    """
+    The path `text` spells, made absolute against the prim `owner`:
+    `../Wrist` typed on /Rig/Arm/IK is /Rig/Arm/Wrist, `.x` is
+    /Rig/Arm/IK.x, and an absolute path comes back as it is. `./Child`
+    is taken for `Child`, as everywhere else in the panel.
+
+    Raises ValueParseError for text that is not a path at all, and for
+    a relative path with no absolute form -- one that climbs above the
+    root, like `../../../X` from /Rig/Arm. Sdf answers that with an
+    EMPTY path, and an empty path is not an error once authored: a
+    relocate to <> removes its prim.
+    """
+    text = text.strip()
+    if text.startswith("./") and len(text) > 2:
+        text = text[2:]
+    if not Sdf.Path.IsValidPathString(text):
+        raise ValueParseError("%r is not a path" % text)
+    path = Sdf.Path(text)
+    if path.IsAbsolutePath():
+        return path
+    anchor = TargetAnchor(owner)
+    absolute = path.MakeAbsolutePath(anchor)
+    if absolute.isEmpty:
+        raise _PathAnchorError(
+            "<%s> climbs above the root from %s; there is no such path"
+            % (text, anchor))
+    return absolute
+
+
+def AnchorPathLiterals(text, owner, spelled=None):
+    """
+    usda `text` with every relative <path> in it anchored at the prim
+    `owner` (AnchorPath), ready for a scratch parse that knows nothing
+    about where it will be authored.
+
+    Needed wherever the panel parses a path. Sdf's own handling of a
+    relative path depends on the field: a target is anchored to the
+    prim the scratch parse used -- a stand-in, not the real owner -- an
+    inherit likewise, a reference prim path or a relocate is refused or
+    silently emptied. Anchoring first makes them all mean one thing.
+
+    The one relative path left alone is the prim path of an EXTERNAL
+    arc (`@./hand.usda@<../Hand>`): it names a prim in another layer,
+    where this prim is nothing to be relative to, so it is refused with
+    that reason. `text` comes back unchanged when there is no `owner`.
+
+    `spelled`, when given, is filled with {absolute path: the relative
+    text it was typed as}, which is what pathSpelling.Record keeps.
+    """
+    if owner is None:
+        return text
+    out = []
+    end = 0
+    afterAsset = False
+    for match in pathSpelling.PATH_LITERALS.finditer(text):
+        literal = match.group(0)
+        between = text[end:match.start()]
+        out.append(between)
+        if literal.startswith("<"):
+            body = literal[1:-1].strip()
+            external = afterAsset and not between.strip()
+            if body and not body.startswith("/") \
+                    and Sdf.Path.IsValidPathString(
+                        body[2:] if body.startswith("./") else body):
+                if external:
+                    raise _PathAnchorError(
+                        "%s names a prim in another layer, so it must be "
+                        "absolute, like </Hand>" % literal)
+                absolute = AnchorPath(body, owner)
+                if spelled is not None:
+                    spelled[absolute] = (body[2:] if body.startswith("./")
+                                         else body)
+                literal = "<%s>" % absolute
+        out.append(literal)
+        afterAsset = literal.startswith("@")
+        end = match.end()
+    out.append(text[end:])
+    return "".join(out)
 
 
 def _OwnerSource(owner, body):
@@ -615,7 +744,8 @@ def FormatListOpItem(key, value, item):
     return _SoleMetadataAssignment(layer.ExportToString())
 
 
-def ParseListOpItem(key, keyword, text, current=None):
+def ParseListOpItem(key, keyword, text, current=None, owner=None,
+                    spelled=None):
     """
     `text` parsed as ONE item of the list-op field written `keyword`.
 
@@ -629,17 +759,33 @@ def ParseListOpItem(key, keyword, text, current=None):
     would silently drop one of them.
 
     `current` is the item the row holds now. It decides the shorthand:
-    a bare layer path for a reference or payload, a bare `/Prim` for a
-    path, a bare word for a string or token list.
+    a bare layer path for a reference or payload, a bare `/Prim` or
+    `../Prim` for a path, a bare word for a string or token list.
+
+    `owner` is the prim the field is on. A relative prim path -- an
+    inherit of `<../_class_Arm>`, an internal reference to `<../Leg>` --
+    is anchored there (AnchorPathLiterals), not at the scratch prim the
+    text is parsed on.
+
+    `spelled`, when given, is filled with {absolute path: relative text}
+    for the relative path the item was typed with, if any.
     """
+    found = {}
+
+    def _Parse(candidate):
+        found.clear()
+        return _ParseListOpText(
+            key, keyword, AnchorPathLiterals(candidate, owner, found))
+
     items = _FirstParse(
-        lambda candidate: _ParseListOpText(key, keyword, candidate),
-        [text, _ListOpItemShorthand(keyword, text, current)],
+        _Parse, [text, _ListOpItemShorthand(keyword, text, current)],
         "not a %s: %r" % (keyword, text))
     if len(items) != 1:
         raise ValueParseError(
             "%r is %d items; this row is one %s"
             % (text, len(items), keyword))
+    if spelled is not None:
+        spelled.update(found)
     return items[0]
 
 
@@ -676,7 +822,7 @@ def _ListOpItemShorthand(keyword, text, current):
         return _ArcShorthand(text)
     if isinstance(current, Sdf.Path) or (
             current is None and keyword in ("inherits", "specializes")):
-        return "<%s>" % text if text.startswith("/") else text
+        return _TargetShorthand(text)
     if isinstance(current, str):
         return _Quote(text)
     return text
@@ -685,8 +831,15 @@ def _ListOpItemShorthand(keyword, text, current):
 def _ArcShorthand(text):
     """
     A reference or payload typed without its @@: `./hand.usda</Hand>`
-    is external, and a lone `/Class` is internal. Anything else is left
-    to fail, so a sentence is not taken for a file name.
+    is external, and a lone `/Class` or `../Class` is internal. Anything
+    else is left to fail, so a sentence is not taken for a file name.
+
+    A layer is told from a relative prim path by its file extension,
+    which every layer has (_LooksLikeLayerPath): `../hand.usda` is a
+    file, `../Hand` a sibling prim. A bare `./Name` is not taken for a
+    prim: `./` is how an arc spells a FILE beside its layer, and the
+    prim it would name -- this prim's own child -- is a composition
+    cycle as an arc target anyway.
     """
     match = _BARE_ARC.match(text)
     if match is None:
@@ -696,7 +849,7 @@ def _ArcShorthand(text):
     offset = match.group("offset") or ""
     if _LooksLikeLayerPath(asset):
         return _AssetLiteral(asset) + prim + (" " + offset if offset else "")
-    if asset.startswith("/") and not prim:
+    if asset.startswith(("/", "../")) and not prim:
         return "<%s>%s" % (asset, " " + offset if offset else "")
     return text
 
@@ -828,22 +981,36 @@ def FormatRelocate(source, target):
     return text.strip().strip("{}").strip().rstrip(",").strip()
 
 
-def ParseRelocate(text):
+def ParseRelocate(text, owner=None):
     """
     (source, target) from one `relocates` entry -- `</A>: </B>`, or the
     bare `/A: /B` shorthand.
+
+    Relocates are layer metadata, and usda anchors a relative path in
+    them at the layer's root -- where `<../B>` is no path at all and
+    parses to an EMPTY target, which is a relocate that deletes its
+    prim. So a relative path is anchored at `owner`, the prim the panel
+    is showing, like every other path typed into it.
     """
-    return _FirstParse(_ParseRelocateText,
-                       [text, _RelocateShorthand(text)],
-                       "not a relocate: %r" % text)
+    return _FirstParse(
+        lambda candidate: _ParseRelocateText(
+            AnchorPathLiterals(candidate, owner)),
+        [text, _RelocateShorthand(text)],
+        "not a relocate: %r" % text)
+
+
+# One side of a relocate: a path in <>, or a bare one that plainly is a
+# path -- absolute, or explicitly relative with a leading dot.
+_RELOCATE_SIDE = r"(<[^<>]*>|[/.][^<>:\s]*)"
 
 
 def _RelocateShorthand(text):
-    match = re.match(r"^\s*<?(/[^<>:\s]*)>?\s*:\s*<?(/[^<>:\s]*)>?\s*$",
-                     text)
+    match = re.match(r"^\s*%s\s*:\s*%s\s*$" % (_RELOCATE_SIDE,
+                                                _RELOCATE_SIDE), text)
     if match is None:
         return text
-    return "<%s>: <%s>" % match.groups()
+    return "%s: %s" % tuple(_TargetShorthand(side)
+                            for side in match.groups())
 
 
 def _ParseRelocateText(text):
@@ -935,7 +1102,7 @@ class OpinionRow(object):
     def __init__(self, layer, specPath, kind, key, valueText,
                  editable, winning, typeName=None, infoValue=None,
                  infoKey=None, keyword=None, arm=None, index=None,
-                 item=None, count=0, summarized=False):
+                 item=None, count=0, summarized=False, anchor=None):
         self.layer = layer
         self.specPath = Sdf.Path(specPath)
         # "info" | "attribute" | "relationship" | "arcItem"
@@ -963,10 +1130,24 @@ class OpinionRow(object):
         # editor would open on the summary -- see SummarizedValueText.
         self.summarized = summarized
         self.children = []
+        # Set only on a layer's own rows, whose spec path is the
+        # pseudo-root: see `anchor`.
+        self._anchor = Sdf.Path(anchor) if anchor else None
 
     @property
     def primPath(self):
         return self.specPath.GetPrimPath()
+
+    @property
+    def anchor(self):
+        """
+        The prim a relative path typed into this row resolves against:
+        the prim the opinion is on (TargetAnchor), or for a layer's own
+        relocates -- which are on no prim -- the prim the panel shows.
+        """
+        if self._anchor is not None:
+            return self._anchor
+        return TargetAnchor(self.specPath)
 
     def __repr__(self):
         return "<OpinionRow %s %s %s in %s>" % (
@@ -988,6 +1169,10 @@ class OpinionGroup(object):
         self.rows = []
         # Set by the UI once it knows usdview's edit target.
         self.isEditTarget = False
+        # How the layer spells its paths (pathSpelling.Spellings), read
+        # once per rebuild -- the file half is a stat and a dict lookup
+        # once it has been read.
+        self.spellings = {}
 
     @property
     def displayName(self):
@@ -1024,12 +1209,13 @@ def OpinionGroups(prim):
         if group is None:
             group = OpinionGroup(layer, _LayerEditable(layer),
                                  layer.identifier in local)
+            group.spellings = pathSpelling.Spellings(layer)
             byLayer[layer] = group
             groups.append(group)
         group.rows.extend(_RowsForSpec(spec, group, winners))
     for group in groups:
         if group.local:
-            group.rows[:0] = _LayerArcRows(group)
+            group.rows[:0] = _LayerArcRows(group, prim.GetPath())
     return groups
 
 
@@ -1059,7 +1245,6 @@ def _RowsForSpec(spec, group, winners):
             row.children = _VariantSelectionRows(spec, group, value)
         rows.append(row)
     for prop in spec.properties:
-        owner = TargetAnchor(prop.path)
         if isinstance(prop, Sdf.AttributeSpec):
             kind = "attribute"
             typeName = prop.typeName
@@ -1071,7 +1256,8 @@ def _RowsForSpec(spec, group, winners):
                 # and a default are separate opinions, removed and
                 # overridden separately.
                 connText, connSummarized = _SummarizedTargets(
-                    prop.connectionPathList, owner)
+                    prop.connectionPathList,
+                    _Speller(group.spellings, prop.path, "connectionPaths"))
                 rows.append(OpinionRow(
                     layer=spec.layer,
                     specPath=prop.path,
@@ -1085,7 +1271,9 @@ def _RowsForSpec(spec, group, winners):
                     continue
         else:
             kind = "relationship"
-            text, summarized = _SummarizedTargets(prop.targetPathList, owner)
+            text, summarized = _SummarizedTargets(
+                prop.targetPathList,
+                _Speller(group.spellings, prop.path, "targetPaths"))
             typeName = None
             editable = group.editable and not summarized
         rows.append(OpinionRow(
@@ -1172,6 +1360,10 @@ def _ListOpRows(spec, group, key, value):
     editable = _ArcRowsEditable(group)
     for arm, index, item in ListOpItems(value):
         keyword, text = FormatListOpItem(key, value, item)
+        if key in pathSpelling.FIELDS:
+            # An inherit or specialize: shown as spelled, like a target.
+            text = "<%s>" % pathSpelling.Spell(group.spellings, spec.path,
+                                               key, item)
         prefix = _ARM_PREFIX[arm]
         count = len(getattr(value, arm + "Items"))
         rows.append(OpinionRow(
@@ -1212,13 +1404,16 @@ def _VariantSelectionRows(spec, group, selections):
     return rows
 
 
-def _LayerArcRows(group):
+def _LayerArcRows(group, primPath):
     """
     The layer's own composition: its sublayers and its relocates.
 
     Returned as two parent rows with a child each, or nothing at all
     when the layer has neither -- most layers have no relocates and only
     the root layer has sublayers, so the common case adds no rows.
+
+    `primPath` is the prim the panel is showing, which a relative path
+    typed into a relocate row is anchored at.
     """
     layer = group.layer
     editable = _ArcRowsEditable(group)
@@ -1254,45 +1449,56 @@ def _LayerArcRows(group):
                 valueText=FormatRelocate(source, target),
                 editable=editable, winning=True,
                 infoKey="relocates", index=index,
-                item=(source, target), count=len(relocates)))
+                item=(source, target), count=len(relocates),
+                anchor=primPath))
         rows.append(parent)
     return rows
 
 
-def _FormatTargets(pathList, owner):
+def _Speller(spellings, specPath, field):
+    """`path` -> its text, as `spellings` spells it in one field."""
+    return lambda path: pathSpelling.Spell(spellings, specPath, field, path)
+
+
+def _FormatTargets(pathList, spell):
     """
-    A target or connection list as usda would spell it, each path made
-    relative to `owner` where PreferredPath says so: `[ <../B>, <.x> ]`.
-    The editor opens on this text and accepts it back unchanged.
+    A target or connection list as usda would write it, each path as
+    `spell` spells it: `[ <../B>, </Rig/C> ]` -- relative where it was
+    typed or saved relative, absolute where it was absolute. The editor
+    opens on this text and accepts it back unchanged.
     """
     items = list(pathList.explicitItems) or list(pathList.prependedItems)
-    return FormatPathList(items, owner)
+    return _SpelledPathList(items, spell)
 
 
-def _SummarizedTargets(pathList, owner):
+def _SummarizedTargets(pathList, spell):
     """(text, summarized) for a target or connection list; see
     SummarizedValueText -- a skinned mesh can carry thousands."""
     items = list(pathList.explicitItems) or list(pathList.prependedItems)
     if len(items) <= MAX_INLINE_ITEMS:
-        return _Clipped(FormatPathList(items, owner))
-    head = FormatPathList(items[:_PREVIEW_ITEMS], owner)
+        return _Clipped(_SpelledPathList(items, spell))
+    head = _SpelledPathList(items[:_PREVIEW_ITEMS], spell)
     return ("%s paths  %s, ... ]" % ("{:,}".format(len(items)),
                                      head.rstrip().rstrip("]").rstrip()),
             True)
 
 
+def _SpelledPathList(paths, spell):
+    return "[ %s ]" % ", ".join("<%s>" % spell(path) for path in paths)
+
+
 def FormatPathList(paths, owner):
     """`paths` as a usda list, relative to `owner` where they can be."""
-    return "[ %s ]" % ", ".join(
-        "<%s>" % PreferredPath(path, owner) for path in paths)
+    return _SpelledPathList(paths, lambda path: PreferredPath(path, owner))
 
 
 def PreferredPath(path, owner):
     """
-    `path` as the panel shows and offers it: relative to the prim
-    `owner`, always -- `<../../Material/Cloth>` reads back the way it
-    was typed, and it survives the asset being referenced under a new
-    root, which an absolute path does not describe.
+    `path` as the target picker OFFERS it: relative to the prim `owner`
+    -- `<../../Material/Cloth>` says what the rig means, where
+    `</Asset/Material/Cloth>` says where it happens to sit today. What
+    is picked is then kept as picked (pathSpelling); a path already
+    authored is shown the way it is spelled, not this way.
     """
     path = Sdf.Path(path)
     owner = TargetAnchor(owner) if owner else None
@@ -1642,8 +1848,13 @@ def _SetArcItem(row, text):
     occupied, so retyping a reference's asset path does not also change
     which arcs it wins over.
     """
+    spelled = {}
     item = _Anchored(row.layer, ParseListOpItem(
-        row.infoKey, row.keyword, text, row.item))
+        row.infoKey, row.keyword, text, row.item, row.anchor, spelled))
+    if row.infoKey in pathSpelling.FIELDS:
+        # An inherit or specialize keeps its spelling, as a target does.
+        pathSpelling.Record(row.layer, row.specPath, row.infoKey,
+                            [(item, spelled.get(item, str(item)))])
     before = InfoSnapshot.Capture(row.layer, row.specPath, row.infoKey)
     with Sdf.ChangeBlock():
         SetListOpItem(row.layer.GetPrimAtPath(row.specPath), row.infoKey,
@@ -1696,7 +1907,7 @@ def _SetSublayerRow(row, text):
 
 
 def _SetRelocateRow(row, text):
-    source, target = ParseRelocate(text)
+    source, target = ParseRelocate(text, row.anchor)
     before = RelocatesSnapshot.Capture(row.layer)
     with Sdf.ChangeBlock():
         SetRelocate(row.layer, row.index, source, target)
@@ -1725,23 +1936,28 @@ def _SetAttribute(row, text):
 
 
 def _SetTargets(row, text):
-    targets = ParseTargets(text, TargetAnchor(row.specPath))
+    spelled = ParseSpelledTargets(text, row.anchor)
+    # Recorded BEFORE authoring: the notice the edit sends can rebuild
+    # the panel the moment the change block closes, and the rebuilt row
+    # has to find the spelling already there.
+    pathSpelling.Record(row.layer, row.specPath, "targetPaths", spelled)
     before = SpecCopySnapshot.Capture(row.layer, row.specPath)
     with Sdf.ChangeBlock():
         spec = row.layer.GetRelationshipAtPath(row.specPath)
         spec.targetPathList.ClearEdits()
-        spec.targetPathList.explicitItems = targets
+        spec.targetPathList.explicitItems = [path for path, _ in spelled]
     after = SpecCopySnapshot.Capture(row.layer, row.specPath)
     return _Commit("Set %s" % row.key, row.layer, row.specPath, before, after)
 
 
 def _SetConnections(row, text):
-    sources = ParseTargets(text, TargetAnchor(row.specPath))
+    spelled = ParseSpelledTargets(text, row.anchor)
+    pathSpelling.Record(row.layer, row.specPath, "connectionPaths", spelled)
     before = SpecCopySnapshot.Capture(row.layer, row.specPath)
     with Sdf.ChangeBlock():
         spec = row.layer.GetAttributeAtPath(row.specPath)
         spec.connectionPathList.ClearEdits()
-        spec.connectionPathList.explicitItems = sources
+        spec.connectionPathList.explicitItems = [path for path, _ in spelled]
     after = SpecCopySnapshot.Capture(row.layer, row.specPath)
     return _Commit("Set %s" % row.key, row.layer, row.specPath, before, after)
 

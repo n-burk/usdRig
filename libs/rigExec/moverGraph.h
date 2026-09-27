@@ -99,7 +99,7 @@ enum class RigExecReadPhaseKind {
 /// A resolved read phase. \p prim is meaningful only for AtPrim.
 ///
 /// AtPrim is the general form the other three are shorthands for: the walk is
-/// reverse-sibling post-order over the composed Movers namespace, so "as of
+/// reverse-sibling post-order over the whole composed rig, so "as of
 /// this prim" means the moment that prim was finished with -- for a mover,
 /// immediately after it applied; for a grouping Scope, after everything
 /// beneath it applied, because post-order visits a parent last. Naming a Scope

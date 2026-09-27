@@ -970,14 +970,14 @@ class RigExecUsdviewContainer(PluginContainer):
         }
         for rigPath in rigPaths:
             root = stage.GetPrimAtPath(rigPath)
-            moversPath = rigPath.AppendChild("Movers")
             found = False
             for prim in Usd.PrimRange(root):
                 if prim.GetTypeName() in outputTypes:
                     found = True
                     break
-                if (prim.GetPath().HasPrefix(moversPath) and
-                        prim.GetRelationship("rigExec:moves")):
+                # A mover anywhere under the root -- carrying rigExec:moves
+                # is what makes it one, as it is to the native compiler.
+                if prim.GetRelationship("rigExec:moves"):
                     found = True
                     break
             if not found:

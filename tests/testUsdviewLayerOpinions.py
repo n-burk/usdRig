@@ -199,6 +199,47 @@ def testUsdviewInputFunction(appController):
            "the menu path hands it the container's shared undo stack")
     panel = opened
 
+    # --- 8. a relative target typed into the tree -----------------------
+    # Through the panel's own path this time -- the text lands in the
+    # value column, itemChanged runs _Apply, the Edit goes on the shared
+    # undo stack -- and to a prim that does not exist yet: a rig is
+    # often wired before the prim a target names.
+    jointsPath = IK + ".rigExec:joints"
+    original = list(fileLayer.GetRelationshipAtPath(
+        jointsPath).targetPathList.explicitItems)
+    iterator = QtWidgets.QTreeWidgetItemIterator(panel._tree)
+    item = None
+    while iterator.value():
+        candidate = iterator.value()
+        row = candidate.data(layerOpinionsUI.COL_VALUE,
+                             layerOpinionsUI._ROW_ROLE)
+        if (row is not None and row.key == "rigExec:joints"
+                and row.layer == fileLayer):
+            item = candidate
+            break
+        iterator += 1
+    _Check(item is not None, "the tree has the IK's joints row")
+    item.setText(layerOpinionsUI.COL_VALUE, "../NotYet, <../IK/Later>")
+    appController._processEvents()
+    targets = list(fileLayer.GetRelationshipAtPath(
+        jointsPath).targetPathList.explicitItems)
+    _Check(targets == [Sdf.Path("/ArmAsset/Rig/Solvers/NotYet"),
+                       Sdf.Path("/ArmAsset/Rig/Solvers/IK/Later")],
+           "relative targets typed into the tree anchor at the IK, "
+           "existing or not: %s (status %r)"
+           % (targets, panel._status.text()))
+    shown = [r for (ident, key, _, r) in _RowItems(panel)
+             if key == "rigExec:joints" and ident == fileLayer.identifier]
+    _Check(shown and shown[0].valueText == "[ <../NotYet>, <../IK/Later> ]",
+           "the rebuilt tree shows them exactly as typed: %r"
+           % (shown[0].valueText if shown else None))
+    _Check(panel._undo.CanUndo(), "and the edit is on the undo stack")
+    panel._undo.Undo()
+    appController._processEvents()
+    _Check(list(fileLayer.GetRelationshipAtPath(
+        jointsPath).targetPathList.explicitItems) == original,
+        "undo puts the original targets back")
+
     shot = os.environ.get("RIGEXEC_OPINIONS_SHOT")
     if shot:
         panel.Rebuild()
@@ -206,4 +247,4 @@ def testUsdviewInputFunction(appController):
         panel.grab().save(shot)
 
     print("RIGEXEC_LAYER_OPINIONS_OK menu, selection, edit, parse "
-          "refusal, delete, undo")
+          "refusal, delete, undo, relative target")

@@ -1022,6 +1022,16 @@ PYBIND11_MODULE(_rigexec, m) {
             }
             return out;
         }, "The composed movers in execution order (reverse-sibling\npost-order: bottom-to-top stack walk, spec section 4.2).")
+        .def("skipped_operations", [](const _Rig &r) {
+            py::dict out;
+            for (const auto &[path, reason] :
+                 r.evaluator->GetSkippedOperations()) {
+                out[py::str(_PathStr(path))] = reason;
+            }
+            return out;
+        }, "Operations the last compile set aside, path -> the error that\n"
+           "disqualified it. A broken operation is warned about and left out;\n"
+           "the rest of the rig compiles and evaluates without it.")
         .def_property("profiling_enabled",
             [](_Rig &r) { return r.evaluator->GetProfilingEnabled(); },
             [](_Rig &r, bool v) { r.evaluator->SetProfilingEnabled(v); },

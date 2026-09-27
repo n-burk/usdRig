@@ -784,21 +784,31 @@ def _PathRows(stage, layer):
         [r for g in groups if g.layer == layer for r in g.rows])}
 
 
-def TestTargetsReadRelativeToTheirPrim():
+def TestTargetsReadAsWritten():
     '''
-    A target reads relative to the prim that owns it -- including one
-    in another root prim, so `../../../Elsewhere` reads back the way it
-    was typed. The text shown is text the editor accepts back unchanged.
+    A target reads the way it is spelled: absolute as the fixture wrote
+    it, and relative -- including into another root prim -- once typed
+    relative. Nothing is converted either way, and the text shown is
+    text the editor accepts back unchanged.
     '''
     stage, layer = _PathStage()
+    rel = "/Asset/Arm/IK.joints"
+    row = _PathRows(stage, layer)["joints"]
+    _Check(row.valueText == "[ </Asset/Arm/Wrist>, </Elsewhere> ]",
+           "an absolute target reads absolute: %r" % row.valueText)
+    lom.SetRowValue(row, "../Wrist, ../../../Elsewhere")
     row = _PathRows(stage, layer)["joints"]
     _Check(row.valueText == "[ <../Wrist>, <../../../Elsewhere> ]",
-           "shown relative: %r" % row.valueText)
+           "typed relative, it reads relative: %r" % row.valueText)
     lom.SetRowValue(row, row.valueText)
-    _Check(list(layer.GetRelationshipAtPath(
-        "/Asset/Arm/IK.joints").targetPathList.explicitItems)
-        == [Sdf.Path("/Asset/Arm/Wrist"), Sdf.Path("/Elsewhere")],
-        "and the shown text round-trips to the same targets")
+    _Check(list(layer.GetRelationshipAtPath(rel).targetPathList.explicitItems)
+           == [Sdf.Path("/Asset/Arm/Wrist"), Sdf.Path("/Elsewhere")],
+           "and the shown text round-trips to the same targets")
+    lom.SetRowValue(row, "</Asset/Arm/Wrist>, ../../../Elsewhere")
+    _Check(_PathRows(stage, layer)["joints"].valueText
+           == "[ </Asset/Arm/Wrist>, <../../../Elsewhere> ]",
+           "each target keeps its own spelling: %r"
+           % _PathRows(stage, layer)["joints"].valueText)
 
 
 def TestRelativeTargetsAnchorToTheOwningPrim():
@@ -824,22 +834,26 @@ def TestRelativeTargetsAnchorToTheOwningPrim():
 def TestConnectionsAreTheirOwnRow():
     '''
     An attribute connection is shown, edited and removed as a row of
-    its own -- relative like a target -- and removing it leaves the
-    attribute's default alone.
+    its own -- spelled as written, like a target -- and removing it
+    leaves the attribute's default alone.
     '''
     stage, layer = _PathStage()
     rows = _PathRows(stage, layer)
     row = rows.get("blend.connect")
     _Check(row is not None and row.kind == "connection",
            "the connection has a row: %s" % sorted(rows))
-    _Check(row.valueText == "[ <../Wrist.out> ]",
-           "shown relative: %r" % row.valueText)
+    _Check(row.valueText == "[ </Asset/Arm/Wrist.out> ]",
+           "shown as written: %r" % row.valueText)
     lom.SetRowValue(row, "../Wrist.out, .blend2")
     attr = layer.GetAttributeAtPath("/Asset/Arm/IK.blend")
     _Check(list(attr.connectionPathList.explicitItems)
            == [Sdf.Path("/Asset/Arm/Wrist.out"),
                Sdf.Path("/Asset/Arm/IK.blend2")],
            "retyped relative, anchored at the prim")
+    _Check(_PathRows(stage, layer)["blend.connect"].valueText
+           == "[ <../Wrist.out>, <.blend2> ]",
+           "and shown as typed: %r"
+           % _PathRows(stage, layer)["blend.connect"].valueText)
     edit = lom.DeleteRow(_PathRows(stage, layer)["blend.connect"])
     attr = layer.GetAttributeAtPath("/Asset/Arm/IK.blend")
     _Check(not attr.HasInfo("connectionPaths") and attr.default == 2.0,
@@ -885,6 +899,105 @@ def TestInlineArcsAndSublayersTakeBarePaths():
            "bare sublayer")
     _Check(lom.ParseRelocate("/A/B: /A/C")
            == (Sdf.Path("/A/B"), Sdf.Path("/A/C")), "bare relocate")
+
+
+def TestRelativeTargetsNeedNotResolve():
+    '''
+    A relative target is authored whether or not anything is there yet
+    -- a rig is often wired before the prim it names exists -- and one
+    that climbs above the root is refused in words, not authored as the
+    empty path Sdf would make of it.
+    '''
+    stage, layer = _PathStage()
+    rel = "/Asset/Arm/IK.joints"
+    lom.SetRowValue(_PathRows(stage, layer)["joints"], "../NotYet, ./Later")
+    _Check(list(layer.GetRelationshipAtPath(rel).targetPathList.explicitItems)
+           == [Sdf.Path("/Asset/Arm/NotYet"),
+               Sdf.Path("/Asset/Arm/IK/Later")],
+           "dangling relative targets are authored, anchored at the prim")
+    _Check(_PathRows(stage, layer)["joints"].valueText
+           == "[ <../NotYet>, <Later> ]",
+           "and read back relative: %r"
+           % _PathRows(stage, layer)["joints"].valueText)
+    try:
+        lom.SetRowValue(_PathRows(stage, layer)["joints"],
+                        "../../../../Nowhere")
+        raise AssertionError("a path above the root was accepted")
+    except lom.ValueParseError as error:
+        _Check("climbs above the root" in str(error)
+               and "\n" not in str(error),
+               "the refusal says why, on one line: %r" % str(error))
+    _Check(len(layer.GetRelationshipAtPath(
+        rel).targetPathList.explicitItems) == 2,
+        "and the targets were left alone")
+
+
+def TestEveryPathTypesRelative():
+    '''
+    Not only targets: an inherit, an internal reference and a relocate
+    typed relative are anchored at the prim too. Parsed as they are,
+    Sdf would anchor the inherit at the scratch prim (</_class_Arm>, off
+    the root), refuse the reference, and turn the relocate's target
+    into <> -- a relocate that deletes its prim.
+    '''
+    stage, root, sub = _ArcStage()
+    spec = root.GetPrimAtPath("/Rig/IK")
+
+    lom.SetRowValue(_ArcRows(stage)["prepend inherits [0]"],
+                    "<../_class_Arm>")
+    _Check(list(spec.inheritPathList.prependedItems)
+           == [Sdf.Path("/Rig/_class_Arm")],
+           "an inherit anchors at /Rig/IK, and need not exist: %s"
+           % spec.inheritPathList)
+    lom.SetRowValue(_ArcRows(stage)["prepend inherits [0]"], "../_class_Leg")
+    _Check(list(spec.inheritPathList.prependedItems)
+           == [Sdf.Path("/Rig/_class_Leg")], "bare, too")
+
+    lom.SetRowValue(_ArcRows(stage)["prepend references [1]"],
+                    "../Other (offset = 3)")
+    _Check(list(spec.referenceList.prependedItems)[1]
+           == Sdf.Reference("", "/Rig/Other", Sdf.LayerOffset(3)),
+           "a relative internal reference anchors at the prim: %s"
+           % list(spec.referenceList.prependedItems))
+
+    before = list(spec.referenceList.prependedItems)
+    try:
+        lom.SetRowValue(_ArcRows(stage)["prepend references [0]"],
+                        "@./a.usda@<../X>")
+        raise AssertionError("a relative prim path in another layer "
+                             "was accepted")
+    except lom.ValueParseError as error:
+        _Check("another layer" in str(error),
+               "an external arc's prim cannot be relative to this one, "
+               "and the refusal says so: %r" % str(error))
+    _Check(list(spec.referenceList.prependedItems) == before,
+           "and nothing was authored")
+    try:
+        lom.ParseListOpItem("references", "references", "./Name",
+                            Sdf.Reference("./a.usda"), "/Rig/IK")
+        raise AssertionError("./Name was taken for a prim")
+    except lom.ValueParseError:
+        pass
+
+    lom.SetRowValue(_ArcRows(stage)["relocate [0]"], "<../Old>: ../Moved")
+    _Check(list(root.relocates)[0] == (Sdf.Path("/Rig/Old"),
+                                       Sdf.Path("/Rig/Moved")),
+           "a relocate anchors at the prim the panel shows: %s"
+           % list(root.relocates))
+    try:
+        lom.SetRowValue(_ArcRows(stage)["relocate [0]"],
+                        "</Rig/Old>: <../../../Gone>")
+        raise AssertionError("a relocate target above the root was "
+                             "accepted")
+    except lom.ValueParseError:
+        pass
+    _Check(list(root.relocates)[0][1] == Sdf.Path("/Rig/Moved"),
+           "rather than authored as an empty target: %s"
+           % list(root.relocates))
+    lom.SetRowValue(_ArcRows(stage)["relocate [0]"], "</Rig/Old>: <>")
+    _Check(list(root.relocates)[0] == (Sdf.Path("/Rig/Old"),
+                                       Sdf.Path.emptyPath),
+           "while an empty target TYPED as one still means what it says")
 
 
 def TestHeavyValuesAreSummarized():
@@ -959,6 +1072,9 @@ def TestRelativeTargetsInsideAVariant():
     variant, which a target may not. Relative text still anchors at the
     prim -- `../../Material/Cloth` from Body is /Asset/Material/Cloth,
     not something off the root -- and the picker still offers paths.
+    But usda cannot keep it relative there (the reader anchors into the
+    variant and refuses the result), so it reads back absolute: what the
+    row shows is what a save will write.
     '''
     layer = Sdf.Layer.CreateAnonymous("variant.usda")
     layer.ImportFromString(_VARIANT_STAGE)
@@ -970,13 +1086,18 @@ def TestRelativeTargetsInsideAVariant():
     _Check(row.specPath.ContainsPrimVariantSelection(),
            "the fixture authors the target inside the variant: %s"
            % row.specPath)
-    _Check(row.valueText == "[ <../../Material/Old> ]",
-           "shown relative to the prim: %r" % row.valueText)
+    _Check(row.valueText == "[ </Asset/Material/Old> ]",
+           "shown as written: %r" % row.valueText)
     lom.SetRowValue(row, "../../Material/Cloth")
     _Check(prim.GetRelationship("material:binding").GetTargets()
            == [Sdf.Path("/Asset/Material/Cloth")],
            "anchored at /Asset/Geo/Body, not off the root: %s"
            % prim.GetRelationship("material:binding").GetTargets())
+    shown = {r.key: r for g in lom.OpinionGroups(prim)
+             for r in lom.WalkRows(g.rows)}["material:binding"].valueText
+    _Check(shown == "[ </Asset/Material/Cloth> ]",
+           "and shown absolute, which is what the file can hold: %r"
+           % shown)
     _Check("<../../Material/Cloth>" in lom.TargetCandidates(
         stage, "/Asset/Geo/Body"), "and the picker offers it")
 
@@ -1016,13 +1137,16 @@ def main():
          TestDeletingAWholeLayerGroupIgnoresItsLayerArcs),
         ("shorthand is accepted", TestShorthandIsAccepted),
         ("refusals are one line", TestRefusalsAreOneLine),
-        ("targets read relative", TestTargetsReadRelativeToTheirPrim),
+        ("targets read as written", TestTargetsReadAsWritten),
         ("relative targets anchor to the owner",
          TestRelativeTargetsAnchorToTheOwningPrim),
         ("connections are their own row", TestConnectionsAreTheirOwnRow),
         ("target candidates", TestTargetCandidatesAreNearestFirstAndRelative),
         ("bare arc and sublayer paths",
          TestInlineArcsAndSublayersTakeBarePaths),
+        ("relative targets need not resolve",
+         TestRelativeTargetsNeedNotResolve),
+        ("every path types relative", TestEveryPathTypesRelative),
         ("heavy values are summarized", TestHeavyValuesAreSummarized),
         ("relative targets inside a variant",
          TestRelativeTargetsInsideAVariant),

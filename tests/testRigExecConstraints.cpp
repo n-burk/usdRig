@@ -23,6 +23,26 @@
 #include <utility>
 #include <vector>
 
+// A broken operation is set aside with a warning instead of failing the rig
+// (RigExecRigEvaluator::_CompileEpoch): the rest compiles and evaluates.
+// True when the compile succeeded and set aside every one of `operations`.
+static bool
+SkipsOperations(RigExecRigEvaluator &evaluator,
+                const std::vector<SdfPath> &operations,
+                std::vector<std::string> *errors)
+{
+    if (!evaluator.Compile(errors)) {
+        return false;
+    }
+    for (const SdfPath &operation : operations) {
+        if (!evaluator.GetSkippedOperations().count(operation)) {
+            return false;
+        }
+    }
+    return !operations.empty();
+}
+
+
 using namespace rigExec;
 
 static int failures = 0;
@@ -759,7 +779,8 @@ TestSingleChainIkUniversalWeightObject()
         authorWeight(stage, TfToken("constant"), jointPaths[1], 0.5f);
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        CHECK(SkipsOperations(
+            evaluator, {SdfPath("/Asset/Rig/Movers/IK")}, &errors));
         CHECK(std::any_of(
             errors.begin(), errors.end(), [](const std::string &error) {
                 return error.find("weightTarget does not match mover target") !=

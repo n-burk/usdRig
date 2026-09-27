@@ -500,6 +500,16 @@ public:
         return _movers;
     }
 
+    /// Operations the last compile set aside -- operation prim -> the error
+    /// that disqualified it. A broken operation (a mover whose target is
+    /// not on this stage, a solver naming a prim that is not a joint, ...)
+    /// is warned about and left out; the rest of the rig -- its controls,
+    /// joints and every other operation -- compiles and evaluates without
+    /// it. Empty when nothing was skipped or the compile failed outright.
+    const std::map<SdfPath, std::string> &GetSkippedOperations() const {
+        return _skippedOperations;
+    }
+
     /// Structural digest of the compiled mover topology: the v0.1
     /// binding-epoch identity. Structural edits change it and trigger
     /// recompilation on the next Evaluate (spec §4.2, §6.3).
@@ -732,8 +742,20 @@ private:
     bool _SettleEpoch(std::vector<std::string> *diagnostics);
 
     /// The whole of Compile but for forgetting the failure memo: what the
-    /// settle path runs, so that its own compiles can be memoized.
+    /// settle path runs, so that its own compiles can be memoized. One
+    /// broken operation does not fail it: see _CompileEpochAttempt.
     bool _CompileEpoch(std::vector<std::string> *errors);
+
+    /// One compile of the rig with the operations in _skippedOperations
+    /// left out, exactly as though they were not on the stage. Its fatal
+    /// error, if any, is also left in _lastCompileError, which is what
+    /// _CompileEpoch reads to decide which operation to set aside next.
+    bool _CompileEpochAttempt(std::vector<std::string> *errors);
+
+    /// Whether \p path is an operation the current compile set aside.
+    bool _IsSkippedOperation(const SdfPath &path) const {
+        return _skippedOperations.count(path) > 0;
+    }
 
     /// The settle path's compile. A compile that failed is answered from
     /// _failedCompile, without compiling, for as long as its key matches:
@@ -1994,6 +2016,10 @@ private:
         std::vector<std::string> errors;
     };
     _FailedCompileMemo _failedCompile;
+    /// See GetSkippedOperations. Rebuilt by every compile.
+    std::map<SdfPath, std::string> _skippedOperations;
+    /// The fatal error of the last _CompileEpochAttempt, or empty.
+    std::string _lastCompileError;
     /// The last notice's disposition and patched paths. Written by the
     /// notice handler on its own thread; read by the registry's notice
     /// adapter on the same thread (USD delivers notices synchronously),

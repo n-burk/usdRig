@@ -46,6 +46,7 @@ import math
 from pxr import Pcp, Sdf, Tf, Usd
 
 import layerOpinionsModel
+import pathSpelling
 import rigExecUndo
 
 
@@ -353,6 +354,16 @@ class _Arc(object):
         raise NotImplementedError
 
     @classmethod
+    def _Spelled(cls, primPath, values):
+        """
+        [(field, path, text)]: the paths this arc authors that are kept as
+        TYPED -- relative or absolute -- rather than as Sdf stores them
+        (pathSpelling). Only an inherit or a specialize has any: a
+        reference's prim path and a relocate are absolute in usda.
+        """
+        return []
+
+    @classmethod
     def _Snapshot(cls, layer, primPath):
         """
         Capture whatever this arc is about to change, as an object with
@@ -476,14 +487,21 @@ class _Arc(object):
         however many opinions the prim already carries -- which on a rig
         prim is dozens.
         """
-        return cls._Seed(context, values).ExportToString()
+        return _SpelledText(cls._Seed(context, values),
+                            _LayerSpellings(values))
 
     @classmethod
     def Preview(cls, context, values):
-        """The usda that authoring would produce."""
+        """
+        The usda that authoring would produce -- and that saving the
+        layer would write, paths spelled as typed.
+        """
         scratch = cls._Seed(context, values)
         cls._ApplyFor(scratch, context.primPath, values, context)
-        return scratch.ExportToString()
+        spellings = _LayerSpellings(values)
+        for field, path, text in cls._Spelled(context.primPath, values):
+            spellings[(str(context.primPath), field, str(path))] = text
+        return _SpelledText(scratch, spellings)
 
     @classmethod
     def Validate(cls, context, values):
@@ -520,6 +538,10 @@ class _Arc(object):
         specPath = (Sdf.Path.absoluteRootPath if cls.scope == "layer"
                     else primPath)
 
+        # Recorded before authoring, so the panel's rebuild on the
+        # notice already finds it.
+        for field, path, text in cls._Spelled(primPath, values):
+            pathSpelling.Record(layer, primPath, field, [(path, text)])
         before = cls._Snapshot(layer, primPath)
         with Sdf.ChangeBlock():
             cls._ApplyFor(layer, primPath, values, context)
@@ -530,6 +552,23 @@ class _Arc(object):
             else cls.Label(values),
             [rigExecUndo.EditEntry(layer, specPath, before, after)])
         return edit, warnings
+
+
+def _LayerSpellings(values):
+    """How the chosen layer spells its paths, for the preview."""
+    layer = values.get("layer")
+    return pathSpelling.Spellings(layer) if layer is not None else {}
+
+
+def _SpelledText(scratch, spellings):
+    """
+    `scratch` as usda with its paths spelled -- or plainly, should the
+    spelled text not read back, which a preview must not fail over.
+    """
+    try:
+        return pathSpelling.SpelledUsdaText(scratch, spellings)[0]
+    except pathSpelling.SpellingError:
+        return scratch.ExportToString()
 
 
 def _SeedAncestors(layer, scratch, primPath):
@@ -630,12 +669,31 @@ def _LayerOffsetFrom(values):
     return Sdf.LayerOffset(offset, scale)
 
 
-def _ParsePrimPath(text, label, allowEmpty=False):
+def _ParsePrimPath(text, label, allowEmpty=False, anchor=None):
+    """
+    The prim path typed into a PRIM_PATH field, absolute.
+
+    With an `anchor` -- the prim the arc is authored on -- a relative
+    path is taken too, and resolved there exactly as the panel's inline
+    editor resolves one (layerOpinionsModel.AnchorPath): `../_class_Arm`
+    from /Rig/Arm is /Rig/_class_Arm. It need not exist yet. Without one
+    -- the target of an EXTERNAL arc, a prim in another layer that this
+    prim is nothing to be relative to -- only an absolute path is.
+    """
     text = (text or "").strip()
     if not text:
         if allowEmpty:
             return Sdf.Path.emptyPath
         raise ArcError("%s is required" % label)
+    if anchor is not None:
+        try:
+            path = layerOpinionsModel.AnchorPath(text, anchor)
+        except layerOpinionsModel.ValueParseError as error:
+            raise ArcError("%s: %s" % (label, error))
+        if not path.IsPrimPath():
+            raise ArcError("%s must be a prim path, like ../Class or "
+                           "/Asset/Rig, not %r" % (label, text))
+        return path
     path = Sdf.Path(text)
     if not path.IsAbsolutePath() or not path.IsPrimPath():
         raise ArcError("%s must be an absolute prim path, like /Asset/Rig, "
@@ -686,7 +744,9 @@ class _TargetedArc(_Arc):
                    "against the layer you are authoring into."),
         Field("primPath", "Target prim", PRIM_PATH, optional=True,
               help="Which prim inside the target to compose. Leave empty "
-                   "for an external file to use its defaultPrim."),
+                   "for an external file to use its defaultPrim. An "
+                   "internal target may be relative to this prim "
+                   "(../Class)."),
     ) + _OffsetFields("the target's") + (_POSITION_FIELD,)
 
     @classmethod
@@ -704,7 +764,8 @@ class _TargetedArc(_Arc):
         assetPath = (values.get("assetPath") or "").strip()
         primPath = _ParsePrimPath(
             values.get("primPath"), "Target prim",
-            allowEmpty=not internal)
+            allowEmpty=not internal,
+            anchor=context.primPath if internal else None)
 
         if internal:
             if assetPath:
@@ -762,18 +823,19 @@ class _TargetedArc(_Arc):
         return LayerPrimPaths(resolved)
 
     @classmethod
-    def _NewItem(cls, values):
+    def _NewItem(cls, values, primPath):
         internal = values.get("source") == "internal"
         asset = "" if internal else _AssetPathFrom(values)
         target = _ParsePrimPath(values.get("primPath"), "Target prim",
-                                allowEmpty=not internal)
+                                allowEmpty=not internal,
+                                anchor=primPath if internal else None)
         return cls._Item(asset, target, _LayerOffsetFrom(values))
 
     @classmethod
     def _Apply(cls, layer, primPath, values):
         spec = _PrimSpecFor(layer, primPath)
         _AddToListOp(cls._ListOp(spec), values.get("position"),
-                     cls._NewItem(values))
+                     cls._NewItem(values, primPath))
 
     @classmethod
     def _ValuesFromRow(cls, row):
@@ -793,7 +855,7 @@ class _TargetedArc(_Arc):
     def _ApplyEdit(cls, layer, primPath, values, row):
         layerOpinionsModel.SetListOpItem(
             _PrimSpecFor(layer, primPath), row.infoKey, row.arm, row.index,
-            cls._NewItem(values))
+            cls._NewItem(values, primPath))
 
 
 def _CheckNotCyclic(primPath, targetPath):
@@ -933,11 +995,15 @@ class PayloadArc(_TargetedArc):
 class _ClassArc(_Arc):
     """Shared machinery for inherits and specializes."""
 
+    # The prim-spec field the arc lives in, as pathSpelling keys it.
+    spellingField = ""
+
     fields = (
         _LAYER_FIELD,
         Field("primPath", "Target prim", PRIM_PATH,
               help="The prim to compose from -- conventionally a `class` "
-                   "prim, which composes nowhere on its own."),
+                   "prim, which composes nowhere on its own. Absolute, or "
+                   "relative to this prim (../_class_Arm)."),
         _POSITION_FIELD,
     )
 
@@ -948,7 +1014,8 @@ class _ClassArc(_Arc):
     @classmethod
     def Check(cls, context, values):
         warnings = []
-        path = _ParsePrimPath(values.get("primPath"), "Target prim")
+        path = _ParsePrimPath(values.get("primPath"), "Target prim",
+                              anchor=context.primPath)
         _CheckNotCyclic(context.primPath, path)
         target = context.stage.GetPrimAtPath(path)
         if not target:
@@ -964,23 +1031,40 @@ class _ClassArc(_Arc):
 
     @classmethod
     def _Apply(cls, layer, primPath, values):
-        path = _ParsePrimPath(values.get("primPath"), "Target prim")
+        path = _ParsePrimPath(values.get("primPath"), "Target prim",
+                              anchor=primPath)
         spec = _PrimSpecFor(layer, primPath)
         _AddToListOp(cls._ListOp(spec), values.get("position"), path)
 
     @classmethod
     def _ValuesFromRow(cls, row):
+        # As the row spells it, so reopening a relative inherit shows
+        # the relative text rather than what Sdf anchored it to.
+        text = row.valueText.strip()
+        if text.startswith("<") and text.endswith(">"):
+            return {"primPath": text[1:-1]}
         return {"primPath": str(row.item)}
+
+    @classmethod
+    def _Spelled(cls, primPath, values):
+        text = (values.get("primPath") or "").strip()
+        if not text:
+            return []
+        path = _ParsePrimPath(text, "Target prim", anchor=primPath)
+        return [(cls.spellingField, path,
+                 text[2:] if text.startswith("./") else text)]
 
     @classmethod
     def _ApplyEdit(cls, layer, primPath, values, row):
         layerOpinionsModel.SetListOpItem(
             _PrimSpecFor(layer, primPath), row.infoKey, row.arm, row.index,
-            _ParsePrimPath(values.get("primPath"), "Target prim"))
+            _ParsePrimPath(values.get("primPath"), "Target prim",
+                           anchor=primPath))
 
 
 class InheritArc(_ClassArc):
     key = "inherit"
+    spellingField = "inheritPaths"
     label = "Inherit..."
     title = "Add Inherit"
     summary = (
@@ -1001,6 +1085,7 @@ class InheritArc(_ClassArc):
 
 class SpecializeArc(_ClassArc):
     key = "specialize"
+    spellingField = "specializes"
     label = "Specialize..."
     title = "Add Specialize"
     summary = (
@@ -1273,7 +1358,8 @@ class RelocateArc(_Arc):
                    "layer whose relocates map gains an entry."),
         Field("source", "Move from", PRIM_PATH,
               help="The prim as it currently composes -- the path that "
-                   "arrived through the arc."),
+                   "arrived through the arc. Absolute, or relative to the "
+                   "selected prim."),
         Field("target", "Move to", PRIM_PATH,
               help="The path it should appear at instead. Its parent must "
                    "already exist. Moving it under a DIFFERENT parent is "
@@ -1291,8 +1377,10 @@ class RelocateArc(_Arc):
     @classmethod
     def Check(cls, context, values):
         warnings = []
-        source = _ParsePrimPath(values.get("source"), "Move from")
-        target = _ParsePrimPath(values.get("target"), "Move to")
+        source = _ParsePrimPath(values.get("source"), "Move from",
+                                anchor=context.primPath)
+        target = _ParsePrimPath(values.get("target"), "Move to",
+                                anchor=context.primPath)
         stage = context.stage
         # The relocate as it stands, when one is being edited. The stage
         # already REFLECTS it, which turns two of the checks below on
@@ -1385,8 +1473,10 @@ class RelocateArc(_Arc):
 
     @classmethod
     def _Apply(cls, layer, primPath, values):
-        source = _ParsePrimPath(values.get("source"), "Move from")
-        target = _ParsePrimPath(values.get("target"), "Move to")
+        source = _ParsePrimPath(values.get("source"), "Move from",
+                                anchor=primPath)
+        target = _ParsePrimPath(values.get("target"), "Move to",
+                                anchor=primPath)
         layer.relocates = list(layer.relocates) + [(source, target)]
 
     @classmethod
@@ -1398,8 +1488,10 @@ class RelocateArc(_Arc):
     def _ApplyEdit(cls, layer, primPath, values, row):
         layerOpinionsModel.SetRelocate(
             layer, row.index,
-            _ParsePrimPath(values.get("source"), "Move from"),
-            _ParsePrimPath(values.get("target"), "Move to"))
+            _ParsePrimPath(values.get("source"), "Move from",
+                           anchor=primPath),
+            _ParsePrimPath(values.get("target"), "Move to",
+                           anchor=primPath))
 
 
 # Menu order: the arcs an artist reaches for most, first; the two

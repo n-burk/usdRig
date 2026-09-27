@@ -22,6 +22,7 @@ from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 import layerOpinionsModel as model
 import panelIcons
+import pathSpelling
 import sessionRegistry
 
 
@@ -340,7 +341,8 @@ class LayerOpinionsPanel(QtWidgets.QDialog,
 
         hint = QtWidgets.QLabel(
             "Double-click a value to edit. Shorthand is fine: ik, 4 5 6, "
-            "bar.png, ../Wrist -- paths are written relative to the prim.")
+            "bar.png, ../Wrist -- paths stay as typed, relative or "
+            "absolute, and Save Layer writes them that way.")
         hint.setObjectName("opinionsHint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -366,6 +368,12 @@ class LayerOpinionsPanel(QtWidgets.QDialog,
         self._status = QtWidgets.QLabel("")
         self._status.setObjectName("opinionsStatus")
         buttons.addWidget(self._status)
+        self._saveButton = self._ActionButton("Save Layer", "layer")
+        self._saveButton.setToolTip(
+            "Save the selected layer, every path spelled as it was "
+            "typed -- relative or absolute")
+        self._saveButton.clicked.connect(self._OnSaveSelected)
+        buttons.addWidget(self._saveButton)
         refresh = self._ActionButton("Refresh", "refresh")
         refresh.clicked.connect(self.Rebuild)
         buttons.addWidget(refresh)
@@ -718,6 +726,9 @@ class LayerOpinionsPanel(QtWidgets.QDialog,
             action = menu.addAction("Delete All Opinions In This Layer")
             action.setEnabled(group.editable)
             action.triggered.connect(lambda: self._DeletePrimSpec(group))
+            save = menu.addAction(panelIcons.Icon("layer"), "Save Layer")
+            save.setEnabled(_CanSave(group.layer))
+            save.triggered.connect(lambda: self._SaveLayer(group.layer))
             copyId = menu.addAction("Copy Layer Path")
             copyId.triggered.connect(
                 lambda: QtWidgets.QApplication.clipboard().setText(
@@ -895,6 +906,37 @@ class LayerOpinionsPanel(QtWidgets.QDialog,
         if group is not None:
             self._DeletePrimSpec(group)
 
+    def _SelectedLayer(self):
+        """The layer of the selected row or layer header, or None."""
+        items = self._tree.selectedItems()
+        if not items:
+            return None
+        row = items[0].data(COL_NAME, _ROW_ROLE)
+        if row is not None:
+            return row.layer
+        group = items[0].data(0, _GROUP_ROLE)
+        return group.layer if group is not None else None
+
+    def _OnSaveSelected(self):
+        layer = self._SelectedLayer()
+        if layer is not None:
+            self._SaveLayer(layer)
+
+    def _SaveLayer(self, layer):
+        """
+        Save `layer` through pathSpelling, so every target, connection,
+        inherit and specialize is written the way the tree shows it.
+        """
+        try:
+            report = pathSpelling.SaveLayer(layer)
+        except Exception as error:
+            self._SetStatus("save failed: %s" % _FirstLine(str(error)),
+                            "error", str(error))
+            return
+        self._SetStatus(str(report), "error" if report.note else "ok",
+                        report.note)
+        self._RequestRebuild()
+
     def _DeletePrimSpec(self, group):
         answer = QtWidgets.QMessageBox.question(
             self, "Delete all opinions",
@@ -1030,12 +1072,20 @@ class LayerOpinionsPanel(QtWidgets.QDialog,
                 text = "Delete All In Layer"
         self._deleteButton.setEnabled(enabled)
         self._deleteButton.setText(text)
+        layer = self._SelectedLayer()
+        self._saveButton.setEnabled(layer is not None and _CanSave(layer))
 
     def _GroupFor(self, layer):
         for group in self._groups:
             if group.layer == layer:
                 return group
         return None
+
+
+def _CanSave(layer):
+    """Whether `layer` has a file of its own it may be saved to."""
+    return (not layer.anonymous and bool(layer.permissionToSave)
+            and not layer.expired)
 
 
 def _RowIdentity(row):

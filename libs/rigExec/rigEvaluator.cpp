@@ -56,6 +56,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -183,15 +184,20 @@ _GetPoseStackOrder(const UsdPrim &root)
     return ordered;
 }
 
-/// The same walk restricted to the Movers subtree, which is what numbers the
-/// mover stack. Taken over the RIG ROOT instead, the identical walk numbers
-/// the UNIFIED POSE STACK -- joint-writing aggregate solvers and pose-domain
+/// The same walk over the whole RIG ROOT, which is what numbers the mover
+/// stack. A mover is any prim beneath the rig that carries rigExec:moves --
+/// what it IS, not where it sits: `Movers` is the conventional scope for
+/// them, exactly as `Solvers` is for solvers (spec §4.1, no membership
+/// lists), and a mover under `Ops`, under a control, or straight under the
+/// rig root is discovered the same way. The identical walk numbers the
+/// UNIFIED POSE STACK -- joint-writing aggregate solvers and pose-domain
 /// frame constraints in one order (spec §4.2) -- and the mover order is a
-/// restriction of it.
+/// restriction of it, so a scope's position among its siblings orders the
+/// movers inside it against every other scope's.
 std::vector<UsdPrim>
-_GetMoverExecutionOrder(const UsdPrim &movers)
+_GetMoverExecutionOrder(const UsdPrim &rig)
 {
-    return _GetPoseStackOrder(movers);
+    return _GetPoseStackOrder(rig);
 }
 
 /// True for the schema types that GENERATE a weight field from a placed
@@ -968,7 +974,8 @@ _ValidateWeightObjectDomain(
 // type-name comparison -- the same idiom the imaging registry uses to find the
 // rig itself. RigExecJoint has no derived types.
 std::vector<SdfPath>
-_DiscoverJointOutputs(const UsdStageRefPtr &stage, const SdfPath &rigPath)
+_DiscoverJointOutputs(const UsdStageRefPtr &stage, const SdfPath &rigPath,
+                      const std::map<SdfPath, std::string> &skipped = {})
 {
     static const TfToken kJointType("RigExecJoint");
     static const TfToken kJointsRel("rigExec:joints");
@@ -987,8 +994,12 @@ _DiscoverJointOutputs(const UsdStageRefPtr &stage, const SdfPath &rigPath)
         }
     }
 
-    // Union in whatever the operators name, in solver namespace order.
+    // Union in whatever the operators name, in solver namespace order --
+    // leaving out an operator the compile set aside.
     for (const UsdPrim &prim : UsdPrimRange(rig)) {
+        if (skipped.count(prim.GetPath())) {
+            continue;
+        }
         const UsdRelationship jointsRel = prim.GetRelationship(kJointsRel);
         if (!jointsRel) {
             continue;
@@ -1010,10 +1021,10 @@ _DiscoverJointOutputs(const UsdStageRefPtr &stage, const SdfPath &rigPath)
 // Discovers the rig's pose interpolators the same implicit way: being a
 // RigExecPoseInterpolator under the rig is what makes a prim one.
 //
-// The interpolators live at <rig>/PoseInterpolators/<name>, OUTSIDE /Movers
-// by design -- an interpolator writes no transform and no points, so it has
-// no place in a mover ordering -- which is exactly why discovery is
-// type-based here rather than a walk of the mover namespace.
+// The interpolators conventionally live at <rig>/PoseInterpolators/<name>,
+// but like every other rig element they are found by type wherever they sit.
+// An interpolator writes no transform and no points, so it carries no
+// rigExec:moves and has no place in the mover ordering.
 std::vector<SdfPath>
 _DiscoverPoseInterpolators(const UsdStageRefPtr &stage, const SdfPath &rigPath)
 {
@@ -1116,6 +1127,96 @@ _DiscoverAggregateSolvers(
     return solvers;
 }
 
+// Every OPERATION beneath the rig: a prim that writes something when the rig
+// evaluates -- a mover or constraint (it carries rigExec:moves), an aggregate
+// solver, a pose interpolator, or anything else claiming joints through
+// rigExec:joints. These are the prims a compile error can be attributed to and
+// set aside (see RigExecRigEvaluator::_CompileEpoch); controls, joints and
+// weights are what operations read, and are never skipped.
+std::vector<SdfPath>
+_DiscoverOperationPaths(const UsdStageRefPtr &stage, const SdfPath &rigPath)
+{
+    static const TfToken kInterpolatorType("RigExecPoseInterpolator");
+    std::vector<SdfPath> operations;
+    const UsdPrim rig = stage ? stage->GetPrimAtPath(rigPath) : UsdPrim();
+    if (!rig) {
+        return operations;
+    }
+    for (const UsdPrim &prim : UsdPrimRange(rig)) {
+        const TfToken type = prim.GetTypeName();
+        if (prim.GetRelationship(_movesRel) || _IsAggregateSolverType(type) ||
+            type == kInterpolatorType ||
+            prim.GetRelationship(TfToken("rigExec:joints"))) {
+            operations.push_back(prim.GetPath());
+        }
+    }
+    return operations;
+}
+
+// The operations a compile error is about, in the order the message names
+// them. A name counts only as a whole path -- not as the prefix of a longer
+// name or of a descendant, so /Rig/Ops/arm is not /Rig/Ops/armTwist and a
+// mover parent is not its child. Usually the first is the one at fault: an
+// error names its subject first ("Mover /A targets missing prim /B", "/A
+// reads /B, which runs after it"). A CYCLE is the exception -- no one member
+// is at fault, so every operation it names is (see _CompileEpoch).
+std::vector<SdfPath>
+_OperationsNamedBy(const std::string &message,
+                   const std::vector<SdfPath> &operations)
+{
+    const auto isPathChar = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' ||
+               c == '/' || c == '.' || c == ':' || c == '{' || c == '}' ||
+               c == '=';
+    };
+    std::vector<std::pair<size_t, SdfPath>> named;
+    for (const SdfPath &path : operations) {
+        const std::string &text = path.GetString();
+        for (size_t at = message.find(text); at != std::string::npos;
+             at = message.find(text, at + 1)) {
+            const size_t end = at + text.size();
+            const bool startsWhole = at == 0 || !isPathChar(message[at - 1]);
+            // A property of the operation (".rigExec:moves") still names it;
+            // a child ("/x") or a longer name ("x2") does not.
+            const bool endsWhole = end == message.size() ||
+                message[end] == '.' || !isPathChar(message[end]);
+            if (startsWhole && endsWhole) {
+                named.emplace_back(at, path);
+                break;
+            }
+        }
+    }
+    std::sort(named.begin(), named.end());
+    std::vector<SdfPath> ordered;
+    for (const auto &entry : named) {
+        ordered.push_back(entry.second);
+    }
+    if (!ordered.empty()) {
+        return ordered;
+    }
+    // Named only through something INSIDE it -- a pose under an
+    // interpolator, a knot under an adjuster: the error is that operation's,
+    // and the deepest one enclosing what the message names owns it.
+    SdfPath enclosing;
+    for (const SdfPath &path : operations) {
+        const std::string prefix = path.GetString() + "/";
+        for (size_t at = message.find(prefix); at != std::string::npos;
+             at = message.find(prefix, at + 1)) {
+            if ((at == 0 || !isPathChar(message[at - 1])) &&
+                (enclosing.IsEmpty() ||
+                 path.GetPathElementCount() >
+                     enclosing.GetPathElementCount())) {
+                enclosing = path;
+                break;
+            }
+        }
+    }
+    if (!enclosing.IsEmpty()) {
+        ordered.push_back(enclosing);
+    }
+    return ordered;
+}
+
 // Exact, iterative connection closure used by both the solver cache's
 // authored-input index and its topology digest. Keep missing sources and
 // cycles in the identity without reading any values or time-sample counts.
@@ -1179,7 +1280,8 @@ _NamespaceFrameProvider(UsdPrim prim)
 // Authored scalar channels remain ordinary legal attribute dependencies.
 static bool
 _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
-    const UsdPrim &rig, std::string *error)
+    const UsdPrim &rig, std::string *error,
+    const std::map<SdfPath, std::string> &skipped = {})
 {
     // The closure below exists to report exactly one thing: a consumer that
     // reads a RigExecCurvenetAdjustment frame. With no Adjustment prim on the
@@ -1219,6 +1321,9 @@ _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
         TfToken("parent:space"), TfToken("posed:space")};
     std::vector<std::pair<SdfPath, SdfPath>> pending;
     for (const UsdPrim &prim : UsdPrimRange(rig)) {
+        if (skipped.count(prim.GetPath())) {
+            continue;
+        }
         const auto type = prim.GetTypeName();
         if (isFrame(prim) && type != "RigExecCurvenetAdjustment")
             pending.emplace_back(prim.GetPath(), prim.GetPath());
@@ -3716,8 +3821,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // driver, every pose's rotation, translation, type and radii, the kernel,
         // the twist axis, the regularization and which channels are enabled.
         // Numeric though most of those are, an edit to one has to reach a solve
-        // that has already happened, and nothing else in this digest even names a
-        // prim outside /Movers.
+        // that has already happened, and nothing else in this digest hashes an
+        // interpolator.
         //
         // inputs:enabled on a POSE is hashed and inputs:enabled on the
         // INTERPOLATOR is not, which is the same distinction the schema draws: a
@@ -4613,11 +4718,15 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     if (segments & _DigestSolvers) {
         stampDigestRegion("Digest.Solvers");
     }
-    const UsdPrim movers = (segments & _DigestMovers)
-        ? _stage->GetPrimAtPath(_rigPath.AppendChild(TfToken("Movers")))
+    // The whole rig, the same walk Compile's mover discovery takes: a mover
+    // is found by carrying rigExec:moves, wherever it sits. (Its own
+    // handle rather than the solver segment's `rig`, which is only set when
+    // that segment is being computed.)
+    const UsdPrim moverRig = (segments & _DigestMovers)
+        ? _stage->GetPrimAtPath(_rigPath)
         : UsdPrim();
-    if (movers) {
-        for (const UsdPrim &prim : _GetMoverExecutionOrder(movers)) {
+    if (moverRig) {
+        for (const UsdPrim &prim : _GetMoverExecutionOrder(moverRig)) {
             const UsdRelationship moves = prim.GetRelationship(_movesRel);
             if (!moves) {
                 continue;
@@ -4941,8 +5050,14 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
     static const TfToken kWeight("outputs:weight");
 
     out->clear();
-    const std::vector<SdfPath> interpolators =
+    std::vector<SdfPath> interpolators =
         _DiscoverPoseInterpolators(_stage, _rigPath);
+    interpolators.erase(
+        std::remove_if(interpolators.begin(), interpolators.end(),
+                       [this](const SdfPath &path) {
+                           return _IsSkippedOperation(path);
+                       }),
+        interpolators.end());
     if (interpolators.empty()) {
         return true;
     }
@@ -5367,7 +5482,8 @@ RigExecRigEvaluator::_ApplyDerivedStartFrames()
     if (rig) {
         UsdEditContext sessionCtx(_stage, session);
         for (const UsdPrim &prim : UsdPrimRange(rig)) {
-            if (prim.GetTypeName() != "RigExecFkChain") {
+            if (prim.GetTypeName() != "RigExecFkChain" ||
+                _IsSkippedOperation(prim.GetPath())) {
                 continue;
             }
             TfToken policy;
@@ -5468,8 +5584,96 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     return compiled;
 }
 
+// ONE BROKEN OPERATION DOES NOT TAKE THE RIG DOWN.
+//
+// A compile error that is ONE operation's fault -- a mover whose target is not
+// on this stage, a solver naming a prim that is not a joint, a constraint with
+// nothing to move -- used to fail the whole rig, so nothing published: not the
+// controls, not the joints, not the operations that were fine. A rig layer
+// opened on its own, before the model layer that supplies its geometry is
+// composed in, drew nothing at all.
+//
+// So the error is attributed to the operation it names, that operation is set
+// aside -- warned about, and treated as though it were not on the stage -- and
+// the rig compiles again without it. Repeated until the compile succeeds, or
+// fails for a reason no single operation owns (no rig prim, no outputs, an
+// error naming no operation), which still fails the rig as before and leaves
+// the program it had running.
+//
+// What is skipped is a function of structure alone, and the structure digest
+// already covers it: supplying the missing target, or fixing the operation, is
+// a structural edit, and the recompile it leads to tries every operation again.
 bool
 RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
+{
+    // Bounds the retries on a rig that is broken everywhere at once; past it
+    // the rig fails as a whole, as it always did.
+    static constexpr size_t kMaxSkippedOperations = 64;
+
+    const std::map<SdfPath, std::string> committedSkips = _skippedOperations;
+    _skippedOperations.clear();
+    std::vector<std::string> attempt;
+    for (;;) {
+        attempt.clear();
+        _lastCompileError.clear();
+        if (_CompileEpochAttempt(&attempt)) {
+            break;
+        }
+        // The operation the error is about -- or, for a dependency cycle,
+        // every operation in it: a cycle is no one member's fault, and
+        // setting aside whichever happens to be named first would leave the
+        // rest running on an order nobody chose.
+        std::vector<SdfPath> culprits = _OperationsNamedBy(
+            _lastCompileError, _DiscoverOperationPaths(_stage, _rigPath));
+        if (!culprits.empty() &&
+            _lastCompileError.find("cycle") == std::string::npos) {
+            culprits.resize(1);
+        }
+        const bool repeat = std::any_of(
+            culprits.begin(), culprits.end(),
+            [this](const SdfPath &path) { return _IsSkippedOperation(path); });
+        if (culprits.empty() || repeat ||
+            _skippedOperations.size() >= kMaxSkippedOperations) {
+            // Not one operation's fault. The rig fails as a whole, and the
+            // program it had -- with the operations IT had set aside --
+            // keeps running. What was set aside on the way is said first:
+            // a rig whose only operation is broken fails with "publishes
+            // no outputs" once that operation is gone, and that line alone
+            // would hide the reason.
+            if (errors) {
+                // Once per reason: a cycle sets aside every member
+                // for the one error.
+                std::set<std::string> said;
+                for (const auto &[path, reason] : _skippedOperations) {
+                    if (said.insert(reason).second) {
+                        errors->push_back(reason);
+                    }
+                }
+                errors->insert(errors->end(), attempt.begin(), attempt.end());
+            }
+            _skippedOperations = committedSkips;
+            return false;
+        }
+        for (const SdfPath &culprit : culprits) {
+            _skippedOperations.emplace(culprit, _lastCompileError);
+        }
+    }
+    for (const auto &[path, reason] : _skippedOperations) {
+        const std::string line =
+            "Skipped operation " + path.GetString() + " -- " + reason;
+        TF_WARN("RigExec %s: %s", _rigPath.GetText(), line.c_str());
+        if (errors) {
+            errors->push_back("warning: " + line);
+        }
+    }
+    if (errors) {
+        errors->insert(errors->end(), attempt.begin(), attempt.end());
+    }
+    return true;
+}
+
+bool
+RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
 {
     RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile", "compile");
     // DROP THE GIL FOR THE WHOLE CALL. Compile dispatches exec work to
@@ -5660,7 +5864,11 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     // cannot leave one open.
     RigExecProfilePhases compileBlocks(&_profiler, "compile");
 
-    auto reportError = [errors](const std::string &message) {
+    auto reportError = [this, errors](const std::string &message) {
+        // Kept apart from the notices: it is what _CompileEpoch attributes
+        // to an operation. Every caller returns false right after, so the
+        // last one is the one that failed the attempt.
+        _lastCompileError = message;
         if (errors) {
             errors->push_back(message);
         }
@@ -5696,7 +5904,8 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
         return false;
     }
     std::string adjustmentReadError;
-    if (!_ValidateAdjustmentPoseConsumers(_stage, rig, &adjustmentReadError)) {
+    if (!_ValidateAdjustmentPoseConsumers(_stage, rig, &adjustmentReadError,
+                                          _skippedOperations)) {
         reportError(adjustmentReadError);
         return false;
     }
@@ -5705,7 +5914,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     // state until every check passes, so a failed structural edit keeps
     // the previous epoch publishable (spec §4.1 atomic transactions).
     std::vector<SdfPath> newJointPaths =
-        _DiscoverJointOutputs(_stage, _rigPath);
+        _DiscoverJointOutputs(_stage, _rigPath, _skippedOperations);
     // A rig with no joints is legal.
     //
     // It used to be rejected here, on the reading that a joint is what a rig
@@ -5732,8 +5941,14 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     // the imaging chain, like OpenExec's IrJointScope guides). Discovered
     // here, with the other providers, because it is the last thing the exec
     // lane below needs before it can start.
-    const std::vector<UsdPrim> aggregateSolvers =
+    std::vector<UsdPrim> aggregateSolvers =
         _DiscoverAggregateSolvers(_stage, _rigPath);
+    aggregateSolvers.erase(
+        std::remove_if(aggregateSolvers.begin(), aggregateSolvers.end(),
+                       [this](const UsdPrim &solver) {
+                           return _IsSkippedOperation(solver.GetPath());
+                       }),
+        aggregateSolvers.end());
     std::vector<SdfPath> solverArrayPaths;
     solverArrayPaths.reserve(aggregateSolvers.size());
     for (const UsdPrim &solver : aggregateSolvers) {
@@ -6121,19 +6336,24 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     }
 
     compileBlocks.Next("DiscoverValidate.MoverDiscovery");
-    // Mover discovery: reverse-sibling post-order walk of the composed Movers
-    // namespace. Descendants run before their mover parent; sibling branches
-    // run bottom-to-top in usdview (reverse composed child order, spec §4.2).
+    // Mover discovery: reverse-sibling post-order walk of the whole composed
+    // rig. Carrying rigExec:moves is what makes a prim a mover -- the scope it
+    // sits under is an authoring convention, never a requirement (see
+    // _GetMoverExecutionOrder). Descendants run before their mover parent;
+    // sibling branches run bottom-to-top in usdview (reverse composed child
+    // order, spec §4.2).
     std::vector<RigExecMoverRecord> newMovers;
     /// Mover-bearing prims discovered but skipped because nothing is wired to
     /// their rigExec:moves yet. They are not outputs, but they ARE evidence
     /// that the rig root points somewhere real.
     size_t inertMovers = 0;
-    const UsdPrim movers =
-        _stage->GetPrimAtPath(_rigPath.AppendChild(TfToken("Movers")));
+    const UsdPrim moverRig = _stage->GetPrimAtPath(_rigPath);
     int ordinal = 0;
-    if (movers) {
-        for (const UsdPrim &prim : _GetMoverExecutionOrder(movers)) {
+    if (moverRig) {
+        for (const UsdPrim &prim : _GetMoverExecutionOrder(moverRig)) {
+            if (_IsSkippedOperation(prim.GetPath())) {
+                continue;
+            }
             const UsdRelationship moves = prim.GetRelationship(_movesRel);
             if (!moves) {
                 if (_IsFrameConstraintType(prim.GetTypeName())) {
@@ -6144,10 +6364,10 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                         "rigExec:moves relationship");
                     return false;
                 }
-                // A solver carries no rigExec:moves; it poses joints through
-                // the rig-wide solver discovery above, so here it is just
-                // skipped like any other grouping scope.
-                continue;  // grouping scope
+                // Not a mover: a solver, a control, a joint, a weight, or a
+                // grouping scope. Solvers pose joints through the rig-wide
+                // solver discovery above; the rest are read, not applied.
+                continue;
             }
             SdfPathVector targets;
             moves.GetTargets(&targets);
@@ -6159,10 +6379,10 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                 // the moment a wire is pulled.
                 //
                 // This is the same treatment a prim with no rigExec:moves at
-                // all already gets just above (grouping scope), with one
-                // difference: that case is silent because every Scope under
-                // Movers would otherwise announce itself, while an authored
-                // but empty write set is a wire the author meant to connect.
+                // all already gets just above, with one difference: that case
+                // is silent because every scope, control and joint in the rig
+                // would otherwise announce itself, while an authored but
+                // empty write set is a wire the author meant to connect.
                 // So it is skipped and SAID, never skipped silently.
                 ++inertMovers;
                 reportNotice("Mover has no moves targets: " +
@@ -6777,9 +6997,8 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     // volume publishes its falloff guide while it is being authored, and a
     // mover publishes whatever its targets are. Zero of all four is a rig that
     // evaluates to an empty generation every frame, which is far likelier to
-    // be an authoring mistake -- a Movers scope whose contents were renamed
-    // out from under it, a rig root pointed at the wrong prim -- than an
-    // intent.
+    // be an authoring mistake -- a rig root pointed at the wrong prim -- than
+    // an intent.
     // An inert mover is not an output, but it is evidence of intent: the rig
     // root found mover prims, they simply are not wired yet. Failing that is
     // the same mistake as failing the whole rig for one disconnected mover --
@@ -6920,7 +7139,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     // Solver -> its position in the SOLVER STACK ORDINAL: the reverse of the
     // composed pre-order of the whole rig, which is _GetMoverExecutionOrder's
     // rule (see the comment at its definition) applied to the solver set
-    // instead of the Movers subtree. Bottom composed sibling first, a parent
+    // instead of the movers. Bottom composed sibling first, a parent
     // after its descendants -- so "the bottom one executes first" reads the
     // same whichever kind of node a rigger is looking at, and a reorder in
     // usdview reorders the stack.
@@ -7127,6 +7346,9 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
             // carrying rigExec:joints is rejected wherever it sits.
             if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
                 for (const UsdPrim &solver : UsdPrimRange(rig)) {
+                    if (_IsSkippedOperation(solver.GetPath())) {
+                        continue;
+                    }
                     const UsdRelationship jointsRel =
                         solver.GetRelationship(TfToken("rigExec:joints"));
                     if (!jointsRel) {
@@ -9666,7 +9888,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
         } else {
             // In dependency order: each step waits on the next, the last on
             // the first. A constraint's wait on its predecessor in the
-            // Movers stack shows up here as an ordinary edge, which is how
+            // mover stack shows up here as an ordinary edge, which is how
             // "this follower is authored below what it needs" reads.
             size_t waiting = 0;
             for (const auto &[path, pending] : pendingPose) {

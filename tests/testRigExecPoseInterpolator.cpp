@@ -63,6 +63,26 @@
 #include <string>
 #include <vector>
 
+// A broken operation is set aside with a warning instead of failing the rig
+// (RigExecRigEvaluator::_CompileEpoch): the rest compiles and evaluates.
+// True when the compile succeeded and set aside every one of `operations`.
+static bool
+SkipsOperations(RigExecRigEvaluator &evaluator,
+                const std::vector<SdfPath> &operations,
+                std::vector<std::string> *errors)
+{
+    if (!evaluator.Compile(errors)) {
+        return false;
+    }
+    for (const SdfPath &operation : operations) {
+        if (!evaluator.GetSkippedOperations().count(operation)) {
+            return false;
+        }
+    }
+    return !operations.empty();
+}
+
+
 using namespace rigExec;
 
 static int failures = 0;
@@ -572,7 +592,7 @@ TestStructuralValidation()
             .SetTargets({SdfPath("/Asset/Rig/NotAProvider")});
         RigExecRigEvaluator evaluator(stage, kRig);
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        CHECK(SkipsOperations(evaluator, {kInterpolator}, &errors));
         CHECK(!errors.empty());
     }
     {   // No driver at all.
@@ -581,7 +601,7 @@ TestStructuralValidation()
             .GetRelationship(TfToken("rigExec:driver")).SetTargets({});
         RigExecRigEvaluator evaluator(stage, kRig);
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        CHECK(SkipsOperations(evaluator, {kInterpolator}, &errors));
     }
     {   // A child that is not a pose.
         UsdStageRefPtr stage = MakeRig();
@@ -589,7 +609,7 @@ TestStructuralValidation()
                           TfToken("Scope"));
         RigExecRigEvaluator evaluator(stage, kRig);
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        CHECK(SkipsOperations(evaluator, {kInterpolator}, &errors));
     }
     {   // outputs:weight is a source; an authored connection on it says
         // otherwise.

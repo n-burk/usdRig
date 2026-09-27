@@ -41,7 +41,7 @@ import platform
 import sys
 import time
 
-from pxr import Sdf, Usd
+from pxr import Sdf
 
 import rigexec
 
@@ -80,18 +80,18 @@ def schedule_shape(stage, rig, rig_root):
     for path, level in levels.items():
         by_level.setdefault(level, []).append(_name(path))
 
-    movers_path = Sdf.Path(rig_root).AppendChild("Movers")
-    movers = stage.GetPrimAtPath(movers_path)
-    constraints, chains, math_movers = 0, 0, 0
-    if movers:
-        for prim in Usd.PrimRange(movers):
-            t = prim.GetTypeName()
-            if t.endswith("Constraint"):
-                constraints += 1
-            elif t == "RigExecFloatMathMover":
-                math_movers += 1
-            elif prim.GetParent() == movers:
-                chains += 1
+    # The engine's own answers -- the movers it discovered, wherever they sit
+    # under the rig, and the geometry chains it built from them (one per
+    # written target) -- rather than a count of whatever scope they happen
+    # to be grouped under.
+    constraints, math_movers = 0, 0
+    for mover in rig.mover_order():
+        t = mover["type"]
+        if t.endswith("Constraint"):
+            constraints += 1
+        elif t == "RigExecFloatMathMover":
+            math_movers += 1
+    chains = sum(len(level["targets"]) for level in rig.chain_levels())
 
     return {
         "solver_count": len(levels),
