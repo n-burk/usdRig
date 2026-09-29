@@ -3367,8 +3367,38 @@ main(int argc, char **argv)
     const char *outerMode = getenv("RIGEXEC_EVALUATION_MODE");
     const bool outerChoseMode = outerMode && *outerMode;
 #endif
-    if (!outerChoseMode) {
+    const bool defaultMode = argc > 2 && std::string(argv[2]) == "--default-mode";
+    if (!outerChoseMode && !defaultMode) {
         SetEnv("RIGEXEC_EVALUATION_MODE", "baked");
+    }
+    if (defaultMode) {
+        UsdStageRefPtr stage = MakeTinyRig();
+        const SdfPath rig("/Asset/Rig");
+        RigExecImagingBridge bridge(stage, rig);
+        CHECK(bridge.Compile());
+        CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(1)).ok);
+        CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
+        CHECK(bridge.GetEvaluator().GetEvaluationModeSource() ==
+              RigExecEvaluationModeSource::Default);
+        RigExecRigEvaluator explicitMode(stage, rig, true);
+        CHECK(explicitMode.Compile());
+        CHECK(explicitMode.Evaluate(UsdTimeCode(1)).valid);
+        CHECK(explicitMode.GetBakedProgram() != nullptr);
+        explicitMode.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+        CHECK(explicitMode.Evaluate(UsdTimeCode(2)).valid);
+        CHECK(explicitMode.GetBakedProgram() == nullptr);
+        const UsdAttribute baked = stage->GetPrimAtPath(rig).GetAttribute(
+            TfToken("rigExec:baked"));
+        baked.Set(false);
+        CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(2)).ok);
+        CHECK(bridge.GetEvaluator().GetBakedProgram() == nullptr);
+        RigExecImagingBridge optedOut(stage, rig);
+        CHECK(optedOut.Compile());
+        CHECK(optedOut.EvaluateAndPublishResult(UsdTimeCode(1)).ok);
+        CHECK(optedOut.GetEvaluator().GetBakedProgram() == nullptr);
+        baked.Clear();
+        CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(3)).ok);
+        CHECK(bridge.GetEvaluator().GetBakedProgram() != nullptr);
     }
     const auto scratch =
         std::filesystem::temp_directory_path() /

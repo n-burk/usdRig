@@ -2617,8 +2617,15 @@ struct RigExecRigEvaluator::_SolverInputIndexInputs {
 
 RigExecRigEvaluator::RigExecRigEvaluator(
     const UsdStageRefPtr &stage, const SdfPath &rigPath)
+    : RigExecRigEvaluator(stage, rigPath, false)
+{
+}
+
+RigExecRigEvaluator::RigExecRigEvaluator(
+    const UsdStageRefPtr &stage, const SdfPath &rigPath, bool preferProgram)
     : _stage(stage)
     , _rigPath(rigPath)
+    , _preferProgram(preferProgram)
     , _evaluationMode(_EnvironmentEvaluationMode().mode)
     , _evaluationModeSource(_EnvironmentEvaluationMode().authored
                                 ? RigExecEvaluationModeSource::Environment
@@ -5822,7 +5829,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // nothing else.
     const RigExecEvaluationMode peekedMode = _PeekEvaluationMode();
     const bool deferExecPrep =
-        RigExecEvaluationModeRunsProgram(peekedMode, _evaluationModeSource) &&
+        _ModeRunsProgram(peekedMode) &&
         peekedMode != RigExecEvaluationMode::BakedWithParityCheck;
     // The parts WITHIN those regions, for the same reason and on the same
     // clock: a phase that takes a fifth of the compile says nothing about
@@ -13268,7 +13275,8 @@ RigExecRigEvaluator::_EnsureScopedClearShadow()
     // has not: Compile and Evaluate call this first. Whatever a caller set
     // before then is handed over here, in the order it would have been set
     // on a fresh evaluator; everything after is mirrored as it happens.
-    auto shadow = std::make_unique<RigExecRigEvaluator>(_stage, _rigPath);
+    auto shadow = std::make_unique<RigExecRigEvaluator>(
+        _stage, _rigPath, _preferProgram);
     shadow->_wholesaleValueClears = true;
     if (_evaluationModeSource == RigExecEvaluationModeSource::Explicit) {
         shadow->SetEvaluationMode(_evaluationMode);
@@ -13640,13 +13648,14 @@ RigExecRigEvaluator::_RefreshAttributeEvaluationMode()
             }
         }
     }
+    const bool ranProgram = _ModeRunsProgram();
     _evaluationModeSource = authored
         ? RigExecEvaluationModeSource::Attribute
         : RigExecEvaluationModeSource::Default;
     const RigExecEvaluationMode mode = authored && baked
         ? RigExecEvaluationMode::Baked
         : RigExecEvaluationMode::Dynamic;
-    if (mode == _evaluationMode) {
+    if (mode == _evaluationMode && ranProgram == _ModeRunsProgram(mode)) {
         return false;
     }
     _evaluationMode = mode;
@@ -13691,13 +13700,14 @@ RigExecRigEvaluator::SetEvaluationMode(RigExecEvaluationMode mode)
     // it is already in has still taken the decision away from the rig's
     // rigExec:baked, and a later notice on that attribute must not take it
     // back.
+    const bool ranProgram = _ModeRunsProgram();
     _evaluationModeSource = RigExecEvaluationModeSource::Explicit;
     // A stage left broken is compiled again on the next frame rather than
     // answered from the failure memo: the mode decides which preparations a
     // compile runs and so which of them can fail (deferExecPrep in Compile),
     // and this call moves the mode without a notice to say so.
     _failedCompile = _FailedCompileMemo();
-    if (mode == _evaluationMode) {
+    if (mode == _evaluationMode && ranProgram == _ModeRunsProgram(mode)) {
         return;
     }
     _evaluationMode = mode;

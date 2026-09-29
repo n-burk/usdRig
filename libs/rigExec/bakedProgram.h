@@ -114,8 +114,8 @@ enum class RigExecEvaluationModeSource {
 /// answer the same question from different paths.
 ///
 /// Off by default. With it off Dynamic is the exec walk and nothing else,
-/// which is what every in-tree stage that does not author rigExec:baked, and
-/// usdview, run today.
+/// unless a viewport evaluator opts into a program for its default mode.
+/// Explicit mode choices retain the policy described below.
 bool RigExecDynamicRunsProgram();
 
 /// Whether an evaluator in \p mode, chosen by \p source, builds the baked

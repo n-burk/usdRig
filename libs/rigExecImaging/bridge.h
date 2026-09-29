@@ -571,6 +571,7 @@ private:
     const RigExecOutputAffectedIndex *_SyncAffectedIndex();
     uint64_t _freshEpoch = 0;
     bool _freshEpochValid = false;
+    uint64_t _cacheEditSerial = 0;
     RigExecEvaluationMode _cacheMode = RigExecEvaluationMode::Baked;
     bool _cacheModeValid = false;
     mutable std::unordered_map<SdfPath, _GuideInputs, SdfPath::Hash>

@@ -3385,7 +3385,21 @@ RigExecImagingRegistry::_OnObjectsChanged(
                         session.bridge->GetEvaluator()
                             .ClassifyNoticeDisposition(notice,
                                                        &patchedPaths);
-                    if (disposition == RigExecNoticeDisposition::Patched ||
+                    const auto namesRig = [&session](const SdfPath &path) {
+                        return path.HasPrefix(session.rigPath) ||
+                               session.rigPath.HasPrefix(path);
+                    };
+                    const auto resynced = notice.GetResyncedPaths();
+                    const auto changed = notice.GetChangedInfoOnlyPaths();
+                    const bool rigStructureChanged = session.readRootsDirty &&
+                        (std::any_of(resynced.begin(), resynced.end(), namesRig) ||
+                         std::any_of(changed.begin(), changed.end(), namesRig));
+                    if (rigStructureChanged) {
+                        // A removed binding can disappear from the capture
+                        // index before this handler sees its notice.
+                        _CancelGenerationLocked(session.rigPath);
+                        session.bridge->ClearFrameCache();
+                    } else if (disposition == RigExecNoticeDisposition::Patched ||
                         disposition == RigExecNoticeDisposition::Edited ||
                         disposition ==
                             RigExecNoticeDisposition::StampBumped) {

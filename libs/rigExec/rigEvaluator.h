@@ -293,7 +293,11 @@ enum class RigExecNoticeDisposition {
 
 class RigExecRigEvaluator : public TfWeakBase {
 public:
+    /// preferProgram enables background-cache-compatible evaluation when no
+    /// attribute, environment setting, or caller selected a mode.
     RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath);
+    RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath,
+                        bool preferProgram);
     ~RigExecRigEvaluator();
 
     /// Discovers joints and movers, validates targets, and prepares the
@@ -1017,10 +1021,12 @@ private:
     /// Whether this evaluator's mode builds and runs the program; see
     /// RigExecEvaluationModeRunsProgram. The gates that REPORT a fallback
     /// ask RigExecEvaluationModeWantsProgram instead.
-    bool _ModeRunsProgram() const {
-        return RigExecEvaluationModeRunsProgram(_evaluationMode,
-                                                _evaluationModeSource);
+    bool _ModeRunsProgram(RigExecEvaluationMode mode) const {
+        return (_preferProgram && mode == RigExecEvaluationMode::Dynamic &&
+                _evaluationModeSource == RigExecEvaluationModeSource::Default) ||
+               RigExecEvaluationModeRunsProgram(mode, _evaluationModeSource);
     }
+    bool _ModeRunsProgram() const { return _ModeRunsProgram(_evaluationMode); }
     std::unique_ptr<RigExecTapSet> _taps;
     /// Observational solver-guide taps in their own prepared request: a
     /// failing or unused aggregate solver degrades guide drawing with a
@@ -1906,6 +1912,7 @@ private:
     std::map<SdfPath, GfMatrix4d> _volumeWeightMatrices;
 
     bool _publishWeightFields = true;
+    bool _preferProgram = false;
     /// The compiled epoch flattened into an exec-free op list, built at the
     /// end of Compile when the mode asks for one.
     ///

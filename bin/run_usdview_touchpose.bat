@@ -21,7 +21,7 @@ rem
 rem Alt still drives the camera, untouched.
 rem
 rem Why this exists rather than a flag on launch_usdview.bat: that script
-rem is the RigExec launcher and registers museAssistant and usdNoodles;
+rem is the RigExec launcher and registers usdNoodles;
 rem this one adds plugin\touchPose to PXR_PLUGINPATH_NAME the same way,
 rem APPENDING to the canonical value _env.bat sets rather than replacing
 rem it (pointing it at the SOURCE schema resources instead of the

@@ -11,7 +11,7 @@ produces a file rather than a mode.
 
 ## Dynamic: the live path
 
-Dynamic is the default and the reference. It is live OpenExec evaluation: the
+The dynamic evaluator uses live OpenExec evaluation: the
 composed scene plus the registered computations are **compiled** into an
 execution network, a batch of requested values becomes a reusable schedule, and
 each frame **evaluates** by pulling the invalid values and reusing the rest
@@ -20,9 +20,13 @@ from cache. Edit the stage and the affected part of the network is
 changing child order, changing a read phase) begin a new epoch, while ordinary
 value edits do not.
 
-This is what you get when you open a rig in `usdview` with the UsdRig imaging
-plugin loaded, scrub the timeline, or drag a control. It is also what stock
-`usdrecord` gets, with no bake step and no UsdRig flags:
+Standalone evaluators use this path by default. The imaging plugin used by
+`usdview` and `usdrecord` prefers the executable program for rigs without an
+explicit mode choice, enabling background frame-cache warming. It falls back
+to live OpenExec when a rig cannot use that program. Set
+`RIGEXEC_EVALUATION_MODE=reference` to request OpenExec explicitly.
+
+Rendering requires no exported bake:
 
 ```sh
 USD/bin/usdrecord --renderer GL --camera /IkAsset/MainCam \

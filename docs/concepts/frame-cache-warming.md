@@ -47,6 +47,17 @@ re-evaluation.
   enqueue costs about 1.2 ms on the heaviest measured rig, then the pool
   drains it in about 25 ms.
 
+## Viewport evaluation
+
+usdview prepares an executable program by default so the background workers
+can fill the animation range before playback. Explicit evaluation modes and
+an authored `rigExec:baked = false` retain their requested behavior. Rigs that
+cannot prepare a program still cache frames as you visit them.
+
+Set `RIGEXEC_DYNAMIC_RUNS_PROGRAM=0` to opt out of the viewport default.
+This leaves visited-frame caching enabled but prevents background warming
+for rigs using the dynamic evaluator.
+
 ## Switches
 
 | variable | default | what it does |
@@ -71,3 +82,11 @@ re-evaluation.
 
 See [architecture](../specs/spec.md), `libs/rigExec/frameCache.cpp`, and
 `libs/rigExec/backgroundScheduler.cpp` for cache ownership and scheduling.
+
+## Verification
+
+`bin/run_testusdview_framecache.bat` (or `.sh`) opens the animated arm in
+usdview, waits for automatic range warming, and replays the range in both
+directions. Pass another animated stage as its first argument. The native
+`testRigExecImagingFrameCacheDefault` suite checks default-mode cache hits,
+zero evaluator pulls on warmed frames, edit invalidation, and mode overrides.

@@ -184,7 +184,7 @@ fi
 
 # build/python is where the build stages the UsdNoodles package beside its
 # native module; see rigexec_register_usdnoodles below.
-export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant:$RIG/build/python${PY_SITE:+:$PY_SITE}${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/build/python${PY_SITE:+:$PY_SITE}${PYTHONPATH:+:$PYTHONPATH}"
 
 # The schema resources MUST be the GENERATED directory: only the generated
 # plugInfo carries the LibraryPath and implementsComputeExtent that let Plug
@@ -242,9 +242,8 @@ rigexec_require_usd() {
 }
 
 # Register the usdNoodles node-graph editor the build staged under
-# build/python/UsdNoodles. For the interactive launchers only, like the Muse
-# container: the headless runners must not load an extra panel into the app
-# they are asserting against. Call it after building, so a first build has
+# build/python/UsdNoodles. Interactive launchers register the editor; headless
+# runners leave it unloaded. Call it after building, so a first build has
 # already produced the plugInfo.json it looks for.
 #
 # An OpenUSD built from PR #4156 with noodles -- where this copy came from --

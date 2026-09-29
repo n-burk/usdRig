@@ -14,16 +14,7 @@ call "%~dp0_env.bat"
 call "%~dp0_require_python.bat"
 if errorlevel 1 exit /b 1
 
-rem Register the Muse assistant's plugin container. _env.bat puts museAssistant
-rem on PYTHONPATH for every helper, but registering it is deliberately left to
-rem the interactive launchers: the headless testusdview runners share that env
-rem and must not load an extra panel into the app they are asserting against.
-rem
-rem Hosted providers need MUSE_API_KEY (or ANTHROPIC_API_KEY). Local Apple FM
-rem and Ollama do not.
-set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\museAssistant"
-
-rem TouchPose, for the same reason and with the same caveat. This launcher
+rem Register TouchPose for interactive sessions. This launcher
 rem is the one an animator opens, and the toolset is not something they
 rem should have to pick a launcher for: without this the RigExec menu
 rem simply has no TouchPose item and nothing says why. plugin\touchPose

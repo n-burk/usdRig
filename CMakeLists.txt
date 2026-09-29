@@ -822,10 +822,16 @@ target_compile_definitions(testRigExecImagingFrameCache PRIVATE
     ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 add_test(NAME testRigExecImagingFrameCache COMMAND testRigExecImagingFrameCache
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecImagingFrameCacheDefault COMMAND "${CMAKE_COMMAND}" -E env
+    --unset=RIGEXEC_EVALUATION_MODE --unset=RIGEXEC_DYNAMIC_RUNS_PROGRAM
+    RIGEXEC_FRAME_CACHE=on RIGEXEC_ENABLE_PARALLEL_EVAL=1
+    "$<TARGET_FILE:testRigExecImagingFrameCache>"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples" --default-mode)
 
 foreach(_rigexec_plugin_test testRigExecFrameCacheCones_Verify
         testRigExecFrozenContext
-        testRigExecImagingFrameCache)
+        testRigExecImagingFrameCache
+        testRigExecImagingFrameCacheDefault)
     set_property(TEST ${_rigexec_plugin_test} APPEND PROPERTY
         ENVIRONMENT_MODIFICATION
         "PXR_PLUGINPATH_NAME=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
@@ -1362,13 +1368,6 @@ install(DIRECTORY plugin/rigExecUsdview/
         PATTERN "*.json"
         PATTERN "*.png")
 
-install(DIRECTORY plugin/museAssistant/
-    DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/museAssistant"
-    FILES_MATCHING
-        PATTERN ".*" EXCLUDE
-        PATTERN "__pycache__" EXCLUDE
-        PATTERN "*.py"
-        PATTERN "*.json")
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecImaging/resources/plugInfo.json.in")

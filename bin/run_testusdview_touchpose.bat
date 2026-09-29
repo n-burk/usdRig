@@ -48,7 +48,7 @@ if errorlevel 1 exit /b 1
 rem APPENDED, never replaced: _env.bat is the canonical value and points
 rem PXR_PLUGINPATH_NAME at the GENERATED schema resources. The TouchPose
 rem container is its own plugin directory, registered here the same way
-rem launch_usdview.bat registers museAssistant and usdNoodles.
+rem launch_usdview.bat registers usdNoodles.
 set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\touchPose"
 set "PYTHONPATH=%RIG%\plugin\touchPose;%PYTHONPATH%"
 

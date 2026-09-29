@@ -541,11 +541,15 @@ _PlaceOverridesIntoResolved(
 
 void
 _SampleWeightBindings(const RigExecBakedProgramImpl::WeightObject &object,
-                      const RigExecResolvedInputs *resolved, UsdTimeCode time,
-                      RigExecFrameInputs *out)
+                      const RigExecResolvedInputs *standing,
+                      const RigExecResolvedInputs *refreshed,
+                      const std::vector<char> &flags, UsdTimeCode time,
+                      RigExecFrameInputs *out,
+                      const RigExecResolvedInputs *chainFresh)
 {
     _VisitWeightInputs(object, [&](const auto &input) {
-        _SampleBinding(input, resolved, time, out);
+        _SampleFlaggedBinding(input, standing, refreshed, flags, time, out,
+                              chainFresh);
     });
 }
 
@@ -2657,7 +2661,8 @@ RigExecSampleFrameInputsWithChainBindings(
     }
     for (const RigExecBakedProgramImpl::WeightObject &object :
          B.weightObjects) {
-        _SampleWeightBindings(object, resolved, time, &sampled);
+        _SampleWeightBindings(object, resolved, &refreshed, overrideFlags,
+                              time, &sampled, chainFresh);
         _SampleWeightArrays(object, &refreshed, time, &sampled);
     }
     // Ribbon driver points: read straight off the stage by the prologue,
@@ -3159,8 +3164,9 @@ RigExecSampleFrameInputsWithBurstCache(
     for (size_t i = 0; i < B.weightObjects.size(); ++i) {
         if (weightSite < cache->weightSites.size() &&
             cache->weightSites[weightSite] == i) {
-            _SampleWeightBindings(B.weightObjects[i], resolved, time,
-                                  &sampled);
+            _SampleWeightBindings(B.weightObjects[i], resolved, &refreshed,
+                                  cache->overrideFlags, time, &sampled,
+                                  chainFresh);
             ++weightSite;
         }
         // Point arrays ride outside the burst memo (always fresh, like the

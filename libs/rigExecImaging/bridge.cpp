@@ -733,7 +733,8 @@ RigExecImagingBridge::RigExecImagingBridge(
     std::shared_ptr<RigExecSnapshotStore> store)
     : _stage(stage)
     , _rigPath(rigPath)
-    , _evaluator(std::make_unique<RigExecRigEvaluator>(stage, rigPath))
+    , _evaluator(std::make_unique<RigExecRigEvaluator>(
+          stage, rigPath, TfGetenvBool("RIGEXEC_DYNAMIC_RUNS_PROGRAM", true)))
     , _store(std::move(store))
     , _frameCache(std::make_shared<RigExecFrameCache>())
 {
@@ -2498,6 +2499,12 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     // While overrides stand the cache is neither read nor written, exactly
     // as when off; proofs and entries are left untouched, so releasing the
     // drag resumes hitting the authored frames.
+    const uint64_t serial = _evaluator->GetStageEditSerial();
+    if (!_warmIndex && _cacheEditSerial != serial) {
+        // Standalone bridges have no registry to retire proofs on edits.
+        _freshDigests.clear();
+    }
+    _cacheEditSerial = serial;
     const bool useCache = cacheMode != RigExecFrameCacheMode::Off &&
                           _interactiveOverrides.empty();
     if (useCache && _TryPublishCachedResult(time, &result)) {
