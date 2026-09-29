@@ -3,12 +3,15 @@
 RigExec is an experimental character-rig evaluator for OpenUSD 26.08. It
 evaluates controls, constraints, solvers, and geometry deformers in memory,
 then publishes the results through Hydra for live playback in `usdview`.
-Evaluation does not write results into the source stage.
 
 **Status: 0.1 alpha.** APIs and file formats may change. Original project code
 is [MIT licensed](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md)
 for bundled code, published methods, and unresolved asset provenance.
 The distribution [NOTICE](NOTICE) identifies OpenUSD, noodles, and font credits.
+
+Authors: [Nick Burkard] (https://www.github.com/n-burk)
+[Walt Yoder] (https://www.github.com/wyoder)
+[Matt Schiller] (https://www.github.com/matthewschiller)
 
 ## Features
 
@@ -20,7 +23,7 @@ The distribution [NOTICE](NOTICE) identifies OpenUSD, noodles, and font credits.
   with a standalone binary runtime.
 - `usdview` tools for controls, curves, layers, picking, and node graphs.
 
-RigExec builds against an unchanged OpenUSD installation with OpenExec.
+RigExec builds against OpenUSD installation with OpenExec.
 The [architecture guide](docs/specs/spec.md) explains the evaluation layers;
 the [node reference](docs/index.md) describes authoring and parameters.
 
@@ -113,8 +116,8 @@ status documented in the third-party notices.
 ## Development
 
 Run the build helper after native changes. For Python interaction math, use
-`bin/run_python_tests.sh` or `bin\run_python_tests.bat`. Viewer integration
-checks are available through the `bin/run_testusdview*` helpers and require a
+`bin/test/run_python_tests.sh` or `bin\test\run_python_tests.bat`. Viewer integration
+checks are available through the `bin/test/run_testusdview*` helpers and require a
 working graphics context.
 
 Node pages are generated from `libs/rigExecSchema/schema.usda` and

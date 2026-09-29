@@ -56,7 +56,16 @@ def ScrubForeignPxrFinders(usdInstall):
 
     def _is_outside(spec):
         locations = getattr(spec, "submodule_search_locations", None) or []
-        claimed = os.path.normcase((spec.origin or "") + "\n".join(locations))
+        # Normpath both sides of the comparison: the install root
+        # routinely arrives with an embedded ".." (ctest passes
+        # USD_INSTALL_DIR verbatim from its
+        # ${CMAKE_CURRENT_SOURCE_DIR}/../usd-install default), and
+        # without this the install's own claim reads as foreign and
+        # the finder carrying it is evicted.
+        parts = [spec.origin or ""]
+        parts.extend(str(location) for location in locations)
+        claimed = os.path.normcase("\n".join(
+            os.path.normpath(part) for part in parts if part))
         return home not in claimed
 
     for finder in list(sys.meta_path):

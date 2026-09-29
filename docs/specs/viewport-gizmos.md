@@ -75,4 +75,4 @@ Qt-free interaction code lives in `gizmoMath.py`, `gizmoScreen.py`,
 `gizmoDrag.py`, and `gizmoSnap.py` under `plugin/rigExecUsdview`.
 `gizmoUI.py` connects it to usdview and the shared undo stack.
 Run the corresponding `test_gizmo_*` suites with the Python test helper;
-`bin/run_testusdview_gizmo.sh` or `.bat` checks the viewport path.
+`bin/test/run_testusdview_gizmo.sh` or `.bat` checks the viewport path.

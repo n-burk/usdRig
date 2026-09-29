@@ -49,7 +49,7 @@
 #     that leaves the viewport subtly broken behind it is worse than no
 #     mode.
 #
-# Run with:  bin\run_testusdview_touchpose.bat
+# Run with:  bin\test\run_testusdview_touchpose.bat
 # Set TOUCHPOSE_SHOT=path.png to keep a frame grab of the highlight.
 #
 import os

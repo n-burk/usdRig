@@ -36,8 +36,8 @@ scripts; their defaults look for a sibling dependency install.
 
 1. Read relevant code and current changes before editing. Preserve user work.
 2. Build with `bin/build_rigexec.sh` or `bin\build_rigexec.bat`; these also run CTest.
-3. Use `bin/run_python_tests.sh` or `.bat` for Qt-free interaction changes.
-4. Use the relevant `bin/run_testusdview*` helper for viewport changes.
+3. Use `bin/test/run_python_tests.sh` or `.bat` for Qt-free interaction changes.
+4. Use the relevant `bin/test/run_testusdview*` helper for viewport changes.
 5. Report checks actually run and any unavailable dependency or graphics test.
 
 Use the existing tests to verify dependency invalidation, numerical conventions,

@@ -38,7 +38,7 @@
 #   * macOS and MSVC. README records those as locally verified; GitHub-
 #     hosted macOS/Windows + a matching OpenUSD prefix is a later pass.
 #   * Python bindings, usdNoodles (including testUsdNoodles), and every
-#     bin/run_testusdview*.sh harness. Those need Python-enabled OpenUSD,
+#     bin/test/run_testusdview*.sh harness. Those need Python-enabled OpenUSD,
 #     PySide/usdview, and a display.
 #
 # Host note: GitHub-hosted ubuntu-24.04 is 4 vCPU / 16 GB. OpenUSD is

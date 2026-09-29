@@ -46,4 +46,4 @@ drawn. Frame All fits the keys; a tangent overshoot may extend outside that view
 Shortcuts apply to the editor window and yield to text-entry widgets.
 Clamped/Plateau tangents, audio, retiming tools, and Euler filtering are not
 implemented. The Qt-free model is tested by `test_graph_model` and
-`test_graph_screen`; `bin/run_testusdview_graph.sh` or `.bat` checks the UI.
+`test_graph_screen`; `bin/test/run_testusdview_graph.sh` or `.bat` checks the UI.

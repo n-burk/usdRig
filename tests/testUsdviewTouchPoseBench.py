@@ -33,7 +33,7 @@
 #   pose         a rig control is moved with TouchPose on and a region
 #                selected, and the viewport redraws (playback / drag cost)
 #
-# Run:  bin/run_testusdview_touchpose_bench.sh [stage]
+# Run:  bin/test/run_testusdview_touchpose_bench.sh [stage]
 # Prints one line per measurement and RIGEXEC_TOUCHPOSE_BENCH at the end.
 #
 import os

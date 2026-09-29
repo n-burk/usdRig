@@ -365,13 +365,13 @@ rules in a headless module, Qt as a thin driver.
 ## Tests
 
 ```sh
-bin/run_python_tests.sh test_composition_arcs_model test_layer_opinions_model
-bin/run_testusdview_arcs.sh                   # the dialogs in real usdview
+bin/test/run_python_tests.sh test_composition_arcs_model test_layer_opinions_model
+bin/test/run_testusdview_arcs.sh                   # the dialogs in real usdview
 ```
 
 Both also run under ctest (`testCompositionArcsModel`,
 `testLayerOpinionsModel`), and both helpers have `.bat` twins for Windows:
-`bin\run_python_tests.bat`, `bin\run_testusdview_arcs.bat`.
+`bin\test\run_python_tests.bat`, `bin\test\run_testusdview_arcs.bat`.
 
 The headless tests cover every authoring rule against in-memory layers,
 and the row expansion, formatting, parsing and reordering that editing

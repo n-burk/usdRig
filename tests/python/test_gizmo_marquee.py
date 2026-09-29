@@ -20,7 +20,7 @@ import sys
 # SetupPluginTest is the shared form of test_rigexec_python's
 # _setup_environment -- same sys.path, DLL-directory and plugin-path
 # work, plus plugin/rigExecUsdview -- so this test runs from ctest, from
-# bin/run_python_tests, and from a bare shell alike.
+# bin/test/run_python_tests, and from a bare shell alike.
 import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()

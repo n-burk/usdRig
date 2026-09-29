@@ -18,6 +18,18 @@ if (MSVC)
         WIN32_LEAN_AND_MEAN)
 endif()
 
+# Bitwise parity with Gf and the frozen oracles needs OpenUSD's own
+# floating-point contraction: USD builds with -ffp-contract=off on Apple
+# (cmake/defaults/clangdefaults.cmake) so a*b+c is never fused into FMA.
+# Clang on ARM64 contracts by default, which drifts every memcmp/bitwise
+# test (RuntimeMath, RuntimePose, RuntimeGeometry, ImagingPlayback,
+# verify_binary, the Rbf oracle) by an ulp. -fno-fast-math does not cover
+# this; only -ffp-contract=off does. MSVC needs nothing: /fp:precise is
+# its default and it never auto-contracts.
+if (NOT MSVC)
+    add_compile_options(-ffp-contract=off)
+endif()
+
 set(RIGEXEC_INSTALL_LIBDIR     "lib"
     CACHE STRING "Install directory for libraries, relative to the prefix")
 set(RIGEXEC_INSTALL_INCLUDEDIR "include"

@@ -256,7 +256,7 @@ missing tail.
 | Authoring UI | `plugin/rigExecUsdview/volumeWeightUI.py` |
 | Influence overlay + guides | `libs/rigExecImaging/` (`RigExecImaging_SetWeightOverlay`) |
 | Example | `examples/11_VolumeWeights.usda` |
-| Tests | `tests/testRigExecWeightFields.cpp`, `tests/testRigExecVolumeWeights.cpp`, `tests/testRigExecWeightOverlay.cpp`, `bin/run_testusdview_overlay.bat` |
+| Tests | `tests/testRigExecWeightFields.cpp`, `tests/testRigExecVolumeWeights.cpp`, `tests/testRigExecWeightOverlay.cpp`, `bin/test/run_testusdview_overlay.bat` |
 
 ## Registering computations on an abstract base
 
@@ -310,7 +310,7 @@ correct and the fault was purely invalidation. The fix re-announces the
 prim with its upstream type on the on/off transition
 (`sceneIndices.cpp`, the structural arm of `NotifyGenerationPublished`).
 
-`bin/run_testusdview_overlay.bat` (and `bin/run_testusdview_overlay.sh`) now
+`bin/test/run_testusdview_overlay.bat` (and `bin/test/run_testusdview_overlay.sh`) now
 asserts on **pixels**, not just on the scene index, and that assertion is
 mutation-verified: disabling the resync makes it fail while every other test in
 the suite still passes.
@@ -413,7 +413,7 @@ through `currentFrame` and through `RigExecImaging_SetTime`, which is
 unambiguous by construction -- and compares the published points.
 Mutation-verified: restoring the property read fails that comparison
 (`(0.0, 9.5, 0.0)` vs `(0.06, 10.13, 0.48)`) while
-`bin/run_testusdview_overlay.bat` and all nine ctest binaries still pass,
+`bin/test/run_testusdview_overlay.bat` and all nine ctest binaries still pass,
 which is exactly the blindness that let it ship.
 
 ## What the epoch digest is and is not tested for

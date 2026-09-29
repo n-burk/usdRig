@@ -85,7 +85,7 @@ See [architecture](../specs/spec.md), `libs/rigExec/frameCache.cpp`, and
 
 ## Verification
 
-`bin/run_testusdview_framecache.bat` (or `.sh`) opens the animated arm in
+`bin/test/run_testusdview_framecache.bat` (or `.sh`) opens the animated arm in
 usdview, waits for automatic range warming, and replays the range in both
 directions. Pass another animated stage as its first argument. The native
 `testRigExecImagingFrameCacheDefault` suite checks default-mode cache hits,

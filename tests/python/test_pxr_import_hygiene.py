@@ -11,7 +11,8 @@ such finders before the first pxr import; this test pins that:
      the install once the bootstrap ran, and the import itself must
      land inside the install;
   2. synthetically, a hostile claim is dropped while a friendly one
-     from inside the install is kept;
+     from inside the install is kept -- including through an
+     unnormalized install root carrying "..", the form ctest passes;
   3. the helper launch path: the helper scripts put
      plugin/rigExecUsdview first on PYTHONPATH, so a sitecustomize
      there is the startup scrub for every helper-launched
@@ -44,7 +45,10 @@ def _usd_install():
 
 def _claim_locations(spec):
     locations = getattr(spec, "submodule_search_locations", None) or []
-    return os.path.normcase((spec.origin or "") + "\n".join(locations))
+    parts = [spec.origin or ""]
+    parts.extend(str(location) for location in locations)
+    return os.path.normcase("\n".join(
+        os.path.normpath(part) for part in parts if part))
 
 
 class _FakeFinder:
@@ -152,6 +156,32 @@ def main():
     assert hostile not in sys.meta_path, "a hostile pxr claim survived"
     assert friendly in sys.meta_path, "an install-local pxr claim was dropped"
     sys.meta_path.remove(friendly)
+
+    # 2b. The same verdict through an unnormalized install root. ctest
+    # passes USD_INSTALL_DIR verbatim from its
+    # ${CMAKE_CURRENT_SOURCE_DIR}/../usd-install default, so the root
+    # and the finders' origins both carry an embedded ".." above the
+    # install name. Normalization must apply to both sides of the
+    # comparison, or the install's own claim reads as foreign and the
+    # finder carrying it -- PathFinder -- is evicted, breaking every
+    # later import in the process.
+    messy_install = os.path.join(
+        os.path.dirname(usd_install), "usdRig", "..",
+        os.path.basename(usd_install))
+    messy_friendly = _FakeFinder(os.path.join(
+        messy_install, "lib", "python3.11", "site-packages",
+        "pxr", "__init__.py"))
+    messy_hostile = _FakeFinder(os.path.join(
+        "C:", "elsewhere", "pxr", "__init__.py"))
+    sys.meta_path.insert(0, messy_hostile)
+    sys.meta_path.insert(0, messy_friendly)
+    rigexec_test_env.ScrubForeignPxrFinders(messy_install)
+    assert messy_hostile not in sys.meta_path, (
+        "a hostile pxr claim survived under an unnormalized root")
+    assert messy_friendly in sys.meta_path, (
+        "an install-local pxr claim was dropped under an unnormalized "
+        "root: %s" % messy_install)
+    sys.meta_path.remove(messy_friendly)
 
     repo_root = pathlib.Path(__file__).resolve().parents[2]
 

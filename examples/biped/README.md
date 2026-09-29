@@ -177,7 +177,7 @@ C++ against the posed mesh (a BVH refit per pose). Measured on this
 character: a hover costs about **0.3 ms** where it cost 4-8 ms, a region
 crossing reaches the screen in about **15 ms** where it took 60-90 ms, and
 TouchPose adds almost nothing to a selection change where it added
-~200 ms (`bin\run_testusdview_touchpose_bench.bat`).
+~200 ms (`bin\test\run_testusdview_touchpose_bench.bat`).
 
 While the box is ticked the **mesh is not selectable**: a click on the skin
 belongs to TouchPose, and on unpainted skin it selects nothing rather than

@@ -21,6 +21,6 @@ a camera prim switches to the free camera first. No layer is edited.
 
 The widget uses `QPainter`; projection, region picking, and orientation math
 live in `plugin/rigExecUsdview/viewCubeMath.py`. Test them with
-`bin/run_python_tests.sh test_viewcube_math` or the `.bat` equivalent.
-`bin/run_testusdview_viewcube.sh` or `.bat` exercises the viewport integration.
+`bin/test/run_python_tests.sh test_viewcube_math` or the `.bat` equivalent.
+`bin/test/run_testusdview_viewcube.sh` or `.bat` exercises the viewport integration.
 Settings are session-local; roll buttons and projection menus are not provided.
