@@ -196,6 +196,12 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
         }
         object.falloffMin = ctx->Bind(prim, "inputs:falloffMin", 0.0f);
         object.falloffMax = ctx->Bind(prim, "inputs:falloffMax", 1.0f);
+        object.scaleXPos = ctx->Bind(prim, "inputs:scaleXPos", 1.0f);
+        object.scaleYPos = ctx->Bind(prim, "inputs:scaleYPos", 1.0f);
+        object.scaleZPos = ctx->Bind(prim, "inputs:scaleZPos", 1.0f);
+        object.scaleXNeg = ctx->Bind(prim, "inputs:scaleXNeg", 1.0f);
+        object.scaleYNeg = ctx->Bind(prim, "inputs:scaleYNeg", 1.0f);
+        object.scaleZNeg = ctx->Bind(prim, "inputs:scaleZNeg", 1.0f);
         object.scaleX = ctx->Bind(prim, "inputs:scaleX", 1.0f);
         object.scaleY = ctx->Bind(prim, "inputs:scaleY", 1.0f);
         object.scaleZ = ctx->Bind(prim, "inputs:scaleZ", 1.0f);
@@ -376,6 +382,14 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         inputs.params.strength = rd(object.strength);
         inputs.params.curve = object.falloffCurve;
         if (object.type != _tokens->planeWeight) {
+            inputs.positiveScales = GfVec3f(
+                rd(object.scaleXPos),
+                rd(object.scaleYPos),
+                rd(object.scaleZPos));
+            inputs.negativeScales = GfVec3f(
+                rd(object.scaleXNeg),
+                rd(object.scaleYNeg),
+                rd(object.scaleZNeg));
             inputs.scales = GfVec3f(rd(object.scaleX), rd(object.scaleY),
                                     rd(object.scaleZ));
         } else {
@@ -531,6 +545,12 @@ RigExecBakedNoteWeightInputs(
     RigExecBakedNoteInput(weight.invert, step);
     RigExecBakedNoteInput(weight.falloffMin, step);
     RigExecBakedNoteInput(weight.falloffMax, step);
+    RigExecBakedNoteInput(weight.scaleXPos, step);
+    RigExecBakedNoteInput(weight.scaleYPos, step);
+    RigExecBakedNoteInput(weight.scaleZPos, step);
+    RigExecBakedNoteInput(weight.scaleXNeg, step);
+    RigExecBakedNoteInput(weight.scaleYNeg, step);
+    RigExecBakedNoteInput(weight.scaleZNeg, step);
     RigExecBakedNoteInput(weight.scaleX, step);
     RigExecBakedNoteInput(weight.scaleY, step);
     RigExecBakedNoteInput(weight.scaleZ, step);

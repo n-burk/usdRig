@@ -500,6 +500,45 @@ TestSphereVolumeGuides()
     CHECK(Near(float(radii[0]), 1.0f));
     CHECK(Near(float(radii[1]), 2.0f));
 
+    const UsdPrim sphere = f.stage->GetPrimAtPath(_kVolumePath);
+    CHECK(sphere.GetAttribute(TfToken("inputs:scaleXPos")).Set(2.0f));
+    CHECK(sphere.GetAttribute(TfToken("inputs:scaleXNeg")).Set(0.5f));
+    for (const char *mode : {"wire", "geometry"}) {
+        CHECK(sphere.GetAttribute(TfToken("guide:drawMode")).Set(TfToken(mode)));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        for (const SdfPath &child : results->GetChildPrimPaths(_kVolumePath)) {
+            const auto guide = results->GetPrim(child);
+            CHECK(guide.primType == (std::string(mode) == "wire"
+                ? HdPrimTypeTokens->basisCurves : HdPrimTypeTokens->mesh));
+            const auto points = _GetPointsPrimvar(guide);
+            CHECK(!points.empty());
+            float low = 0, high = 0;
+            for (const auto &point : points) {
+                low = std::min(low, point[0]);
+                high = std::max(high, point[0]);
+                GfVec3f unit = point;
+                unit[0] /= unit[0] < 0 ? 0.5f : 2.0f;
+                CHECK(Near(unit.GetLength(), 1.0f));
+            }
+            CHECK(Near(low, -0.5f));
+            CHECK(Near(high, 2.0f));
+            if (guide.primType == HdPrimTypeTokens->mesh) {
+                auto topology = HdMeshSchema::GetFromParent(guide.dataSource).GetTopology();
+                const auto counts = topology.GetFaceVertexCounts()->GetTypedValue(0);
+                const auto indices = topology.GetFaceVertexIndices()->GetTypedValue(0);
+                size_t offset = 0;
+                for (int count : counts) {
+                    const GfVec3f a = points[indices[offset]];
+                    const GfVec3f b = points[indices[offset+1]];
+                    const GfVec3f c = points[indices[offset+2]];
+                    CHECK(GfDot(GfCross(b-a, c-a), a+b+c) > 0);
+                    offset += count;
+                }
+                CHECK(offset == indices.size());
+            }
+        }
+    }
+
     // guide:drawMode = "none" suppresses the guide without disturbing the
     // field -- and takes the announced children back with it.
     f.stage->GetPrimAtPath(_kVolumePath)

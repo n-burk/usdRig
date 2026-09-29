@@ -200,6 +200,12 @@ struct RigExecWireWeightObject {
     int32_t providerSlot = -1;
     RigExecWireInput falloffMin;
     RigExecWireInput falloffMax;
+    RigExecWireInput scaleXPos{RigExecWireInput::Tag::Float, 0.0, 1.0f};
+    RigExecWireInput scaleYPos{RigExecWireInput::Tag::Float, 0.0, 1.0f};
+    RigExecWireInput scaleZPos{RigExecWireInput::Tag::Float, 0.0, 1.0f};
+    RigExecWireInput scaleXNeg{RigExecWireInput::Tag::Float, 0.0, 1.0f};
+    RigExecWireInput scaleYNeg{RigExecWireInput::Tag::Float, 0.0, 1.0f};
+    RigExecWireInput scaleZNeg{RigExecWireInput::Tag::Float, 0.0, 1.0f};
     RigExecWireInput scaleX;
     RigExecWireInput scaleY;
     RigExecWireInput scaleZ;

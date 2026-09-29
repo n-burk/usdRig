@@ -283,6 +283,12 @@ _VisitWeightInputs(Obj &object, Fn &&fn)
     fn(object.invert);
     fn(object.falloffMin);
     fn(object.falloffMax);
+    fn(object.scaleXPos);
+    fn(object.scaleYPos);
+    fn(object.scaleZPos);
+    fn(object.scaleXNeg);
+    fn(object.scaleYNeg);
+    fn(object.scaleZNeg);
     fn(object.scaleX);
     fn(object.scaleY);
     fn(object.scaleZ);
@@ -5135,6 +5141,14 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
         packetInputs.params.strength = rd(object.strength);
         packetInputs.params.curve = object.falloffCurve;
         if (object.type != _frozenWeightTokens->planeWeight) {
+            packetInputs.positiveScales = GfVec3f(
+                rd(object.scaleXPos),
+                rd(object.scaleYPos),
+                rd(object.scaleZPos));
+            packetInputs.negativeScales = GfVec3f(
+                rd(object.scaleXNeg),
+                rd(object.scaleYNeg),
+                rd(object.scaleZNeg));
             packetInputs.scales = GfVec3f(rd(object.scaleX), rd(object.scaleY),
                                           rd(object.scaleZ));
         } else {

@@ -162,12 +162,17 @@ RigExecSphereWeightField(
     const std::vector<GfVec3f> &points,
     const GfMatrix4d &worldToLocal,
     const RigExecFalloffParams &params,
-    std::vector<float> *weights)
+    std::vector<float> *weights,
+    const GfVec3f &positiveScales, const GfVec3f &negativeScales)
 {
     weights->resize(points.size());
     for (size_t i = 0; i < points.size(); ++i) {
-        const float d =
-            RigExecSphereDistance(_ToLocal(worldToLocal, points[i]));
+        GfVec3f local = _ToLocal(worldToLocal, points[i]);
+        for (int axis = 0; axis < 3; ++axis) {
+            local[axis] /= local[axis] < 0.0f
+                ? negativeScales[axis] : positiveScales[axis];
+        }
+        const float d = RigExecSphereDistance(local);
         (*weights)[i] = RigExecEvaluateFalloff(d, params);
     }
 }

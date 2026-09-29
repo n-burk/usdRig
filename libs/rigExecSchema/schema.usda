@@ -1560,7 +1560,9 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     d = |(px/sx, py/sy, pz/sz)| in rigid volume-local space, so
     inputs:falloffMin/falloffMax are the inner and outer radii and
     inputs:scaleX/Y/Z make the iso-surfaces ellipsoidal (spec section
-    4.1, volumetric extension)."""
+    4.1, volumetric extension). The scaleXPos/YPos/ZPos and
+    scaleXNeg/YNeg/ZNeg inputs multiply the shared scale on each local
+    half-axis independently, keeping the origin fixed."""
 )
 {
     float inputs:scaleX = 1 (
@@ -1572,6 +1574,24 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     float inputs:scaleY = 1
     float inputs:scaleZ = 1
+    float inputs:scaleXPos = 1 (
+        doc = "Positive, finite multiplier of the shared axis scale on the positive local X half-axis."
+    )
+    float inputs:scaleYPos = 1 (
+        doc = "Positive, finite multiplier of the shared axis scale on the positive local Y half-axis."
+    )
+    float inputs:scaleZPos = 1 (
+        doc = "Positive, finite multiplier of the shared axis scale on the positive local Z half-axis."
+    )
+    float inputs:scaleXNeg = 1 (
+        doc = "Positive, finite multiplier of the shared axis scale on the negative local X half-axis."
+    )
+    float inputs:scaleYNeg = 1 (
+        doc = "Positive, finite multiplier of the shared axis scale on the negative local Y half-axis."
+    )
+    float inputs:scaleZNeg = 1 (
+        doc = "Positive, finite multiplier of the shared axis scale on the negative local Z half-axis."
+    )
 }
 
 class RigExecPlaneWeight "RigExecPlaneWeight" (

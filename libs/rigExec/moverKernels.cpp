@@ -136,6 +136,12 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((falloffMin, "inputs:falloffMin"))
     ((falloffMax, "inputs:falloffMax"))
     ((inputsInvert, "inputs:invert"))
+    ((inputsScaleXPos, "inputs:scaleXPos"))
+    ((inputsScaleYPos, "inputs:scaleYPos"))
+    ((inputsScaleZPos, "inputs:scaleZPos"))
+    ((inputsScaleXNeg, "inputs:scaleXNeg"))
+    ((inputsScaleYNeg, "inputs:scaleYNeg"))
+    ((inputsScaleZNeg, "inputs:scaleZNeg"))
     ((inputsScaleX, "inputs:scaleX"))
     ((inputsScaleY, "inputs:scaleY"))
     ((inputsScaleZ, "inputs:scaleZ"))
@@ -310,6 +316,13 @@ _BuildSphereWeightPacket(const VdfContext &ctx)
     static const TfToken sphereType("RigExecSphereWeight");
     rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
     _ReadAxisScales(ctx, &inputs.scales);
+    inputs.positiveScales[0] = _Scalar(ctx, _tokens->inputsScaleXPos, 1.0f);
+    inputs.positiveScales[1] = _Scalar(ctx, _tokens->inputsScaleYPos, 1.0f);
+    inputs.positiveScales[2] = _Scalar(ctx, _tokens->inputsScaleZPos, 1.0f);
+    inputs.negativeScales[0] = _Scalar(ctx, _tokens->inputsScaleXNeg, 1.0f);
+    inputs.negativeScales[1] = _Scalar(ctx, _tokens->inputsScaleYNeg, 1.0f);
+    inputs.negativeScales[2] = _Scalar(ctx, _tokens->inputsScaleZNeg, 1.0f);
+
     if (rigExec::RigExecVolumeWeightCanBuild(sphereType, inputs)) {
         _ReadVolumeWeightPoints(ctx, &inputs);
     }
@@ -721,7 +734,13 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSphereWeight)
         .Callback<RigExecWeightPacket>(&_BuildSphereWeightPacket)
         .Inputs(
             RIGEXEC_VOLUME_WEIGHT_COMMON_INPUTS,
-            RIGEXEC_VOLUME_WEIGHT_AXIS_SCALES);
+            RIGEXEC_VOLUME_WEIGHT_AXIS_SCALES,
+            AttributeValue<float>(_tokens->inputsScaleXPos),
+            AttributeValue<float>(_tokens->inputsScaleYPos),
+            AttributeValue<float>(_tokens->inputsScaleZPos),
+            AttributeValue<float>(_tokens->inputsScaleXNeg),
+            AttributeValue<float>(_tokens->inputsScaleYNeg),
+            AttributeValue<float>(_tokens->inputsScaleZNeg));
 }
 
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecPlaneWeight)

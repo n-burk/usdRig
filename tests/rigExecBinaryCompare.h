@@ -1375,6 +1375,12 @@ _BinaryCompareWeightObject(
     CHECK(live.providerSlot == wire.providerSlot);
     _BinaryCompareInput(live.falloffMin, wire.falloffMin, reader);
     _BinaryCompareInput(live.falloffMax, wire.falloffMax, reader);
+    _BinaryCompareInput(live.scaleXPos, wire.scaleXPos, reader);
+    _BinaryCompareInput(live.scaleYPos, wire.scaleYPos, reader);
+    _BinaryCompareInput(live.scaleZPos, wire.scaleZPos, reader);
+    _BinaryCompareInput(live.scaleXNeg, wire.scaleXNeg, reader);
+    _BinaryCompareInput(live.scaleYNeg, wire.scaleYNeg, reader);
+    _BinaryCompareInput(live.scaleZNeg, wire.scaleZNeg, reader);
     _BinaryCompareInput(live.scaleX, wire.scaleX, reader);
     _BinaryCompareInput(live.scaleY, wire.scaleY, reader);
     _BinaryCompareInput(live.scaleZ, wire.scaleZ, reader);
@@ -1628,6 +1634,12 @@ _BinaryCollectOracle(const rigExec::RigExecBakedProgramImpl &program)
         _BinaryCollectOne(object.invert, Tag::Float, &oracle);
         _BinaryCollectOne(object.falloffMin, Tag::Float, &oracle);
         _BinaryCollectOne(object.falloffMax, Tag::Float, &oracle);
+        _BinaryCollectOne(object.scaleXPos, Tag::Float, &oracle);
+        _BinaryCollectOne(object.scaleYPos, Tag::Float, &oracle);
+        _BinaryCollectOne(object.scaleZPos, Tag::Float, &oracle);
+        _BinaryCollectOne(object.scaleXNeg, Tag::Float, &oracle);
+        _BinaryCollectOne(object.scaleYNeg, Tag::Float, &oracle);
+        _BinaryCollectOne(object.scaleZNeg, Tag::Float, &oracle);
         _BinaryCollectOne(object.scaleX, Tag::Float, &oracle);
         _BinaryCollectOne(object.scaleY, Tag::Float, &oracle);
         _BinaryCollectOne(object.scaleZ, Tag::Float, &oracle);

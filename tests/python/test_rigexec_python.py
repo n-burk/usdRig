@@ -91,7 +91,7 @@ def _setup_environment():
         dll_dirs = [usd_install / "lib", usd_install / "bin", build_root]
         # Multi-config generators (Visual Studio) place the native libs in a
         # per-configuration subdirectory of the build root.
-        if build_root.is_dir():
+        if build_root.is_dir() and not (build_root / "rigExec.dll").is_file():
             for sub in sorted(build_root.iterdir()):
                 if sub.is_dir() and (sub / "rigExec.dll").is_file():
                     dll_dirs.append(sub)

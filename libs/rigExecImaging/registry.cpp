@@ -3994,6 +3994,18 @@ _AccumulateRestGuideBounds(
             }
         }
         if (type == "RigExecSphereWeight") {
+            const PXR_NS::GfVec3d positiveScales(
+                floatNumber("inputs:scaleXPos", 1.0),
+                floatNumber("inputs:scaleYPos", 1.0),
+                floatNumber("inputs:scaleZPos", 1.0));
+            const PXR_NS::GfVec3d negativeScales(
+                floatNumber("inputs:scaleXNeg", 1.0),
+                floatNumber("inputs:scaleYNeg", 1.0),
+                floatNumber("inputs:scaleZNeg", 1.0));
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
+                    !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) return false;
+            }
             bool found = false;
             for (const double radius : {falloffMin, falloffMax}) {
                 if (!std::isfinite(radius) || radius <= 0.0) {
@@ -4003,9 +4015,9 @@ _AccumulateRestGuideBounds(
                 scale.SetScale(PXR_NS::GfVec3d(
                     radius * axisScale[0], radius * axisScale[1],
                     radius * axisScale[2]));
-                const PXR_NS::GfVec3d half(1.0 + halfWidth);
+                const PXR_NS::GfVec3d padding(halfWidth);
                 range->UnionWith(
-                    PXR_NS::GfBBox3d(PXR_NS::GfRange3d(-half, half),
+                    PXR_NS::GfBBox3d(PXR_NS::GfRange3d(-negativeScales - padding, positiveScales + padding),
                                      scale * rest)
                         .ComputeAlignedRange());
                 found = true;

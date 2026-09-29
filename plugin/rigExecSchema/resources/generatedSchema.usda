@@ -2229,8 +2229,38 @@ class RigExecSphereWeight "RigExecSphereWeight" (
         the radial distance, so the iso-surfaces are ellipsoids."""
         }
     )
+    float inputs:scaleXNeg = 1 (
+        customData = {
+            string userDocBrief = "Positive, finite multiplier of the shared axis scale on the negative local X half-axis."
+        }
+    )
+    float inputs:scaleXPos = 1 (
+        customData = {
+            string userDocBrief = "Positive, finite multiplier of the shared axis scale on the positive local X half-axis."
+        }
+    )
     float inputs:scaleY = 1
+    float inputs:scaleYNeg = 1 (
+        customData = {
+            string userDocBrief = "Positive, finite multiplier of the shared axis scale on the negative local Y half-axis."
+        }
+    )
+    float inputs:scaleYPos = 1 (
+        customData = {
+            string userDocBrief = "Positive, finite multiplier of the shared axis scale on the positive local Y half-axis."
+        }
+    )
     float inputs:scaleZ = 1
+    float inputs:scaleZNeg = 1 (
+        customData = {
+            string userDocBrief = "Positive, finite multiplier of the shared axis scale on the negative local Z half-axis."
+        }
+    )
+    float inputs:scaleZPos = 1 (
+        customData = {
+            string userDocBrief = "Positive, finite multiplier of the shared axis scale on the positive local Z half-axis."
+        }
+    )
     float inputs:strength = 1 (
         customData = {
             string userDocBrief = "Final multiplier on the remapped weight."

@@ -177,6 +177,12 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
         Add(object.invert, RigExecWireInput::Tag::Float);
         Add(object.falloffMin, RigExecWireInput::Tag::Float);
         Add(object.falloffMax, RigExecWireInput::Tag::Float);
+        Add(object.scaleXPos, RigExecWireInput::Tag::Float);
+        Add(object.scaleYPos, RigExecWireInput::Tag::Float);
+        Add(object.scaleZPos, RigExecWireInput::Tag::Float);
+        Add(object.scaleXNeg, RigExecWireInput::Tag::Float);
+        Add(object.scaleYNeg, RigExecWireInput::Tag::Float);
+        Add(object.scaleZNeg, RigExecWireInput::Tag::Float);
         Add(object.scaleX, RigExecWireInput::Tag::Float);
         Add(object.scaleY, RigExecWireInput::Tag::Float);
         Add(object.scaleZ, RigExecWireInput::Tag::Float);

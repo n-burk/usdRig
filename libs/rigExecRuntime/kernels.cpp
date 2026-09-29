@@ -316,6 +316,18 @@ RrProgram::WeightInput(size_t object, int field) const
         return w.falloffMin;
     case RrWeightFalloffMax:
         return w.falloffMax;
+    case RrWeightScaleXPos:
+        return w.scaleXPos;
+    case RrWeightScaleYPos:
+        return w.scaleYPos;
+    case RrWeightScaleZPos:
+        return w.scaleZPos;
+    case RrWeightScaleXNeg:
+        return w.scaleXNeg;
+    case RrWeightScaleYNeg:
+        return w.scaleYNeg;
+    case RrWeightScaleZNeg:
+        return w.scaleZNeg;
     case RrWeightScaleX:
         return w.scaleX;
     case RrWeightScaleY:

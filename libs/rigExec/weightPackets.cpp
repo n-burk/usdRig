@@ -314,10 +314,12 @@ _BuildSphereWeightPacket(const RigExecVolumeWeightInputs &inputs)
             &points)) {
         return packet;
     }
+    if (!_ValidateScales(inputs.positiveScales) ||
+        !_ValidateScales(inputs.negativeScales)) return packet;
     std::vector<float> weights;
     RigExecSphereWeightField(
         *points, _ApplyAxisScales(worldToLocal, inputs.scales), inputs.params,
-        &weights);
+        &weights, inputs.positiveScales, inputs.negativeScales);
     if (!_FinishVolumeWeight(&packet, &weights)) {
         return RigExecWeightPacket();
     }
@@ -409,6 +411,9 @@ RigExecVolumeWeightCanBuild(
     const TfToken &typeName, const RigExecVolumeWeightInputs &inputs)
 {
     GfMatrix4d worldToLocal(1.0);
+    if (typeName == "RigExecSphereWeight" &&
+        (!_ValidateScales(inputs.positiveScales) ||
+         !_ValidateScales(inputs.negativeScales))) return false;
     return _CheckVolumePrologue(
         _UsesAxisScales(typeName), inputs, &worldToLocal);
 }

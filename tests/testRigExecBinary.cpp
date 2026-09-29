@@ -103,7 +103,7 @@ TestContainerRejections()
     CHECK(!RigExecBinaryReader::Open(good.data(), 3, &error));
 
     bad = good;
-    bad[4] = 2;  // major version 2
+    bad[4] = 1;  // legacy records must be rejected by the major 2 reader
     CHECK(!RigExecBinaryReader::Open(bad.data(), bad.size(), &error));
     CHECK(error.find("version") != std::string::npos);
 

@@ -30,12 +30,18 @@ framable prim positioned by the same avars as a control or joint — so a
 sphere authored inside a joint rides that joint with nothing wired, and
 the region a mover grabs can be animated by moving the ball. Per-axis
 `inputs:scaleX/Y/Z` turn the iso-surfaces into ellipsoids.
+`inputs:scaleXPos/YPos/ZPos` and `inputs:scaleXNeg/YNeg/ZNeg` multiply
+the matching shared axis scale independently on each local half-axis.
+All six default to 1, preserving existing shapes; values must be finite
+and positive. The center stays fixed as either side grows or shrinks.
 
 Radial falloff about the volume's placed origin:
 d = |(px/sx, py/sy, pz/sz)| in rigid volume-local space, so
 inputs:falloffMin/falloffMax are the inner and outer radii and
 inputs:scaleX/Y/Z make the iso-surfaces ellipsoidal (spec section
-4.1, volumetric extension).
+4.1, volumetric extension). The scaleXPos/YPos/ZPos and
+scaleXNeg/YNeg/ZNeg inputs multiply the shared scale on each local
+half-axis independently, keeping the origin fixed.
 
 ## How it works
 
@@ -43,8 +49,9 @@ The prim publishes a weight packet that the bound mover consumes as
 its envelope during the geometry (point-chain) phase. Each evaluation it
 takes its own posed frame from `computePointFrame`, strips scale and
 shear so the field matches the rigid guide that is drawn, divides local
-coordinates by `inputs:scaleX/Y/Z`, and measures
-`d = |(px/sx, py/sy, pz/sz)|` for every element of
+coordinates by `inputs:scaleX/Y/Z` and the matching positive or negative
+local-axis multiplier, then measures `d = |(px/sx, py/sy, pz/sz)|`
+using those effective divisors for every element of
 `rigExec:weightTarget` — or of `rigExec:sampleSource`, when authored,
 which changes *what is measured* without changing what is weighted.
 `d` is normalized across the falloff band, exchanged end-for-end by
@@ -413,6 +420,42 @@ packet is invalid, rather than silently collapsing the volume.
 #### `inputs:scaleZ`
 
 *Type:* `float`. *Default:* `1`.
+
+#### `inputs:scaleXPos`
+
+*Type:* `float`. *Default:* `1`.
+
+Positive, finite multiplier of the shared axis scale on the positive local X half-axis.
+
+#### `inputs:scaleYPos`
+
+*Type:* `float`. *Default:* `1`.
+
+Positive, finite multiplier of the shared axis scale on the positive local Y half-axis.
+
+#### `inputs:scaleZPos`
+
+*Type:* `float`. *Default:* `1`.
+
+Positive, finite multiplier of the shared axis scale on the positive local Z half-axis.
+
+#### `inputs:scaleXNeg`
+
+*Type:* `float`. *Default:* `1`.
+
+Positive, finite multiplier of the shared axis scale on the negative local X half-axis.
+
+#### `inputs:scaleYNeg`
+
+*Type:* `float`. *Default:* `1`.
+
+Positive, finite multiplier of the shared axis scale on the negative local Y half-axis.
+
+#### `inputs:scaleZNeg`
+
+*Type:* `float`. *Default:* `1`.
+
+Positive, finite multiplier of the shared axis scale on the negative local Z half-axis.
 
 ## Example
 

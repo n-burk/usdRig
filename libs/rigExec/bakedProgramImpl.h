@@ -2409,6 +2409,7 @@ struct RigExecBakedProgramImpl {
         int providerSlot = -1;
         RigExecBakedInput<float> falloffMin, falloffMax;
         RigExecBakedInput<float> scaleX, scaleY, scaleZ;
+        RigExecBakedInput<float> scaleXPos, scaleYPos, scaleZPos, scaleXNeg, scaleYNeg, scaleZNeg;
         RigExecBakedInput<float> extentU, extentV;
         TfToken planeAxis, planeBounds;
         /// The points-bearing relationships, as the attributes their

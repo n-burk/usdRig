@@ -629,6 +629,12 @@ _PutWeightObject(std::vector<uint8_t> *out,
     RigExecWirePutI32(out, object.providerSlot);
     RigExecWirePutInput(out, object.falloffMin);
     RigExecWirePutInput(out, object.falloffMax);
+    RigExecWirePutInput(out, object.scaleXPos);
+    RigExecWirePutInput(out, object.scaleYPos);
+    RigExecWirePutInput(out, object.scaleZPos);
+    RigExecWirePutInput(out, object.scaleXNeg);
+    RigExecWirePutInput(out, object.scaleYNeg);
+    RigExecWirePutInput(out, object.scaleZNeg);
     RigExecWirePutInput(out, object.scaleX);
     RigExecWirePutInput(out, object.scaleY);
     RigExecWirePutInput(out, object.scaleZ);
@@ -716,6 +722,12 @@ _ReadWeightObject(RigExecWireReader *reader,
         !reader->ReadI32(&object->providerSlot) ||
         !RigExecWireReadInput(reader, &object->falloffMin) ||
         !RigExecWireReadInput(reader, &object->falloffMax) ||
+        !RigExecWireReadInput(reader, &object->scaleXPos) ||
+        !RigExecWireReadInput(reader, &object->scaleYPos) ||
+        !RigExecWireReadInput(reader, &object->scaleZPos) ||
+        !RigExecWireReadInput(reader, &object->scaleXNeg) ||
+        !RigExecWireReadInput(reader, &object->scaleYNeg) ||
+        !RigExecWireReadInput(reader, &object->scaleZNeg) ||
         !RigExecWireReadInput(reader, &object->scaleX) ||
         !RigExecWireReadInput(reader, &object->scaleY) ||
         !RigExecWireReadInput(reader, &object->scaleZ) ||

@@ -305,6 +305,14 @@ main(int argc, char **argv)
         CHECK(_Near(sphereRange.GetMin(), GfVec3d(3.85, -3.075, -3.075)));
         CHECK(_Near(sphereRange.GetMax(), GfVec3d(16.15, 3.075, 3.075)));
 
+        CHECK(sphere.GetAttribute(TfToken("inputs:scaleXPos")).Set(2.0f));
+        CHECK(sphere.GetAttribute(TfToken("inputs:scaleXNeg")).Set(0.5f));
+        volumeCache.Clear();
+        const GfRange3d asymmetricRange =
+            volumeCache.ComputeWorldBound(sphere).ComputeAlignedRange();
+        CHECK(_Near(asymmetricRange.GetMin(), GfVec3d(6.85, -3.075, -3.075)));
+        CHECK(_Near(asymmetricRange.GetMax(), GfVec3d(22.15, 3.075, 3.075)));
+
         const GfRange3d planeRange =
             volumeCache.ComputeWorldBound(plane).ComputeAlignedRange();
         CHECK(!planeRange.IsEmpty());

@@ -475,11 +475,17 @@ _RrSphereWeightField(const std::vector<RrVec3f> &points,
                      const RrMat4d &worldToLocal, float falloffMin,
                      float falloffMax, float invert, float strength,
                      const std::vector<float> &curve,
-                     std::vector<float> *weights)
+                     std::vector<float> *weights,
+                     const RrVec3f &positiveScales, const RrVec3f &negativeScales)
 {
     weights->resize(points.size());
     for (size_t i = 0; i < points.size(); ++i) {
-        const float d = _RrToLocal(worldToLocal, points[i]).GetLength();
+        RrVec3f local = _RrToLocal(worldToLocal, points[i]);
+        for (int axis = 0; axis < 3; ++axis) {
+            local[axis] /= local[axis] < 0.0f
+                ? negativeScales[axis] : positiveScales[axis];
+        }
+        const float d = local.GetLength();
         (*weights)[i] = _RrEvaluateFalloff(d, falloffMin, falloffMax,
                                            invert, strength, curve);
     }
@@ -1146,6 +1152,7 @@ _RrBuildSpherePacket(const RrProgram *program,
                      const RrPointFrame *placement, bool hasPlacement,
                      float falloffMin, float falloffMax, float invert,
                      float strength, const RrVec3f &scales,
+                     const RrVec3f &positiveScales, const RrVec3f &negativeScales,
                      const std::vector<RrVec3f> &targetPoints,
                      const std::vector<RrVec3f> &samplePoints)
 {
@@ -1159,10 +1166,14 @@ _RrBuildSpherePacket(const RrProgram *program,
         return packet;
     }
     std::vector<float> weights;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
+            !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) return packet;
+    }
     _RrSphereWeightField(*points,
                          _RrApplyAxisScales(worldToLocal, scales),
                          falloffMin, falloffMax, invert, strength,
-                         wire.falloffCurve, &weights);
+                         wire.falloffCurve, &weights, positiveScales, negativeScales);
     RrWeightPacket out;
     if (!_RrFinishVolumeWeight(program, &packet, &weights, &out)) {
         return out;
@@ -1379,10 +1390,18 @@ _RrRunWeightPacket(RrProgram *program, size_t step,
             }
         }
         if (isSphere) {
+            const RrVec3f positiveScales(
+                _RrReadWeightFloat(program, index, RrWeightScaleXPos),
+                _RrReadWeightFloat(program, index, RrWeightScaleYPos),
+                _RrReadWeightFloat(program, index, RrWeightScaleZPos));
+            const RrVec3f negativeScales(
+                _RrReadWeightFloat(program, index, RrWeightScaleXNeg),
+                _RrReadWeightFloat(program, index, RrWeightScaleYNeg),
+                _RrReadWeightFloat(program, index, RrWeightScaleZNeg));
             store.weightPackets[index] = _RrBuildSpherePacket(
                 program, wire, placement, hasPlacement, falloffMin,
-                falloffMax, invert, strength, scales, targetPoints,
-                samplePoints);
+                falloffMax, invert, strength, scales, positiveScales,
+                negativeScales, targetPoints, samplePoints);
         } else if (isPlane) {
             store.weightPackets[index] = _RrBuildPlanePacket(
                 program, wire, placement, hasPlacement, falloffMin,

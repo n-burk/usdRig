@@ -409,13 +409,13 @@ _ReadCurveGuidePoints(
 }
 
 // One sphere iso-surface at local radius \p radius.
-// The points are the UNIT wire sphere and the radius (times the per-axis
-// divisors, which is what makes the iso-surface an ellipsoid) rides in the
-// transform -- so the wire and implicit draw modes are sized identically
-// and the radius can never be applied twice.
+// The radius and shared axis scales ride in the transform. Directional
+// scales reshape the unit points; asymmetric geometry uses a closed mesh
+// because an implicit sphere cannot represent unequal half-axes.
 void
 _AppendSphereVolumeGuide(
-    double radius, const GfVec3d &axisScale, bool wire,
+    double radius, const GfVec3d &axisScale,
+    const GfVec3d &positiveScales, const GfVec3d &negativeScales, bool wire,
     const GfMatrix4d &rigidToAsset, double wireWidth,
     std::vector<RigExecVolumeGuideElement> *elements)
 {
@@ -432,10 +432,61 @@ _AppendSphereVolumeGuide(
 
     RigExecVolumeGuideElement element;
     element.xform = scale * rigidToAsset;
-    if (!wire) {
+    const bool asymmetric = positiveScales != negativeScales;
+    if (!wire && !asymmetric) {
+        GfMatrix4d directional(1.0);
+        directional.SetScale(positiveScales);
+        element.xform = directional * element.xform;
         // Hydra's own implicit, exactly as the joint and control guides
         // use it. Unit radius, set explicitly by the scene index.
         element.primType = HdPrimTypeTokens->sphere;
+        elements->push_back(std::move(element));
+        return;
+    }
+    auto shapePoint = [&](GfVec3f p) {
+        for (int axis = 0; axis < 3; ++axis)
+            p[axis] *= float(p[axis] < 0 ? negativeScales[axis] : positiveScales[axis]);
+        return p;
+    };
+    if (!wire) {
+        element.primType = HdPrimTypeTokens->mesh;
+        element.normalsInterpolation = TfToken("vertex");
+        constexpr int longitude = 64, latitude = 32;
+        constexpr double pi = 3.14159265358979323846;
+        auto vertex = [&](const GfVec3f &unit) {
+            element.points.push_back(shapePoint(unit));
+            GfVec3f normal = unit;
+            for (int a = 0; a < 3; ++a)
+                normal[a] /= float(unit[a] < 0 ? negativeScales[a] : positiveScales[a]);
+            normal.Normalize();
+            element.normals.push_back(normal);
+        };
+        vertex(GfVec3f(0, 1, 0));
+        for (int j = 1; j < latitude; ++j) {
+            const double theta = pi * j / latitude;
+            for (int i = 0; i < longitude; ++i) {
+                const double phi = 2 * pi * i / longitude;
+                vertex(GfVec3f(float(std::sin(theta) * std::cos(phi)),
+                              float(std::cos(theta)),
+                              float(std::sin(theta) * std::sin(phi))));
+            }
+        }
+        const int bottom = int(element.points.size());
+        vertex(GfVec3f(0, -1, 0));
+        auto face = [&](std::initializer_list<int> ids) {
+            element.counts.push_back(int(ids.size()));
+            for (int id : ids) element.indices.push_back(id);
+        };
+        for (int i = 0; i < longitude; ++i) {
+            const int next = (i + 1) % longitude;
+            face({0, 1 + next, 1 + i});
+            for (int j = 0; j < latitude - 2; ++j) {
+                const int row = 1 + j * longitude;
+                face({row + i, row + next, row + longitude + next, row + longitude + i});
+            }
+            const int row = 1 + (latitude - 2) * longitude;
+            face({row + i, row + next, bottom});
+        }
         elements->push_back(std::move(element));
         return;
     }
@@ -447,6 +498,7 @@ _AppendSphereVolumeGuide(
     _AppendVolumeRing(kOrigin, kX, kZ, _kVolumeRingSegments, &element.points);
     _AppendVolumeRing(kOrigin, kX, kY, _kVolumeRingSegments, &element.points);
     _AppendVolumeRing(kOrigin, kY, kZ, _kVolumeRingSegments, &element.points);
+    for (GfVec3f &point : element.points) point = shapePoint(point);
     element.counts = VtIntArray{_kVolumeRingSegments + 1,
                                 _kVolumeRingSegments + 1,
                                 _kVolumeRingSegments + 1};
@@ -1363,8 +1415,21 @@ RigExecImagingBridge::_FillVolumeGuides(
                 continue;
             }
             if (typeName == "RigExecSphereWeight") {
+                const GfVec3d positiveScales(
+                    readFloat("inputs:scaleXPos", 1.0f),
+                    readFloat("inputs:scaleYPos", 1.0f),
+                    readFloat("inputs:scaleZPos", 1.0f));
+                const GfVec3d negativeScales(
+                    readFloat("inputs:scaleXNeg", 1.0f),
+                    readFloat("inputs:scaleYNeg", 1.0f),
+                    readFloat("inputs:scaleZNeg", 1.0f));
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
+                        !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) scaleOk = false;
+                }
+                if (!scaleOk) continue;
                 for (const double radius : {falloffMin, falloffMax}) {
-                    _AppendSphereVolumeGuide(radius, axisScale, wire, rigid,
+                    _AppendSphereVolumeGuide(radius, axisScale, positiveScales, negativeScales, wire, rigid,
                                              wireWidth, &elements);
                 }
             } else if (typeName == "RigExecCurveWeight") {

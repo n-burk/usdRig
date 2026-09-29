@@ -3669,6 +3669,12 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                  "inputs:driver", "inputs:scale", "inputs:bias",
                  "inputs:falloffMin", "inputs:falloffMax",
                  "inputs:invert", "inputs:strength", "inputs:scaleX",
+                 "inputs:scaleXPos",
+                 "inputs:scaleYPos",
+                 "inputs:scaleZPos",
+                 "inputs:scaleXNeg",
+                 "inputs:scaleYNeg",
+                 "inputs:scaleZNeg",
                  "inputs:scaleY", "inputs:scaleZ", "inputs:extentU",
                  "inputs:extentV", "inputs:weights", "rigExec:autoSmooth",
                  "rigExec:basis", "rigExec:samplesPerSpline", "rigExec:unreachedValue"}) {
@@ -11020,7 +11026,23 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     worldToLocal = worldToLocal * divide;
 
     if (typeName == "RigExecSphereWeight") {
-        RigExecSphereWeightField(samplePoints, worldToLocal, params, weights);
+        const GfVec3f positiveScales(
+            readFloat("inputs:scaleXPos", 1.0f),
+            readFloat("inputs:scaleYPos", 1.0f),
+            readFloat("inputs:scaleZPos", 1.0f));
+        const GfVec3f negativeScales(
+            readFloat("inputs:scaleXNeg", 1.0f),
+            readFloat("inputs:scaleYNeg", 1.0f),
+            readFloat("inputs:scaleZNeg", 1.0f));
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
+                !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) {
+                *error = who() + ": signed axis scales must be finite and positive";
+                return false;
+            }
+        }
+        RigExecSphereWeightField(samplePoints, worldToLocal, params, weights,
+                                 positiveScales, negativeScales);
         return true;
     }
     if (typeName == "RigExecCurveWeight") {

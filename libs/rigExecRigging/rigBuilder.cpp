@@ -1349,6 +1349,18 @@ RigExecSphereWeightHandle::SetScales(float sx, float sy, float sz)
 }
 
 void
+RigExecSphereWeightHandle::SetDirectionalScales(
+    float px, float py, float pz, float nx, float ny, float nz)
+{
+    _AuthorAttr(GetPrim(), "inputs:scaleXPos", SdfValueTypeNames->Float, VtValue(px));
+    _AuthorAttr(GetPrim(), "inputs:scaleYPos", SdfValueTypeNames->Float, VtValue(py));
+    _AuthorAttr(GetPrim(), "inputs:scaleZPos", SdfValueTypeNames->Float, VtValue(pz));
+    _AuthorAttr(GetPrim(), "inputs:scaleXNeg", SdfValueTypeNames->Float, VtValue(nx));
+    _AuthorAttr(GetPrim(), "inputs:scaleYNeg", SdfValueTypeNames->Float, VtValue(ny));
+    _AuthorAttr(GetPrim(), "inputs:scaleZNeg", SdfValueTypeNames->Float, VtValue(nz));
+}
+
+void
 RigExecPlaneWeightHandle::SetAxis(const TfToken &axis)
 {
     _AuthorAttr(

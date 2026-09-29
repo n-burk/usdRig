@@ -2020,6 +2020,11 @@ class VolumeWeightPanel(QtWidgets.QWidget):
             self._AddAttributeRow(
                 self._parametersLayout, prim, "inputs:scale%s" % axis,
                 "scale%s" % axis, sensitivity=0.005)
+        for axis in ("X", "Y", "Z"):
+            for side, sign in (("Pos", "+"), ("Neg", "-")):
+                self._AddAttributeRow(
+                    self._parametersLayout, prim, "inputs:scale%s%s" % (axis, side),
+                    "scale %s%s" % (sign, axis), sensitivity=0.005)
         self._AddAttributeRow(
             self._parametersLayout, prim, "rigExec:planeAxis", "planeAxis")
         self._AddAttributeRow(

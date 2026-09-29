@@ -117,6 +117,8 @@ struct RigExecVolumeWeightInputs {
     std::vector<GfVec3f> targetPoints;  ///< rigExec:weightTarget points
     std::vector<GfVec3f> samplePoints;  ///< rigExec:sampleSource, may be
                                         ///< empty
+    GfVec3f positiveScales = GfVec3f(1.0f);
+    GfVec3f negativeScales = GfVec3f(1.0f);
     GfVec3f scales = GfVec3f(1.0f);     ///< inputs:scaleX/Y/Z (sphere,
                                         ///< curve)
 

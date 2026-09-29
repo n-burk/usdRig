@@ -507,6 +507,8 @@ public:
     using RigExecVolumeWeightHandle::RigExecVolumeWeightHandle;
 
     void SetScales(float sx, float sy, float sz);
+    void SetDirectionalScales(float px, float py, float pz,
+                              float nx, float ny, float nz);
 };
 
 /// RigExecPlaneWeight: signed gradient across a plane.

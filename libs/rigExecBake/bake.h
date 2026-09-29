@@ -12,6 +12,8 @@
 #ifndef RIGEXEC_BAKE_H
 #define RIGEXEC_BAKE_H
 
+#include "rigExecBinary/container.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -27,7 +29,7 @@ struct RigExecBakeOpts {
     std::vector<double> frames;
     /// The reader major version the binary must load under. The writer only
     /// knows its own (see RigExecBinaryVersion), so anything else fails.
-    uint32_t targetReaderVersion = 1;
+    uint32_t targetReaderVersion = RigExecBinaryMajor(RigExecBinaryVersion);
 };
 
 /// What a bake produced.

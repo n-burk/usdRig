@@ -2459,13 +2459,18 @@ ramped between `inputs:falloffMin` (fully on) and `inputs:falloffMax`
 framable prim positioned by the same avars as a control or joint — so a
 sphere authored inside a joint rides that joint with nothing wired, and
 the region a mover grabs can be animated by moving the ball. Per-axis
-`inputs:scaleX/Y/Z` turn the iso-surfaces into ellipsoids.""",
+`inputs:scaleX/Y/Z` turn the iso-surfaces into ellipsoids.
+`inputs:scaleXPos/YPos/ZPos` and `inputs:scaleXNeg/YNeg/ZNeg` multiply
+the matching shared axis scale independently on each local half-axis.
+All six default to 1, preserving existing shapes; values must be finite
+and positive. The center stays fixed as either side grows or shrinks.""",
         "how_it_works": """The prim publishes a weight packet that the bound mover consumes as
 its envelope during the geometry (point-chain) phase. Each evaluation it
 takes its own posed frame from `computePointFrame`, strips scale and
 shear so the field matches the rigid guide that is drawn, divides local
-coordinates by `inputs:scaleX/Y/Z`, and measures
-`d = |(px/sx, py/sy, pz/sz)|` for every element of
+coordinates by `inputs:scaleX/Y/Z` and the matching positive or negative
+local-axis multiplier, then measures `d = |(px/sx, py/sy, pz/sz)|`
+using those effective divisors for every element of
 `rigExec:weightTarget` — or of `rigExec:sampleSource`, when authored,
 which changes *what is measured* without changing what is weighted.
 `d` is normalized across the falloff band, exchanged end-for-end by

@@ -20,6 +20,17 @@ volume:
 | `RigExecCurveWeight` | `RigExecVolumeWeight` | distance to the curve's polyline |
 | `RigExecCombineWeight` | `RigExecWeightObject` | folds other weight objects |
 
+Sphere axis divisors are the shared `inputs:scaleX/Y/Z` multiplied by
+`inputs:scaleXPos/YPos/ZPos` for nonnegative local coordinates and
+`inputs:scaleXNeg/YNeg/ZNeg` for negative ones. All six directional
+multipliers default to 1 and must be finite and positive. The origin stays
+fixed; placement rotation determines the axes. These inputs are animatable
+and affect evaluation, guides, and framing bounds.
+
+Binary exports use major version 2 to carry the six new inputs. Re-export
+older `.rigexec` files and rebuild runtime consumers; USD source stages
+retain their previous shape when directional inputs are absent.
+
 ## The remap
 
 Every volume shares one distance-to-weight remap:

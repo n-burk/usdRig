@@ -11,6 +11,8 @@
 // expected at <examples>/../plugin/rigExecSchema/resources.
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
+#include "rigExec/weightPackets.h"
+#include <limits>
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
@@ -307,6 +309,102 @@ TestVolumePlacedByRestSpace()
 
 // Anisotropy comes from inputs:scaleX/Y/Z, never from the transform:
 // halving the X divisor doubles the reach along X.
+static void
+TestSphereDirectionalScaleValidation()
+{
+    RigExecVolumeWeightInputs inputs;
+    inputs.representation = TfToken("dense");
+    inputs.rangePolicy = TfToken("clamp");
+    inputs.hasPlacement = true;
+    inputs.targetPoints = {GfVec3f(0)};
+    const TfToken type("RigExecSphereWeight");
+    CHECK(RigExecBuildVolumeWeightPacket(type, inputs).valid);
+    for (const float bad : {0.0f, -1.0f, std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()}) {
+        for (int side = 0; side < 2; ++side) {
+            for (int axis = 0; axis < 3; ++axis) {
+                auto test = inputs;
+                (side ? test.negativeScales : test.positiveScales)[axis] = bad;
+                CHECK(!RigExecVolumeWeightCanBuild(type, test));
+                CHECK(!RigExecBuildVolumeWeightPacket(type, test).valid);
+            }
+        }
+    }
+}
+
+static void
+TestSphereDirectionalScales()
+{
+    const float pos[3] = {2, 3, 4}, neg[3] = {5, 6, 7};
+    VtVec3fArray probes;
+    for (int axis = 0; axis < 3; ++axis) {
+        GfVec3f p(0), n(0);
+        p[axis] = pos[axis] * 0.5f;
+        n[axis] = -neg[axis] * 1.5f;
+        probes.push_back(p);
+        probes.push_back(n);
+    }
+    Fixture f(probes, GfVec3d(0, 2, 0));
+    UsdPrim v = f.MakeVolume("Asymmetric", TfToken("RigExecSphereWeight"),
+                             GfVec3d(0), 0.0f, 2.0f);
+    const char *positive[] = {"inputs:scaleXPos", "inputs:scaleYPos", "inputs:scaleZPos"};
+    const char *negative[] = {"inputs:scaleXNeg", "inputs:scaleYNeg", "inputs:scaleZNeg"};
+    for (int a = 0; a < 3; ++a) {
+        CHECK(v.GetAttribute(TfToken(positive[a])).Set(pos[a]));
+        CHECK(v.GetAttribute(TfToken(negative[a])).Set(neg[a]));
+    }
+    f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
+    const auto points = f.Resolve("directional-sphere");
+    CHECK(points.size() == probes.size());
+    if (points.size() == probes.size()) {
+        for (int a = 0; a < 3; ++a) {
+            CHECK(Near(points[2*a], Moved(probes[2*a], 0.75f)));
+            CHECK(Near(points[2*a+1], Moved(probes[2*a+1], 0.25f)));
+        }
+    }
+}
+
+static void
+TestSphereDirectionalEdits()
+{
+    Fixture f(VtVec3fArray{GfVec3f(1,0,0), GfVec3f(-1,0,0)}, GfVec3d(0,2,0));
+    UsdPrim v = f.MakeVolume("SignedEdit", TfToken("RigExecSphereWeight"),
+                             GfVec3d(0), 0.0f, 2.0f);
+    const auto pos = v.GetAttribute(TfToken("inputs:scaleXPos"));
+    const auto neg = v.GetAttribute(TfToken("inputs:scaleXNeg"));
+    CHECK(pos.Set(1.0f));
+    CHECK(neg.Set(1.0f));
+    f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
+    RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
+    evaluator.cpuParityMode = !BakedPathRequested();
+    CHECK(evaluator.Compile());
+    auto check = [&](UsdTimeCode time, float wp, float wn) {
+        const auto pose = evaluator.Evaluate(time);
+        CHECK(pose.valid);
+        CheckTheHarnessRan("signed edits", pose);
+        const auto it = pose.movedProperties.find(Fixture::Target());
+        CHECK(it != pose.movedProperties.end());
+        if (it == pose.movedProperties.end()) return;
+        const auto points = it->second.Get<VtVec3fArray>();
+        CHECK(points.size() == 2);
+        if (points.size() != 2) return;
+        CHECK(Near(points[0], Moved(f.base[0], wp)));
+        CHECK(Near(points[1], Moved(f.base[1], wn)));
+    };
+    check(UsdTimeCode::Default(), 0.5f, 0.5f);
+    const auto digest = evaluator.GetBindingEpochDigest();
+    CHECK(pos.Set(2.0f));
+    check(UsdTimeCode::Default(), 0.75f, 0.5f);
+    CHECK(evaluator.GetBindingEpochDigest() == digest);
+    CHECK(neg.Set(0.5f));
+    check(UsdTimeCode::Default(), 0.75f, 0.0f);
+    CHECK(evaluator.GetBindingEpochDigest() == digest);
+    CHECK(pos.Set(1.0f, UsdTimeCode(1)));
+    CHECK(pos.Set(2.0f, UsdTimeCode(2)));
+    check(UsdTimeCode(1), 0.5f, 0.0f);
+    check(UsdTimeCode(2), 0.75f, 0.0f);
+}
+
 static void
 TestSphereAxisScales()
 {
@@ -1355,6 +1453,9 @@ main(int argc, char **argv)
     TestSphereWeight();
     TestVolumePlacedByRestSpace();
     TestSphereAxisScales();
+    TestSphereDirectionalScales();
+    TestSphereDirectionalEdits();
+    TestSphereDirectionalScaleValidation();
     TestVolumeIgnoresTransformScaleAvars();
     TestPlaneWeight();
     TestPlaneBounded();

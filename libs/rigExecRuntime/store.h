@@ -98,7 +98,13 @@ enum RrWeightField : int {
     RrWeightExtentV = 12,
     RrWeightCurvenetSamples = 13,
     RrWeightCurvenetUnreached = 14,
-    RrWeightFieldCount = 15,
+    RrWeightScaleXPos = 15,
+    RrWeightScaleYPos = 16,
+    RrWeightScaleZPos = 17,
+    RrWeightScaleXNeg = 18,
+    RrWeightScaleYNeg = 19,
+    RrWeightScaleZNeg = 20,
+    RrWeightFieldCount = 21,
 };
 
 // One slot's live ladder values, recomputed by the pose prologue when

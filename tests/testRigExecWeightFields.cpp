@@ -243,6 +243,28 @@ TestSphereField()
     CHECK(Near(w[0], 0.0f));  // 2 along x reaches the boundary
     CHECK(Near(w[1], 0.0f));  // 1 along y also reaches it
     CHECK(Near(w[2], 0.5f));  // 1 along x is only halfway
+    const GfVec3f positive(2, 3, 4), negative(5, 6, 7);
+    std::vector<GfVec3f> directional;
+    for (int axis = 0; axis < 3; ++axis) {
+        GfVec3f pos(0), neg(0);
+        pos[axis] = positive[axis] * 0.25f;
+        neg[axis] = -negative[axis] * 0.75f;
+        directional.push_back(pos);
+        directional.push_back(neg);
+    }
+    RigExecSphereWeightField(directional, GfMatrix4d(1.0), p, &w, positive, negative);
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK(Near(w[2 * axis], 0.75f));
+        CHECK(Near(w[2 * axis + 1], 0.25f));
+    }
+    GfMatrix4d placement(0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 10, 20, 30, 1);
+    for (auto &point : directional)
+        point = GfVec3f(placement.TransformAffine(GfVec3d(point)));
+    RigExecSphereWeightField(directional, placement.GetInverse(), p, &w, positive, negative);
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK(Near(w[2 * axis], 0.75f));
+        CHECK(Near(w[2 * axis + 1], 0.25f));
+    }
 }
 
 static void

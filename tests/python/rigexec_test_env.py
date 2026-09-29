@@ -132,7 +132,7 @@ def SetupPluginTest(buildRoot=None):
         dllDirs = [usdInstall / "lib", usdInstall / "bin", buildRoot]
         # Multi-config generators (Visual Studio) place the native libs
         # in a per-configuration subdirectory of the build root.
-        if buildRoot.is_dir():
+        if buildRoot.is_dir() and not (buildRoot / "rigExec.dll").is_file():
             for sub in sorted(buildRoot.iterdir()):
                 if sub.is_dir() and (sub / "rigExec.dll").is_file():
                     dllDirs.append(sub)

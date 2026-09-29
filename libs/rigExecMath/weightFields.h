@@ -135,11 +135,15 @@ float RigExecSegmentDistance(
 // are expressed in into the volume's local space; pass identity when they
 // already share a space. \p weights is resized to points.size().
 
+/// Directional divisors are selected by each transformed local coordinate
+/// sign. Callers validate finite, positive scales; defaults preserve symmetry.
 void RigExecSphereWeightField(
     const std::vector<GfVec3f> &points,
     const GfMatrix4d &worldToLocal,
     const RigExecFalloffParams &params,
-    std::vector<float> *weights);
+    std::vector<float> *weights,
+    const GfVec3f &positiveScales = GfVec3f(1.0f),
+    const GfVec3f &negativeScales = GfVec3f(1.0f));
 
 /// \p bounds is null for the infinite plane and non-null for a bounded
 /// one, whose field is exactly zero outside the rectangle. A pointer

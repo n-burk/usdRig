@@ -1249,6 +1249,12 @@ RigExecBakeConvertDomainGeometry(const RigExecBakedProgramImpl &program,
         wire.providerSlot = int32_t(object.providerSlot);
         wire.falloffMin = _ToInput(object.falloffMin, writer);
         wire.falloffMax = _ToInput(object.falloffMax, writer);
+        wire.scaleXPos = _ToInput(object.scaleXPos, writer);
+        wire.scaleYPos = _ToInput(object.scaleYPos, writer);
+        wire.scaleZPos = _ToInput(object.scaleZPos, writer);
+        wire.scaleXNeg = _ToInput(object.scaleXNeg, writer);
+        wire.scaleYNeg = _ToInput(object.scaleYNeg, writer);
+        wire.scaleZNeg = _ToInput(object.scaleZNeg, writer);
         wire.scaleX = _ToInput(object.scaleX, writer);
         wire.scaleY = _ToInput(object.scaleY, writer);
         wire.scaleZ = _ToInput(object.scaleZ, writer);

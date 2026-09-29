@@ -1696,6 +1696,9 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("path"));
 
     py::class_<rigExec::RigExecSphereWeightHandle, rigExec::RigExecVolumeWeightHandle>(m, "SphereWeight")
+        .def("set_directional_scales", &rigExec::RigExecSphereWeightHandle::SetDirectionalScales,
+             py::arg("px"), py::arg("py"), py::arg("pz"),
+             py::arg("nx"), py::arg("ny"), py::arg("nz"))
         .def("set_scales", &rigExec::RigExecSphereWeightHandle::SetScales,
              py::arg("sx"), py::arg("sy"), py::arg("sz"));
 

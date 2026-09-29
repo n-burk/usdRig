@@ -791,6 +791,7 @@ _TestSyntheticBuilders()
         in.planeBounds = TfToken(planeBounds);
         return in;
     };
+    const std::vector<GfVec3f> signedSamples = {GfVec3f(1, 0, 0), GfVec3f(0, 1, 0), GfVec3f(0, 0, -2)};
     // 11: sphere over pathReads points, smooth remap LUT.
     {
         RigExecWireWeightObject object = _SynthObject(
@@ -798,6 +799,10 @@ _TestSyntheticBuilders()
             "clamp");
         object.providerSlot = 0;
         object.falloffMax = _SynthFloat(2.0f);
+        _SynthAttr(&writer, "/signed.points", &object.samplePoints, &object.sampleValid);
+        object.scaleXPos = _SynthFloat(2.0f);
+        object.scaleYPos = _SynthFloat(3.0f);
+        object.scaleZNeg = _SynthFloat(4.0f);
         object.falloffCurve =
             RigExecBuildFalloffLut(RigExecFalloffProfile::Smooth);
         _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
@@ -805,6 +810,9 @@ _TestSyntheticBuilders()
         geometry.weightObjects.push_back(object);
         RigExecVolumeWeightInputs sphereIn =
             volumeInputs("y", "unbounded");
+        sphereIn.samplePoints = signedSamples;
+        sphereIn.positiveScales = GfVec3f(2.0f, 3.0f, 1.0f);
+        sphereIn.negativeScales = GfVec3f(1.0f, 1.0f, 4.0f);
         sphereIn.params.curve =
             RigExecBuildFalloffLut(RigExecFalloffProfile::Smooth);
         expected.push_back(RigExecBuildVolumeWeightPacket(
@@ -1137,6 +1145,8 @@ _TestSyntheticBuilders()
         value.tag = RigExecWireInput::Tag::Float;
         value.f32 = 0.3f;
         record.values.push_back(value);
+        record.pathReads.push_back(
+            _SynthPointsRead(&writer, "/signed.points", signedSamples));
         record.pathReads.push_back(
             _SynthPointsRead(&writer, "/mesh.points", meshPoints));
         record.pathReads.push_back(
