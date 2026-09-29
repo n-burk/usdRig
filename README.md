@@ -9,9 +9,12 @@ is [MIT licensed](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md)
 for bundled code, published methods, and unresolved asset provenance.
 The distribution [NOTICE](NOTICE) identifies OpenUSD, noodles, and font credits.
 
-Authors: [Nick Burkard] (https://www.github.com/n-burk)
-[Walt Yoder] (https://www.github.com/wyoder)
-[Matt Schiller] (https://www.github.com/matthewschiller)
+Authors: [Nick Burkard](https://github.com/n-burk),
+[Walt Yoder](https://github.com/wyoder) and
+[Matt Schiller](https://github.com/matthewschiller) of
+[Squarebit Studios](https://www.squarebitstudios.com).
+The biped example rig in `examples/biped` is a Squarebit Studios
+character converted to RigExec.
 
 ## Features
 
