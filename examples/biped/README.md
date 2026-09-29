@@ -1,5 +1,8 @@
 # Biped -- the ported character
 
+Character and rig by [Squarebit Studios](https://www.squarebitstudios.com/)
+([Matt Schiller](https://github.com/matthewschiller),
+[Walt Yoder](https://github.com/wyoder)), converted to RigExec.
 For source and licensing status, see [third-party notices](../../THIRD_PARTY_NOTICES.md#provenance-requiring-owner-review).
 
 **Open `Biped_layered.usda`.** That is the whole character: skeleton, rig,
