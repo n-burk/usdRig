@@ -82,6 +82,61 @@ def _Stage():
     return stage, pts
 
 
+def _CheckNeutralReference():
+    import _rigexec
+    for phase in ('base', 'final'):
+        stage, pts = _Stage()
+        head = stage.GetPrimAtPath('/Asset/Rig/Controls/head')
+        handle = stage.GetPrimAtPath('/Asset/Rig/Controls/head/handle')
+        mover = stage.GetPrimAtPath('/Asset/Rig/Movers/cluster')
+        refs = []
+        for source, path in ((head, '/Asset/Rig/Neutral/head'),
+                             (handle, '/Asset/Rig/Neutral/head/handle')):
+            ref = stage.DefinePrim(path, 'RigExecControl')
+            for name in ('rest:space', 'rest:tx', 'rest:ty', 'rest:tz',
+                         'default:tx', 'default:ty', 'default:tz'):
+                ref.GetAttribute(name).SetConnections([source.GetAttribute(name).GetPath()])
+            refs.append(ref)
+        mover.GetRelationship('rigExec:referenceTransform').SetTargets([refs[1].GetPath()])
+        mover.GetRelationship('rigExec:referenceTransformSpace').SetTargets([refs[0].GetPath()])
+        mover.GetAttribute('rigExec:transformReadPhase').Set(phase)
+        rig = _rigexec.Rig(stage, '/Asset/Rig')
+        rig.evaluation_mode = 'parity'
+        rig.compile()
+        for offset in (.3, -1.7, 2.1):
+            head.GetAttribute('default:tz').Set(offset)
+            handle.GetAttribute('rest:tx').Set(offset / 2)
+            handle.GetAttribute('default:ty').Set(2 * offset)
+            neutral = rig.evaluate(1)
+            _Check(neutral.valid and neutral.baked_parity_mismatches == 0,
+                   'neutral reference evaluates with parity')
+            _Check(rig.baked_cluster_count > 0, 'reference rig must exercise baked evaluation')
+            _Check(max((Gf.Vec3d(*a) - Gf.Vec3d(b)).GetLength()
+                       for a, b in zip(neutral.moved_property('/Asset/Geom/cloud.points'), pts)) < 1e-5,
+                   'live fitting must not deform partially weighted geometry')
+            pivot = PIVOT + Gf.Vec3d(offset / 2, 2 * offset, offset)
+            pose = rig.evaluate(2)
+            _Check(pose.valid and pose.baked_parity_mismatches == 0, 'reference posed parity')
+            angle = math.radians(40)
+            for i, p in enumerate(pts):
+                d = Gf.Vec3d(p) - pivot
+                turned = pivot + Gf.Vec3d(d[0] * math.cos(angle) - d[1] * math.sin(angle),
+                                          d[0] * math.sin(angle) + d[1] * math.cos(angle), d[2])
+                want = Gf.Vec3d(p) + (turned - Gf.Vec3d(p)) * WEIGHTS.get(i, 0)
+                got = Gf.Vec3d(*pose.moved_property('/Asset/Geom/cloud.points')[i])
+                _Check((got - want).GetLength() < 1e-4,
+                       'animation must rotate about fitted pivot with parent motion removed')
+        # References are structural input: changing the target must rebuild.
+        mover.GetRelationship('rigExec:referenceTransformSpace').SetTargets([])
+        try:
+            rig.compile()
+        except (RuntimeError, ValueError):
+            pass
+        else:
+            _Check(not rig.evaluate(1).valid, 'missing parent reference must be rejected')
+        print('  ok: %s neutral reference, live fitting and weighted pivots' % phase)
+
+
 def main():
     _RegisterSchema()
     import _rigexec
@@ -113,6 +168,7 @@ def main():
                    "%s: point %d at %s, expected %s (the head's motion must "
                    "not reach it)" % (mode, i, tuple(got[i]), want))
         print("  ok: %s localized sparse cluster" % mode)
+    _CheckNeutralReference()
     print("RIGEXEC_MATRIX_SPACE_OK")
     return 0
 

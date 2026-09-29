@@ -1,8 +1,6 @@
-//
 // Shared normalization for RigExecControl/RigExecJoint avars:sx/sy/sz.
 // Kept in the common math layer so evaluation, authoring, and imaging apply
 // one identical scale policy. Other avars require no analogous normalization.
-//
 #ifndef RIGEXEC_MATH_AVAR_SCALE_H
 #define RIGEXEC_MATH_AVAR_SCALE_H
 

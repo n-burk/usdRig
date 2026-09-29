@@ -1,18 +1,14 @@
-//
 // RigExec native bounds (host-durability redesign): UsdGeomBBoxCache must
 // answer for RigExec prims in ANY host, with no RigExec code running.
-//
 // This executable deliberately does NOT link rigExecImaging. It registers
 // the codeless schema plugin and nothing else, so the only way an extent
 // can be produced is the one the redesign relies on: Plug reads
 // implementsComputeExtent off the schema type, loads the library named by
 // the schema plugInfo's LibraryPath, and that library's
 // TF_REGISTRY_FUNCTION registers the compute-extent function on demand.
-//
 // Linking the imaging library here would register it at load time and the
 // test would pass without proving anything -- which is exactly the failure
 // this file exists to prevent.
-//
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/gf/range3d.h"

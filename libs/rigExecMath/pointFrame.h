@@ -1,11 +1,8 @@
-//
 // RigExec — point-native transform system (spec §5).
-//
 // The canonical pose value is a point frame: four points [O, X, Y, Z]
 // representing an affine origin and the transformed X, Y, and Z basis
 // endpoints. It round-trips exactly to a nonsingular affine matrix,
 // including scale and shear.
-//
 #ifndef RIGEXEC_MATH_POINT_FRAME_H
 #define RIGEXEC_MATH_POINT_FRAME_H
 

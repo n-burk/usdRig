@@ -31,10 +31,8 @@ _TEST_META_KEY = "LLM_" + "test-only-example-key"
 _TEST_META_KEY_WITH_FINGERPRINT = _TEST_META_KEY + "T3ST"
 
 
-# ---------------------------------------------------------------------------
 # The validation the Messages API performs server-side.  Every request the
 # agent builds must pass this or the panel is dead in the water.
-# ---------------------------------------------------------------------------
 
 def assertValidRequest(system, messages):
     if not messages:
@@ -110,9 +108,7 @@ def testLeadingAssistantTurnIsDropped():
     assertValidRequest(ma.build_system_prompt(), messages)
 
 
-# ---------------------------------------------------------------------------
 # The tool loop
-# ---------------------------------------------------------------------------
 
 class FakeExecutor(object):
     """Records what the agent asked the session to do."""
@@ -964,7 +960,7 @@ def testOllamaProviderRoutesLocallyWithNoKey():
 
 
 def testLmStudioProviderDiscoversModelsAndRunsToolsWithoutAKey():
-    """LM Studio on hivemind is explicit, keyless, and uses Muse's tool loop."""
+    """LM Studio on local-server is explicit, keyless, and uses Muse's tool loop."""
     for name in ("MUSE_PROVIDER", "MUSE_BASE_URL", "ANTHROPIC_BASE_URL",
                  "MUSE_API_KEY", "ANTHROPIC_API_KEY", "MUSE_MODEL",
                  "MUSE_LMSTUDIO_URL"):
@@ -972,8 +968,8 @@ def testLmStudioProviderDiscoversModelsAndRunsToolsWithoutAKey():
 
     if ma.PROVIDER_LMSTUDIO != "lmstudio":
         raise AssertionError("unexpected LM Studio provider id")
-    if ma.LMSTUDIO_DEFAULT_BASE_URL != "http://hivemind.local:1234":
-        raise AssertionError("LM Studio did not default to hivemind: %r"
+    if ma.LMSTUDIO_DEFAULT_BASE_URL != "http://127.0.0.1:1234":
+        raise AssertionError("LM Studio did not default to local-server: %r"
                              % ma.LMSTUDIO_DEFAULT_BASE_URL)
 
     os.environ["MUSE_PROVIDER"] = "lmstudio"
@@ -981,7 +977,7 @@ def testLmStudioProviderDiscoversModelsAndRunsToolsWithoutAKey():
         raise AssertionError("MUSE_PROVIDER=lmstudio was not honoured")
     base, source = ma.resolve_base_url()
     if base != ma.LMSTUDIO_DEFAULT_BASE_URL \
-            or source != "LM Studio on Hivemind":
+            or source != "LM Studio":
         raise AssertionError("LM Studio did not resolve its default: %r"
                              % ((base, source),))
     if ma.describe_key_problem(None, base, ma.PROVIDER_LMSTUDIO) is not None:
@@ -1010,7 +1006,7 @@ def testLmStudioProviderDiscoversModelsAndRunsToolsWithoutAKey():
 
         routed_base, routed_source = ma.resolve_base_url()
         if routed_base != server.url \
-                or routed_source != "LM Studio on Hivemind":
+                or routed_source != "LM Studio":
             raise AssertionError("MUSE_LMSTUDIO_URL was not routed cleanly: %r"
                                  % ((routed_base, routed_source),))
 
@@ -1034,7 +1030,7 @@ def testLmStudioProviderDiscoversModelsAndRunsToolsWithoutAKey():
         executor = FakeExecutor()
         events = []
         result = ma.run_agent(
-            messages=[{"role": "user", "content": "edit through hivemind"}],
+            messages=[{"role": "user", "content": "edit through local-server"}],
             executor=executor,
             system_prompt=ma.build_system_prompt(stage_context="Stage: /tmp/x.usda"),
             on_event=lambda kind, payload: events.append((kind, payload)),
@@ -1190,12 +1186,12 @@ def testBackEndSettingsRoundTripBesideTheKey(tmpdir):
     # LM Studio owns a separate LAN endpoint and model pin; switching to it
     # clears stale local-provider addresses without touching the hosted key.
     mu.save_settings({"MUSE_PROVIDER": "lmstudio",
-                      "MUSE_LMSTUDIO_URL": "http://hivemind.local:1234",
+                      "MUSE_LMSTUDIO_URL": "http://127.0.0.1:1234",
                       "MUSE_OLLAMA_URL": "", "MUSE_APPLE_URL": "",
                       "MUSE_MODEL": "openai/gpt-oss-20b"}, path)
     saved = mu.load_saved_settings(path)
     if saved != {"MUSE_PROVIDER": "lmstudio",
-                 "MUSE_LMSTUDIO_URL": "http://hivemind.local:1234",
+                 "MUSE_LMSTUDIO_URL": "http://127.0.0.1:1234",
                  "MUSE_MODEL": "openai/gpt-oss-20b"}:
         raise AssertionError(
             "LM Studio settings did not round-trip cleanly: %r" % saved)
@@ -1430,9 +1426,7 @@ def testGatewayBaseUrlMakesANonAnthropicKeyUsable():
     os.environ.pop("MUSE_BASE_URL", None)
 
 
-# ---------------------------------------------------------------------------
 # Camera metadata round-trip
-# ---------------------------------------------------------------------------
 
 def _minimalPng():
     """A real 1x1 PNG, so the chunk walker is exercised against valid bytes."""

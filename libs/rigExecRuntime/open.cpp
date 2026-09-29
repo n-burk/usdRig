@@ -1,13 +1,9 @@
-//
 // rigExecRuntime Open (M2 framework).
-//
 // Decodes every section, then derives what the file implies but does not
 // store: the uid routing (replaying the capture traversal), the SSA
 // version pool sizes and last-version maps (scanning the commit writes),
 // and the store sizing. Cross-references that do not close are Open
 // errors naming the table.
-//
-
 #include "rigExecRuntime/runtime.h"
 
 #include <algorithm>
@@ -499,8 +495,13 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     std::vector<uint32_t> finWriteCount(slots, 0);
     std::vector<uint32_t> baseWriteCount(slots, 0);
     uint32_t finMax = 0, baseMax = 0;
-    auto noteFin = [&](uint32_t v) { finMax = std::max(finMax, v); };
-    auto noteBase = [&](uint32_t v) { baseMax = std::max(baseMax, v); };
+    bool haveFinReference = false, haveBaseReference = false;
+    auto noteFin = [&](uint32_t v) {
+        haveFinReference = true; finMax = std::max(finMax, v);
+    };
+    auto noteBase = [&](uint32_t v) {
+        haveBaseReference = true; baseMax = std::max(baseMax, v);
+    };
     for (const RigExecWireCommit &commit : self->_poses.commits) {
         for (size_t p = 0; p < commit.slots.size(); ++p) {
             const size_t slot = size_t(commit.slots[p]);
@@ -611,7 +612,10 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     }
     const size_t finPool = 2 * slots + finArena;
     const size_t basePool = 2 * slots + baseArena;
-    if (size_t(finMax) >= finPool || size_t(baseMax) >= basePool) {
+    // A mesh-only rig has no pose slots and no version references. An empty
+    // pool is valid there; the initial max of zero is not a reference to it.
+    if ((haveFinReference && size_t(finMax) >= finPool) ||
+        (haveBaseReference && size_t(baseMax) >= basePool)) {
         return fail("a version reference exceeds the version pools");
     }
     store.fin.assign(finPool, RrPointFrame());

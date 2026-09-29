@@ -657,9 +657,7 @@ def IsInfoEditable(key, value):
     return isinstance(value, (bool, str))
 
 
-# --------------------------------------------------------------------
 # List-op fields: the shape every composition arc on a prim spec has.
-# --------------------------------------------------------------------
 
 # The arms of an SdfListOp, in the order usda writes them. An opinion
 # uses either `explicit` on its own or some of the other five.
@@ -911,14 +909,12 @@ def MoveListOpItem(spec, key, arm, index, delta):
     return True
 
 
-# --------------------------------------------------------------------
 # The two arcs that are LAYER metadata: sublayers and relocates.
 #
 # Neither is a field on a prim spec, so neither can go through the
 # list-op path above -- but both round-trip through usda the same way,
 # by exporting a scratch layer holding just the one entry and importing
 # the text back.
-# --------------------------------------------------------------------
 
 def FormatSublayer(path, offset):
     """
@@ -1598,10 +1594,8 @@ def WalkRows(rows):
             yield child
 
 
-# --------------------------------------------------------------------
 # Snapshots. Each restores exactly one opinion, so an undo entry is as
 # narrow as the edit that made it.
-# --------------------------------------------------------------------
 
 class InfoSnapshot(object):
     """The authored state of one info field on one prim spec."""
@@ -1813,9 +1807,7 @@ def _Commit(label, layer, specPath, before, after):
         label, [rigExecUndo.EditEntry(layer, specPath, before, after)])
 
 
-# --------------------------------------------------------------------
 # Operations. Each applies the change and returns the undoable Edit.
-# --------------------------------------------------------------------
 
 def SetRowValue(row, text):
     """Author `text` as the row's new value. Returns an undoable Edit."""

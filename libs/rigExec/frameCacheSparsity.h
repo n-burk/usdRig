@@ -1,33 +1,25 @@
-//
 // RigExec sparse cross-frame reuse: a cached frame as the base of the next.
-//
 // Within one frame the baked step graph already runs only the closure of
 // value-changed sources over clusters (§7). This module extends that closure
 // ACROSS frames: a cached frame retains its source values (plus the slot
 // state a re-run executes against), a lookup compares the request's sources
 // by value, a frame whose cone is empty is a hit, and a partial cone re-runs
 // only affected clusters against otherwise-retained slots.
-//
 // Whether that retention fits the byte cap is Stream 0's go/no-go (plan D2),
 // answered below from the measured numbers: GO on both measured rigs, so
 // this module ships the reuse, not whole-pose memo only. The no-go endpoint
 // stays available -- RigExecDecideSparsity answers it for any rig -- and the
 // output-affected index ships either way, since warming selection needs it.
-//
 // How the pieces compose (Stream E wires this into the imaging chain):
-//
 //   exact key hit          serve the pose, zero work (Stream A path)
 //   retained base + empty cone   serve the retained pose, zero work
 //   retained base + cone         re-run the plan's clusters, publish afresh
 //   no retained base             live eval (the pool never serves)
-//
 // The re-run itself is the caller's: the plan names the clusters, a
 // RigExecClusterRunner executes them, and RigExecRunSparsePlan counts what
 // ran. The slot snapshot the runner executes against is captured by whoever
 // owns the program (Stream E) and carried here as an opaque handle with
 // accounted bytes -- this module never names a program slot.
-//
-
 #ifndef RIGEXEC_FRAME_CACHE_SPARSITY_H
 #define RIGEXEC_FRAME_CACHE_SPARSITY_H
 
@@ -53,9 +45,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 
-// ---------------------------------------------------------------------------
 // D2 go/no-go, from reports/frame-cache-measurements.md.
-// ---------------------------------------------------------------------------
 
 /// Per-frame stored bytes, pose maps and slot arenas separately: biped
 /// 430,258 + 2,767,505 (3.05 MiB full), 9mesh 447,038 + 1,796,703.
@@ -89,9 +79,7 @@ RigExecSparsityDecision RigExecDecideSparsity(
 /// rather than silently pricing reuse out.
 RigExecSparsityDecision RigExecStream0SparsityDecision();
 
-// ---------------------------------------------------------------------------
 // Retained cross-frame state.
-// ---------------------------------------------------------------------------
 
 /// What one cached frame keeps so a later request can reuse it: the source
 /// values the request is compared against by VALUE (§7's rule -- never "the
@@ -145,9 +133,7 @@ std::vector<RigExecControlId> RigExecChangedControls(
     const RigExecFrameInputs &requested,
     const std::vector<RigExecValueOverride> &requestedOverrides);
 
-// ---------------------------------------------------------------------------
 // Planning and execution.
-// ---------------------------------------------------------------------------
 
 /// What reuse decided.
 enum class RigExecSparseVerdict {
@@ -234,9 +220,7 @@ RigExecSparseExecution RigExecRunSparsePlan(
     const RigExecSparsePlan &plan, const std::vector<int> &clusterOrder,
     RigExecClusterRunner runner);
 
-// ---------------------------------------------------------------------------
 // Entry provenance and retained-state rebind (plan 2.0).
-// ---------------------------------------------------------------------------
 
 /// The provenance of a full evaluation over \p program: every cluster, every
 /// weight object the program reaches, and every constant region, with \p
@@ -276,9 +260,7 @@ struct RigExecClusterRebindContext {
 RigExecClusterRunner RigExecMakeClusterRunner(
     RigExecClusterRebindContext context);
 
-// ---------------------------------------------------------------------------
 // Candidate lookup: which retained frame a request reuses.
-// ---------------------------------------------------------------------------
 
 /// The (epoch, time) -> key sidecar. A re-warm targets a TIME; the stale
 /// entry at that time is the ideal reuse base (same time-varying inputs,
@@ -313,9 +295,7 @@ private:
     std::map<std::pair<uint64_t, UsdTimeCode>, RigExecFrameCacheKey> _map;
 };
 
-// ---------------------------------------------------------------------------
 // Epoch invalidation through the baked capture index.
-// ---------------------------------------------------------------------------
 
 /// Drops every cached frame and memoized selection of \p epochDigest,
 /// returning cached frames dropped (memo drops are counted on the memo).
@@ -334,9 +314,7 @@ bool RigExecNoteCaptureIndex(RigExecFrameCache &cache,
                              const RigExecBakedProgram &program,
                              const UsdNotice::ObjectsChanged &notice);
 
-// ---------------------------------------------------------------------------
 // RIGEXEC_FRAME_CACHE_VERIFY shadow mode.
-// ---------------------------------------------------------------------------
 
 /// Whether RIGEXEC_FRAME_CACHE_VERIFY asks every cache hit to also
 /// live-evaluate and diff. Read fresh on each call -- unlike

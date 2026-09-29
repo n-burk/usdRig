@@ -1,17 +1,13 @@
-//
 // .rigexec sectioned container: the reader and writer every bake producer and
 // runtime consumer shares.
-//
 // A .rigexec file is a flat little-endian binary: a 16-byte header, a section
 // table, then the section payloads. Unknown section tags are skipped, so a
 // minor version can add tables without breaking old loaders. All offsets are
 // u64, all counts u32.
-//
 // This header is pleasure-free on purpose: <cstdint>, <string>, <vector> and
 // <memory> only. It is the foundation of the zero-USD runtime (M2), so it
 // must never gain a USD include -- directly or through another project
 // header. The bake side (libs/rigExecBake) is what knows about USD.
-//
 #ifndef RIGEXEC_BINARY_CONTAINER_H
 #define RIGEXEC_BINARY_CONTAINER_H
 
@@ -50,6 +46,7 @@ enum class RigExecBinarySection : uint32_t {
     Cones = 10,       ///< cone closures (M1 slice 4)
     Diagnostics = 11,  ///< embedded diagnostics; the loader skips it
     SolverStart = 12,  ///< FkChain start providers (minor 1)
+    Presentation = 13, ///< Optional embedded render geometry/materials and public controls
 };
 
 /// Builds a .rigexec file in memory.

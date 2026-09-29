@@ -1,47 +1,47 @@
-#
-# RigExec usdview plugin: the Maya-style Graph Editor -- a window over
-# usdview holding a curve list, a QPainter canvas of the selected
-# attributes' Ts splines, and the gestures that edit them.
-#
-# Layering, and why: everything decidable without Qt already was.
-# graphModel.py owns "which attributes are curves" and every Ts.Spline
-# edit (MoveKeys, InsertKey, SetTangentType, ...); graphScreen.py owns
-# "where is that key on screen and what did the mouse mean"
-# (ViewTransform, glyphs, hit-testing, drag resolution). This file is
-# the shell: widgets, painting, event plumbing and the undo bracket.
-#
-# PIXELS. graphScreen works in LOGICAL pixels -- the units Qt mouse
-# events and QPainter both use -- so, unlike gizmoUI._Position, nothing
-# here multiplies by devicePixelRatioF. The ViewTransform is built from
-# the canvas's logical width()/height() and KeyPixels() / TangentPixels()
-# hand back logical pixels a test can put straight into a QMouseEvent.
-#
-# ONE GESTURE, ONE UNDO STEP (spec section 2.4). Every edit -- a drag, a
-# button, a typed number -- goes through _Gesture: rigExecUndo
-# .EditRecorder.Begin() over every attribute the gesture can touch,
-# attr.SetSpline(edited) on each mouse move so the viewport follows the
-# drag live, and Commit() + undoStack.Push() once at the end (or
-# Abort() on Escape). The spline written each move is recomputed from
-# the spline the gesture STARTED with, never from the previous move, so
-# a slow drag cannot accumulate rounding or re-clamp its own clamp.
-#
-# HOTKEYS AND usdview. Two of the editor's keys are claimed
-# application-wide by usdview itself, whichever window is active:
-#   Escape -- appEventFilter.py:117 swallows every Escape KeyPress to
-#             reset focus from the mouse position.
-#   F      -- appEventFilter.py routes bare F (KeyboardShortcuts
-#             .FramingKey) to appController.processNavKeyEvent, which
-#             frames the 3D VIEWPORT (appController.py:5311).
-# So the editor reads its keys from an application-level filter of its
-# own (GraphHotkeyFilter), installed when the window opens and therefore
-# ahead of usdview's -- Qt runs the most recently installed application
-# filter first. The filter claims a key only for events belonging to the
-# editor's own visible window and only when focus is not in a text field
-# or spin box. usdview's other bare-letter shortcuts (I, V, J, W, C) are
-# QActions on the MAIN window with Qt's default WindowShortcut context,
-# so they are inert while this window is the active one; I is still
-# taken by the filter for symmetry with the Insert Key button.
-#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import math
 import os
 import sys
@@ -73,7 +73,7 @@ SIDE_IN = graphModel.SIDE_IN
 SIDE_OUT = graphModel.SIDE_OUT
 SIDE_BOTH = graphModel.SIDE_BOTH
 
-# Maya's graph editor palette, dark enough that a saturated curve colour
+# graph editor palette, dark enough that a saturated curve colour
 # carries on its own (spec section 2.2).
 COLOR_BACKGROUND = QtGui.QColor(43, 43, 43)
 COLOR_RULER = QtGui.QColor(56, 56, 56)
@@ -104,7 +104,7 @@ ZOOM_DRAG_PIXELS = 220.0
 # marquee, in logical pixels.
 CLICK_SLOP = 3.0
 
-# Maya's Infinity menu, in menu order, as (label, graphModel name).
+# Infinity menu, in menu order, as (label, graphModel name).
 INFINITY_CHOICES = (
     ("Constant", "constant"),
     ("Linear", "linear"),
@@ -173,15 +173,13 @@ def _FormatTick(value, step):
     return "%.*f" % (decimals, value)
 
 
-# ---------------------------------------------------------------------------
 # Small widgets
-# ---------------------------------------------------------------------------
 
 class BlankableSpinBox(QtWidgets.QDoubleSpinBox):
     """
     A double spin box that can show NOTHING.
 
-    Maya's Time / Value key stats are blank when the selected keys
+    Time / Value key stats are blank when the selected keys
     disagree, and a plain QDoubleSpinBox always shows a number -- which
     would read as "every selected key is at frame 1001" when in fact
     they are spread over the shot. Blankness is a display state only:
@@ -226,10 +224,10 @@ class BlankableSpinBox(QtWidgets.QDoubleSpinBox):
 
 class CurveListWidget(QtWidgets.QTreeWidget):
     """
-    Maya's outliner column: one row per curve, with the colour it draws
+    outliner column: one row per curve, with the colour it draws
     in, the prim it belongs to, the attribute, and a visibility check.
 
-    Selecting rows ISOLATES those curves (Maya's behaviour): the canvas
+    Selecting rows ISOLATES those curves (behaviour): the canvas
     then draws only the selection, and `Show All` puts everything back.
     """
 
@@ -257,9 +255,7 @@ class CurveListWidget(QtWidgets.QTreeWidget):
             "curve; select rows to isolate them.")
 
 
-# ---------------------------------------------------------------------------
 # Canvas
-# ---------------------------------------------------------------------------
 
 class GraphCanvas(QtWidgets.QWidget):
     """
@@ -643,7 +639,7 @@ class GraphCanvas(QtWidgets.QWidget):
                 event.accept()
             return
         if button == QtCore.Qt.MiddleButton:
-            # Maya's "move the picked keys from anywhere": the selection
+            # "move the picked keys from anywhere": the selection
             # is not touched, so a middle drag never loses it.
             if self._panel.BeginKeyDrag(point):
                 self._mode = "keys"
@@ -727,7 +723,7 @@ class GraphCanvas(QtWidgets.QWidget):
 
     def _Zoom(self, point):
         """
-        Maya's Alt+right drag: rightward magnifies time, upward
+        Alt+right drag: rightward magnifies time, upward
         magnifies value, both about the press point so the frame under
         the cursor when the drag started stays there.
         """
@@ -878,9 +874,7 @@ def _FinitePolylines(points):
     return runs
 
 
-# ---------------------------------------------------------------------------
 # Gestures
-# ---------------------------------------------------------------------------
 
 class _Refused(Exception):
     """
@@ -942,9 +936,7 @@ class _Gesture(object):
         self.recorder.Abort()
 
 
-# ---------------------------------------------------------------------------
 # Hotkeys
-# ---------------------------------------------------------------------------
 
 class GraphHotkeyFilter(QtCore.QObject):
     """
@@ -1011,9 +1003,7 @@ def _TypingFocus():
     return (isinstance(focus, QtWidgets.QComboBox) and focus.isEditable())
 
 
-# ---------------------------------------------------------------------------
 # Panel
-# ---------------------------------------------------------------------------
 
 class GraphEditorPanel(QtWidgets.QWidget):
     """
@@ -1426,9 +1416,9 @@ class GraphEditorPanel(QtWidgets.QWidget):
             return False
         attr = self._Attribute(index)
         if attr is None or not attr:
-            # The attribute went out from under the editor (a stage edit
-            # between the gesture starting and this write). Leave the
-            # cache alone: it is the last thing that was true.
+
+
+
             return False
         try:
             graphModel.ApplySpline(self.Stage(), self._curves[index].attrPath,
@@ -1661,7 +1651,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
         """
         (tMin, tMax, vMin, vMax) over the keys, or None when there are
         none. Values come from the knots, not from the sampled curve: a
-        Bezier can overshoot its keys and Maya frames the keys.
+        Bezier can overshoot its keys and the editor frames the keys.
         """
         times, values = [], []
         for index in self.VisibleIndices():
@@ -1776,7 +1766,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
                               width if weighted else None)
         if unified:
             other = SIDE_IN if glyph.side == SIDE_OUT else SIDE_OUT
-            # Slope only: Maya's unified tangents share an angle, not a
+            # Slope only: unified tangents share an angle, not a
             # length, so the far handle keeps the weight it had.
             graphModel.SetTangent(spline, glyph.time, other, slope)
         with Sdf.ChangeBlock():
@@ -1874,7 +1864,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
     # -- edit commands --------------------------------------------------
 
     def SetTangentType(self, mode):
-        """Maya's tangent buttons, on the selected keys (spec 2.4)."""
+        """tangent buttons, on the selected keys (spec 2.4)."""
         times = self.SelectedTimes()
         if not times:
             return False
@@ -2036,7 +2026,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
 
     def SetInfinity(self, pre=None, post=None):
         """
-        Maya's Infinity combos, on the visible curves that have keys.
+        Infinity combos, on the visible curves that have keys.
 
         The visible set IS the selected set here: picking rows in the
         curve list isolates them, so what is drawn is what an artist
@@ -2103,7 +2093,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
 
     def SetKeyTime(self, time):
         """
-        Put the selection at `time`: Maya's Time field (spec 2.4).
+        Put the selection at `time`: Time field (spec 2.4).
 
         graphModel.SetKeyTimes does the move per spline, refusing when
         the frame is already held by a key OUTSIDE the selection. Across
@@ -2172,7 +2162,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
         self.canvas.update()
 
     def SetKeyValue(self, value):
-        """Set every selected key's departure to `value` (Maya's Value)."""
+        """Set every selected key's departure to `value` (Value)."""
         try:
             if not math.isfinite(float(value)):
                 self._Notify("Value must be a finite number: %r" % (value,))
@@ -2663,9 +2653,7 @@ def _FrameValue(frame):
         return 0.0
 
 
-# ---------------------------------------------------------------------------
 # Entry points
-# ---------------------------------------------------------------------------
 
 def OpenGraphEditor(usdviewApi, undoStack=None):
     """

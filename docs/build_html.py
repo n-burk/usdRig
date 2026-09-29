@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Generate a Houdini-style multi-page HTML node reference.
+"""Generate a multi-page HTML node reference.
 
 Usage: python docs/build_html.py
 
@@ -10,14 +10,6 @@ one page per operator under nodes/, one page per hand-written concept
 under concepts/ (sources: docs/concepts/*.md), a shared stylesheet, and
 copied icons/, gifs/, examples/ and specs/ trees so the site is
 self-contained.  Open docs/site/index.html in a browser to read it.
-
-The theme follows the SideFX Houdini help: a black 32px top bar whose
-search field filters the node list, a fixed left table of contents with
-node icons, breadcrumbs, the pale metatable under the title, ruled
-section headings, and the side-by-side parameter grid whose right-aligned
-label cell carries the monospace parameter name over a small type/default
-signature.  It follows the system colour scheme: that look in light, and
-a near-black usdview-ish palette when the OS prefers dark.
 
 Every tree is copied with dot-directories ignored, so editor and tool
 metadata such as icons/.omc never reaches the site.
@@ -57,14 +49,11 @@ SECTIONS = [
 ]
 
 CSS = """\
-/* UsdRig node reference: a port of the SideFX Houdini help look.
-   Black 32px top bar, fixed left TOC, ruled sections, side-by-side
-   parameter grid. Every colour is a custom property, so the dark
-   scheme further down is a token swap and nothing else. */
+/* Shared reference layout with light and dark themes. */
 :root {
     color-scheme: light dark;
     /* chrome */
-    --nav-bg: #000;
+    --nav-bg: #17333b;
     --nav-fg: #fff;
     --nav-dim: #888;
     --search-bg: rgba(255, 255, 255, 0.8);
@@ -83,7 +72,7 @@ stroke='%23555' stroke-width='1.6'%3E%3Ccircle cx='6.6' cy='6.6' r='4.4'\
     --rule: rgba(0, 0, 0, 0.12);
     --rule-soft: rgba(0, 0, 0, 0.07);
     --wash: #f6f6f6;
-    --meta-bg: #f6f6ef;
+    --meta-bg: #eef6f5;
     --pre-bg: #f6f6f6;
     --pre-fg: #000;
     /* table of contents */
@@ -91,13 +80,13 @@ stroke='%23555' stroke-width='1.6'%3E%3Ccircle cx='6.6' cy='6.6' r='4.4'\
     --toc-fg: #000;
     --toc-line: rgba(0, 0, 0, 0.07);
     /* links */
-    --link: #1782ba;
+    --link: #006d77;
     --link-visited: #2c7ba5;
     --link-hover: #21a1e3;
     /* accents */
     --teal: #42a0a4;
-    --accent: #f90;
-    --accent-active: #f60;
+    --accent: #007f80;
+    --accent-active: #006366;
     --button: #58a4ff;
     --button-active: #069;
     --tag-bg: #e0e0e0;
@@ -128,7 +117,7 @@ stroke='%23555' stroke-width='1.6'%3E%3Ccircle cx='6.6' cy='6.6' r='4.4'\
 }
 
 /* ---- dark scheme -------------------------------------------------
-   The SideFX help at night over a usdview viewport: a near-black page,
+   Dark theme: a near-black page,
    warm amber for the node you are on, and a page-coloured gap between
    the parameter cells so the striped grid still reads.  Follows the
    system preference; [data-theme] is only a hook for forcing one.  The
@@ -990,7 +979,7 @@ def _sidebar(active, prefix, concepts=(), concept=None):
                 '<img src="%sicons/%s.png" alt="">'
                 "<span>%s</span></a></li>"
                 % (cls, _esc(note["title"].lower()), prefix, key,
-                   prefix, key, _esc(note["title"])))
+                   prefix, (key if os.path.isfile(os.path.join(RIG, "icons", key + ".png")) else "concept"), _esc(note["title"])))
         chunks.append("</ul></div>")
     chunks.append("</div></div>")
     chunks.append(TOC_JS)
@@ -1108,7 +1097,8 @@ def _catlist(keys, icon_prefix, link_prefix, current=None):
     out = ['<ul class="catlist">']
     for key in keys:
         note = OPERATORS[key]
-        icon = '<img src="%sicons/%s.png" alt="">' % (icon_prefix, key)
+        icon_key = key if os.path.isfile(os.path.join(RIG, "icons", key + ".png")) else "concept"
+        icon = '<img src="%sicons/%s.png" alt="">' % (icon_prefix, icon_key)
         if key == current:
             out.append('<li class="current">%s<span class="t">%s</span>'
                        '<p class="d">%s</p></li>'
@@ -1132,7 +1122,7 @@ def render_node(key, category, classes, concepts=()):
                  '<a href="../index.html#%s">%s</a>'
                  '<i class="pathsep">&rsaquo;</i>'
                  % (_slug(category), _esc(category)))
-    header = _titleblock(key, "../", ancestors, note["title"], "rig node",
+    header = _titleblock(key if os.path.isfile(os.path.join(RIG, "icons", key + ".png")) else "concept", "../", ancestors, note["title"], "rig node",
                          _md_inline(note["summary"]))
 
     body = []
@@ -1270,7 +1260,6 @@ def render_node(key, category, classes, concepts=()):
                   header, "\n".join(body))
 
 
-# ---- concept pages ---------------------------------------------------
 # Authors write one convention, relative to docs/: a node page is
 # "nodes/<key>.md" and an image is "gifs/<name>.gif".  The Markdown
 # sources under docs/concepts/ are themselves the Markdown output and are
@@ -1425,7 +1414,9 @@ def _copy_tree(src, dest, required=True):
             raise SystemExit("media source not found: %s" % src)
         print("skipped missing %s" % src)
         return
-    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".*"))
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
+        ".*", "__pycache__", "*.pyc", "*.prompt.txt", "*.prompt.md",
+        "*_capture_manifest.json", "*.bak", "*.orig", "*.rej"))
 
 
 def main():
@@ -1446,7 +1437,7 @@ def main():
         shutil.rmtree(SITE)
     nodes_dir = os.path.join(SITE, "nodes")
     os.makedirs(nodes_dir)
-    with open(os.path.join(SITE, "style.css"), "w") as stream:
+    with open(os.path.join(SITE, "style.css"), "w", encoding="utf-8") as stream:
         stream.write(CSS)
     concepts = load_concepts()
     with open(os.path.join(SITE, "index.html"), "w", encoding="utf-8") as stream:
@@ -1454,7 +1445,7 @@ def main():
     print("wrote index.html")
     for key in OPERATORS:
         page = render_node(key, _category_of(key), classes, concepts)
-        with open(os.path.join(nodes_dir, key + ".html"), "w") as stream:
+        with open(os.path.join(nodes_dir, key + ".html"), "w", encoding="utf-8") as stream:
             stream.write(page)
         print("wrote nodes/%s.html" % key)
     if concepts:

@@ -1,6 +1,4 @@
-//
 // RigExec exec type registrations (spec §12.1).
-//
 #include "types.h"
 
 #include "pxr/exec/exec/typeRegistry.h"
@@ -86,7 +84,6 @@ RigExecWeightPacket::ResolveAll(
     // and for `sparse` it was worse than redundant: Resolve() binary-searches
     // the index array per point, making a whole-array resolve O(n log m)
     // where a scatter is O(n + m).
-    //
     // Same values, same failure conditions, and the same atomicity: nothing
     // is written into *resolved until the whole array has passed, because an
     // in-place caller cannot roll back a partial write.
@@ -115,7 +112,6 @@ RigExecWeightPacket::ResolveAll(
     // sparse: the default everywhere, then the authored entries scattered
     // over it. The indices were range-checked and proved strictly ascending
     // above, so each one lands exactly once and in bounds.
-    //
     // The default is only checked when some point can actually read it. A
     // sparse packet that happens to name every point never resolves to its
     // default, and the per-point loop this replaces would never have seen

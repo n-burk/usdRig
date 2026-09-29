@@ -1,12 +1,8 @@
-//
 // rigExecRuntime shared value types (M2 framework).
-//
 // Zero-USD mirrors of the pose values the step bodies pass around:
 // point frames, input values, weight packets, the phased-read snapshot
 // store, and per-step outputs. Family .cpps build their private state
 // from these; the store owns the framework-visible instances.
-//
-
 #ifndef RIGEXEC_RUNTIME_VALUES_H
 #define RIGEXEC_RUNTIME_VALUES_H
 

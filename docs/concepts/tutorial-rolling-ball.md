@@ -11,11 +11,18 @@ weight object and a mover — plus one thing that is easy to get wrong and
 worth getting right, which is making the **spin follow the travel** so
 there is only one channel to animate.
 
-This page builds it live in `usdview`, through the **usdNoodles** node
-graph editor, and shows every step as a recording of the real
-application. The finished stage is
+This page explains how to build it in `usdview`, through the **usdNoodles**
+node graph editor. The GIFs are captioned inspection checkpoints of the
+completed asset in the real application, with the corrected top-centred star
+and continuous equatorial stripe. They pause for 4.5 seconds and retain the
+native UI resolution; open them directly to read the attributes. The finished stage is
 [`docs/examples/tutorial_rolling_ball.usda`](../examples/tutorial_rolling_ball.usda)
-and every snippet below is a literal excerpt of it.
+and the snippets below describe its composed `travelX` mode. The asset also
+has a `free` mode for the interactive Godot game described below.
+
+[Download the USD source, texture and icons together](../examples/usdview_rolling_ball.zip).
+Extract the entire archive, then open `docs/examples/tutorial_rolling_ball.usda`.
+The `tutorial_rolling_ball_free.usda` wrapper uses the same textured mesh for Godot.
 
 ## What you start with
 
@@ -34,7 +41,7 @@ steps at a stage of your own — the pieces are:
 * `/BallAsset/Geom/Ground` — a checkered plane.
 * `/BallAsset/Rig` — a [Rig Root](../nodes/rig_root.md) with empty
   `Controls`, `Joints`, `Solvers`, `Weights` and `Movers` scopes.
-* `/BallAsset/MainCam` — the camera the recordings use.
+* `/BallAsset/MainCam` — an authored camera for inspecting the scene.
 
 Open it with `bin/launch_usdview.bat docs/examples/tutorial_rolling_ball.usda`
 (or `bin/usdview.sh`), then **Window ▸ Noodles Editor**. The editor opens
@@ -43,7 +50,7 @@ docked; it is scoped to the rig, so the graph starts on
 
 ## Step 1 — point your edits at the file
 
-![Changing the edit target from the session layer to the root layer](../gifs/concepts/ball_step01_edit_target.gif)
+![Source stage and the layer editor's edit-target choices](../gifs/concepts/ball_step01_edit_target.gif)
 
 Do this first, every time. usdview opens with the **session layer** as the
 edit target, and the session layer is thrown away when the application
@@ -60,7 +67,7 @@ From here on every prim, relationship and value lands in
 
 ## Step 2 — put the stage in the graph
 
-![Adding the rig and the geometry to the node graph](../gifs/concepts/ball_step02_stage.gif)
+![Inspecting the geometry, rig scopes and textured material](../gifs/concepts/ball_step02_stage.gif)
 
 The editor draws the prims you ask it to. Select `/BallAsset/Rig` in
 usdview's prim browser and press **A** over the graph canvas ("add from
@@ -75,7 +82,7 @@ prim.
 
 ## Step 3 — the Move control
 
-![Creating the Move control and applying RigExecControlAPI](../gifs/concepts/ball_step03_move_control.gif)
+![Inspecting the completed Move control](../gifs/concepts/ball_step03_move_control.gif)
 
 A [Control](../nodes/control.md) is the animator-facing prim: an
 animatable coordinate space whose animation is authored on its `avars`.
@@ -108,7 +115,7 @@ opinion that says what the schema already says.
 
 ## Step 4 — the Squash control
 
-![Creating the Squash control under Move](../gifs/concepts/ball_step04_squash_control.gif)
+![Inspecting Squash under Move](../gifs/concepts/ball_step04_squash_control.gif)
 
 Same three actions, with `Move` selected so the new control lands
 underneath it. `Squash` carries the scale avars.
@@ -134,7 +141,7 @@ rolls.
 
 ## Step 5 — the Roll and Spin controls
 
-![Creating the Roll and Spin controls](../gifs/concepts/ball_step05_roll_control.gif)
+![Inspecting the Roll and Spin controls](../gifs/concepts/ball_step05_roll_control.gif)
 
 `Roll` is the control the rig drives for you; `Spin` is the one you can
 still key by hand when a shot needs the ball to scuff or spin on the spot.
@@ -171,7 +178,7 @@ this page sets it, next to the mover that reads it.
 
 ## Step 6 — the joints
 
-![Creating the four joints](../gifs/concepts/ball_step06_joints.gif)
+![Inspecting the four-joint hierarchy](../gifs/concepts/ball_step06_joints.gif)
 
 Controls are what an animator touches; [Joints](../nodes/joint.md) are
 what a solver writes and a mover reads. This rig needs one per control, in
@@ -207,7 +214,7 @@ two have to agree about where the ball turns.
 
 ## Step 7 — the FK chain
 
-![Creating the FK chain and wiring it to the four controls and the four joints](../gifs/concepts/ball_step07_fk_chain.gif)
+![Inspecting the FK chain and its control and joint relationships](../gifs/concepts/ball_step07_fk_chain.gif)
 
 An [FK Chain](../nodes/fk_chain.md) is the solver that maps controls onto
 joints, one to one, in order.
@@ -249,7 +256,7 @@ the five values you have to type.
 
 ## Step 8 — the skin
 
-![Creating the weight and the matrix mover and carrying the ball from the last joint](../gifs/concepts/ball_step08_skin.gif)
+![Inspecting the weight and matrix mover binding the ball to the last joint](../gifs/concepts/ball_step08_skin.gif)
 
 One [Matrix Mover](../nodes/matrix_mover.md) carries the whole ball from
 the last joint, under a [Static Weight](../nodes/static_weight.md) of 1.
@@ -291,7 +298,7 @@ which is the problem the next step solves.
 
 ## Step 9 — make the roll a consequence of the travel
 
-![Setting the gain, wiring the float math mover and rolling the ball](../gifs/concepts/ball_step09_auto_roll.gif)
+![Inspecting the roll gain and float math mover](../gifs/concepts/ball_step09_auto_roll.gif)
 
 This is the step the whole tutorial is for.
 
@@ -363,14 +370,15 @@ the FK chain sees in the same evaluation; nothing is a frame late.
 Drag `Move`'s X handle again and the ball rolls, star and band sweeping
 over the top, with no keys on any rotation.
 
-For sideways travel, add a second mover the same way with
-`inputs:value.connect` on `Move.avars:tz`, `rigExec:moves` on
-`Roll.avars:rx`, and a gain of **+57.29578** — travelling along +Z turns
-the ball about +X, so the sign flips.
+For a straight shot along Z, the analogous mover reads `Move.avars:tz`,
+targets `Roll.avars:rx`, and uses a gain of **+57.29578**. Do not combine
+independent position-to-Euler mappings for free movement: rotations about
+different axes do not commute. A ball that turns corners needs accumulated
+orientation, as in the free-rolling mode below.
 
 ## Step 10 — key the travel, and only the travel
 
-![Keying the travel at 1001 and 1049 from the Avar Editor, then scrubbing](../gifs/concepts/ball_step10_keys.gif)
+![The Move control and automatic roll relationship used by the two-key animation](../gifs/concepts/ball_step10_keys.gif)
 
 Select `Move`. Put the gizmo on **Animation** on the viewport toolbar and
 the Avar Editor's own **Write** box on **Animation (key at current
@@ -392,7 +400,12 @@ a channel.
 
 ## Playback
 
-![The finished rig playing back in usdview](../gifs/concepts/ball_final.gif)
+![The finished rig evaluated live by usdview's Hydra Storm renderer](../gifs/concepts/ball_final.gif)
+
+This preview uses usdview's Storm renderer and the live rigExec imaging plugin
+at **1280 × 800, 30 fps**, with 8× antialiasing. It plays the authored travel
+forward and backward at inspection speed, with a following camera and hidden
+rig guides. The material and mesh come directly from the downloadable USD.
 
 Drag usdview's frame slider from 1001 to 1049, or press **Play**. The rig
 evaluates live: no bake, no export. The star and the band are what tell
@@ -451,8 +464,79 @@ frames. Editing the `.usda` and reloading (**File ▸ Reload All Layers**)
 does the same job, and `docs/examples/tutorial_rolling_ball.usda` already
 has every one of them.
 
+## Free rolling in the Godot game
+
+The tutorial asset now exposes **`rollMode`** on `/BallAsset`:
+
+* **`travelX`** (default) preserves the recorded lesson: the variant supplies
+  the `-57.29578` gain and the float math mover drives roll from X travel.
+* **`free`** disables `RollFromTravelX` and supplies a neutral `rz = 0`.
+  Both Roll and Spin expose independent `rx`, `ry`, and `rz` controls.
+  The centre pivot and `Move → Squash → Roll → Spin` hierarchy stay intact.
+
+Open [`tutorial_rolling_ball_free.usda`](../examples/tutorial_rolling_ball_free.usda)
+for the game-ready variant. It references the same tutorial rig, uses one
+unit as one metre (radius one), and is baked at frame 1001. Changing the
+variant in usdview also lets you pose all three rotation channels manually.
+Selecting `free` does not automatically integrate travel inside USD; its
+rotation channels are driven by the application or authored animation.
+
+The sibling `godot_rigExec/demo/project.godot` now opens **Roll / Collect**,
+a small course with six rings, obstacles, a ramp, hopping, a finish pad and
+fall recovery. Use WASD / arrows to move, Space to hop, Shift to brake and
+R to restart. Run `python demo/setup_rolling.py --build` from that plugin
+checkout to rebuild the native plugin and bake this asset, then run
+`godot --path demo`.
+
+The game stores orientation as a normalized quaternion. On contact with a
+surface, project the **actual collision-constrained displacement** into its
+tangent plane, then accumulate a world-space increment:
+
+```text
+tangent = displacement - normal * dot(normal, displacement)
+axis = normalize(cross(normal, tangent))
+angle = length(tangent) / radius
+orientation = normalize(quaternion(axis, angle) * orientation)
+```
+
+Skip the increment for zero displacement. This handles diagonal travel,
+reversals and changing surface normals. It retains path history: a square
+lap can return the ball to its starting position with a different orientation.
+In the air the game preserves angular velocity, and resumes contact rolling
+on landing. The no-slip calculation assumes a spherical ball of fixed radius;
+squash is left at one in the game.
+
+Only at the rig boundary is the quaternion decomposed to degree avars.
+USD's row-vector XYZ composition corresponds to Godot's `EULER_ORDER_ZYX`.
+`RigExecPlayer.set_avar()` drives Move translation and Roll rotation, then
+`evaluate()` executes the compiled FK program and `apply_to_skeleton()`
+updates the skeleton. `rolling_ball.tscn` is a reusable Godot object containing
+the collision body, skeleton, mesh, material and `rolling_ball.gd` controller.
+The level instantiates it and manages the course. Other controllers can feed
+`drive(direction, delta, braking)` instead of keyboard input.
+
+Its mesh is exported from `/BallAsset/Geom/Ball` with the original face-varying
+UVs, refined by OpenSubdiv and attached to Spin. The exported shader preserves
+the bound USD material's texture, diffuse and emission scales, roughness,
+metallic and specular values. The export corrects the source's inward winding
+for Godot culling while preserving corner UVs. No generic Godot sphere or
+substitute UV mapping is used. The visible mesh has no separately animated
+rotation. Godot lighting and tone mapping can differ from usdview.
+
+The plugin distinguishes skinning deltas from bone poses: the existing
+`get_joint_transforms()` returns rest-to-posed deltas, while
+`get_joint_pose_transforms()` returns posed frames and
+`get_joint_rest_transforms()` supplies skeleton rests. Applying a delta as
+a bone pose would make this ball orbit instead of turning about its centre.
+
+Run `godot --headless --path demo --script verify_rolling.gd` in the plugin
+checkout to verify multi-axis FK, no-slip signs, blocked movement, resets
+and the game loop against the native extension.
+
 ## Where to go next
 
+* [Godot and baked rigs](../concepts/tutorial-godot-baked-rig.md) — package this
+  ball as a reusable game object and drive its controls in Godot, with gameplay GIFs.
 * [Baked and dynamic evaluation](baked-vs-dynamic.md) — the same rig, two
   ways to compute it.
 * [Two-Bone IK](../nodes/two_bone_ik.md) — the next solver up, and the one

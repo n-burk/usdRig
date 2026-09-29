@@ -1,6 +1,4 @@
-//
 // benchPlayback -- what pressing play costs, tick by tick, with warming on.
-//
 // Simulates exactly what the usdview plugin does on every playback tick
 // (_OnFrameChanged with no pending edit): SetTime(frame) then OnIdle().
 // Two passes: a cold first play paced at 24 fps (the playhead a user
@@ -11,9 +9,7 @@
 // tick path, the warming race, or the cache rather than guessed at.
 // Prints human-readable numbers; asserts nothing, so it is built but
 // deliberately NOT registered with ctest (like benchCommitLag).
-//
 //   benchPlayback [examplesDir] [frameCount] [paceMs] [stage] [profile]
-//
 // paceMs paces tick starts apart (41.7 ~= 24 fps); 0 runs unpaced, which
 // is the mechanics run (the playhead outruns the workers on purpose).
 // stage is the stage path under examplesDir (default
@@ -21,7 +17,6 @@
 // lane. profile (default 0) enables the scheduler and bridge profilers
 // and prints their summaries after the passes; profiling perturbs tick
 // timings, so it stays off unless asked.
-//
 // Environment, read and reported, never assumed: RIGEXEC_FRAME_CACHE (unset
 // is set to "on" in-process for the run; an explicit off/warm-off is
 // honored) and RIGEXEC_ENABLE_PARALLEL_EVAL (the process default).

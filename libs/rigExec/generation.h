@@ -1,6 +1,4 @@
-//
 // RigExec generation tokens: the edit fence in front of the per-frame cache.
-//
 // A generation is a rig's edit serial. The UI thread takes the current token
 // at enqueue time, samples the job's input vector under it, and the worker
 // rechecks the token twice: before it runs and again before it publishes.
@@ -10,19 +8,15 @@
 // checking discipline -- which call sites ask, and what each answer means --
 // plus the D7 admission policy, so that every producer and consumer of a
 // token answers those questions the same way.
-//
 // The bump contract (Stream E wires it; the calls already exist): every
 // rig-affecting edit calls RigExecBackgroundScheduler::CancelGeneration for
 // the rig, and the edit-commit trigger enqueues fresh jobs under the new
 // token. Entering a rig at generation 0 and bumping on every edit is what
 // makes "stale" decidable from the token alone, with no frame-level
 // invalidation bookkeeping.
-//
 // Header-only on purpose: the checks are two comparisons, and every caller
 // -- the frozen worker, the scheduler, the imaging publish fence -- inlines
 // them rather than paying for a call across the library boundary per frame.
-//
-
 #ifndef RIGEXEC_GENERATION_H
 #define RIGEXEC_GENERATION_H
 

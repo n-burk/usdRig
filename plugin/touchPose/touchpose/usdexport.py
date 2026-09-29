@@ -59,17 +59,17 @@ SELECTED_COLOR_ATTR = "touchpose:selectedColor"
 FACES_ATTR = "touchpose:faces"
 ELEMENT_ATTR = "touchpose:elementType"
 MESH_ATTR = "touchpose:mesh"
-# Where the regions live. NOT under the mesh: hdSt collects every face
-# GeomSubset under a mesh whatever its familyName, so touch regions
-# collided with the materialBind subsets and cost 16,739
-# `SanitizeGeomSubsets` warnings -- and their startup time -- for data
-# the renderer never uses. A sibling scope carries the same face
-# indices with no type the renderer cares about.
-#
-# The NAME is a default, not a location. This used to be the absolute
-# path "/Biped/TouchPose", which meant TouchPose worked for exactly one
-# character. The reader finds the scope by schema type, so where it sits
-# is the rig's decision, including inside its RigExecRoot.
+
+
+
+
+
+
+
+
+
+
+
 SCOPE_NAME = "TouchPose"
 # The shipped highlight surface, one per regions scope.
 OVERLAY_NAME = "Overlay"
@@ -115,19 +115,19 @@ def _beside_the_asset(mesh_path):
         return Sdf.Path.absoluteRootPath.AppendChild(SCOPE_NAME)
     return path.AppendChild(SCOPE_NAME)
 
-# --- node-graph placement -------------------------------------------------
-#
-# usdNoodles reads these two off any prim it shows, so the regions are
-# laid out and coloured AT AUTHORING TIME rather than by the editor.
-# Without a position every node sits at the origin and 98 regions land in
-# one pile; with one the editor and the loader agree about where things
-# are, because the values ARE the editor's own.
-#
-# THE 1/1000 IS NOT DECORATION. `NodeModel._writePositionToUsd` divides by
-# 1000 on the way in and multiplies by 1000 on the way out, so a position
-# written in display units comes back a thousand times too far away the
-# first time a rigger drags the node. Same convention, same constant, as
-# `tools/biped/build_biped_rigexec.py::layout_for_noodles`.
+
+
+
+
+
+
+
+
+
+
+
+
+
 POS_ATTR = "ui:nodegraph:node:pos"
 DISPLAY_COLOR_ATTR = "ui:nodegraph:node:displayColor"
 # The rig's columns are 1.6 apart and its Controls column is x=0, so this
@@ -135,16 +135,16 @@ DISPLAY_COLOR_ATTR = "ui:nodegraph:node:displayColor"
 # column rightwards and never cross back over it. A region node measures
 # 985 units wide (see below), so the column still clears x=0 by 0.6.
 COLUMN_X = -1.6
-# THE ROW PITCH IS MEASURED, AND IT IS NOT THE RIG'S.
-# `build_biped_rigexec.layout_for_noodles` stacks rig nodes 0.11 apart and
-# this started as a copy of that number. Then the nodes were measured
-# through the editor's own layout (`GraphModel.calculateNodeSize`, the
-# shipped Poppins metrics, default render config): a region node is 784
-# display units tall and a rig control node is 4,879 to 6,244. A 0.11
-# pitch is 110 units, so the rig's own layout overlaps its nodes by
-# roughly fifty to one, and copying it would have stacked the 98 regions
-# seven deep -- a different way of piling up at the origin. 0.9 clears a
-# region node by 116 units.
+
+
+
+
+
+
+
+
+
+
 ROW_PITCH = 0.9
 # The group sits a pitch clear above the first region, so it reads as the
 # head of the column rather than as row zero of it.

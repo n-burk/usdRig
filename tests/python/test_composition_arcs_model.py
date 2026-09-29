@@ -136,7 +136,6 @@ def _Context(stage, path="/Rig/IK"):
     return arcs.ArcContext(stage, prim)
 
 
-# --------------------------------------------------------------------
 
 
 def TestAuthoringLayersAreTheLocalStackOnly():
@@ -1207,10 +1206,8 @@ def _SpecBody(usda):
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------
 # Reopening an arc that is already there. Same dialog, same rules; the
 # difference is one attribute on the context.
-# --------------------------------------------------------------------
 
 
 def _EditStage():
@@ -1526,10 +1523,8 @@ def TestEveryEditableArcCanReadItsOwnRows():
                % arc.key)
 
 
-# --------------------------------------------------------------------
 # Which paths the Target prim combo offers. For an external arc they
 # come from the ASSET; everywhere else, from this stage.
-# --------------------------------------------------------------------
 
 
 def _PrimPathField(arc=None):

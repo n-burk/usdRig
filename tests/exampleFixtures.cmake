@@ -1,4 +1,3 @@
-# ---------------------------------------------------------------------------
 # The per-example fixture table: one source of truth.
 #
 # Three harnesses ask the same three questions of every shipped example -- at
@@ -53,7 +52,6 @@
 # Every other stage under examples/, examples/biped/ and examples/components/
 # has an entry, so a new example that nobody wired up is a visible omission
 # rather than a silently skipped test.
-# ---------------------------------------------------------------------------
 set(RIGEXEC_EXAMPLE_FIXTURES
     # -- the numbered tour -------------------------------------------------
     "01_FkChainTail.usda|1001,1012,1024,1036,1048|/TailAsset/Rig/Controls/Tail2|avars:rz|/TailAsset/Rig/Weights/Seg2W|rigExec:defaultWeight|YES|-"

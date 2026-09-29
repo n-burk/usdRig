@@ -1,12 +1,9 @@
-//
 // Tests for the compiled mover graph (spec §7.2).
-//
 // Three halves, really: the revision ops themselves (every operation,
 // composition, weighting, cardinality guards, pass-through paths); the binding
 // resolution that replaces compiler-authored rigExec:resolved* wiring with
 // build-time path choices; and packet assembly from provider values, which is
 // what lets a revision run with no derived stage in existence.
-//
 #include "rigExec/moverGraph.h"
 #include "rigExec/types.h"
 

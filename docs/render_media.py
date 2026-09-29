@@ -156,12 +156,12 @@ TEXT = (232, 236, 242)
 TEXT_DIM = (150, 160, 173)
 ACCENT = (242, 161, 60)          # the control you animate
 STATIC_CTRL = (150, 165, 181)    # a control that is NOT animated here
-# Joints and their bones. Deliberately a desaturated TEAL rather than the
-# steel-blue this used to be: the ghost is cyan, the ghost composites down
-# to roughly that steel over the dark gradient, and the key's `rest` and
-# `joints` swatches then read as one colour at 640 px -- a four-swatch key
-# that says three things. Teal keeps the "cool, not the accent" law and
-# separates from both the ghost and the neutral mesh grey.
+
+
+
+
+
+
 JOINT_RGB = (0.34, 0.66, 0.62)
 GHOST_RGB = (0.42, 0.82, 1.00)   # the rest pose
 GHOST_ALPHA = 0.72
@@ -402,9 +402,7 @@ def bake(src, frames, dst):
     rigexec.export_baked(stage, roots, frames, dst)
 
 
-# ---------------------------------------------------------------------------
 # Stage preparation: guide sizing, ground grid, driver discovery
-# ---------------------------------------------------------------------------
 
 class Scene(object):
     """Everything the renderer needs to know about one example."""
@@ -945,12 +943,12 @@ def _drive_links(stage):
                 links.append((paths[0], joints[-1], short))
             elif short == "poleControl":
                 links.append((paths[0], joints[len(joints) // 2], short))
-            # A spline IK names one midControl and one endControl against
-            # a whole chain of joints, so both used to fall into the
-            # catch-all below and draw one control against the first THREE
-            # joints: six dashes across the arch interior, asserting that
-            # the end control poses the root joints. It does not -- it
-            # carries the last two CVs and the end twist.
+
+
+
+
+
+
             elif short == "midControl":
                 links.append((paths[0], joints[len(joints) // 2], short))
             elif short == "endControl":
@@ -1070,10 +1068,10 @@ def _chain_line(stage, scene, moved):
         if path in moved:
             geometry.append(prim.GetName())
     if not geometry:
-        # A property-math mover revises `xformOp:transform` and publishes
-        # no moved point at all, so `moved` is empty and the line used to
-        # stop at the handle with no arrow and no follower. The movers
-        # themselves still say what they write.
+
+
+
+
         seen = set()
         for prim in stage.Traverse():
             rel = prim.GetRelationship("rigExec:moves")
@@ -1469,9 +1467,7 @@ def camera_ops(camera, yaw=YAW, pitch=PITCH):
     return ((translate[0], translate[1], translate[2]), (pitch, yaw, 0.0))
 
 
-# ---------------------------------------------------------------------------
 # Offscreen Storm renderer
-# ---------------------------------------------------------------------------
 
 class Viewport(object):
     """The offscreen GL context, framebuffer and Storm engine.
@@ -1685,9 +1681,7 @@ def _to_pil(qimage):
     return Image.frombytes("RGBA", (width, height), data)
 
 
-# ---------------------------------------------------------------------------
 # Frame composition
-# ---------------------------------------------------------------------------
 
 def _gradient(width, height, top, bottom):
     band = Image.new("RGB", (1, height))
@@ -1917,10 +1911,10 @@ def _value_text(attr, time, divisions=None, samples=None):
         count = len(value)
     except TypeError:
         return None
-    # A matrix channel (`posed:space`) used to fall through to the array
-    # branch and print "space  4" -- the row count, which is 4 for every
-    # matrix ever authored. It prints the translation and the Z rotation
-    # the matrix carries instead, in the same shape as a scalar avar.
+
+
+
+
     if _is_matrix4(value):
         channels = _matrix_channels(value)
         return _channel_text(
@@ -1939,12 +1933,12 @@ def _value_text(attr, time, divisions=None, samples=None):
     if divisions:
         return "%s  %s" % (name, "\u00d7".join(str(d) for d in divisions))
     if _is_vector_array(value):
-        # A driver whose animation IS an array of points -- a swept curve,
-        # a ribbon's CVs -- used to print the array's LENGTH, which is the
-        # same integer in every frame of the loop: a chip that labels
-        # nothing, with a leader across the frame to reach it. Print the
-        # element that actually travels, by name, so the number is one a
-        # reader can watch move AND can find in the .usda.
+
+
+
+
+
+
         moved = _moving_element(attr, samples, time)
         if moved is not None:
             index, axis, number = moved
@@ -2201,12 +2195,12 @@ def compose(chrome, passes, state, scene, index, total):
 
     frame = chrome.base.copy()
     frame.paste(view, (0, TITLE_H), view)
-    # Every overlay is drawn into a VIEW_W x VIEW_H layer and composited
-    # at the viewport's origin, so a projected pixel OUTSIDE the viewport
-    # -- an aim target swinging below the bottom edge, a control leader
-    # running off the side -- is clipped by the layer instead of being
-    # painted over the title strip or off the canvas. It used to run over
-    # both: the aim example drew its dashed links down past the picture.
+
+
+
+
+
+
     overlay = Image.new("RGBA", (VIEW_W, VIEW_H), (0, 0, 0, 0))
     pen = ImageDraw.Draw(overlay, "RGBA")
     clip = (VIEW_W, VIEW_H)
@@ -2376,9 +2370,7 @@ def compose(chrome, passes, state, scene, index, total):
     return frame.convert("RGB")
 
 
-# ---------------------------------------------------------------------------
 # Output
-# ---------------------------------------------------------------------------
 
 def _write_gif(frames, path, fps=GIF_FPS):
     """Assemble the GIF with ffmpeg's palettegen/paletteuse.

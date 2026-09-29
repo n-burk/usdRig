@@ -1,10 +1,7 @@
-//
 // Multi-stage imaging (docs/multistage-imaging.md; usdOrchestrate SPEC 14.1).
-//
 // Several stages imaged in ONE process, each through the REAL UsdImaging
 // chain (UsdImagingCreateSceneIndices, exactly as usdview builds it), each
 // with its own imaging context:
-//
 //   (a) two stages opened from the SAME file (identical prim paths) plus a
 //       third, different rig stage: SetTime on one changes only that
 //       stage's generation and published control frames;
@@ -32,9 +29,7 @@
 //       path (a stray rig-root pull), only by an explicit activation;
 //   (k) warming counters survive Deactivate and re-activation, and a
 //       context owns a scheduler (threads) only while a rig is active.
-//
 // No GL: every assertion reads the terminal scene index or the C surface.
-//
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
 #include "rigExecImaging/touchPose.h"
@@ -375,7 +370,6 @@ TestMultiStage(const std::string &examplesDir)
     // Isolated from whatever an earlier activation left current.
     RigExecImaging_Deactivate();
 
-    // ---- (a) same file twice plus a different rig, three chains ---------
     std::unique_ptr<_Viewport> a = _Open(UsdStage::Open(turretFile));
     std::unique_ptr<_Viewport> b = _Open(UsdStage::Open(turretFile));
     std::unique_ptr<_Viewport> c = _Open(UsdStage::Open(tailFile));
@@ -454,7 +448,6 @@ TestMultiStage(const std::string &examplesDir)
     CHECK(RigExecImaging_ContextCount() ==
           int(RigExecImagingRegistry::ContextCount()));
 
-    // ---- (b) the same path, each chain its own stage's pose -------------
     const GfMatrix4d turretA1024 = _WorldOf(a->Terminal(), kTurret);
     CHECK(!_Close(turretA1024, turretA1001));
     CHECK(_Close(_WorldOf(b->Terminal(), kTurret), turretB1001));
@@ -567,7 +560,6 @@ TestMultiStage(const std::string &examplesDir)
         std::filesystem::remove(profile, ignored);
     }
 
-    // ---- (c) previews stay on their stage --------------------------------
     {
         _RecordingObserver observerB;
         b->Terminal()->AddObserver(HdSceneIndexObserverPtr(&observerB));
@@ -609,7 +601,6 @@ TestMultiStage(const std::string &examplesDir)
         b->Terminal()->RemoveObserver(HdSceneIndexObserverPtr(&observerB));
     }
 
-    // ---- (d) deactivating A leaves B and C active and evaluated ---------
     RigExecImaging_DeactivateForStage(a->id);
     CHECK(RigExecImaging_IsActiveForStage(a->id) == 0);
     // A context without an active rig owns no threads; B's pool runs on.
@@ -634,7 +625,6 @@ TestMultiStage(const std::string &examplesDir)
         CHECK(RigExecImaging_SetTimeForStage(a->id, 1030.0) == 1);
     }
 
-    // ---- (e) a stage with no rig -----------------------------------------
     {
         std::unique_ptr<_Viewport> d = _Open(_PlainStage());
         std::unique_ptr<_Viewport> e = _Open(_PlainStage());
@@ -665,7 +655,6 @@ TestMultiStage(const std::string &examplesDir)
         _Close(e);
     }
 
-    // ---- (f) the legacy surface --------------------------------------------
     {
         // The last legacy activation (C) is current.
         CHECK(RigExecImagingRegistry::Current() ==
@@ -723,7 +712,6 @@ TestMultiStage(const std::string &examplesDir)
         CHECK(legacy.IsActive());
     }
 
-    // ---- (g) a destroyed stage releases its context ----------------------
     {
         // A live explicit activation stays current throughout, so the
         // automatic activation below never becomes the legacy current one.
@@ -850,7 +838,6 @@ TestMultiStage(const std::string &examplesDir)
         CHECK(results->GetStore()->Get());
     }
 
-    // ---- (h) a stage replaced under the same chain rebinds ---------------
     {
         std::unique_ptr<_Viewport> h = _Open(UsdStage::Open(turretFile));
         CHECK(h->results && h->results->GetContextKey() == _KeyOf(h->stage));
@@ -890,7 +877,6 @@ TestMultiStage(const std::string &examplesDir)
         _Close(h);
     }
 
-    // ---- (j) the automatic path never revives a host-deactivated stage ---
     {
         std::unique_ptr<_Viewport> j = _Open(UsdStage::Open(turretFile));
         CHECK(RigExecImaging_IsActiveForStage(j->id) == 1);
@@ -912,8 +898,6 @@ TestMultiStage(const std::string &examplesDir)
         _Close(j);
     }
 
-    // ---- (k) warming counters survive re-activation -----------------------
-    //
     // Two stages built identically (same prim paths) from a rig that warms
     // in the background. Warming on P counts, caches and clears on P only;
     // P's counters survive its Deactivate and re-activation.
@@ -993,7 +977,6 @@ TestMultiStage(const std::string &examplesDir)
         _Close(q);
     }
 
-    // ---- (i) a TouchPose highlight lights only its own stage's chain -----
     {
         CHECK(!_HasTouchPrimvar(a->Terminal(), kBarrel));
         CHECK(!_HasTouchPrimvar(b->Terminal(), kBarrel));

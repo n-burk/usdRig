@@ -1,7 +1,5 @@
-//
 // benchCommitLag -- what a manipulation release (or undo/redo) costs at a
 // held playhead with warming on.
-//
 // Simulates exactly what the usdview plugin does on a gizmo release, an
 // undo/redo, or a panel commit: one stage edit (synchronous notices through
 // the native handler plus the SetTime re-evaluation) followed by
@@ -11,15 +9,11 @@
 // the rig's scale, so a lag report can be attributed rather than guessed
 // at. Prints human-readable numbers; asserts nothing, so it is built but
 // deliberately NOT registered with ctest (like benchFrameCacheWarm).
-//
 //   benchCommitLag [examplesDir]
-//
 // Environment, read and reported, never assumed: RIGEXEC_FRAME_CACHE (unset
 // is set to "on" in-process for the run, so a bare bench measures warming;
 // an explicit off is honored and the commit half says it enqueued nothing)
 // and RIGEXEC_ENABLE_PARALLEL_EVAL (the process default).
-//
-
 #include "rigExecImaging/registry.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"

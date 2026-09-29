@@ -1,7 +1,5 @@
-//
 // RigExec baked program: the compiled epoch as a flat op list over dense
 // slots, with no exec round trip on the per-frame path.
-//
 // The dynamic path re-derives the same numbers every frame through OpenExec
 // requests, SdfPath-keyed maps and VtValue copies. Almost none of that work
 // depends on the frame: on a rig whose shape is fixed for the epoch, the
@@ -11,12 +9,10 @@
 // program that reads only the inputs that actually vary, runs the same
 // rigExecMath kernels in the same order over dense arrays, and publishes the
 // same RigExecRigPose.
-//
 // It is a SECOND implementation of the evaluation semantics, so it is a
 // request rather than a promise: a rig using any feature the program cannot
 // express stays on the dynamic path, with a reason per feature. See
 // IsBakeable.
-//
 #ifndef RIGEXEC_BAKED_PROGRAM_H
 #define RIGEXEC_BAKED_PROGRAM_H
 

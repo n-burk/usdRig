@@ -289,9 +289,9 @@ class LayerOpinionsPanel(QtWidgets.QDialog,
         self._seeded = set()
         self._rebuilding = False
         self._noticeKey = None
-        # A stage change that arrived while an editor was open. The
-        # rebuild waits for the editor to close: rebuilding under it
-        # deletes the item being typed into and throws the text away.
+
+
+
         self._staleWhileEditing = False
         # (row identity, text) of an edit the model just refused.
         self._retry = None

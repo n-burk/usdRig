@@ -1,9 +1,5 @@
-#
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
-#
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
 """RigExec -> General Editors -> Profiler: where the open rig's time goes, and on how many
 threads.
 

@@ -1,13 +1,10 @@
-//
 // .rigexec DomainPose section: the pose-domain build tables.
-//
 // Ladders, pose interpolators (+ solved RBF tables), solvers, constraints,
 // walk steps and commits: everything the pose-half steps index into. Bound
 // inputs travel as tagged constants plus their read-route flags; the USD
 // handles behind them (queries, attributes) do not -- per-frame value
 // streams arrive with the InputTable section (M1 slice 4), which keys off
 // the head paths and override indices recorded here.
-//
 #ifndef RIGEXEC_BINARY_POSE_H
 #define RIGEXEC_BINARY_POSE_H
 

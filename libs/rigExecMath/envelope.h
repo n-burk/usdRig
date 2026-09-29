@@ -1,6 +1,4 @@
-//
 // Exact common-envelope blending shared by every mover output domain.
-//
 #ifndef RIGEXEC_MATH_ENVELOPE_H
 #define RIGEXEC_MATH_ENVELOPE_H
 

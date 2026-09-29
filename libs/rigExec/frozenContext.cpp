@@ -1,7 +1,4 @@
-//
 // RigExec frozen evaluation contexts. See frozenContext.h.
-//
-
 #include "frozenContext.h"
 
 #include "bakedProgramImpl.h"
@@ -54,7 +51,6 @@ constexpr size_t kMaxFrozenArenaSlots = size_t(1) << 27;
 // authored connection is followed, otherwise the attribute's own value is
 // read -- but type-erased into a VtValue, because the sampler names no
 // binding's type.
-//
 // GetAttribute itself cannot serve here: its in-memory lookup is typed
 // (Find + IsHolding<T>), and T=VtValue never matches, so the chain outputs
 // the sample exists to capture would be skipped and the stage read instead.
@@ -415,7 +411,6 @@ _BurstInterpolatorNeedsVisit(
 // placed, stage reads at the job's time). The sample then carries the value
 // the frame consumes, and the worker patches it as a constant; no separate
 // override value travels.
-//
 // A chain-resolved binding under an override still depends on chain outputs
 // whenever the override misses mid-walk, so without the hook's refreshed
 // values it is marked stale and the vector declines.
@@ -1479,17 +1474,13 @@ _SampleMoverPathArrayRawAtTimeCached(const SdfPath &key, const SdfPath &path,
     }
 }
 
-// ---------------------------------------------------------------------------
 // The chain-sampling hook (Increment B).
-// ---------------------------------------------------------------------------
-//
 // Replicates the live property-chain prologue through public API only: chain
 // discovery from the evaluator's mover order, _BindInput pinning, and the
 // _EvaluatePropertyChains revision loop over the property-math kernels. The
 // sampler runs it for the job's time on the UI thread, into caller-owned
 // resolved inputs seeded with the job's overrides, and reads chain-resolved
 // bindings through the refreshed values.
-//
 // ORDER SOUNDNESS. The hook evaluates in dependency order computed fresh at
 // bind time. That order equals the live path's compile-time order within an
 // epoch: every order-relevant edge -- a chain input's connection walk, a
@@ -1503,7 +1494,6 @@ _SampleMoverPathArrayRawAtTimeCached(const SdfPath &key, const SdfPath &path,
 // cannot be read through the resolved inputs at a compatible type, and so
 // cannot move a value, or fails the bind as a cycle; either way the job
 // declines rather than warming a misordered evaluation.
-//
 // What is NOT replicated is the live path's memoization (the watch/upstream
 // dirty skip): it republishes identical values and lines, so recomputing
 // every call changes no answer. Weight-object envelopes are declined, not
@@ -2686,7 +2676,6 @@ RigExecSampleFrameInputsWithChainBindings(
     // a weight the read misses is 0, an activation 1, points empty. Dense
     // points ride a synthetic key under the sample prim, never the target
     // path (see _FrozenBlendInputKey).
-    //
     // A pose-driven weight samples only when the refreshed inputs hold its
     // path -- an override or chain result standing on it, which is exactly
     // when live reads R instead of the pose slot. Otherwise the worker
@@ -3611,15 +3600,11 @@ RigExecFrozenPurityAudit()
     return audit;
 }
 
-// ---------------------------------------------------------------------------
 // The frozen executor.
-// ---------------------------------------------------------------------------
-//
 // ISOLATION AUDIT (D3). A frozen run executes on a worker thread while the
 // host may author on the UI thread, so no frozen code path may reach a
 // UsdStage, UsdAttribute, UsdAttributeQuery, UsdPrim, the evaluator, its
 // caches, or any live lock. The argument, per unit the run touches:
-//
 //  * The snapshot (RigExecFrozenProgram) is cloned on the UI thread. Its
 //    program copy keeps the live program's USD handles COPIED but DEAD: the
 //    worker copies them again (refcount operations, thread-safe) and never
@@ -3674,7 +3659,6 @@ RigExecFrozenPurityAudit()
 //    atomic refcounts and the process-global immutable-after-load tables
 //    under brief internal locks -- the same operations the live path
 //    performs per frame, never the stage, and never held across evaluation.
-//
 // What the frozen run therefore reads: the immutable snapshot, the job's
 // sampled vector, and its own working state. What it writes: its own
 // working state and the output pose. Everything else declines.
@@ -3755,7 +3739,6 @@ _ForEachPatchableInput(Impl &B, Fn &&fn)
 // the ones it uses at worker-owned state -- and every other field is
 // copied, including the per-frame working state (the history the frozen
 // run branches from) and the USD handles (copied but dead; see the audit).
-//
 // When a field is added to RigExecBakedProgramImpl, it must be added here:
 // a missing epoch field silently changes the frozen run's answers, and a
 // missing per-frame field silently changes its history. The bit-identity
@@ -4360,9 +4343,7 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Worker-side state and input patching.
-// ---------------------------------------------------------------------------
 
 // One job's private working state: the snapshot cloned onto the worker plus
 // the live-state stand-ins the reused code dereferences (resolved inputs,
@@ -5547,7 +5528,6 @@ _FrozenAssembleWire(
 // order. Only plain data from the clone's channels is touched (paths, pose
 // slots, phases, blend-shape paths) -- never the dead UsdAttributes, never
 // the freeze-time layouts, never the evaluator-bound resolve callback.
-//
 // R.Find answers the pose-slot question exactly as live: the worker's
 // resolved inputs hold the job's overrides and chain results and nothing
 // else, which are the only things live R can hold at a weight path that

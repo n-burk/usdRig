@@ -1,27 +1,27 @@
-#
-# RigExec usdview plugin: the Avar Editor.
-#
-# Select a control (or a joint, or anything carrying `avars:*`) in the
-# viewport or the prim tree and its avar channels appear here as
-# sliders and number fields. Drag one and the rig re-evaluates and the
-# viewport follows; let go and the drag is one Ctrl+Z on the shared
-# undo stack the viewport gizmo and the graph editor use.
-#
-# Every rule -- which attributes are channels, what unit they are in,
-# how a value is keyed or defaulted, what reset means for an animated
-# channel -- lives in avarEditorModel and is tested without Qt. This
-# file is the widgets, the selection and frame wiring, and the
-# refresh-on-notice loop.
-#
-# WHY IT AUTHORS PER SLIDER SAMPLE. The gizmo previews a drag through
-# Hydra and authors once on release, because a mouse drag produces
-# hundreds of samples and the preview lane is only wired for the
-# channels the C side knows. A slider sample is rarer than a mouse
-# sample, and a custom avar like the biped's `ikfk` has no preview
-# lane, so the editor writes each sample to the stage and lets the
-# evaluator's own stage notice republish. The undo bracket spans the
-# whole drag, so the cost is time, never a polluted undo stack.
-#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import os
 import sys
 

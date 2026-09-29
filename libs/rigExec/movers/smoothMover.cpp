@@ -1,14 +1,10 @@
-//
 // RigExecSmoothMover: everything about the smooth mover (spec §4.1).
-//
 // A smooth mover applies fixed-adjacency Laplacian smoothing over the
 // destination's standard topology. This TU owns its exec-side
 // computeMoverParameters registration and builder, its revision binder,
 // and its parity-oracle branch, and registers the row that points at
 // them. Compile validation is the generic points-target + single-target
 // rules.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 

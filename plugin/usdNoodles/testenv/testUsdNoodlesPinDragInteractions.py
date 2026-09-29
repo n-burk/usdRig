@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -37,13 +37,11 @@ import collections
 import unittest
 
 
-# ---------------------------------------------------------------------------
 # Lightweight fakes (plain objects, NOT MagicMock).
 #
 # MagicMock is unsafe here: getattr(mock, "_title_collapsed", False) returns a
 # truthy Mock rather than the default, which would silently short-circuit the
 # row-edge logic. Plain objects give honest attribute defaults.
-# ---------------------------------------------------------------------------
 
 
 class _Renderer:
@@ -136,9 +134,7 @@ class _View:
         return self._port_positions.get((pinName, isOutput))
 
 
-# ===========================================================================
 # Shims (byte-faithful mirrors of the production methods)
-# ===========================================================================
 
 
 def _should_draw_pin(view, node, pin_name, is_output, is_connected, is_rel_pin):
@@ -262,9 +258,7 @@ def _find_arrowhead_under_cursor(view, world_pos):
     return best
 
 
-# ===========================================================================
 # REQ 3 - Pin visibility gate
-# ===========================================================================
 
 
 class TestPinVisibilityGate(unittest.TestCase):
@@ -328,9 +322,7 @@ class TestPinVisibilityGate(unittest.TestCase):
         self.assertFalse(_should_draw_pin(view, node, "in", False, False, False))
 
 
-# ===========================================================================
 # REQ 4 - Row-edge drag start
-# ===========================================================================
 
 
 class TestRowEdgePinCandidates(unittest.TestCase):
@@ -527,9 +519,7 @@ class TestFindRowEdgeDragStart(unittest.TestCase):
         )
 
 
-# ===========================================================================
 # REQ 5 - Arrowhead hit-test
-# ===========================================================================
 
 
 class TestFindArrowheadUnderCursor(unittest.TestCase):
@@ -589,7 +579,6 @@ class TestFindArrowheadUnderCursor(unittest.TestCase):
         self.assertEqual(_find_arrowhead_under_cursor(view, (106.0, 50.0)), -1)
 
 
-# ===========================================================================
 # Bug 2 regression - _getRowHitMetrics schema-type offset
 #
 # After REQ 1 every USD-prim node carries a schemaTypeName, so the renderer
@@ -600,7 +589,6 @@ class TestFindArrowheadUnderCursor(unittest.TestCase):
 # freshly added (unconnected, glyph-less) node cannot start a connection from
 # its side. The shim below mirrors the production method (graphView.py:5224);
 # schema_type_font_ratio stands in for RenderConfig.kSchemaTypeFontRatio.
-# ===========================================================================
 
 
 class _MetricsRenderer:

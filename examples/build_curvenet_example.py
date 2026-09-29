@@ -15,18 +15,14 @@ articulation onto a tube whose tessellation the rig never mentions.
 import math
 import os
 
-# ---------------------------------------------------------------------------
 # tube
-# ---------------------------------------------------------------------------
 
 TUBE_RADIUS = 1.0
 TUBE_HEIGHT = 6.0
 TUBE_SIDES = 16
 TUBE_RINGS = 13  # rings of vertices, so 12 quad bands
 
-# ---------------------------------------------------------------------------
 # curvenet: three profile rings plus four longitudinal curves
-# ---------------------------------------------------------------------------
 
 NET_RADIUS = 1.06          # sits just off the surface, as §3 assumes
 RING_HEIGHTS = [1.5, 3.0, 4.5]

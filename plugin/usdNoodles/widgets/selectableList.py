@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 #
@@ -146,7 +146,6 @@ class SelectableList:
         # here is what keeps the two from drifting apart.
         self._rebuild_rows()
 
-    # ---- row layout ---------------------------------------------------
 
     def _rebuild_rows(self):
         """Flatten filtered_items into the rows that actually get drawn."""

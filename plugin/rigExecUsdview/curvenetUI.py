@@ -1,25 +1,25 @@
-#
-# usdview panel for authoring curvenets (docs/specs/curvenet.md).
-#
-# The toolkit the 2022 paper describes is the specification for this file:
-#
-#   "The user can then insert control points at arbitrary locations on the
-#    surface and click-and-drag curves resembling surface profiles. [...]
-#    Importantly, we allow endpoints to be shared by multiple splines. [...]
-#    Our toolkit also includes operations such as split and merge splines,
-#    weld and break control points, project endpoints to the surface mesh,
-#    and flatten tangents, to cite a few."
-#
-# The one thing that makes this possible in usdview at all is that a click on
-# the model can be turned into a 3D point on the surface:
-# stageView.computePickFrustum(x, y) followed by stageView.pick(frustum)
-# returns hits carrying hitPoint and hitNormal in world space.
-#
-# NOTE the pick has to be done directly. usdview's own pickObject() emits
-# signalPrimSelected with a "point" whose x and y it has already overwritten
-# with scaled MOUSE coordinates (stageView.py, pickObject) -- so the signal
-# cannot be used to recover where on the surface the artist clicked.
-#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import math
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, Vt
@@ -35,9 +35,7 @@ except ImportError:                    # loader that did not add our dir
     import sessionRegistry
 
 
-# ---------------------------------------------------------------------------
 # stage helpers
-# ---------------------------------------------------------------------------
 
 CURVENET_TYPE = "RigExecCurvenet"
 MOVER_TYPE = "RigExecCurvenetMover"
@@ -111,7 +109,6 @@ def SetSplines(prim, indices):
     attr.Set(Vt.IntArray([int(i) for i in indices]))
 
 
-# ---------------------------------------------------------------------------
 # §3 derived structure
 #
 # Mirrors RigExecBuildCurvenetTopology's classification so the panel can show
@@ -119,7 +116,6 @@ def SetSplines(prim, indices):
 # the CLASSIFICATION -- valences, curve grouping -- and not the frame math:
 # one implementation of the frames is enough, and it lives in C++ where the
 # solve uses it.
-# ---------------------------------------------------------------------------
 
 KIND_UNUSED = "unused"
 KIND_HANDLE = "handle"
@@ -244,14 +240,12 @@ def EvalBezier(p0, p1, p2, p3, t):
             Gf.Vec3f(p2) * (3.0 * u * t * t) + Gf.Vec3f(p3) * (t * t * t))
 
 
-# ---------------------------------------------------------------------------
 # editing operations
 #
 # Module level, taking the prim, so every one of them is exercisable without
 # a display, a QApplication, or a single widget -- which is what
 # tests/testUsdviewCurvenetAuthoring.py does. The panel below is a thin shell
 # over these.
-# ---------------------------------------------------------------------------
 
 def CreateCurvenet(stage, parent, name="Curvenet"):
     path = parent.GetPath().AppendChild(MakeUniqueName(parent, name))
@@ -477,9 +471,7 @@ def CheckBindPreconditions(stage, mesh, rig):
     return warnings
 
 
-# ---------------------------------------------------------------------------
 # picking
-# ---------------------------------------------------------------------------
 
 class SurfacePicker(object):
     """
@@ -561,9 +553,7 @@ class SurfacePicker(object):
                 else Gf.Vec3d(0, 0, 1))
 
 
-# ---------------------------------------------------------------------------
 # the panel
-# ---------------------------------------------------------------------------
 
 MODE_OFF = "off"
 MODE_DRAW = "draw"
@@ -1479,9 +1469,7 @@ class CurvenetPanel(QtWidgets.QWidget):
         super(CurvenetPanel, self).closeEvent(event)
 
 
-# ---------------------------------------------------------------------------
 # geometry helpers used by project/flatten
-# ---------------------------------------------------------------------------
 
 def _MeshTriangles(mesh):
     points = mesh.GetAttribute("points").Get()

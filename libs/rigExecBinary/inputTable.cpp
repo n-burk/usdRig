@@ -1,7 +1,4 @@
-//
 // .rigexec InputTable section: wire encoding.
-//
-
 #include "rigExecBinary/inputTable.h"
 
 namespace rigExec {

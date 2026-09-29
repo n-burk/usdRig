@@ -1,13 +1,10 @@
-//
 // RigExec rigging API (spec section 4 authoring surface).
-//
 // A programmatic, fluent way to create and wire the prims a RigExec rig is
 // made of -- controls, joints, solvers, constraints, weight objects, and
 // mover chains -- directly on a UsdStage. The engine itself authors nothing;
 // this library is the authoring side of that contract: it writes exactly the
 // typed prims, attributes, and relationships the RigExecRigEvaluator
 // discovers (type-name based, codeless schema), and nothing else.
-//
 // Conventions mirrored from the examples/ assets:
 //   <rig>/Controls/<name>    RigExecControl prims (flat)
 //   <rig>/Joints/<name>      RigExecJoint prims (nestable; rest:space is an
@@ -21,7 +18,6 @@
 //                            (bottom-to-top stack walk) -- so ADD ORDER IS
 //                            REVERSE APPLICATION ORDER: the last added runs
 //                            first. Add outermost passes first.
-//
 #ifndef RIGEXEC_RIGGING_BUILDER_H
 #define RIGEXEC_RIGGING_BUILDER_H
 
@@ -423,6 +419,7 @@ public:
     void SetSolverMode(const TfToken &mode);       // rotatePlane | ...
     void SetPoleVectorMode(const TfToken &mode);   // vector | ...
     void SetEvaluationMode(const TfToken &mode);   // neverTS | autoDetect | alwaysTS
+    void SetOrientationMode(const TfToken &mode);  // aimX | preserve
 };
 
 /// Common contract of weight objects: a total scalar field over the logical
@@ -660,9 +657,7 @@ public:
     void SetSamplesPerSpline(int count);
 };
 
-// ---------------------------------------------------------------------------
 // Mover handles (point-domain and property-domain operations)
-// ---------------------------------------------------------------------------
 
 /// RigExecMatrixMover: p' = q + w (T q - q). Moves points through one
 /// provider's matrix, blended by a per-point weight field.
@@ -759,6 +754,18 @@ public:
     void SetReadPhase(const TfToken &phase);
 };
 
+/// Native delta mush: rest-detail transport after iterative smoothing.
+class RigExecDeltaMushMoverHandle : public RigExecMoverHandle {
+public:
+    using RigExecMoverHandle::RigExecMoverHandle;
+    void SetRestPoints(const std::vector<GfVec3f> &points);
+    void SetIterations(int iterations);
+    void SetStep(float step);
+    void SetPinBorders(bool pin);
+    void SetDistanceWeight(float weight);
+    void SetDisplacement(float amount);
+};
+
 /// RigExecSmoothMover: uniform-weight Laplacian smoothing.
 class RigExecSmoothMoverHandle : public RigExecMoverHandle {
 public:
@@ -834,9 +841,7 @@ public:
     void SetWeight(float weight);
 };
 
-// ---------------------------------------------------------------------------
 // Mover chains
-// ---------------------------------------------------------------------------
 
 /// One mover chain: a scope at <rig>/Movers/<name> whose children are the
 /// chain's operations as SIBLINGS. The evaluator executes Movers in
@@ -854,7 +859,6 @@ public:
     /// operation writes; pass an empty path to reuse the chain's default
     /// target set at construction.
 
-    // ---- Point-domain movers -------------------------------------------
 
     /// Moves points through a provider's matrix. weightObject is optional;
     /// without one, the MoverAPI defaultWeight envelope is used.
@@ -919,6 +923,9 @@ public:
         const TfToken &readPhase = TfToken("base"));
 
     /// Uniform-weight Laplacian smoothing with the common mover envelope.
+    RigExecDeltaMushMoverHandle AddDeltaMushMover(
+        const std::string &name, float defaultWeight = 1.0f,
+        const SdfPath &target = SdfPath());
     RigExecSmoothMoverHandle AddSmoothMover(
         const std::string &name, float defaultWeight = 1.0f,
         const SdfPath &target = {});
@@ -938,7 +945,6 @@ public:
         const std::string &name, const std::vector<SdfPath> &adjustments,
         float defaultWeight = 1.0f, const SdfPath &target = {});
 
-    // ---- Property-domain movers ----------------------------------------
 
     /// add | multiply | clamp | remap | blend over an exact float property.
     RigExecFloatMathMoverHandle AddFloatMathMover(
@@ -964,7 +970,6 @@ public:
         const SdfPath &target = {},
         float defaultWeight = 1.f);
 
-    // ---- Pose constraints (movers too) ---------------------------------
 
     RigExecAimConstraintHandle AddAimConstraint(
         const std::string &name, const SdfPath &target = {});
@@ -1029,9 +1034,7 @@ private:
     SdfPath _defaultTarget;
 };
 
-// ---------------------------------------------------------------------------
 // Top-level builder
-// ---------------------------------------------------------------------------
 
 /// The top-level builder: one per (stage, rig root).
 class RigExecRigBuilder {
@@ -1047,7 +1050,6 @@ public:
     UsdStageRefPtr GetStage() const { return _stage; }
     const SdfPath &GetRootPath() const { return _root; }
 
-    // ---- Transform providers -------------------------------------------
 
     /// Create <rig>/Controls/<name> (or nested under \p parentControl) as a
     /// RigExecControl. restSpace is asset space for a top-level control and
@@ -1067,7 +1069,6 @@ public:
         const GfMatrix4d &restSpace = GfMatrix4d(),
         const RigExecJointHandle *parentJoint = nullptr);
 
-    // ---- Solvers (created under <rig>/Solvers) --------------------------
 
     RigExecFkChainHandle AddFkChain(const std::string &name);
     RigExecTwoBoneIkHandle AddTwoBoneIk(
@@ -1095,7 +1096,6 @@ public:
         const SdfPath &midControl,
         const SdfPath &endControl);
 
-    // ---- Weight objects (created under <rig>/Weights) -------------------
 
     /// Dense or sparse authored field over \p target.
     RigExecStaticWeightHandle AddStaticWeight(
@@ -1141,14 +1141,12 @@ public:
         const std::vector<SdfPath> &inputWeights,
         const TfToken &mode = TfToken("multiply"));
 
-    // ---- Independently composable blend channels ------------------------
 
     /// Create <rig>/BlendInputs/<name>. Link it to any blend-shape mover with
     /// RigExecBlendShapeMoverHandle::SetBlendInputs.
     RigExecBlendInputHandle AddBlendInput(
         const std::string &name, float weight = 0.f);
 
-    // ---- Pose interpolators (created under <rig>/PoseInterpolators) ------
 
     /// Create <rig>/PoseInterpolators/<name> reading \p driver.
     ///
@@ -1159,14 +1157,12 @@ public:
     RigExecPoseInterpolatorHandle AddPoseInterpolator(
         const std::string &name, const SdfPath &driver);
 
-    // ---- Curvenets (created under <rig>/Curvenets) ----------------------
 
     RigExecCurvenetHandle AddCurvenet(
         const std::string &name, const std::vector<GfVec3f> &points);
     RigExecCurvenetAdjustmentHandle AddCurvenetAdjustment(
         const std::string &name, const SdfPath &curvenet, int knotIndex);
 
-    // ---- Mover chains ----------------------------------------------------
 
     /// Start a new chain at <rig>/Movers/<chainName>. Operations added to the
     /// returned chain apply in REVERSE add order (last added runs first);

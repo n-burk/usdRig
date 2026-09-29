@@ -1,21 +1,16 @@
-//
 // RigExec task-list cache: the affected-cluster set per (control, epoch).
-//
 // The brief's task-list cache (pp. 9, 32): computing which clusters an edit
 // reaches means walking the output-affected index, and a drag re-edits ONE
 // control dozens of times. The first edit walks and memoizes; every repeat
 // re-runs the cached selection without rewalking. Multi-control edits union
 // one memoized set per control, so each control still walks at most once per
 // epoch.
-//
 // Keyed by (epochDigest, control): a topology change is a new epoch, which
 // makes every memoized set unreachable the way a control edit makes a cached
 // pose unreachable (plan D1). InvalidateEpoch drops an epoch's sets eagerly
 // so a dead epoch's memo does not hold memory until LRU pressure -- there is
 // no LRU here, the table is small (controls x live epochs) and explicit
 // invalidation bounds it.
-//
-
 #ifndef RIGEXEC_TASK_LIST_CACHE_H
 #define RIGEXEC_TASK_LIST_CACHE_H
 

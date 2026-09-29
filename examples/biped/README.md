@@ -1,5 +1,7 @@
 # Biped -- the ported character
 
+For source and licensing status, see [third-party notices](../../THIRD_PARTY_NOTICES.md#provenance-requiring-owner-review).
+
 **Open `Biped_layered.usda`.** That is the whole character: skeleton, rig,
 skinned mesh and materials, composed from three side layers. It is
 self-contained -- clone the repo and open it, nothing else to build or

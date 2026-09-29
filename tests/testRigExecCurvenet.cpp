@@ -1,9 +1,6 @@
-//
 // Curvenet and Profile Mover conformance tests.
-//
 // The properties checked here are the ones the 2022 paper's method must have
 // for anything built on it to be trustworthy:
-//
 //   * the sparse solver actually solves;
 //   * the polygonal Laplacian is the cotan Laplacian on a triangle, is PSD,
 //     annihilates constants, and is scale invariant (Appendix A's claims);
@@ -11,7 +8,6 @@
 //   * an unposed curvenet is EXACTLY the identity on the surface;
 //   * a rigidly moved curvenet moves the surface rigidly;
 //   * the two sides of a curve are independent -- the hinge of Fig. 11.
-//
 #include "rigExecMath/curvenet.h"
 #include "rigExecMath/curvenetWeights.h"
 #include "rigExecMath/cutMesh.h"
@@ -60,9 +56,7 @@ static bool Near(const GfVec3d &a, const GfVec3d &b, double tol = 1e-9)
     return (a - b).GetLength() <= tol;
 }
 
-// ---------------------------------------------------------------------------
 // A flat grid mesh in the XY plane, used as the surface under test.
-// ---------------------------------------------------------------------------
 
 struct Grid {
     std::vector<GfVec3f> points;
@@ -115,9 +109,7 @@ static void AddStraightSpline(std::vector<GfVec3f> *points,
     splines->push_back(knotB);
 }
 
-// ---------------------------------------------------------------------------
 // Sparse solver
-// ---------------------------------------------------------------------------
 
 static void TestSparseSolver()
 {
@@ -168,9 +160,7 @@ static void TestSparseSolver()
     CHECK(!reason.empty());
 }
 
-// ---------------------------------------------------------------------------
 // Appendix A
-// ---------------------------------------------------------------------------
 
 static void TestPolygonLaplacian()
 {
@@ -247,9 +237,7 @@ static void TestPolygonLaplacian()
     }
 }
 
-// ---------------------------------------------------------------------------
 // §3 topology
-// ---------------------------------------------------------------------------
 
 static void TestTopology()
 {
@@ -416,9 +404,7 @@ static void TestIsolatedCurveGradient()
     }
 }
 
-// ---------------------------------------------------------------------------
 // §4: the Profile Mover
-// ---------------------------------------------------------------------------
 
 /// A cross-shaped curvenet across the middle of the grid.
 ///

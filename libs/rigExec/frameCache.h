@@ -1,7 +1,5 @@
-//
 // RigExec per-frame cache: evaluated poses keyed by what they are a function
 // of, not by when they were asked for.
-//
 // A cached pose is a pure function of its sampled inputs, so the key is the
 // pair (bindingEpochDigest, controlStateDigest): the epoch the program was
 // built for, and a hash over every source value the frame actually read,
@@ -11,11 +9,9 @@
 // control edit changes the digest at every affected frame by construction,
 // so stale entries become unreachable and LRU reclaims them without any
 // frame-level invalidation bookkeeping.
-//
 // Memory is bounded by a per-rig byte cap with LRU eviction. Corrupt or
 // undersized entries are evicted, never partially served: an unevaluated
 // result is recoverable, a plausible wrong one is not.
-//
 // Threading: the store is sharded -- sixteen key partitions behind sixteen
 // locks, plus lock-free counters -- so Lookup runs concurrently with
 // background Publish without touching the registry mutex. Every lock is held
@@ -24,7 +20,6 @@
 // handle under the shard lock and the pose outside it, and Publish builds
 // the entry (bytes, copy, digest) before taking the lock, so a below-normal
 // worker can never stall a UI-thread lookup.
-//
 #ifndef RIGEXEC_FRAME_CACHE_H
 #define RIGEXEC_FRAME_CACHE_H
 

@@ -1,49 +1,8 @@
 #!/usr/bin/env python
-"""
-Bake generated glyphs into the gizmo toolbar's icon set.
+"""Normalize monochrome source glyphs into transparent toolbar icons.
 
-THE PIPELINE, end to end, so the set can be regenerated rather than only
-admired. The art is produced by the Codex CLI's built-in image generation, one
-glyph per call, with a fixed style preamble:
-
-    codex exec --skip-git-repo-check -s danger-full-access -C <dir>       "Use your built-in image generation tool to create ONE image and save it
-       as <name>.png in the current working directory.
-
-       Style, exactly:
-       - pure black background (#000000), glyph in pure white (#FFFFFF)
-       - a SINGLE centered line-art glyph: no text, no border, no shadow, no
-         gradient, no 3D, no background shapes, no frame
-       - uniform stroke weight, roughly 3% of the image width, with rounded
-         caps and rounded joins
-       - the glyph occupies the middle ~76% of the canvas, centered
-       - flat, geometric, minimal, in the visual language of Blender/Maya
-         viewport toolbar icons
-
-       The glyph: <one sentence describing it>"
-
-Black ground rather than transparency on purpose: asked for transparency an
-image model tends to draw a checkerboard, whereas white-on-black keys cleanly
-and keeps the antialiasing.
-
-Then this script, which is where the twelve independent generations become a
-SET. The generator centres and sizes each glyph only roughly, and roughly is
-not good enough for a toolbar: twelve icons each at their own scale read as
-twelve unrelated pictures, and the eye notices long before it can say why.
-
-  * alpha comes from LUMINANCE, so the black ground becomes transparent and the
-    antialiased edge of a stroke becomes a partially transparent edge rather
-    than a grey fringe against whatever the toolbar is painted;
-  * the glyph is cropped to its own ink, scaled so its LONGEST side is the same
-    fraction of the canvas for every icon, and centred on that bounding box --
-    which is what makes them a family;
-  * the ink is flattened to white, because the toolbar tints it at draw time
-    (gizmoIcons) and a stray off-white pixel would tint differently.
-
-Usage: bakeGizmoIcons.py <source dir> <dest dir> [size]
-
-The shipped set is 128 px, matching icons/ at the repository root:
-
-    python tools/bakeGizmoIcons.py <generated> plugin/rigExecUsdview/icons 128
+Usage: bakeGizmoIcons.py <source-dir> <destination-dir> [size]
+Requires NumPy and Pillow. The default output size is 128 pixels.
 """
 
 import os

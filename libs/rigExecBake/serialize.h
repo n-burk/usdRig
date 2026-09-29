@@ -1,15 +1,11 @@
-//
 // .rigexec serialization: the live baked program as wire structs.
-//
 // Converts RigExecBakedProgramImpl's epoch-stable state into the plain wire
 // structs libs/rigExecBinary/program.h defines. Per-run state -- scratch
 // buffers, last-run comparisons, counters, timestamps, diagnostics -- is
 // deliberately NOT converted: a file carries what Build decided, and the
 // runtime re-derives the rest by running.
-//
 // Internal to rigExecBake: the Impl type is that library's business, and
 // nothing outside it includes this header.
-//
 #ifndef RIGEXEC_BAKE_SERIALIZE_H
 #define RIGEXEC_BAKE_SERIALIZE_H
 

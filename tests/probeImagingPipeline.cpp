@@ -1,6 +1,4 @@
-//
 // End-to-end probe of the REAL UsdImaging scene index chain.
-//
 // The C++ unit tests build the chain by hand, and a hand-built chain is only
 // ever as truthful as its author's model of the real one. This probe builds
 // no chain: it calls UsdImagingCreateSceneIndices exactly as usdview does,
@@ -9,11 +7,9 @@
 // plugin uses, and then reads transforms off the terminal scene index --
 // the same data source HdSceneIndexAdapterSceneDelegate::GetTransform reads
 // to drive Storm.
-//
 // It exists because a synthetic harness put the flattening scene index
 // downstream of RigExec, where the real chain puts it upstream, and the
 // resulting test passed while the viewport stayed static.
-//
 // WHAT THIS PROBE DOES NOT COVER, so nobody mistakes a pass for one:
 //   - Invalidation. Every assertion is a direct GetPrim() pull, and a pull
 //     always sees the freshly swapped store. A build that published results
@@ -25,7 +21,6 @@
 //     everything downstream of it.
 //   - Native instancing. Inside a prototype the "world" space these
 //     transforms live in is prototype-common space, which is untested.
-//
 #include "rigExecImaging/registry.h"
 
 #include "pxr/imaging/hd/sceneIndex.h"
@@ -248,7 +243,6 @@ main(int argc, char **argv)
           "Sight world == Turret world (identity local)");
 
     // And the aim must actually aim -- at the target's WORLD position.
-    //
     // A direction-sign check ("z swings from -x to +x") is not enough: a
     // constraint that solves the provider's LOCAL frame against a
     // world-space target also swings the right way, and passes. Compare
@@ -262,7 +256,6 @@ main(int argc, char **argv)
     // positioned by rest:space plus its avars, so an xform cache reads it as
     // identity. Derive it from the authored rig data instead, which keeps
     // this oracle independent of the engine's own frame plumbing.
-    //
     // rest:space is ASSET space: it carries no stage placement. Composing the
     // asset root's world transform onto it is what makes this a world-space
     // oracle -- without that step it would happily confirm a solve that mixed

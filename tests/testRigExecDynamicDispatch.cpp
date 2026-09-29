@@ -1,13 +1,10 @@
-//
 // What Dynamic dispatches to (unified-program spec, HP-D0: rules D1, D2, D4).
-//
 // RIGEXEC_DYNAMIC_RUNS_PROGRAM decides whether Dynamic -- the mode every rig
 // that does not author rigExec:baked, and usdview, run in -- answers from the
 // baked program or from the exec walk. The evaluator reads it once per
 // process, so this suite is registered twice, with the variable unset and set,
 // and every assertion is written against RigExecDynamicRunsProgram() so that
 // one binary states both halves:
-//
 //   * off, Dynamic builds no program and is the walk, as it always was;
 //   * on, Dynamic builds the program wherever Baked would, publishes the
 //     program's generations, and those are exactly the oracle's
@@ -17,10 +14,8 @@
 //     its answer rather than a fallback;
 //   * on, Compile defers the walk-only exec preparations for Dynamic exactly
 //     as it does for Baked, and never for ExecReference.
-//
 // And what every mode that runs the program does when a run gives the
 // generation back (HP-D2, rule D3), which needs no flag to be seen:
-//
 //   * a bail only the walk can answer -- a rig left mid-edit, whose program
 //     bails on every frame -- is answered by the walk with a valid pose,
 //     identical to the oracle's, and costs one build for the epoch rather
@@ -28,9 +23,7 @@
 //   * an unresolvable constraint target is the program's own answer: the
 //     run leaves the walk's invalid pose, keeps the program, and the run
 //     after it runs everything.
-//
 // argv[1] = path to the examples directory.
-//
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -211,7 +204,6 @@ TestADefaultRigRunsTheProgramOnlyUnderTheFlag(const std::string &examplesDir,
         CHECK(rig.GetBakedGenerationCount() == before + (runs ? 1 : 0));
 
         // An override no program can place: the walk answers, silently.
-        //
         // Judged against an oracle whose walk is as warm as the one that
         // answers. Under the flag every earlier generation came from the
         // program, so this is the first walk generation this evaluator runs
@@ -540,7 +532,6 @@ TestAPersistentBailBuildsOnce(RigExecEvaluationMode mode, const char *what)
 // one, and the compile refuses a target that is not a transform -- so the
 // run is asked directly, between the edit and the settle, the way the
 // frozen sampler asks the seed hook.
-//
 // The ribbon spine, with an aim constraint added that moves a plain Xform:
 // the Xform is the target the stage frames read, and the ribbon's animated
 // driver curve is per-run state the prologue consumes before it reaches

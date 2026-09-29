@@ -1,10 +1,7 @@
-//
 // RigExec typed extraction API (spec §9), v0.1 subset.
-//
 // Backend-neutral addresses resolve through the USD implementation to
 // ExecUsdValueKey batches; snapshots copy immutable values before crossing
 // threads (spec §6.1).
-//
 #ifndef RIGEXEC_TAP_SET_H
 #define RIGEXEC_TAP_SET_H
 

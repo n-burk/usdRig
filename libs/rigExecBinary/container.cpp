@@ -1,7 +1,4 @@
-//
 // .rigexec sectioned container, writer and reader.
-//
-
 #include "rigExecBinary/container.h"
 
 #include <cstring>

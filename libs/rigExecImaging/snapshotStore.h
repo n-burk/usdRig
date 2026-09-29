@@ -1,11 +1,8 @@
-//
 // RigExec Hydra snapshot store (spec §8.2, §10.3).
-//
 // Evaluation always completes before Hydra pulls: the evaluator publishes
 // complete immutable generations here, and the results scene index's
 // GetPrim() only ever reads the current atomic snapshot. It never
 // computes, waits, changes time, or locks the authoring stage.
-//
 #ifndef RIGEXEC_IMAGING_SNAPSHOT_STORE_H
 #define RIGEXEC_IMAGING_SNAPSHOT_STORE_H
 

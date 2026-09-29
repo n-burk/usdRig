@@ -46,7 +46,6 @@ def Check(condition, message):
         print("  ok   %s" % message)
 
 
-# ---------------------------------------------------------------- setup
 
 CTL = "/Char/Rig/Controls/hand_ctl"
 CTL2 = "/Char/Rig/Controls/foot_ctl"
@@ -118,7 +117,6 @@ def Button(picker, name, panel):
                  if b.id == name and b.parent == panel), None)
 
 
-# ------------------------------------------------------------ discovery
 
 print("discovery")
 stage = BuildStage()
@@ -186,7 +184,6 @@ with Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer())):
     stage.RemovePrim(deep.GetPath())
 stage.GetSessionLayer().Clear()
 
-# ------------------------------------------------------------ overrides
 
 print("")
 print("overrides, authored in a layer the artist owns")
@@ -257,7 +254,6 @@ with Usd.EditContext(stage, session):
 
 stage.GetSessionLayer().Clear()
 
-# --------------------------------------------------- more than one tab
 
 print("")
 print("two characters, two tabs")

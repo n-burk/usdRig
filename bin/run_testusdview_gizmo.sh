@@ -5,7 +5,7 @@
 # Drives synthetic mouse and key events through the gizmo's own projected
 # handle positions and asserts what landed on the stage: the avars, the
 # undo/redo round trip, Default vs Animation, Pivot vs Pose, a plain
-# xform's op stack, and the Maya parity behaviours (planar handles,
+# xform's op stack, and the the editor parity behaviours (planar handles,
 # middle-drag repeat, step snap, view ring, gimbal, free rotate, the
 # scale ratio rule, Preserve Children, hotkeys). Prints RIGEXEC_GIZMO_OK.
 #

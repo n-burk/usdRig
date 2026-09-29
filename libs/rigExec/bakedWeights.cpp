@@ -1,28 +1,22 @@
-//
 // The baked program's weight objects: the table, at bake, and the packet
 // each one publishes, per frame.
-//
 // A weight object is the one piece of the epoch neither domain owns -- a
 // mover binds one, so does a constraint, and the same object may be bound by
 // several of each -- so it lives here rather than in bakedPose.cpp or
 // bakedGeometry.cpp, and both call in.
-//
 // The arithmetic is NOT restated here. RigExecBuildStaticWeightPacket and its
 // peers in weightPackets.h are the same functions the exec computeWeightPacket
 // callbacks call, so a packet cannot mean one thing on the dynamic path and
 // another on this one; what this file owns is only WHICH values are handed to
 // them, and when.
-//
 // It is deliberately NOT RigExecRigEvaluator::_ResolveWeights. That is an
 // independent second implementation with its own failure modes -- it rejects
 // a static field carrying time samples, which exec simply reads, and it
 // reports errors as strings where exec publishes an invalid packet -- and its
 // value is exactly that it was written separately.
-//
 // WHICH SIDE EACH CALL SITE COPIES. The dynamic path resolves a weight in
 // two different ways, and every parity bug in this domain is a call site
 // copying the wrong one. So it is written down once, here, and obeyed:
-//
 //   * a MOVER copies EXEC. Its packet is the one the computeWeightPacket
 //     callbacks publish -- these builders -- placed against the volume's
 //     BASE frame, with exec's validity ladder, and an invalid packet is a
@@ -43,11 +37,9 @@
 //     a bind half and a field half (curvenetWeightComputations.h) and exec
 //     calls both in order; the program holds a bind of its own, one per
 //     weight object, and calls the field half with the same arguments.
-//
 // The two placements genuinely differ for a volume some constraint revises,
 // and reproducing BOTH is the contract: parity is with the dynamic path as
 // it stands, not with the dynamic path as it might be tidied.
-//
 #include "bakedProgramImpl.h"
 
 #include "types.h"
@@ -234,7 +226,6 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
         // covers an array, so they are read through the generation's resolved
         // inputs every frame -- which is what lets an animated inputs:weights
         // move the field without re-cutting the mesh.
-        //
         // An interactive OVERRIDE on one is another matter, and the prim is
         // deliberately NOT routed: exec declares both AttributeValue<float>
         // and AttributeValue<int>, so an override carrying the array they
@@ -582,7 +573,6 @@ RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     // Where every volume weight ended up, as one step and one slot.
-    //
     // It exists for two readers. pose.weightFrames is one; the other is the
     // ORACLE, which places a volume from this map and is what a constraint's
     // envelope and a current-phase field resolve through. The dynamic path

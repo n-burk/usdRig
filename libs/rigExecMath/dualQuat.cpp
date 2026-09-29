@@ -1,6 +1,5 @@
-//
+// Method reference: Kavan et al. (2008), https://users.cs.utah.edu/~ladislav/dq/index.html
 // RigExec dual-quaternion skinning primitives.
-//
 #include "dualQuat.h"
 
 #include "pointFrame.h"

@@ -9,7 +9,7 @@
 #
 # State ints mirror the C API exactly (registry.h:
 # RigExecImaging_GetFrameStates writes 0 uncached, 1 warming, 2 cached,
-# 3 dirty). The palette is the Maya-style coloring, defined once here;
+# 3 dirty). The palette is the coloring, defined once here;
 # the Stream 3 view reuses it rather than naming its own colors.
 #
 import ctypes
@@ -36,7 +36,7 @@ STATE_ROLES = {
     DIRTY: ROLE_DIRTY,
 }
 
-# Maya-style timeline palette, defined once: cached reads done (green),
+# timeline palette, defined once: cached reads done (green),
 # warming reads in-flight (blue), dirty reads stale (red), uncached
 # reads untouched (dark grey, near the timeline's own background).
 PALETTE = {

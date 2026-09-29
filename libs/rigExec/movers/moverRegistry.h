@@ -1,28 +1,22 @@
-//
 // RigExec mover registry (spec §4.1).
-//
 // One row per concrete mover schema, registered by the mover's own
 // translation unit under libs/rigExec/movers/. Every dispatch site that
 // used to compare schema-type strings -- the revision-op map, revision
 // binding, compile validation, the parity oracle, and the evaluator's
 // one-off type checks -- reads this table instead, so adding a mover is
 // adding a file rather than editing every switch in the engine.
-//
 // A mover TU owns everything about its mover: the EXEC_REGISTER block and
 // computeMoverParameters builder (where the mover has exec-side
 // computations at all -- skin, the curvenet pair, and the math movers do
 // not), the revision binder, the compile validator, and the parity-oracle
 // branch. Only genuinely shared logic lives here: registration, lookup,
 // predicates, and the small stage-reading helpers every mover TU needs.
-//
 // Registration runs during library load, before any evaluation, exactly
 // like the EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA blocks beside it (which
 // is also why rigExec must stay a SHARED library: a static archive would
 // let the linker drop a TU nothing else references, and with it that
 // mover's row). After load the table is immutable, so lookups need no
 // lock.
-//
-
 #ifndef RIGEXEC_MOVERS_MOVER_REGISTRY_H
 #define RIGEXEC_MOVERS_MOVER_REGISTRY_H
 

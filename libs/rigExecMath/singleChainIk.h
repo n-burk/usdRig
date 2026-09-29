@@ -1,11 +1,8 @@
-//
 // RigExec arbitrary-length single-chain IK kernel.
-//
 // This is the pure-math counterpart of FBX's FbxConstraintSingleChainIK.
 // It has no USD, Exec, hierarchy, or schema dependencies: callers resolve the
 // ordered first-joint-through-end-joint chain and all object relationships
 // before invoking it.
-//
 #ifndef RIGEXEC_MATH_SINGLE_CHAIN_IK_H
 #define RIGEXEC_MATH_SINGLE_CHAIN_IK_H
 
@@ -37,6 +34,9 @@ struct RigExecSingleChainIkParams {
     /// [0, 1]. Segment directions are blended on the unit sphere and then
     /// accumulated, so authored segment lengths remain exact at every weight.
     double weight = 1.0;
+    /// Preserve the input frame's orientation relative to its bone instead
+    /// of replacing its aim axis with local X. Useful for imported skeletons.
+    bool preserveJointOrientation = false;
 };
 
 /// Solves an ordered joint chain [firstJoint, ..., endJoint].

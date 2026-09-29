@@ -1,8 +1,6 @@
-//
 // rigExecRuntime weight-family parity (M2): baked program vs runtime over
 // every baking fixture, comparing weight packets bit for bit, plus
 // synthetic builder checks against the real baked builders.
-//
 // Fixture strategy per fixture: bake in-process, then run a fresh
 // evaluator (Evaluate) and a fresh reader (SetFrame + Execute) frame by
 // frame in order. Mask 0x7 is tried first; when Execute fails with "not
@@ -12,8 +10,6 @@
 // anything composed over them -- are deferred, with weightFrames and
 // diagnostics, until pose lands. In 0x7 mode weightFrames and
 // diagnostics compare verbatim too.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
@@ -441,12 +437,10 @@ _TestFixture(const std::string &name, const std::string &stagePath,
     std::printf("%s: mask=0x2 FAILED\n", name.c_str());
 }
 
-// ---------------------------------------------------------------------------
 // Synthetic builder checks: a hand-built wire program exercising every
 // builder arm against the real baked builders, including the pathReads
 // and chain-base gather layers no fixture populates for weight
 // attributes, and the invalid-packet shapes.
-// ---------------------------------------------------------------------------
 
 static RigExecWireInput
 _SynthFloat(float value)

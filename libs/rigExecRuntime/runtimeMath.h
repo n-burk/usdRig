@@ -1,6 +1,8 @@
-//
+// Copyright 2024 Pixar
+// Licensed under the Tomorrow Open Source Technology License 1.0.
+// See https://openusd.org/license and plugin/usdNoodles/LICENSE.txt.
+
 // rigExecRuntime vendored scalar math: vectors.
-//
 // An operational mirror of the OpenUSD Gf subset the kernels use. Every
 // operation performs the SAME floating-point operations in the SAME order
 // as its Gf counterpart -- including Gf's quirks (division multiplies by
@@ -8,14 +10,10 @@
 // by their length) -- so results are bit-identical under default FP
 // semantics. No fast-math: the runtime target must keep precise behavior
 // on every platform or the parity gate fails.
-//
 // Verified against Gf by testRigExecRuntimeMath (randomized bitwise
 // comparison, USD linked into the TEST only -- never here).
-//
 // Only <algorithm>, <cmath>, <cstdint>: this header must compile with no
 // USD include path. The M4 import check enforces it.
-//
-
 #ifndef RIGEXEC_RUNTIME_MATH_H
 #define RIGEXEC_RUNTIME_MATH_H
 
@@ -2103,9 +2101,7 @@ RrMat4d::Orthonormalize(bool issueWarning)
 
     return result;
 }
-// ---------------------------------------------------------------------------
 // Chunk 11: GfCamera-compatible frustum math
-// ---------------------------------------------------------------------------
 
 // Fit-mode policy mirroring GfCamera::FOVDirection.
 enum RrCameraFitMode {

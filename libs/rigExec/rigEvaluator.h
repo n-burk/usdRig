@@ -1,6 +1,4 @@
-//
 // RigExec rig evaluator, v0.1-alpha.
-//
 // Transforms and solvers evaluate through OpenExec; the geometry mover
 // chains evaluate through the in-memory RigExecMoverGraph. NOTHING is
 // authored: the engine has no compiler, no generated prims, and no derived
@@ -8,7 +6,6 @@
 // A staged CPU implementation of the same kernels over the same composed
 // reverse-sibling post-order walk (spec §4.2) is retained behind
 // cpuParityMode as the scalar parity reference.
-//
 #ifndef RIGEXEC_RIG_EVALUATOR_H
 #define RIGEXEC_RIG_EVALUATOR_H
 

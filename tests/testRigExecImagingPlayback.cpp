@@ -1,7 +1,5 @@
-//
 // testRigExecImagingPlayback (M2b): a rig played from its .rigexec file
 // publishes the same geometry the live bridge does.
-//
 // For every baking fixture: bake in process, publish each frame through a
 // live RigExecImagingBridge and through a RigExecBakedPlayback, and compare
 // the two generations leaf by leaf -- points, normals, extents and driven
@@ -9,13 +7,10 @@
 // documented v1 gaps (see playback.h) and are not compared: the assertion
 // is that every geometry leaf the live path owns, playback owns with the
 // same value, and that playback owns no geometry leaf the live path lacks.
-//
 // Also covered: nearest-frame time mapping (ties to the lower frame),
 // Open() refusing an unreadable file, and registry selection -- a stage
 // whose rig names rigExec:asset activates into a guideless playback
 // generation, while the same stage without the attribute draws guides.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/playback.h"

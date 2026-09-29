@@ -86,7 +86,6 @@ def _Close(a, b, tolerance=1e-4):
     return abs(float(a) - float(b)) <= tolerance
 
 
-# ---------------------------------------------------------------------
 
 def TestPrimCreation(ui):
     stage, meshPrim = _MakeStage()

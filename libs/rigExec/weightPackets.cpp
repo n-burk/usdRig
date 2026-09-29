@@ -152,13 +152,10 @@ RigExecBuildDynamicWeightPacket(
     return packet;
 }
 
-// ---------------------------------------------------------------------------
 // Volumetric weight objects (spec §4.1 volumetric extension).
-//
 // One shared body: read the placement and the band, pick a distance
 // function, remap, and publish a dense packet. Only the distance function
 // and the extra inputs it needs differ between sphere, plane, and curve.
-// ---------------------------------------------------------------------------
 
 bool
 RigExecRigidWorldToLocal(const RigExecPointFrame &posed, GfMatrix4d *result)
@@ -485,7 +482,6 @@ RigExecBuildCombineWeightPacket(
     // it is not an exotic case -- nothing among the inputs knows the
     // cardinality and the combine has to get it from its own
     // rigExec:weightTarget.
-    //
     // Reading the target here is not belt-and-braces: without it a
     // constant-only combine publishes an invalid packet and the mover
     // passes through, while the CPU oracle resolves every constant to

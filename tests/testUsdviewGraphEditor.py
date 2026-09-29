@@ -220,12 +220,12 @@ def testUsdviewInputFunction(appController):
            "the panel pushes onto the viewport toolbar's stack, so one "
            "Ctrl+Z history covers gizmo drags and graph edits alike")
 
-    # testusdview's windows are never activated by the window manager, so
-    # QApplication.activeWindow() is None and Qt's shortcut map refuses
-    # EVERY shortcut before it looks at the key -- Ctrl+Z would silently
-    # do nothing for reasons that have nothing to do with the editor.
-    # Supplying the activation is what lets the undo assertion below go
-    # through the real key path instead of calling the action by hand.
+
+
+
+
+
+
     d = _Driver(appController, panel)
     d.QtWidgets.QApplication.setActiveWindow(panel)
     d.Pump()
@@ -337,7 +337,7 @@ def testUsdviewInputFunction(appController):
         _Check(knot.GetPreTanAlgorithm() == Ts.TangentAlgorithmAutoEase
                and knot.GetPostTanAlgorithm()
                == Ts.TangentAlgorithmAutoEase,
-               "and it came in with Maya's Auto tangents on both sides: "
+               "and it came in with Auto tangents on both sides: "
                "%s / %s" % (knot.GetPreTanAlgorithm(),
                             knot.GetPostTanAlgorithm()))
     # An unanimated channel has nothing to evaluate, so its first key
@@ -467,10 +467,10 @@ def testUsdviewInputFunction(appController):
     _Check(graphModel.IsUnified(knot), "and the key reads as unified")
     d.Rewind(stack)
 
-    # --- 10. Infinity ---------------------------------------------------
-    # SetInfinity applies to the curves the editor is SHOWING, because
-    # picking rows in the curve list is what isolates them; tx alone is
-    # visible from section 8, so this is a one-curve edit.
+
+
+
+
     _Check(panel.VisibleIndices()
            and [panel.Curves()[i].Label()
                 for i in panel.VisibleIndices()] == [TX],
@@ -480,7 +480,7 @@ def testUsdviewInputFunction(appController):
     d.Pump()
     spline = d.Spline("avars:tx")
     _Check(spline.GetPreExtrapolation().mode == Ts.ExtrapLoopReset,
-           "Maya's Cycle is TsExtrapLoopReset -- the curve repeated "
+           "Cycle is TsExtrapLoopReset -- the curve repeated "
            "exactly -- not LoopRepeat, which is Cycle with Offset: %s"
            % (spline.GetPreExtrapolation().mode,))
     _Check(spline.GetPostExtrapolation().mode == Ts.ExtrapLoopOscillate,
@@ -504,10 +504,10 @@ def testUsdviewInputFunction(appController):
     panel.SetVisibleCurves([ref.Label() for ref in panel.Curves()])
     d.Pump()
 
-    # --- 10b. Curve types ------------------------------------------------
-    # Bezier (free widths) and Hermite (fixed widths) are Ts's two spline
-    # types (ts/types.h:101-105). Like Infinity, SetCurveType applies to
-    # the curves the editor is SHOWING.
+
+
+
+
     import graphModel as _gm
     panel.SetVisibleCurves([TX])
     d.Pump()

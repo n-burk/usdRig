@@ -1,6 +1,4 @@
-//
 // Every shipped example, under the parity check, with a drag standing on it.
-//
 // The per-example ctest entries (example_parity_*) hold each rig against the
 // dynamic path frame by frame; this is the half they cannot reach, because
 // rigExecPose has no gizmo. An interactive override the program cannot place
@@ -9,15 +7,12 @@
 // passes and the only visible symptom is that the drag got slow. What this
 // suite asserts, per fixture, is therefore that the generations under a drag
 // CAME FROM THE PROGRAM, and that the parity check found nothing.
-//
 // The fixtures come from tests/exampleFixtures.cmake through the generated
 // header: one table, read here and by the ctest entries, so the two cannot
 // disagree about which frames a rig is tested at or which prim a drag lands
 // on. A fixture that does not bake yet is skipped and reported, and turns
 // itself on when its operator group removes the refusal.
-//
 // argv[1] = path to the examples directory.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 
@@ -106,7 +101,6 @@ BumpedValue(const UsdAttribute &attribute, double delta, VtValue *out)
 // count the caller has already seen; it is advanced by the frames evaluated
 // here, and a mismatch between the two is the whole point of the exercise --
 // see the file comment.
-//
 // Each frame is evaluated TWICE. SetInteractiveOverrides invalidates the
 // static input cache on the way in and on the way out, and a cache that
 // refilled during the drag gets its chance to hold the overridden value only

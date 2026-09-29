@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 """Geometry for the inline attribute value cells drawn on property rows.
@@ -209,15 +209,13 @@ def corner_radius(h):
     return CORNER_RATIO * h
 
 
-# ---------------------------------------------------------------------------
-# Theme
-#
-# Every colour a value cell draws is DERIVED from the node theme the rest of
-# the editor already reads (nodeBgHigh / nodeBgLow / nodeBgAlpha, the port
-# colours, the selection stroke). Nothing here is a fixed grey: change the
-# node background and the pills follow it, which is what makes them read as
-# part of the node rather than as a widget pasted over it.
-# ---------------------------------------------------------------------------
+
+
+
+
+
+
+
 
 # Axis tints for vector components. A convention, not a theme value -- x/y/z
 # are red/green/blue everywhere in this industry -- but muted hard, because

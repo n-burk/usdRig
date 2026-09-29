@@ -1,12 +1,9 @@
-//
 // rigExecRuntime weight family (M2): WeightPacket, VolumePlacements.
-//
 // A bit-identical port of RigExecBakedRunWeightStep
 // (libs/rigExec/bakedWeights.cpp) with its builders
 // (libs/rigExec/weightPackets.cpp, libs/rigExecMath/weightFields.cpp).
 // Gf -> Rr, TfToken comparisons -> string-table text comparisons, the
 // arithmetic untouched: float stays float, in the same order.
-//
 // Where the baked step reads the stage per frame, the runtime reads the
 // frame record. Scalar inputs arrive through the uid holders (the
 // runtime form of RigExecBakedRead); the point arrays a volume measures
@@ -22,7 +19,6 @@
 // bit. A connected weight target is a known residual risk: the correct
 // fix is a bake-side recorder hook in the weight gather (a capture
 // hole, not a runtime approximation), which this file cannot add.
-//
 // Two deliberate deferrals, both loud rather than silent:
 //   * RigExecCurvenetWeight's numerical bind (cutMesh + curvenet +
 //     sparseSolve, ~140KB of numerics with no fixture coverage) is not
@@ -33,8 +29,6 @@
 //     exactly what the baked builders return for them: invalid packets
 //     (bare for an unknown type, carrying the object's tokens
 //     otherwise), never a defaulted valid field.
-//
-
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
@@ -317,9 +311,7 @@ _RrGatherIntList(const RrProgram *program, RrWeightScratch *scratch,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Packet envelope (RigExecWeightPacket::Resolve, types.cpp).
-// ---------------------------------------------------------------------------
 
 enum _RrRepresentation {
     _RrRepConstant,
@@ -390,9 +382,7 @@ _RrApplyRangePolicy(bool clamp, float *w)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Volumetric field kernels (rigExecMath/weightFields.cpp).
-// ---------------------------------------------------------------------------
 
 float
 _RrClamp01(float x)
@@ -638,10 +628,8 @@ _RrCombineWeightFields(
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Rigid placement (RigExecRigidWorldToLocal, weightPackets.cpp, over
 // GfMatrix4d::RemoveScaleShear from pxr/base/gf/matrix4d.cpp).
-// ---------------------------------------------------------------------------
 
 // Jacobi eigen decomposition of the symmetric 3x3 in _Jacobi3's upper
 // triangle, in place. A line port of GfMatrix4d::_Jacobi3.

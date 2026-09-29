@@ -1,10 +1,7 @@
-//
 // RigExec volumetric weight-field conformance tests (spec §4.1 weight
 // objects, volumetric extension).
-//
 // Covers the distance-to-weight remap, the baked falloff profiles, the
 // three distance functions, and weight-object composition.
-//
 #include "rigExecMath/weightFields.h"
 
 #include <cmath>

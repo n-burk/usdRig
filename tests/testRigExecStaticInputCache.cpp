@@ -1,13 +1,10 @@
-//
 // RigExecStaticInputCache: the three rules it rests on, one test each.
-//
 // The cache holds one authored value per attribute path and serves it to
 // every later read in the generation. That is only sound while the three
 // rules below hold, and each of them has a failure mode that no end-to-end
 // rig test can see reliably -- a wrong answer that depends on which time
 // codes were evaluated first, or a race that fires in one run out of
 // thirteen. So they are asserted directly here:
-//
 //   * ADMISSION. A held attribute must answer the same at every time code a
 //     caller can ask for, INCLUDING Default. Neither "has no connections"
 //     nor "might not be time varying" is enough on its own: USD reports
@@ -23,7 +20,6 @@
 //     any other thread must bounce off it rather than race on it, which is
 //     what lets the level-parallel chain walk read through the same resolved
 //     inputs.
-//
 #include "rigExec/moverGraph.h"
 
 #include "pxr/usd/sdf/types.h"

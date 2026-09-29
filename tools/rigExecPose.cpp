@@ -1,12 +1,9 @@
-//
 // rigExecPose -- evaluate a rig and print what came out.
-//
 // The test suites assert against fixtures they own. This is the tool for the
 // other case: an arbitrary stage carrying a RigExecRoot, evaluated at chosen
 // frames so an author can see whether the rig they just wrote compiles, what
 // the compiler objected to, where the joints ended up, and how far each moved
 // property actually travelled.
-//
 //   rigExecPose <stage> [--rig <primPath>] [--frames 1001,1024,1048]
 //               [--joints] [--targets] [--joints-out <file.usda>]
 //               [--pose-out <file.txt>] [--repeat N]
@@ -14,11 +11,9 @@
 //               [--mode dynamic|baked|parity|reference]
 //               [--guides] [--require-baked]
 //               [--drag <prim> <attr> <steps>]
-//
 // With no --frames it evaluates the stage's start time code (or Default when
 // the stage has no time range). Exit status is non-zero when the rig fails to
 // compile or an evaluation comes back invalid, so it can gate a build.
-//
 // --mode is a request, and giving it takes the decision away from everything
 // else: without it the tool leaves the evaluator to decide for itself, which
 // is RIGEXEC_EVALUATION_MODE if the session set one and the stage's own
@@ -28,12 +23,10 @@
 // accounting total at the end. `reference` is the exec-authoritative oracle
 // alone (RigExecEvaluationMode::ExecReference): it never builds a program,
 // so like dynamic it prints no bake reasons and no accounting.
-//
 // --guides re-enables the observational solver-guide request, which is off
 // by default here. pose.solverFrames is one of the domains the parity check
 // compares, and with guides off both paths fill it with nothing -- so a
 // ctest built on this tool compares an empty map unless it asks for them.
-//
 // --require-baked turns a fallback into a failure: it sets
 // RIGEXEC_BAKE_REQUIRED for the evaluator, fails when a mode that asks for
 // the program finds the rig unbakeable, and fails when fewer generations
@@ -41,13 +34,11 @@
 // one that catches a silent fallback that is not a refusal -- an
 // interactive override the program cannot place, or a Run that handed the
 // generation back.
-//
 // --profile records scoped phase timings (compile, property chains, pose
 // seed, each solver batch and constraint, the exec snapshot, each geometry
 // chain, derived maintenance) across every evaluated frame, writes them as
 // Chrome Trace Event JSON to <file.trace> -- openable in Perfetto
 // (ui.perfetto.dev) or chrome://tracing -- and prints a per-phase summary.
-//
 // --repeat N cycles the frame list N times instead of once. Only the last
 // pass reports: the N-1 before it evaluate and throw the pose away, so the
 // printed output of `--repeat 1` -- and of a command line that never names
@@ -55,7 +46,6 @@
 // process divides by N frames instead of one. It exists because the frames
 // of this rig cost a few hundred microseconds each and a process start
 // costs half a second; timing one frame means timing the process.
-//
 // --drag <prim> <attr> <steps> ramps one attribute through <steps> values
 // with SetInteractiveOverrides, evaluating after each one, and prints the
 // wall clock of every step plus the median and the minimum. It is the
@@ -63,11 +53,9 @@
 // drawn, over and over on one control. Nothing else about the run changes --
 // the drag happens after the reported frames, so every line above it is the
 // line a command line without the option prints.
-//
 // --pose-out writes every published domain of every evaluated generation in
 // a canonical text form (%.17g doubles, %.9g floats), so two runs -- two
 // builds, two modes -- can be compared byte for byte with `cmp`.
-//
 // --verify-binary <file.rigexec> gates the zero-USD runtime: every frame is
 // evaluated in parity mode (dynamic==baked, enforced internally) and replayed
 // from the binary, and the two generations are compared bit for bit over
@@ -76,8 +64,6 @@
 // It implies --require-baked, replaces the reporting loop, and still honors
 // --pose-out/--joints-out (from the parity poses); --repeat/--drag/--profile
 // are ignored with a note.
-//
-//
 // --joints-out writes the evaluated joint frames, as asset-space matrices
 // sampled at every requested frame, to a plain USD layer. It is deliberately
 // schema-neutral -- a joint path list and a parallel matrix array per time
@@ -85,7 +71,6 @@
 // something that is not RigExec: a converter to another skinning schema, or a
 // comparison against one. It is a diagnostic export of what the evaluator
 // computed, not a baked character.
-//
 #include "rigExec/frameExtraction.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
@@ -557,8 +542,6 @@ ModeSourceName(rigExec::RigExecEvaluationModeSource source)
 }
 
 
-// ---- --verify-binary ------------------------------------------------------
-//
 // The zero-USD runtime gate: every frame runs in parity mode (so a
 // dynamic==baked disagreement already fails the frame) and replays from
 // the binary, and the two generations are compared bit for bit.
@@ -1098,7 +1081,6 @@ main(int argc, char **argv)
     }
     // Before Compile, so the bake happens inside it rather than on the first
     // frame; the mode is a request either way.
-    //
     // Only when --mode was GIVEN. SetEvaluationMode is the top of the
     // precedence ladder and setting it unasked would pin every run of this
     // tool to Dynamic -- which would make the tool the one place a rig's
@@ -1325,15 +1307,12 @@ main(int argc, char **argv)
         }
     }
 
-    // ---- the manipulator's frame ------------------------------------------
-    //
     // A drag is not a frame change: the time stands still and one attribute
     // moves, over and over, with a pose drawn between each pair of values.
     // That is the generation the interactive path has to be quick at, and it
     // is a different shape from an animation frame -- no time moved, so
     // every input that is a function of time is unchanged and only the cone
     // below the dragged control has anything to do.
-    //
     // Measured AFTER the accounting above, so the generation counts a reader
     // (and --require-baked) sees still describe the requested frames alone;
     // what the drag itself did with the program is reported here instead.

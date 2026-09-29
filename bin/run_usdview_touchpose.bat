@@ -51,8 +51,7 @@ set "STAGE=%~1"
 if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_all.usda"
 if not exist "%STAGE%" (
     >&2 echo ERROR: stage not found: %STAGE%
-    >&2 echo        build it with:
-    >&2 echo          bin\run_touchpose.bat import_touch examples\biped\Biped.usda
+    >&2 echo        Pass an existing stage containing RigExecTouchRegions.
     exit /b 1
 )
 

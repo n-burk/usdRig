@@ -99,7 +99,7 @@ every application of the atomic mover.
 
 *Type:* `uniform bool`. *Default:* `false`.
 
-Authoring lock metadata for DCC interchange. Evaluation
+Authoring lock metadata for application interchange. Evaluation
 remains active while locked; use RigExecMoverAPI inputs:enabled or
 inputs:defaultWeight to disable or blend the operation.
 

@@ -1,8 +1,5 @@
-//
 // The baked program's scheduler: edges, executors and the report.
-//
 // See bakedSchedule.h for what belongs here and what belongs with a domain.
-//
 #include "bakedSchedule.h"
 
 #include "parallel.h"
@@ -96,9 +93,7 @@ RigExecBakedStepKindName(RigExecBakedStepKind kind)
     return "unknown";
 }
 
-// ---------------------------------------------------------------------------
 // Execution mode.
-// ---------------------------------------------------------------------------
 
 RigExecBakedScheduleMode
 RigExecBakedScheduleModeFromEnvironment()
@@ -125,17 +120,13 @@ RigExecBakedScheduleReportRequested()
     return requested;
 }
 
-// ---------------------------------------------------------------------------
 // The cost model.
-//
 // cost = a[kind] + b[kind] x size(step), in microseconds. Two constants per
 // step kind and one size per step, which is as much model as a scheduler can
 // use: the packing only ever asks "is this bin about a grain yet", so what it
 // needs is the RATIO between a skin chunk and a constraint, not either one's
 // absolute time.
-//
 // The size of a step is the count that its body's inner loop runs over:
-//
 //   ComposeSubtree   provider slots in the group
 //   Solve            controls for an FK chain, joints for a spline IK,
 //                    published elements otherwise
@@ -165,7 +156,6 @@ RigExecBakedScheduleReportRequested()
 //   Derived          the CHAIN's vertices, which is what recomputeNormals
 //                    and recomputeExtent walk -- an extent is two vectors
 //                    however large the mesh behind it is
-//
 // The constants below were fitted by RIGEXEC_BAKED_SCHEDULE_CALIBRATE=1 over
 // eight frames of examples/biped/Biped_anim.usda on a 20-core box (see
 // RigExecBakedScheduleCalibrationRequested). They are a machine's
@@ -174,7 +164,6 @@ RigExecBakedScheduleReportRequested()
 // an answer. Build must not measure: a schedule that depended on what the box
 // was doing while the program was built could not be tested for producing the
 // same values at every grain.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -215,7 +204,6 @@ static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
               "rigExec: every baked step kind needs a cost row");
 
 // Four rows are worth reading twice before they are trusted:
-//
 //  * PoseInterpolator is a GUESS, not a fit: two quaternion extractions, a
 //    quaternion delta and one RBF kernel row per pose. No calibration run
 //    has covered a rig with interpolators yet; the first one to do so should
@@ -233,7 +221,6 @@ static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
 //    the only one of the three with enough steps for the fit to mean
 //    anything. One run of each printed roughly double the rest and is not in
 //    the spread; the medians are what nine runs agree on.
-//
 //    The frame COUNT is the part worth copying, because the first fit of
 //    these three rows did not do it and was not reproducible. A rig with one
 //    step of a kind gives the fit one sample per run, so the cold frame --
@@ -245,7 +232,6 @@ static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
 //    200 (0.0914 -> 0.0880, 0.0530 -> 0.0515), which is what puts every row
 //    of this table on one scale. A row fitted on one step must be fitted
 //    warm to join them.
-//
 //    All three sizes are small -- a handful of providers, one volume, a few
 //    packet elements -- so the per-unit terms are honest at that scale and
 //    extrapolate on trust. The guesses they replace were {1.0, 0.2},
@@ -513,9 +499,7 @@ RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Clustering.
-// ---------------------------------------------------------------------------
 
 double
 RigExecBakedScheduleGrainUs(double totalCost)
@@ -680,8 +664,6 @@ RigExecBakedBuildClusters(const RigExecBakedProgramImpl &B, double grainUs)
         return out;
     }
 
-    // ---- level packing ------------------------------------------------------
-    //
     // With longest-path levels no edge joins two steps of ONE level, so any
     // grouping within a level is acyclic however the bins fall. That is the
     // whole correctness argument for the packing, and it is why the levels
@@ -727,8 +709,6 @@ RigExecBakedBuildClusters(const RigExecBakedProgramImpl &B, double grainUs)
     BuildQuotient(B, &out);
     Compact(B, &out);
 
-    // ---- chain fusion -------------------------------------------------------
-    //
     // Contract (A, B) when B is A's only successor and A is B's only
     // predecessor: nothing else can run while A holds B up, so the edge buys
     // no parallelism and costs a dispatch. Contracting such an edge cannot
@@ -756,8 +736,6 @@ RigExecBakedBuildClusters(const RigExecBakedProgramImpl &B, double grainUs)
         }
     }
 
-    // ---- absorb -------------------------------------------------------------
-    //
     // A cluster too small to be worth a task joins its predecessor when it
     // has exactly one. The invariant is evaluated on the CURRENT quotient
     // graph after every merge, which is what makes it sound: with
@@ -788,9 +766,7 @@ RigExecBakedBuildClusters(const RigExecBakedProgramImpl &B, double grainUs)
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Edges.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -990,29 +966,23 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program,
     RigExecBakedBuildCones(&B);
 }
 
-// ---------------------------------------------------------------------------
 // Cone re-execution (§7).
-//
 // What a frame may skip, and why skipping it is not an approximation. ONE
 // closure decides it, computed once at Build, at two grains:
-//
 //   stepCone[s] -- run step s and you have to run all of this
 //   cone[c]     -- the same over clusters
-//
 // A live run decides with the first: a cluster is how the parallel executor
 // packs work, not a unit of change, so a dirty step re-runs its own forward
 // closure and never the clean steps packed beside it. The cluster closure is
 // kept for the readers that answer per cluster -- the output-affected index,
 // the sparse frame-cache planner, the frozen clone -- and a run's closed
 // clusters are the ones holding a closed step.
-//
 // There used to be a second, the restore closure: "run c and all of THIS had
 // to have run first, because c reads a slot version the end of a run does not
 // hold". Versioned pose storage (§3.1) retired it. Every writer writes its
 // own entry, so the version a clean reader wants is exactly where its writer
 // left it however often the SLOT was revised afterwards, and nothing ever has
 // to be re-run to put a value back.
-//
 // One rule decides what starts the closure: a SOURCE -- the avar table, a
 // chain's base points, a skin revision's static packet, the property-chain
 // results -- always runs, and its output is compared with the last run's by
@@ -1021,7 +991,6 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program,
 // a routed prim authors no flag, a released drag leaves the table disturbed,
 // a cleared layout cache changes a packet), and a value comparison misses
 // none of them.
-// ---------------------------------------------------------------------------
 
 std::vector<int>
 RigExecBakedClusterTopologicalOrder(const RigExecBakedClustering &clustering)
@@ -1078,8 +1047,6 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     cones.alwaysSteps.Resize(stepCount);
     cones.poseSteps.Resize(stepCount);
 
-    // ---- which steps read outside the graph ---------------------------------
-    //
     // A step whose every read is a source slot can be run BEFORE the dirty
     // set is computed -- it has no predecessor to wait for -- and that is
     // what "sources always run" comes to in an executor. A step that reads
@@ -1164,8 +1131,6 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         }
     }
 
-    // ---- who re-reads an input a stage value edit reached --------------------
-    //
     // An edit on a per-frame input is routed like the run after a drag is
     // lifted (unified-program spec rule S2), so it is only as good as the
     // reader it reaches. Three readers qualify: a step that declares the
@@ -1196,7 +1161,6 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         }
     }
 
-    // ---- what a changed source makes dirty ----------------------------------
     cones.avarCluster.assign(B.paths.size(), -1);
     cones.chainBaseClusters.assign(B.chains.size(), {});
     cones.solverPointsClusters.assign(B.solvers.size(), {});
@@ -1318,7 +1282,6 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
                        clusters.end());
     }
 
-    // ---- the forward closure ------------------------------------------------
     const std::vector<int> &order = B.clustering.topologicalOrder;
     for (size_t k = order.size(); k-- > 0;) {
         const int cluster = order[k];
@@ -1329,8 +1292,6 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         }
     }
 
-    // ---- and over steps -----------------------------------------------------
-    //
     // In reverse program order, which needs no sort: every step edge points
     // forward in program order (§4.1), so each successor's row is final
     // before any predecessor reads it.
@@ -1400,7 +1361,6 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // Everything; the closure below is not consulted.
     } else if (!B.everRan) {
         // The FIRST run of this program -- §7's other dirty set [S28].
-        //
         // There is nothing to compare against, so every step that could have
         // moved for any reason is dirty: the whole pose half, the steps that
         // read outside the graph, and the steps a time or a standing
@@ -1410,7 +1370,6 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // whose position in its chain did not move, and re-deforming those
         // would spend a whole skin on an edit the dynamic path's VdfNetwork
         // reconnects without re-executing a node.
-        //
         // Nothing downstream of them is at risk of running on half a state:
         // a revision's steps are dirtied together or not at all, because
         // every source whose cone reaches one of them -- its own
@@ -1695,9 +1654,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     B.lastClosedSteps = B.closedSteps.Count();
 }
 
-// ---------------------------------------------------------------------------
 // The executors.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -1905,7 +1862,6 @@ ParallelRun::RunFrom(int start)
         }
         // Release what this cluster wrote to whoever picks its successors
         // up, and acquire it on the thread that sees the last decrement.
-        //
         // The counters stay per CLUSTER and count every closed predecessor on
         // the unreduced cluster edges. That is what makes a step closure safe
         // to dispatch: the clusters holding a closed step are not a union of
@@ -2089,9 +2045,7 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
     return RunStepsSerial(program, time);
 }
 
-// ---------------------------------------------------------------------------
 // Calibration.
-// ---------------------------------------------------------------------------
 
 bool
 RigExecBakedStepTimingRequested()
@@ -2284,9 +2238,7 @@ RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
     std::fwrite(out.data(), 1, out.size(), stderr);
 }
 
-// ---------------------------------------------------------------------------
 // The report.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -2504,9 +2456,7 @@ RigExecBakedScheduleRunReport(const RigExecBakedProgramImpl &B)
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Profiling.
-// ---------------------------------------------------------------------------
 
 void
 RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
@@ -2539,7 +2489,6 @@ RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
     }
 
     // The clusters themselves, one span each, on the row that ran them.
-    //
     // A reader looking at a parallel frame wants the shape before the
     // detail: how many rows carried work, how long each held one, and where
     // a row sat idle waiting for a predecessor. The steps alone do not show

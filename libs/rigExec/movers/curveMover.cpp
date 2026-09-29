@@ -1,6 +1,4 @@
-//
 // RigExecCurveMover: everything about the curve mover (spec §4.1).
-//
 // A curve mover deforms points from a driver curve in one of three
 // modes: ribbon (rotation-minimizing frame transport), wire (NURBS
 // displacement at the bind parameter), or emitGuidePoints. This TU owns
@@ -8,8 +6,6 @@
 // revision binder, and its parity-oracle branch, and registers the row
 // that points at them. Compile validation is the generic points-target
 // rules.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 

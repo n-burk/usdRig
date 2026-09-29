@@ -1,13 +1,9 @@
-//
 // RigExecMatrixMover: everything about the matrix mover (spec §4.1).
-//
 // A matrix mover applies one provider's transform to a points array,
 // measured against an optional transform space: p' = q + w (T q - q).
 // This TU owns its exec-side computeMoverParameters registration and
 // builder, its revision binder, its compile validator, and its
 // parity-oracle branch, and registers the row that points at them.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 
@@ -93,6 +89,21 @@ _BindMatrixMover(const rigExec::RigExecMoverBindContext &ctx)
         }
     }
     binding.transformSpace = space;
+    // Matrix movers use the shared ordered provider list for optional
+    // neutral references: transform first, then transformSpace. This gives
+    // them the same phase, dependency, invalidation and frozen-run handling
+    // as the provider lists used by skin and wire movers.
+    for (const char *name : {"rigExec:referenceTransform",
+                             "rigExec:referenceTransformSpace"}) {
+        const auto targets = rigExec::RigExecRelationshipTargets(moverPrim, name);
+        if (targets.empty()) continue;
+        SdfPath reference = targets.front();
+        if (binding.transformPhase.kind == rigExec::RigExecReadPhaseKind::Final) {
+            const auto it = frameChainHeads.find(reference);
+            if (it != frameChainHeads.end()) reference = it->second;
+        }
+        binding.influences.push_back(reference);
+    }
 }
 
 bool
@@ -182,6 +193,26 @@ _ValidateMatrixMover(
                        "matrix provider";
         return false;
     }
+    const auto references = rigExec::RigExecRelationshipTargets(
+        prim, "rigExec:referenceTransform");
+    const auto referenceSpaces = rigExec::RigExecRelationshipTargets(
+        prim, "rigExec:referenceTransformSpace");
+    if (references.size() > 1 || referenceSpaces.size() > 1 ||
+        (!referenceSpaces.empty() && (references.empty() || spaces.empty())) ||
+        (!references.empty() && !spaces.empty() && referenceSpaces.empty())) {
+        *error = who + ": referenceTransform takes one provider; a transformSpace "
+                       "also requires referenceTransformSpace";
+        return false;
+    }
+    for (const auto &paths : {references, referenceSpaces}) {
+        for (const auto &path : paths) {
+            const UsdPrim reference = stage->GetPrimAtPath(path);
+            if (!reference || !frameProviderTypes.count(reference.GetTypeName())) {
+                *error = who + ": reference target is not a matrix provider";
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -222,6 +253,17 @@ _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
         return RigExecOracleResult::PassThrough;
     }
     GfMatrix4d m = matrixIt->second;
+    const auto normalize = [&](const char *name, GfMatrix4d *value) {
+        const auto refs = rigExec::RigExecRelationshipTargets(prim, name);
+        if (refs.empty()) return true;
+        const auto it = matrices.find(refs.front());
+        if (it == matrices.end()) return false;
+        *value = rigExec::RigExecMeasureFromReference(*value, it->second);
+        return true;
+    };
+    if (!normalize("rigExec:referenceTransform", &m)) {
+        return RigExecOracleResult::PassThrough;
+    }
     SdfPathVector spaces;
     if (UsdRelationship rel = prim.GetRelationship(
             TfToken("rigExec:transformSpace"))) {
@@ -236,7 +278,11 @@ _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
                 " matrix provider at " + spaces[0].GetString());
             return RigExecOracleResult::PassThrough;
         }
-        m = rigExec::RigExecMeasureInSpace(m, spaceIt->second);
+        GfMatrix4d space = spaceIt->second;
+        if (!normalize("rigExec:referenceTransformSpace", &space)) {
+            return RigExecOracleResult::PassThrough;
+        }
+        m = rigExec::RigExecMeasureInSpace(m, space);
     }
     for (size_t i = 0; i < points.size(); ++i) {
         const GfVec3d moved = rigExec::RigExecApplyWeightedMatrix(
@@ -255,7 +301,8 @@ _MakeHandler()
         rigExec::RigExecMoverDomain::Points);
     handler.customTargetValidation = true;
     handler.frameRelationships = {
-        "rigExec:transform", "rigExec:transformSpace"};
+        "rigExec:transform", "rigExec:transformSpace",
+        "rigExec:referenceTransform", "rigExec:referenceTransformSpace"};
     handler.transformRelationship = "rigExec:transform";
     handler.spaceRelationship = "rigExec:transformSpace";
     handler.bind = &_BindMatrixMover;

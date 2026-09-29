@@ -22,12 +22,12 @@ CENTER_PIXELS = 6.0
 RING_FRACTION = 0.85
 RING_SEGMENTS = 48
 
-# Maya manipulator geometry, as fractions of the manipulator size (design
-# section 8.1-8.4).  PLANE_OFFSET places each planar handle 30% out along
-# both of its axes; PLANE_SIDE is the square's side; CENTER_SIDE the
-# view-plane / uniform-scale square; CUBE_SIDE the scale axis cubes;
-# CONE_RADIUS the base radius of the move arrowheads.  The view-axis ring
-# is drawn outside the axis rings so it can be grabbed on its own.
+
+
+
+
+
+
 PLANE_OFFSET = 0.30
 PLANE_SIDE = 0.15
 CENTER_SIDE = 0.12
@@ -35,8 +35,8 @@ CUBE_SIDE = 0.08
 CONE_RADIUS = 0.05
 VIEW_RING_FRACTION = 1.25
 
-# Maya's manipulator palette.  The axis colours are the flat primaries
-# Maya uses, not softened pastels, so a screenshot matches Maya's.
+
+
 COLOR_VIEW = (0.4, 0.75, 1.0)
 COLOR_HOVER = (1.0, 0.85, 0.4)
 COLOR_SELECTED = (1.0, 1.0, 0.0)
@@ -61,7 +61,7 @@ _MIN_PLANE_FACING = 0.05
 # An axis pointing nearly at the camera has almost no screen direction, so
 # every pixel of mouse travel becomes a huge world move: at 4 px a 100 px
 # drag would push the object 11 world units with the camera 10 units away.
-# Every other DCC gizmo answers this the same way -- the axis goes
+# Every other application gizmo answers this the same way -- the axis goes
 # ungrabbable and the artist orbits a few degrees before dragging it.
 MIN_AXIS_PIXELS = 12.0
 
@@ -103,7 +103,7 @@ class Handle(object):
 
     Rings carry `frontPoints`, the runs of projected points on the
     camera side of the ring centre, and `frontWorld`, those points in
-    world space.  Maya hides the back half of each ring so the three
+    world space.  the editor hides the back half of each ring so the three
     rings stay tellable apart; drawing and picking both use the front.
 
     `grabbable` is False for an axis that is too foreshortened to drag
@@ -278,7 +278,7 @@ def BuildHandles(tool, gizmoMatrix, camera, viewport, pixelRatio,
                  sizePixels=GIZMO_PIXELS, orientation=None, gimbalAxes=None,
                  freeRotate=True):
     """
-    Maya's manipulator for `tool`, laid out in screen space.
+    manipulator for `tool`, laid out in screen space.
 
     `gizmoMatrix` places the manipulator; `orientation` (a Gf.Matrix4d
     whose rows are the world axes to draw along) overrides the direction
@@ -366,8 +366,8 @@ def BuildHandles(tool, gizmoMatrix, camera, viewport, pixelRatio,
             screen, world = _ProjectRing(vp, viewport, origin, u, v, radius)
             if screen is None:
                 continue
-            # Maya hides the half of each ring that is behind the ring
-            # centre, so three overlapping circles stay readable.
+
+
             mask = [Gf.Dot(p - origin, toCamera) >= -1e-9 for p in world]
             runs = _FrontRuns(mask)
             handles.append(_Make(
@@ -478,7 +478,7 @@ def HitTest(handles, x, y, radius):
 
     `radius` is the pick tolerance in physical pixels for everything with
     an outline; the free-rotate disc instead claims its whole interior,
-    which is how Maya's works.
+    which is how works.
 
     Handles marked not grabbable are skipped, so a foreshortened axis or
     an edge-on plane cannot be picked by accident -- it has collapsed
@@ -589,7 +589,7 @@ def RayPlaneDragDelta(camera, viewport, worldOrigin, worldNormal, press,
 
     Ray/plane intersection rather than scaled screen travel, so the point
     the artist grabbed stays under the cursor as the plane recedes --
-    Maya's planar handles behave this way and a plain screen mapping
+    planar handles behave this way and a plain screen mapping
     visibly slides away from the cursor in a perspective view.
 
     Falls back to the camera-plane mapping when the plane is edge-on:
@@ -615,7 +615,7 @@ def AccumulateAngle(total, previous, current):
     `total` plus the shortest way round from `previous` to `current`.
 
     RotationDragAngle wraps into (-180, 180], but a rotate drag has to
-    keep counting: Maya lets one sweep run to 400 degrees. Accumulating
+    keep counting: the editor lets one sweep run to 400 degrees. Accumulating
     the wrapped step rather than the raw difference is what makes the
     crossing at 180 invisible.
     """
@@ -648,9 +648,9 @@ def TrackballRotation(camera, press, current, radiusPixels):
     return axis.GetNormalized(), travel / (2.0 * radiusPixels) * 180.0
 
 
-def MayaScaleFactor(handle, origin2d, press, current, allowNegative):
+def HandleScaleFactor(handle, origin2d, press, current, allowNegative):
     """
-    Maya's scale ratio: how far the cursor is from the manipulator origin
+    scale ratio: how far the cursor is from the manipulator origin
     along the handle, over how far it was when the drag started.
 
     Dragging the handle onto the origin therefore gives 0 and carrying it
@@ -695,7 +695,7 @@ def _RoundToStep(value, step):
 
 def SnapRelative(value, step):
     """
-    Quantise a DELTA to a multiple of `step` (Maya's Discrete move /
+    Quantise a DELTA to a multiple of `step` (Discrete move /
     Snap rotate). Relative to the drag start, so an object that began off
     the grid stays off it and only moves in whole steps.
 
@@ -708,7 +708,7 @@ def SnapRelative(value, step):
 
 def SnapAbsolute(value, step):
     """
-    Quantise a POSITION onto a grid of `step` (Maya's `X` hold). Same
+    Quantise a POSITION onto a grid of `step` (`X` hold). Same
     arithmetic as SnapRelative but a different meaning, and the two are
     separate names because a caller must not confuse a delta with a
     position: this one lands the object ON the grid.
@@ -735,7 +735,7 @@ def RingParameter(handle, point2d):
 
 def PiePolygon(handle, startParameter, sweepDegrees):
     """
-    Maya's rotation-amount wedge: the manipulator centre followed by the
+    rotation-amount wedge: the manipulator centre followed by the
     arc from `startParameter` through `sweepDegrees`.
 
     `sweepDegrees` is degrees about the ring's OWN world axis -- what

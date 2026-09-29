@@ -1,23 +1,17 @@
-//
 // rigExecRuntime: zero-USD .rigexec playback (M2).
-//
 // Opens a baked .rigexec file, replays its cluster DAG per frame, and
 // publishes joint matrices and deformed points -- no USD headers, no USD
 // library. The wire structs and decoders come from rigExecBinary (already
 // USD-free); the math is runtimeMath.h (a bit-identical Gf mirror); the
 // step bodies are ports of the baked program's, one family per .cpp.
-//
 // Fidelity rule (plan section 5): for the same frame, floating-point
 // results must be bit-identical to the baked path. rigExecPose
 // --verify-binary gates every family on dynamic==baked==binary over the
 // shipped examples.
-//
 // Threading (D2): Execute is serial over clusters; the consumer may run
 // clusters in parallel when the cluster DAG allows (the OpenUSD side
 // keeps its dispatcher, Godot uses WorkerThreadPool). The reader holds
 // no locks: one reader per thread, or external synchronization.
-//
-
 #ifndef RIGEXEC_RUNTIME_H
 #define RIGEXEC_RUNTIME_H
 
@@ -31,6 +25,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -107,6 +102,14 @@ public:
     // miss when the file carries no such frame.
     bool SetFrame(double frame, std::string *error);
 
+    // Persistent local TRS avar overrides, applied after the selected frame
+    // and before FK/geometry evaluation. Angles are degrees. Only compiled
+    // control slots with TRS poses are supported; property-mover outputs are refused
+    // because those chains are captured, not re-executed by this runtime.
+    bool SetAvar(const std::string &propertyPath, double value,
+                 std::string *error);
+    void ClearAvars();
+
     // Replays the cluster DAG for the selected frame. False naming the
     // first failing step; outputs keep their previous frame.
     bool Execute(std::string *error);
@@ -116,11 +119,16 @@ public:
     // one family's outputs are compared while another is still landing.
     void SetRunMaskForTesting(unsigned mask);
 
-    // Final asset-space joint matrices, in path order.
+    // Final asset-space skinning deltas (rest -> posed), in path order.
     const std::vector<RigExecRuntimeJointMatrix> &GetJointMatrices() const
     {
         return _jointMatrices;
     }
+
+    // GetJointMatrices preserves the skinning delta (rest -> posed) API.
+    // Skeleton consumers need the asset-space rest and posed frames.
+    std::vector<RigExecRuntimeJointMatrix> GetJointRestMatrices() const;
+    std::vector<RigExecRuntimeJointMatrix> GetJointPoseMatrices() const;
 
     // Deformed points per moved property, in path order.
     const std::vector<RigExecRuntimePoints> &GetPoints() const
@@ -198,6 +206,7 @@ private:
 
     size_t _frameIndex = 0;
     bool _frameSelected = false;
+    std::map<size_t, double> _avarOverrides;
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;

@@ -1,11 +1,8 @@
-//
 // RigExecFrameCache, Stream A: the (epochDigest, controlDigest) store.
-//
 // The key, entry, and stats types keep the semantics Stream 0 asserted, so
 // those tests stand unchanged below. The stub half of the Stream 0 file is
 // replaced here by the store's own contract, one rule per test group in the
 // testRigExecStaticInputCache style:
-//
 //   * KEYING. A pose is a function of its two digests and nothing else:
 //     either half misses, time is not key material, and a hit serves the
 //     published pose bit-identically.
@@ -24,7 +21,6 @@
 //     is still functional afterwards.
 //   * DROP. Corrupt input is declined, never served: invalid poses,
 //     oversized entries, and null out-params all miss.
-//
 #include "rigExec/frameCache.h"
 #include "rigExec/frozenContext.h"
 

@@ -165,9 +165,7 @@ def _Settings(tool):
     return gset.ToolDefaults(tool)
 
 
-# ---------------------------------------------------------------------
 # Translate
-# ---------------------------------------------------------------------
 
 def TestAxisTranslate():
     """
@@ -710,9 +708,7 @@ def TestGridWorldNotChannels():
            "the channels do not: %s (world %s)" % (local, world))
 
 
-# ---------------------------------------------------------------------
 # Rotate
-# ---------------------------------------------------------------------
 
 def TestRingRotate():
     """A ring drag turns about that ring's own world axis."""
@@ -963,9 +959,7 @@ def TestRotateGrid():
            "point on rotate names itself inert: %r" % state.snapReason)
 
 
-# ---------------------------------------------------------------------
 # Scale
-# ---------------------------------------------------------------------
 
 def TestAxisScale():
     """An axis cube scales that axis by the distance ratio."""

@@ -1,6 +1,4 @@
-//
 // RigExecSkinMover: everything about the skin mover (spec §4.1).
-//
 // A skin mover deforms points by a weighted blend of influence-provider
 // matrices, classic-linear or dual-quaternion. The skin mover has no
 // exec-side computation: its packet is assembled directly by
@@ -8,8 +6,6 @@
 // application calls. This TU owns its revision binder, its compile
 // validator, and its parity-oracle branch, and registers the row that
 // points at them.
-//
-
 #include "moverRegistry.h"
 
 #include "rigExecMath/dualQuat.h"

@@ -159,6 +159,7 @@ CONCRETE_SCHEMA_TYPES = (
     "RigExecSingleChainIkConstraint",
     "RigExecSkinMover",
     "RigExecSmoothMover",
+    "RigExecDeltaMushMover",
     "RigExecSphereWeight",
     "RigExecSplineIk",
     "RigExecStaticWeight",
@@ -238,7 +239,7 @@ class SchemaFacadeTests(_ContractTestCase):
             self.assertEqual(self.stage.GetRootLayer().ExportToString(), original)
 
     def test_all_concrete_types_define_and_get(self):
-        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 39)
+        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 40)
         self.assertEqual(
             set(rigexec.schema.names()), set(CONCRETE_SCHEMA_TYPES))
         self.assertFalse(hasattr(rigexec.schema, "CustomConstraint"))
@@ -811,6 +812,7 @@ class BuilderDependencyTests(_ContractTestCase):
 
         movers = (
             chain.add_smooth_mover("Smooth"),
+            chain.add_delta_mush_mover("DeltaMush"),
             chain.add_volume_correct_mover("Volume"),
             chain.add_curvenet_mover("Profile", curvenet),
         )
@@ -822,6 +824,44 @@ class BuilderDependencyTests(_ContractTestCase):
                 default_weight = prim.GetAttribute("inputs:defaultWeight")
                 self.assert_api_property(default_weight)
                 self.assertEqual(default_weight.Get(), 1.0)
+
+    def test_delta_mush_authoring_and_evaluation(self):
+        rest = [(1, 0, 0), (0, 1.2, 0), (-1, 0, 0),
+                (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+        posed = list(rest)
+        posed[4] = (0.7, 0, 1.2)
+        mesh = UsdGeom.Mesh.Define(self.stage, "/Body")
+        mesh.CreatePointsAttr(posed)
+        mesh.CreateFaceVertexCountsAttr([3] * 8)
+        mesh.CreateFaceVertexIndicesAttr(
+            [0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4,
+             1, 0, 5, 2, 1, 5, 3, 2, 5, 0, 3, 5])
+        mover = self.builder.new_mover_chain(
+            "Deform", "/Body.points").add_delta_mush_mover("Detail")
+        self.assertIsInstance(mover, rigexec.DeltaMushMover)
+        mover.set_rest_points(rest)
+        mover.set_iterations(3)
+        mover.set_step(0.5)
+        mover.set_pin_borders(True)
+        mover.set_distance_weight(1.0)
+        mover.set_displacement(1.0)
+        for method, invalid in ((mover.set_iterations, -1),
+                                (mover.set_step, 1.1),
+                                (mover.set_distance_weight, -1.0),
+                                (mover.set_displacement, float("nan"))):
+            with self.assertRaises(ValueError):
+                method(invalid)
+        rig = rigexec.Rig(self.stage, self.builder.root_path)
+        rig.compile()
+        result = rig.evaluate(-1)
+        self.assertTrue(result.valid)
+        points = result.moved_property("/Body.points")
+        self.assertGreater((Gf.Vec3f(*points[4]) - Gf.Vec3f(*posed[4])).GetLength(), 0.01)
+        mover.set_default_weight(0)
+        result = rig.evaluate(-1)
+        self.assertTrue(result.valid)
+        for actual, expected in zip(result.moved_property("/Body.points"), posed):
+            self.assertLess((Gf.Vec3f(*actual) - Gf.Vec3f(*expected)).GetLength(), 1e-6)
 
     def test_single_chain_ik_authors_the_complete_joint_write_set(self):
         root = self.builder.add_joint("Root")

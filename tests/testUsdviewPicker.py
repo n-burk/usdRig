@@ -242,11 +242,11 @@ def testUsdviewInputFunction(appController):
     _Check(float(attr.Get()) == before,
            "clicking again cycled back to %g" % before)
 
-    # --- 7. nothing unpickable is drawn --------------------------------
-    # A button that resolves to nothing is not drawn at all. It used to be
-    # drawn dimmed, on the theory that a hole where a control will be is
-    # informative; three rounds of "why is this greyed out?" said
-    # otherwise. `coverage()` still counts them so the gap is measurable.
+
+
+
+
+
     drawn = picker.visible(body.id)
     inert = [b for b in drawn if not b.live and not b.decoration]
     _Check(not inert,
@@ -285,12 +285,12 @@ def testUsdviewInputFunction(appController):
            "switching the arms changes what is drawn: %d -> %d"
            % (len(with_modes), len(after)))
 
-    # ...and the panel must notice a dial moved from OUTSIDE it -- the
-    # Avar Editor, a gizmo on `avars:ikfk`, an undo, a scrub. It used to
-    # refresh only on its own switch click, so measured on Biped_all,
-    # setting arm_l back to 0 (FK) from outside still drew L_ArmIK and
-    # L_ArmPV and still hid L_UpArm/L_LoArm/L_Hand until the panel was
-    # reopened. That is the "the IK controls are always on" report.
+
+
+
+
+
+
     dial = next(p for p in modes if "arm_l" in p)
     was = modes[dial]
     attr = stage.GetAttributeAtPath(Sdf.Path(dial))

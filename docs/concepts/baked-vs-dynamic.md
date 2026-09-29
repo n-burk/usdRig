@@ -165,12 +165,13 @@ caused it. The families of refusal include:
 The list is a report, not a gate: a rig that declines simply evaluates
 dynamically and keeps working.
 
-## Sources
+## Implementation
 
-`docs/specs/baked-step-graph.md` (What was built; §1 Why; §2 Non-negotiables;
-§5 Clustering and execution; §7 Cone re-execution; Phase 4 deferrals);
-`docs/specs/spec.md` §6.1 (compilation, scheduling, evaluation) and §4.2
-(epoch-beginning edits); `docs/specs/python-bake-inverse.md`;
-`README.md` (Recording with `usdrecord`; the evaluation-mode notes);
-`build/python/rigexec/bake.py`; `libs/rigExec/bakedProgram.cpp`
-(`IsBakeable`); `tests/testRigExecBakedSchedule.cpp`.
+See [architecture](../specs/spec.md), [bake APIs](../specs/python-bake-inverse.md),
+`libs/rigExec/bakedProgram.cpp`, and `tests/testRigExecBakedSchedule.cpp`.
+
+## Run a baked rig in Godot
+
+[Godot and baked rigs](../concepts/tutorial-godot-baked-rig.md) walks through
+a self-contained `.rigexec` asset with embedded visuals and exposed controllers, and a reusable rolling-ball
+game object. It includes live gameplay GIFs and the commands to run the example.

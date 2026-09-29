@@ -1,7 +1,5 @@
-//
 // The baked program's scheduler: the edges between its steps, the executors
 // that run them, and the report that shows both.
-//
 // The step bodies live with the domain they belong to (bakedPose.cpp,
 // bakedGeometry.cpp). What lives here is everything that is true of a step
 // whatever it computes: that its reads and writes are declared as slot
@@ -10,7 +8,6 @@
 // running the steps in program order on one thread reproduces the straight
 // line this graph was derived from -- which is the reference every other
 // order is measured against.
-//
 #ifndef RIGEXEC_BAKED_SCHEDULE_H
 #define RIGEXEC_BAKED_SCHEDULE_H
 

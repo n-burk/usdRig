@@ -1,6 +1,4 @@
-//
 // RigExec rigging API implementation. See rigBuilder.h for the contract.
-//
 #include "rigBuilder.h"
 #include "schemaAuthoring.h"
 
@@ -224,9 +222,7 @@ _ResolveType(const UsdStageRefPtr &stage, const TfToken &name)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Handle base
-// ---------------------------------------------------------------------------
 
 void
 RigExecHandleBase::SetAttr(
@@ -291,9 +287,7 @@ RigExecMoverHandle::SetReadPhase(
     _Schema(GetPrim()).SetReadPhase(propertyName, phase);
 }
 
-// ---------------------------------------------------------------------------
 // Xformable-backed handles (control, joint, volume weights)
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -396,9 +390,7 @@ void RigExecJointHandle::SetAvarScale(double sx, double sy, double sz)
 void RigExecJointHandle::SetAvarSpin(double degrees)
 { _SetAvarSpin(this, degrees); }
 
-// ---------------------------------------------------------------------------
 // Solvers
-// ---------------------------------------------------------------------------
 
 void
 RigExecSolverHandle::SetJoints(const std::vector<RigExecJointHandle> &joints)
@@ -757,9 +749,7 @@ RigExecSplineIkHandle::SetJointElements(const std::vector<int> &elements)
         VtValue(VtIntArray(elements.begin(), elements.end())));
 }
 
-// ---------------------------------------------------------------------------
 // Constraints
-// ---------------------------------------------------------------------------
 
 void
 RigExecConstraintHandle::SetTarget(const SdfPath &target)
@@ -1137,9 +1127,14 @@ RigExecSingleChainIkConstraintHandle::SetEvaluationMode(const TfToken &mode)
         VtValue(mode));
 }
 
-// ---------------------------------------------------------------------------
+void
+RigExecSingleChainIkConstraintHandle::SetOrientationMode(const TfToken &mode)
+{
+    _AuthorAttr(GetPrim(), "rigExec:orientationMode", SdfValueTypeNames->Token,
+                VtValue(mode));
+}
+
 // Weight objects
-// ---------------------------------------------------------------------------
 
 void
 RigExecWeightHandle::SetTarget(const SdfPath &target)
@@ -1266,7 +1261,6 @@ RigExecDynamicWeightHandle::SetBias(float bias)
         GetPrim(), "inputs:bias", SdfValueTypeNames->Float, VtValue(bias));
 }
 
-// ---- Placed volumes -------------------------------------------------------
 
 void RigExecVolumeWeightHandle::SetRestSpace(const GfMatrix4d &m)
 { _SetRestSpace(this, m); }
@@ -1419,9 +1413,7 @@ RigExecCombineWeightHandle::SetInvert(float invert)
         GetPrim(), "inputs:invert", SdfValueTypeNames->Float, VtValue(invert));
 }
 
-// ---------------------------------------------------------------------------
 // Blend inputs / samples
-// ---------------------------------------------------------------------------
 
 void
 RigExecBlendInputHandle::SetWeight(float weight)
@@ -1519,16 +1511,13 @@ RigExecBlendInputHandle::ConnectWeight(const SdfPath &output)
     attr.SetConnections({ output });
 }
 
-// ---------------------------------------------------------------------------
 // Pose interpolators
-//
 // the conventional poseInterpolator. The maths is libs/rigExecMath/rbf.h; this is only
 // the authoring side, and it deliberately stores no solved matrix: the
 // inverse is a function of the poses, the per-pose radii, the kernel and the
 // regularization, every one of which is authored here, so re-deriving it at
 // compile time is exact and a stored copy would be a second thing to keep in
 // step.
-// ---------------------------------------------------------------------------
 
 void
 RigExecPoseInterpolatorHandle::SetDriver(const SdfPath &path)
@@ -1717,9 +1706,7 @@ RigExecPoseHandle::GetWeightOutput() const
     return _path.AppendProperty(TfToken("outputs:weight"));
 }
 
-// ---------------------------------------------------------------------------
 // Curvenet
-// ---------------------------------------------------------------------------
 
 void
 RigExecCurvenetHandle::SetPoints(const std::vector<GfVec3f> &points)
@@ -1771,9 +1758,7 @@ RigExecCurvenetHandle::SetSamplesPerSpline(int count)
         GetPrim(), "rigExec:samplesPerSpline", SdfValueTypeNames->Int, VtValue(count));
 }
 
-// ---------------------------------------------------------------------------
 // Mover handles
-// ---------------------------------------------------------------------------
 
 void
 RigExecMatrixMoverHandle::SetTransformProvider(const SdfPath &path)
@@ -2102,9 +2087,7 @@ RigExecMatrixMathMoverHandle::SetWeight(float weight)
     SetDefaultWeight(weight);
 }
 
-// ---------------------------------------------------------------------------
 // Mover chains
-// ---------------------------------------------------------------------------
 
 SdfPath
 RigExecMoverChain::_AddMoverPrim(
@@ -2296,6 +2279,37 @@ RigExecMoverChain::AddSmoothMover(
     return handle;
 }
 
+void RigExecDeltaMushMoverHandle::SetRestPoints(const std::vector<GfVec3f> &points) {
+    _AuthorAttr(GetPrim(), "inputs:restPoints", SdfValueTypeNames->Point3fArray,
+                VtValue(VtVec3fArray(points.begin(),points.end())));
+}
+void RigExecDeltaMushMoverHandle::SetIterations(int n) {
+    if (n<0 || n>1000) throw std::invalid_argument("delta mush iterations must be in [0,1000]");
+    _AuthorAttr(GetPrim(),"inputs:iterations",SdfValueTypeNames->Int,VtValue(n));
+}
+void RigExecDeltaMushMoverHandle::SetStep(float v) {
+    _RequireNormalizedMoverWeight(v);
+    _AuthorAttr(GetPrim(),"inputs:step",SdfValueTypeNames->Float,VtValue(v));
+}
+void RigExecDeltaMushMoverHandle::SetPinBorders(bool v) {
+    _AuthorAttr(GetPrim(),"inputs:pinBorders",SdfValueTypeNames->Bool,VtValue(v));
+}
+void RigExecDeltaMushMoverHandle::SetDistanceWeight(float v) {
+    if (!std::isfinite(v) || v<0 || v>10) throw std::invalid_argument("delta mush distance weight must be in [0,10]");
+    _AuthorAttr(GetPrim(),"inputs:distanceWeight",SdfValueTypeNames->Float,VtValue(v));
+}
+void RigExecDeltaMushMoverHandle::SetDisplacement(float v) {
+    _RequireNormalizedMoverWeight(v);
+    _AuthorAttr(GetPrim(),"inputs:displacement",SdfValueTypeNames->Float,VtValue(v));
+}
+RigExecDeltaMushMoverHandle
+RigExecMoverChain::AddDeltaMushMover(const std::string &name, float weight, const SdfPath &target) {
+    _RequireNormalizedMoverWeight(weight);
+    RigExecDeltaMushMoverHandle handle(_stage,_AddMoverPrim("RigExecDeltaMushMover",name,target));
+    handle.SetDefaultWeight(weight);
+    return handle;
+}
+
 RigExecVolumeCorrectMoverHandle
 RigExecMoverChain::AddVolumeCorrectMover(
     const std::string &name, float defaultWeight, const SdfPath &target)
@@ -2443,8 +2457,6 @@ RigExecMoverChain::AddMatrixMathMover(
     return handle;
 }
 
-// ---- Constraints as movers -------------------------------------------------
-//
 // Constraints are movers: the chain applies RigExecMoverAPI and authors the
 // exact target on rigExec:moves, so a constraint participates in composed
 // post-order application like any other operation.
@@ -2608,9 +2620,7 @@ RigExecMoverChain::Under(
     return RigExecMoverChain(_stage, moverPath, effectiveDefault);
 }
 
-// ---------------------------------------------------------------------------
 // Top-level builder
-// ---------------------------------------------------------------------------
 
 RigExecRigBuilder
 RigExecRigBuilder::Create(
@@ -2878,7 +2888,6 @@ RigExecRigBuilder::AddSplineIk(
     return handle;
 }
 
-// ---- Weight objects ---------------------------------------------------------
 
 RigExecStaticWeightHandle
 RigExecRigBuilder::AddStaticWeight(

@@ -103,8 +103,8 @@ def testUsdviewInputFunction(appController):
 
     panel._SetMode(curvenetUI.MODE_DRAW)
 
-    # ONE click. A single knot has no spline yet, and this is precisely the
-    # moment the tool used to show nothing at all.
+
+
     click(*target)
     if len(curvenetUI.GetPoints(net)) != 1:
         raise AssertionError("first click placed no knot")
@@ -159,7 +159,7 @@ def testUsdviewInputFunction(appController):
         if vis != UsdGeom.Tokens.invisible:
             raise AssertionError("unchecking left %s visible (%s)"
                                  % (label, vis))
-    # Idempotent: this used to throw the second time through.
+
     panel._UpdateDisplay()
 
     panel._showNet.setChecked(True)

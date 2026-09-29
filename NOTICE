@@ -1,0 +1,72 @@
+usdRig
+Copyright (c) 2026 Nick Burkard
+
+This project is licensed under the MIT License. See the LICENSE file.
+
+This distribution includes third-party material. The notices below are
+informational and do not change those components' own licenses.
+
+OpenUSD
+-------
+License: Tomorrow Open Source Technology License 1.0 (TOST-1.0)
+https://openusd.org/license
+
+The usdview node-graph editor under plugin/usdNoodles was localized from
+OpenUSD PR #4156 (pxr/usdImaging/usdNoodles). A copy of the TOST text is
+checked in at plugin/usdNoodles/LICENSE.txt.
+
+plugin/usdNoodles/moduleDeps.cpp is the OpenUSD pxr_library script-module
+dependency table (Copyright 2024 Pixar). Its header still points at
+https://openusd.org/license.
+
+libs/rigExecRuntime/runtimeMath.h is partly derived from OpenUSD Gf math.
+It repeats the same floating-point operations in the same order as the Gf
+subset the runtime kernels use, including Gf's short-vector and reciprocal
+behavior, and it compiles without an OpenUSD include path. Its header
+keeps the OpenUSD TOST notice (https://openusd.org/license).
+
+facebookexperimental/noodles
+----------------------------
+License: MIT
+Repository: https://github.com/facebookexperimental/noodles
+Pinned commit: ff5d473f10e8c37ceaf0da11ea7cb80805bc8314
+License text:
+https://github.com/facebookexperimental/noodles/blob/ff5d473f10e8c37ceaf0da11ea7cb80805bc8314/LICENSE.txt
+
+The pin and its SHA256 are also recorded in plugin/usdNoodles/CMakeLists.txt.
+The noodles C++ library is fetched at build time. It is not vendored as
+source. These files in plugin/usdNoodles/assets are copies of that commit:
+
+  assets/shaders/*.glsl
+    GLSL sources. Byte-identical to the upstream shaders once the upstream
+    MIT comment is removed. Each file in this tree carries a Meta Platforms
+    MIT header; the complete license is included at
+    plugin/usdNoodles/NOODLES_LICENSE.txt.
+
+  assets/fonts/Poppins-Light.json
+  assets/fonts/Poppins-Light.png
+  assets/fonts/Poppins-Medium.json
+  assets/fonts/Poppins-Medium.png
+  assets/fonts/Poppins-Regular.json
+  assets/fonts/Poppins-Regular.png
+    Copies of the upstream MSDF atlases; JSON line endings may differ. The noodles
+    THIRD_PARTY_LICENSES.txt at the pinned commit identifies them as
+    derived from the Poppins font family, Copyright 2020 The Poppins
+    Project Authors, under the SIL Open Font License, Version 1.1:
+    https://github.com/facebookexperimental/noodles/blob/ff5d473f10e8c37ceaf0da11ea7cb80805bc8314/THIRD_PARTY_LICENSES.txt
+    The full license text is included in
+    plugin/usdNoodles/THIRD_PARTY_LICENSES.txt.
+
+The Python editor, Boost.Python bindings, UsdPrimRegistry, and their
+tests are not copies of the noodles repository (that tree has no Python
+sources). They were localized from OpenUSD and retain their existing Meta copyright
+notices and Tomorrow Open Source Technology License terms. Upstream
+PR #4156 at 4b753359d308d7d0416dcee464e1c7d130bc39dc confirms that
+Meta attribution; it must not be replaced by a different copyright owner.
+The noodles shader sources keep the Meta MIT header. The Poppins atlases
+stay under the SIL Open Font License. None of that third-party code is
+relicensed under the project MIT license.
+
+The adapted attribute widgets in plugin/rigExecUsdview/volumeWeightUI.py
+retain their existing Copyright 2026 Pixar and OpenUSD license notice.
+See THIRD_PARTY_NOTICES.md for unresolved asset and RBF provenance.

@@ -55,9 +55,7 @@ except Exception:
         pass
 
 
-# ---------------------------------------------------------------------------
 # Non-Qt helpers — importable and testable without a display.
-# ---------------------------------------------------------------------------
 
 def stage_summary(stage):
     """One-line summary of a Usd.Stage for the LLM context window."""
@@ -125,9 +123,7 @@ def get_prim_info(stage, primPath):
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # Stored credentials — plain functions, testable without Qt.
-# ---------------------------------------------------------------------------
 
 # Kept out of the repo deliberately: a key in the checkout is one `git add -A`
 # from being published. Written 0600 because it is a bearer credential.
@@ -344,7 +340,6 @@ def exec_python(code, stage=None, api=None, extra_globals=None):
     return success, stdout_buf.getvalue(), stderr_buf.getvalue(), result
 
 
-# ---------------------------------------------------------------------------
 # Assistant plumbing.
 #
 # The assistant runs a real tool loop (see museAgent): it inspects the stage,
@@ -352,7 +347,6 @@ def exec_python(code, stage=None, api=None, extra_globals=None):
 # keeps going.  The LLM call itself happens on a worker thread; every tool call
 # is marshalled back onto usdview's main thread, because USD and Qt are both
 # main-thread-only.
-# ---------------------------------------------------------------------------
 
 import museAgent
 
@@ -417,9 +411,7 @@ def capture_viewport_png(api, annotation="", embed_metadata=True):
         })
     return png, camera
 
-# ---------------------------------------------------------------------------
 # Goal helpers (headless-testable, no Qt required)
-# ---------------------------------------------------------------------------
 
 def parse_goal_command(text):
     """Parse a /goal command. Returns (is_goal, goal_text_or_none, is_clear, is_show, help_text)."""
@@ -454,9 +446,7 @@ def build_goal_context(goal):
     return "LONG-HORIZON GOAL (set via /goal, keep on task): %s" % goal
 
 
-# ---------------------------------------------------------------------------
 # Drawover helpers (headless stubs + Qt-aware capture)
-# ---------------------------------------------------------------------------
 
 def _get_camera_info(api):
     """Collect pertinent camera info from the usdview stageView. Returns a dict."""
@@ -656,9 +646,7 @@ def _EnsureGuideVisibleForRig(api):
 
 
 
-# ---------------------------------------------------------------------------
 # Drawover overlay — transparent paint layer over the viewport
-# ---------------------------------------------------------------------------
 
 if _HAS_QT:
 
@@ -922,7 +910,7 @@ if _HAS_QT:
                     ("Anthropic / Meta Muse (from the key)",
                      museAgent.PROVIDER_ANTHROPIC),
                     ("Ollama (local server)", museAgent.PROVIDER_OLLAMA),
-                    ("LM Studio (Hivemind)",
+                    ("LM Studio",
                      museAgent.PROVIDER_LMSTUDIO),
                     ("Apple Foundation Models (on-device)",
                      museAgent.PROVIDER_APPLE)):
@@ -1146,9 +1134,9 @@ if _HAS_QT:
                     1 for entry in self._lmstudio_models
                     if entry.get("native_tools"))
                 self._current.setText(
-                    "%d model(s) on Hivemind, %d with native tool support."
+                    "%d model(s) on the server, %d with native tool support."
                     % (count, native) if count else
-                    "Hivemind is not answering on port 1234.")
+                    "the server is not answering on port 1234.")
                 return
             key, source = museAgent.resolve_api_key()
             if key:
@@ -1686,9 +1674,9 @@ if _HAS_QT:
                 models = museAgent.fetch_lmstudio_models(base_url)
                 if not models:
                     self._log_system(
-                        "LM Studio at %s is not answering. On Hivemind, start "
-                        "the server on port 1234 and enable Serve on Local "
-                        "Network, or choose another back end in Muse ▸ "
+                        "LM Studio at %s is not answering. Start the server "
+                        "on port 1234, or set MUSE_LMSTUDIO_URL, or choose "
+                        "another back end in Muse ▸ "
                         "Settings…." % base_url)
                     return
                 model = museAgent.resolve_model(base_url, provider)
@@ -1698,7 +1686,7 @@ if _HAS_QT:
                     self._log_system(problem)
                 else:
                     self._log_system(
-                        "Ready — %s through LM Studio on Hivemind (%s)."
+                        "Ready — %s through LM Studio (%s)."
                         % (model, base_url))
                 return
 
@@ -1916,9 +1904,7 @@ else:
         def activateWindow(self): pass
 
 
-# ---------------------------------------------------------------------------
 # Utility: open the panel (command entry point)
-# ---------------------------------------------------------------------------
 
 def OpenMuseAssistant(usdviewApi):
     """Command-plugin entry point: show the chat window.
@@ -1940,9 +1926,7 @@ def OpenMuseAssistant(usdviewApi):
     return chat
 
 
-# ---------------------------------------------------------------------------
 # PluginContainer
-# ---------------------------------------------------------------------------
 
 _container = None  # strong ref — usdview's loader doesn't retain containers without commands
 

@@ -1,5 +1,5 @@
 #
-# RigExec usdview plugin: a Maya-style view cube in the viewport -- a
+# RigExec usdview plugin: a view cube in the viewport -- a
 # small labelled cube in the top-right corner that shows the camera
 # orientation, whose faces, edges and corners orbit the free camera to
 # the 26 canonical views when clicked, with hover highlight,
@@ -107,9 +107,7 @@ def _FaceArea(points):
     return abs(total) * 0.5
 
 
-# ---------------------------------------------------------------------------
 # Widget
-# ---------------------------------------------------------------------------
 
 class ViewCubeWidget(QtWidgets.QWidget):
     """
@@ -429,9 +427,7 @@ class ViewCubeWidget(QtWidgets.QWidget):
         painter.drawPolygon(house)
 
 
-# ---------------------------------------------------------------------------
 # Controller
-# ---------------------------------------------------------------------------
 
 class ViewCubeController(QtCore.QObject):
     """
@@ -797,9 +793,7 @@ class ViewCubeController(QtCore.QObject):
                 pass
 
 
-# ---------------------------------------------------------------------------
 # Installation
-# ---------------------------------------------------------------------------
 
 # One view cube per usdview session, filed under the session's main window.
 # Several sessions can share this module in one process (usdOrchestrate's

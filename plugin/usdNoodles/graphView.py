@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 import ctypes
@@ -455,14 +455,14 @@ class GraphView(QGLWidget):
     # re-register on the new instance.
     nodeGraphReplaced = QtCore.Signal()
 
-    # Per-instance cache for the ortho projection matrices. A single frame runs
-    # many render passes (nodes, links, text, stickers, port highlights,
-    # overlays), each of which previously rebuilt the same QMatrix4x4 via
-    # .ortho() ~6x/frame. The matrices are memoized and keyed on the view state
-    # that defines them, so the cache self-invalidates on any pan/zoom/resize
-    # without explicit invalidation hooks. These class-level defaults are
-    # shadowed by per-instance values on the first call (None is immutable, so
-    # no cross-instance sharing).
+
+
+
+
+
+
+
+
     _worldProjCacheKey = None
     _worldProjCache = None
     _screenProjCacheKey = None
@@ -636,7 +636,7 @@ class GraphView(QGLWidget):
         # The first printable key REPLACES, emulating the select-all a real
         # line edit does on focus (volumeWeightUI.py:1052 does the same).
         self._valueEditFresh = True
-        # A rejected value tints the editor outline instead of closing it.
+
         self._valueEditError = False
         self._mungState = None
         self._mungActive = False
@@ -743,10 +743,10 @@ class GraphView(QGLWidget):
         self._lastPinIndex = -1
         self._lastLinkCycleIndex = 0
 
-        # Navigation history: track which link was used to arrive at the current node
-        # This allows going back to the same link instead of just the first one
-        # _lastInputLinkIndex: The link index we used when arriving via an input (going forward)
-        # _lastOutputLinkIndex: The link index we used when arriving via an output (going backward)
+
+
+
+
         self._lastInputLinkIndex = -1
         self._lastOutputLinkIndex = -1
 
@@ -1252,9 +1252,9 @@ class GraphView(QGLWidget):
         """Internal helper to complete the jump to source node."""
         sourceNode = self.nodes[sourceNodeId]
 
-        # Record the link index we used to arrive at this node
-        # Since we're going backward (to source), record this as the output link
-        # we can use to go forward again
+
+
+
         for i, l in enumerate(self.links):
             if l is link:
                 self._lastOutputLinkIndex = i
@@ -1323,9 +1323,9 @@ class GraphView(QGLWidget):
         """Internal helper to complete the jump to target node."""
         targetNode = self.nodes[targetNodeId]
 
-        # Record the link index we used to arrive at this node
-        # Since we're going forward (to target), record this as the input link
-        # we can use to go backward again
+
+
+
         for i, l in enumerate(self.links):
             if l is link:
                 self._lastInputLinkIndex = i
@@ -2178,8 +2178,8 @@ class GraphView(QGLWidget):
                 needsRepaint = True
                 needsTextUpdate = True
             else:
-                # Check if this is a child/parent path of a node we care about
-                # (e.g., a new prim was added under a container we're viewing)
+
+
                 for nodeId in self.nodes:
                     if _isPathRelated(pathStr, nodeId):
                         self.nodes[nodeId].invalidateCache()
@@ -2202,11 +2202,11 @@ class GraphView(QGLWidget):
 
                 # Check what kind of property changed
                 if "ui:nodegraph:node:pos" in propName:
-                    # Position changed - invalidate position cache. The cache
-                    # is NodeModel._position; the name this used to null
-                    # (_cachedPosition) is not an attribute NodeModel has, so
-                    # the assignment quietly created a dead one and an external
-                    # move never showed up.
+
+
+
+
+
                     node._position = None
                     needsRepaint = True
                 elif "ui:nodegraph:node:expansionState" in propName:
@@ -2972,10 +2972,10 @@ class GraphView(QGLWidget):
         # Initialize icon renderer
         from .iconRenderer import CppIconRenderer
 
-        # C++ icon path. Shares the shader library + assets path with the other
-        # render paths; the transform frame is shared below so icons ride node
-        # drags. Construction degrades to a no-op if the C++ extension is
-        # unavailable, so the editor still opens.
+
+
+
+
         self._cppIconRenderer = CppIconRenderer()
         self._cppIconRenderer.initialize(self.shaderLibrary, str(assetsPath))
 
@@ -4330,9 +4330,9 @@ class GraphView(QGLWidget):
         """
         self.links.clear()
 
-        # Phase 1: refresh each USD-backed node's cached link lists from its
-        # prim WITHOUT positioning yet, so every connection endpoint is known
-        # before we materialize pins for it in phase 2.
+
+
+
         for node in self.nodes.values():
             # Virtual nodes (Blueprint I/O) have no USD prim; keep their cached
             # inputLinks/outputLinks as-is.
@@ -4343,14 +4343,14 @@ class GraphView(QGLWidget):
             if node._prim and node._prim.IsValid():
                 self._populateNodeLinksFromPrim(node, node._prim)
 
-        # Phase 2: surface a pin/row for every connection endpoint that lacks
-        # one, so phase-3 positioning snaps each noodle to a real pin instead of
-        # the bare node edge. This covers outputs that exist only as connection
-        # targets on prims whose schema is not registered (so USD never exposes
-        # them as attributes), treating all properties uniformly.
+
+
+
+
+
         self._surfaceConnectionEndpointPins()
 
-        # Phase 3: position links into self.links now that all rows exist.
+
         for node in self.nodes.values():
             self._processNodeLinks(node)
 
@@ -5700,9 +5700,9 @@ class GraphView(QGLWidget):
 
         if hasSelectedNodes:
             self._syncSelectionToPrimtree()
-        # Do not sync empty selection back to prim tree — the user may click
-        # the canvas to focus the editor and then press A to add the prim they
-        # had selected in the prim tree.
+
+
+
 
     def _finalizeNodeDrag(self):
         """Finalize a node drag: write positions to USD and push undo command."""
@@ -6887,9 +6887,9 @@ class GraphView(QGLWidget):
 
         self._dragLinkValidTarget = False
 
-        # When dragging from a connected input port, lift the existing
-        # connection so releasing on empty or an invalid target deletes it
-        # (matches Presto "drag to empty to delete" parity: T262819088).
+
+
+
         if not isOutput and not self._reconnectingLink:
             existingLink = self._findLinkToInput(nodeId, portName)
             if existingLink and not getattr(existingLink, "isDangling", False):
@@ -8402,8 +8402,8 @@ class GraphView(QGLWidget):
         outputNode.outputLinks.append(link)
         inputNode.inputLinks.append(link)
 
-        # A link was added in place (no full rebuild); re-mirror to C++ and
-        # rebuild port highlights (the new connection changes port colors).
+
+
         self._linksNeedSync = True
         self._portHighlightsDirty = True
 
@@ -10321,14 +10321,12 @@ class GraphView(QGLWidget):
             )
         return parent_path
 
-    # ------------------------------------------------------------------
     # Inline attribute values
     #
     # Geometry, hit-testing, the drag, the keyboard editor and the token
     # popup. The invariant the whole group rests on is stated once, in
     # widgets/valueCell.cell_rect: the value cell and the two connection
     # gutters are disjoint, so a press can mean exactly one of the two.
-    # ------------------------------------------------------------------
 
     def _valueRowLayout(self, node):
         """``(input_pins, in_slots, in_kinds, occupied)`` for the value rows.
@@ -10532,7 +10530,6 @@ class GraphView(QGLWidget):
             self.setCursor(cursor if cursor is not None else QtCore.Qt.ArrowCursor)
             self._valueCursorSet = cursor
 
-    # ---- drawing -------------------------------------------------------
 
     def _valueFontSize(self):
         """Value text size: a little smaller than the row label, never its own.
@@ -11631,7 +11628,7 @@ class GraphView(QGLWidget):
     def _paintMungLadder(self):
         """A small readout of the step the drag is currently using.
 
-        Houdini's ladder without the ladder: the multiplier is the only part
+        ladder without the ladder: the multiplier is the only part
         a user needs while dragging, and it belongs next to the cursor rather
         than in a status bar on the other side of the window.
         """

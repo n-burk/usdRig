@@ -1,7 +1,4 @@
-//
 // .rigexec container + bake conformance.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExecBake/capture.h"
 #include "rigExec/rigEvaluator.h"

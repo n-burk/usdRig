@@ -103,9 +103,7 @@ from .bake import export_baked
 from .inverse import InverseResult, solve_parameters
 from .curvenet import create_curvenet_weight
 
-# ---------------------------------------------------------------------------
 # Re-exported native surface.
-# ---------------------------------------------------------------------------
 
 _NativeBuilder = _native.Builder
 SchemaPrim = _native.SchemaPrim
@@ -154,6 +152,7 @@ BlendShapeMover = _native.BlendShapeMover
 CurveMover = _native.CurveMover
 SurfaceMover = _native.SurfaceMover
 SmoothMover = _native.SmoothMover
+DeltaMushMover = _native.DeltaMushMover
 VolumeCorrectMover = _native.VolumeCorrectMover
 CurvenetMover = _native.CurvenetMover
 CurvenetAdjustment = _native.CurvenetAdjustment
@@ -176,7 +175,7 @@ __all__ = [
     "PlaneWeight", "CurveWeight", "CombineWeight",
     "BlendInput", "BlendSample", "Curvenet", "CurvenetAdjustment", "CurvenetAdjusterMover",
     "MatrixMover", "SkinMover", "LatticeMover", "BlendShapeMover", "CurveMover",
-    "SurfaceMover", "SmoothMover", "VolumeCorrectMover", "CurvenetMover",
+    "SurfaceMover", "SmoothMover", "DeltaMushMover", "VolumeCorrectMover", "CurvenetMover",
     "FloatMathMover", "Vec3fMathMover", "MatrixMathMover",
     "MoverChain",
     "load_schema_plugin", "identity",
@@ -184,9 +183,7 @@ __all__ = [
     "create_curvenet_weight",
 ]
 
-# ---------------------------------------------------------------------------
 # Schema plugin registration.
-# ---------------------------------------------------------------------------
 
 _registered_dirs = []
 
@@ -279,9 +276,7 @@ def identity():
             0, 0, 0, 1]
 
 
-# ---------------------------------------------------------------------------
 # OpenUSD-style, low-level schema facade.
-# ---------------------------------------------------------------------------
 
 _CONCRETE_SCHEMA_NAMES = (
     "AimConstraint",
@@ -315,6 +310,7 @@ _CONCRETE_SCHEMA_NAMES = (
     "ScaleConstraint",
     "SingleChainIkConstraint",
     "SmoothMover",
+    "DeltaMushMover",
     "SphereWeight",
     "SplineIk",
     "StaticWeight",

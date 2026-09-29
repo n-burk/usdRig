@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -354,7 +354,7 @@ class TestAutoLayoutAction(unittest.TestCase):
         view = SimpleNamespace(
             nodeCreationHotbox=SimpleNamespace(is_showing=False),
             _autoLayoutNodes=MagicMock(),
-            # No rename in progress; the editor owns the keyboard when it is.
+
             _renamingNodeId="",
             # Nor a value drag / editor / token popup, each of which is asked
             # about before the single-letter shortcuts get a turn.

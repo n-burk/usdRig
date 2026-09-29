@@ -15,6 +15,7 @@ Storm viewport with the rig guides on.
 | ![Baked and dynamic evaluation](../icons/concept.png) | [Baked and dynamic evaluation](concepts/baked-vs-dynamic.md) | The two ways UsdRig computes a frame, how to switch between them, and what each one is for. |
 | ![What warming does](../icons/concept.png) | [What warming does](concepts/frame-cache-warming.md) | The per-frame cache in one page: what warms, what you see, what it costs, and the switches. |
 | ![Tutorial: a rolling ball rig](../icons/concept.png) | [Tutorial: a rolling ball rig](concepts/tutorial-rolling-ball.md) | Build the classic bouncing-ball rig in usdview, node by node, and make the roll a consequence of the travel instead of a channel to key. |
+| ![Tutorial: Godot and baked rigs](../icons/concept.png) | [Tutorial: Godot and baked rigs](concepts/tutorial-godot-baked-rig.md) | Build the ball in usdview, bake one self-contained rig asset, and drive its exposed controllers in Godot, with GIF checkpoints. |
 
 ## Rig
 
@@ -62,6 +63,7 @@ Storm viewport with the rig guides on.
 | ![Lattice Mover](../icons/lattice_mover.png) | [Lattice Mover](nodes/lattice_mover.md) | Deforms points through an animated Bernstein or B-spline cage. |
 | ![Surface Mover](../icons/surface_mover.png) | [Surface Mover](nodes/surface_mover.md) | Drapes points onto an animated driver surface. |
 | ![Smooth Mover](../icons/smooth_mover.png) | [Smooth Mover](nodes/smooth_mover.md) | Relaxes points with uniform Laplacian smoothing. |
+| ![Delta Mush Mover](../icons/concept.png) | [Delta Mush Mover](nodes/delta_mush_mover.md) | Smooths deformation and restores transported rest detail. |
 | ![Volume Correct Mover](../icons/volume_correct_mover.png) | [Volume Correct Mover](nodes/volume_correct_mover.md) | Pulls a deformation back toward its rest bound volume. |
 
 ## Curvenet

@@ -1,13 +1,9 @@
-//
 // TouchPose C surface.
-//
 // The usdview plugin (plugin/touchPose) binds this with ctypes, the same way
 // rigExecUsdview binds RigExecImaging_*: the stage crosses in-process as a
 // UsdUtilsStageCache id, arrays cross as raw pointers into numpy buffers,
 // and nothing needs a Python extension module built against one interpreter.
-//
 // One HANDLE per touched mesh. It owns:
-//
 //   * the posed geometry and its ray-cast acceleration (touchPoseMesh.h),
 //     kept current from the RigExec snapshot the viewport draws, so a pick
 //     lands on the deformed skin and not the rest mesh on the stage;
@@ -16,13 +12,10 @@
 //     which it composes into the per-region colour table the Storm shader
 //     reads (touchPoseHighlight.h). Setting a state that is already drawn
 //     sends nothing to Hydra at all.
-//
 // Every call is main-thread (the Qt thread), which is the thread usdview
 // changes its stage and draws on. Queries are internally parallel.
-//
 // Return conventions: counts and indices are >= 0 on success; -1 means a bad
 // handle or bad arguments.
-//
 #ifndef RIGEXEC_IMAGING_TOUCH_POSE_H
 #define RIGEXEC_IMAGING_TOUCH_POSE_H
 

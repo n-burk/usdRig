@@ -1,7 +1,4 @@
-//
 // .rigexec serialization.
-//
-
 #include "rigExecBake/serialize.h"
 #include "rigExec/bakedProgramImpl.h"
 
@@ -945,6 +942,7 @@ _RIGEXEC_BAKE_PIN_OP(Curvenet, 10);
 _RIGEXEC_BAKE_PIN_OP(CurvenetAdjuster, 11);
 _RIGEXEC_BAKE_PIN_OP(RecomputeNormals, 12);
 _RIGEXEC_BAKE_PIN_OP(RecomputeExtent, 13);
+_RIGEXEC_BAKE_PIN_OP(DeltaMush, 14);
 #undef _RIGEXEC_BAKE_PIN_OP
 #define _RIGEXEC_BAKE_PIN_PHASE(name, value)                               \
     static_assert(uint8_t(RigExecReadPhaseKind::name) == value,            \

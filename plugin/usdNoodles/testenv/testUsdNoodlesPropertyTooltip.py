@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -128,9 +128,7 @@ class TestGetPinDocumentation(unittest.TestCase):
         self.assertEqual(doc, "")
 
 
-# ---------------------------------------------------------------------------
 # Shared fixtures for GraphView tooltip tests
-# ---------------------------------------------------------------------------
 
 
 def _make_renderer():
@@ -194,9 +192,7 @@ def _make_view_for_hit_test(nodes):
     )
 
 
-# ---------------------------------------------------------------------------
 # Tests: GraphView._getPropertyAtPoint
-# ---------------------------------------------------------------------------
 
 
 @unittest.skipUnless(_has_graph, "GraphView modules not available (headless CI)")
@@ -261,9 +257,7 @@ class TestGetPropertyAtPoint(unittest.TestCase):
         self.assertEqual(result, ("/Top", "top_in"))
 
 
-# ---------------------------------------------------------------------------
 # Tests: GraphView._updatePropertyTooltip
-# ---------------------------------------------------------------------------
 
 
 def _make_view_for_update_tooltip(
@@ -355,9 +349,7 @@ class TestUpdatePropertyTooltip(unittest.TestCase):
             self.assertEqual(view._tooltipScreenPos, ("global", QtCore.QPoint(0, 0)))
 
 
-# ---------------------------------------------------------------------------
 # Tests: GraphView._showPropertyTooltip
-# ---------------------------------------------------------------------------
 
 
 @unittest.skipUnless(_has_graph, "GraphView modules not available (headless CI)")
@@ -428,9 +420,7 @@ class TestShowPropertyTooltip(unittest.TestCase):
             )
 
 
-# ---------------------------------------------------------------------------
 # Tests: GraphView leaveEvent cleanup (G3)
-# ---------------------------------------------------------------------------
 
 
 def _leave_event_cleanup(view):

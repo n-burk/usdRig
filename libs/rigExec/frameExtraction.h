@@ -1,6 +1,4 @@
-//
 // Per-element frame extraction from a packed solver boundary (spec §5.7).
-//
 // A solver publishes one aggregate RigExecPointFrameArray; each joint it
 // poses takes exactly one element of it. Two places need that extraction and
 // they must agree bit for bit: the joint's computePointFrame registration
@@ -8,10 +6,8 @@
 // indexes the solver's array directly using its in-memory solver->joint
 // binding. Duplicating the math would let the two drift silently, so it lives
 // here once.
-//
 // This is the former RigExecPointFrameView out:space math, kept verbatim
 // through the view-free rework (user-directed 2026-07-25).
-//
 #ifndef RIGEXEC_FRAME_EXTRACTION_H
 #define RIGEXEC_FRAME_EXTRACTION_H
 

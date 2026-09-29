@@ -1,14 +1,11 @@
-//
 // rigExecRuntime frame driver (M2 framework).
-//
 // SetFrame loads a baked frame's sparse values into the holders;
 // Execute runs prologues, the region and the epilogue, then assembles
 // the outputs. Failures name the step and keep the previous outputs.
-//
-
 #include "rigExecRuntime/runtime.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace rigExec {
 
@@ -78,9 +75,84 @@ RigExecRuntimeReader::SetFrame(double frame, std::string *error)
 }
 
 void
+RigExecRuntimeReader::ClearAvars()
+{
+    _avarOverrides.clear();
+}
+
+bool
+RigExecRuntimeReader::SetAvar(const std::string &path, double value,
+                            std::string *error)
+{
+    const size_t dot = path.find_last_of('.');
+    const auto slot = _program.pathIndex.find(path.substr(0, dot));
+    int channel = -1;
+    if (dot != std::string::npos) {
+        for (int i = 0; i < 9; ++i) {
+            if (path.substr(dot + 1) == RrAvarNames[i]) channel = i;
+        }
+    }
+    if (!std::isfinite(value) || slot == _program.pathIndex.end() ||
+        channel < 0 ||
+        _slotMeta.slotKind[size_t(slot->second)] !=
+            RigExecWireSlotKind::FirstFramePose ||
+        _constants.posedAuthored[size_t(slot->second)] ||
+        std::find(_slotMeta.controlSlots.begin(), _slotMeta.controlSlots.end(),
+                  slot->second) == _slotMeta.controlSlots.end() ||
+        (channel >= 3 && channel <= 5 &&
+         _constants.noScaleAvars[size_t(slot->second)])) {
+        if (error) *error = "expected a finite TRS avar on a compiled pose slot: " + path;
+        return false;
+    }
+    for (const auto &frame : _inputs.frames) {
+        for (uint32_t id : frame.propertyPaths) {
+            if (_program.TextOrEmpty(id) == path) {
+                if (error) *error = "cannot override a captured property-mover output: " + path;
+                return false;
+            }
+        }
+    }
+    _avarOverrides[size_t(slot->second) * 11 + size_t(channel)] = value;
+    return true;
+}
+
+void
 RigExecRuntimeReader::SetRunMaskForTesting(unsigned mask)
 {
     _program.runMask = mask;
+}
+
+std::vector<RigExecRuntimeJointMatrix>
+RigExecRuntimeReader::GetJointRestMatrices() const
+{
+    std::vector<RigExecRuntimeJointMatrix> out;
+    for (size_t i = 0; i < _slotMeta.jointSlots.size(); ++i) {
+        const size_t slot = size_t(_slotMeta.jointSlots[i]);
+        RrMat4d rest;
+        const RrPointFrame frame = RrWireToFrame(_constants.restFrames[slot]);
+        if (RrPointsToMatrix(RrIdentityLandmarks(), frame.points, &rest)) {
+            out.push_back({_program.TextOrEmpty(_slotMeta.jointPaths[i]), rest});
+        }
+    }
+    _SortByPath(&out);
+    return out;
+}
+
+std::vector<RigExecRuntimeJointMatrix>
+RigExecRuntimeReader::GetJointPoseMatrices() const
+{
+    const auto rests = GetJointRestMatrices();
+    std::vector<RigExecRuntimeJointMatrix> out;
+    for (const auto &delta : _jointMatrices) {
+        const auto rest = std::lower_bound(rests.begin(), rests.end(), delta.path,
+            [](const RigExecRuntimeJointMatrix &a, const std::string &path) {
+                return a.path < path;
+            });
+        if (rest != rests.end() && rest->path == delta.path) {
+            out.push_back({delta.path, rest->matrix * delta.matrix});
+        }
+    }
+    return out;
 }
 
 const std::vector<RrPointFrame> &
@@ -151,6 +223,10 @@ RigExecRuntimeReader::Execute(std::string *error)
     }
     store.runSnapshots.Clear();
 
+    // Restore constant channels as well as sampled ones, so clearing an
+    // override returns to the baked pose on the very next evaluation.
+    store.avars = _constants.avarConstants;
+
     std::vector<std::string> poseDiagnostics;
     if ((program.runMask & 0x1u) != 0 &&
         !RrProloguePose(&program, record, &poseDiagnostics, error)) {
@@ -160,6 +236,9 @@ RigExecRuntimeReader::Execute(std::string *error)
         !RrPrologueGeometry(&program, time, record, &poseDiagnostics,
                             error)) {
         return false;
+    }
+    for (const auto &entry : _avarOverrides) {
+        store.avars[entry.first] = entry.second;
     }
     if (!RrRunSteps(&program, time, false, error)) {
         return false;

@@ -1,20 +1,16 @@
-//
 // .rigexec InputTable section: the per-frame values the program consumed.
-//
 // Two halves. The static DIRECTORY assigns every bound varying input a uid
 // in one documented traversal order (see RigExecBakeCapture in
 // libs/rigExecBake/capture.h): ladders, interpolators, solvers,
 // constraints, weight objects, then the avar bindings, each input in field
 // order. The runtime allocates one slot per uid in the same order, so a
 // uid IS the slot -- no lookup tables on the hot path.
-//
 // The dynamic half is one record per baked frame: the values the inputs
 // resolved (sparse -- an input records only when its step ran, and the
 // runtime holds the last value, which is exactly the program's cone
 // semantics), plus the prologue's retained arrays for that frame. Inputs
 // the directory skips (constant or unbound) provably read as their
 // constant -- see RigExecBakedRead -- so the runtime never consults them.
-//
 #ifndef RIGEXEC_BINARY_INPUT_TABLE_H
 #define RIGEXEC_BINARY_INPUT_TABLE_H
 

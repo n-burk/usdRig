@@ -1,11 +1,9 @@
-//
 // RigExec dual-quaternion tests: matrix round trips (including 180 degree
 // rotations), single-influence exactness, exact translation blending,
 // length preservation versus linear matrix blending, shortest-arc sign
 // correction, unit-norm invariants, degenerate weights, and the scale/shear
 // drop policy. Also prints a timing comparison of the direct point
 // transform against the matrix path (informational, not asserted).
-//
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
@@ -635,9 +633,7 @@ TestRotateVector()
                1e-14));
 }
 
-// ---------------------------------------------------------------------------
 // Scale-aware path
-// ---------------------------------------------------------------------------
 
 static bool
 SameBits(double a, double b)
@@ -1007,10 +1003,8 @@ TestScaledDegenerates()
     CHECK(Near(RigExecScaledDualQuatTransformPoint(refl, p), Apply(mirrored, p), 1e-12));
 }
 
-// ---------------------------------------------------------------------------
 // Palette-indexed scale-aware blend and the skinning kernel over
 // RigExecSkinLayout (RigExecApplyDualQuatSkin)
-// ---------------------------------------------------------------------------
 
 static bool
 SameBits(const GfMatrix3d &a, const GfMatrix3d &b)

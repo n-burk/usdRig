@@ -1,8 +1,5 @@
-//
 // RigExec warm-frame index. See warmIndex.h for the contract and the lock
 // discipline.
-//
-
 #include "rigExecImaging/warmIndex.h"
 
 namespace rigExec {

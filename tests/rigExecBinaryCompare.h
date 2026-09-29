@@ -1,13 +1,9 @@
-//
 // testRigExecBinary comparison: the decoded wire structs against the live
 // program they were converted from, field by field.
-//
 // Included by tests/testRigExecBinary.cpp AFTER its CHECK macro: every
 // comparison below reports through it. Doubles compare with exact equality,
 // which is correct here because the converter copies values and the wire
 // preserves bits -- no arithmetic stands between the two sides.
-//
-
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExecBinary/container.h"
 #include "rigExecBinary/geometry.h"

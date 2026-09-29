@@ -1,7 +1,5 @@
-//
 // The baked program: build and run. See bakedProgram.h for what it is and
 // why it is a request rather than a promise.
-//
 // Everything here is a second expression of semantics that live elsewhere --
 // the provider compose and the default-space ladder in computations.cpp, the
 // pose walk in rigEvaluator.cpp, the geometry revision in moverGraph.cpp --
@@ -10,8 +8,6 @@
 // instead of mirrored (the constraint operators, the skin kernel, the
 // extent/normal kernels, the packet assembler, the property chains) it is,
 // because a shared call cannot drift and a copy can.
-//
-//
 // Phase 2 split this file by domain: the pose walk lives in bakedPose.cpp and
 // the geometry chains in bakedGeometry.cpp, both over the state declared in
 // bakedProgramImpl.h. What stays here is the public surface, the bakeability
@@ -20,7 +16,6 @@
 // the evaluator's private state. This is the only translation unit the
 // evaluator declares a friend, so Build captures what a frame needs of it
 // once and the halves read the program instead.
-//
 #include "bakedProgram.h"
 
 #include "bakedProgramImpl.h"
@@ -140,7 +135,6 @@ _IsVolumeWeightTypeName(const TfToken &type)
 }
 
 // The weight-object schemas the program can build a packet for.
-//
 // It is about the BUILDER and nothing else. The volumetric three are here
 // because RigExecBuildVolumeWeightPacket is one of the builders, and they are
 // still refused above by the _volumeWeightMatrixTaps loop, which is about the
@@ -226,9 +220,7 @@ _ConnectionReachesComputedSpace(const UsdAttribute &attribute)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Bakeability.
-// ---------------------------------------------------------------------------
 
 bool
 RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
@@ -251,7 +243,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         return false;
     }
 
-    // ---- pose providers ---------------------------------------------------
     for (const auto &[path, taps] : E._connectedPoseTaps) {
         say("connected-space provider", path);
     }
@@ -296,7 +287,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
-    // ---- pose interpolators -------------------------------------------------
     // The step reads the driver's frame, and its parent's, out of the slots,
     // so both have to BE slots. Compile already refused a driver that is not a
     // joint or control of the rig; this is the same fact stated against the
@@ -394,7 +384,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         // plainly and against the unedited rig, because the tail already
         // authors a rest:space here and a case that re-authored the value
         // it found would have agreed with everything.
-        //
         // What rest:space cannot carry is a connection that ENDS at one of
         // the six computed spaces, where exec's computeValue is a
         // computation and the walk would read a raw authored value instead.
@@ -434,7 +423,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
-    // ---- solvers ----------------------------------------------------------
     std::set<SdfPath> batched;
     for (const auto &batch : E._solverBatches) {
         for (const auto &[solverPath, tap] : batch.solvers) {
@@ -471,8 +459,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
-    // ---- weight objects -----------------------------------------------------
-    //
     // A weight object is a COMPOSITION -- a dynamic weight remaps a base, a
     // combine folds a list -- so every question about one is a question about
     // its closure and not about the object a mover or a constraint happens to
@@ -513,7 +499,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         });
     };
 
-    // ---- constraints -------------------------------------------------------
     for (const auto &constraint : E._frameConstraints) {
         if (!_IsBakedConstraintType(constraint.schemaType)) {
             say("constraint type not baked (" +
@@ -565,7 +550,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 // composition entirely -- while exec's computeWeightPacket
                 // goes on placing that same volume from its avars. Two
                 // placements, and the program has one slot to hold them in.
-                //
                 // Refused rather than guessed, and refused narrowly: a
                 // volume a constraint does NOT target bakes, which is what
                 // lifting "volume weight object on constraint" above was
@@ -587,7 +571,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     // constraint.snapshotAfter / snapshotTargets. A solver-named phase would
     // silently find no record and read a different value, which is exactly
     // the divergence this program refuses to have.
-    //
     // "Is an aggregate solver" is _solverDependencies membership: every
     // discovered solver is seeded as a key there and every value is also a
     // key, so the map's key set IS the solver set. (The evaluator's own
@@ -621,7 +604,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
-    // ---- geometry ----------------------------------------------------------
     auto checkRevision = [&](const RigExecRigEvaluator::_GraphRevision &r,
                              bool derived) {
         const bool supported =
@@ -645,6 +627,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                        r.op == RigExecRevisionOp::Wire ||
                        r.op == RigExecRevisionOp::VolumeCorrect ||
                        r.op == RigExecRevisionOp::Smooth ||
+                       r.op == RigExecRevisionOp::DeltaMush ||
                        r.op == RigExecRevisionOp::Lattice ||
                        r.op == RigExecRevisionOp::SurfaceProject);
         if (!supported) {
@@ -705,9 +688,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     return out.size() == before;
 }
 
-// ---------------------------------------------------------------------------
 // The bake.
-// ---------------------------------------------------------------------------
 
 RigExecBakedProgram::RigExecBakedProgram(
     std::unique_ptr<RigExecBakedProgramImpl> impl)
@@ -740,7 +721,6 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
     // held. Everything here is a CACHE of the last run; the compiled
     // description around it comes from the epoch the new program was built
     // from and is left alone.
-    //
     // \p keepRun says whether the cached RESULT may be kept as well as the
     // node: a revision spliced into or out of a chain changes the point
     // stream every revision after it reads, which is why the dynamic path's
@@ -787,7 +767,6 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         // reached through the fold instead of through the packet: the
         // dynamic path's VdfNetwork keeps the buffers of the nodes it
         // reconnects, so it reports no such work.
-        //
         // Carried only where the two tables are the same shape. keepRun says
         // the revision is the same mover at the same place in the chain; it
         // does not say its binding still names the same joints, and the fold
@@ -929,9 +908,7 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Invalidation.
-// ---------------------------------------------------------------------------
 
 bool
 RigExecBakedProgram::IsInvalidatedBy(
@@ -1144,7 +1121,6 @@ RigExecComparePoses(const RigExecRigPose &reference,
     // path that reported them; they are not two answers to one question, and
     // making them agree would mean either the program inventing a cache or
     // the dynamic path giving one up.
-    //
     // movedPropertiesCpu, moverGraphParityMismatches and
     // moverGraphParityAgreements are left out for the opposite reason: they
     // are filled only by cpuParityMode, and cpuParityMode turns the baked
@@ -1163,9 +1139,7 @@ RigExecComparePoses(const RigExecRigPose &reference,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Interactive overrides.
-// ---------------------------------------------------------------------------
 
 void
 RigExecBakedProgram::BumpProgramStamp()
@@ -1230,7 +1204,6 @@ _ConnectedSources(const RigExecBakedProgramImpl &B)
 // anything, so the dry run and ApplyValueEdits share every check by
 // construction. The caller has already asked IsInvalidatedBy, so no path
 // here is one whose value the bake captured.
-//
 // Fills \p indices with the override numbers of the per-frame inputs the
 // notice reached, and \p readPaths with every property path it names that
 // something in the program can read -- the edited inputs, the properties of
@@ -1377,7 +1350,6 @@ RigExecBakedProgram::ApplyValueEdits(const UsdNotice::ObjectsChanged &notice)
 namespace {
 
 // One captured avar, moved to a new constant.
-//
 // Three copies of the value exist and all three move: the binding (what a
 // drag's release writes back from), the constant table (what a rebuild would
 // have captured), and the working table the frame reads. The working slot is
@@ -1386,7 +1358,6 @@ namespace {
 // back, which is exactly the value an authored edit under a drag should land
 // on. Nothing is marked dirty: the frame path compares every avar slot with
 // last run's by VALUE, which is the whole of what the cone needs.
-//
 // \p animated moves the binding the other way instead: the avar has become a
 // function of time (Animation mode keys a released drag as a spline knot),
 // so from now on the frame reads it the long way, exactly as a rebuild would
@@ -1658,9 +1629,7 @@ RigExecBakedProgram::SetOverrides(
 
 namespace {
 
-// ---------------------------------------------------------------------------
 // RIGEXEC_BAKED_PROGRAM_DIGEST: a fingerprint of what Build produced.
-//
 // The parts of Build that resolve in parallel promise a program identical to
 // a serial Build's, byte for byte -- the same override numbering, the same
 // invalidation index, the same bound constants. Nothing in a frame's OUTPUT
@@ -1670,7 +1639,6 @@ namespace {
 // run with RIGEXEC_ENABLE_PARALLEL_EVAL=0 (or a build from before a change)
 // must print the same lines. One line per table rather than one hash, so a
 // mismatch names the table it is in.
-// ---------------------------------------------------------------------------
 
 bool
 _ProgramDigestRequested()
@@ -1857,9 +1825,7 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Build.
-// ---------------------------------------------------------------------------
 
 void
 RigExecBakedBuildContext::Refuse(const std::string &what, const SdfPath &where)
@@ -1994,13 +1960,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // compiled tables and the stage, and so do those three: none of them
     // writes anything but the program under construction and `ctx`, which
     // are discarded whole on a refusal.
-    //
     // The two write their refusals to separate vectors, merged in program
     // order at the join. `ctx.reasons` is what `refuse()` appends to, and the
     // dense slots refuse; sharing one vector with the walk would interleave
     // the two lists and race. On a refusal the walk's reasons alone are
     // handed back, which is what running it first used to return.
-    //
     // Inline where a task is not allowed or not worth it: with parallel
     // evaluation off, inside a frozen run, and on an evaluator that has not
     // compiled, whose tables the slots below have no business reading.
@@ -2136,8 +2100,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.assetRoot = B.stage->GetPrimAtPath(B.assetRootPath);
 
     phases.Next("Bake.dense_provider_slots");
-    // ---- dense provider slots ---------------------------------------------
-    //
     // The ordered union of the two families, which is the set the dynamic
     // walk's frame maps hold: the exec-seeded providers and the plain
     // Xformables a constraint targets. Both are already in SdfPath order, so
@@ -2198,8 +2160,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     }
 
     phases.Next("Bake.the_rest_chain_and_the_default-space_ladder");
-    // ---- the rest chain and the default-space ladder -----------------------
-    //
     // computations.cpp resolves both per provider per evaluation through
     // eight computations. Every channel feeding them is BOUND here, not
     // folded: an ordinary rig binds fifteen constants per provider and the
@@ -2236,7 +2196,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // doubles, so ResolveBind's typed result is kept typed rather than
     // forced into one array -- each paired with its walk, same as
     // _AvarResolution.
-    //
     // The commit's order-free half runs in the same pass: each chunk of
     // slots records its folds and bindings into a shard of its own (see
     // RigExecBakedRecordBind), in the slot-then-channel order the serial
@@ -2386,7 +2345,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             // An xform-derived slot has no rest chain and no default-space
             // ladder: the dynamic path gives it the identity rest frame
             // outright and reads its pose off the stage.
-            //
             // SI-6, invalidation-index coverage: the prim and every ancestor
             // whose transform the prologue composes go into B.prims, so a
             // RESYNC that retypes or reparents one rebuilds the program. They
@@ -2506,7 +2464,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.lastXformBase.assign(B.xformSlots.size(), GfMatrix4d(1.0));
 
     phases.Next("Bake.the_input_binding_table");
-    // ---- the input binding table -------------------------------------------
     B.avarConstants.assign(size_t(N) * 11, 0.0);
     // Eleven channels on every provider, each an independent read of the
     // composed stage, and on a character this is one of the two loops Build
@@ -2600,8 +2557,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     bindPhases.Close();
 
     phases.Next("Bake.the_walk");
-    // ---- the walk ------------------------------------------------------------
-    //
     // Restated as plain records, because _PoseStep, _SolverBatch and
     // _FrameConstraint are private to the evaluator and bakedPose.cpp is not
     // its friend. The restatement is a copy of the structure only: every
@@ -2744,7 +2699,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.lastNativeFrameOk = B.nativeFrameOk;
 
     phases.Next("Bake.publication");
-    // ---- publication ---------------------------------------------------------
     for (const SdfPath &joint : E._jointPaths) {
         B.jointSlots.push_back(slotOf(joint));
         B.jointPaths.push_back(joint);
@@ -2805,13 +2759,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.jointMatrixPublished.assign(B.jointPaths.size(), 0);
 
     phases.Next("Bake.geometry");
-    // ---- geometry ------------------------------------------------------------
-    //
     // Restated for the same reason the walk was: _GraphRevision is private to
     // the evaluator.
     phases.Next("Bake.pose_interpolators");
-    // ---- pose interpolators -------------------------------------------------
-    //
     // Before the geometry, which looks the weights up by property path to
     // wire a connected blend channel to its slot. The solved table is COPIED
     // from the compiled record: it is a constant of the epoch, and the
@@ -2895,8 +2845,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     RigExecBakedBuildGeometry(&ctx, chainSpecs);
 
     phases.Next("Bake.the_rest_of_the_invalidation_index");
-    // ---- the rest of the invalidation index ---------------------------------
-    //
     // Property chains run INSIDE the program, off the authored stage through
     // the generation's resolved inputs, so their movers are read live like a
     // geometry mover: nothing captured, and an override on one places itself.
@@ -2973,13 +2921,10 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     }
 
     phases.Next("Bake.the_step_graph");
-    // ---- the step graph -----------------------------------------------------
-    //
     // Last, because it is derived from everything above: the steps are the
     // straight line's pieces in the straight line's order, and the edges
     // between them follow from the slot ranges each piece declares. Built
     // once here, so that a frame costs the graph nothing.
-    //
     // Its parts are marked one level down, under the phase this one opened,
     // so the trace says which of them the graph's time goes to.
     RigExecProfilePhases graphPhases(&E._profiler, "compile");
@@ -3021,13 +2966,10 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         new RigExecBakedProgram(std::move(impl)));
 }
 
-// ---------------------------------------------------------------------------
 // One frame.
-//
 // The prologue is here rather than in bakedPose.cpp because it is the one
 // part of a frame that calls the evaluator's own private routines; everything
 // it produces reaches the two halves through the program.
-// ---------------------------------------------------------------------------
 
 bool
 RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
@@ -3059,7 +3001,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     bool stageFramesOk = true;
 
     // Every frame the run reads off the STAGE, read once, here.
-    //
     // A step may not touch USD, so the stage-derived frames the pose walk
     // uses are settled in the prologue: the plain Xformables a constraint
     // targets, seeded into their slots' FIRST version, which is where the
@@ -3068,7 +3009,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // UsdGeomXformCache keeps a UsdGeomXformQuery per prim across SetTime,
     // so an xformOp added or reordered would leave a stale query where the
     // dynamic path has none.
-    //
     // False means a target's transform could not be resolved at all, which
     // is the one thing the dynamic walk gives the generation back for here
     // -- and gives it back invalid, so a false here ends the frame with the
@@ -3127,7 +3067,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     };
 
     // A constraint's own authored tables, read RAW at the frame's time.
-    //
     // Not through the resolved inputs and not through a bound query: the
     // dynamic walk reads these straight off the attribute, so a property
     // chain or an interactive override on one is deliberately honoured by
@@ -3173,8 +3112,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         }
     };
 
-    // ---- prologue -----------------------------------------------------------
-    //
     // Serial, always run, and the only part of a frame that may take a lock,
     // read the stage through anything but a pinned query, or touch the pose
     // as it goes. Everything the region needs from outside itself is settled
@@ -3258,8 +3195,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         phaseMark = mark;
     }
 
-    // ---- the region ---------------------------------------------------------
-    //
     // A run executes the CLOSURE of what the sources say moved, not the whole
     // program (§7). Under RIGEXEC_BAKED_VERIFY_CONES it does both: the cone
     // run's whole answer is shadowed, the state the prologue left is put
@@ -3330,7 +3265,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         }
     }
 
-    // ---- epilogue -----------------------------------------------------------
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedEpilogue", "baked");
     RigExecBakedReplayStepTimings(B);
     if (RigExecBakedScheduleCalibrationRequested()) {

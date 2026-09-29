@@ -79,7 +79,7 @@ APIs are rejected consistently by export, load and runtime preparation; they may
 introduce computation expressions beyond this provider scope.
 
 The version-1 manifest identifies this limited `providers` scope. It is not
-the complete multi-profile deployment format in specification §11.3: profile
+a complete multi-profile deployment format: profile
 composition, normalized sparse-weight semantic hashes, source-closure resource
 packaging, complete evaluation-identity contexts, ABI/plugin hashes, whole-rig
 lowering and production qualification remain outside this slice. Unchanged
@@ -91,5 +91,4 @@ exporter refuses to overwrite a source layer.
 paired exact/PreTime values, blocks, native geometry and assets, stage-free
 database use, deterministic output, malformed identities/schema values and
 explicit unsupported-scope rejection. `testRigExecStandalone` exercises the
-separate provider runtime and ephemeral edit path. Final integration results
-are recorded in the [review report](code-review-2026-09-05.md).
+separate provider runtime and ephemeral edit path.

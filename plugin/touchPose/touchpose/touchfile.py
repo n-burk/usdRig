@@ -44,8 +44,8 @@ naming. The `_touch` suffix is the whole convention, and three sets
 -- bound controls whose region was never painted.
 
 THREE THINGS THE SHIPPED FILE DOES NOT EXERCISE, and which are handled
-here anyway because the TouchPose Blender port's `domain/schema.py`
-(branch `feature/blender-port`, read not copied) documents them as having
+here anyway because the TouchPose the editor port's `domain/schema.py`
+(branch `feature/the editor-port`, read not copied) documents them as having
 been verified against the conventional tool's writer:
 
   * The colour key was renamed. `touch_sets_data.py` defines the colour

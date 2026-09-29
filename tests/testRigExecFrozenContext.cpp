@@ -1,21 +1,17 @@
-//
 // RigExec frozen contexts, Stream B: the sampled input vector, the
 // epoch-pinned context, the UI-thread sampler, and the fail-closed frozen
 // worker entry.
-//
 // FrameInputs is the type the UI thread samples at enqueue time and the
 // worker reads from, so its container semantics are asserted here: values
 // are found by path, a missing path is null rather than a default, an
 // explicitly valueless source is still a recorded source, and Clear empties
 // the vector and resets the time.
-//
 // The sampler (RigExecSampleFrameInputs) walks the baked program's varying
 // bindings through the same route the frame path reads, so its fidelity is
 // asserted against two independent oracles: the authored time samples the
 // test set itself, and direct stage reads at the sampled time. The digest
 // (RigExecFrozenControlDigest) must move with every control edit and stand
 // still across re-samples, because the frame cache keys on it.
-//
 // The frozen worker entry (RigExecEvaluateFrozen with a runner) is asserted
 // through an injected serial kernel: bit-identical across runs, equivalent
 // to the same kernel run directly, refusing every inconsistent request
@@ -25,8 +21,6 @@
 // trivially copyable, which a member holding a stage, an evaluator, or a
 // USD handle cannot be -- and the purity audit names every unit the frozen
 // path was checked against.
-//
-
 #include "rigExec/frozenContext.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
@@ -184,9 +178,7 @@ TestTheStubEvaluatorAnswersInvalidAtTheRequestedTime()
     CHECK(pose.time == UsdTimeCode(9.0));
 }
 
-// ---------------------------------------------------------------------------
 // Stream B: the sampler and its oracles.
-// ---------------------------------------------------------------------------
 
 constexpr size_t kTinyPointCount = 8;
 
@@ -420,14 +412,12 @@ TestDigestMovesWithControls()
     CHECK(RigExecFrozenControlDigest(withGap) != digest1);
 }
 
-// ---------------------------------------------------------------------------
 // Increment B: the chain-sampling hook. The tiny rig plus one float math
 // mover revising the tx avar by a time-varying factor -- the biped's foot
 // chains in miniature (compare examples/09_PropertyMathMovers.usda): the
 // chain's output at the sampled time exists nowhere until the hook runs,
 // so a sampler that read the standing state would warm frame 3 with
 // frame 2's chain values.
-// ---------------------------------------------------------------------------
 
 UsdStageRefPtr
 MakeChainedRig()
@@ -450,10 +440,8 @@ MakeChainedRig()
     return stage;
 }
 
-// ---------------------------------------------------------------------------
 // The production frozen executor: a warming job evaluates bit-identically
 // to live evaluation of the same inputs.
-// ---------------------------------------------------------------------------
 
 // Runs one warming job through the real worker entry point: freeze, sample,
 // evaluate under the production runner with a live generation fence.
@@ -1578,9 +1566,7 @@ TestProductionRunnerDeclinesWithoutProof()
     }
 }
 
-// ---------------------------------------------------------------------------
 // Stream B: the frozen worker entry through an injected serial kernel.
-// ---------------------------------------------------------------------------
 
 // A deterministic serial kernel standing in for the baked serial executor:
 // reads every sampled double, works the private arena, and publishes one

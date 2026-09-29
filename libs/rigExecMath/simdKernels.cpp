@@ -1,16 +1,12 @@
-//
 // RigExec CPU SIMD kernels implementation.
-//
 // SSE2 where the target has it -- every x86-64 build, and 32-bit x86 built
 // with /arch:SSE2 or -msse2 -- and a scalar fallback everywhere else, so this
 // file compiles on arm64 (Apple Silicon, iOS) instead of failing on the x86
 // intrinsic headers. ARM64EC is deliberately excluded even though MSVC
 // defines _M_X64 there.
-//
 // The fallback delegates to RigExecApplyWeightedMatrix, the same scalar
 // reference kernel the parity mode (spec §13.4) compares SIMD output against,
 // so on a non-SSE target the two paths agree exactly rather than to tolerance.
-//
 #include "simdKernels.h"
 
 #include "solvers.h"
@@ -132,7 +128,6 @@ RigExecApplyLinearBlendSkinSimd(
     // Every influence's rows, narrowed to float once rather than once per
     // (point, slot). Unaligned loads from a plain float table sidestep any
     // question of __m128 storage alignment.
-    //
     // A caller that skins several ranges against one influence table hands
     // its own table in and this narrows nothing; the narrowing is per matrix,
     // so the two tables hold the same floats either way.

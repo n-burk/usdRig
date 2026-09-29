@@ -1,20 +1,15 @@
-//
 // RigExec output-affected index: which clusters a changed control reaches.
-//
 // Cross-frame sparse reuse (plan Stream D) needs the question the baked cone
 // machinery never asks: given a control that moved, which clusters downstream
 // of it have to re-run. The gap analysis flags this output-dependency list as
 // missing -- RigExecBakedCones maps a changed SOURCE to its seed clusters and
 // closes over them, but nothing maps a CONTROL to the clusters it reaches.
 // This index is that list, at cluster granularity.
-//
 // It derives NOTHING. Build copies the forward closures and the seed tables
 // RigExecBakedBuildCones computed; every query is a union over those copies.
 // A control the index never learned (not a provider slot, no explicit
 // mapping) answers conservatively with every cluster: re-running too much is
 // a slower frame, skipping a cluster that moved is a wrong pose.
-//
-
 #ifndef RIGEXEC_OUTPUT_AFFECTED_INDEX_H
 #define RIGEXEC_OUTPUT_AFFECTED_INDEX_H
 

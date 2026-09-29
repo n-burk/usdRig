@@ -1,10 +1,8 @@
-//
 // RigExec imaging registry: the rendezvous between the UsdImaging
 // scene-index plugin (which builds filter chains when engines construct)
 // and the application activation (which owns the stage, evaluator, and time
 // source). Order-independent: chains read their context's snapshot store
 // atomically, so activation may happen before or after chain construction.
-//
 // PER-STAGE CONTEXTS (docs/multistage-imaging.md). One
 // RigExecImagingRegistry object is one IMAGING CONTEXT: everything that
 // used to be process-global -- the snapshot store, the bound chains, the
@@ -15,7 +13,6 @@
 // Several usdview sessions in one process therefore evaluate their own
 // rigs side by side, including two stages opened from the same file
 // (identical prim paths).
-//
 // THE DIRECTORY maps a stage to its context (ForStage / ForStageCacheId /
 // ForKey). It is keyed by stage IDENTITY -- the UsdStage object, validated
 // through a UsdStageWeakPtr, so an expired stage never aliases a new one
@@ -28,7 +25,6 @@
 // itself once the last chain bound to its context goes away (engine
 // destroyed, or the stage replaced under it); an explicit activation lasts
 // until its host deactivates it.
-//
 // CHAIN -> CONTEXT BINDING (the sanctioned transport; there is no stage at
 // AppendSceneIndex time). The scene-index plugin registers every new chain
 // with the directory UNBOUND (RegisterUnboundChain): an unbound chain reads
@@ -45,7 +41,6 @@
 // store, pruned scopes, preview deltas and binding epoch, and only that
 // context's publications reach it. Same mechanism as the time trigger: a
 // data-source leaf the stage scene index already builds, no side channel.
-//
 // LEGACY SURFACE. GetInstance() and the stage-less C functions keep their
 // signatures. GetInstance() is the process's LEGACY HANDLE: an unbound
 // context object that owns no stage and routes every call to the CURRENT
@@ -65,7 +60,6 @@
 // refusing all but one. Stage-aware callers use ForStage* and the
 // ...ForStage C functions (RigExecImaging_ActivateForStage included) and
 // never touch the current designation.
-//
 // LOCK ORDER (never inverted):
 //   scheduler fence mutex (ClearFrameCache/SetWeightOverlay only)
 //     -> context _mutex
@@ -77,7 +71,6 @@
 // nothing is ever called into a context -- and no context is destroyed --
 // while it is held. Contexts released by the directory are destroyed after
 // it unlocks.
-//
 #ifndef RIGEXEC_IMAGING_REGISTRY_H
 #define RIGEXEC_IMAGING_REGISTRY_H
 
@@ -209,7 +202,7 @@ public:
 
     /// The primary warming trigger: call on drag release / value commit, on
     /// the UI thread. Enqueues the scrub neighbors (+-1..N of the playhead)
-    /// plus the Premonition-style sweep of the surrounding range for every
+    /// plus the nearest-frame-first sweep of the surrounding range for every
     /// active non-playback rig, sampling each job's input vector on this
     /// thread. The playhead itself is never enqueued (the playhead always
     /// evaluates live). Returns how many jobs were enqueued across rigs.
@@ -1050,9 +1043,7 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_UpdatePreview(
     const double *values, int count);
 RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreview();
 
-// ---------------------------------------------------------------------------
 // Stage-scoped surface (docs/multistage-imaging.md).
-//
 // Every per-stage entry point above has a ...ForStage twin taking the stage's
 // UsdUtilsStageCache id FIRST and otherwise the same arguments and return
 // convention. A twin acts on THAT stage's context only -- several stages
@@ -1067,7 +1058,6 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreview();
 // RigExecImaging_Activate and RigExecImaging_GetControlFrameAssetSpace
 // already take the id and use that stage's context; Activate also makes that
 // context current, RigExecImaging_ActivateForStage does not.
-// ---------------------------------------------------------------------------
 
 /// RigExecImaging_Activate on THAT stage's context (created when it has
 /// none) without making it the legacy current context, and without the

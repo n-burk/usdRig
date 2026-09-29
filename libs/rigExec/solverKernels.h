@@ -1,7 +1,5 @@
-//
 // RigExec solver glue shared by the exec callbacks and the baked program
 // (spec §7.5).
-//
 // The solver MATH lives in rigExecMath (geometryKernels.h, solvers.h) and is
 // already shared. What is not is the glue around it: the guards that decide
 // when a solver publishes nothing, the defaulting of an unauthored input, and
@@ -9,12 +7,10 @@
 // used to sit inside the VdfContext callbacks in computations.cpp and
 // moverKernels.cpp, where a baked program could only re-express it -- and a
 // second expression of a guard is a second chance to get it wrong.
-//
 // These functions are the guard and the packing, with the ctx reads left
 // behind in the callback. They live here rather than in rigExecMath because
 // RigExecPointFrameArray is a rigExec type (types.h) and rigExecMath must not
 // depend on rigExec.
-//
 #ifndef RIGEXEC_SOLVER_KERNELS_H
 #define RIGEXEC_SOLVER_KERNELS_H
 

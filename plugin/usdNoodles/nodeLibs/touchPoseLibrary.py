@@ -2,7 +2,7 @@
 # TouchPose node library for usdNoodles.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 """Node descriptions for TouchPose regions and their group scope.

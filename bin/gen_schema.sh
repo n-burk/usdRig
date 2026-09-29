@@ -23,6 +23,9 @@ s = io.open(p, encoding='utf-8').read()
 s = s.replace('"LibraryPath": "@PLUG_INFO_LIBRARY_PATH@", ', '')
 s = s.replace('"@PLUG_INFO_RESOURCE_PATH@"', '"."')
 s = s.replace('"@PLUG_INFO_ROOT@"', '"."')
-io.open(p, 'w', encoding='utf-8').write(s)
+io.open(p, 'w', encoding='utf-8').write('\n'.join(line.rstrip() for line in s.splitlines()) + '\n')
+p = '../../plugin/rigExecSchema/resources/generatedSchema.usda'
+s = io.open(p, encoding='utf-8').read().replace('DCC apps', 'applications')
+io.open(p, 'w', encoding='utf-8').write('\n'.join(line.rstrip() for line in s.splitlines()) + '\n')
 PY
 echo "regenerated plugin/rigExecSchema/resources -- review the diff before committing"

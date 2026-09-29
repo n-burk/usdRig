@@ -53,16 +53,14 @@ set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\touchPose"
 set "PYTHONPATH=%RIG%\plugin\touchPose;%PYTHONPATH%"
 
 rem testusdview `exec`s the script, so it has no __file__ to locate the
-rem package from. Handed over explicitly rather than guessed at, exactly
-rem as run_touchpose_view.bat does for the spikes.
+rem package from. Supply the package path explicitly.
 set "TOUCHPOSE_PLUGIN_DIR=%RIG%\plugin\touchPose"
 
 set "STAGE=%~1"
 if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_touch.usda"
 if not exist "%STAGE%" (
     >&2 echo ERROR: stage not found: %STAGE%
-    >&2 echo        build it with:
-    >&2 echo          bin\run_touchpose.bat import_touch examples\biped\Biped.usda
+    >&2 echo        Pass an existing stage containing RigExecTouchRegions.
     exit /b 1
 )
 

@@ -1,9 +1,9 @@
 #usda 1.0
 (
-    doc = """Generated from Composed Stage of root layer /var/folders/n1/3jdrkcb53gx0bzrffj2l0g2w0000gn/T/rigexec-blank.usda
+    doc = """Composed example stage.
 
 
-Generated from Composed Stage of root layer D:\\work\\usdRig\\usdRig\\examples\\spider_legs_assembly.usd
+Composed example stage.
 """
 )
 

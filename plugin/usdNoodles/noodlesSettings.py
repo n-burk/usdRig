@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 """
@@ -395,19 +395,19 @@ class NoodlesSettingsDataModel(StateSource, QtCore.QObject):
                 "linkHighlightedColor",
                 [0.31, 0.78, 0.47, 1.0],
                 lambda v: len(v) == 4,
-                "Link color for active-flow highlighting (RGB 0-1, Presto green)",
+                "Link color for active-flow highlighting (RGB 0-1, the editor green)",
             ),
             (
                 "linkAttributeBaseColor",
                 [0.31, 0.55, 0.86, 1.0],
                 lambda v: len(v) == 4,
-                "Base color for attribute connections (RGB 0-1, Presto blue)",
+                "Base color for attribute connections (RGB 0-1, the editor blue)",
             ),
             (
                 "linkRelationshipBaseColor",
                 [0.78, 0.24, 0.24, 1.0],
                 lambda v: len(v) == 4,
-                "Base color for relationship connections (RGB 0-1, Presto red)",
+                "Base color for relationship connections (RGB 0-1, the editor red)",
             ),
             (
                 "nodeSelectedStrokeColor",

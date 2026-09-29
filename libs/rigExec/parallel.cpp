@@ -1,6 +1,4 @@
-//
 // RigExec parallelism switch. See parallel.h.
-//
 #include "parallel.h"
 
 #include "pxr/base/tf/envSetting.h"

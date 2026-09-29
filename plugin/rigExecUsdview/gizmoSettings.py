@@ -61,7 +61,7 @@ _ORIENT_LABELS = {
     ORIENT_GIMBAL: "Gimbal",
 }
 
-# What the TOOLBAR calls them. the conventional tool says World/Object; every other DCC
+# What the TOOLBAR calls them. the conventional tool says World/Object; every other application
 # an animator is likely to have used says Global/Local, and the toolbar
 # has room for one word. The panel keeps the conventional spelling because the
 # rest of that panel is the authored data's.

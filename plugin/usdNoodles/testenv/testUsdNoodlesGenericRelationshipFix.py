@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 #
@@ -34,9 +34,7 @@ class TestGenericRelationshipFix(unittest.TestCase):
 
         self.lib = _Lib()
 
-    # ------------------------------------------------------------------ #
     # create_connection                                                    #
-    # ------------------------------------------------------------------ #
 
     def test_create_connection_authors_generic_input_relationship(self):
         """A relationship pin with any name (not 'sources') is authored on target."""
@@ -143,9 +141,7 @@ class TestGenericRelationshipFix(unittest.TestCase):
 
         self.assertFalse(result)
 
-    # ------------------------------------------------------------------ #
     # delete_connection                                                    #
-    # ------------------------------------------------------------------ #
 
     def test_delete_connection_removes_generic_input_relationship_target(self):
         """delete_connection removes a target from a generic input relationship."""
@@ -169,9 +165,7 @@ class TestGenericRelationshipFix(unittest.TestCase):
         self.assertTrue(result)
         target_relationship.SetTargets.assert_called_once_with([])
 
-    # ------------------------------------------------------------------ #
     # can_connect                                                          #
-    # ------------------------------------------------------------------ #
 
     def test_can_connect_returns_true_for_generic_relationship_pin(self):
         """can_connect allows connecting to any valid USD relationship."""
@@ -235,9 +229,7 @@ class TestGenericRelationshipFix(unittest.TestCase):
 
         self.assertFalse(result)
 
-    # ------------------------------------------------------------------ #
     # create_connection — exception / edge cases                          #
-    # ------------------------------------------------------------------ #
 
     def test_create_connection_returns_false_when_exception_raised(self):
         """create_connection catches exceptions and returns False."""
@@ -283,9 +275,7 @@ class TestGenericRelationshipFix(unittest.TestCase):
         self.assertTrue(result)
         target_valid_attr.AddConnection.assert_called_once_with("/Source.outputs:value")
 
-    # ------------------------------------------------------------------ #
     # delete_connection — source-side relationship                        #
-    # ------------------------------------------------------------------ #
 
     def test_delete_connection_removes_source_side_relationship_target(self):
         """delete_connection removes a target from a source-side output relationship."""

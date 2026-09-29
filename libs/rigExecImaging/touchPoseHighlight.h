@@ -1,21 +1,16 @@
-//
 // TouchPose highlight: a Storm fragment-shader tint, driven by two primvars
 // that never exist on the USD stage.
-//
 // THE MECHANISM, end to end:
-//
 //   rigExecTouchRegion   uniform float, one per face of the touched mesh:
 //                        the face's region index + 1, 0 for unpainted skin.
 //                        Published ONCE when TouchPose attaches, and again
 //                        only when a paint stroke moves faces between
 //                        regions.
-//
 //   rigExecTouchTable    constant vec4[N]: the colour and strength each
 //                        region is lit with right now (hover, lead,
 //                        selected, the paint-mode edit colours, or alpha 0
 //                        for unlit). THIS is what a hover changes -- a
 //                        few hundred floats, one constant-primvar upload.
-//
 //   the material         every material bound to the mesh (or to one of its
 //                        GeomSubsets) has its surface terminal swapped for a
 //                        generated glslfx node that runs the ORIGINAL
@@ -23,13 +18,11 @@
 //                        table[region] into the lit colour. Guarded by
 //                        HD_HAS_rigExecTouchRegion, so any other mesh sharing
 //                        the material compiles to exactly its old shader.
-//
 // Both primvars and the material edit are added by
 // RigExecTouchPoseSceneIndex, a UsdImaging scene-index filter. Nothing is
 // authored, no prim is created, deleted or toggled, and the rig never sees
 // a change notice: a hover is a Hydra dirty on one constant primvar of one
 // rprim.
-//
 // WHY A SHADER AND NOT A SECOND MESH. The overlay mesh it replaces had to be
 // authored into the stage (a Hydra resync of a 17k-point rprim per region
 // crossing, measured at 71-91 ms to the next drawn frame), lifted off the
@@ -38,7 +31,6 @@
 // shader has none of those properties: it is exactly on the surface, it
 // deforms with the surface because it IS the surface, and it is invisible
 // to picking.
-//
 #ifndef RIGEXEC_IMAGING_TOUCH_POSE_HIGHLIGHT_H
 #define RIGEXEC_IMAGING_TOUCH_POSE_HIGHLIGHT_H
 

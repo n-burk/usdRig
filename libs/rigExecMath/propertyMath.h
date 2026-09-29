@@ -1,15 +1,11 @@
-//
 // RigExec property-domain math kernels (spec §4.1 math movers).
-//
 // The point-domain movers revise a point3f[] array; these revise a single
 // scalar, vector, or matrix property. Same chain model -- base value in,
 // revised value out, one revision per mover in composed post-order -- so the
 // only thing that differs is the value type, and that is exactly what the
 // three statically typed mover schemas encode.
-//
 // Pure and stateless, like every other kernel in this library: the evaluator
 // reads the authored inputs and hands them over as values.
-//
 #ifndef RIGEXEC_MATH_PROPERTY_MATH_H
 #define RIGEXEC_MATH_PROPERTY_MATH_H
 

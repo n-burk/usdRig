@@ -1,14 +1,14 @@
-#
-# A broken operation is set aside, not fatal.
-#
-# The reported case: a rig layer opened on its own, before the model layer
-# that supplies its geometry is composed in. Its mover targets a mesh that
-# is not on this stage. That used to fail the whole compile, so nothing
-# published and not even the controls drew. Now the mover is warned about
-# and left out, and everything else -- the controls, and any operation that
-# is fine -- compiles and evaluates. Supplying the missing geometry is a
-# structural edit: the next evaluate recompiles and the mover runs.
-#
+
+
+
+
+
+
+
+
+
+
+
 import sys
 
 import rigexec_test_env

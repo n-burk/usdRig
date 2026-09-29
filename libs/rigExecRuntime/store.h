@@ -1,6 +1,4 @@
-//
 // rigExecRuntime program state and pipeline contracts (M2 framework).
-//
 // RrStore owns every framework-visible slot domain: the avar table, the
 // SSA fin/base version pools, matrices, aggregates, commit scratch, the
 // prologue's retained arrays and their lasts, snapshots, step outputs,
@@ -8,8 +6,6 @@
 // (solver live rests, revision packets, weight oracles) behind the three
 // extension points on RrProgram, and implement the pipeline functions
 // declared here. The framework implements Open/closure/walk/publish.
-//
-
 #ifndef RIGEXEC_RUNTIME_STORE_H
 #define RIGEXEC_RUNTIME_STORE_H
 
@@ -157,7 +153,6 @@ struct RrWeightScratch;
 // The frame's working state. Sized once at Open from the decoded tables;
 // a run mutates values, never sizes.
 struct RrStore {
-    // ---- pose slots --------------------------------------------------
     std::vector<double> avars, lastAvars;
     std::vector<RrPointFrame> base, fin;
     std::vector<uint32_t> finLast, baseLast;
@@ -165,16 +160,13 @@ struct RrStore {
     std::vector<RrPointFrameArray> aggregates;
     std::vector<RrLadderLive> ladders;
     std::vector<int> ladderMovedSlots;
-    // ---- per-solver pose scratch --------------------------------------
     std::vector<std::vector<RrPointFrame>> solverOutFrames;
     std::vector<std::vector<char>> solverOutPresent;
     std::vector<std::vector<RrVec3f>> ribbonPoints, ribbonLast;
     std::vector<std::vector<RrVec3f>> ribbonConstant;
     std::vector<char> ribbonVarying, ribbonDirty;
-    // ---- commits and constraint arrays --------------------------------
     std::vector<RrCommitScratch> commits;
     std::vector<RrConstraintArraysLive> arrays;
-    // ---- prologue retained arrays and their lasts ---------------------
     std::map<uint32_t, RrPropertyValue> propertyResults, lastPropertyResults;
     std::vector<char> chainHaveBase, chainBaseDirty, lastHaveBase;
     std::vector<std::vector<RrVec3f>> chainBases;
@@ -192,17 +184,14 @@ struct RrStore {
     // last-frame copy is retained.
     std::vector<RrMat4d> deltaValues;
     std::vector<char> deltaPresent;
-    // ---- geometry progress flags --------------------------------------
     std::vector<char> revisionRan, revisionStaticDirty;
     std::vector<RrRevisionPublish> revisionPublish;
     std::vector<RrChainPublish> chainPublish;
     std::vector<RrDerivedPublish> derivedPublish;
-    // ---- weights -------------------------------------------------------
     std::vector<RrWeightPacket> weightPackets;
     std::map<uint32_t, RrMat4d> weightFrames;
     std::vector<float> poseWeights;
     std::vector<char> overridden, lastOverridden;
-    // ---- publication ---------------------------------------------------
     std::map<uint32_t, RrMat4d> providerXforms, providerBaseXforms;
     std::map<uint32_t, RrMat4d> jointMatricesFinal;
     std::map<uint32_t, RrPointFrame> jointFramesBase, jointFramesFinal;
@@ -213,12 +202,9 @@ struct RrStore {
     // Pending curvenet bind lines, drained by the epilogue so a
     // cached bind stays silent on every later frame.
     std::vector<std::string> curvenetBindDiagnostics;
-    // ---- inputs --------------------------------------------------------
     std::vector<RrInputValue> inputHolders;
-    // ---- snapshots and step outputs ------------------------------------
     RrSnapshots runSnapshots;
     std::vector<RrStepOutput> stepOutputs;
-    // ---- closure -------------------------------------------------------
     std::vector<uint64_t> closedWords;
     bool everRan = false;
     double lastTime = 0;
@@ -335,7 +321,6 @@ struct RrProgram {
     }
 };
 
-// ---- pipeline -----------------------------------------------------------
 // The framework (closure.cpp, publish.cpp, runtime.cpp) implements the
 // executor and the epilogue; each family .cpp implements its own
 // prologue, steps and scratch sizing. A step body reports a bail
@@ -378,7 +363,6 @@ void RrPublishGeometry(RrProgram *program,
                        const RigExecWireFrameInputs &record,
                        std::vector<std::string> *poseDiagnostics);
 
-// ---- shared kernels (kernels.cpp) ----------------------------------------
 // Bit-identical ports of the point-frame kernels every family reads:
 // FrameFromMatrix, PointsToMatrix, MatrixToPoints, FrameRotation,
 // ElementOutSpace, ExtractElementFrame, RoundTrip.

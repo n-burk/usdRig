@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 # pyre-strict
@@ -36,9 +36,9 @@ _RELATIONSHIP_MULTI_TARGET_INPUT_PINS: frozenset[str] = frozenset(
 _INPUT_HINT_PREFIXES: tuple[str, ...] = ("inputs:", "input:", "in:")
 _OUTPUT_HINT_PREFIXES: tuple[str, ...] = ("outputs:", "output:", "out:")
 
-# Namespaces hidden from pins by default: editor-written UI metadata such as
-# ``ui:nodegraph:node:pos`` / ``:icon`` / ``:expansionState`` (consumed
-# specially by the editor, not data pins). Gated by a ``hide_ui`` flag.
+
+
+
 _HIDDEN_PIN_NAMESPACES: tuple[str, ...] = ("ui:",)
 
 

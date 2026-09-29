@@ -69,9 +69,7 @@ SPLINE_PROFILE_NAMES = (
 )
 
 
-# ---------------------------------------------------------------------
 # Attribute authoring helpers (no Qt)
-# ---------------------------------------------------------------------
 
 def SetAtTime(attr, value, time):
     """
@@ -170,9 +168,7 @@ def AttributeValueMayHaveChanged(attrPath, notice):
     return False
 
 
-# ---------------------------------------------------------------------
 # Falloff spline authoring (no Qt)
-# ---------------------------------------------------------------------
 #
 # The falloff spline is a shape over the NORMALIZED band parameter, not
 # over time: x = 0 is the outer end of the band (inputs:falloffMax) and
@@ -373,9 +369,7 @@ def DeleteSplineKnot(attr, x, minimumKnots=2):
     return True
 
 
-# ---------------------------------------------------------------------
 # Prim creation and placement (no Qt)
-# ---------------------------------------------------------------------
 
 def FindRigPrim(stage):
     """
@@ -712,9 +706,7 @@ def SnapWeightToPrim(weightPrim, sourcePrim, time=None):
     return centre
 
 
-# ---------------------------------------------------------------------
 # Combine weight input list (no Qt)
-# ---------------------------------------------------------------------
 
 def GetInputWeightPaths(prim):
     """
@@ -784,9 +776,7 @@ def IsWeightObjectPrim(prim):
     return bool(prim) and prim.GetTypeName() in WEIGHT_OBJECT_TYPE_NAMES
 
 
-# ---------------------------------------------------------------------
 # Qt widgets
-# ---------------------------------------------------------------------
 
 def _EventPos(event):
     """
@@ -897,10 +887,10 @@ class AttributeValueWidget(QtWidgets.QLineEdit):
         else:
             self.setReadOnly(True)
 
-        # Set the initial value of the widget, and maintain a cache of
-        # the last text value set on the widget.  This cached value is
-        # used to avoid unwanted authoring due to spurious
-        # editingFinished signals invoking _onEditingFinished().
+
+
+
+
         self._cachedText = self._TypedValueToString(
             self._usdAttribute.Get(self._usdviewApi.dataModel.currentFrame))
         self.setText(self._cachedText)

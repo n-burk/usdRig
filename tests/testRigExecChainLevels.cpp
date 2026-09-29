@@ -1,8 +1,6 @@
-//
 // Independent geometry chains are walked one task per chain, which is only
 // worth doing if the rig cannot tell. Three things have to hold, and each is
 // asserted here against the same rig:
-//
 //  - the same numbers. A chain's points must come out bit for bit as they do
 //    when the whole walk is serial -- not close, identical -- whether the
 //    walk is spread over the machine, pinned to one thread, or taken down the
@@ -16,7 +14,6 @@
 //    it may be: too few chains to pay for the dispatch, a weight object two
 //    chains share, or a phased read one of them makes, and the level is
 //    walked in order like it always was.
-//
 #include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
 
@@ -192,7 +189,6 @@ Identical(const VtVec3fArray &a, const VtVec3fArray &b, const char *what)
 // answer's neighbourhood; a failed one is passed through untouched. Both are
 // checked, because "every chain returned its base" would otherwise satisfy
 // every equality in this file.
-//
 // The neighbourhood is RELATIVE, because the published points are float32
 // and the fixture's coordinates reach ~1600. One ulp there is 1.2e-4, so an
 // absolute 1e-4 asked for agreement finer than the type can represent and
@@ -379,7 +375,6 @@ TestRepeatedWalksAreIdentical()
 
 // The invariant that makes the parallel walk memory-safe, asserted instead
 // of hoped for.
-//
 // Chains in one level run concurrently and each indexes _liveGraphs by its
 // own target; Compile pre-creates every node so that indexing is a lookup
 // and never an insertion. Delete the pre-creation and the walk inserts into
@@ -434,7 +429,6 @@ TestOneThreadAndManyAgree()
 
 // Weight objects in a parallel level: each chain publishes its own resolved
 // field, and the fields are merged in chain order like everything else.
-//
 // (A weight object BOUND BY TWO CHAINS would keep the level in order --
 // Compile checks for that -- but the schema validation reaches it first: a
 // weight object's target has to be the mover's own target, so two chains
@@ -537,7 +531,6 @@ TestPhasedReadSplitsAndSerializesLevels()
 }  // namespace
 
 // argv[1], optional: run every case this many times.
-//
 // The two guards that make the level-parallel walk memory-safe fail
 // PROBABILISTICALLY when they are broken -- a broken build passes a single
 // run about three times in four. The invariants asserted above catch the two

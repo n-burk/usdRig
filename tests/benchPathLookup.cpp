@@ -1,15 +1,11 @@
-//
 // SCRATCH BENCHMARK -- what the compile's bookkeeping actually costs.
-//
 // Three questions the compile trace raises but cannot answer:
 //   1. How dear is UsdStage::GetPrimAtPath, really? 92 call sites in
 //      rigEvaluator.cpp resolve paths in inner loops; is caching the prim
 //      worth a map, or is the stage's own lookup already a hash hit?
 //   2. How much does std::map<SdfPath, ...> cost against a hash map? 132
 //      path-keyed node containers are declared in that one file.
-//
 // Not a test: it asserts nothing and is not registered with ctest.
-//
 #include "pxr/base/tf/hashmap.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/prim.h"

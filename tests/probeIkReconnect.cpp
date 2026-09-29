@@ -1,12 +1,9 @@
-//
 // Probe: disconnect solver bindings, move rest positions, reconnect.
-//
 // Drives the REAL UsdImaging chain (as probeImagingPipeline does) through the
 // interactive sequence a rigger performs in usdview: unbind the solver so the
 // joints are free, move rest positions, then rebind. Runs the variants of
 // "disconnect" the graph editor can produce, because each authors a different
 // edit and they invalidate differently.
-//
 #include "rigExecImaging/registry.h"
 
 #include "pxr/imaging/hd/sceneIndex.h"

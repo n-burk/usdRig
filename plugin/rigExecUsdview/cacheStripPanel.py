@@ -1,22 +1,22 @@
-#
-# Cache-strip panel model: the Stream 3 strip's poll, skip, and actions.
-#
-# Headless by contract: this module imports neither Qt nor pxr, so the
-# ctest suite below exercises the exact poll/skip/action logic the Qt
-# dialog in cacheStripUI.py drives. State fetch, the sleep/wake check,
-# and the Maya palette all live in cacheStripModel.py; this module adds
-# the panel's own state on top: the rig, the stage range, the playhead,
-# the repaint gate, and the clear/warm actions.
-#
-# The repaint gate: a driver-tick poll whose completions counter is
-# still, with an unchanged playhead and range and no enqueue since the
-# last paint, skips the state fetch AND the repaint. Anything else --
-# a moved counter, moved playhead, changed states, a SetTime, an edit
-# commit, a range change, a clear, a warm push -- refetches and repaints
-# when the snapshot differs. An older library without the counter
-# binding degrades to fetching every tick and repainting on states
-# alone, never to skipping repaints it cannot prove needless.
-#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import os
 import sys
 

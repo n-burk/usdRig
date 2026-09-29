@@ -1,18 +1,14 @@
-//
 // RIGEXEC_FRAME_CACHE_VERIFY shadow suite (Stream D): every cache hit also
 // live-evaluates and diffs through RigExecComparePoses, the same judge as
 // BakedWithParityCheck.
-//
 // A match serves the cached pose; a mismatch reports in the comparator's
 // words and serves the live pose instead -- a plausible wrong pose is never
 // served. A live runner that fails (or is absent) leaves the hit unverified
 // rather than substituted: the shadow only ever substitutes a proven live
 // pose.
-//
 // The test name carries the Cones_ substring so the CI exclusion pattern
 // (`-E 'Cones_|ExampleParity'`) catches this suite without edits, the way
 // it catches the baked cone suites.
-//
 // STAGE SHADOWS. The tests above prove the judge on synthetic poses; the
 // tests below run it on the validation plan's three rigs -- the biped, the
 // animated 9-mesh, and a bake-refusal rig -- with faithful cache keys: each

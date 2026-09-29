@@ -1,15 +1,11 @@
-//
 // benchFrameCache -- Stream 0 measurements for the per-frame caching plan.
-//
 // Measures, on the biped and the 9-mesh rig, the four numbers the plan's
 // defaults are made from: per-frame stored bytes (pose maps and slot arenas
 // reported separately), baked serial frame cost (the warming budget), and
 // the UI-thread cost of sampling one frame's input vector (which bounds the
 // neighbor radius). Prints human-readable breakdowns; asserts nothing, so it
 // is built but deliberately NOT registered with ctest (like benchPathLookup).
-//
 //   benchFrameCache <examplesDir> [biped|9mesh|all]
-//
 // The serial numbers come from running under RIGEXEC_ENABLE_PARALLEL_EVAL=0
 // (the binary prints the switch state, so a mistimed run labels itself).
 // RIGEXEC_BAKED_STEP_TIMING=N adds the library's own prologue/region/epilogue
@@ -17,7 +13,6 @@
 // 1..8; the 9-mesh rig is the MakeMultiMeshRig construction from
 // testRigExecChainLevels with animated controls (time samples at 1..40 on
 // the two control avars) and valid envelopes throughout, timed at 1..40.
-//
 // Method notes, so the report's numbers can be re-derived:
 //   * Pose bytes walk every published map of a real evaluated pose and sum
 //     payload bytes. SdfPath keys count sizeof(SdfPath); path strings are
@@ -39,7 +34,6 @@
 //   * Frame cost is min-of-5 pass means over 40 animated frames each, with
 //     the minimum clusters-run across the 200 frames proving every timed
 //     frame ran the whole program rather than an empty cone.
-//
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
@@ -516,9 +510,7 @@ MeasureArenaBytes(const RigExecBakedProgramImpl &B, const char *rig)
     return total;
 }
 
-// ---------------------------------------------------------------------------
 // Input sampling: the UI-thread cost of one frame's input vector.
-// ---------------------------------------------------------------------------
 
 // Collects one binding's read handle when it is a per-frame input: the
 // retained query when USD alone answers, the resolved attribute when a
@@ -806,9 +798,7 @@ MeasureSampling(const RigExecBakedProgramImpl &B, UsdTimeCode time,
                 totalUs + baseUs);
 }
 
-// ---------------------------------------------------------------------------
 // Rigs.
-// ---------------------------------------------------------------------------
 
 SdfPath
 FindRig(const UsdStageRefPtr &stage)

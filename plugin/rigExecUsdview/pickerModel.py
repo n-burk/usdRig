@@ -266,7 +266,7 @@ class Picker(object):
 
         Intersection, not containment: a marquee that has to swallow a
         button whole makes the long thin ones (a spine segment, a finger)
-        almost impossible to catch, and every DCC marquee this is modelled
+        almost impossible to catch, and every application marquee this is modelled
         on touches rather than encloses.
         """
         lo_x, hi_x = (x0, x1) if x0 <= x1 else (x1, x0)
@@ -306,7 +306,6 @@ class Picker(object):
         return live, dead, deco
 
 
-# -------------------------------------------------------------- loading
 
 def live_control_paths(stage):
     """Every prim a picker button may legitimately select.

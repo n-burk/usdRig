@@ -1,7 +1,4 @@
-//
 // .rigexec program sections: wire encoding.
-//
-
 #include "rigExecBinary/program.h"
 
 #include <cstring>

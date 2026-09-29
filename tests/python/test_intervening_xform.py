@@ -36,10 +36,8 @@ def _RegisterSchema():
            "RigExecControl schema is not registered")
 
 
-# --------------------------------------------------------------------
 # Fixtures. Built in memory rather than read from examples/, so the test
 # says what it depends on and no shipped asset can drift underneath it.
-# --------------------------------------------------------------------
 
 def _Joint(stage, path, tx=0.0, ty=0.0, tz=0.0):
     prim = stage.DefinePrim(path, "RigExecJoint")
@@ -114,7 +112,6 @@ def _Close(a, b, tolerance=1e-9):
     return all(abs(a[i] - b[i]) < tolerance for i in range(3))
 
 
-# --------------------------------------------------------------------
 
 
 def TestNoInterveningXformIsUnchanged():

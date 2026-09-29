@@ -1,5 +1,5 @@
 @echo off
-rem Headless end-to-end test of the Maya-style view cube
+rem Headless end-to-end test of the view cube
 rem (tests\testUsdviewViewCube.py) on examples\ArmShotAnim.usda. The Windows
 rem twin of run_testusdview_viewcube.sh.
 rem

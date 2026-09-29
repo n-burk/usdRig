@@ -1,7 +1,5 @@
-//
 // Sparse Cholesky: minimum-degree ordering, elimination tree, up-looking
 // numeric factorization.
-//
 // The algorithms are the standard ones (Davis, "Direct Methods for Sparse
 // Linear Systems"): an elimination tree, `ereach` to find the nonzero pattern
 // of one row of L by walking that tree, and an up-looking factorization that
@@ -9,7 +7,6 @@
 // supernodal because it needs no column counts and no dense frontal work, and
 // the matrices here -- one-ring sparsity on a surface mesh -- are exactly the
 // case where that simplicity costs nothing.
-//
 #include "sparseSolve.h"
 
 #include <algorithm>

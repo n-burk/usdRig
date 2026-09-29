@@ -87,8 +87,8 @@ MESH = "/Biped/Geom/body_geo"
 # reading, so the panel opens here and its slider moves it live.
 HIGHLIGHT_OPACITY = 0.85
 
-# Prims TouchPose used to author at the stage root, kept only so a session
-# saved by the old version does not leave one of them selected.
+
+
 _LEGACY_OVERLAYS = ("/TouchPoseHighlight", "/TouchPoseSelected",
                     "/TouchPoseLead", "/TouchPoseRegions")
 
@@ -402,9 +402,9 @@ class TouchPoseController(QtCore.QObject,
         except Exception as exc:
             self._model = None
             self._error = str(exc)
-            return ("No touch regions on this stage (%s). Import them with "
-                    "`bin\\run_touchpose.bat import_touch <rig>.usda` and "
-                    "open <rig>_touch.usda." % exc)
+            return ("No touch regions on this stage (%s). Open a stage with "
+                    "RigExecTouchRegions, such as "
+                    "examples/biped/Biped_touch.usda." % exc)
         self._opacity = HIGHLIGHT_OPACITY
         self._highlight = Highlight(self._model, self._opacity)
         self._model.SyncPose(self._Time(), force=True)

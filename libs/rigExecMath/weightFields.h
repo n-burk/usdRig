@@ -1,18 +1,14 @@
-//
 // RigExec volumetric weight-field kernels (spec §4.1 weight objects,
 // volumetric extension).
-//
 // Pure, deterministic CPU kernels that turn a point set plus a placed
 // volume into a scalar weight field. Everything here is expressed in the
 // VOLUME's local space: callers hand in the world-to-volume matrix and the
 // kernel transforms as it goes, so a non-uniform volume transform gives
 // ellipsoidal (sphere) or sheared (plane, curve) iso-surfaces for free
 // rather than needing a separate radius-per-axis authoring surface.
-//
 // No token-string dispatch and no USD dependency beyond gf/vt: the schema
 // token -> enum mapping belongs to the rigExec layer, exactly as it does
 // for the geometry mover kernels.
-//
 #ifndef RIGEXEC_MATH_WEIGHT_FIELDS_H
 #define RIGEXEC_MATH_WEIGHT_FIELDS_H
 
@@ -85,10 +81,8 @@ float RigExecEvaluateFalloff(float distance, const RigExecFalloffParams &p);
 /// is the identity.
 float RigExecSampleFalloffLut(const std::vector<float> &curve, float r);
 
-// ---------------------------------------------------------------------------
 // Distance functions. Each takes a point already in the volume's local
 // space; the field builders below do the transform.
-// ---------------------------------------------------------------------------
 
 /// Radial distance from the local origin.
 float RigExecSphereDistance(const GfVec3f &p);
@@ -137,11 +131,9 @@ float RigExecCurveDistance(
 float RigExecSegmentDistance(
     const GfVec3f &p, const GfVec3f &a, const GfVec3f &b);
 
-// ---------------------------------------------------------------------------
 // Field builders. \p worldToLocal maps a point from the space \p points
 // are expressed in into the volume's local space; pass identity when they
 // already share a space. \p weights is resized to points.size().
-// ---------------------------------------------------------------------------
 
 void RigExecSphereWeightField(
     const std::vector<GfVec3f> &points,
@@ -173,9 +165,7 @@ void RigExecCurveWeightField(
     const RigExecFalloffParams &params,
     std::vector<float> *weights);
 
-// ---------------------------------------------------------------------------
 // Composition (spec §4.1 volumetric extension: weight objects compose).
-// ---------------------------------------------------------------------------
 
 /// How one weight field folds into the accumulated result.
 ///

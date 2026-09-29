@@ -1,10 +1,6 @@
-//
 // Copyright (c) Meta Platforms, Inc. and affiliates.
-//
 // Licensed under the terms set forth in the LICENSE.txt file available
-// at the root of this repository.
-//
-
+// in plugin/usdNoodles/ in this repository.
 #include "undo/CompoundCommand.h"
 #include "undo/LambdaCommand.h"
 #include "undo/NoodlesUndoManager.h"
@@ -41,12 +37,10 @@ class PyLambdaCommand : public Command {
     // calls PyThreadState_Get with no thread state, and the process dies on
     // the way out of an otherwise clean quit. It reproduces in two lines:
     // push one command from Python, exit.
-    //
     // Once the interpreter is gone there is nothing left to release -- it has
     // already freed every object these handles name -- so abandon them
     // instead of decref'ing into freed memory. This leaks only at process
     // exit, and only for commands still on the stack.
-    //
     // The check has to be here rather than in noodles: the undo manager is
     // plain C++ that knows nothing about Python, and this wrapper is what
     // couples a Python lifetime to it.

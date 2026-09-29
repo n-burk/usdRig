@@ -1,6 +1,4 @@
-//
 // RigExec Hydra scene-index filters implementation (spec §10).
-//
 #include "sceneIndices.h"
 
 #include "registry.h"
@@ -133,9 +131,7 @@ _TriggerTime(
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // RigExecInternalPrimPruningSceneIndex
-// ---------------------------------------------------------------------------
 
 RigExecInternalPrimPruningSceneIndex::RigExecInternalPrimPruningSceneIndex(
     const HdSceneIndexBaseRefPtr &inputSceneIndex)
@@ -253,9 +249,7 @@ RigExecInternalPrimPruningSceneIndex::_PrimsDirtied(
     }
 }
 
-// ---------------------------------------------------------------------------
 // RigExecBindingResolvingSceneIndex
-// ---------------------------------------------------------------------------
 
 RigExecBindingResolvingSceneIndex::RigExecBindingResolvingSceneIndex(
     const HdSceneIndexBaseRefPtr &inputSceneIndex)
@@ -339,9 +333,7 @@ RigExecBindingResolvingSceneIndex::_PrimsDirtied(
     }
 }
 
-// ---------------------------------------------------------------------------
 // RigExecResultsSceneIndex
-// ---------------------------------------------------------------------------
 
 RigExecResultsSceneIndex::RigExecResultsSceneIndex(
     const HdSceneIndexBaseRefPtr &inputSceneIndex,
@@ -451,12 +443,10 @@ _Token(const TfToken &token)
     return HdRetainedTypedSampledDataSource<TfToken>::New(token);
 }
 
-// ---------------------------------------------------------------------------
 // Synthesized guide children (spec §10.3 extension): joints draw a sphere at
 // each posed origin plus a cone to every nested child, while aggregate
 // solvers draw a sphere/cone pair along each frame's +X aim axis. Both use
 // purpose guide and constant displayColor/displayOpacity primvars.
-// ---------------------------------------------------------------------------
 
 const std::string _guideSpherePrefix("rigGuideSphere_");
 const std::string _guideConePrefix("rigGuideCone_");
@@ -520,7 +510,6 @@ _GuideHasSphere(const RigExecPublishedPrim &published, size_t index)
 // the guide's own points when it is an explicit primitive rather than one
 // of Hydra's implicits, a constant width when it is a wire curve, and
 // optional normals when an explicit mesh provides them.
-//
 // \p wireWidth of zero authors no widths at all, which is the hairline
 // fallback and the only thing the joint sphere/cone guides ever want.
 HdContainerDataSourceHandle
@@ -593,20 +582,17 @@ _BuildGuideStylePrimvars(
 // INHERITED BY HAND from the parent a guide hangs off: visibility, so
 // hiding a joint or control hides its guides; and primOrigin, so picking
 // one selects that prim.
-//
 // These prims exist only in this scene index. Nothing upstream knows
 // about them -- we are downstream of the flattening that resolves
 // inherited state -- and nothing downstream can map them back to the
 // stage, because they have no USD counterpart at all. Both problems are
 // ours alone to solve, and both have the same shape.
-//
 // Without visibility a synthesized prim falls back to VISIBLE, so guides
 // floated over a hidden rig. Without primOrigin, picking reports the
 // guide's own path, usdview resolves it with
 // UsdStage::GetPrimAtPath (appController.py onPrimSelected), gets
 // nothing, and the click silently selects nothing -- forwarding the
 // parent's origin makes a guide select its joint instead.
-//
 // This is exactly what UsdImaging does for its own synthesized prims
 // (usdImaging/drawModeStandin.cpp `_PrimDataSource`, which forwards the
 // same two from the model prim). The parent's data source is already
@@ -635,7 +621,6 @@ _AppendInheritedGuideState(
 }
 
 // The Hydra render tag for a published prim's resolved USD purpose.
-//
 // One mapping for joints, solvers, and controls alike: BBoxCache buckets a
 // prim's extent by its purpose, so the tag its guide draws under has to be
 // derived from the same value or the two disagree -- a guide that renders
@@ -682,19 +667,16 @@ _BuildGuidePrim(
     }
 
     // Composed with the ASSET ROOT's world transform, and declared final.
-    //
     // guideFrames are ASSET-space -- the space rig frames live in, since
     // rest:space and avars carry no stage placement. Publishing one directly
     // drew every guide at the world origin no matter where the asset was
     // placed, and nothing downstream composes it for us.
-    //
     // The asset root, NOT the guide's parent. A joint may sit under an
     // intervening UsdGeomXform inside the asset (joints are discovered
     // anywhere beneath the rig), and that Xform's contribution is already
     // baked into the rig's own frames -- composing the parent's flattened
     // matrix would apply it a second time. Asset at +100 with an internal
     // Xform at +7 would put an identity guide frame at +107 instead of +100.
-    //
     // resetXformStack is then true because the result is fully composed --
     // the same reason the driven-Xform path sets it (see GetPrim).
     xform = xform * assetRootWorld;
@@ -745,13 +727,11 @@ _BuildGuidePrim(
         names.size(), names.data(), values.data());
 }
 
-// ---------------------------------------------------------------------------
 // Synthesized control guides (spec §10.3 extension): a RigExecControl draws
 // ONE shape at its posed frame, chosen by guide:shape and guide:drawMode and
 // sized by the evaluated frame-axis magnitudes times guide:scaleX/Y/Z. Same
 // synthesis, announcement, and dirtying machinery as the joint sphere/cone
 // children above — only the geometry and the child naming differ.
-// ---------------------------------------------------------------------------
 
 // The single fixed child name. No index suffix, unlike the joint guides:
 // there is exactly one guide per control, so a name that had to be parsed
@@ -759,14 +739,12 @@ _BuildGuidePrim(
 const TfToken _controlGuideName("rigGuideCtrl");
 
 // One unit shape, ready to publish.
-//
 // Every shape here is a UNIT shape centred on the frame origin with
 // half-extent 1: sphere and circle have radius 1, box and cube span ±1,
 // diamond (an octahedron) has its vertices at ±1 on each axis, and pyramid
 // has base corners (±1, -1, ±1) with apex (0, 1, 0). circle and box are the
 // planar pair — normal +Y, drawn in the local XZ plane — while cube is the
 // 3D box.
-//
 // Nothing in here depends on the pose or on the effective scale (both live in
 // the xform), so the whole table is built once and every control that draws
 // a given shape shares the same arrays.
@@ -799,7 +777,6 @@ constexpr int _kGuideRingSegments = 32;
 // Appends one unit ring in the plane spanned by axes \p axisA and \p axisB,
 // traversed in \p direction (-1 reverses it, which is what makes a planar
 // mesh face +Y rather than -Y).
-//
 // \p close repeats the first point at the end. Linear nonperiodic curves
 // have no wrap, so restating the start vertex is what closes a ring; that
 // costs one vertex and avoids the linear-periodic path entirely.
@@ -872,7 +849,6 @@ _BuildControlGuideShapes()
         shapes.push_back(std::move(entry));
     };
 
-    // ---- wire: linear nonperiodic basisCurves. The width comes from
     // guide:wireWidth at publication (see _BuildControlGuidePrim); the
     // topology below is width-free unit geometry.
     {
@@ -939,7 +915,6 @@ _BuildControlGuideShapes()
             VtIntArray{5, 2, 2, 2, 2}, VtIntArray());
     }
 
-    // ---- geometry: the two shapes Hydra already draws as implicits stay
     // implicits (exactly as the joint guides use them), and the rest are
     // meshes with no authored normals -- flat shading is what a guide wants.
     add(kSphere, kGeometry, HdPrimTypeTokens->sphere, VtVec3fArray(),
@@ -979,7 +954,6 @@ _BuildControlGuideShapes()
     }
     {
         // Four side triangles plus the base quad, which faces -Y.
-        //
         // The winding follows _AppendGuideBoxRing's rotational sense --
         // (-1,-1) -> (-1,1) -> (1,1) -> (1,-1) in (x, z), which is
         // counter-clockwise seen from +Y. So a side triangle takes its two
@@ -998,7 +972,6 @@ _BuildControlGuideShapes()
 
 // The unit shape for one published shape/drawMode pair, or nothing when the
 // pair names no shape this version draws.
-//
 // allowedTokens is documentation, not enforcement -- USD will happily
 // compose `guide:shape = "teapot"` -- so an unrecognized pair has to mean
 // something definite. It means no guide at all, and it means that in ONE
@@ -1025,17 +998,14 @@ _BuildControlGuidePrim(
     const GfMatrix4d &assetRootWorld)
 {
     // S(effectiveScale) * rigid frame * asset root placement.
-    //
     // USD is row-vector, so the leftmost factor applies first: the effective
     // per-axis scale sizes the unit shape in ITS own axes, and only
     // then is the result placed by the frame (the same ordering the cone's
     // base offset uses in _BuildGuidePrim). Scaling after the frame would
     // apply the control's X scale along the world X axis rather than its own.
-    //
     // The frame is orthonormalized upstream (RigExec's bridge rigidizes it).
     // controlGuideScale already contains the removed evaluated frame-axis
     // magnitudes multiplied by the positive authored guide multipliers.
-    //
     // Composed with the ASSET ROOT's world transform, and declared final,
     // for exactly the reasons spelled out in _BuildGuidePrim: control frames
     // are ASSET-space, and the asset root -- not the control's namespace
@@ -1080,7 +1050,6 @@ _BuildControlGuidePrim(
     if (shape.primType == HdPrimTypeTokens->basisCurves &&
         published.controlGuideWireWidth > 0.0) {
         // Refine the curves, or the width above is decoration.
-        //
         // Storm honours a curve's width only once the curve is REFINED:
         // HdStBasisCurves::_SupportsRefinement is `refineLevel > 0`, and
         // below that a linear basisCurves draws as one-pixel GL lines with
@@ -1089,7 +1058,6 @@ _BuildControlGuidePrim(
         // all where it mattered most, and the control stayed as unclickable
         // as the hairline it replaced (measured: 8 hits out of 1681
         // single-pixel picks at low, 97 at high).
-        //
         // Asking for refinement on the guide itself decouples that from the
         // viewer's global complexity setting, which is a display preference
         // about the ASSET and has no business deciding whether the rig's
@@ -1171,14 +1139,12 @@ _BuildControlGuidePrim(
         names.size(), names.data(), values.data());
 }
 
-// ---------------------------------------------------------------------------
 // Synthesized volume weight guides (spec §4.1 volumetric extension, drawn
 // side): one child per published iso-surface, announced and dirtied by the
 // same protocol as the joint and control guides above. Only the geometry
 // and the child naming differ — the payload arrives fully built from the
 // bridge (see RigExecVolumeGuideElement), because a curve weight's guide is
 // derived from the AUTHORED curve and has no unit form to table.
-// ---------------------------------------------------------------------------
 
 const std::string _volumeGuidePrefix("rigGuideVol_");
 
@@ -1322,13 +1288,11 @@ _BuildVolumeGuidePrim(
 
 // The influence overlay's colour ramp: neutral grey where the field is off,
 // saturated red where it is fully on.
-//
 // One named function so the look is tunable in one place, and so the test
 // can assert the two endpoints rather than a magic triple. Linear in RGB
 // rather than perceptually uniform on purpose -- the artist is reading
 // WHERE the boundary is, and a linear ramp puts the visual midpoint at
 // w = 0.5, which is the number they are about to type into falloffMin.
-//
 // Red because that is what the R&H "Voodoo" influence display used and
 // what RigExecVolumeWeight's guide:displayColor already defaults to: the
 // volume and the region it grabs read as one object.
@@ -1397,14 +1361,12 @@ _TryInvert(const GfMatrix4d &m, GfMatrix4d *inverse)
     }
 
     // ...and verify the inverse actually inverts.
-    //
     // GfMatrix4d::GetInverse() signals failure by returning
     // SetScale(FLT_MAX) (matrix4d.cpp:400). That sentinel is FINITE, and
     // when the source matrix is tiny the product of magnitudes stays small:
     // diag(0, 1e-30, 1e-30) yields a proxy of only ~3.4e8, well under the
     // conditioning bound, so neither check above rejects it. The residual
     // does -- m * FLT_MAX*I is nowhere near identity.
-    //
     // The tolerance is loose on purpose: anything we accept has a proxy
     // below 1e12, so its worst-case residual is around 1e-16 * 1e12 = 1e-4,
     // while the sentinel misses by many orders of magnitude.
@@ -1486,7 +1448,6 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
     }
 
     // The influence overlay, as a VERTEX displayColor primvar.
-    //
     // A primvar and not a material, deliberately. This is a DIAGNOSTIC
     // that has to appear the instant a rigger selects a volume and vanish
     // the instant they deselect it, over whatever the asset is already
@@ -1500,11 +1461,9 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
     // it is what the joint and control guides are styled with two hundred
     // lines above -- there with CONSTANT interpolation, here with VERTEX,
     // because the whole point is that the value varies per point.
-    //
     // Only emitted when the overlay is on for THIS prim: with it off the
     // container below is exactly what it always was, so a normal render is
     // untouched rather than merely unchanged-looking.
-    //
     // displayOpacity is deliberately NOT published alongside. Fading the
     // mesh by weight would make a zero-weight region translucent, which
     // reads as "not there" rather than "not grabbed", and it would
@@ -1560,7 +1519,6 @@ RigExecControlGuideIsDrawn(const TfToken &shape, const TfToken &drawMode)
 // The world transform \p primPath should have once every constraint-driven
 // ancestor (and possibly itself) is accounted for, or nothing when no driven
 // ancestor applies.
-//
 // Why this is a delta rather than a straight overwrite: this scene index is
 // installed through UsdImagingSceneIndexPlugin::AppendSceneIndex, which
 // UsdImagingCreateSceneIndices calls AFTER building
@@ -1572,18 +1530,13 @@ RigExecControlGuideIsDrawn(const TfToken &shape, const TfToken &drawMode)
 // would move that prim (visible in usdview's scene index debugger) while
 // every mesh parented under it kept its stale world transform (a static
 // viewport) -- which is the entire point of driving an Xform.
-//
 // USD is row-vector, so world = local * parentWorld. For a driven prim A:
-//
 //   W_old = L_old * P          W_new = L_new * P          P = L_old^-1 * W_old
 //   => W_new = L_new * L_old^-1 * W_old
-//
 // A descendant D has F_old = C * W_old for the accumulated locals C between
 // D and A, so F_new = C * W_new = F_old * (W_old^-1 * W_new). That gives one
 // delta, post-multiplied, applying uniformly to A and to everything beneath:
-//
 //   delta = W_old^-1 * L_new * L_old^-1 * W_old
-//
 // Nested driven ancestors compose by post-multiplying innermost-first; each
 // delta is expressed in the un-revised world frame at its own level, which is
 // exactly what the input scene index still reports.
@@ -1999,14 +1952,12 @@ RigExecResultsSceneIndex::_RefreshAnnouncedControlGuide(const SdfPath &path)
 
 // The prim types this prim's volume guide children should have in the
 // current generation, in index order; empty for none.
-//
 // A VECTOR of types rather than a count, because a volume guide is both:
 // the number of iso-surfaces varies (a sphere whose falloffMin is zero
 // draws one surface, not two) AND guide:drawMode decides what kind of prim
 // each one is. Answering both questions from one desired-state function is
 // what keeps GetChildPrimPaths, GetPrim, and the announcements agreeing --
 // the same reason _DesiredControlGuideType returns a type.
-//
 // Requires the parent upstream for the same reason the other two do: this
 // is what a traversing observer actually finds.
 std::vector<TfToken>
@@ -2207,7 +2158,6 @@ RigExecResultsSceneIndex::_SyncGuideChildren(
 
 // Dirties \p locators on the synthesized guide children announced under
 // \p path.
-//
 // These are descendants that exist ONLY in this scene index, so the
 // upstream walk in _DirtySubtree cannot reach them -- and unlike an
 // ordinary descendant, a guide does not merely inherit its ancestors'
@@ -2281,7 +2231,6 @@ RigExecResultsSceneIndex::_RefreshDrivenXform(const SdfPath &path)
 }
 
 // The asset root's world transform, as THIS index reports it.
-//
 // Resolved through our own GetPrim rather than the input, because the asset
 // root may itself be a constraint-driven Xform: reading upstream would place
 // every guide at the asset's pre-revision position and leave them behind
@@ -2297,14 +2246,12 @@ RigExecResultsSceneIndex::_ResolveAssetRootWorld(
     // Resolved against the snapshot the CALLER is holding, not through our
     // own GetPrim -- which would take a second, independent load of the
     // store.
-    //
     // One pull must see one generation. The publisher swaps generations
     // atomically at any moment, so a guide that reads its frame from
     // generation N and its asset-root placement from N+1 draws a pose that
     // never existed: the control where it was, offset by where the asset
     // has since moved to. It is a narrow window and a plausible-looking
     // result, which is exactly the kind that survives review.
-    //
     // This reproduces what GetPrim would report for the asset root -- the
     // driven-transform overlay when one applies, the upstream flattened
     // matrix otherwise -- because _ComputeDrivenXform already takes the
@@ -2366,7 +2313,6 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
 
             // An influence overlay APPEARING or DISAPPEARING changes which
             // primvars this prim owns, and that is a RESYNC, not a dirty.
-            //
             // HdSceneIndexAdapterSceneDelegate caches each rprim's primvar
             // DESCRIPTORS and rebuilds them from PrimsAdded; a dirty --
             // even the universal one emitted just above -- re-pulls values
@@ -2374,7 +2320,6 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             // there at sync time is therefore never asked for, and the
             // mesh renders grey with a perfectly correct red displayColor
             // sitting in the scene index one hop upstream.
-            //
             // Measured in a real usdview by differencing the framebuffer
             // across the on/off transition: with this re-announcement, 2.8%
             // of the frame gets redder; without it, 0.0% does, while every
@@ -2383,7 +2328,6 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             // compares the two frames rather than counting red in one --
             // RigExec's own guide geometry is red and much larger on screen
             // than the mesh, so an absolute count says almost nothing.
-            //
             // Re-announcing the prim with its upstream type is the same
             // move _SyncGuideChildren already makes for a synthesized
             // child whose prim type changed, and it is cheap: it happens
@@ -2421,7 +2365,6 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             // publishes an empty snapshot). Hydra dirtiness is not
             // hierarchical, so without this the descendants keep whichever
             // delta was last applied -- the original bug, in a new dress.
-            //
             // _announcedDrivenXforms is what makes the disappearing case
             // work: by the time we see the removal the snapshot no longer
             // mentions the prim, so the only record that its subtree needs
@@ -2600,7 +2543,6 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                 HdXformSchemaTokens->xform, HdXformSchemaTokens->matrix));
 
             // ...and every descendant, by hand.
-            //
             // No flattening scene index sits downstream of us to propagate
             // this (see _ComputeDrivenXform: UsdImaging builds its flattening
             // BEFORE it appends plugin scene indices). We resolve each
@@ -2608,7 +2550,6 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             // also the only thing that can announce that it changed. Without
             // this the driven Xform moves and everything parented under it
             // stays put.
-            //
             // The locator set is expanded the same way the provider's own is
             // below: GetPrim hands descendants a freshly built retained
             // container each generation, and a consumer that caches the
@@ -2659,7 +2600,6 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             HdContainerDataSourceEditor::ComputeDirtyLocators(leaves));
     }
     // THE DRIVEN-TRANSFORM SUBTREES, topmost roots only, once each.
-    //
     // Walking each driven Xform's subtree as it was met re-walked every
     // nested one again for every driven ancestor above it -- a rig whose
     // whole control and joint hierarchy moves with its root (dragging the
@@ -3052,9 +2992,7 @@ RigExecResultsSceneIndex::_PrimsDirtied(
     _SendPrimsDirtied(forwarded);
 }
 
-// ---------------------------------------------------------------------------
 // RigExecXformOverrideSceneIndex
-// ---------------------------------------------------------------------------
 
 RigExecXformOverrideSceneIndex::RigExecXformOverrideSceneIndex(
     const HdSceneIndexBaseRefPtr &inputSceneIndex)

@@ -1,6 +1,4 @@
-//
 // RigExec spline-IK spine kernel.
-//
 // A control-driven counterpart of the conventional ikSplineSolver as the
 // squarebit biped uses it for the spine and neck. Three control frames
 // (root, mid, end)
@@ -11,14 +9,12 @@
 // volume-preservation scale thins (stretch) or thickens (squash) the
 // off-axis handles. The whole thing is pure math on plain types: no stage,
 // no schema, no hierarchy. Callers resolve the frames and hand them in.
-//
 // Why not RigExecRibbon or the single-chain IK: the ribbon reads its driver
 // curve as native scene data, so a curve reshaped by control-driven movers
 // is invisible to it; a single-chain IK solves to an effector with no
 // shaping, twist distribution, or arc-length stretch. This kernel builds
 // the curve itself from control frames and therefore lives entirely in the
 // pose phase.
-//
 // Conventions (state them, then trust them):
 //   * Row-vector matrices, p' = p * M, the GfMatrix4d layout used by every
 //     other RigExec kernel. The only matrices used here are the rest->pose
@@ -48,7 +44,6 @@
 //     arc distance) is a table lookup plus safeguarded Newton.
 //   * Angles are radians; a positive twist is a right-handed rotation about
 //     the joint's +X aim axis.
-//
 // The conventional spec, as implemented:
 //   Curve.  Rest CVs are the rest origins of joints [0], [1], [N-2], [N-1].
 //     cv0 and cv1 are carried by the root control's rest->pose map, cv2 and
@@ -80,7 +75,6 @@
 //     Linear thinning, exactly as specified, no clamp: ratio < 1 thickens.
 //     Reference weights: spine [0.1429, 0.2857, 0.4286, 0.5, 0.3571,
 //     0.2143, 0.0714], neck [0.16, 0.32, 0.4, 0.24, 0.08].
-//
 #ifndef RIGEXEC_MATH_SPLINE_IK_H
 #define RIGEXEC_MATH_SPLINE_IK_H
 

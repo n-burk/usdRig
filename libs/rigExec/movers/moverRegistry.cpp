@@ -1,7 +1,4 @@
-//
 // RigExec mover registry storage and shared stage-reading helpers.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 
@@ -246,7 +243,6 @@ RigExecResolveBlendSampleLayout(
     // connection is the only route by which these can change while the epoch
     // stands -- and a connected value may itself be animated, which is
     // exactly what the skin layout refuses for.
-    //
     // Noted and carried, NOT returned early: a refusal means "read this every
     // frame", so the read still has to happen. Returning here would hand the
     // caller an empty layout, the sample would fail validation, and a

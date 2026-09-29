@@ -1,6 +1,4 @@
-//
 // benchEditLatency -- what one edit costs the next evaluate, tier by tier.
-//
 // The sibling of benchCommitLag, with the same shape: a stage edit at a held
 // playhead, then the re-evaluation that answers it. Where benchCommitLag
 // times the release flush around the imaging registry, this drives the
@@ -8,7 +6,6 @@
 // program spec section 3): the registry's frame cache and publication would
 // add costs that belong to neither the settle nor the program, and the
 // tiers' baselines were measured without them.
-//
 // Every scenario runs in a child process of its own (the bench re-runs
 // itself with --child), on a freshly opened stage and a fresh evaluator,
 // compiled in the requested mode, profiled, and warmed with three evaluates
@@ -21,7 +18,6 @@
 // has none in the root layer, and a property's first spec arrives as a
 // resync rather than as a value change) authors it in its setup and warms
 // again.
-//
 // One round is: clear the profile, apply the edit (timed as "edit": the
 // authoring plus the synchronous notice handling), Evaluate (timed as
 // "wall"), then split that evaluate by its profile scopes:
@@ -35,25 +31,19 @@
 // Plus how many clusters and steps the program ran (sources always run),
 // and in how many rounds the program answered at all. Every column is a
 // median over the rounds on its own, so a row need not add up.
-//
 // Prints numbers and asserts nothing, so it is built but deliberately NOT
 // registered with ctest, like the other benches.
-//
 //   benchEditLatency [examplesDir] [--mode baked|dynamic|parity]
 //                    [--rounds N] [--only ID[,ID...]]
 //                    [--stage FILE] [--rig PATH]
-//
 // --child runs the selected scenarios in this process and prints only
 // their rows; it is how the bench calls itself.
-//
 // The stage defaults to <examplesDir>/biped/Biped_anim.usda, whose targets
 // the scenarios name first; on another stage each target falls back to the
 // first prim of the right kind, and a scenario with no target says so.
 // Environment is read and reported, never set: RIGEXEC_ENABLE_PARALLEL_EVAL,
 // RIGEXEC_BAKED_SCHEDULE, RIGEXEC_FRAME_CACHE and
 // RIGEXEC_DYNAMIC_RUNS_PROGRAM (which makes --mode dynamic run the program).
-//
-
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/parallel.h"
@@ -169,11 +159,9 @@ IsLeafControl(const UsdPrim &prim)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Targets. The biped's named prims come first -- they are the ones the tier
 // baselines were measured on -- and each falls back to the first prim of the
 // same kind, so the bench still says something on another rig.
-// ---------------------------------------------------------------------------
 
 struct Targets {
     SdfPath rig;
@@ -335,9 +323,7 @@ FindTargets(const UsdStageRefPtr &stage, const SdfPath &rig)
     return t;
 }
 
-// ---------------------------------------------------------------------------
 // One measured round, and the scopes that split it.
-// ---------------------------------------------------------------------------
 
 struct Round {
     double editMs = 0, wallMs = 0;
@@ -452,9 +438,7 @@ MeasureRound(RigExecRigEvaluator &evaluator,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Reporting.
-// ---------------------------------------------------------------------------
 
 void
 PrintHeader()
@@ -527,9 +511,7 @@ PrintRow(const std::string &id, const std::vector<Round> &rounds)
         clusterText.c_str(), stepText.c_str(), baked, rounds.size());
 }
 
-// ---------------------------------------------------------------------------
 // Scenarios.
-// ---------------------------------------------------------------------------
 
 struct Scenario {
     std::string id;

@@ -88,7 +88,7 @@ class RigExecRoot "RigExecRoot" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
 }
@@ -273,7 +273,7 @@ class RigExecControl "RigExecControl" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -385,7 +385,7 @@ class "RigExecXformable" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -525,7 +525,7 @@ class RigExecJoint "RigExecJoint" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -629,7 +629,7 @@ class RigExecFkChain "RigExecFkChain" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -729,7 +729,7 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -808,7 +808,7 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -897,7 +897,7 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -991,7 +991,7 @@ class RigExecRibbon "RigExecRibbon" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -1135,7 +1135,7 @@ class RigExecSplineIk "RigExecSplineIk" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -1196,7 +1196,7 @@ class "RigExecConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
         }
     )
     uniform token rigExec:rotationOrder = "XYZ" (
@@ -1260,7 +1260,7 @@ class "RigExecSourceConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
         }
     )
     uniform token rigExec:rotationOrder = "XYZ" (
@@ -1354,7 +1354,7 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
         }
     )
     uniform token[] rigExec:preserve = ["origin", "scale"] (
@@ -1441,7 +1441,7 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
         }
     )
     uniform token rigExec:rotationOrder = "XYZ" (
@@ -1509,7 +1509,7 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
         }
     )
     uniform token rigExec:rotationOrder = "XYZ" (
@@ -1577,7 +1577,7 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
         }
     )
     uniform token rigExec:rotationOrder = "XYZ" (
@@ -1655,7 +1655,7 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
         }
     )
     uniform token rigExec:rotationOrder = "XYZ" (
@@ -1741,7 +1741,7 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
         allowedTokens = ["neverTS", "autoDetect", "alwaysTS"]
         customData = {
             string userDocBrief = """Controls whether animated per-chain translation and scale\r
-        contribute to IK solve lengths, following Autodesk EvaluateTSAnim:\r
+        contribute to IK solve lengths:\r
         neverTS ignores animated T/S and uses rest-derived lengths, autoDetect\r
         uses current T/S when animation is detected, and alwaysTS always uses\r
         the current T/S."""
@@ -1754,7 +1754,13 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     )
     uniform bool rigExec:locked = 0 (
         customData = {
-            string userDocBrief = "Authoring lock metadata for DCC interchange."
+            string userDocBrief = "Authoring lock metadata for application interchange."
+        }
+    )
+    uniform token rigExec:orientationMode = "aimX" (
+        allowedTokens = ["aimX", "preserve"]
+        customData = {
+            string userDocBrief = "Aim local X down each bone, or preserve the input frame relative to its bone direction."
         }
     )
     uniform token rigExec:poleVectorMode = "vector" (
@@ -2116,7 +2122,7 @@ class "RigExecVolumeWeight" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -2338,7 +2344,7 @@ class RigExecSphereWeight "RigExecSphereWeight" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -2589,7 +2595,7 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -2820,7 +2826,7 @@ class RigExecCurveWeight "RigExecCurveWeight" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -2891,6 +2897,17 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     }
 )
 {
+    rel rigExec:referenceTransform (
+        customData = {
+            string userDocBrief = """Optional neutral-solve provider sharing transform's authored\r
+        rest frame."""
+        }
+    )
+    rel rigExec:referenceTransformSpace (
+        customData = {
+            string userDocBrief = "Neutral counterpart of transformSpace."
+        }
+    )
     rel rigExec:transform (
         customData = {
             string userDocBrief = "Exactly one GfMatrix4d provider (computeMatrix)."
@@ -3342,6 +3359,20 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
     )
 }
 
+class RigExecDeltaMushMover "RigExecDeltaMushMover" (
+    customData = {
+        string userDocBrief = "Native detail-preserving smoothing."
+    }
+)
+{
+    float inputs:displacement = 1
+    float inputs:distanceWeight = 0
+    int inputs:iterations = 10
+    bool inputs:pinBorders = 1
+    point3f[] inputs:restPoints
+    float inputs:step = 0.5
+}
+
 class RigExecSmoothMover "RigExecSmoothMover" (
     customData = {
         string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points\r
@@ -3477,7 +3508,7 @@ class RigExecCurvenet "RigExecCurvenet" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     float[] widths (
@@ -3680,7 +3711,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
     uniform token[] xformOpOrder (
@@ -3994,7 +4025,7 @@ class RigExecTouchRegions "RigExecTouchRegions" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
             string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most DCC apps.'''
+        visibility that is supported by most applications.'''
         }
     )
 }

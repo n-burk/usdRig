@@ -1,6 +1,4 @@
-//
 // RigExec volumetric weight-field kernels implementation.
-//
 #include "weightFields.h"
 
 #include <algorithm>

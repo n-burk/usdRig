@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 """Renaming a prim, and everything a rename implies.
@@ -102,10 +102,10 @@ def rename_prim(stage, prim, new_name):
     oldPath = prim.GetPath()
     newPath = oldPath.GetParentPath().AppendChild(new_name)
 
-    # Relocates are opt-OUT, not opt-in: Usd.NamespaceEditor.EditOptions()
-    # defaults allowRelocatesAuthoring to True, so constructing the editor
-    # with no options quietly authors a relocates map the moment a rename
-    # touches a prim that arrives across a reference. Turned off explicitly.
+
+
+
+
     options = Usd.NamespaceEditor.EditOptions()
     options.allowRelocatesAuthoring = False
 

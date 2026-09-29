@@ -1,6 +1,4 @@
-//
 // The one switch every parallel region in rigExec is behind.
-//
 #ifndef RIGEXEC_PARALLEL_H
 #define RIGEXEC_PARALLEL_H
 

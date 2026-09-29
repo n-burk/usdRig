@@ -1,12 +1,9 @@
-//
 // .rigexec DomainGeometry section: chains, revisions, weight objects.
-//
 // The geometry-half build tables: revision bindings (+ read phases), chunk
 // partitions, epoch layouts (skin topologies, blend-sample shapes), weight
 // objects, falloff LUTs, delta descriptors and the dense revision index.
 // Per-frame values -- packets, influence tables, envelopes, published
 // points -- are NOT on the wire: the runtime re-derives them by running.
-//
 // Two deliberate deferrals, both documented where they land:
 //   * Curvenet profile binds own a factorization, which has no by-value
 //     form; M2 re-binds from the bind inputs. The weight side already
@@ -15,7 +12,6 @@
 //   * Blend layouts and skin topologies the epoch cache refused vary per
 //     frame; their streams arrive with the InputTable (slice 4), keyed by
 //     the sample/mover paths recorded here.
-//
 #ifndef RIGEXEC_BINARY_GEOMETRY_H
 #define RIGEXEC_BINARY_GEOMETRY_H
 

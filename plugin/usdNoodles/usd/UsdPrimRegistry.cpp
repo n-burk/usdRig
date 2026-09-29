@@ -1,10 +1,6 @@
-//
 // Copyright (c) Meta Platforms, Inc. and affiliates.
-//
 // Licensed under the terms set forth in the LICENSE.txt file available
-// at the root of this repository.
-//
-
+// in plugin/usdNoodles/ in this repository.
 #include "usd/UsdPrimRegistry.h"
 
 #include <pxr/base/plug/plugin.h>
@@ -26,9 +22,7 @@ constexpr std::string_view kInputsPrefix = "inputs:";
 constexpr std::string_view kOutputsPrefix = "outputs:";
 } // namespace
 
-// ---------------------------------------------------------------------------
 // Schema discovery
-// ---------------------------------------------------------------------------
 
 void UsdPrimRegistry::_DiscoverTypes() const {
   std::call_once(_discoveryFlag, [this]() {
@@ -103,9 +97,7 @@ std::vector<UsdPrimRegistry::PrimTypeInfo> UsdPrimRegistry::GetPrimTypes(
   return result;
 }
 
-// ---------------------------------------------------------------------------
 // Attribute introspection
-// ---------------------------------------------------------------------------
 
 UsdPrimRegistry::PrimDescriptor UsdPrimRegistry::GetDescriptorFromPrim(const UsdPrim& prim) const {
   PrimDescriptor desc;
@@ -148,9 +140,7 @@ UsdPrimRegistry::PrimDescriptor UsdPrimRegistry::GetDescriptorFromPrim(const Usd
   return desc;
 }
 
-// ---------------------------------------------------------------------------
 // Schema-aware property helpers
-// ---------------------------------------------------------------------------
 
 TfTokenVector UsdPrimRegistry::GetSchemaAwarePropertyNames(const UsdPrim& prim) {
   // TfToken dedup: its HashFunctor hashes the interned pointer, avoiding a
@@ -197,9 +187,7 @@ std::string UsdPrimRegistry::GetAttributeTypeNameString(
   return {};
 }
 
-// ---------------------------------------------------------------------------
 // Prim type check
-// ---------------------------------------------------------------------------
 
 bool UsdPrimRegistry::CanHandlePrim(const UsdPrim& prim) const {
   _DiscoverTypes();
@@ -212,9 +200,7 @@ bool UsdPrimRegistry::CanHandlePrim(const UsdPrim& prim) const {
   return _typeNameSet.count(typeName) > 0;
 }
 
-// ---------------------------------------------------------------------------
 // Connection reading
-// ---------------------------------------------------------------------------
 
 std::vector<UsdPrimRegistry::LinkInfo> UsdPrimRegistry::GetLinksForPrim(const UsdPrim& prim) const {
   std::vector<LinkInfo> links;

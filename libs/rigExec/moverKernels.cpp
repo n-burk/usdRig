@@ -1,14 +1,11 @@
-//
 // RigExec exec computations for solvers and mover operands
 // (spec §7.2, §12.1).
-//
 // Weight objects publish computeWeightPacket, blend samples/inputs publish
 // their descriptors, and the aggregate solvers publish
 // computePointFrameArray. The geometry writer callbacks that used to live
 // here belonged to compiler-authored hidden application prims; those, the
 // compiler, and its derived stage are all gone -- point chains evaluate
 // through the in-memory RigExecMoverGraph instead.
-//
 #include "types.h"
 #include "moverGraph.h"
 #include "frameExtraction.h"
@@ -152,21 +149,17 @@ TF_DEFINE_PRIVATE_TOKENS(
 
 namespace {
 
-// ---------------------------------------------------------------------------
 // Weight objects (spec §4.1).
-//
 // The packet arithmetic lives in weightPackets.h, not here: the baked
 // evaluation program has to publish the identical packet from the values
 // it bound at compile time, and the only way to guarantee that is one
 // definition called from both sides. What is left below is the adapter --
 // it turns a VdfContext into the plain values those kernels take, and
 // nothing else.
-//
 // Absent inputs are defaulted HERE rather than inside the kernels,
 // because exec distinguishes "the input has no value" from "the attribute
 // is authored empty" and a kernel that collapsed the two would accept a
 // rig exec rejects.
-// ---------------------------------------------------------------------------
 
 // Collects a vectorized GfVec3f input into a plain vector.
 std::vector<GfVec3f>
@@ -243,13 +236,10 @@ _BuildDynamicWeightPacket(const VdfContext &ctx)
         inputs, ctx.GetInputValuePtr<RigExecWeightPacket>(_tokens->basePacket));
 }
 
-// ---------------------------------------------------------------------------
 // Volumetric weight objects (spec §4.1 volumetric extension).
-//
 // The three shapes share a prologue (placement, band, sampled points) and
 // differ only in the extra inputs their distance function needs, so the
 // common half is read once here and each callback adds its own.
-// ---------------------------------------------------------------------------
 
 // Reads the band, the invert/strength pair, and the baked remap.
 rigExec::RigExecFalloffParams
@@ -279,7 +269,6 @@ _ReadAxisScales(const VdfContext &ctx, GfVec3f *scales)
 }
 
 // The inputs every volumetric shape reads, LESS the point arrays.
-//
 // The points are a whole mesh, so they are gathered separately, after
 // RigExecVolumeWeightCanBuild has said the volume can produce a field at
 // all -- the callbacks this replaced checked the placement before
@@ -613,7 +602,6 @@ _EvaluateScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
 // RigExecRibbon solver: rotation-minimizing frame samples along the
 // driver curve, published with paired rest frames (spec §7.5). The rest
 // driver points are the compiler-captured bind-time curve value.
-//
 // The sampling itself is RigExecSampleRibbonFrames, which the baked program
 // calls as well; only the reads below are exec's.
 RigExecPointFrameArray
@@ -651,9 +639,7 @@ _ComputeRibbonFrames(const VdfContext &ctx)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Weight objects publish computeWeightPacket (spec §12.1).
-// ---------------------------------------------------------------------------
 
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecStaticWeight)
 {
@@ -683,9 +669,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecDynamicWeight)
                 .InputName(_tokens->basePacket));
 }
 
-// ---------------------------------------------------------------------------
 // Volumetric weight objects (spec §4.1 volumetric extension).
-//
 // computeFalloffLut is a STUB that returns an empty (linear) table. The
 // real bake -- a named analytic profile, or the resampled spline authored
 // on rigExec:falloffCurve -- arrives as a RigExecValueOverride supplied
@@ -693,12 +677,10 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecDynamicWeight)
 // for an attribute's spline (see RigExecFalloffLut in types.h). This is
 // the same shape the ribbon uses for its driver-curve points, and for the
 // same class of reason.
-//
 // The shared inputs are spelled out per concrete type rather than shared
 // through a macro over the abstract base: the three shapes genuinely
 // differ in what they read, and a registration that lied about its inputs
 // would silently miss an invalidation.
-// ---------------------------------------------------------------------------
 
 #define RIGEXEC_VOLUME_WEIGHT_COMMON_INPUTS                                  \
     AttributeValue<TfToken>(_tokens->representation),                        \
@@ -797,9 +779,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecCombineWeight)
                 .InputName(_tokens->weightTargetPoints));
 }
 
-// ---------------------------------------------------------------------------
 // Blend descriptors (spec §12.1).
-// ---------------------------------------------------------------------------
 
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendSample)
 {
@@ -827,31 +807,23 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendInput)
                 .Required());
 }
 
-// ---------------------------------------------------------------------------
 // Operation/type-specific property applications (spec §4.1, §7.2): each
 // host's frozen signature consumes the preceding exact-typed vector, the
 // realizing mover's computeMoverParameters, and computeMoverStatus.
-// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
 // RigExecPointFrameMoverApplication: one writer revision of a transform
 // provider's point frame (spec §4.2), publishing paired views.
-// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
 // RigExecRibbon solver (spec §7.5): frame samples from the driver curve.
-// ---------------------------------------------------------------------------
 
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecRibbon)
 {
     // Driver-curve points, live and at bind time, as boxed single values.
-    //
     // These callbacks return EMPTY and are meant to be overridden: the
     // evaluator resolves rigExec:driverCurve to the target's points and
     // supplies both, the same way a solver-bound joint's frame is supplied.
     // A ribbon whose driver cannot be resolved therefore samples an empty
     // curve and publishes no frames, rather than silently using stale data.
-    //
     // Two exec constraints force this shape. A relationship accessor can
     // request computations on its TARGETS but not a named attribute of them,
     // so the points cannot be reached from the ribbon prim. And an override
@@ -872,7 +844,6 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecRibbon)
         // supplies the live and bind-time values, exactly as a solver-bound
         // joint receives its frame -- which is what let the last authoring
         // pass, and the derived stage that held it, be deleted.
-        //
         // A Relationship accessor cannot do this job: TargetedObjects
         // requests a computation on the TARGETS, and rigExec:driverCurve
         // targets the curve prim, not its points attribute.
@@ -887,11 +858,9 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecRibbon)
                 .InputName(_tokens->driverPoints));
 }
 
-// ---------------------------------------------------------------------------
 // Operation/type-specific Phase 3 property applications (spec §4.1, §7.2):
 // each host's frozen signature consumes the preceding exact-typed vector,
 // the realizing mover's computeMoverParameters, and computeMoverStatus.
-// ---------------------------------------------------------------------------
 
 #define RIGEXEC_REGISTER_ARRAY_HOST(HostSchema, KernelFn)                    \
     EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(HostSchema)                        \

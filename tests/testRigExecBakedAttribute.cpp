@@ -1,7 +1,5 @@
-//
 // `uniform bool rigExec:baked` on the RigExecRoot: the rig asking to be
 // answered by the baked program.
-//
 // The mode has three possible authors and they do not carry the same weight
 // (RigExecEvaluationModeSource). This suite is about the WEAKEST of them --
 // the one an asset carries -- and therefore about the precedence as much as
@@ -12,16 +10,13 @@
 // entries. What is asserted here is that turning the program on through the
 // stage reaches the same answer as turning it on through the API, and that
 // nothing about the rest of the ladder moved.
-//
 // Run twice by ctest. The second run sets RIGEXEC_EVALUATION_MODE=dynamic
 // and passes --expect-environment: the variable is read once per process, so
 // "the environment outranks the attribute" cannot be tested in the same
 // binary as "the attribute decides".
-//
 // argv[1] = path to the examples directory (only to locate the codeless
 // schema plugin at <examples>/../plugin/rigExecSchema/resources; every
 // fixture here is built in memory).
-//
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -72,7 +67,6 @@ CompareEveryMap(const std::string &where, const RigExecRigPose &reference,
 // One rig, small enough to read and complete enough to bake: a control, a
 // joint, and a skinned slab, which is one pose domain and one geometry
 // domain.
-//
 // \p connectedSpace builds the shape testRigExecBakedMode's
 // TestANonBakeableRigFallsBack uses -- a provider whose posed:space is an
 // exec answer computed from the middle of the pose walk, which is the one
@@ -166,9 +160,7 @@ DynamicAnswer(const char *what, const UsdStageRefPtr &stage, UsdTimeCode time)
     return rig.Evaluate(time);
 }
 
-// ---------------------------------------------------------------------------
 // (a) The attribute asks, and the program answers.
-// ---------------------------------------------------------------------------
 
 static void
 TestTheAttributeCompilesIntoTheProgram()
@@ -254,9 +246,7 @@ TestAnAuthoredFalseKeepsTheSourceAndTheDynamicPath()
     CHECK(rig.GetBakedProgramBuildCount() == 0);
 }
 
-// ---------------------------------------------------------------------------
 // (b) Flipped under a running evaluator.
-// ---------------------------------------------------------------------------
 
 static void
 TestFlippingTheAttributeMovesTheRig()
@@ -306,9 +296,7 @@ TestFlippingTheAttributeMovesTheRig()
     CompareEveryMap(std::string(what) + ", rebuilt", dynamic, rebuilt);
 }
 
-// ---------------------------------------------------------------------------
 // (c) A caller that chose deliberately outranks the stage.
-// ---------------------------------------------------------------------------
 
 static void
 TestAnExplicitModeOutranksTheAttribute()
@@ -364,9 +352,7 @@ TestAnExplicitModeOutranksTheAttribute()
     }
 }
 
-// ---------------------------------------------------------------------------
 // (d) The rig asked and could not be given the program.
-// ---------------------------------------------------------------------------
 
 // The line the fallback publishes, exactly as
 // RigExecRigEvaluator::_ReportAttributeBakeFallback assembles it.
@@ -446,10 +432,8 @@ TestAnUnbakeableRigWithTheAttributeSaysSo()
           RigExecEvaluationModeSource::Attribute);
 }
 
-// ---------------------------------------------------------------------------
 // (e) The environment outranks the attribute. Its own ctest entry, because
 // RIGEXEC_EVALUATION_MODE is read once per process.
-// ---------------------------------------------------------------------------
 
 static void
 TestTheEnvironmentOutranksTheAttribute()

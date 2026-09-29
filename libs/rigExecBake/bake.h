@@ -1,18 +1,14 @@
-//
 // .rigexec baking: a compiled rigExec character as a USD-independent binary.
-//
 // BakeToBinary drives a RigExecRigEvaluator through the baked program at the
 // requested frames and serializes the epoch -- manifest first (this slice),
 // then the slot tables, steps and schedule (later M1 slices) -- into the
 // sectioned container libs/rigExecBinary owns.
-//
 // A bake is of the PROGRAM, never of a fallback: every requested frame must
 // be answered by the baked program, and an epoch the program cannot express
 // fails naming the feature (RigExecBakedProgram::IsBakeable reasons), the
 // same contract --require-baked gives rigExecPose. There is no quiet dynamic
 // bake, because a binary whose numbers came from two different paths is a
 // binary no parity check can hold to account.
-//
 #ifndef RIGEXEC_BAKE_H
 #define RIGEXEC_BAKE_H
 

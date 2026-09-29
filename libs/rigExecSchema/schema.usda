@@ -1013,7 +1013,7 @@ class "RigExecConstraint" (
 )
 {
     uniform bool rigExec:locked = false (
-        doc = """Authoring lock metadata for DCC interchange. Evaluation
+        doc = """Authoring lock metadata for application interchange. Evaluation
         remains active while locked; use RigExecMoverAPI inputs:enabled or
         inputs:defaultWeight to disable or blend the operation."""
     )
@@ -1244,10 +1244,14 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     uniform token rigExec:poleVectorMode = "vector" (
         allowedTokens = ["vector", "object"]
     )
+    uniform token rigExec:orientationMode = "aimX" (
+        allowedTokens = ["aimX", "preserve"]
+        customData = { string userDocBrief = "Aim local X down each bone, or preserve the input frame relative to its bone direction." }
+    )
     uniform token rigExec:evaluationMode = "neverTS" (
         allowedTokens = ["neverTS", "autoDetect", "alwaysTS"]
         doc = """Controls whether animated per-chain translation and scale
-        contribute to IK solve lengths, following Autodesk EvaluateTSAnim:
+        contribute to IK solve lengths:
         neverTS ignores animated T/S and uses rest-derived lengths, autoDetect
         uses current T/S when animation is detected, and alwaysTS always uses
         the current T/S."""
@@ -1431,7 +1435,6 @@ class "RigExecVolumeWeight" (
         disagreeing."""
     )
 
-    # ---- RigExecWeightObject contract, redeclared (see the class doc) ----
     rel rigExec:weightTarget (
         doc = "Canonical prim or exact property carrying the weighted domain."
     )
@@ -1451,7 +1454,6 @@ class "RigExecVolumeWeight" (
         the field saturate, not invalidate the rig mid-drag."""
     )
 
-    # ---- Falloff band ----
     float inputs:falloffMin = 0 (
         doc = """Distance at which the field is fully ON. In the volume's
         local units after inputs:scaleX/Y/Z, so for a sphere it is simply
@@ -1479,7 +1481,6 @@ class "RigExecVolumeWeight" (
         strict-policy violation."""
     )
 
-    # ---- Distance-to-weight remap ----
     uniform token rigExec:falloffProfile = "smooth" (
         allowedTokens = ["linear", "smooth", "easeIn", "easeOut", "constant", "curve"]
         doc = """Named analytic remap of the normalized band parameter, or
@@ -1509,7 +1510,6 @@ class "RigExecVolumeWeight" (
         yields a total field."""
     )
 
-    # ---- Point sampling ----
     uniform token rigExec:samplePhase = "reference" (
         allowedTokens = ["reference", "current"]
         doc = """Which points the distance function measures against.
@@ -1534,7 +1534,6 @@ class "RigExecVolumeWeight" (
         unposed reference copy. Ignored when samplePhase is `current`."""
     )
 
-    # ---- Guide drawing ----
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry", "none"]
         doc = """wire draws the falloffMin and falloffMax iso-surfaces as
@@ -1759,6 +1758,19 @@ class RigExecMatrixMover "RigExecMatrixMover" (
         pivot, so the points move by what the handle does inside the space
         and not by the space's motion -- a localized cluster, for geometry
         that is deformed at rest before it is skinned to that space."""
+    )
+    rel rigExec:referenceTransform (
+        doc = """Optional neutral-solve provider sharing transform's authored
+        rest frame. Normalizes the transform as inverse(M(reference)) *
+        M(transform), so the fitted neutral solve produces identity even
+        when a solver has rest residuals or controls have default offsets.
+        Read at transformReadPhase; the reference must have animation
+        channels neutralized while sharing the live fitting parameters."""
+    )
+    rel rigExec:referenceTransformSpace (
+        doc = """Neutral counterpart of transformSpace. Required when both
+        referenceTransform and transformSpace are supplied. Normalize both
+        transforms independently before removing the space's motion."""
     )
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
@@ -2311,6 +2323,20 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
     uniform token rigExec:surfaceReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
+}
+
+class RigExecDeltaMushMover "RigExecDeltaMushMover" (
+    inherits = </Typed>
+    customData = { string className = "DeltaMushMover" }
+    doc = "Native detail-preserving smoothing. Smooth rest and incoming points using fixed rest-derived weights, then transport rest detail in surface frames. The common mover envelope blends the result once."
+)
+{
+    point3f[] inputs:restPoints
+    int inputs:iterations = 10
+    float inputs:step = 0.5
+    bool inputs:pinBorders = true
+    float inputs:distanceWeight = 0
+    float inputs:displacement = 1
 }
 
 class RigExecSmoothMover "RigExecSmoothMover" (

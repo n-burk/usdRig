@@ -38,9 +38,7 @@ def _RegisterSchema():
            "RigExecControl schema is not registered")
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 
 # A gentle zig-zag: every knot is a local extremum, so the AutoEase
 # slopes are all 0 and the Catmull-Rom ("spline") slopes are not. The two
@@ -83,9 +81,7 @@ def _RigStage():
     return stage, control, mesh
 
 
-# ---------------------------------------------------------------------------
 # Discovery
-# ---------------------------------------------------------------------------
 
 def TestDiscoverFromProperties():
     stage, control, _ = _RigStage()
@@ -162,9 +158,7 @@ def TestDiscoverFromPrims():
            "both prims contribute: %s" % [r.Label() for r in refs])
 
 
-# ---------------------------------------------------------------------------
 # Knot authoring
-# ---------------------------------------------------------------------------
 
 def TestAuthorKnot():
     spline = Ts.Spline("double")
@@ -175,7 +169,7 @@ def TestAuthorKnot():
     _Check(stored.GetNextInterpolation() == Ts.InterpCurve, "curve segment")
     _Check(stored.GetPreTanAlgorithm() == Ts.TangentAlgorithmAutoEase
            and stored.GetPostTanAlgorithm() == Ts.TangentAlgorithmAutoEase,
-           "Maya's default new key is AutoEase on both sides")
+           "default new key is AutoEase on both sides")
     _Check(knot.GetTime() == 5.0, "the authored knot is returned")
 
     gm.AuthorKnot(spline, 5.0, 7.0)
@@ -209,9 +203,7 @@ def TestAuthorKnot():
            "an existing knot keeps its tangents")
 
 
-# ---------------------------------------------------------------------------
 # Edit operations
-# ---------------------------------------------------------------------------
 
 def TestMoveKeys():
     spline = _Spline()
@@ -516,9 +508,9 @@ def TestExtrapolation():
     spline = _Spline()
     gm.SetExtrapolation(spline, pre="cycle", post="cycle_offset")
     _Check(spline.GetPreExtrapolation().mode == Ts.ExtrapLoopReset,
-           "Maya Cycle repeats the curve exactly -> LoopReset")
+           "the editor Cycle repeats the curve exactly -> LoopReset")
     _Check(spline.GetPostExtrapolation().mode == Ts.ExtrapLoopRepeat,
-           "Maya Cycle with Offset joins the ends -> LoopRepeat")
+           "the editor Cycle with Offset joins the ends -> LoopRepeat")
 
     gm.SetExtrapolation(spline, pre="constant")
     _Check(spline.GetPreExtrapolation().mode == Ts.ExtrapHeld, "constant")
@@ -557,9 +549,7 @@ def TestSnapAndNeighbours():
            "an empty spline has no neighbours")
 
 
-# ---------------------------------------------------------------------------
 # Writing
-# ---------------------------------------------------------------------------
 
 def _SessionStage():
     stage, control, _ = _RigStage()
@@ -751,8 +741,8 @@ def TestSetKeyValuesAndTimes():
 
 
 def TestCurveTypes():
-    # Ts ships Bezier and Hermite (ts/types.h:101-105); the editor must
-    # switch between them and author to each.
+
+
     spline = _Spline()
     _Check(gm.CurveTypeName(spline) == "bezier",
            "new splines are Bezier: %s" % gm.CurveTypeName(spline))

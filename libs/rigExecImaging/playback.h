@@ -1,16 +1,12 @@
-//
 // RigExec baked playback for Hydra (M2b): answers a rig from its .rigexec
 // file instead of evaluating it.
-//
 // Selected per rig at activation: a RigExecRoot carrying rigExec:asset
 // plays the binary it names, and a rig without the attribute (or whose
 // file cannot be opened) evaluates live. The live path is otherwise
 // untouched -- this class owns no evaluator, takes no locks the registry
 // does not already hold, and publishes snapshots in exactly the shape
 // the results scene index reads.
-//
 // What one generation carries, and what it deliberately does not:
-//
 //   * deformed points, normals and extents, split out of the runtime's
 //     moved properties by property name, exactly the three geometry
 //     leaves the bridge publishes;
@@ -25,15 +21,12 @@
 //   * NO movedFloats: the runtime publishes no scalar moved properties,
 //     so tool reads of RigExecImaging_GetMovedFloats find nothing on a
 //     playback session rather than a recomputed guess.
-//
 // Time maps to the nearest baked frame, ties to the lower one: scrubbing
 // between two baked frames holds the nearer pose, deterministically.
 // UsdTimeCode::Default reads as 0.0 for the mapping. Stage edits never
 // dirty a playback session -- the binary is static -- so changing the
 // asset, or the file it names, needs a re-activation, the same rule as
 // a rig authored into an already-active stage.
-//
-
 #ifndef RIGEXEC_IMAGING_PLAYBACK_H
 #define RIGEXEC_IMAGING_PLAYBACK_H
 

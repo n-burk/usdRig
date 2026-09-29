@@ -1,7 +1,5 @@
-//
 // RigExec solver glue shared by exec and the bake (spec §7.5).
 // See solverKernels.h.
-//
 #include "solverKernels.h"
 #include "frameExtraction.h"
 
@@ -23,7 +21,6 @@ namespace rigExec {
 namespace {
 
 // Re-bases one aggregate element onto a joint's rest reference.
-//
 // The element's own rest->pose map is measured from \p ownRest and applied to
 // \p jointRest instead, so the frame a pose step BELOW this solver left is
 // carried through the solve rather than replaced (spec 4.2). Used only where

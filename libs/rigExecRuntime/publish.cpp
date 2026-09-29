@@ -1,14 +1,10 @@
-//
 // rigExecRuntime epilogue (M2 framework).
-//
 // Ports of RigExecBakedPublishPose (bakedPose.cpp) and
 // RigExecBakedPublishGeometry (bakedGeometry.cpp): step diagnostics in
 // program order, fallback-joint lines, provider xforms, joint/control
 // publication, weight fields, adjusters and moved properties. Guides
 // are skipped: the runtime carries no tap request, which is the
 // guides-disabled shape the baked path mirrors.
-//
-
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>

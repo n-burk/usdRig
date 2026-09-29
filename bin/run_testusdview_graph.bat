@@ -7,7 +7,7 @@ rem Drives synthetic mouse and key events at the pixels the graph canvas itself
 rem reports for its keys and tangent handles, and asserts what landed on the
 rem stage: the curve set for a prim and for a property selection, a key drag
 rem written into the session layer, the Ctrl+Z round trip, insert and delete,
-rem the Maya tangent types, tangent handle drags, break/unify, the infinity
+rem the the editor tangent types, tangent handle drags, break/unify, the infinity
 rem mapping, the ruler scrub and marquee selection. Prints RIGEXEC_GRAPH_OK.
 rem
 rem Usage: run_testusdview_graph.bat [rendererDisplayName]   (e.g. Embree)

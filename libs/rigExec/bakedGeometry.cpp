@@ -1,13 +1,10 @@
-//
 // The baked program's geometry half: the chain/revision bake and the frame
 // path that runs those revisions and the derived maintenance behind them.
-//
 // Split out of bakedProgram.cpp for the reason bakedPose.cpp was: a domain's
 // bake and its frame path have to agree about what was captured and what is
 // re-read. The evaluator is not visible here -- the compiled chains arrive
 // restated as RigExecBakedChainSpec, and the caches the frame path shares
 // with the dynamic walk were captured into RigExecBakedProgramImpl at Build.
-//
 #include "bakedProgramImpl.h"
 
 #include "frameExtraction.h"
@@ -60,9 +57,7 @@ TF_DEFINE_PRIVATE_TOKENS(
 
 namespace rigExec {
 
-// ---------------------------------------------------------------------------
 // Bake.
-// ---------------------------------------------------------------------------
 
 void
 RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
@@ -149,7 +144,6 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         // RESYNC (the property appearing, disappearing or being retargeted,
         // which also invalidates any retained query) finds them, and in no
         // case in `rebuild`, which is for values the program captured.
-        //
         // Named unconditionally rather than per operation: the binding
         // carries exactly the paths the operation resolved, so an empty one
         // is an operation that does not read it and an authored one is a
@@ -416,9 +410,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
 }
 
 
-// ---------------------------------------------------------------------------
 // The vertex partition.
-//
 // A skin revision's per-vertex work is separable -- point i reads the indices
 // and weights at i * elementSize, the influence matrices they name and its
 // own incoming position, and nothing else -- so a contiguous range of
@@ -426,14 +418,12 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
 // same vertices computed as part of the whole array. What is NOT separable is
 // everything around that body, which is why the range is cut here and the
 // decisions stay whole (§6 of docs/specs/baked-step-graph.md).
-//
 // The cut is by vertex COUNT and the key follows from it, rather than the
 // other way round: the vertex order is the mesh's and is never permuted, so
 // two body regions that happen to share a range simply wait for both their
 // joints -- and the other ranges still start when their own joints land,
 // which is what the whole exercise buys. The schedule report prints |key| per
 // chunk so that trade-off is measured per asset rather than assumed.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -706,9 +696,7 @@ RigExecBakedPartitionRevision(
     revision->chunked = keyed;
 }
 
-// ---------------------------------------------------------------------------
 // Build: the geometry half of the program, in program order.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -805,7 +793,6 @@ PartitionAtBuild(const ProviderLevels &levels,
 
     // Whether the cut pays, which is a question about LEVELS and not about
     // vertex counts.
-    //
     // A chunk body is a serial loop over its range; an uncut revision is one
     // call to RigExecApplySkinKernel over the whole array, and that kernel
     // spreads itself over the arena. So cutting a revision into seven ranges
@@ -815,7 +802,6 @@ PartitionAtBuild(const ProviderLevels &levels,
     // FOR is the range whose own joints land early: it may start while the
     // rest of the rig is still being posed, and that is only possible when
     // the candidate ranges become ready at different levels.
-    //
     // Equivalently, and this is how the rule reads in §6: the whole revision
     // is ready when its LAST joint is, which is the maximum below, so a
     // range readier than that maximum is exactly a range that can start
@@ -887,7 +873,6 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             // The table the PACKET carries for a skin revision, and never
             // anything else: identity, sized to the influence count and
             // written once, here.
-            //
             // The packet is assembled before the matrices are folded, so it
             // cannot carry them -- that is what lets a chunk start on its own
             // joints without waiting for every joint of the rig. What the
@@ -1187,15 +1172,12 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
     }
 }
 
-// ---------------------------------------------------------------------------
 // One frame, geometry half.
-//
 // The packet is assembled by the same RigExecAssembleParameters the dynamic
 // path calls and the kernel is the same shared kernel; only the VdfNetwork
 // around them is baked away, so the accounting it performed -- a revision
 // runs when its inputs changed, and not otherwise -- is performed here
 // instead, by the four steps a revision is made of.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -1262,7 +1244,6 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
     // step declares -- the assemble only READS it, and a step that writes a
     // slot it declared as a read is the declaration the executor trusts
     // being wrong.
-    //
     // The dynamic path applies it before the final-phase substitution rather
     // than after. The two orders can only disagree for a revision that has
     // both a bound transform provider and a delta, which cannot arise: a
@@ -1277,13 +1258,11 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
     // form `base`, `preceding` and `final` abbreviate: the provider's matrix
     // as it stood immediately after one named constraint, out of the run's
     // snapshot store instead of out of the dense tables.
-    //
     // AFTER the delta, exactly as the dynamic path orders the two, and the
     // two can no more both apply here than they can there: an AtPrim phase
     // needs a bound rigExec:transform to name a frame chain of, and a
     // geometry-domain constraint's binding.transform is empty -- which is
     // what makes its delta the only source of the matrix.
-    //
     // A phase that resolved to NOTHING leaves the dense-table value
     // standing and says nothing, because that is what the dynamic path does
     // with it: compile has already refused a phase naming a prim that
@@ -1308,11 +1287,23 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
         // pointer whenever the store answered, whatever the tap held.
         revision->haveTransform = true;
     }
+    const bool hasReference = revision->op == RigExecRevisionOp::Matrix &&
+                              !revision->influenceSlots.empty();
+    const auto referenceMatrix = [&B, revision](size_t index) {
+        const size_t slot = size_t(revision->influenceSlots[index]);
+        return revision->finalPhase ? B.finalMatrix[slot] : B.baseMatrix[slot];
+    };
+    if (revision->haveTransform && hasReference) {
+        revision->transform = RigExecMeasureFromReference(revision->transform, referenceMatrix(0));
+    }
     if (revision->haveTransform && revision->transformSpaceSlot >= 0) {
-        const GfMatrix4d &space =
+        GfMatrix4d space =
             revision->finalPhase
                 ? B.finalMatrix[size_t(revision->transformSpaceSlot)]
                 : B.baseMatrix[size_t(revision->transformSpaceSlot)];
+        if (hasReference && revision->influenceSlots.size() > 1) {
+            space = RigExecMeasureFromReference(space, referenceMatrix(1));
+        }
         revision->transform =
             RigExecMeasureInSpace(revision->transform, space);
     }
@@ -1514,7 +1505,6 @@ SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
 // WHICH points a revision is assembled against, stated once because the two
 // callers below pass different ones and the difference is invisible until an
 // operator reads them:
-//
 //  * a CHAIN revision gets the chain's AUTHORED base -- the attribute as the
 //    stage holds it -- for every revision of the chain, not the running
 //    value. The dynamic walk reads the base once per target and hands that
@@ -1524,7 +1514,6 @@ SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
 //  * a DERIVED revision gets the chain's FINAL points, which is what it is
 //    for: recomputeNormals and recomputeExtent take auxPoints = basePoints
 //    and must describe the geometry as published.
-//
 // Taken as a range rather than a vector because the two callers hold the
 // points in different containers and RigExecProviderValues copies them
 // anyway.
@@ -1567,7 +1556,6 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     }
     // The fold decided whether there is a matrix at all -- a bound transform
     // provider, or a geometry-domain constraint's delta -- and wrote it.
-    //
     // A SKIN revision is assembled without one, and that is not an omission:
     // its static step runs BEFORE its fold, precisely so its chunks wait for
     // their own joints rather than for the rig's, so the fold's matrix here
@@ -1646,7 +1634,6 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     // sorted, and each channel's samples stable-sorted by activation. Float
     // addition is not associative, so a different order is a different last
     // bit of every point.
-    //
     // The reads go through the generation-wide resolved inputs and NOT
     // through this revision's phase overlay: a sample's own phase is looked
     // up directly, which is what lets one blend sample read another chain
@@ -1818,7 +1805,6 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
         revision->partitionTopology = revision->topology;
     };
     // The Profile Mover's bind, resolved HERE and never in a step.
-    //
     // RigExecCurvenetBindCache mutates its entry map and appends to its
     // pending diagnostics with no synchronisation whatever, so it belongs to
     // serial code -- and a step body may take no lock to make it belong
@@ -1829,7 +1815,6 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
     // against the rest net's cardinality. The bind is therefore this frame's
     // whichever points stand in the net chain's buffer while the prologue
     // runs, and the step is left with a pointer and no cache.
-    //
     // The price is one extra curvenet packet assembly per frame per curvenet
     // mover, paid so that the bind cannot be reached from two threads. It is
     // the same assembly the dynamic walk performs once, over the same arrays.
@@ -2039,7 +2024,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             RigExecStatusForParameters(parameters, revision.moverPath);
         step->counters.revisionsBuilt = 1;
         // The 26k-point input is remembered by HANDLE, not by copy.
-        //
         // A derived revision's auxPoints IS the chain's own published
         // buffer, and nothing else in the packet is that size -- so the run
         // remembers the packet with that one field emptied and the points
@@ -2196,7 +2180,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // rigExec:samplePhase = "current": the field is measured against the
         // points AS THEY STAND HERE, not the authored base, so the volume
         // grabs whatever is inside it right now.
-        //
         // This one copies the ORACLE and not exec (see bakedWeights.cpp):
         // the dynamic path cannot get it from exec either -- a revision
         // node's parameters are a VDF constant, so nothing in the packet can
@@ -2255,7 +2238,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // This is the half of the decision the packet and the status carry;
         // the chain's sticky bit and the influence table's own comparison are
         // ORed in by the fuse, which is the first step that has all three.
-        //
         // The scalar the fuse's one diagnostic is about, read here because
         // this step always runs and the fuse may not. Compared like every
         // other source value: two different out-of-range weights can leave
@@ -2440,7 +2422,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             // holds this run's answer -- and its `ok` still describes it.
             // Another chunk's joints moving makes the REVISION execute; it
             // does not make this range's vertices land anywhere else.
-            //
             // `ok` is part of the gate rather than a consequence of it: a
             // chunk whose last answer was a failure, or one the partition
             // reset without the packet moving, has nothing in its range to
@@ -2544,9 +2525,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
 }
 
-// ---------------------------------------------------------------------------
 // The report.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -2724,7 +2703,6 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
     // at the evaluated time. Built LAZILY and at most once per frame: a rig
     // with no adjuster never constructs a UsdGeomXformCache, and one with
     // several composes each net's ladder through the same cache.
-    //
     // Here rather than in a step because it reads the stage and writes the
     // pose, and both are the epilogue's business. The kernel's own output --
     // the adjusted frames in net-local space -- was produced in the region;

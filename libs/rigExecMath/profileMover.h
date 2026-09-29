@@ -1,15 +1,11 @@
-//
 // The Profile Mover: propagating a rigged curvenet's articulation over a
 // surface mesh (2022 paper §4, Algorithm 1).
-//
 //   precompute (projection pose):  cut-mesh, {L, C, V}, factorize Vt L V
 //   runtime:                       curvenet frames and gradients (§3)
 //                                  -> harmonic interpolation of the gradients
 //                                  -> Poisson reconstruction of positions
-//
 // The bind is expensive and the solve is not, which is the whole point: one
 // factorization serves every frame of animation.
-//
 #ifndef RIGEXEC_MATH_PROFILE_MOVER_H
 #define RIGEXEC_MATH_PROFILE_MOVER_H
 

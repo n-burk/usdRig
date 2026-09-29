@@ -1,6 +1,4 @@
-//
 // RigExec tap set: USD backend implementation over ExecUsdSystem.
-//
 #include "tapSet.h"
 #include "debugCodes.h"
 
@@ -175,7 +173,6 @@ bool
 RigExecTapSet::Prepare()
 {
     // A tap set with nothing in it is a legitimate epoch, not a failure.
-    //
     // It arrives whenever a rig's whole output set is derived without exec:
     // a constraint aiming a plain UsdGeomXformable at another plain
     // UsdGeomXformable reads both frames from their USD transforms, and a

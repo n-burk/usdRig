@@ -1,13 +1,9 @@
-//
 // RigExecSurfaceMover: everything about the surface mover (spec §4.1).
-//
 // A surface mover projects points onto a driver surface. This TU owns
 // its exec-side computeMoverParameters registration and builder, its
 // revision binder, and its parity-oracle branch, and registers the row
 // that points at them. Compile validation is the generic points-target
 // rules.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 

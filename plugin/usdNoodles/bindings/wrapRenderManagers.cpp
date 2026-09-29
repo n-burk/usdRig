@@ -1,10 +1,6 @@
-//
 // Copyright (c) Meta Platforms, Inc. and affiliates.
-//
 // Licensed under the terms set forth in the LICENSE.txt file available
-// at the root of this repository.
-//
-
+// in plugin/usdNoodles/ in this repository.
 #include "render/FontAtlas.h"
 #include "render/IconRenderManager.h"
 #include "render/LinkRenderManager.h"
@@ -319,7 +315,7 @@ void _LinkRenderManager_renderLinks(
     hoveredColor[2] = extract<float>(pyHoveredColor[2]);
   }
 
-  std::array<float, 3> highlightedColor{0.31f, 0.78f, 0.47f}; // Presto green
+  std::array<float, 3> highlightedColor{0.31f, 0.78f, 0.47f}; // the editor green
   if (len(pyHighlightedColor) >= 3) {
     highlightedColor[0] = extract<float>(pyHighlightedColor[0]);
     highlightedColor[1] = extract<float>(pyHighlightedColor[1]);
@@ -394,7 +390,7 @@ void _LinkRenderManager_renderLinksFromGraph(
     hoveredColor[2] = extract<float>(pyHoveredColor[2]);
   }
 
-  std::array<float, 3> highlightedColor{0.31f, 0.78f, 0.47f}; // Presto green
+  std::array<float, 3> highlightedColor{0.31f, 0.78f, 0.47f}; // the editor green
   if (len(pyHighlightedColor) >= 3) {
     highlightedColor[0] = extract<float>(pyHighlightedColor[0]);
     highlightedColor[1] = extract<float>(pyHighlightedColor[1]);

@@ -140,7 +140,7 @@ elif [ "$_MUSE_PROVIDER" = "lmstudio" ]; then
     _MUSE_LMSTUDIO_URL_SOURCE="saved settings"
   fi
   if [ -z "$_MUSE_LMSTUDIO_URL" ]; then
-    _MUSE_LMSTUDIO_URL="http://hivemind.local:1234"
+    _MUSE_LMSTUDIO_URL="http://127.0.0.1:1234"
     _MUSE_LMSTUDIO_URL_SOURCE="default"
   fi
   _MUSE_LMSTUDIO_URL="${_MUSE_LMSTUDIO_URL%/}"
@@ -152,7 +152,7 @@ elif [ "$_MUSE_PROVIDER" = "lmstudio" ]; then
     _MUSE_LMSTUDIO_MODEL_SOURCE="saved settings"
   fi
 
-  echo "Muse provider: LM Studio on Hivemind"
+  echo "Muse provider: LM Studio"
   echo "Muse endpoint: $_MUSE_LMSTUDIO_URL/v1/messages ($_MUSE_LMSTUDIO_URL_SOURCE)"
   echo "Muse key: not needed — a local placeholder is used; hosted keys are not sent"
   if ! "$PY" -c "import anthropic" 2>/dev/null; then
@@ -205,8 +205,8 @@ print("%d\t%s" % (len(models), preferred))' 2>/dev/null)"; then
     else
       echo "Muse model: unavailable until the server lists one"
     fi
-    echo "Muse server: NOT READY — on Hivemind, start LM Studio on port 1234"
-    echo "             and enable Serve on Local Network in its server settings."
+    echo "Muse server: NOT READY — start LM Studio on port 1234"
+    echo "             or set MUSE_LMSTUDIO_URL to the server address."
   fi
 else
   if [ -z "$_MUSE_KEY" ]; then

@@ -1,12 +1,8 @@
-//
 // rigExecRuntime executor (M2 framework).
-//
 // A port of the serial half of bakedSchedule.cpp: RigExecBakedComputeClosure
 // and the serial step walk of RigExecBakedRunSteps. The runtime never
 // rebuilds, so revision `ran` starts false and the program stamp never
 // moves; everything else is the same value comparisons in the same order.
-//
-
 #include "rigExecRuntime/store.h"
 
 namespace rigExec {

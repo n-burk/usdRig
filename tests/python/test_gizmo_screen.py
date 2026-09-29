@@ -73,7 +73,7 @@ def TestTranslateHandles():
     handles = gs.BuildHandles(gs.TOOL_TRANSLATE, Gf.Matrix4d(1.0), camera,
                               VIEWPORT, 1.0)
     byName = {h.name: h for h in handles}
-    # Maya's Move manipulator: three axes, three planar handles and the
+    # Move manipulator: three axes, three planar handles and the
     # view-plane centre (design section 8.2).
     _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
            "move handles: %s" % sorted(byName))
@@ -119,7 +119,7 @@ def TestRotateHandles():
     handles = gs.BuildHandles(gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera,
                               VIEWPORT, 1.0)
     byName = {h.name: h for h in handles}
-    # Maya's Rotate manipulator adds the view-axis ring and the
+    # Rotate manipulator adds the view-axis ring and the
     # free-rotate sphere to the three axis rings (design section 8.3).
     _Check(set(byName) == {"x", "y", "z", "view", "free"},
            "rotate handles: %s" % sorted(byName))
@@ -210,16 +210,16 @@ def TestDragMath():
         gs.TOOL_SCALE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
     _Check(set(scale) == {"x", "y", "z", "xy", "yz", "xz", "center"},
            "scale handles: %s" % sorted(scale))
-    # The scale RULE is Maya's ratio, MayaScaleFactor, asserted in
-    # TestMayaScaleHandles; only the handle set belongs here.
+    # The scale RULE is ratio, HandleScaleFactor, asserted in
+    # TestHandleScaleHandles; only the handle set belongs here.
 
 
-def TestMayaTranslateHandles():
+def TestHandleTranslateHandles():
     camera = _Camera()
     byName = {h.name: h for h in gs.BuildHandles(
         gs.TOOL_TRANSLATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
     _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
-           "Maya move handles: %s" % sorted(byName))
+           "the editor move handles: %s" % sorted(byName))
     xy = byName["xy"]
     _Check(xy.kind == "plane" and xy.axisIndex == 2
            and xy.color == (0.0, 0.0, 1.0), "xy plane is blue (normal z)")
@@ -253,12 +253,12 @@ def TestMayaTranslateHandles():
     _Check(_Close(big["x"].points[1][0], 580, 1e-3), "sizePixels honoured")
 
 
-def TestMayaRotateHandles():
+def TestHandleRotateHandles():
     camera = _Camera()
     byName = {h.name: h for h in gs.BuildHandles(
         gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
     _Check(set(byName) == {"x", "y", "z", "view", "free"},
-           "Maya rotate handles: %s" % sorted(byName))
+           "the editor rotate handles: %s" % sorted(byName))
     view = byName["view"]
     radius = gs.GIZMO_PIXELS * gs.RING_FRACTION * gs.VIEW_RING_FRACTION
     _Check(view.kind == "view" and view.color == gs.COLOR_VIEW
@@ -316,36 +316,36 @@ def TestMayaRotateHandles():
            is None, "outside everything")
 
 
-def TestMayaScaleHandles():
+def TestHandleScaleHandles():
     camera = _Camera()
     byName = {h.name: h for h in gs.BuildHandles(
         gs.TOOL_SCALE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
     _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
-           "Maya scale handles: %s" % sorted(byName))
+           "the editor scale handles: %s" % sorted(byName))
     origin = (400, 300)
     x = byName["x"]
-    f = gs.MayaScaleFactor(x, origin, (445, 300), (490, 300), True)
+    f = gs.HandleScaleFactor(x, origin, (445, 300), (490, 300), True)
     _Check(_Close(f, 2.0, 1e-9), "press at half length, drag to the tip: 2x")
     # Design section 8.4 defines the factor as (cursor distance from the
     # origin along the axis) / (that distance at press). Pressing 45 px
     # out and dragging to 45 px on the far side is -45/45, so the factor
     # is -1: same size, mirrored. The sign flip is what matters here.
-    f = gs.MayaScaleFactor(x, origin, (445, 300), (355, 300), True)
+    f = gs.HandleScaleFactor(x, origin, (445, 300), (355, 300), True)
     _Check(_Close(f, -1.0, 1e-9), "through the origin flips the sign")
-    f = gs.MayaScaleFactor(x, origin, (445, 300), (355, 300), False)
+    f = gs.HandleScaleFactor(x, origin, (445, 300), (355, 300), False)
     _Check(_Close(f, 1e-4, 1e-12), "Prevent Negative Scale clamps")
     c = byName["center"]
-    f = gs.MayaScaleFactor(c, origin, (400, 300), (445, 300), True)
+    f = gs.HandleScaleFactor(c, origin, (400, 300), (445, 300), True)
     _Check(_Close(f, 1.5, 1e-9), "centre: 1 + dx / size")
     xy = byName["xy"]
     d = (xy.worldCenterScreen[0] - 400, xy.worldCenterScreen[1] - 300)
     press = (400 + d[0], 300 + d[1])
     current = (400 + 2 * d[0], 300 + 2 * d[1])
-    f = gs.MayaScaleFactor(xy, origin, press, current, True)
+    f = gs.HandleScaleFactor(xy, origin, press, current, True)
     _Check(_Close(f, 2.0, 1e-6), "plane handle: ratio along the diagonal")
 
 
-def TestMayaDragMath():
+def TestHandleDragMath():
     camera = _Camera()
     delta = gs.RayPlaneDragDelta(camera, VIEWPORT, Gf.Vec3d(0, 0, 0),
                                  Gf.Vec3d(0, 0, 1), (400, 300), (410, 290))
@@ -442,10 +442,10 @@ def main():
         ("rotate handles", TestRotateHandles),
         ("hit test", TestHitTest),
         ("drag math", TestDragMath),
-        ("maya translate handles", TestMayaTranslateHandles),
-        ("maya rotate handles", TestMayaRotateHandles),
-        ("maya scale handles", TestMayaScaleHandles),
-        ("maya drag math", TestMayaDragMath),
+        ("the editor translate handles", TestHandleTranslateHandles),
+        ("the editor rotate handles", TestHandleRotateHandles),
+        ("the editor scale handles", TestHandleScaleHandles),
+        ("the editor drag math", TestHandleDragMath),
         ("world origin", TestWorldOrigin),
     ]
     for name, fn in groups:

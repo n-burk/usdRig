@@ -1,6 +1,4 @@
-//
 // RigExec spline-IK spine kernel.
-//
 #include "splineIk.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -158,9 +156,7 @@ _DegenerateCopy(const RigExecPointFrame &frame)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // RigExecSplineIkCurve
-// ---------------------------------------------------------------------------
 
 RigExecSplineIkCurve::RigExecSplineIkCurve()
     : RigExecSplineIkCurve(std::array<GfVec3d, 4>{
@@ -342,9 +338,7 @@ RigExecSplineIkCurve::PointAtArcLength(
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Rest construction and CV posing
-// ---------------------------------------------------------------------------
 
 RigExecSplineIkRest
 RigExecSplineIkMakeRest(
@@ -497,9 +491,7 @@ RigExecSplineIkTwistAboutAxis(
     return 2.0 * std::atan2(along, q.GetReal());
 }
 
-// ---------------------------------------------------------------------------
 // The solve
-// ---------------------------------------------------------------------------
 
 bool
 RigExecSolveSplineIk(

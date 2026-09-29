@@ -1,9 +1,6 @@
-//
 // RigExec exec-facing value types (spec §12.1).
-//
 // Only genuinely RigExec-specific, non-geometry value types are registered
 // with ExecTypeRegistry. Geometry stays native (VtArray never registered).
-//
 #ifndef RIGEXEC_TYPES_H
 #define RIGEXEC_TYPES_H
 
@@ -278,6 +275,11 @@ struct RigExecMoverParameters {
     /// The user-facing blend is always the common weights packet above.
     double referenceVolume = 0.0;
     float strength = 0.0f;
+    int mushIterations = 10;
+    float mushStep = 0.5f;
+    bool mushPinBorders = true;
+    float mushDistanceWeight = 0.0f;
+    float mushDisplacement = 1.0f;
 
     /// Standard topology for smooth/normals/surface kernels.
     std::vector<int> topologyCounts;
@@ -343,6 +345,9 @@ struct RigExecMoverParameters {
                blendDeltas == o.blendDeltas && blendSurfaceFrame == o.blendSurfaceFrame &&
                referenceVolume == o.referenceVolume &&
                strength == o.strength &&
+               mushIterations == o.mushIterations && mushStep == o.mushStep &&
+               mushPinBorders == o.mushPinBorders &&
+               mushDistanceWeight == o.mushDistanceWeight && mushDisplacement == o.mushDisplacement &&
                topologyCounts == o.topologyCounts &&
                topologyIndices == o.topologyIndices &&
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&

@@ -111,7 +111,7 @@ every application of the atomic mover.
 
 *Type:* `uniform bool`. *Default:* `false`.
 
-Authoring lock metadata for DCC interchange. Evaluation
+Authoring lock metadata for application interchange. Evaluation
 remains active while locked; use RigExecMoverAPI inputs:enabled or
 inputs:defaultWeight to disable or blend the operation.
 
@@ -244,6 +244,12 @@ Valid values: `rotatePlane`, `singleChain`.
 
 Valid values: `vector`, `object`.
 
+#### `rigExec:orientationMode`
+
+*Type:* `uniform token`. *Default:* `"aimX"`.
+
+Valid values: `aimX`, `preserve`.
+
 #### `rigExec:evaluationMode`
 
 *Type:* `uniform token`. *Default:* `"neverTS"`.
@@ -251,7 +257,7 @@ Valid values: `vector`, `object`.
 Valid values: `neverTS`, `autoDetect`, `alwaysTS`.
 
 Controls whether animated per-chain translation and scale
-contribute to IK solve lengths, following Autodesk EvaluateTSAnim:
+contribute to IK solve lengths:
 neverTS ignores animated T/S and uses rest-derived lengths, autoDetect
 uses current T/S when animation is detected, and alwaysTS always uses
 the current T/S.

@@ -1,6 +1,4 @@
-//
 // RigExec Hydra publication bridge implementation.
-//
 #include "bridge.h"
 
 #include "warmIndex.h"
@@ -34,13 +32,11 @@ namespace {
 
 // The rigid ASSET-space placement matrix of one posed frame, or nothing
 // when the frame cannot supply one.
-//
 // Guides are placed by a rigid matrix: scale/shear never leaks into the
 // placement itself. Joint link lengths come from child origins, solver
 // dimensions come from their frame landmarks, and controls ask for the
 // removed basis magnitudes separately and fold those into their positive
 // authored guide:scaleX/Y/Z multipliers.
-//
 // Shared by the joint/solver payload and the control guides so the two
 // cannot drift apart: a guide drawn from a frame one of them rejects and
 // the other accepts would be a difference nobody could see coming.
@@ -93,7 +89,6 @@ _RigidGuideMatrix(
 // length, primitive radius, and whether it owns an origin sphere. Solver
 // elements derive length from the frame's aim landmark distance. Joint
 // elements pass child-derived link frames and lengths directly.
-//
 // A non-positive radius draws nothing at all. Unlike length, where zero
 // legitimately means "sphere but no bone", a zero-radius guide is invisible
 // either way, so publishing it would only cost the viewer geometry it
@@ -190,12 +185,10 @@ _ReadGuidePurpose(const UsdPrim &prim)
 // The value the FIRST connection source of \p attr holds at the pose's
 // time, or nothing when the attribute has no connection or the source
 // cannot supply one (dangling path, a relationship, no value).
-//
 // UsdAttribute::Get() does NOT follow connections: they are a
 // shading-graph concept, not value resolution. So a rig that authored
 // `guide:displayOpacity.connect = </limb_params.avars:ikfk>` compiled,
 // drew nothing different, and gave no hint why. This is the read-through.
-//
 // A property-mover result for the source wins over its authored value,
 // exactly as the volume guides read their driven dimensions: a dial that
 // is itself computed must fade the guide by what it computed.
@@ -301,16 +294,13 @@ _ReadGuideStyle(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Influence volume guides (spec §4.1 volumetric extension, drawn side).
-//
 // A weight volume is otherwise invisible: it owns no points, and its effect
 // is only legible once geometry has already moved -- by which time the
 // artist is reading a deformation, not the region that caused it. What is
 // actually being PLACED is the pair of surfaces the falloff band is defined
 // by, so those are what is drawn: the falloffMin iso-surface (fully ON) and
 // the falloffMax iso-surface (fully OFF).
-//
 // Everything here is built in the volume's own rigid local space, the SAME
 // space the field is measured in (RigExecRigPose::weightFrames is the very
 // matrix the kernels invert). That is what makes the drawing and the field
@@ -318,7 +308,6 @@ _ReadGuideStyle(
 // insists shape comes from floats and never from the transform: a scale
 // baked into the placement would deform the field without deforming this
 // guide, and the artist would be painting with a shape they cannot see.
-// ---------------------------------------------------------------------------
 
 // std::acos(-1) rather than M_PI, which needs _USE_MATH_DEFINES on MSVC.
 const double _kTwoPi = 2.0 * std::acos(-1.0);
@@ -334,7 +323,6 @@ constexpr int _kVolumeTubeSegments = 8;
 
 // Appends one closed ring about \p center in the plane spanned by \p axisA
 // and \p axisB, whose LENGTHS are the ring's semi-axes.
-//
 // The first point is repeated at the end: linear nonperiodic curves have no
 // wrap, so restating the start vertex is what closes the ring. That costs
 // one vertex and avoids the linear-periodic path entirely -- the same trade
@@ -368,7 +356,6 @@ _PerpendicularTo(const GfVec3f &t)
 
 // The volume's rigid ASSET-space placement, or nothing when it cannot
 // supply one.
-//
 // RemoveScaleShear() for exactly the reason _ResolveVolumeWeights applies
 // it to the same matrix: inputs:scaleX/Y/Z is the sole authority on
 // anisotropy, so a scale that leaked in through the transform would size
@@ -422,7 +409,6 @@ _ReadCurveGuidePoints(
 }
 
 // One sphere iso-surface at local radius \p radius.
-//
 // The points are the UNIT wire sphere and the radius (times the per-axis
 // divisors, which is what makes the iso-surface an ellipsoid) rides in the
 // transform -- so the wire and implicit draw modes are sized identically
@@ -470,7 +456,6 @@ _AppendSphereVolumeGuide(
 // One plane iso-surface: the rectangle at signed offset \p distance along
 // the local rigExec:planeAxis, sized by the in-plane half-extents
 // \p extentU and \p extentV.
-//
 // The size comes from inputs:extentU/extentV and from NOTHING ELSE. This
 // used to derive a half-size from the falloff band (max(1, |min|, |max|)),
 // which meant scrubbing the band resized the drawn square as well as
@@ -479,7 +464,6 @@ _AppendSphereVolumeGuide(
 // directions and different quantities: the band is a distance ALONG the
 // axis and is the only thing \p distance carries, the extents are the size
 // ACROSS it. Keeping them apart is bug (2) of this change.
-//
 // BOUNDED vs UNBOUNDED has to be readable at a glance, because it decides
 // whether the rectangle is the field's edge or just a label. Bounded draws
 // the closed rectangle alone: what you see is exactly what the field
@@ -489,7 +473,6 @@ _AppendSphereVolumeGuide(
 // the ticks are a fraction of the extent rather than a fixed length.
 // Filled corner flares or a fade would need a second material and a
 // gradient the guide protocol does not carry.
-//
 // Note the per-axis divisors are deliberately absent: the plane kernel
 // returns BEFORE inputs:scaleX/Y/Z is folded into its matrix, so a scaled
 // plane guide would draw a band the field does not have.
@@ -564,14 +547,12 @@ _AppendPlaneVolumeGuide(
 
 // One curve iso-surface: the tube of local radius \p radius about the
 // polyline through \p localCurve.
-//
 // Wire mode draws rings at every polyline vertex plus four longitudinal
 // rails. Geometry mode uses the same transported rings as shared vertices
 // of a closed manifold: outward-wound side quads and oppositely-wound end
 // caps. Its normals are face-varying so the caps remain flat without
 // splitting the ring vertices and turning the topology back into an open
 // surface.
-//
 // The polyline is already in the DIVIDED local space, so the tube is round
 // here and the per-axis divisors turn it elliptical through the transform
 // -- the same order the kernel folds them in.
@@ -1255,7 +1236,6 @@ RigExecImagingBridge::_FillControlGuides(
 
 // Every placed influence volume draws its falloffMin and falloffMax
 // iso-surfaces (spec §4.1 volumetric extension, drawn side).
-//
 // Driven by pose.weightFrames rather than by a second stage traversal: the
 // evaluator discovers every placed volume beneath the rig and resolves its
 // frame whether or not a mover consumes the field. That makes the schema's
@@ -1511,7 +1491,6 @@ RigExecImagingBridge::_FillCurvenetGuides(
 
 // Paints ONE selected weight object's resolved field onto the geometry it
 // weights (spec §10.3 influence-overlay extension).
-//
 // The field is taken from pose.weightFields -- the packet a mover actually
 // consumed -- rather than recomputed, so what a rigger sees is exactly what
 // deformed the geometry. A re-derivation could drift, and it would drift
@@ -1543,7 +1522,6 @@ RigExecImagingBridge::_FillWeightOverlay(
 }
 
 // Stamps WHICH STAGE and WHICH TIME a generation describes onto it.
-//
 // The store is process-global, so a consumer that finds a prim by path
 // alone -- the compute-extent callback is the one USD calls with a stage
 // and time of its own choosing -- would otherwise accept whatever rig
@@ -2533,19 +2511,16 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     }();
     if (!pose.valid) {
         // A rig that cannot evaluate STOPS DRIVING THE SCENE.
-        //
         // Returning here without publishing used to leave the last good
         // generation current, and every consumer kept serving it: disconnect
         // a constraint's rigExec:moves and the recompile fails ("Mover has no
         // moves targets"), so the mesh under the driven Xform stayed exactly
         // where the constraint had put it -- forever, through frame changes
         // and further edits.
-        //
         // Nothing downstream could correct that. The results scene index
         // handles a driven transform disappearing, and the store diffs a prim
         // that left the generation as structural -- but neither runs, because
         // there was no publication for them to run on.
-        //
         // Clearing is the rule the evaluator already applies to a
         // non-converged generation: an unevaluated result is recoverable, a
         // plausible wrong one is not. The scene falls back to what the stage

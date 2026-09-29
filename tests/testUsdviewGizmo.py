@@ -659,20 +659,20 @@ def testUsdviewInputFunction(appController):
     _Check(d.QtWidgets.QApplication.activeWindow() is not None,
            "the main window is active, so application shortcuts dispatch")
 
-    # The toolbar fits usdview's DEFAULT width: at the designer
-    # default (mainWindowUI.py:37, 1145x1002) the viewport frame is
-    # 598 logical px, and the Snap: button once pushed Undo/Redo into
-    # the overflow chevron. Asserted here, before the resize below --
-    # at 1800 px everything fits and the check would be vacuous.
-    # NOTHING folds into QToolBar's overflow chevron at usdview's default
-    # width. This used to ask only that Undo and Redo survive, and it was the
-    # most the row could promise: text buttons are as wide as the platform's
-    # UI font makes them, and on Windows at 10pt the row wanted 856 px against
-    # the ~600 it gets, so Snap, Undo, Redo, Settings and Graph all went into
-    # the chevron -- where, as the toolbar's own comment says, nobody finds
-    # them. The row is glyphs now (gizmoIcons), which are the width we choose
-    # rather than the width a font imposes, so every control fits everywhere
-    # and the assertion can say so.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     d.Pump()
     bar = controller.toolbar
     _Check(bar.width() > 0, "the toolbar is laid out already")
@@ -1195,11 +1195,11 @@ def testUsdviewInputFunction(appController):
            == Gf.Vec3d(1, 2, 3),
            "the same undo step reverted the child's compensation: %s"
            % stage.GetAttributeAtPath(childOpPath).Get(frame))
-    # Removing the prim is plain cleanup. It used to raise "Applying
-    # predicate to invalid prim" out of OpenExec's resync handler
-    # (pxr/exec/esfUsd/stageData.cpp) whenever a compiled evaluator was
-    # attached; tests/python/test_rigexec_stage_edits.py pins that fix, and
-    # an exception here is a real regression, not something to guard.
+
+
+
+
+
     stage.RemovePrim(childPath)
     d.Pump()
     _Check(not stage.GetPrimAtPath(childPath),

@@ -738,14 +738,14 @@ def TestImporterSkipsUnboundSets():
            "the layer OVERS the mesh rather than defining it -- stacked "
            "over the wrong asset it must fail to find the mesh, not "
            "conjure one; got %s" % mesh.GetSpecifier())
-    # The regions live on their own scope, NOT under the mesh: a face
-    # GeomSubset is collected by hdSt whatever family it declares, and
-    # 98 of them collided with `body_geo`'s five materialBind subsets for
-    # 16,739 warnings on open, over data the renderer never draws.
-    # The path is DERIVED from the mesh, not a constant: it used to be
-    # the literal "/Biped/TouchPose", so TouchPose worked for exactly one
-    # character. Here the mesh is /Body, which has no asset scope above
-    # it, so the regions land beside it at /TouchPose.
+
+
+
+
+
+
+
+
     expected = usdexport.scope_path_for("/Body")
     scope = written.GetPrimAtPath(expected)
     _Check(scope and scope.IsValid(),

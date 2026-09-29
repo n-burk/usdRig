@@ -1,6 +1,6 @@
 #!/bin/bash
 # bin/run_testusdview_viewcube.sh -- headless end-to-end test of the
-# Maya-style view cube (tests/testUsdviewViewCube.py) on
+# view cube (tests/testUsdviewViewCube.py) on
 # examples/ArmShotAnim.usda.
 #
 # Drives synthetic mouse events through the cube's own projected region

@@ -1,7 +1,5 @@
-//
 // The baked program's implementation state, and the helpers its build and run
 // halves share.
-//
 // bakedProgram.cpp is the only translation unit the evaluator declares a
 // friend, so everything the frame path needs out of RigExecRigEvaluator is
 // captured ONCE, at Build, into the pointers below; bakedPose.cpp and
@@ -10,10 +8,8 @@
 // friendship -- and the capture is also the list of exactly what a running
 // frame reads from outside itself, which Phase 2's step graph needs stated
 // rather than discovered.
-//
 // Nothing here is a second expression of semantics: the helpers are the ones
 // bakedProgram.cpp already had, moved so more than one file can call them.
-//
 #ifndef RIGEXEC_BAKED_PROGRAM_IMPL_H
 #define RIGEXEC_BAKED_PROGRAM_IMPL_H
 
@@ -73,9 +69,7 @@ namespace rigExec {
 class RigExecRigEvaluator;
 struct RigExecRigPose;
 
-// ---------------------------------------------------------------------------
 // Shared helpers.
-// ---------------------------------------------------------------------------
 
 // Mirrors computations.cpp _ComposeAvars (the provider compose exec runs).
 // The program must produce the same numbers as that callback, so the two are
@@ -177,23 +171,19 @@ RigExecBakedAnimatedOrConnected(const UsdAttribute &attribute)
            attribute.GetConnections(&connections) && !connections.empty();
 }
 
-// ---------------------------------------------------------------------------
 // The input binding table.
-//
 // RigExecResolvedInputs::GetAttribute -- which is what both exec's
 // AttributeValue accessor and every static read in the evaluator resolve
 // through -- walks a single authored connection chain and takes the nearest
 // readable upstream value, preferring anything this generation already
 // resolved. That WALK is epoch-structural: connections cannot change without
 // a resync, and a resync recompiles. Only the VALUES on it can move.
-//
 // So each input is classified once: if nothing on its walk is written by a
 // property chain and nothing on it might vary with time, the value is an
 // epoch constant and the frame path never touches USD for it. Otherwise it is
 // read per frame -- through a retained UsdAttributeQuery when USD alone can
 // answer, and through the generation's resolved inputs when a property chain
 // is in the way, which is the same route the dynamic path takes.
-// ---------------------------------------------------------------------------
 
 template <class T>
 struct RigExecBakedInput {
@@ -383,6 +373,7 @@ RigExecBakedOpName(RigExecRevisionOp op)
     case RigExecRevisionOp::BlendShape: return "blendShape";
     case RigExecRevisionOp::VolumeCorrect: return "volumeCorrect";
     case RigExecRevisionOp::Smooth: return "smooth";
+    case RigExecRevisionOp::DeltaMush: return "deltaMush";
     case RigExecRevisionOp::Lattice: return "lattice";
     case RigExecRevisionOp::SurfaceProject: return "surfaceProject";
     case RigExecRevisionOp::Ribbon: return "ribbon";
@@ -396,9 +387,7 @@ RigExecBakedOpName(RigExecRevisionOp op)
     return "unknown";
 }
 
-// ---------------------------------------------------------------------------
 // The program.
-// ---------------------------------------------------------------------------
 
 /// What a provider slot IS, which decides both what writes it and what the
 /// walk may do with it.
@@ -419,9 +408,7 @@ enum class RigExecBakedSlotKind {
     XformDerived,
 };
 
-// ---------------------------------------------------------------------------
 // The step graph.
-//
 // A run is a dependency graph of steps over dense slots rather than one
 // straight line. PROGRAM ORDER -- the order the straight line used -- is still
 // the reference: a step's index is its position in it, every edge points
@@ -429,13 +416,11 @@ enum class RigExecBakedSlotKind {
 // makes "byte-identical to the old Run" a property any topological order of
 // this graph has, because floating-point results depend only on operand values
 // and each step's arithmetic is fixed.
-//
 // A step declares the slot RANGES it reads and writes; the edges are computed
 // from those declarations alone (bakedSchedule.cpp). Declared writes are an
 // UPPER BOUND: a disabled constraint, a revision that did not execute and a
 // commit that passed through all write fewer slots than they declared, and no
 // executor may ever "write what was declared".
-// ---------------------------------------------------------------------------
 
 /// Which dense table a slot indexes.
 ///
@@ -675,8 +660,6 @@ struct RigExecBakedStep {
     /// to put a slot back.
     std::vector<int> preds, succs;
 
-    // ---- what a run outside the graph can change ---------------------------
-    //
     // A step is a pure function of its declared reads with three exceptions,
     // and every one of them is recorded here so that the dirty set can name
     // it rather than the executor having to guess (§7).
@@ -787,7 +770,6 @@ struct RigExecBakedCluster {
     /// grouped by and what the report sorts on.
     int level = 0;
 
-    // ---- what the last run did, filled by the parallel executor ----------
     /// When the cluster's last predecessor finished, when it started and
     /// when it ended, as RigExecProfiler::NowUs() reads. Recorded only while
     /// the schedule report or the profiler asks for them, so a production
@@ -991,15 +973,12 @@ struct RigExecBakedCones {
     /// stamp instead of being routed (unified-program spec rules S2, S3).
     std::vector<uint8_t> editRoute;
 
-    // ---- the same tables over STEPS ----------------------------------------
-    //
     // What a live run decides with. A cluster is the unit a task runs, not
     // the unit that moved: one dirty step does not make its cluster-mates
     // dirty, because they read exactly what they read last run and versioned
     // storage (§3.1) left it where it was. So the live closure is taken over
     // `step.succs` and a run skips every step outside it, including the clean
     // members of a cluster it does dispatch.
-    //
     // The per-cluster tables above are KEPT beside these rather than derived
     // from them on demand: the output-affected index, the sparse frame-cache
     // planner and the frozen clone read them, and each wants a cluster
@@ -1093,8 +1072,6 @@ struct RigExecBakedCommit {
     /// A constraint step's source scratch, sized at Build.
     std::vector<RigExecConstraintSource> sources;
 
-    // ---- where this commit's frames come from and go (§3.1) ---------------
-    //
     // Every index below is into `fin` / `base`, and every one of them was
     // decided at Build: a read names the VERSION of a slot that was live at
     // this commit's point in the program, and a write names storage no other
@@ -1185,8 +1162,6 @@ struct RigExecBakedProgramImpl {
     /// the same `_rigPath.GetParentPath()` for both.
     SdfPath assetRootPath;
 
-    // ---- the evaluator state the frame path reads --------------------------
-    //
     // Captured once, at Build, inside the one translation unit the evaluator
     // declares a friend. Pointers rather than copies wherever the value can
     // move between frames -- a drag rewrites the override list, a cache fills
@@ -1229,7 +1204,6 @@ struct RigExecBakedProgramImpl {
     /// program, so this one is a captured constant and not a pointer.
     bool hasPropertyChains = false;
 
-    // ---- dense provider slots, namespace DFS order ------------------------
     // The slot table is the ordered UNION of the two provider families the
     // dynamic walk holds in one frame map: the RigExec providers exec seeds
     // (_firstFramePoseFrames) and the plain Xformables a constraint targets
@@ -1248,8 +1222,6 @@ struct RigExecBakedProgramImpl {
     /// ancestor a propagated descendant rides.
     std::vector<int> propParent;
 
-    // ---- xform-derived provider slots -------------------------------------
-    //
     // A plain Xformable a constraint targets has no rest chain and no avars:
     // its pose is whatever the stage says its transform is, measured relative
     // to the asset root. The run reads that in its PROLOGUE -- it is a stage
@@ -1268,8 +1240,6 @@ struct RigExecBakedProgramImpl {
     /// It is also what `providerBaseXforms` publishes.
     std::vector<GfMatrix4d> xformBase, lastXformBase;
 
-    // ---- a constraint's own per-frame arrays ------------------------------
-    //
     // inputs:sourceWeights and the parent offsets are read RAW off the
     // attribute at the frame's time -- no connection walk, no resolved
     // input, no interactive override -- because that is what the dynamic
@@ -1304,8 +1274,6 @@ struct RigExecBakedProgramImpl {
     };
     std::vector<ConstraintArrays> constraintArrays;
 
-    // ---- native Xformable constraint sources ------------------------------
-    //
     // A constraint source (or aim world-up object) that is neither a
     // RigExecControl nor a RigExecJoint is read off the stage, exactly as a
     // target is -- and then RIDDEN on the revision of the deepest provider
@@ -1327,8 +1295,6 @@ struct RigExecBakedProgramImpl {
     std::vector<RigExecPointFrame> nativeFrames, lastNativeFrames;
     std::vector<char> nativeFrameOk, lastNativeFrameOk;
 
-    // ---- the provider ladder ----------------------------------------------
-    //
     // The rest chain and the default-space ladder, resolved once at Build
     // and again on any frame that can move them. Every channel below is a
     // BOUND input rather than a folded constant, which is what lets an
@@ -1406,8 +1372,6 @@ struct RigExecBakedProgramImpl {
     /// walk straight past.
     std::vector<char> noScaleAvars;
 
-    // ---- pose interpolators ------------------------------------------------
-    //
     // A RigExecPoseInterpolator reads the FINAL pose of its driver and writes
     // floats the geometry chains consume, so on the dynamic path it is a
     // phase of its own between the pose walk and the chains. Here it is a
@@ -1447,7 +1411,6 @@ struct RigExecBakedProgramImpl {
     std::vector<float> poseWeights;
     std::map<SdfPath, int> poseWeightIndex;
 
-    // ---- the input binding table ------------------------------------------
     std::vector<double> avarConstants;                 // providers * 11
     struct AvarBinding {
         size_t slot = 0;
@@ -1471,7 +1434,6 @@ struct RigExecBakedProgramImpl {
     size_t boundInputs = 0;
     size_t varyingInputs = 0;
 
-    // ---- per-frame working state (dense) ----------------------------------
     std::vector<double> avars;
     std::vector<GfMatrix4d> posedM;
     /// The pose frames, in SSA form (§3.1).
@@ -1534,15 +1496,12 @@ struct RigExecBakedProgramImpl {
     /// still never computed, which is the lazy set this program keeps.
     bool phasedReads = false;
 
-    // ---- rest->pose matrices ------------------------------------------------
-    //
     // What computeMatrix publishes, over dense slots: the whole
     // AuthoritativeSnapshot request is a re-derivation of values the walk
     // already holds. Program-owned rather than a per-frame allocation,
     // because BOTH halves of a frame read them, the geometry half must see
     // exactly the matrix the pose half published, and a 267 KB zero-fill per
     // frame is work that belongs at Build.
-    //
     // One ProviderMatrix step writes each entry the program can read -- the
     // set today's lazy finalMatrixOf/baseMatrixOf computed, no larger -- so
     // there is no on-demand fill and no per-frame reset: an entry no step
@@ -1553,12 +1512,9 @@ struct RigExecBakedProgramImpl {
     /// it. Build fills both.
     std::vector<char> needFinal, needBase;
 
-    // ---- solvers -----------------------------------------------------------
     struct Solver {
         SdfPath path;
         TfToken type;
-        // ---- the rest description ------------------------------------
-        //
         // Exec rebuilds every one of the rest members below from the
         // epoch's rests on EVERY evaluation, because it is a pure function
         // of them. The bake resolves it once, and RigExecBakedRefreshSolver
@@ -1681,8 +1637,6 @@ struct RigExecBakedProgramImpl {
         // (providerSlot, element) pairs this solver writes
         std::vector<std::pair<int, int>> outputs;
 
-        // ---- the Solve step's own scratch, sized at Build -----------------
-        //
         // The candidates this solver published, in `outputs` order and
         // nowhere else: the merge into the batch's table is the commit's
         // job, so two solvers of one batch never write the same storage --
@@ -1712,7 +1666,6 @@ struct RigExecBakedProgramImpl {
     std::map<SdfPath, int> solverIndex;
     std::vector<RigExecPointFrameArray> aggregates;
 
-    // ---- constraints -------------------------------------------------------
     struct Constraint {
         SdfPath path;
         TfToken type;
@@ -1775,8 +1728,6 @@ struct RigExecBakedProgramImpl {
         /// rig with no read phase pays per constraint.
         bool snapshotAfter = false;
 
-        // ---- SingleChainIK -------------------------------------------------
-        //
         // The one multi-target built-in: it revises its whole inferred joint
         // chain atomically, so `targetSlots` IS the chain and the commit
         // declares every one of them.
@@ -1787,6 +1738,7 @@ struct RigExecBakedProgramImpl {
         /// resolved against _IkUsesAnimatedTs. Both are uniform tokens over
         /// epoch-structural state, so both are settled at Build.
         bool poleModeObject = false;
+        bool preserveJointOrientation = false;
         bool useAnimatedTs = false;
         /// Parallel to targetSlots: the compiled "a step below wrote this
         /// joint" flags, so the rest reference is that step's frame.
@@ -1804,7 +1756,6 @@ struct RigExecBakedProgramImpl {
     };
     std::vector<Constraint> constraints;
 
-    // ---- the walk ----------------------------------------------------------
     struct WalkStep {
         bool solverBatch = false;
         size_t level = 0;
@@ -1819,8 +1770,6 @@ struct RigExecBakedProgramImpl {
     };
     std::vector<WalkStep> walkSteps;
 
-    // ---- the step graph ----------------------------------------------------
-    //
     // Built from the tables above, once, at the end of Build. `steps` is in
     // program order -- the order today's straight-line Run visited the same
     // work in -- and every edge points forward in it.
@@ -1857,8 +1806,6 @@ struct RigExecBakedProgramImpl {
     /// because std::atomic is neither copyable nor movable.
     std::unique_ptr<RigExecBakedClusterCounter[]> clusterCounters;
 
-    // ---- cone re-execution -------------------------------------------------
-    //
     // What a run may SKIP. The sets are Build's; everything below them is the
     // last run's answer, kept so that this run's sources can be compared with
     // it by VALUE. There is no "time changed" and no "overridden" predicate
@@ -1929,7 +1876,6 @@ struct RigExecBakedProgramImpl {
     size_t solverOverrideRounds = 0;
     size_t solverEvaluations = 0;
 
-    // ---- publication -------------------------------------------------------
     std::vector<int> jointSlots;
     std::vector<SdfPath> jointPaths;
     std::vector<int> controlSlots;
@@ -1982,7 +1928,6 @@ struct RigExecBakedProgramImpl {
     /// Build, so the epilogue allocates nothing.
     std::vector<char> jointMatrixPublished;
 
-    // ---- geometry ----------------------------------------------------------
     // One entry per revision of one chain, in chain order. The packet is
     // assembled by the SAME RigExecAssembleParameters the dynamic path calls
     // and the kernel is the same shared kernel, so only the plumbing around
@@ -2194,7 +2139,6 @@ struct RigExecBakedProgramImpl {
         /// VdfNetwork node instead of adding one.
         bool created = true;
 
-        // ---- what the steps of a revision hand each other -----------------
         /// The influence table the PACKET carries, which for a skin revision
         /// is identity and nothing else: the packet is assembled before the
         /// matrices are folded, precisely so a chunk can start on its own
@@ -2233,7 +2177,6 @@ struct RigExecBakedProgramImpl {
         /// never a dirtiness flag -- a control dragged back to where it
         /// started must not count as executed.
         bool executed = false;
-        // ---- the vertex partition ------------------------------------------
         /// The revision's vertex chunks, in vertex order, covering
         /// [0, pointCount) exactly once. Always at least one; more only for
         /// a skin revision whose layout the epoch fixed (see
@@ -2266,7 +2209,6 @@ struct RigExecBakedProgramImpl {
         int partitionReadyMin = 0;
         int partitionReadyMax = 0;
 
-        // ---- what RevisionStatic decides for the whole array ---------------
         /// The layout half of the skin kernel's validation (the matrix half
         /// is `influencesValid` below).
         bool layoutUsable = false;
@@ -2297,7 +2239,6 @@ struct RigExecBakedProgramImpl {
         /// whole rather than a chunk deforming a vertex against an identity.
         bool partitionStale = false;
 
-        // ---- the weight object this revision binds -------------------------
         /// rigExec:weightObject as an index into `weightObjects`, or -1.
         /// The packet itself is shared -- one per object per frame, however
         /// many movers bind it -- so what a revision holds is the index.
@@ -2323,7 +2264,6 @@ struct RigExecBakedProgramImpl {
         std::vector<float> weightField;
         bool weightFieldPublished = false;
 
-        // ---- what InfluenceFold decides for the whole array ----------------
         /// Every influence matrix finite and affine. For a skin revision the
         /// packet cannot answer this -- it is assembled before the matrices
         /// are folded -- so the fuse ANDs this in where the dynamic path's
@@ -2421,13 +2361,10 @@ struct RigExecBakedProgramImpl {
     std::vector<GfMatrix4d> deltaBaseMatrix, lastDeltaBaseMatrix;
     std::vector<char> deltaBaseOk, lastDeltaBaseOk;
 
-    // ---- weight objects ----------------------------------------------------
-    //
     // One entry per weight object the epoch reaches, in DEPENDENCY ORDER
     // (post-order over rigExec:baseWeight and rigExec:inputWeights, children
     // before parents), so one forward pass per frame builds every packet and
     // a composed object finds its inputs already built.
-    //
     // The sharing matters as much as the order: exec's
     // Relationship().TargetedObjects<RigExecWeightPacket>() accessor gives
     // one packet per weight object per generation no matter how many movers
@@ -2464,7 +2401,6 @@ struct RigExecBakedProgramImpl {
         /// answer.
         size_t costElements = 1;
 
-        // ---- the volumetric three ------------------------------------------
         /// The provider slot the volume is posed into, and therefore the
         /// BASE frame its field is placed against -- base and not final,
         /// because the evaluator overrides every seeded provider's
@@ -2492,8 +2428,6 @@ struct RigExecBakedProgramImpl {
         /// The epoch's resampled falloff remap, copied from falloffLuts.
         std::vector<float> falloffCurve;
 
-        // ---- RigExecCurvenetWeight -----------------------------------------
-        //
         // The one weight object whose field is not a formula over a few
         // floats: it is the solution of a factorized system over the CUT
         // mesh, so the packet needs the BIND that factorization lives in.
@@ -2580,12 +2514,9 @@ struct RigExecBakedProgramImpl {
     /// region.
     std::vector<RigExecWeightPacket> weightPackets;
 
-    // ---- the invalidation index --------------------------------------------
-    //
     // What the bake looked at, so a notice can be answered without rebuilding
     // and without guessing. Four sets, because a notice asks four different
     // questions and one set would have to answer the bluntest of them:
-    //
     //  * `rebuild` -- properties whose VALUE decided something the program
     //    holds: a folded constant, or the selection of a per-frame query.
     //    A changed-info notice on one of these rebuilds the program.
@@ -2602,7 +2533,6 @@ struct RigExecBakedProgramImpl {
     //    the identity today, which is a judgement about their composed
     //    transform and not about one attribute, so any property of theirs
     //    counts.
-    //
     // A changed-info notice that misses all of them is a value edit on an
     // input the frame path re-reads, and needs nothing.
     std::set<SdfPath> rebuild;
@@ -2610,7 +2540,6 @@ struct RigExecBakedProgramImpl {
     std::set<SdfPath> prims;
     std::set<SdfPath> xformPrims;
 
-    // ---- interactive override placement -------------------------------------
     // One flag per registered input; see RigExecBakedRead. Kept as a dense
     // vector so the frame path costs an index rather than a map lookup per
     // read.
@@ -2663,9 +2592,7 @@ struct RigExecBakedProgramImpl {
     bool publishWeightFields = true;
 };
 
-// ---------------------------------------------------------------------------
 // What committing an input records, and where it can be recorded.
-//
 // A committed input records two kinds of fact. Its override NUMBER is
 // order-bearing: numbers are handed out from one running counter, so the
 // order inputs are committed in IS the numbering the program carries, and
@@ -2673,10 +2600,8 @@ struct RigExecBakedProgramImpl {
 // Everything else is order-free -- two counts that sum, and paths landing
 // in the sets of the invalidation index, where inserting a path a second
 // time is a no-op whenever it happens.
-//
 // RigExecBakedRecordBind and RigExecBakedRecordFold state both kinds once,
 // against a sink that receives them, and there are two sinks:
-//
 //  * RigExecBakedProgramSink writes straight into the program, numbering
 //    from `overridden.size()`. This is the serial commit, CommitBind's, one
 //    input at a time in program order.
@@ -2685,13 +2610,11 @@ struct RigExecBakedProgramImpl {
 //    number is the running counter at the phase's entry plus every number
 //    the chunks before it handed out -- a prefix sum, known only once every
 //    chunk has counted -- and RigExecBakedMergeCommitShards adds it.
-//
 // So a parallel commit cannot drift from the serial one: the rule is
 // written here once and only WHERE the facts land differs. Chunks are
 // contiguous runs of the program order and are merged in that order, which
 // is what makes the numbers, and each `overridableInputs` entry's order,
 // the serial ones exactly.
-// ---------------------------------------------------------------------------
 
 /// The serial sink: every fact straight into \p program.
 struct RigExecBakedProgramSink {
@@ -2837,15 +2760,12 @@ RigExecBakedRecordFold(Sink *sink, const UsdPrim &prim, const char *name)
     sink->Prim(prim.GetPath());
 }
 
-// ---------------------------------------------------------------------------
 // The compiled epoch, in terms the program can name.
-//
 // RigExecRigEvaluator's compiled structures are private nested types, so only
 // bakedProgram.cpp can read them. It restates the parts each domain's bake
 // needs as the plain records below and hands those over; the per-domain bake
 // functions then depend on the SHAPE of the epoch rather than on the
 // evaluator, which is what keeps the friendship to one file.
-// ---------------------------------------------------------------------------
 
 /// One frame constraint of the compiled walk.
 struct RigExecBakedConstraintSpec {
@@ -3059,7 +2979,6 @@ RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
     // layer it names still has the new number -- but it resolves the spline
     // itself once and keeps answering from the copy it took, silently and
     // with nothing downstream able to tell.
-    //
     // That is not a hypothetical: Animation mode authors a released gizmo
     // drag as a spline knot (gizmoMath.SetAnimated), so the FIRST release on
     // a control creates the property spec -- a resync, which rebakes and
@@ -3070,7 +2989,6 @@ RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
     // publishing the first drag's pose: the control moved under the preview
     // and sprang back the moment the artist let go, until some other
     // control's first release resynced and rebaked the program for it.
-    //
     // Reading through the generation's resolved inputs is what the dynamic
     // path does for the same attribute, so the two still agree by
     // construction, and `live` in RigExecBakedRecordBind stays honest: the
@@ -3093,13 +3011,10 @@ RigExecBakedBuildContext::CommitBind(const UsdPrim &prim, const char *name,
     RigExecBakedRecordBind(&sink, prim, name, input, walk);
 }
 
-// ---------------------------------------------------------------------------
 // The per-domain halves of Build and Run.
-//
 // Build calls the two builders in program order and Run calls the two
 // executors in program order; each pair lives in one file so that a domain's
 // bake and its frame path are read side by side.
-// ---------------------------------------------------------------------------
 
 /// Bakes the interleaved solver/constraint walk into \p ctx's program.
 void RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,

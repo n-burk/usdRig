@@ -1,7 +1,5 @@
-//
 // The skin layout is resolved once per binding epoch and shared, so these
 // are the cases where "once per epoch" must not mean "once, ever":
-//
 //  - a weight-paint edit is a VALUE edit. It does not change the structure
 //    digest, so no new epoch begins and nothing recompiles; the only thing
 //    standing between the artist's new weights and a stale deformation is
@@ -11,7 +9,6 @@
 //    and the rig has to keep deforming correctly frame by frame.
 //  - an interactive override is a value the static reads must prefer over
 //    the stage, and the layout is read through exactly that route.
-//
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
@@ -355,7 +352,6 @@ TestPointCountChangeFailsAtomically()
 
 // A partial constant envelope, which is the case both geometry loops' "the
 // blend is the identity, skip it" fast path must NOT take.
-//
 // Every shipped stage and every other fixture here carries a full-strength
 // constant envelope, where skipping and blending give the same answer -- so
 // without this the predicate is only ever exercised where it cannot be
@@ -386,7 +382,6 @@ TestAPartialConstantEnvelopeIsApplied()
 }
 
 // The same refusal, taken AFTER the epoch was compiled.
-//
 // Authoring the first time sample on a layout attribute -- or connecting it --
 // moves no structure digest, so nothing recompiles and Compile's decision is
 // never re-taken. It does send a notice, and a notice drops the cache, so the
@@ -424,7 +419,6 @@ TestWeightsBecomeTimeSampledAfterCompile()
 
 // And the connected half of the same after-Compile case: an attribute that
 // gains a connection after the epoch was compiled.
-//
 // The layout read itself does not FOLLOW the connection (see _Array in
 // moverGraph.cpp: the attribute's own value is what a layout is), so the
 // values below are the attribute's throughout. What is being tested is that
@@ -498,7 +492,6 @@ TestAnUnrelatedEditDoesNotRerunTheKernel()
 
 // An override one hop UPSTREAM of a layout attribute drops the layouts, and
 // reaches the deformation.
-//
 // The hazard the narrow clear has to survive. An override is compared against
 // the properties that can REACH a layout, and "reach" has to mean the same
 // walk the value is read through: RigExecResolvedInputs::GetAttribute follows
@@ -507,7 +500,6 @@ TestAnUnrelatedEditDoesNotRerunTheKernel()
 // value the mover assembles with. Compare an override against the mover's own
 // four attributes alone and that one is called unrelated, the layouts are
 // kept, and a mover deforms against a binding nobody has any more.
-//
 // Two halves, and they prove different things. The deformation changing is
 // the read walk: skinningMethod is assembled per frame, so it would follow
 // the override whatever this cache did. The cache EMPTYING is the predicate:
@@ -581,7 +573,6 @@ TestAnOverrideUpstreamOfTheLayoutDropsTheCache()
 }
 
 // An override on a control keeps them.
-//
 // The whole point of narrowing the clear: a drag names a control avar, and
 // re-reading and re-comparing every skinned mesh's layout for it costs about
 // a third of a baked drag frame on a biped (~400us of ~1.1ms) for arrays no

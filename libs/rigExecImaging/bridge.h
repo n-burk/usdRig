@@ -1,11 +1,8 @@
-//
 // RigExec Hydra publication bridge (spec §8.2 generation-fenced flow).
-//
 // Owns the evaluator-side of the imaging chain: evaluation completes
 // first, then the complete immutable generation is atomically published
 // to the snapshot store, and only then are precise dirtied notices sent.
 // Hydra pulls never compute or wait.
-//
 #ifndef RIGEXEC_IMAGING_BRIDGE_H
 #define RIGEXEC_IMAGING_BRIDGE_H
 

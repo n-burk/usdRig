@@ -1,4 +1,3 @@
-# ---------------------------------------------------------------------------
 # _rigexec: pybind11 extension module + rigexec pure-Python package.
 #
 # The native module binds the spec section 4 authoring surface (Builder and
@@ -8,7 +7,6 @@
 # are Boost.Python; _rigexec is pybind11. Both coexist because they load the
 # SAME USD shared libraries (Windows DLL caching), and a pxr object's C++
 # owner is recovered through its "refptr" capsule -- see _rigexec.cpp.
-# ---------------------------------------------------------------------------
 
 find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
 

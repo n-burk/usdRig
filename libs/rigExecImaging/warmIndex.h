@@ -1,9 +1,6 @@
-//
 // RigExec warm-frame index: the shared-owned completed-per-frame store
 // behind the per-frame query API (plan 1.4).
-//
 // One index serves every rig in the registry. It records, per (rig, time):
-//
 //   * the publish completion (key + generation), fed by publish-confirmed
 //     completions recording into shared state -- the worker closure on its
 //     Published outcome, the UI thread on a memoized publish -- and retired
@@ -11,17 +8,14 @@
 //     key for a republished time retires nothing) and by Clear;
 //   * the queue visibility (queued/running), fed by the scheduler's
 //     per-frame transition hooks.
-//
 // Dirtiness is computed, not stored: a completion under an older generation
 // or epoch than the query's is dirty (global until Stream 2 scopes it).
 // Proofs are NOT consulted here -- no per-frame sampling on the query path,
 // and no callbacks into bridges, which sessions may destroy under live jobs.
-//
 // Locking: the index mutex is a leaf, taken under the registry mutex (query,
 // memoize, reset), under the scheduler mutex (transition hooks), and alone
 // (worker completions, eviction callbacks, which run outside every cache
 // lock). It never takes another lock and never calls out.
-//
 #ifndef RIGEXEC_IMAGING_WARM_INDEX_H
 #define RIGEXEC_IMAGING_WARM_INDEX_H
 

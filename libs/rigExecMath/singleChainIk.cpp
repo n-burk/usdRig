@@ -1,6 +1,4 @@
-//
 // RigExec arbitrary-length single-chain IK kernel.
-//
 #include "singleChainIk.h"
 
 #include <algorithm>
@@ -545,9 +543,14 @@ RigExecSolveSingleChainIk(
     for (size_t i = 0; i + 1 < solvedBases.size(); ++i) {
         const GfVec3d solvedSegment = solved[i + 1] - solved[i];
         const GfVec3d aim = solvedSegment / solvedSegment.GetLength();
-        solvedBases[i] = _AimedBasis(bases[i], aim, angularEpsilon);
+        solvedBases[i] = params.preserveJointOrientation
+            ? _TransportedBasis(bases[i],
+                (original[i + 1] - original[i]).GetNormalized(), aim,
+                angularEpsilon)
+            : _AimedBasis(bases[i], aim, angularEpsilon);
     }
-    if (params.mode == RigExecSingleChainIkMode::SingleChain) {
+    if (params.mode == RigExecSingleChainIkMode::SingleChain &&
+        !params.preserveJointOrientation) {
         solvedBases.back() = effectorBasis;
     } else {
         const GfVec3d currentTerminalSegment =

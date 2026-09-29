@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 # Maximum Z-depth for orthographic projection (rendering depth range is -MAX_RENDER_DEPTH to +MAX_RENDER_DEPTH)

@@ -1,12 +1,9 @@
-//
 // RigExec OpenExec computation registrations (spec §12.1).
-//
 // Every semantically addressable transform provider publishes paired
 // computePointFrame / computeMatrix. Packed solver boundaries publish the
 // aggregate computePointFrameArray; scalar scene-addressable providers
 // (joints, views) consume the aggregate and publish scalar frames
 // (spec §5.7 universal point extraction invariant).
-//
 #include "types.h"
 #include "frameExtraction.h"
 #include "solverKernels.h"
@@ -168,7 +165,6 @@ _IdentityLandmarks()
 // provider path -- RigExecPointTransformAPI carried one and was removed as
 // dead surface (see docs/specs/dead-surface-removal.md).
 
-// ---------------------------------------------------------------------------
 // RigExecJoint (IrXformable mirror, user-directed alignment 2026-07-25):
 // matrix4d rest/posed spaces with scalar avars. A solver-posed joint's frame
 // arrives as a value override from RigExecRigEvaluator (exec cannot traverse
@@ -177,7 +173,6 @@ _IdentityLandmarks()
 // an unconnected joint follows its namespace-parent joint's posed space with
 // its local rest offset and avars applied. Point frames stay the internal
 // value type: the spaces convert to landmark frames at this boundary.
-// ---------------------------------------------------------------------------
 
 static double
 _ScalarInput(const VdfContext &ctx, const TfToken &name, double fallback)
@@ -340,7 +335,6 @@ _ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
     // supplies its frame as a value override, because exec cannot traverse
     // the solver's rigExec:joints backwards to find it. What remains here is
     // every other way a joint gets posed.
-    //
     // 1. Connected posed:space (a provider's out:space) is authoritative.
     if (const GfMatrix4d *connected =
             ctx.GetInputValuePtr<GfMatrix4d>(_tokens->posedConnected)) {
@@ -557,13 +551,11 @@ RIGEXEC_REGISTER_XFORMABLE(
 // it deliberately does not bind avars:sx/sy/sz: volume shape is authored only
 // through inputs:scaleX/Y/Z, and its placement is rigidized by both evaluation
 // and imaging.
-//
 // Registered ONCE on the ABSTRACT base, unlike the two above. Exec
 // composes a prim's computation set by walking its full ancestor type
 // vector strongest-to-weakest (exec/definitionRegistry.cpp
 // _GetFullyExpandedSchemaTypeVector), so the three concrete volume
 // weights inherit these three computations from RigExecVolumeWeight.
-//
 // It has to be the base rather than the concrete types, because the
 // concrete types already carry an
 // EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA block in moverKernels.cpp for
@@ -581,11 +573,9 @@ RIGEXEC_REGISTER_XFORMABLE(
 #undef RIGEXEC_NO_AVAR_SCALE_INPUTS
 #undef RIGEXEC_AVAR_SCALE_INPUTS
 
-// ---------------------------------------------------------------------------
 // RigExecFkChain: applies control frames to a rest hierarchy. v0.1 treats
 // the targeted control list as an ordered chain (each element's parent is
 // the preceding element).
-//
 // rigExec:controlSpace says what a control's frame already contains.
 // `world` (default): sibling controls, each frame carrying only its own
 // delta A_i, composed here as W_i = W_(i-1) . A_i. `parentRelative`:
@@ -595,7 +585,6 @@ RIGEXEC_REGISTER_XFORMABLE(
 // pose_i . rest_i^-1 IS W_i and composing the parent in again would apply
 // its motion twice -- every element is solved as a chain root instead.
 // The joints come out the same either way; only the control frames differ.
-//
 // rigExec:startFrame (optional) is the frame the chain HANGS FROM. Without
 // it this solver is absolute: it composes control deltas onto the controls'
 // own asset-space rests and nothing tells it that its joints live under,
@@ -609,7 +598,6 @@ RIGEXEC_REGISTER_XFORMABLE(
 // rather than onto -1). The synthetic element's own frame is then DROPPED,
 // which is what keeps the published cardinality equal to the control count
 // and every joint's element index unchanged.
-// ---------------------------------------------------------------------------
 
 // The joints' rest references, in rigExec:joints order, and which of them a
 // pose step BELOW this solver actually wrote (RigExecPointFrameLiveRest, set
@@ -677,7 +665,6 @@ _ComputeFkChain(const VdfContext &ctx)
     // left on that joint -- its authored rest when none did -- and it is the
     // basis this chain composes its control deltas onto, so a constraint
     // below the chain is carried through the solve instead of replaced.
-    //
     // Used only when there is exactly one per control, which is the
     // positional contract rigExec:joints[N] <- element N already has. A
     // chain with no joints (a guide-only solver), or one whose targets do
@@ -778,9 +765,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecFkChain)
             AttributeValue<TfToken>(_tokens->controlSpace));
 }
 
-// ---------------------------------------------------------------------------
 // RigExecTwoBoneIk: analytic solve publishing [root, mid, end] frames.
-// ---------------------------------------------------------------------------
 
 static RigExecPointFrameArray
 _ComputeTwoBoneIk(const VdfContext &ctx)
@@ -920,9 +905,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwoBoneIk)
             AttributeValue<float>(_tokens->inputsSoftness));
 }
 
-// ---------------------------------------------------------------------------
 // RigExecBlendPointFrames: element-wise blend of two aggregates.
-// ---------------------------------------------------------------------------
 
 static RigExecPointFrameArray
 _ComputeBlendPointFrames(const VdfContext &ctx)
@@ -942,7 +925,6 @@ _ComputeBlendPointFrames(const VdfContext &ctx)
         ctx.GetInputValuePtr<float>(_tokens->inputsWeight);
     // Clamp to [0, 1]: a blend weight outside the unit interval extrapolates
     // past both inputs, which is never what a blend means.
-    //
     // This is a BOUND, not the author's clamp. RigExecFloatMathMover is
     // evaluated now, and the reference assets' ClampIKFKWeight /
     // ClampBlendWeight movers reach this computation as a value override on
@@ -1034,9 +1016,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendPointFrames)
             AttributeValue<TfToken>(_tokens->scaleBlend));
 }
 
-// ---------------------------------------------------------------------------
 // RigExecTwistDistribution: N frames between start and end providers.
-// ---------------------------------------------------------------------------
 
 static RigExecPointFrameArray
 _ComputeTwistDistribution(const VdfContext &ctx)
@@ -1103,14 +1083,12 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwistDistribution)
             AttributeValue<double>(_tokens->twistTurns));
 }
 
-// ---------------------------------------------------------------------------
 // RigExecSplineIk: control-driven spline IK over an ordered joint chain.
 // Three control frames shape the curve; the chain named on rigExec:joints
 // supplies the rest CVs and the rest spacing, and receives one frame per
 // entry. All of it is pose-phase: the curve is never scene data, so a
 // control-driven pose reaches it directly (contrast RigExecRibbon, whose
 // native driver curve cannot see mover output).
-// ---------------------------------------------------------------------------
 
 static RigExecPointFrameArray
 _ComputeSplineIk(const VdfContext &ctx)

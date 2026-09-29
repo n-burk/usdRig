@@ -1,13 +1,10 @@
-//
 // RigExec background scheduler. See backgroundScheduler.h.
-//
 // The pool is std::thread only: no Work, no TBB anywhere in this file. A
 // kernel-level parallel call on a worker would run its tasks on the shared
 // arena at normal priority, past the below-normal boundary the pool exists to
 // hold -- so each job runs under a RigExecFrozenSerialScope instead, and the
 // OS priority call sits behind the one function the plan's risk table asks
 // for, with a logged no-op fallback.
-//
 #include "backgroundScheduler.h"
 
 #include "frozenContext.h"

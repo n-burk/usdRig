@@ -1,8 +1,6 @@
-//
 // The per-point geometry kernels run over point ranges on several threads.
 // "Bit-identical" is the claim that makes that safe, and it has two halves,
 // both asserted here:
-//
 //  - splitting the range changes nothing. A point range is an independent
 //    sub-layout -- point i reads slots i * elementSize and writes index i --
 //    so the parallel result must equal the scalar reference computed one
@@ -12,11 +10,9 @@
 //    two results compared bit for bit; ctest also runs this whole suite a
 //    second time with RIGEXEC_ENABLE_PARALLEL_EVAL=0, which takes the other
 //    branch entirely.
-//
 // The meshes here are deliberately larger than RigExecGeometryParallelThreshold
 // (and the small one deliberately smaller), because a threshold that is never
 // crossed in a test is a threshold that is never tested.
-//
 #include "rigExec/moverGraph.h"
 #include "rigExec/parallel.h"
 #include "rigExec/types.h"

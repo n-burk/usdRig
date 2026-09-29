@@ -15,9 +15,7 @@ re-evaluation.
 - **First scrub over a cold range** computes each frame live, exactly as
   today, and keeps the poses it computed.
 - **Scrub back** over a warmed range serves frames from the cache with no
-  re-evaluation — that is the speedup (about 4× a cold scrub on the biped
-  in the default mode; `reports/frame-cache-measurements.md` §6 has the
-  numbers).
+  re-evaluation.
 - **Drag a control** and the frame under the cursor evaluates live on every
   tick, as today; warming never serves a neighboring frame's pose in place
   of the requested one, and it never makes a drag laggier. When you release
@@ -69,9 +67,7 @@ re-evaluation.
 - The cache is **in memory only** — there is no on-disk persistence, so
   restarting the session starts cold.
 
-## Sources
+## Implementation
 
-`reports/frame-cache-measurements.md` (the measured numbers behind the
-defaults above); `docs/plans/per-frame-caching-system.md` (the full plan);
-`docs/specs/baked-step-graph.md` (the cache-interaction appendix, for the
-engineering detail).
+See [architecture](../specs/spec.md), `libs/rigExec/frameCache.cpp`, and
+`libs/rigExec/backgroundScheduler.cpp` for cache ownership and scheduling.

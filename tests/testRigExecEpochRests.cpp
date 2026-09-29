@@ -1,7 +1,5 @@
-//
 // The epoch's rest frames: when they may be pulled once, and what has to put
 // them back on the per-frame path.
-//
 // A rest frame is a function of rest:space and the six rest avars of a
 // provider and of its RigExec ancestors, and of nothing else. When none of
 // those can move within the epoch, every frame's answer is the same answer
@@ -9,7 +7,6 @@
 // where "once" is wrong, and each of them is invisible to the structure
 // digest -- which hashes wiring, not values and not time codes -- so none of
 // them recompiles by itself:
-//
 //   * a rest channel carrying time samples, or connected, or written by a
 //     property chain: the frames are not epoch constants at all;
 //   * the same three, authored AFTER the epoch was compiled;
@@ -18,14 +15,11 @@
 //     as authoring it would, or the drag and the commit of that same drag
 //     disagree -- and jointMatricesFinal is the rest->pose map, so a pose
 //     that moved against a rest that did not is not a pose of this rig.
-//
 // Every case is checked against a REFERENCE stage carrying the same value
 // authored plainly before it was ever compiled, because a rest edit moves a
 // joint's rest frame and its posed frame together and comparing the two
 // halves against each other proves nothing.
-//
 // argv[1] = path to the examples directory.
-//
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
@@ -207,7 +201,6 @@ RunWithConstantRestSpace(const std::string &examplesDir,
                epochRestCount);
 }
 
-// ---------------------------------------------------------------------------
 
 // The ordinary rig: no rest channel can move, so the epoch holds them all.
 // Everything below is a departure from this, and without it they could all
@@ -340,7 +333,6 @@ TestAConnectedRestIsPulledPerFrame(const std::string &examplesDir)
 }
 
 // rest:space carrying a connection.
-//
 // It is the one MATRIX channel of the ladder exec reads with a plain
 // AttributeValue -- computations.cpp declares it in computeRestFrame beside
 // AttributeValue<double>(rest:tx), and registers its five space expressions
@@ -404,7 +396,6 @@ TestAConnectedRestSpaceIsPulledPerFrame(const std::string &examplesDir)
 // spaces reaches a COMPUTATION -- here the space expression that follows the
 // namespace parent -- and the walk would read the target's raw authored
 // value instead. The program must hand that rig back rather than answer it.
-//
 // Bakeability only: this suite's ctest entries require the bake, so a case
 // that EVALUATED an unbakeable rig would fail them by design.
 void
@@ -434,7 +425,6 @@ TestARestSpaceConnectedToAComputedSpaceRefusesTheBake(
 }
 
 // A rest that moves while nothing else in the rig does.
-//
 // The pose prologue recomposing a ladder is a per-run delta like any other,
 // and it owes the schedule a dirty hook: without one, a frame whose avars
 // and whose time-sampled inputs all stood still would skip the compose that
@@ -544,7 +534,6 @@ TestAPropertyChainOnARestRefusesTheEpochPath(const std::string &examplesDir)
 }
 
 // An interactive override standing on a rest channel.
-//
 // The drag and the commit of that same drag have to agree, so the override is
 // compared against the identical value AUTHORED on a stage that was compiled
 // with it. The epoch must still be on the constant-rest path here: that is
@@ -658,7 +647,6 @@ TestAnOverrideElsewhereLeavesTheRestsAlone(const std::string &examplesDir)
 }
 
 // A rest pull that fails fails the compile, wherever the pull ran.
-//
 // A baked compile pulls its epoch rests on the exec lane, beside its commit
 // and its bake, and only learns the verdict at the rest join behind the bake
 // -- by which time the epoch is committed and a program may have been built
@@ -666,7 +654,6 @@ TestAnOverrideElsewhereLeavesTheRestsAlone(const std::string &examplesDir)
 // ahead of the commit: Compile false with the same error, no program, and a
 // rig that is not compiled, so the next evaluate asks again instead of
 // running the program of an epoch whose rests it never got.
-//
 // The pull is made to fail by aiming a constraint at a RigExecControl that
 // is inactive: it is still a frame provider by type, so it is seeded into
 // the rest request, and exec cannot compute a rest frame for it. A baked
@@ -787,7 +774,6 @@ RunInMode(const std::string &examplesDir, const _Edit &edit,
 }
 
 // A rest VALUE edited after the compile, in the session layer, on \p prim.
-//
 // The digest reads no rest value, so nothing recompiles, and the epoch keeps
 // its rest frames as constants: only their values are wrong. The program
 // answers the frames right after the edit from its own rebuilt rests, which
@@ -796,7 +782,6 @@ RunInMode(const std::string &examplesDir, const _Edit &edit,
 // the oracle has to re-pull and read the edited rest -- not the one the
 // epoch pulled at the compile. Both halves are compared with the same value
 // authored before a fresh compile, in the same mode.
-//
 // \p prim is the joint itself, and a RigExec ancestor of it, whose rest
 // reaches the joint through the namespace-ancestor input of its rest frame.
 void
@@ -883,7 +868,6 @@ CheckARestValueEditAfterCompile(const std::string &examplesDir,
 
 // The same rest VALUE edit, with the program kept for the whole epoch and
 // the oracle run beside it on every frame: BakedWithParityCheck.
-//
 // The program stands, so the settle does not re-pull the epoch's rests; the
 // dynamic walk the mode runs after the program is their one reader and has
 // to re-pull them itself, before it reads them. A walk that read the rests

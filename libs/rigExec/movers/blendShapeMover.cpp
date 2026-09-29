@@ -1,15 +1,11 @@
-//
 // RigExecBlendShapeMover: everything about the blend-shape mover
 // (spec §4.1, §7.3).
-//
 // A blend-shape mover accumulates channel-weighted delta samples onto
 // the points: p'_i = p_i + sum_k alpha_k(w_k) d_{k,i}, with deltas
 // derived against the authored base. This TU owns its exec-side
 // computeMoverParameters registration and builder, its revision binder,
 // its compile validator, and its parity-oracle branch, and registers
 // the row that points at them.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 
@@ -296,7 +292,6 @@ _OracleBlendShapeMover(const rigExec::RigExecMoverOracleContext &ctx)
         }
         float channel = 0;
         // Through the resolver, NOT straight off the stage.
-        //
         // An authored `inputs:weight` and a DRIVEN one are the same
         // attribute; a plain Get() sees only the first. The moment
         // anything connects a weight -- which is the entire point of

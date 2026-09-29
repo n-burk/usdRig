@@ -1,6 +1,4 @@
-//
 // Path text without SdfPath::GetString().
-//
 #ifndef RIGEXEC_PATH_TEXT_H
 #define RIGEXEC_PATH_TEXT_H
 

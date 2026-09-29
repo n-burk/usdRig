@@ -1,6 +1,6 @@
 #
 # Timeline overlay: per-frame cache states painted over usdview's own
-# timeline slider -- a thin Maya-palette band along the slider's bottom
+# timeline slider -- a thin cache-status band along the slider's bottom
 # edge that fills in green as background warming completes frames.
 #
 # The slider is found, never subclassed, restyled, or repainted: the

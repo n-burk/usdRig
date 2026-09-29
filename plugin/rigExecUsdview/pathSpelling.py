@@ -156,9 +156,7 @@ def Spell(spellings, specPath, field, path):
     return spellings.get(_Key(specPath, field, path), str(path))
 
 
-# --------------------------------------------------------------------
 # Writing: the layer's usda, spelled.
-# --------------------------------------------------------------------
 
 def SpelledUsdaText(layer, spellings=None):
     """
@@ -289,9 +287,7 @@ def _FirstLine(text):
     return text
 
 
-# --------------------------------------------------------------------
 # Reading: the spellings a .usda file already has.
-# --------------------------------------------------------------------
 
 def _IsUsda(layer):
     """Whether `layer` is text on disk -- the only form a spelling has."""
@@ -385,9 +381,7 @@ def _PathFields(layer):
                 yield spec, field, op
 
 
-# --------------------------------------------------------------------
 # Saving.
-# --------------------------------------------------------------------
 
 def SaveLayer(layer):
     """

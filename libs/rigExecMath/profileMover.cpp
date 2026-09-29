@@ -1,6 +1,5 @@
-//
+// Method reference: de Goes et al. (2022), https://doi.org/10.1145/3528223.3530060
 // The Profile Mover (2022 paper §4.3, Algorithm 1).
-//
 #include "profileMover.h"
 
 #include <algorithm>
@@ -157,7 +156,6 @@ bool RigExecEvaluateProfileMover(
         layered = (restMeshPoints[v] != binding.projectionMeshPoints[v]);
     }
 
-    // ---- rest configuration --------------------------------------------
     RigExecCurvenetSampling restSampling = binding.projectionSampling;
     std::vector<GfVec3d> restCorner(cut.cornerNode.size());
 
@@ -186,7 +184,6 @@ bool RigExecEvaluateProfileMover(
         }
     }
 
-    // ---- §3: frames and gradients ---------------------------------------
     const RigExecCurvenetSampling posedSampling = RigExecSampleCurvenet(
         binding.topology, posedCurvenetPoints, binding.samplesPerSpline);
     if (posedSampling.GetSampleCount() != restSampling.GetSampleCount()) {
@@ -213,7 +210,6 @@ bool RigExecEvaluateProfileMover(
         RigExecRemapGradientsToSamples(binding.topology, posedSampling,
                                        posedFrames, gradients);
 
-    // ---- Eq. (4): interpolate the gradients ------------------------------
     const int constraintCount = cut.constraintCount;
     const int unknowns = cut.unknownCount;
     std::vector<double> gradientConstraints(size_t(constraintCount) * 9, 0.0);
@@ -232,7 +228,6 @@ bool RigExecEvaluateProfileMover(
                           std::vector<double>(), 9, &rhs);
     binding.solver->Solve(rhs, 9, &gradientUnknowns);
 
-    // ---- per-corner gradients, then the deformed cut-face polygons -------
     const size_t cornerCount = cut.cornerNode.size();
     std::vector<double> cornerGradient(cornerCount * 9, 0.0);
     for (size_t c = 0; c < cornerCount; ++c) {
@@ -289,8 +284,6 @@ bool RigExecEvaluateProfileMover(
         }
     }
 
-    // ---- Eq. (5): positional constraints and the second solve ------------
-    //
     // §4.3 writes the positional constraint as p_i = q_i - F_i (q_i - p_i)
     // per SAMPLE: the surface keeps the offset the curve floats at,
     // transported by the same gradient. Every cut-vertex the cut introduced
@@ -300,7 +293,6 @@ bool RigExecEvaluateProfileMover(
     // straight chord between the two samples' projections, so at rest the
     // interpolated constraint pulls the vertex off itself and the mover is
     // no longer the identity.
-    //
     // Measuring the residual from the CUT-VERTEX'S OWN rest position instead
     // is exact for both. At a sample the node IS that sample's projection and
     // this reduces to the paper's formula unchanged; between samples it is
@@ -352,7 +344,6 @@ bool RigExecEvaluateProfileMover(
                           cornerOffsets, 3, &rhs);
     binding.solver->Solve(rhs, 3, &positionUnknowns);
 
-    // ---- write out --------------------------------------------------------
     outPoints->assign(restMeshPoints.begin(), restMeshPoints.end());
     for (int u = 0; u < unknowns; ++u) {
         const int vertex = cut.unknownVertex[u];

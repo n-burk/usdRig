@@ -502,7 +502,6 @@ static void TestAnimatedPointCounts()
 
 // Uncommitted manipulation values change the generation and author nothing
 // (docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
-//
 // The fixture is the ordering fixture's arithmetic, reused because it makes
 // every candidate behaviour a different number: dial = 2, multiplied by 10,
 // then 1 added, published as the chain's result at /Asset/Rig/Channels
@@ -691,7 +690,6 @@ static void TestInteractiveOverrides()
     CHECK(exported() == authored);
 
     // 7. A drag on an input the STATIC INPUT CACHE is allowed to hold.
-    //
     //    inputs:defaultWeight is authored, unconnected and carries no time
     //    sample, so it is exactly what that cache admits -- and the
     //    generations before the drag have filled it with the authored 1.
@@ -725,7 +723,6 @@ static void TestInteractiveOverrides()
 // A control dragged TWICE, with each release authored the way the viewport
 // gizmo authors one: as a knot on the attribute's spline (Animation mode,
 // gizmoMath.SetAnimated). The second release is the one that mattered.
-//
 // A released drag is an ordinary value edit, so nothing about the rig's
 // structure moves and no recompile follows it. What the baked program holds
 // across such an edit therefore has to be re-read, and for a spline-valued
@@ -733,7 +730,6 @@ static void TestInteractiveOverrides()
 // at bake time, and a UsdAttributeQuery does not follow a later edit to a
 // SPLINE the way it follows an edited time sample or default -- it resolves
 // the spline once and keeps answering from that copy.
-//
 // In usdview that read as the drag being ignored. The first release on a
 // control CREATES the property spec, which resyncs and rebakes, so it
 // worked; every release after it re-authored the same knot, which is
@@ -741,7 +737,6 @@ static void TestInteractiveOverrides()
 // first drag's pose. The control followed the preview and sprang back the
 // instant the artist let go -- until some other control's first release
 // resynced the stage and rebaked the program for all of them.
-//
 // Two drags is the whole test: one release to create the spec, and one more
 // to be answered from the spline as it now stands. The suite runs under
 // RIGEXEC_EVALUATION_MODE=baked in the parity harness, which is where this

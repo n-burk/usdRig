@@ -1,10 +1,6 @@
-//
 // Copyright (c) Meta Platforms, Inc. and affiliates.
-//
 // Licensed under the terms set forth in the LICENSE.txt file available
-// at the root of this repository.
-//
-
+// in plugin/usdNoodles/ in this repository.
 #include "core/GraphLayout.h"
 #include "core/NodeData.h"
 #include "pxr/base/gf/vec2d.h"
@@ -26,7 +22,6 @@ namespace {
 // Sugiyama layout, and return {nodeId: GfVec2d} of the new positions. The caller
 // (graphView.py) applies these through the NodeModel position setter, so this
 // binding stays decoupled from persistence (display-only vs USD-authoring).
-//
 // We return positions instead of mutating in place because the C++ GraphModel
 // holds COPIES of each NodeData (NodeModel IS-A NodeData; extract<NodeData&>
 // yields the embedded base, then emplace copies it) and GraphModel::nodes is

@@ -1,27 +1,27 @@
-#
-# RigExec usdview graph editor model: which attributes are animation
-# curves, and the Ts.Spline edits behind the editor's gestures.
-#
-# Qt-free by design (volumeWeightUI.py's banner rule): every operation
-# here is exercised headlessly by tests/python/test_graph_model.py, and
-# graphEditorUI.py holds all the widgets.
-#
-# Two rules the whole module obeys
-# (docs/superpowers/specs/2026-09-01-graph-editor-design.md:1.4, 2.4):
-#
-# 1. Every edit operation MUTATES the Ts.Spline it is handed. It never
-#    touches an attribute. The panel copies the attribute's spline with
-#    Ts.Spline(spline), runs a gesture's worth of operations on the copy,
-#    and writes the copy back once through ApplySpline -- so one gesture
-#    is one whole-spline write and one undo step.
-# 2. Time is in FRAMES, matching usdview's current frame, so "snap" means
-#    "round to a whole frame".
-#
-# Ts splines are scalar in this build (Ts.Spline.IsSupportedValueType is
-# true for double/float/half, false for double3), so the editor lists
-# scalar attributes only; vector xformOps carry time samples and are not
-# curves here (spec section 1.1).
-#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import math
 
 from pxr import Sdf, Ts, Usd
@@ -30,11 +30,9 @@ import gizmoMath
 import rigExecUndo
 
 
-# ---------------------------------------------------------------------------
 # Curve identity and colour
-# ---------------------------------------------------------------------------
 
-# Maya's channel colouring: the axis decides the hue, so tx/rx/sx share
+# channel colouring: the axis decides the hue, so tx/rx/sx share
 # red and an artist reads the axis off the curve without the legend.
 CURVE_RED = (0.95, 0.3, 0.3)
 CURVE_GREEN = (0.3, 0.85, 0.3)
@@ -59,10 +57,10 @@ _CHANNEL_COLORS = {
     "rspin": CURVE_YELLOW,
 }
 
-# The rig channels the editor offers even when they carry no spline yet,
-# so an unanimated control can be keyed from the graph (spec 1.3). The
-# ORDER is the listing order, and it is the gizmo's own channel order
-# (gizmoMath.py:34-41) so the graph and the toolbar agree.
+
+
+
+
 RIG_CHANNELS = (gizmoMath.AVAR_T + gizmoMath.AVAR_R + gizmoMath.AVAR_S
                 + (gizmoMath.AVAR_RSPIN,)
                 + gizmoMath.REST_T + gizmoMath.REST_R)
@@ -189,11 +187,9 @@ def DiscoverCurves(stage, propPaths, primPaths):
     return refs
 
 
-# ---------------------------------------------------------------------------
 # Knots
-# ---------------------------------------------------------------------------
 
-# Maya's default new key: Auto tangents on both sides and a curve segment
+# default new key: Auto tangents on both sides and a curve segment
 # after it (spec assumption 1.2).
 DEFAULT_TAN_ALGORITHM = Ts.TangentAlgorithmAutoEase
 DEFAULT_INTERP = Ts.InterpCurve
@@ -207,11 +203,11 @@ MIN_TIME_GAP = 1e-6
 # them as the same tangent.
 SLOPE_EPSILON = 1e-9
 
-# Maya remembers that a key's tangents were broken even while the two
-# sides still happen to agree; Ts has no such flag, so it is recorded in
-# the knot's customData. `preTanAlgorithm` / `postTanAlgorithm` are the
-# only reserved keys (ts/types.h:149-153), so a namespaced key of our own
-# is safe, and it round trips through .usda with the knot.
+
+
+
+
+
 BROKEN_KEY = "rigExec"
 BROKEN_FIELD = "tangentsBroken"
 
@@ -259,7 +255,7 @@ def AuthorKnot(spline, time, value):
     """
     Create or update the knot at `time` and return it.
 
-    A NEW knot gets Maya's defaults: AutoEase on both tangents and a
+    A NEW knot gets defaults: AutoEase on both tangents and a
     curve segment after it. An EXISTING knot keeps everything but its
     value -- re-keying a channel the artist has already shaped must not
     silently throw that shape away.
@@ -330,7 +326,7 @@ def KeyNeighbours(spline, time):
 
 def IsUnified(knot):
     """
-    Whether the knot's two tangents move as one (Maya's "unified").
+    Whether the knot's two tangents move as one ("unified").
 
     Broken-ness is read from the customData marker BreakTangents leaves,
     because two sides can be broken and still agree -- breaking a tangent
@@ -351,9 +347,7 @@ def IsUnified(knot):
                - knot.GetPostTanSlope()) <= SLOPE_EPSILON
 
 
-# ---------------------------------------------------------------------------
 # Edit operations (each mutates the spline it is given)
-# ---------------------------------------------------------------------------
 
 def _PlaceMovedKeys(moving, blocked, pinned, dt, gap, snapFrames, forward):
     """
@@ -409,7 +403,7 @@ def MoveKeys(spline, times, dt, dv, snapFrames=True):
     Move the keys at `times` by `dt` frames and `dv` in value; return
     their new times, ascending.
 
-    Maya keeps key order through a drag, so a moved key is clamped into
+    the editor keeps key order through a drag, so a moved key is clamped into
     the open interval between the nearest keys that are NOT moving, and
     the moving keys are placed in the direction of travel so they cannot
     collide with each other either. While snapping, the clamp stops one
@@ -423,8 +417,7 @@ def MoveKeys(spline, times, dt, dv, snapFrames=True):
     neighbour and silently destroy a key.
 
     Snapping applies to any move, `dt` of zero included, so a value-only
-    drag pulls a fractional key onto a whole frame. That is Maya's
-    behaviour: Snap Frames is a property of the drag, not of the axis.
+    drag pulls a fractional key onto a whole frame. That is behaviour: Snap Frames is a property of the drag, not of the axis.
 
     Times that name no key are ignored: the canvas can ask to move a
     selection that a concurrent stage change has already invalidated.
@@ -638,7 +631,7 @@ def InsertKey(spline, time):
     key already on that frame.
 
     The new key takes Auto tangents (spec 2.4), which DOES reshape the
-    neighbouring segments slightly -- this is Maya's "Add Key", not its
+    neighbouring segments slightly -- this is "Add Key", not its
     shape-preserving "Insert Key". Ts.Spline.Breakdown is the
     shape-preserving alternative if that is ever wanted.
 
@@ -696,7 +689,7 @@ SIDE_BOTH = "both"
 
 def _CatmullRomSlope(spline, time):
     """
-    Maya's "Spline" tangent: the slope of the line through the
+    "Spline" tangent: the slope of the line through the
     neighbouring keys, (v_next - v_prev) / (t_next - t_prev).
 
     An end key has only one neighbour, so it takes the slope to that
@@ -741,7 +734,7 @@ def _SetSegmentInterp(spline, time, mode, side):
 
 def SetTangentType(spline, times, mode, side=SIDE_BOTH):
     """
-    Apply one of Maya's tangent-type buttons to the keys at `times`
+    Apply one of tangent-type buttons to the keys at `times`
     (spec 2.4).
 
     `auto`, `spline` and `flat` shape the tangents and restore
@@ -751,7 +744,7 @@ def SetTangentType(spline, times, mode, side=SIDE_BOTH):
     key (or before it, for the In side) and leave the tangents alone,
     which is where they live in Ts.
 
-    Maya's Clamped and Plateau are out of scope (spec 1.6); ask for
+    Clamped and Plateau are out of scope (spec 1.6); ask for
     `auto` instead.
     """
     if mode not in TANGENT_MODES:
@@ -875,7 +868,7 @@ def BreakTangents(spline, times):
 def UnifyTangents(spline, times):
     """
     Re-link the two tangents of the keys at `times`: the OUT slope wins
-    and is copied onto the in side (Maya's Unify), and the broken marker
+    and is copied onto the in side (Unify), and the broken marker
     is dropped.
 
     Both sides stay authored: unifying an automatic key would be a no-op,
@@ -949,20 +942,20 @@ def SetCurveType(spline, name):
     spline.SetCurveType(CURVE_TYPE_MODES[name])
 
 
-# Maya's Infinity menu -> TsExtrapMode. Verified against
-# /Users/burkard/work/usd-pr4156/pxr/base/ts/types.h:112-121, whose two
-# looping modes are easy to read backwards:
-#
-#   TsExtrapLoopRepeat = "Knot curve repeated, OFFSET so ends meet"
-#       -> Maya "Cycle with Offset" (each repeat starts where the last
-#          ended, so a walk cycle keeps travelling).
-#   TsExtrapLoopReset  = "Curve repeated EXACTLY, discontinuous joins"
-#       -> Maya "Cycle" (every repeat is the same, and the value jumps
-#          back at the seam unless the ends already match).
-#
-# So the names invert what they suggest: Repeat is the offset one.
-# Oscillate is "like Reset, but every other copy reversed", which is
-# Maya's Oscillate exactly.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 EXTRAP_MODES = {
     "constant": Ts.ExtrapHeld,
     "linear": Ts.ExtrapLinear,
@@ -976,7 +969,7 @@ EXTRAP_NAMES = dict((mode, name) for name, mode in EXTRAP_MODES.items())
 
 def SetExtrapolation(spline, pre=None, post=None):
     """
-    Set the pre / post infinity of `spline` from Maya's names.
+    Set the pre / post infinity of `spline` from names.
 
     `constant`, `linear`, `cycle`, `cycle_offset`, `oscillate`; None
     leaves that side as it is. See EXTRAP_MODES above for the mapping and
@@ -997,9 +990,7 @@ def SetExtrapolation(spline, pre=None, post=None):
         apply_(Ts.Extrapolation(EXTRAP_MODES[name]))
 
 
-# ---------------------------------------------------------------------------
 # Writing
-# ---------------------------------------------------------------------------
 
 def ClearSpline(stage, attrPath):
     """

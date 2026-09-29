@@ -1,6 +1,4 @@
-//
 // FBX-equivalent constraint schema and evaluator conformance.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExecMath/pointFrame.h"
@@ -1695,10 +1693,8 @@ TestGeometryConstraintDenseEnvelopeSupersedesScalar()
 
 // The design's defining property: the target spelling picks WHERE the answer
 // lands, not what it is.
-//
 // It is EXACT at full envelope, which is the case the design is really about
 // -- </Geom/M> and </Geom/M.points> are then two spellings of one result.
-//
 // At an intermediate envelope the two domains blend in different spaces and
 // deliberately diverge: the transform domain lerps DECOMPOSED CHANNELS (half
 // of a 90-degree rotation is a 45-degree rotation), while the geometry domain
@@ -1837,7 +1833,6 @@ TestGeometryEnvelopeIsChordLerp()
 }
 
 // Competing writers are keyed by the exact target, and that is correct.
-//
 // Two writers of the SAME points set compose in mover order. A
 // transform-domain constraint on /M and a geometry-domain one on /M.points
 // are NOT competing: they write different output domains, and the prim's
@@ -2636,7 +2631,6 @@ TestAggregateSolverValueUpdates()
 }
 
 // Moves \p evaluator to the exec oracle when the session left it at Dynamic.
-//
 // The suites that call this count solverEvaluations in the WALK's meaning:
 // the batches this generation re-evaluated, so an unchanged pull reads zero.
 // In the program it is a Build-time constant (unified-program spec rule D4),
@@ -3074,13 +3068,11 @@ TestConstrainedSolverInputAncestor()
 }
 
 // Namespace propagation must STOP at a path that owns its own pose.
-//
 // A constraint that moves an ancestor publishes a delta its namespace
 // descendants ride, but a joint a solver writes is an absolute posed
 // override: neither it nor anything beneath it may take that ride. Every
 // other test asserts the ride; this one asserts the stop, and its negative
 // control is the same subtree with the joint unbound, which must ride.
-//
 // The constraint's source is itself solver-driven, so the constraint is
 // scheduled after every solver batch and nothing rewrites the blocked frames
 // afterwards -- with the constraint first, a later solver commit would
@@ -3504,14 +3496,12 @@ TestSolverBatchLevelAudit()
     CHECK(pose.solverOverrideRounds == 3);
 }
 
-// ---------------------------------------------------------------------------
 // RigExecSplineIk: the control-driven spine solver, exercised through exec
 // (the aggregate tap, like TestTwoBoneIkRestFrameInputs) and through the
 // evaluator (joint binding, and the non-uniform squash scale surviving into
 // the bound joints' frames and matrices). The kernel itself is covered by
 // testRigExecSplineIk; these tests are about the wiring: control frames in,
 // per-joint frames out, and the schema knobs reaching the solve.
-// ---------------------------------------------------------------------------
 
 static constexpr double kSplineIkPi = 3.141592653589793238462643383279502884;
 

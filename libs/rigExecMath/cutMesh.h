@@ -1,15 +1,11 @@
-//
 // Curvenet-to-surface binding: the cut-mesh and its cut-aware polygonal
 // Laplacian (2022 paper §4.1, §4.2, Appendix A).
-//
 // The cut-mesh conforms the character surface to the curvenet by splitting
 // the faces the profile curves cross, so a value can be DISCONTINUOUS across
 // a curve. That discontinuity is the whole technique: a curve is a hinge, and
 // Fig. 11 shows what averaging the two sides instead produces.
-//
 // Structure of the implementation, and where it departs from the paper's
 // description:
-//
 //   * The paper builds one global halfedge mesh with cracks and traces
 //     segments across it. Here every segment is first split at its crossings
 //     with mesh edges -- which the paper does too -- and the arrangement is
@@ -21,9 +17,7 @@
 //     straightest direction (Polthier & Schmies). At the sample spacing §3
 //     prescribes -- one sample per mesh edge length -- the two agree, and the
 //     target-seeking form is guaranteed to arrive.
-//
 // Both are recorded in docs/specs/curvenet.md.
-//
 #ifndef RIGEXEC_MATH_CUT_MESH_H
 #define RIGEXEC_MATH_CUT_MESH_H
 
@@ -64,14 +58,12 @@ struct RigExecCutCurveRef {
 
 /// The cut-mesh and everything derived from it that does not depend on pose.
 struct RigExecCutMesh {
-    // ---- nodes -------------------------------------------------------
     std::vector<GfVec3d> nodePosition;      ///< in the projection pose
     std::vector<RigExecMeshPoint> nodeBinding;
     std::vector<float> bindingWeights;      ///< pool for nodeBinding
     std::vector<int> nodeMeshVertex;        ///< mesh vertex index, or -1
     std::vector<int> nodeSample;            ///< curvenet sample index, or -1
 
-    // ---- cut faces ---------------------------------------------------
     /// Corner loops. Face f owns corners [faceBegin[f], faceBegin[f+1]).
     /// A crack appears as the same node twice in one loop, which is exactly
     /// the "simple polygon of arbitrary shape" Appendix A wants.
@@ -92,7 +84,6 @@ struct RigExecCutMesh {
     /// Input face each cut-face came from, for reporting.
     std::vector<int> faceSource;
 
-    // ---- unknown numbering -------------------------------------------
     /// Mesh vertex -> unknown column, or -1 when the curvenet took it over
     /// (§4.2 precedence) or when it lies in a component no curve reaches.
     std::vector<int> vertexUnknown;
@@ -107,7 +98,6 @@ struct RigExecCutMesh {
 
     int constraintCount = 0;  ///< 2 * curvenet sample count
 
-    // ---- per-sample surface binding ----------------------------------
     /// Closest point on the projection mesh for each curvenet sample, and
     /// the residual q - p the deformation transports (§4.3).
     std::vector<RigExecMeshPoint> sampleBinding;

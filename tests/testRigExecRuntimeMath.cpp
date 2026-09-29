@@ -1,12 +1,8 @@
-//
 // testRigExecRuntimeMath: bitwise equivalence of the vendored runtime math
 // against Gf. USD is linked into the TEST only -- never into the runtime.
-//
 // Every comparison is exact (bitwise, including signed zeros and NaN
 // payloads): the runtime must perform the SAME operations in the SAME
 // order as Gf. Randomized inputs (fixed seed) plus edge cases.
-//
-
 #include "rigExecRuntime/runtimeMath.h"
 
 #include "pxr/base/gf/matrix3d.h"

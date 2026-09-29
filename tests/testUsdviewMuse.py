@@ -139,7 +139,6 @@ def testUsdviewInputFunction(appController):
         if not hasattr(panel, attribute):
             raise AssertionError("the chat window is missing %s" % attribute)
 
-    # ---- 1. a real edit, driven end to end through the tool loop ----------
     target = "/MuseTest/Ball"
     turns = [
         types.SimpleNamespace(stop_reason="tool_use", content=[
@@ -221,7 +220,6 @@ def testUsdviewInputFunction(appController):
     if target not in transcript:
         raise AssertionError("the transcript never mentions the work that was done")
 
-    # ---- 1a. the menu items exist and macOS cannot steal them ------------
     # Qt defaults every action to TextHeuristicRole, which lets the macOS
     # native menu bar move anything reading like "Settings"/"Preferences" into
     # the application menu beside the Apple logo. That is exactly how
@@ -286,12 +284,12 @@ def testUsdviewInputFunction(appController):
         raise AssertionError("settings did not resolve an Anthropic key: %r" % routing)
 
     # LM Studio is a first-class keyless choice backed by the server on
-    # Hivemind. Stub model discovery so this UI test never needs that machine
+    # the server. Stub model discovery so this UI test never needs that machine
     # to be reachable.
     _fetch_lmstudio_models = museAgent.fetch_lmstudio_models
     museAgent.fetch_lmstudio_models = lambda *args, **kwargs: [{
-        "name": "hivemind-test-model",
-        "display_name": "Hivemind Test Model",
+        "name": "local-server-test-model",
+        "display_name": "the server Test Model",
         "tools": True,
         "native_tools": True,
         "vision": False,
@@ -307,8 +305,8 @@ def testUsdviewInputFunction(appController):
                 or not dialog._key_edit.isHidden():
             raise AssertionError("LM Studio settings showed the wrong controls")
         routing = dialog._routing.text()
-        if "hivemind.local:1234/v1/messages" not in routing or \
-                "hivemind-test-model" not in routing:
+        if "127.0.0.1:1234/v1/messages" not in routing or \
+                "local-server-test-model" not in routing:
             raise AssertionError("LM Studio routing was not explicit: %r" % routing)
     finally:
         museAgent.fetch_lmstudio_models = _fetch_lmstudio_models
@@ -351,7 +349,6 @@ def testUsdviewInputFunction(appController):
     api.qMainWindow.activateWindow()
     QtWidgets.QApplication.processEvents()
 
-    # ---- 1b. escape closes the window, through the real key path ---------
     # usdview installs an application-wide AppEventFilter that swallows every
     # Escape to reset focus (Usdviewq/appEventFilter.py) and returns True
     # before any widget sees it, so a widget-level handler never runs. This
@@ -387,7 +384,6 @@ def testUsdviewInputFunction(appController):
     panel.show()
     _pump(panel, lambda: panel.isVisible(), "the chat window to reappear")
 
-    # ---- 1bb. the window can be dragged, and stays where it is put -------
     # It is frameless, so there is no title bar: the header strip, status line
     # and margins are the grab areas, hit-tested so a drag never competes with
     # selecting text in the transcript.
@@ -439,7 +435,6 @@ def testUsdviewInputFunction(appController):
             "dragging inside the transcript moved the window instead of "
             "selecting text")
 
-    # ---- 1c. prompt history recalls by prefix ----------------------------
     # Up/Down must go through the real key path: the input is a QTextEdit, so
     # the arrows have a default meaning (move between lines) that the recall
     # has to share rather than swallow.
@@ -494,7 +489,6 @@ def testUsdviewInputFunction(appController):
     panel._input.clear()
     QtWidgets.QApplication.processEvents()
 
-    # ---- 2. the camera button attaches the viewport, camera and all ------
     # File attachment and paste went with the panel; the one button that
     # remains is the whole attachment story now, so it is what gets asserted.
     if panel._attachments:
@@ -535,7 +529,6 @@ def testUsdviewInputFunction(appController):
             "attachments were not cleared after sending — the next message "
             "would silently repeat them")
 
-    # ---- 3. edits are always allowed now --------------------------------
     # The old "Allow stage edits" checkbox went with the panel: the chat window
     # is one input and one button by design, so there is nowhere to put a gate
     # and run_python is unconditional. Undo is the brake. This pins that
@@ -560,7 +553,6 @@ def testUsdviewInputFunction(appController):
     if "read-only" in result:
         raise AssertionError("the removed read-only gate is still refusing edits")
 
-    # ---- 4. it can restyle the usdview UI on demand ----------------------
     # "Manipulate my python session / modify UI on demand" is a claim about the
     # live QMainWindow, so assert against the real widget tree.
     captured4 = []

@@ -1,80 +1,10 @@
-//
-// RigExec radial-basis pose interpolation -- the conventional poseInterpolator, and a
-// A native port of the radial-basis pose solver.
-//
-// A pose interpolator answers one question: given where a driver joint is
-// NOW, how much does each authored pose count? This answers it with a radial
-// basis function, and this is the same maths, so the weights match the authored data rather than merely resembling it.
-//
-// Solved once, evaluated many times. RigExecRbfSolver::Solve builds the
-// matrix of every pose's kernel value at every other pose and inverts it;
-// what comes out is a constant, and the per-frame work is then a multiply
-// and a divide against that constant. The split is the same and it is
-// why an interpolator costs so little to evaluate.
-//
-// WHY THIS IS C++ AND NOT THE PYTHON IT CAME FROM
-//   * The per-frame evaluation runs inside the evaluator's pose phase, which
-//     is C++. There is no seam to call Python across, and a GIL acquire on
-//     that path is what deadlocked Compile().
-//   * The converter would otherwise import the reference solver, putting
-//     a hard dependency on a sibling repository into the rig build. The
-//     project's rule (stated for the .shp reader) is that a fresh clone must
-//     work.
-//   * The shape editor re-fits a pose's falloff live, which needs the fitter
-//     native too.
-//
-// The Python stays as the ORACLE, frozen into tests/fixtures/psd_parity.json
-// by tools/biped/gen_psd_parity.py and asserted at 1e-6 by
-// tests/testRigExecRbf.cpp over all 67 solvable interpolators of the shipped
-// biped. Where a comment below cites `rbf.py:NNN-NNN`, that is the original
-// reasoning and it is worth reading before changing anything.
-//
-// CONVENTIONS (state them, then trust them)
-//
-//   * Angles in radians, translations in METRES (the authored data is in centimetres;
-//     the converter scales on the way in). Pose rotations arrive as XYZ
-//     eulers, which is how the authored data is read and how the fixture stores
-//     them.
-//
-//   * Quaternions are GfQuatd (real, imaginary), Hamilton product -- the
-//     same product the Python writes out by hand at rbf.py:1073-1076, so
-//     `q * twist.GetConjugate()` is the swing there and here. Verified
-//     component for component; see the note in RigExecRbfSwingTwist.
-//
-//   * WHERE Gf DIFFERS FROM THE PYTHON, and it matters in exactly two
-//     places:
-//
-//     1. Euler -> quaternion. GfRotation composes with
-//        `GfRotation(Z,z) * GfRotation(Y,y) * GfRotation(X,x)` under the
-//        row-vector convention this codebase uses everywhere (p' = p*M),
-//        which is the REVERSE spelling of the column-vector composition the
-//        Python's closed form encodes. Rather than rely on getting that
-//        reversal right, RigExecRbfQuaternionFromEuler reproduces
-//        rbf.py:1021-1027's closed form term for term. It is the same
-//        rotation either way, but only the closed form is the same
-//        FLOATING-POINT VALUE, and the fixture is compared at 1e-6 through
-//        a matrix inverse that amplifies.
-//
-//     2. Angle between two rotations. GfRotation(q1.GetInverse()*q2)
-//        .GetAngle() takes the quaternion product and an atan2; the Python
-//        takes the 4-vector dot and 2*acos(min(1,|dot|)) (rbf.py:1080-1091).
-//        The two agree analytically and not bit for bit, and the |dot|
-//        (rather than a signed clamp) is load-bearing: it takes the short
-//        way round the double cover, without which poses more than a half
-//        turn apart measure as though they were close. The dot form is what
-//        is implemented here.
-//
-//     Nothing else in this file needs a convention decision: the swing/twist
-//     split, the metric, the matrix build and the Gauss-Jordan inverse are
-//     pure arithmetic on components and are reproduced in the Python's own
-//     operation order, because a reassociated sum is not the same double and
-//     a near-singular inverse magnifies the difference.
-//
-//   * No matrices appear here at all, so the row-vector convention never
-//     comes up. If one is ever added, note that GfMatrix4d::SetRotate(q)
-//     builds M with p*M == q.Transform(p), so (q1*q2) corresponds to
-//     M(q2)*M(q1) and NOT to M(q1)*M(q2).
-//
+// Radial-basis pose interpolation: solve coefficients once, then evaluate weights.
+// Ported from an unidentified Python reference; see THIRD_PARTY_NOTICES.md.
+// psd_parity.json preserves oracle hashes and regression values at 1e-6 tolerance.
+// Angles are radians, translations are meters, and input Euler order is XYZ.
+// Preserve arithmetic order: ill-conditioned inverse solves amplify rounding.
+// Quaternion distance uses 2*acos(min(1, abs(dot(q1,q2)))) for the short arc.
+// With USD row vectors, M(q1*q2) = M(q2)*M(q1).
 #ifndef RIGEXEC_MATH_RBF_H
 #define RIGEXEC_MATH_RBF_H
 
@@ -98,8 +28,7 @@ namespace rigExec {
 /// support, so past the radius its value is not small, it is nothing, which
 /// is what makes RigExecRbfSolver::Coverage worth measuring.
 ///
-/// The `interpolation` value: 0 is Linear, 1 is Gaussian
-///.
+/// Serialized kernel values: Gaussian = 0, Linear = 1.
 enum class RigExecRbfKernel {
     Gaussian = 0,
     Linear = 1,
@@ -135,9 +64,7 @@ constexpr double RigExecRbfCoverageFloor = 0.5;
 /// huge weight. rbf.py:964-987.
 constexpr double RigExecRbfNormalizeFloor = 1.0e-6;
 
-// ---------------------------------------------------------------------------
 // Kernels and the metric
-// ---------------------------------------------------------------------------
 
 /// A bell falling away from a pose: exp(-(distance/radius)^2).
 /// A radius of zero or less answers 1 at the pose and 0 everywhere else.
@@ -176,9 +103,7 @@ double RigExecRbfCombine(double angle, double width, double gap,
                          double translationWidth, bool enableRotation,
                          bool enableTranslation);
 
-// ---------------------------------------------------------------------------
 // Rotations
-// ---------------------------------------------------------------------------
 
 /// An XYZ euler (radians) as a quaternion, reproducing rbf.py:1009-1027's
 /// closed form term for term. See the conventions note at the top of this
@@ -221,9 +146,7 @@ GfVec3d RigExecRbfSlerpEuler(const GfVec3d &first, const GfVec3d &second,
 bool RigExecRbfInvert(const std::vector<std::vector<double>> &matrix,
                       std::vector<std::vector<double>> *inverse);
 
-// ---------------------------------------------------------------------------
 // The solver
-// ---------------------------------------------------------------------------
 
 /// Everything an interpolator is built from. Defaults match the Python's.
 struct RigExecRbfSolverDesc {

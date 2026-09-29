@@ -1,12 +1,9 @@
-//
 // RigExec end-to-end evaluation tests over the spec §4.5/§4.6 arm assets:
 // OpenExec-evaluated transforms (controls, FK, IK, blend, joints), native
 // USD animation resolution parity, and the staged geometry mover pipeline.
-//
 // argv[1] = path to the examples directory (containing ArmRig.usda and
 // ArmShotAnim.usda). The codeless schema plugin is expected at
 // <examples>/../plugin/rigExecSchema/resources.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/tapSet.h"
 #include "rigExec/types.h"
@@ -390,7 +387,6 @@ TestViewFreeValidation(const std::string &examplesDir)
     // and the compile is SILENT about it -- stacking is ordinary authoring
     // under the unified pose stack (spec 4.2), not a shape worth a
     // diagnostic. The order is read from the compiled chains.
-    //
     // Both writers must be solvers nobody READS: a solver whose aggregate is
     // consumed does not write at all, so naming a joint its consumer writes
     // is a rest reference, exercised separately below.
@@ -676,7 +672,6 @@ TestGeometryMovers(const std::string &examplesDir)
     CHECK(pose.valid);
 
     // NOTHING IS AUTHORED, anywhere (spec §7.2 revised).
-    //
     // This used to assert the opposite of the last two checks: that a
     // private derived stage existed and carried a __RigExecGenerated scope,
     // because compilation authored lowered property applications there. The
@@ -717,7 +712,6 @@ TestGeometryMovers(const std::string &examplesDir)
     // docs/specs/mover-graph-cutover.md). The summary line is asserted present, not
     // just the absence of a mismatch: a parity pass that silently checked
     // nothing would otherwise read exactly like one that passed.
-    //
     // ArmBody's chain is the deepest in the examples --
     // volumeCorrect -> curve -> 3x matrix -> blend -- and every one of those
     // ops now has its provider values, so it must AGREE, not defer.
@@ -1093,9 +1087,7 @@ TestDerivedMaintenanceDeferral()
     }
 }
 
-// -------------------------------------------------------------------------
 // Universal mover envelope
-// -------------------------------------------------------------------------
 
 static RigExecRigPose
 EvaluateEnvelopeFixture(const UsdStageRefPtr &stage)
@@ -2292,7 +2284,6 @@ TestMoverGraphParity(const std::string &examplesDir)
         // the evaluated time, assert the published points actually left the
         // authored base. 07's stickers project onto the ground plane at rest;
         // 06's cage bulges at 1024.
-        //
         // This catches a total pass-through (a packet that fails validation
         // and silently preserves the previous revision). It would NOT have
         // caught the SurfaceProject strength bug, which produced a half
@@ -2337,11 +2328,9 @@ TestMoverGraphParity(const std::string &examplesDir)
 }
 
 // A solver cycle is rejected at compile with the offending path.
-//
 // 05 is already SpineFK -> SpineTwist (SpineTwist reads Root/Chest, which
 // SpineFK poses); pointing SpineFK's controls at TwistMid, which SpineTwist
 // poses, closes the loop.
-//
 // A frame read from BELOW its writer is positional under the unified pose
 // stack and orders nothing (spec 4.2) -- but only for a reader that HAS a
 // position. Both solvers here feed SpineRibbon, so both are PRODUCERS: they
@@ -2403,7 +2392,6 @@ TestSolverCycleRejected(const std::string &examplesDir)
 }
 
 // The same rejection for a cycle that never touches a joint.
-//
 // TestSolverCycleRejected above closes the loop through a joint (SpineFK poses
 // what SpineTwist reads). RigExecBlendPointFrames takes rigExec:inputA/inputB
 // as SOLVER paths, so a cycle can also run purely solver -> solver: 03 already
@@ -2444,7 +2432,6 @@ TestPureSolverToSolverCycleRejected(const std::string &examplesDir)
     // from the direct solver->solver rule. The cycle error itself is generic
     // and cannot distinguish the two, which is what makes this check the thing
     // that gives the test its meaning.
-    //
     // ArmFK posing no joints means nothing reads a joint of ArmFK's, and
     // IKFKBlend not being a joint means ArmFK's new controls target cannot be
     // a joint-mediated edge either.
@@ -2487,13 +2474,11 @@ TestPureSolverToSolverCycleRejected(const std::string &examplesDir)
 
 // Aim constraints revise a joint's final frame, and the revision points the
 // authored aim axis at the target.
-//
 // Nothing asserted this before: the mover-graph parity suite only covers point
 // chains, and an aim moves a transform provider's FRAME. So the whole
 // pose-domain revision path could have been a no-op and every test would still
 // have passed -- which matters now that it is applied in memory rather than
 // through a generated RigExecPointFrameMoverApplication.
-//
 // 08_AimEyes: EyeL/EyeR sit at (-1,10,0)/(1,10,0), LookAt at (0,10,6), and
 // both aims declare rigExec:aimAxis = "z" at weight 1. So each eye's final
 // frame must (a) differ from its base and (b) have its Z axis pointing at the
@@ -2553,13 +2538,11 @@ TestAimConstraintRevisesJointFrame(const std::string &examplesDir)
 // A TwoBoneIk that leaves its bone lengths unauthored measures them from the
 // bound joints' rest frames on EVERY Evaluate, so moving a joint's rest
 // recalibrates the solve with no recompile (rigEvaluator.h:298-304).
-//
 // The shipped examples are the regression that matters. Authoring an absolute
 // length -- as a measure-then-bake repair session once did to spider_leg_ik --
 // opts the solver out of that measurement entirely, and the pose silently
 // stops answering to the skeleton it is supposed to follow. The symptom is
 // not a wrong number anywhere; it is an edit that does nothing at all.
-//
 // Every TwoBoneIk names the three joints it solves for, so every rig can
 // be checked. 03_IkFkBlendClamp and ArmRig route POSING through a
 // RigExecBlendPointFrames, but their IKs still name the same chain as a
@@ -2637,7 +2620,6 @@ TestShippedTwoBoneIksRecalibrateOnRestEdit(const std::string &examplesDir)
 
 // 09 exercises the three property-domain math movers: the output domain that
 // is neither a joint frame nor a points array.
-//
 // Each target is an ordinary authored attribute of a different type, and each
 // mover revises it with the operation it authors. Asserting the VALUES, not
 // just presence: a chain that published its own authored base unchanged would
@@ -2701,13 +2683,11 @@ TestPropertyMathMoversAreEvaluated(const std::string &examplesDir)
 }
 
 // A property mover's result reaches the computation that reads the attribute.
-//
 // This is the half that publication alone cannot demonstrate. 03 authors an
 // IK/FK blend weight overdriven to -0.25..1.3 and a ClampBlendWeight mover to
 // bound it, and RigExecBlendPointFrames ALSO clamps internally -- so a clamp
 // that never reached exec and one that did produce identical frames, and the
 // authored mover would be decoration.
-//
 // So the test drives the mover somewhere the kernel's own bound cannot reach:
 // overridden to `blend` toward 0, it must force pure FK at a frame whose
 // clamped weight is 0.525. Different joint frames are the proof the override
@@ -2867,7 +2847,6 @@ TestPropertyMoverTypeMismatchRejected(const std::string &examplesDir)
 
 // A constraint driving a plain UsdGeomXform publishes a transform, and the
 // geometry parented under it is left alone.
-//
 // This is the path that had no writer at all: RigExecSnapshotPrim::hasXform
 // was plumbed to HdXformSchema and never populated, so a constraint on an
 // Xform computed a correct frame that never reached Hydra. Asserting the
@@ -2942,14 +2921,12 @@ TestAimConstraintDrivesXform(const std::string &examplesDir)
 
 // The smallest rig that exists: one constraint, no joints, both ends plain
 // UsdGeomXformables.
-//
 // Two rules used to reject this and neither was about the rig being wrong. A
 // joint was required because the compile gate read "a rig publishes joints",
 // when in fact a mover publishes whatever its target is; and an aim target
 // was always tapped for computePointFrame, which a plain Xformable does not
 // publish -- a HARD exec failure that took the whole snapshot down rather
 // than leaving one value missing.
-//
 // rigexec_flat.usda is a flattened stage of the shape an interactive session
 // produces, so it is the exact case a user hits first.
 static void
@@ -3012,7 +2989,6 @@ TestJointFreeRigPublishesXform(const std::string &examplesDir)
 }
 
 // A rig whose entire content is two property movers competing for one dial.
-//
 // Authored TimesTen-then-AddOne, but DISPLAYED AddOne above TimesTen by the
 // reorder below. The stack must execute bottom-to-top, so TimesTen runs before
 // AddOne. The file order and composed display order disagree on purpose:
@@ -3058,14 +3034,11 @@ def Xform "Asset"
 // Each revision reads the PRECEDING revision, and execution reverses the
 // composed top-to-bottom sibling order -- it is neither authoring order nor a
 // fixed order.
-//
 // The arithmetic is chosen so the three candidate behaviours are three
 // different numbers, and no assertion can pass by accident:
-//
 //   21  multiply-then-add over the chain   ((2 * 10) + 1)   <- correct
 //   30  add-then-multiply over the chain   ((2 + 1) * 10)   <- forward order
 //    3  no chaining, last writer wins      (2 + 1)          <- no chain
-//
 // Then the reorder is flipped through the SESSION layer and Evaluate is
 // called with no intervening Compile: the composed mover topology is part of
 // the binding-epoch digest, so the evaluator has to notice and rebuild. That
@@ -3190,7 +3163,6 @@ TestMoverOrderIsComposedAndDynamic()
 }
 
 // The same chaining property for a POINT chain, on a real rig.
-//
 // 06 nests CageDeform inside Smooth inside VolumeCorrect, so post-order makes
 // the lattice first and the volume correction last. Disabling the lattice
 // must change the PUBLISHED points: if each mover read the authored base
@@ -3264,14 +3236,12 @@ TestPointChainConsumesPrecedingRevision(const std::string &examplesDir)
 
 // "The next mover picks up the modified value" with NO carve-out: a property
 // mover's result reaches a later mover's static parameter read too.
-//
 // Two delivery routes exist for one revised value, because there are two
 // kinds of consumer. A COMPUTATION reads the attribute through exec and gets
 // the value override (03's clamped blend weight). Packet assembly reads it
 // straight off the stage and never touches exec, so it gets the same value
 // through RigExecResolvedInputs instead. Both routes are filled from the one
 // property-chain result, before anything reads an input.
-//
 // Here a float mover drives the smooth mover's inputs:defaultWeight from 0.6
 // to 0,
 // and the smoothing has to actually stop. The CPU oracle resolves its own
@@ -3381,13 +3351,11 @@ TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
 
 // A read phase authored as property metadata selects WHICH revision of an
 // input a mover consumes.
-//
 // 13 deforms a Slab through a cage that is itself deformed by two movers, so
 // the three phases are three different slabs from one rig with no other edit:
 //   base                 the authored cage -- the slab does not move at all;
 //   <CageLift>           the cage as of that mover -- lifted, not twisted;
 //   final                the cage after both -- lifted and twisted.
-//
 // Asserting the DISPLACEMENTS, not just that they differ: the controls put
 // ty=2 on the lift and tx=1.5 on the twist at 1024, so the three answers have
 // to be 0, 2, and sqrt(1.5^2 + 2^2) = 2.5. Anything else means the phase
@@ -4060,7 +4028,6 @@ TestRigWithNoOutputsRejected(const std::string &examplesDir)
 }
 
 // The codeless schema's resource directory.
-//
 // The GENERATED one when the build supplied it: only that copy carries the
 // LibraryPath that lets Plug load the compute-extent registration on demand,
 // which is what makes UsdGeomBBoxCache answer for RigExec prims. The source

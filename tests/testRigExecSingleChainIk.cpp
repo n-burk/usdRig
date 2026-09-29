@@ -1,6 +1,4 @@
-//
 // Arbitrary-length FBX-style SingleChainIK math conformance tests.
-//
 #include "rigExecMath/singleChainIk.h"
 
 #include <algorithm>
@@ -551,6 +549,23 @@ TestDegenerateInputs()
 int
 main()
 {
+    // Non-X-aligned imported bones must retain their frame at the saved
+    // endpoint, and rotate with the bone when the endpoint moves.
+    {
+        std::vector<RigExecPointFrame> chain = {
+            MakeFrame(GfVec3d(0)), MakeFrame(GfVec3d(0, 2, 0))};
+        RigExecSingleChainIkParams params;
+        params.preserveJointOrientation = true;
+        auto saved = RigExecSolveSingleChainIk(chain, chain.back(), params);
+        CHECK(Near(UnitX(saved[0]), GfVec3d(1, 0, 0)));
+        auto moved = RigExecSolveSingleChainIk(
+            chain, MakeFrame(GfVec3d(2, 0, 0)), params);
+        CHECK(Near(moved.back().Origin(), GfVec3d(2, 0, 0)));
+        CHECK(Near(UnitX(moved[0]), GfVec3d(0, -1, 0)));
+        params.preserveJointOrientation = false;
+        auto legacy = RigExecSolveSingleChainIk(chain, chain.back(), params);
+        CHECK(Near(UnitX(legacy[0]), GfVec3d(0, 1, 0)));
+    }
     TestTwoJointReachableAndEndOrientation();
     TestLongerReachableRotatePlane();
     TestUnreachableGoal();

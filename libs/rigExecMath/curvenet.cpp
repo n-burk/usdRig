@@ -1,11 +1,9 @@
-//
+// Method reference: de Goes et al. (2022), https://doi.org/10.1145/3528223.3530060
 // Curvenet representation and scaled frames (2022 paper §3).
-//
 // Matrices here are in MATH (column-vector) convention: column k of a frame
 // is its k-th axis, and M * v applies it, which is what GfMatrix3d's
 // matrix*vector operator already does. USD's row-vector convention only
 // appears where these meet point arrays, and the transpose is written there.
-//
 #include "curvenet.h"
 #include "pxr/base/gf/vec4d.h"
 
@@ -104,9 +102,7 @@ GfMatrix3d _AxisAngle(const GfVec3d &axis, double angle)
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Spline evaluation
-// ---------------------------------------------------------------------------
 
 GfVec3d _EvalBezier(const GfVec3d p[4], double t)
 {
@@ -256,9 +252,7 @@ GfMatrix3d RigExecSmallestRotation(const GfVec3d &from, const GfVec3d &to)
     return _AxisAngle(axis, std::acos(c));
 }
 
-// ---------------------------------------------------------------------------
 // Topology
-// ---------------------------------------------------------------------------
 
 bool RigExecBuildCurvenetTopology(
     const std::vector<int> &splineIndices, size_t pointCount,
@@ -511,7 +505,6 @@ void RigExecOrientCurvenetIntersections(
         if (_SafeNormalize(&normal) == 0.0) {
             // No surface to consult: take the fan's own best-fit plane as the
             // least-variance direction of its spokes.
-            //
             // NOT the sum of consecutive cross products. The spokes arrive in
             // whatever order the curves were built, and for the commonest
             // intersection there is -- four spokes in two antiparallel pairs,
@@ -559,9 +552,7 @@ void RigExecOrientCurvenetIntersections(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Sampling
-// ---------------------------------------------------------------------------
 
 std::vector<int> RigExecPlanCurvenetSamples(
     const RigExecCurvenetTopology &topology,
@@ -651,9 +642,7 @@ RigExecCurvenetSampling RigExecSampleCurvenet(
     return sampling;
 }
 
-// ---------------------------------------------------------------------------
 // Scaled frames
-// ---------------------------------------------------------------------------
 
 GfMatrix3d RigExecCurvenetFrames::GetScaledFrame(size_t segment,
                                                  bool left) const
@@ -780,7 +769,6 @@ RigExecCurvenetFrames RigExecComputeCurvenetFrames(
         // Keep every corner normal on the same side of the surface: a fan
         // sorted counter-clockwise produces corners along +normal, and a
         // reflected one would silently flip a frame's handedness.
-        //
         // Measured against the fan's OWN corners in THIS pose, not against
         // the reference normal frozen at bind time. That reference cannot
         // move with the rig, so a corner normal lying near its equator flips
@@ -1012,9 +1000,7 @@ bool RigExecCurvenetFramesAreValid(const RigExecCurvenetFrames &frames,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Deformation gradients
-// ---------------------------------------------------------------------------
 
 RigExecCurvenetGradients RigExecComputeCurvenetGradients(
     const RigExecCurvenetFrames &restFrames,

@@ -1,6 +1,4 @@
-//
 // TouchPose C surface -- see touchPose.h.
-//
 #include "touchPose.h"
 
 #include "registry.h"

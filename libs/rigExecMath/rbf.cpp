@@ -1,17 +1,5 @@
-//
-// RigExec radial-basis pose interpolation. See rbf.h for the conventions and
-// for why this is native rather than a call into the reference implementation.
-//
-// THE ARITHMETIC IS DELIBERATELY LITERAL. Every sum below accumulates in the
-// Python's own left-to-right order, every division is spelled the way the
-// Python spells it, and the Gauss-Jordan pivot search picks the FIRST maximal
-// row exactly as Python's `max(..., key=...)` does. That is not fussiness:
-// tests/testRigExecRbf.cpp compares this against the Python at 1e-6 THROUGH A
-// MATRIX INVERSE, and several of the biped's interpolators are ill enough
-// conditioned that a reassociated sum moves the answer well past that. Where
-// a rewrite would obviously be faster, the fast spelling belongs in a
-// separate evaluation path with its own tolerance, not here.
-//
+// RBF solver; provenance and conventions are documented in rbf.h.
+// Preserve left-to-right sums and first-maximum pivot selection for fixture parity.
 #include "rigExecMath/rbf.h"
 
 #include <algorithm>
@@ -65,9 +53,7 @@ QuatDot(const GfQuatd &a, const GfQuatd &b)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Kernels and the metric
-// ---------------------------------------------------------------------------
 
 double
 RigExecRbfGaussian(double distance, double radius)
@@ -138,9 +124,7 @@ RigExecRbfCombine(double angle, double width, double gap,
     return std::sqrt(total);
 }
 
-// ---------------------------------------------------------------------------
 // Rotations
-// ---------------------------------------------------------------------------
 
 GfQuatd
 RigExecRbfQuaternionFromEuler(const GfVec3d &euler)
@@ -349,9 +333,7 @@ RigExecRbfInvert(const std::vector<std::vector<double>> &matrix,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // RigExecRbfSolver
-// ---------------------------------------------------------------------------
 
 RigExecRbfSolver::RigExecRbfSolver(const RigExecRbfSolverDesc &desc)
     : _poses(desc.poses),
@@ -760,12 +742,10 @@ bool
 RigExecRbfSolver::Solve()
 {
     // THE TRANSPOSE IS NOT COSMETIC.
-    //
     // Evaluate() forms w[c] = sum_i W[c][i] * phi_i(x), where phi_i is the
     // kernel carrying POSE i's width, and asks that it come out as 1 at pose
     // c and 0 at the others. Since Matrix()[r][i] is phi_i(pose_r), that
     // reads W @ M.T == I, so what has to be inverted is M TRANSPOSED.
-    //
     // With one shared radius M is symmetric and the two are the same matrix,
     // which is why this went unnoticed in the Python for as long as every
     // interpolator had one. Per-pose widths make it asymmetric --
@@ -777,7 +757,6 @@ RigExecRbfSolver::Solve()
     // it cost the head, the neck, both elbows, both wrists, both ankles and
     // both toes between 0.001 and 0.130 at their own poses -- small enough
     // to read as a soft corrective rather than as a bug. rbf.py:868-920.
-    //
     // 33 of the biped's 67 interpolators fit to per-pose widths, so this is
     // the common case here, not the exotic one.
     const std::vector<std::vector<double>> rows = Matrix();
@@ -1017,9 +996,7 @@ RigExecRbfSolver::ScaleWidths(double factor)
     _weights.clear();
 }
 
-// ---------------------------------------------------------------------------
 // The width fitter
-// ---------------------------------------------------------------------------
 
 RigExecRbfSolver
 RigExecRbfFitWidth(const RigExecRbfSolverDesc &desc,

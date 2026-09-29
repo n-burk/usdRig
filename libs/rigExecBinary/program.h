@@ -1,18 +1,14 @@
-//
 // .rigexec program sections: the wire encoding of the baked program's
 // skeleton -- slot inventory, epoch constants, steps, clusters, cones.
-//
 // The wire structs here are plain data (no USD): the bake side converts the
 // live RigExecBakedProgramImpl into them, and the M2 runtime interprets them
 // directly. Encode and Decode are strict inverses -- Decode rejects trailing
 // bytes, so an encoder/decoder skew fails loudly rather than reading stale
 // fields -- and every enum is range-checked on the way in.
-//
 // Layout notes (D1): everything is little-endian; counts are u32; vectors
 // are count-prefixed and dense; matrices are 16xf64 row-major; frames are
 // 4xvec3d landmarks plus a flags u32. String references are u32 indices
 // into the container's string table.
-//
 #ifndef RIGEXEC_BINARY_PROGRAM_H
 #define RIGEXEC_BINARY_PROGRAM_H
 
@@ -23,9 +19,7 @@
 
 namespace rigExec {
 
-// ---------------------------------------------------------------------------
 // Wire primitives.
-// ---------------------------------------------------------------------------
 
 /// Appends little-endian scalars to a section payload.
 void RigExecWirePutU8(std::vector<uint8_t> *out, uint8_t value);
@@ -58,9 +52,7 @@ private:
     size_t _at = 0;
 };
 
-// ---------------------------------------------------------------------------
 // Wire math (mirrors GfVec3d/GfVec3f/GfMatrix4d/RigExecPointFrame fieldwise).
-// ---------------------------------------------------------------------------
 
 using RigExecWireVec3d = std::array<double, 3>;
 using RigExecWireVec3f = std::array<float, 3>;
@@ -95,9 +87,7 @@ bool RigExecWireReadMatrix4d(RigExecWireReader *reader,
 bool RigExecWireReadFrame(RigExecWireReader *reader,
                           RigExecWireFrame *value);
 
-// ---------------------------------------------------------------------------
 // Steps, clusters, cones (SlotMeta section companions).
-// ---------------------------------------------------------------------------
 
 /// Mirrors RigExecBakedSlotDomain, in the same order. The step graph's
 /// domain ids are part of the format, so this enum is frozen: append only,
@@ -247,9 +237,7 @@ bool RigExecWireEncodeCones(const RigExecWireCones &cones,
 bool RigExecWireDecodeCones(RigExecWireReader *reader,
                             RigExecWireCones *cones, std::string *error);
 
-// ---------------------------------------------------------------------------
 // Slot inventory (SlotMeta section) and epoch constants (Constants section).
-// ---------------------------------------------------------------------------
 
 /// Dense provider slots in namespace DFS order, plus the publication
 /// tables the epilogue reads. Paths are string-table references; the

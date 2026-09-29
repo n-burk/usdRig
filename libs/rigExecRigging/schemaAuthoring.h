@@ -1,11 +1,8 @@
-//
 // Strict, schema-backed authoring for codeless RigExec schemas.
-//
 // Unlike the coarse RigExecRigBuilder, this low-level API never invents a
 // property or accepts a caller-declared Sdf type. Every operation resolves its
 // contract from OpenUSD's registered/composed UsdPrimDefinition and fails
 // before authoring when that contract is unavailable.
-//
 #ifndef RIGEXEC_RIGGING_SCHEMA_AUTHORING_H
 #define RIGEXEC_RIGGING_SCHEMA_AUTHORING_H
 

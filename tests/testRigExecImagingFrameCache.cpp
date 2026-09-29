@@ -1,11 +1,8 @@
-//
 // testRigExecImagingFrameCache (Stream E): the imaging integration of the
 // per-frame cache -- scrub-from-cache, live fallback, edit fencing, and
 // cache-only background completions.
-//
 // The contract, one rule per test group in the testRigExecStaticInputCache
 // style:
-//
 //   * SCRUB. A scripted scrub across a warmed range performs zero evaluator
 //     pulls, and every served generation is bit-identical to the live
 //     evaluation of the same frame.
@@ -96,14 +93,11 @@
 //   * OVERLAY-RACE. Setting the overlay mid-warming cancels before
 //     clearing: old-flag jobs drop at the fence and no stale-overlay pose
 //     is served afterwards.
-//
 // The rig is the frozen-context test's tiny in-memory rig (one skinned mesh
 // over two animated controls), which bakes, evaluates, and samples. The
 // tests set RIGEXEC_FRAME_CACHE in-process and also pass under the
 // validation plan's outer combos (cache off, parallel eval off, verify on)
 // by reading the live switches and expecting the combo's own counts.
-//
-
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/registry.h"
 #include "rigExecBake/bake.h"

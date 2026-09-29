@@ -1,9 +1,7 @@
-//
 // Scoped cache clears (unified-program spec rules S5, S6): a stage notice
 // drops, of the value caches that outlive a generation, exactly what it
 // could have made stale -- and what it drops, the next generation reads
 // again.
-//
 // Each case edits one value the caches hold or were read from, evaluates,
 // and holds the pose to two things: a second evaluator compiled fresh on the
 // edited stage, which cannot have kept anything, and the cache's own
@@ -17,11 +15,9 @@
 //     mover prim and not on the mesh;
 //   * a blend sample edit: the UsdSkelBlendShape's offsets, the sample's own
 //     activation, and the points the layout was range-checked against.
-//
 // Registered plain (baked and dynamic in turn), under the parity entries,
 // and under RIGEXEC_VERIFY_SCOPED_CLEARS=1, where every evaluator is shadowed
 // by one that drops the caches whole and the two poses are compared.
-//
 #include "rigExec/bakedProgram.h"
 #include "rigExec/profiler.h"
 #include "rigExec/rigEvaluator.h"
@@ -174,9 +170,7 @@ FloatAt(const RigExecRigPose &pose, const SdfPath &path)
     return found->second.UncheckedGet<float>();
 }
 
-// ---------------------------------------------------------------------------
 // Property chains.
-// ---------------------------------------------------------------------------
 
 // dial = 2, multiplied by TimesTen's inputs:value, then AddOne's
 // inputs:value added -- which is connected to Channels.gain -- published at
@@ -306,9 +300,7 @@ TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
     CHECK(ChainRuns(*evaluator, dial) == 0);
 }
 
-// ---------------------------------------------------------------------------
 // Skin layouts.
-// ---------------------------------------------------------------------------
 
 const SdfPath kSkinTarget("/Asset/Geom/Mesh.points");
 const SdfPath kSkin("/Asset/Rig/Movers/Skin");
@@ -436,9 +428,7 @@ TestAnInputsMethodEditOnASkinMover(RigExecEvaluationMode mode)
                          stage, mode, pose);
 }
 
-// ---------------------------------------------------------------------------
 // Blend sample shapes.
-// ---------------------------------------------------------------------------
 
 const SdfPath kBlendTarget("/Asset/Geom/Face.points");
 

@@ -24,7 +24,7 @@ import zlib
 #   Anthropic   api.anthropic.com   sk-ant-…   x-api-key       claude-opus-5
 #   Meta Muse   api.meta.ai         LLM_…      Bearer token    muse-spark-1.3-contributor
 #   Ollama      <host>:11434        (none)     (ignored)       qwen3.5:9b
-#   LM Studio   hivemind.local:1234 (none)     (ignored)       selected from server
+#   LM Studio   127.0.0.1:1234 (none)     (ignored)       selected from server
 #   Apple FM    localhost:1976      (none)     (none)          system
 #
 # Ollama is a local server and is the reason this list is worth keeping short:
@@ -84,11 +84,8 @@ OLLAMA_PLACEHOLDER_KEY = "ollama"
 # answering from memory, and the settings dialog blocks on it.
 OLLAMA_LIST_TIMEOUT = 4.0
 
-# Hivemind advertises its host name over Bonjour; the bare ``hivemind`` name
-# does not resolve on this Mac, while ``hivemind.local`` does. LM Studio's
-# Anthropic-compatible client base URL deliberately omits /v1 because the SDK
-# appends /v1/messages itself.
-LMSTUDIO_DEFAULT_BASE_URL = "http://hivemind.local:1234"
+# Defaults to loopback; set MUSE_LMSTUDIO_URL for a remote server.
+LMSTUDIO_DEFAULT_BASE_URL = "http://127.0.0.1:1234"
 LMSTUDIO_PLACEHOLDER_KEY = "lmstudio"
 LMSTUDIO_LIST_TIMEOUT = 4.0
 
@@ -171,9 +168,7 @@ Report what happened, not what you intend to do. Lead with the outcome.\
 """
 
 
-# ---------------------------------------------------------------------------
 # Tool schemas
-# ---------------------------------------------------------------------------
 
 TOOL_SCHEMAS = [
     {
@@ -346,7 +341,6 @@ separately after this decision.\
 """
 
 
-# ---------------------------------------------------------------------------
 # Message normalization
 #
 # The Anthropic Messages API rejects a `system` role inside messages, rejects
@@ -354,7 +348,6 @@ separately after this decision.\
 # `user`.  A chat panel naturally produces all three (goal notices logged as
 # system, the live prompt appended to history before the call).  Normalizing
 # here means no caller can construct a request the API will refuse.
-# ---------------------------------------------------------------------------
 
 def normalize_messages(raw_messages):
     """
@@ -405,9 +398,7 @@ def _join_content(first, second):
     return first_blocks + second_blocks
 
 
-# ---------------------------------------------------------------------------
 # PNG text metadata — how camera info rides along with a screenshot
-# ---------------------------------------------------------------------------
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -519,9 +510,7 @@ def png_write_text(data, mapping):
         return data
 
 
-# ---------------------------------------------------------------------------
 # Attachments — images the user sends, with whatever camera context they carry
-# ---------------------------------------------------------------------------
 
 _MEDIA_TYPES = {
     ".png": "image/png",
@@ -643,9 +632,7 @@ def build_user_content(prompt, attachments):
     return blocks
 
 
-# ---------------------------------------------------------------------------
 # The agent loop
-# ---------------------------------------------------------------------------
 
 class AgentError(RuntimeError):
     pass
@@ -717,7 +704,7 @@ def resolve_ollama_base_url():
 
 
 def resolve_lmstudio_base_url():
-    """The LM Studio address: MUSE_LMSTUDIO_URL, else Hivemind."""
+    """The LM Studio address: MUSE_LMSTUDIO_URL, else the loopback default."""
     value = os.environ.get("MUSE_LMSTUDIO_URL", "").strip().rstrip("/")
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1].strip().rstrip("/")
@@ -749,7 +736,7 @@ def resolve_base_url():
     if provider == PROVIDER_APPLE:
         return resolve_apple_base_url(), "Apple Foundation Models"
     if provider == PROVIDER_LMSTUDIO:
-        return resolve_lmstudio_base_url(), "LM Studio on Hivemind"
+        return resolve_lmstudio_base_url(), "LM Studio"
 
     value, name = _env_base_url()
     if value:
@@ -1037,7 +1024,7 @@ def fetch_lmstudio_models(base_url=None, timeout=None, use_cache=True):
 
 
 def preferred_lmstudio_model(models):
-    """Choose a useful default without hard-coding Hivemind's model names."""
+    """Choose a useful default without hard-coding the server's model names."""
     if not models:
         return ""
     # Avoid an unnecessary load first, then prefer native tool syntax and
@@ -1843,8 +1830,8 @@ def run_agent(messages, executor, system_prompt, on_event,
         model or resolve_model(base_url, provider), base_url)
     if provider == PROVIDER_LMSTUDIO and not model:
         raise AgentError(
-            "LM Studio at %s did not list an LLM. Start the server on "
-            "Hivemind with port 1234 exposed to the local network, then "
+            "LM Studio at %s did not list an LLM. Start the server "
+            "(default http://127.0.0.1:1234, or set MUSE_LMSTUDIO_URL), then "
             "select a model in Muse settings." % base_url)
     # A model that cannot call tools cannot do anything Muse asks of it, and
     # the symptom -- fluent answers, untouched stage -- looks like the
@@ -1899,7 +1886,7 @@ def run_agent(messages, executor, system_prompt, on_event,
                 if provider == PROVIDER_LMSTUDIO:
                     raise AgentError(
                         "LM Studio at %s requires authentication, but the "
-                        "Hivemind entry is configured as a keyless LAN "
+                        "the server entry is configured as a keyless LAN "
                         "service. Disable Require Authentication in LM Studio "
                         "or configure a separate authenticated gateway."
                         % base_url)

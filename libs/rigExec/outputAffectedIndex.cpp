@@ -1,7 +1,4 @@
-//
 // RigExec output-affected index. See outputAffectedIndex.h.
-//
-
 #include "outputAffectedIndex.h"
 
 #include <algorithm>

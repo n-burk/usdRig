@@ -1,11 +1,9 @@
-//
 // RigExec spline-IK spine kernel tests: the degree-2 curve against a de
 // Boor reference and a closed-form arc length, rest reproduction on the
 // real biped spine and neck (with the interior rest residual measured and
 // printed, not asserted away), rigid-motion invariance, arc-length stretch,
 // the exact squash formula, constant roll and a linear twist gradient, the
 // mid control bending only the interior, and the degenerate inputs.
-//
 #include "rigExecMath/splineIk.h"
 
 #include "pxr/base/gf/rotation.h"
@@ -280,7 +278,6 @@ MakeStraightRig(RigExecSplineIkRestLength restLength =
     return rig;
 }
 
-// ---------------------------------------------------------------------------
 
 static void
 TestCurveAgainstDeBoor()

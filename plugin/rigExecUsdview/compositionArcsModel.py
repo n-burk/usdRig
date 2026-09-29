@@ -64,10 +64,8 @@ def _Editing(context):
     return context is not None and context.editRow is not None
 
 
-# --------------------------------------------------------------------
 # Field descriptors. The dialog builds itself from these, so adding a
 # field to an arc is a change here and nowhere in the Qt file.
-# --------------------------------------------------------------------
 
 TEXT = "text"              # a line edit
 ASSET = "asset"            # a line edit with a file browser beside it
@@ -122,9 +120,7 @@ def _OffsetFields(what):
     )
 
 
-# --------------------------------------------------------------------
 # Context and layer choice
-# --------------------------------------------------------------------
 
 class ArcContext(object):
     """The stage and prim a flow is authoring against."""
@@ -272,7 +268,6 @@ def ClassPrimPaths(stage):
             if p.GetSpecifier() == Sdf.SpecifierClass]
 
 
-# --------------------------------------------------------------------
 # Snapshots for the things a prim-spec snapshot does not cover.
 #
 # They live in layerOpinionsModel, beside the operations that edit and
@@ -280,15 +275,12 @@ def ClassPrimPaths(stage):
 # where the arcs that use them are. Both satisfy the same contract
 # rigExecUndo.Edit relies on: a Restore() that puts the layer back
 # exactly, called inside the Edit's own change block.
-# --------------------------------------------------------------------
 
 SublayerSnapshot = layerOpinionsModel.SublayerSnapshot
 RelocatesSnapshot = layerOpinionsModel.RelocatesSnapshot
 
 
-# --------------------------------------------------------------------
 # Arc kinds
-# --------------------------------------------------------------------
 
 class _Arc(object):
     """

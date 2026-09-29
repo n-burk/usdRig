@@ -1,6 +1,4 @@
-//
 // benchFrameCacheWarm -- Stream F warming benches for the per-frame cache.
-//
 // Where benchFrameCache measures the numbers the defaults are made from,
 // this bench measures what warming DOES with them: cold-vs-warm scrub
 // throughput, edit-to-affected-frames recompute cost, UI-eval latency with
@@ -10,16 +8,13 @@
 // NOT registered with ctest (like benchFrameCache): wall-clock comparisons
 // flake on shared CI runners, so the benches report and the gate stays
 // deterministic.
-//
 //   benchFrameCacheWarm [examplesDir] [mode] [seconds] [stage] [frames]
-//
 //   mode: all (default), scrub, edit, latency, memory, stress, trace.
 //   seconds: the stress duration (default 5).
 //   stage: the scrub rig under examplesDir (default
 //   "biped/Biped_anim.usda"); "biped/Biped_stack_anim.usda" is the heavy
 //   lane. frames: the scrub's comma-separated frame list (default
 //   "1,2,3,4,5,6,7,8").
-//
 // The primary rig is the frozen-context test's tiny in-memory rig (one
 // skinned mesh over two animated controls), which bakes, evaluates, and --
 // importantly -- samples, so every key below is a real control-state digest
@@ -29,7 +24,6 @@
 // RigExecSampleFrameInputs), in which case the bench says so and reports
 // the evaluator-only cold reference instead of a ratio it cannot stand
 // behind.
-//
 // Environment, read and reported, never assumed: RIGEXEC_FRAME_CACHE (unset
 // is set to "on" in-process for the run, so a bare bench measures warming;
 // an explicit off/warm-off is honored and the fill modes say they skipped),
@@ -38,8 +32,6 @@
 // imply. The busy-work latency load is synthetic by label: a calibrated
 // ~3.1 ms spin standing in for one biped serial frame (report section 2),
 // so the on-vs-off p95 answers the contention question on any rig.
-//
-
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
@@ -298,9 +290,7 @@ KeyFor(uint64_t epoch, const RigExecFrameInputs &inputs,
     return key;
 }
 
-// ---------------------------------------------------------------------------
 // Scrub throughput: cold (live eval + publish) vs warm (digest + lookup).
-// ---------------------------------------------------------------------------
 
 bool
 BenchScrub(BenchRig *rig, const char *name,
@@ -480,10 +470,8 @@ VerdictName(RigExecSparseVerdict verdict)
     return "?";
 }
 
-// ---------------------------------------------------------------------------
 // Edit cost: one control-sample edit across an N-frame range, then what the
 // sparse planner does with the affected frames.
-// ---------------------------------------------------------------------------
 
 bool
 BenchEdit(BenchRig *rig, const std::vector<double> &frames)
@@ -707,12 +695,10 @@ TimeUiEvals(BenchRig *rig, const std::vector<double> &frames, size_t samples)
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // UI-eval latency with warming on/off: the calling thread's live-eval cost
 // alone, then under a draining pool (plumbing first, then synthetic serial
 // load), median and p95 each. A bench, not a gate: wall-clock assertions
 // flake on shared runners.
-// ---------------------------------------------------------------------------
 
 bool
 BenchLatency(BenchRig *rig, const std::vector<double> &frames)
@@ -815,10 +801,8 @@ BenchLatency(BenchRig *rig, const std::vector<double> &frames)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Memory under the cap: measured per-frame bytes, eviction behavior, and the
 // Stream 0 capacity arithmetic the defaults stand on.
-// ---------------------------------------------------------------------------
 
 bool
 BenchMemory(BenchRig *rig, const std::vector<double> &frames)
@@ -913,12 +897,10 @@ BenchMemory(BenchRig *rig, const std::vector<double> &frames)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Stress: N seconds of UI-vs-warming churn for TSAN runs (Linux). The UI
 // thread evaluates live, publishes, commits, and cancels while a second
 // thread hammers the fence; a TSAN-instrumented build reports any race.
 // Prints counts, asserts nothing.
-// ---------------------------------------------------------------------------
 
 bool
 BenchStress(BenchRig *rig, const std::vector<double> &frames, double seconds)
@@ -1023,10 +1005,8 @@ BenchStress(BenchRig *rig, const std::vector<double> &frames, double seconds)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Trace: a short scripted run that exercises the profiler's cache and
 // scheduler lanes end to end, then writes the Chrome trace.
-// ---------------------------------------------------------------------------
 
 bool
 BenchTrace(BenchRig *rig, const std::vector<double> &frames)

@@ -1,6 +1,4 @@
-//
 // RigExec dual-quaternion skinning primitives.
-//
 // A unit dual quaternion q^ = qr + eps*qd encodes a rigid motion: the real
 // part qr is a unit quaternion carrying the rotation, and the dual part
 // qd = 1/2 * t * qr carries the translation t (as a pure quaternion, on the
@@ -9,7 +7,6 @@
 // et al., "Geometric Skinning with Approximate Dual Quaternion Blending",
 // ACM TOG 27(4), 2008): blend N weighted joint motions, normalise once,
 // apply to a point.
-//
 // Conventions (state them, then trust them):
 //   * Matrices follow the GfMatrix4d row-vector convention used throughout
 //     RigExec: points are row vectors, p' = p * M, the upper 3x3 rows are the
@@ -22,7 +19,6 @@
 //   * A dual quaternion and its negation encode the same rigid motion. The
 //     blend performs shortest-arc sign correction so that this double cover
 //     never averages a motion against itself.
-//
 // Scale and shear policy: a dual quaternion can only represent a proper
 // rigid motion. If the input matrix carries scale, shear, or a reflection,
 // RigExecDualQuatFromMatrix keeps the proper rotation of the polar
@@ -35,7 +31,6 @@
 // fall back to linear blending for those joints, which needs to be a caller
 // decision. The optional isRigid output tells the caller whether anything
 // was dropped.
-//
 #ifndef RIGEXEC_MATH_DUAL_QUAT_H
 #define RIGEXEC_MATH_DUAL_QUAT_H
 
@@ -157,40 +152,32 @@ GfVec3d RigExecDualQuatRotateVector(
 GfVec3d RigExecDualQuatTransformPoint(
     const RigExecDualQuat &dq, const GfVec3d &point);
 
-// ---------------------------------------------------------------------------
 // Scale-aware DQS
-//
 // A rig that scales a joint non-uniformly (the squash-and-stretch spine
 // carries s_y = s_z = 1 - w * preserveVolume * (ratio - 1)) must not lose
 // that scale on the DQS path. The rigid-only API above drops it by policy;
 // this API carries it. Each influence is split by polar decomposition into a
 // symmetric stretch and a rigid motion, in the row-vector convention
-//
 //     p' = p * S_i * R_i + t_i        S_i symmetric (scale + shear), R_i rotation
-//
 // where S_i acts FIRST, i.e. in the joint's pre-rotation frame. (Column
 // form: L = R * H with H = R^T L symmetric, the right polar factor; transpose
 // to rows and H * R_row falls out. RigExecPointsToParams computes exactly
 // this H.) The two parts are then blended with the method appropriate to
 // each:
-//
 //     S_blend = sum(w_i * S_i) / sum(w_i)     linear: correct for stretch
 //     (R, t)_blend = RigExecBlendDualQuats     shortest-arc DQS: rigid stays rigid
 //     p' = p * S_blend * R_blend + t_blend
-//
 // So the rotational part keeps DQS's length preservation (the reason DQS
 // exists) and scale/shear is interpolated linearly in the pre-rotation
 // frame, which is the interpolation that makes uniform scale s on every
 // influence come out as exactly s and anisotropic scales come out as their
 // weighted mean, independent of how much the influences rotate relative to
 // each other.
-//
 // A DELIBERATE DIFFERENCE: the classical dual-quaternion skinCluster ignores
 // joint scale and shear entirely (only the rigid motion of each joint
 // reaches the skin). This path does NOT ignore them. A non-uniformly scaled
 // joint therefore deforms the skin here and does not in the conventional tool; that is the
 // intended behaviour, not a bug.
-//
 // Reflection and singular input: a reflected influence comes back from the
 // library decomposition with one negative scale on the pinned Z axis, so
 // its stretch is symmetric but not positive-definite, and a blend across it
@@ -198,7 +185,6 @@ GfVec3d RigExecDualQuatTransformPoint(
 // rotation to keep: the rotation is identity and the stretch is the raw
 // linear part, so a lone singular influence still reproduces its transform
 // exactly. Both report isRigid == false.
-// ---------------------------------------------------------------------------
 
 /// One influence split into rigid motion plus pre-rotation stretch.
 /// A rigid input has stretch == exactly the identity and isRigid == true,

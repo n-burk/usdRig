@@ -1,12 +1,9 @@
-//
 // RigExecBackgroundScheduler, Stream C: the frame-job queue behind the
 // generation fence.
-//
 // The fence tests from the Stream 0 skeleton stand unchanged -- per-rig
 // tokens, monotonic bumps, independence, staleness -- and the stub's "a
 // current job declines" test is replaced by the pool's own contract, one rule
 // per test in the testRigExecStaticInputCache style:
-//
 //   * FENCE. Tokens, bumps, independence, stale refusal (kept from Stream 0).
 //   * SWITCH. RIGEXEC_FRAME_CACHE parses to on/off/warm-off, the fill gate is
 //     the mode AND parallel-eval, and a closed gate declines warming while the
@@ -40,14 +37,12 @@
 //   * BUDGET. The sampling budget bounds factory invocations per trigger;
 //     the millisecond stop binds sampling; already-queued merges consume
 //     nothing; the unlimited default preserves the full burst shape.
-//
 // Two process modes: most tests force RIGEXEC_FRAME_CACHE=on (live-read) and
 // run the warm path, skipping with a note when the ambient
 // RIGEXEC_ENABLE_PARALLEL_EVAL=0 closes the gate -- that cached switch cannot
 // be flipped in-process, so its off mode is covered by the fallback test plus
 // the validation-plan runs of this binary under =0. The fallback test forces
 // the gate closed and passes in every ambient mode.
-//
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/frozenContext.h"
 #include "rigExec/parallel.h"

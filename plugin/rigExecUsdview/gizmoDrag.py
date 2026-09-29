@@ -15,12 +15,11 @@
 # does that world delta do to the channels". This module is the join,
 # and it holds no state of its own beyond the DragState it is handed.
 #
-# RELATIVE snapping is the target's job, not this module's. Maya's
-# steps are steps of the CHANNEL values -- a move lands tx on a whole
+# RELATIVE snapping is the target's job, not this module's. # steps are steps of the CHANNEL values -- a move lands tx on a whole
 # number, a scale lands sx on one -- and only the target knows those
 # values and the frame they live in. So J and the Step Snap option
 # travel as the `snapStep` keyword on Apply*, and nothing here rounds
-# a world delta for them. The WORLD snaps (Maya's X grid, point, edge
+# a world delta for them. The WORLD snaps (X grid, point, edge
 # and surface: snapping design 4.2-4.4) are decided here instead, as
 # plain world deltas through gizmoSnap, because the old channel-space
 # X put round channel numbers at arbitrary world positions under a
@@ -118,7 +117,7 @@ class DragState(object):
                 self.rotationBase = list(_rot[1])
         except Exception:
             self.rotationBase = None
-        # Maya's Ctrl+axis "move in the perpendicular plane", read from
+        # Ctrl+axis "move in the perpendicular plane", read from
         # every event rather than only the press: on macOS Qt turns a
         # Ctrl+left CLICK into a right-button press, so the reachable
         # gesture is to grab the axis first and then hold Ctrl.
@@ -220,7 +219,7 @@ def ApplyDrag(state, current, settings, holdSnap=False, holdGrid=False,
     `current` into a channel edit and write it through the target.
 
     `settings` is the active tool's gizmoSettings.ToolSettings;
-    `holdSnap` is Maya's J (step snap for the duration of the drag) and
+    `holdSnap` is J (step snap for the duration of the drag) and
     `holdGrid` its X (grid snap). `snapMode` is the ALREADY-RESOLVED
     active mode from ActiveSnapMode (the holds live in gizmoUI, so only
     it can resolve them); None means resolve from `settings.snapMode`
@@ -251,9 +250,7 @@ def ApplyDrag(state, current, settings, holdSnap=False, holdGrid=False,
     return None
 
 
-# ---------------------------------------------------------------------------
 # Translate
-# ---------------------------------------------------------------------------
 
 def PlaneDelta(state, origin, normal):
     """
@@ -304,7 +301,7 @@ def TranslateSnap(settings, holdSnap, holdGrid):
     """
     (snapStep, snapAbsolute) for Target.ApplyTranslate (spec 8.2).
 
-    Step Snap or a held J is Maya's Discrete Move: the DELTA advances in
+    Step Snap or a held J is Discrete Move: the DELTA advances in
     whole steps, so an object that started off the grid stays off it.
     `holdGrid` is accepted but IGNORED: X used to mean the channel-space
     absolute grid here, but that put round channel numbers at arbitrary
@@ -464,14 +461,12 @@ def _Translate(state, settings, holdSnap, holdGrid, snapMode, gridSize):
     return write
 
 
-# ---------------------------------------------------------------------------
 # Rotate
-# ---------------------------------------------------------------------------
 
 def RingAngle(state):
     """
     Degrees swept about the grabbed ring's own axis since the press,
-    accumulated so a drag can run past 180 (spec 8.3, "Maya keeps
+    accumulated so a drag can run past 180 (spec 8.3, "the editor keeps
     counting"). Updates the state's running total.
     """
     handle = state.handle
@@ -563,7 +558,7 @@ def _Rotate(state, settings, holdSnap, snapMode):
         state.snapReason = ""
     step = _SnapStep(settings, holdSnap)
     if handle.kind == "sphere":
-        # Maya's Snap Rotate applies to the ball too: the axis the
+        # Snap Rotate applies to the ball too: the axis the
         # trackball found is kept and only the amount is quantised.
         rotation = TrackballRotation(state)
         angle = rotation.GetAngle()
@@ -573,12 +568,12 @@ def _Rotate(state, settings, holdSnap, snapMode):
     angle = RingAngle(state)
     state.angle = _DisplayAngle(angle, step)
     if state.gimbal and handle.kind == "ring":
-        # Maya Gimbal: the ring IS one Euler channel, so the angle goes
-        # straight onto that channel. ApplyRotate would take the
-        # world-axis route, which under a sheared channel frame (a
-        # non-uniform scale anywhere above) reaches the same drawn
-        # rotation by moving all three channels -- correct geometry, but
-        # not what a gimbal ring promises.
+
+
+
+
+
+
         state.target.ApplyRotateChannel(handle.axisIndex, angle,
                                         snapStep=step)
     else:
@@ -586,19 +581,17 @@ def _Rotate(state, settings, holdSnap, snapMode):
     return state.angle
 
 
-# ---------------------------------------------------------------------------
 # Scale
-# ---------------------------------------------------------------------------
 
 def ScaleFactor(state, settings):
     """
-    Maya's scale ratio for the grabbed handle: how far the cursor is
+    scale ratio for the grabbed handle: how far the cursor is
     from the manipulator origin along the handle over how far it was at
     the press, clamped just above zero when Prevent Negative Scale is on
     (spec 8.4). The RESULTING channel value is what Step Snap quantises,
     and only the target knows that, so no snapping happens here.
     """
-    return gizmoScreen.MayaScaleFactor(
+    return gizmoScreen.HandleScaleFactor(
         state.handle, state.origin2d, state.press, state.current,
         not settings.preventNegativeScale)
 

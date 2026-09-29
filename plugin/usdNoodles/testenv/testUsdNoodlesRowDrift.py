@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -103,9 +103,9 @@ class TestLayoutNodeNoDrift(unittest.TestCase):
         _assert_zero_drift(self, node, side="output")
 
     def test_font_size_change_relayouts_without_drift(self):
-        # The exact mutation that used to drift: change the pin font size and
-        # re-lay-out. Centers must track the NEW line height, not stick to the
-        # old one.
+
+
+
         model = _noodles.GraphModel()
         node = NodeModel() if _has_models else _noodles.NodeData()
         node.name = "FontNode"

@@ -1,6 +1,4 @@
-//
 // Shared scaffolding for mover-owned exec computations (spec §4.1).
-//
 // Every concrete mover schema with exec-side computations owns a
 // statically registered computeMoverParameters over its own declared
 // inputs, plus the scalar computeMoverStatus. The registration blocks
@@ -8,12 +6,9 @@
 // what is identical across them lives here: the token vocabulary, the
 // common MoverAPI inputs, the shared envelope/status builders, and the
 // vectorized-input collectors.
-//
 // Weight objects, blend inputs/samples, and the ribbon keep their own
 // private tokens and adapters in moverKernels.cpp; nothing is shared
 // with them but the packet kernels.
-//
-
 #ifndef RIGEXEC_MOVERS_MOVER_EXEC_COMMON_H
 #define RIGEXEC_MOVERS_MOVER_EXEC_COMMON_H
 

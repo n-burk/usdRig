@@ -1,9 +1,6 @@
-//
 // rigExecRuntime geometry-family parity (M2): baked program vs runtime
 // over every baking fixture, comparing published chain points bit for
 // bit. Owned by the geometry-port worker.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecRuntime/runtime.h"

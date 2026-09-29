@@ -1,4 +1,3 @@
-//
 // RigExec Hydra scene-index tests (spec §10, §14.5 Hydra matrix):
 // construction/pull goldens (pre-population attachment, populated
 // wrapping with add-again resync, late-consumer traversal, legacy
@@ -8,7 +7,6 @@
 // capability matrix with one-sample non-motion profile and preflight
 // failure without evaluation, derivative blocking, terminal-enumeration
 // audit, and the real evaluator publishing the ArmShotAnim rig.
-//
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
@@ -1051,7 +1049,6 @@ TestBridgeOverShotStage(const std::string &examplesDir)
 // synthesized `rigGuideCtrl` child drawing the authored guide:shape in the
 // authored guide:drawMode, sized by evaluated control scale multiplied by
 // guide:scaleX/Y/Z, and placed at the control's posed frame.
-//
 // The shape table is asserted exhaustively -- all six shapes in both draw
 // modes -- because the prim type and the topology are the contract a
 // renderer consumes, and a wrong count draws a shape that is merely
@@ -1173,7 +1170,6 @@ TestControlGuides(const std::string &examplesDir)
         return indices;
     };
 
-    // ---- Nothing authored at all: the schema fallbacks draw a wire
     // circle. This runs FIRST, before any guide attribute is set, because
     // it is the only moment the unauthored state exists -- and it is the
     // state every control in every rig that predates this feature is in, so
@@ -1195,8 +1191,6 @@ TestControlGuides(const std::string &examplesDir)
     // loudly rather than quietly author nothing.
     CHECK(setToken(shoulderFk, "guide:shape", "circle"));
 
-    // ---- Every shape in every draw mode, one publication each.
-    //
     // Wire rings close by repeating their first point, so a ring of N
     // segments is N+1 points; the mesh forms drop the repeat because a face
     // closes itself.
@@ -1368,7 +1362,6 @@ TestControlGuides(const std::string &examplesDir)
         }
     }
 
-    // ---- Style and placement, on the default-shaped guide.
     CHECK(setToken(shoulderFk, "guide:shape", "circle"));
     CHECK(setToken(shoulderFk, "guide:drawMode", "wire"));
     CHECK(setToken(elbowFk, "guide:shape", "sphere"));
@@ -1423,7 +1416,6 @@ TestControlGuides(const std::string &examplesDir)
         }
     }
 
-    // ---- Opacity through a CONNECTION: an IK/FK switch fading the
     // inactive control set. UsdAttribute::Get never follows a connection,
     // so a bridge reading the attribute plainly drew the local value and a
     // wired rig looked wired while nothing faded.
@@ -1684,7 +1676,6 @@ TestControlGuides(const std::string &examplesDir)
         CHECK(hasGuideChild(elbowPole));
     }
 
-    // ---- purpose. The STOCK UsdGeomImageable attribute, not a RigExec
     // token: BBoxCache buckets a prim's extent by this exact attribute, so
     // routing the drawn render tag through it is what keeps the bounds and
     // the drawing in the same bucket. Controls keep the inherited
@@ -1713,8 +1704,6 @@ TestControlGuides(const std::string &examplesDir)
         CHECK(sawPurposeDirty);
     }
 
-    // ---- guide:wireWidth, which is what makes a wire control clickable.
-    //
     // usdview's interactive pick window is one physical pixel, so an
     // unwidthed hairline is a target a real click virtually never lands on
     // -- and an empty pick deselects to the pseudo-root, which is what the
@@ -2319,7 +2308,6 @@ TestSimpleRigControlAndDeformation(const std::string &examplesDir)
 
 // A constraint-driven ASSET ROOT carries the synthesized guides with it,
 // and says so.
-//
 // A guide's matrix is not inherited, it is BAKED: the builder composes the
 // asset root's world transform into the guide's own matrix and declares the
 // stack reset. So when the rig drives its own root, every guide's transform
@@ -2420,7 +2408,6 @@ TestGuidesFollowDrivenAssetRoot()
 
 // An aggregate solver's guides are sized by guide:radius on the SOLVER,
 // the same way a joint's are sized by guide:radius on the joint.
-//
 // The elements have no prim of their own, which is why they were pinned at
 // Hydra's fallback radius of 1.0 long after the joints stopped being. On an
 // asset authored at one unit -- chars/puppetA is 0.59 units tall -- that is
@@ -2483,7 +2470,6 @@ TestSolverGuideRadius(const std::string &examplesDir)
 }
 
 // The shipped examples' authored control guides actually draw.
-//
 // An unrecognized guide:shape token draws nothing, silently and by design
 // (allowedTokens is documentation, not enforcement). That makes a typo in
 // an example a defect no other test can see: the rig still compiles, still
@@ -2673,8 +2659,6 @@ TestExampleControlGuides(const std::string &examplesDir)
             CHECK(resolved == control);
         }
 
-        // ---- The planar shapes, authored in memory on this same rig.
-        //
         // No example draws circle or box any more: both lie in the local
         // XZ plane, so they are edge-on from the default front view and
         // read as bare lines there. They are still shapes a real rig must
@@ -3281,19 +3265,16 @@ TestExternalReadEditsRepublish()
 
 // A constraint-driven Xform reaches the snapshot as a transform, and it
 // changes with time.
-//
 // The evaluator side is asserted in testRigExecArm; this is the imaging leg.
 // hasXform was plumbed to HdXformSchema and had no writer at all, so the
 // failure mode here is a published-once-then-frozen transform, which looks
 // exactly like a static prop in the viewer.
 // A rig with no joints publishes through the bridge like any other.
-//
 // The evaluator gate is only half of it: the bridge's guide fills all iterate
 // joint frames, the binding epoch is built from the published prim set, and a
 // rig whose entire output is one driven Xform exercises every one of those
 // with an empty joint set.
 // Disconnecting a constraint's target must un-drive the subtree.
-//
 // The user-visible report: remove the Xform from the aim constraint and the
 // mesh parented under it stays exactly where the constraint had put it. The
 // scene index handles a driven transform DISAPPEARING (see the
@@ -3407,7 +3388,6 @@ TestJointFreeRigPublishes(const std::string &examplesDir)
 }
 
 // Property-domain results stay out of the imaging snapshot.
-//
 // They share movedProperties with the point chains, and the publish loop used
 // to index snapshot->prims before deciding whether it had anything to store —
 // so a float dial on a Scope MINTED an empty published prim for that Scope,
@@ -3443,7 +3423,6 @@ TestPropertyResultsDoNotPublishPrims(const std::string &examplesDir)
 
 // Removing a rigExec:moves RELATIONSHIP re-evaluates, through the same
 // notice path usdview uses.
-//
 // The bridge-level test above drives EvaluateAndPublishResult by hand. This
 // one edits the stage and touches nothing else, so it covers the half that
 // test cannot: that a relationship edit is noticed at all. Attribute edits
@@ -3635,7 +3614,6 @@ TestConstraintDrivenXformPublishes(const std::string &examplesDir)
         upstream->AddPrims(shells);
     }
     // ORDER MATTERS, and it is the opposite of what one would choose.
-    //
     // Flattening comes FIRST because that is where UsdImaging puts it: the
     // chain's only HdFlatteningSceneIndex is built inside
     // UsdImagingNiPrototypePropagatingSceneIndex, which
@@ -3643,7 +3621,6 @@ TestConstraintDrivenXformPublishes(const std::string &examplesDir)
     // indices -- and UsdImagingSceneIndexPlugin::AppendSceneIndex is the only
     // hook RigExec has. So RigExec sees world-space transforms and is solely
     // responsible for carrying a driven Xform's subtree along with it.
-    //
     // (Null inputArgs would mean ZERO flattened data source providers -- an
     // index that flattens nothing, where every child reads back identity
     // forever, which looks exactly like the bug this test exists to catch.)
@@ -3810,7 +3787,6 @@ TestConstraintDrivenXformPublishes(const std::string &examplesDir)
     }
 
     // STRUCTURAL transitions, which are a different code path entirely.
-    //
     // Every hasXform transition -- first publication, a provider gaining or
     // losing its constraint, recompilation, Deactivate() -- is reported as
     // RigExecChangeStructural, never as RigExecChangeXform. The structural
@@ -3837,7 +3813,6 @@ TestConstraintDrivenXformPublishes(const std::string &examplesDir)
     CHECK(close(flatOf(barrel), turretRestWorld));
 
     // THE LATE CONSUMER, which everything above quietly avoids testing.
-    //
     // Every assertion so far ran on an index that watched the driven
     // transform appear, so its history was populated as a side effect. A
     // scene index chain built AFTER activation -- which is the normal case,
@@ -3871,7 +3846,6 @@ TestConstraintDrivenXformPublishes(const std::string &examplesDir)
 }
 
 // Singular and ill-conditioned transforms in the driven-Xform resolution.
-//
 // GfMatrix4d::GetInverse() does not report failure -- it returns
 // FLT_MAX * identity -- so an unchecked inverse turns a zero-scale prim
 // (an ordinary way to hide geometry) into components around 1e77. This
@@ -4002,7 +3976,6 @@ TestDrivenXformConditioning()
     }
 
     // --- 2b. A TINY singular base: the sentinel case.
-    //
     // GetInverse() signals failure with SetScale(FLT_MAX), which is finite.
     // When the source is tiny the two magnitudes multiply to something
     // small -- diag(0, 1e-30, 1e-30) gives a proxy of only ~3.4e8, under the
@@ -4066,7 +4039,6 @@ TestDrivenXformConditioning()
 
 // The guide-bounds C export (registry.h), which is what gives usdview a
 // box to frame.
-//
 // Nothing a rig draws is reachable by UsdGeomBBoxCache: the guides are
 // synthesized inside the imaging chain and never authored, and the RigExec
 // prim types are not UsdGeomImageable. So the published snapshot is the
@@ -4181,7 +4153,6 @@ TestGuideBoundsExport()
 }
 
 // The codeless schema's resource directory.
-//
 // The GENERATED one when the build supplied it: only that copy carries the
 // LibraryPath that lets Plug load the compute-extent registration on demand,
 // which is what makes UsdGeomBBoxCache answer for RigExec prims. The source
@@ -4310,7 +4281,6 @@ TestTransformAuthorityWarnings(const std::string &examplesDir)
     // the provider's frames as of 2026-09-10, so it is no longer a defect to
     // warn about -- placing a rig, or one leg of an assembly, under an Xform
     // inside the asset is a supported shape.
-    //
     // The assertion is that the walk stays quiet about it. That the
     // transform actually lands is a frame question, tested where the frames
     // are (tests/python/test_intervening_xform.py).
@@ -4334,13 +4304,11 @@ TestTransformAuthorityWarnings(const std::string &examplesDir)
 }
 
 // An intervening Xformable moves the guide and must NOT move the extent.
-//
 // The extent is LOCAL and UsdGeomBBoxCache multiplies it by the prim's own
 // local-to-world, which already contains that Xform. The published frames
 // contain it too since 2026-09-10, so the snapshot branch has to divide it
 // back out; if it does not, the box lands at the Xform applied twice --
 // guide in one place, bounding box in another.
-//
 // Asserted with a pure TRANSLATION, where the local extent must come back
 // bit-for-bit unchanged. A rotation would also grow the box through two
 // axis-realignments, which is legal (bounds may be conservative) and would
@@ -4402,7 +4370,6 @@ TestInterveningXformLeavesTheLocalExtentAlone(const std::string &examplesDir)
 
 // The computed extent follows the POSE when a generation is published, and
 // falls back to the rest pose when none is.
-//
 // Both halves matter: the rest answer is what an un-evaluated stage frames
 // on, and the posed answer is what has to agree with the thing on screen.
 static void
@@ -4453,12 +4420,10 @@ TestSnapshotBackedExtent(const std::string &examplesDir)
 }
 
 // The extent callback is a PURE FUNCTION of (stage, time).
-//
 // The snapshot store is a process-global singleton and USD calls this
 // callback with a stage and a time of its own choosing, so a lookup by
 // path alone answers a query about one stage/frame with another's pose --
 // plausible, wrong, and invisible downstream. Both halves are pinned here.
-//
 // Also pins the documented CACHING contract. UsdGeomBBoxCache caches a
 // plugin-computed extent as constant: nothing about it is time-varying,
 // because RigExec authors no extent attribute (and must not -- see
@@ -4679,7 +4644,6 @@ TestAllPurposeRenderTags(const std::string &examplesDir)
 // A manipulation preview of a prim no rig drives reaches Hydra as a
 // post-multiplied world delta, and carries the prim's descendants with it
 // (docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
-//
 // The delta form is what a FLATTENED chain needs. By the time a prim reaches
 // these filters its xform is the composed world one -- which is why the
 // results index marks its own overrides resetXformStack=true -- so a local
@@ -4886,7 +4850,6 @@ TestSetTimeDrivenEvaluation(const std::string &examplesDir)
 }
 
 // A policy-carrying rig activates without taking the registry down.
-//
 // The compile derives rigExec:startFrame targets into the session layer,
 // and the registry registers its ObjectsChanged listener BEFORE Compile
 // and holds a non-recursive mutex across the whole call -- so a notice

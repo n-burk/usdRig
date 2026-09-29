@@ -130,7 +130,7 @@ class ViewTransform(object):
     def Pan(self, dx, dy):
         """
         Move the CONTENT by (dx, dy) pixels, so a curve point under the
-        cursor travels with it. Maya's Alt+middle drag hands the mouse
+        cursor travels with it. Alt+middle drag hands the mouse
         delta straight in.
         """
         dt = float(dx) / self.PixelsPerTime()
@@ -161,7 +161,7 @@ class ViewTransform(object):
 
         A degenerate extent -- one key, or a flat curve -- is framed as a
         unit window round the value instead of collapsing the view to a
-        line, which is what Maya's Frame Selected does with a single key.
+        line, which is what Frame Selected does with a single key.
         """
         self.timeRange = _PaddedRange(tMin, tMax, padding)
         self.valueRange = _PaddedRange(vMin, vMax, padding)
@@ -446,7 +446,7 @@ def KeyGlyphs(curves, splines, transform, selection):
 
 def TangentGlyphs(curves, splines, transform, selection):
     """
-    The tangent handle ends of the SELECTED keys (Maya shows handles for
+    The tangent handle ends of the SELECTED keys (the editor shows handles for
     the selection only, spec section 2.2).
 
     A side only gets a handle when the segment on that side is a curve:
@@ -554,7 +554,7 @@ def KeysInRect(keys, rect):
 def DominantAxis(press, current):
     """
     AXIS_TIME or AXIS_VALUE, whichever leg of the pixel travel is
-    longer. Maya picks the constraint axis this way when Shift goes down
+    longer. the editor picks the constraint axis this way when Shift goes down
     during a key drag (spec section 2.4).
     """
     if abs(current[0] - press[0]) >= abs(current[1] - press[1]):
@@ -594,8 +594,7 @@ def ResolveTangentDrag(transform, keyPixel, handlePixel, weighted,
     go negative, so a handle dragged onto or behind its own key stays on
     its own side with a very steep tangent rather than flipping into the
     opposite quadrant. When `weighted` is off the drag only changes the
-    angle and `currentWidth` is returned unchanged, which is what Maya's
-    non-weighted tangents do (spec section 2.4).
+    angle and `currentWidth` is returned unchanged, which is what non-weighted tangents do (spec section 2.4).
     """
     time, value = transform.FromPixel(keyPixel[0], keyPixel[1])
     handleTime, handleValue = transform.FromPixel(handlePixel[0],

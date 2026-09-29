@@ -1,9 +1,6 @@
-//
 // rigExecBake -- bake a rig to a .rigexec binary.
-//
 //   rigExecBake <stage> [--rig <primPath>] --frames a,b,c -o <file.rigexec>
 //               [--manifest-out <file.json>]
-//
 // Where rigExecPose evaluates and prints, this compiles the epoch through
 // the baked program and serializes it. A bake is of the PROGRAM, so the
 // tool pins the Baked mode and treats anything else as a failure -- the
@@ -12,8 +9,6 @@
 // be a binary no parity check can hold to account. Exit status is 2 on
 // usage errors and 1 when the rig fails to compile, to bake, or to write,
 // so it can gate a build the way rigExecPose does.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExec/rigEvaluator.h"
 

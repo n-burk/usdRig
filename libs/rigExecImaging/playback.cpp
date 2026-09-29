@@ -1,7 +1,4 @@
-//
 // RigExec baked playback for Hydra (M2b). See playback.h for the contract.
-//
-
 #include "playback.h"
 
 #include "pxr/usd/sdf/assetPath.h"

@@ -1,3 +1,4 @@
+// Method reference: Talbot et al. (2026), https://doi.org/10.1145/3799818.3812074
 #include "curvenetWeights.h"
 #include "cutMesh.h"
 #include <algorithm>

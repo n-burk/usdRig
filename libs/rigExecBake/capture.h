@@ -1,18 +1,14 @@
-//
 // .rigexec capture: the per-frame values the program consumed.
-//
 // RigExecBakeCapture walks the standing program's bound varying inputs once,
 // assigning uids in the traversal order the InputTable section documents,
 // arms the bake recorder on the resolved inputs, and then captures one
 // record per Evaluate: the recorded reads plus the prologue's retained
 // arrays for that frame. The destructor disarms, so the evaluator a bake
 // leaves behind reads exactly as it did before.
-//
 // A capture refuses to run with interactive overrides standing: a bake is
 // of the authored epoch, and a held drag would print its values into every
 // stream. It also refuses when the program rebuilds mid-loop, because a
 // rebuild reallocates the inputs the uid map keys off.
-//
 #ifndef RIGEXEC_BAKE_CAPTURE_H
 #define RIGEXEC_BAKE_CAPTURE_H
 

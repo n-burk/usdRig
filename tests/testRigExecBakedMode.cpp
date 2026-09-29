@@ -1,17 +1,13 @@
-//
 // The baked evaluation mode must be the dynamic path's answer, exactly.
-//
 // The program is a second implementation of the evaluation semantics, so the
 // only test that means anything is equality with the path it replaces -- on
 // the whole published generation, at every frame, on every shipped shape of
 // the biped stage (flat, layered and animated) plus a matrix-mover rig, so
 // both geometry operations the program expresses are compared. Exact
 // equality, not a tolerance: "close" here is a second rig.
-//
 // argv[1] = path to the examples directory (containing biped/Biped.usda).
 // The codeless schema plugin is expected at
 // <examples>/../plugin/rigExecSchema/resources.
-//
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -101,7 +97,6 @@ BakeRequired()
 }
 
 // The REFERENCE half of a comparison says its mode out loud.
-//
 // It used to be enough to leave such an evaluator alone: one nobody set was
 // Dynamic, or whatever RIGEXEC_EVALUATION_MODE asked this whole suite for.
 // examples/biped now authors `uniform bool rigExec:baked = true` on its rig
@@ -111,7 +106,6 @@ BakeRequired()
 // exactly the behaviour these evaluators had before the attribute existed,
 // in both environments, and makes the stage unable to change it: the source
 // becomes Explicit, which outranks the attribute.
-//
 // Only for the evaluators a test uses AS a reference. An evaluator the test
 // is measuring says what it is measuring for itself.
 static void
@@ -480,7 +474,6 @@ TestAnEditAfterTheBakeIsFollowed(const std::string &examplesDir)
 // no batch has an answer to lose yet, so it pins only that the switch itself
 // comes out right. The second lands after the build and has to reach its
 // batch through the index, and that is the one a missing index entry fails.
-//
 // A rest edit on a joint the leg IK names, because it is the kind of edit
 // only the index can deliver: it does not recompile the epoch (the digest
 // hashes no rest channel), and what the batch reads of it comes off the
@@ -618,9 +611,7 @@ TestAnInteractiveOverrideAfterTheBakeIsFollowed(const std::string &examplesDir)
 }
 
 
-// ---------------------------------------------------------------------------
 // Invalidation: the index, and the two answers it has to give.
-// ---------------------------------------------------------------------------
 
 using _Edit = std::function<void(const UsdStageRefPtr &, const SdfPath &)>;
 
@@ -629,7 +620,6 @@ using _Edit = std::function<void(const UsdStageRefPtr &, const SdfPath &)>;
 // separate (CompareGenerationScalars) because the mover-graph counters
 // describe how warm an evaluator is, and several callers here hold a fresh
 // evaluator against a running one on purpose.
-//
 // Each of these three carries the coverage its NAME carries in the shared
 // header -- maps, scalars, both -- so that a test written later gets the
 // comparison it asked for rather than the one this file happened to bind to
@@ -664,7 +654,6 @@ ComparePose(const std::string &where, const RigExecRigPose &reference,
 // Bakes a rig, THEN edits the stage under it, and demands the eight
 // generations that follow equal an evaluator that only ever ran dynamically
 // under the same edit.
-//
 // \p expectRebuild is the other half of the contract and the reason this is
 // not just another equality test: an edit that moved something the bake
 // captured has to rebuild the program, and an edit that did not has to leave
@@ -889,7 +878,6 @@ EditKeyedBlendDisabledConstraintAndRest(const UsdStageRefPtr &stage,
 // drives the envelope of the roll constraints through five float-math movers.
 // The program runs those chains itself, off the authored stage, so nothing
 // about the roll is captured.
-//
 // Two edits, because they are two different questions. Keying it makes the
 // attribute animated, which is a STRUCTURAL change the epoch digest hashes --
 // the rig recompiles and rebakes, and what is being tested is that eight
@@ -1079,7 +1067,6 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
 // direction used to rest on two of them (11_VolumeWeights and
 // 12_CurvenetProfile) -- so it would have evaporated the moment those
 // landed, taking the only test that the fallback works at all with it.
-//
 // Built in memory rather than shipped as an example, because an example is
 // something a rigger should copy and this is a rig that deliberately opts
 // out of the fast path.
@@ -1281,7 +1268,6 @@ MakeACurvenetWeightRig()
 
 // The fourth shape of unplaceable, and the one that is unplaceable because
 // the DYNAMIC path cannot hold it either.
-//
 // A curvenet weight's inputs:weights and rigExec:autoSmooth are arrays, read
 // through the generation's resolved inputs every frame -- which an override
 // is written into, so the program would honour one. Exec cannot: its
@@ -1293,7 +1279,6 @@ MakeACurvenetWeightRig()
 // and a different mesh. Measured before the two properties were declared
 // unplaceable: the program published z = 2.368 where the dynamic path
 // published z = 4.
-//
 // It lives in THIS suite and not beside the curvenet's own tests because a
 // deliberate fallback is a "bake required" line, and that suite runs under
 // RIGEXEC_BAKE_REQUIRED=1 where such a line is a failure -- correctly.
@@ -1351,7 +1336,6 @@ TestAnArrayOverrideOnACurvenetWeightFallsBack()
 // The other half of override placement, and the half that has to be wrong
 // SAFELY: an override the program cannot place must send the generation down
 // the dynamic path, not be quietly ignored.
-//
 // Three shapes of unplaceable, one per authored reason:
 //   * a value folded into bake state -- a SPACE EXPRESSION, which the bake
 //     accepted because it is unauthored and whose authoring would replace
@@ -1359,7 +1343,6 @@ TestAnArrayOverrideOnACurvenetWeightFallsBack()
 //   * a property the program never reads, so there is no slot to put it in
 //     and no promise that some other reader would pick it up;
 //   * a computation override, which names something only exec can answer.
-//
 // A rest used to be the first of these and is not one any more: the ladder
 // is a per-frame input, so a rest drag PLACES. The second half of this test
 // is that half, because "it falls back" and "it is answered correctly" are
@@ -1457,9 +1440,7 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
     CompareEveryMap("released, on Biped.usda", before, released);
 }
 
-// ---------------------------------------------------------------------------
 // A value that is keyed ONCE.
-//
 // UsdStage reports ValueMightBeTimeVarying() == false for an attribute whose
 // strongest opinion is exactly one time sample of a non-composable type, while
 // a Default read -- which is what the bake captures at -- never sees a time
@@ -1467,7 +1448,6 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
 // classified as an epoch constant and then captured as the value it does NOT
 // have. An animator's first pose key is exactly that shape, which is why
 // these two edits are the ones worth spending fixtures on.
-// ---------------------------------------------------------------------------
 
 static void
 EditOneKeyOnAControlAvar(const UsdStageRefPtr &stage, const SdfPath &rigPath)
@@ -1503,7 +1483,6 @@ EditOneKeyOnEveryConstraintEnable(const UsdStageRefPtr &stage,
 }
 
 // A skin mover at partial constant strength.
-//
 // The full-strength constant envelope is the one every unweighted mover gets,
 // and both geometry loops skip the blend for it. Nothing in examples/ or
 // tests/ had a PARTIAL constant envelope on a bakeable skin mover, so the
@@ -1525,15 +1504,12 @@ EditHalfStrengthSkinEnvelope(const UsdStageRefPtr &stage,
     weight.Set(0.5f);
 }
 
-// ---------------------------------------------------------------------------
 // An interactive override on an attribute that is a connection SOURCE.
-//
 // A shared-envelope idiom: many constraints' inputs:defaultWeight connected to
 // one upstream attribute, and the drag that switches them all off stands on
 // the upstream one. The program classified each input by walking that
 // connection chain, so the override belongs to every input on the walk -- not
 // only to the head attribute the walk started at.
-// ---------------------------------------------------------------------------
 
 static SdfPath
 ShareOneEnvelopeAcrossConstraints(const UsdStageRefPtr &stage,
@@ -1635,15 +1611,12 @@ TestAnOverrideOnAConnectionSourceIsFollowed(const std::string &examplesDir)
                     before, rig.Evaluate(UsdTimeCode(1.0)));
 }
 
-// ---------------------------------------------------------------------------
 // The parity comparator itself.
-//
 // Every other assertion about BakedWithParityCheck in this suite, and all
 // three *BakedParity ctest entries, say the comparator found NOTHING -- which
 // is exactly what a comparator that does nothing also says. These are the
 // positive direction: two poses that DO disagree, one domain at a time, and
 // the exact count and diagnostic the comparison must produce.
-// ---------------------------------------------------------------------------
 
 static RigExecPointFrame
 MovedFrame(double dy)
@@ -1952,14 +1925,11 @@ TestTheParityComparatorIsExact(const std::string &examplesDir)
     CHECK(quiet.bakedParityMismatches == 0);
 }
 
-// ---------------------------------------------------------------------------
 // Baked requested on a DIRTY epoch.
-//
 // SetEvaluationMode can only build while the epoch is settled, and every
 // notice raises the dirty flag -- so "edit the scene, then turn the mode on",
 // which is what a UI does every time, used to leave the program unbuilt for
 // the rest of the epoch while IsBakeable kept saying yes.
-// ---------------------------------------------------------------------------
 
 static void
 TestBakedModeRequestedOnADirtyEpoch(const std::string &examplesDir)
@@ -2016,15 +1986,12 @@ TestBakedModeRequestedOnADirtyEpoch(const std::string &examplesDir)
     CHECK(rig.GetBakedGenerationCount() > 0);
 }
 
-// ---------------------------------------------------------------------------
 // A rebuild inside an epoch publishes the same GENERATION, counters included.
-//
 // A value edit that hits the capture index rebuilds the program while the
 // geometry graphs it accounts for stand. The dynamic path keeps its graphs
 // across the same edit and reports nothing created; a program that started
 // its accounting over would report everything created, and say so in the
 // mover-graph diagnostic, for a rig that built nothing.
-// ---------------------------------------------------------------------------
 
 // rest:tx on the biped's root joint: a captured constant, so the program
 // rebuilds, and a value the epoch digest is blind to, so nothing recompiles.
@@ -2116,9 +2083,7 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
     CHECK(bakedRig.GetBakedGenerationCount() == 4);
 }
 
-// ---------------------------------------------------------------------------
 // Every shipped example, both modes.
-//
 // The four stages above are the ones chosen for being bakeable; this is the
 // other direction -- whatever is in examples/, whether it bakes or not. A rig
 // that declines has to SAY why and build nothing, and a rig that bakes has to
@@ -2126,23 +2091,19 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
 // compared scalar and the diagnostics in order. Two evaluators over two
 // independently opened stages, so neither can leak a warm cache into the
 // other.
-// ---------------------------------------------------------------------------
 
 // The examples that are ALLOWED to decline the bake, by basename.
-//
 // IT IS EMPTY, and that is the point the four Phase 3 groups were aiming at:
 // every example rig in the tree now bakes. It stays here, empty, rather than
 // being deleted with its machinery, because the machinery is what makes the
 // emptiness mean something -- an example that declines is now unconditionally
 // a failure, with no line anyone can add quietly to make the sweep green
 // again. Adding a name back is a deliberate, reviewable act.
-//
 // Both directions are FAILURES, and so is an entry nothing matched. A list
 // that is only read when a rig declines goes stale silently -- a group that
 // bakes its feature and leaves its line here hands the next person a list
 // that no longer says what still has to be done, and re-declining that same
 // rig later would then be green.
-//
 // The deliberate negative is NOT here and must not be moved here: it is
 // TestANonBakeableRigFallsBack, which builds its rig in memory (a connected
 // posed:space on a provider) precisely so that the shipped examples can all
@@ -2161,7 +2122,6 @@ _ExpectedToDeclineIndex(const std::string &name)
 }
 
 // The frames to sweep a stage at, from the stage's OWN authored range.
-//
 // The sweep used to run every example at frames 1, 2 and 3. The numbered
 // examples are authored over 1001-1048, so all three reads held the first
 // key and the sweep compared one static pose three times -- it had never
@@ -2188,18 +2148,15 @@ _SweepFrames(const UsdStageRefPtr &stage)
 }
 
 
-// ---------------------------------------------------------------------------
 // A volume weight that is ITSELF A CONSTRAINT TARGET: the second deliberate
 // negative, and like the first it is a property of the rig rather than a gap
 // in the bake.
-//
 // A RigExecSphereWeight is exec-seeded like a joint, so it has a first-frame pose
 // frame and an avar composition. It is also not a RigExecControl and not a
 // RigExecJoint, so the moment a constraint targets it the compiler
 // catalogues it as a plain UsdGeomXformable as well -- and the two families
 // the program's slot table merges, which its comment calls disjoint, are not
 // disjoint for this one provider.
-//
 // The dynamic walk resolves the collision by last writer: the xform-derived
 // pass runs after the compose and replaces the volume's rest, base and final
 // with an identity rest and a transform read off the stage. Exec's
@@ -2208,11 +2165,9 @@ _SweepFrames(const UsdStageRefPtr &stage)
 // in, and there is no reading of either side that says which is meant -- the
 // dynamic path's own CPU parity mode refuses to publish a reference-phase
 // field on such a volume rather than choose.
-//
 // Refused, therefore, and narrowly: a volume weight on a constraint bakes
 // (testRigExecVolumeWeights covers both sample phases); a volume weight a
 // constraint MOVES does not.
-// ---------------------------------------------------------------------------
 
 static UsdStageRefPtr
 MakeAConstrainedVolumeRig()
@@ -2332,16 +2287,13 @@ TestAConstrainedVolumeWeightFallsBack()
     CHECK(rig.GetBakedGenerationCount() == 0);
 }
 
-// ---------------------------------------------------------------------------
 // A read phase on rigExec:transform that names a POINT IN THE POSE WALK.
-//
 // The general form of the three shorthands (base, preceding, final): the
 // matrix a mover consumes is the provider's frame as it stood immediately
 // after one named constraint, rather than before the walk or after all of
 // it. Nothing in examples/ authors it and no other suite builds it, which is
 // why the program could refuse it for three phases with no parity evidence
 // either way -- so the fixture comes first and the bake follows it.
-//
 // Two constraints revise ONE joint in the walk, and the mover names the
 // first. That is what makes the case discriminating: the phase's answer is
 // neither the joint's base frame nor its final one, and a program that
@@ -2349,7 +2301,6 @@ TestAConstrainedVolumeWeightFallsBack()
 // nothing to say so. TestAReadPhaseOnTheTransformIsExact asserts exactly
 // that, by building the same rig with a "final" phase and demanding the two
 // disagree.
-// ---------------------------------------------------------------------------
 
 static UsdStageRefPtr
 MakeAPoseWalkReadPhaseRig(const char *phase)
@@ -2642,9 +2593,7 @@ TestEveryExampleStage(const std::string &examplesDir)
     CHECK(declined == kExpectedToDeclineCount);
 }
 
-// ---------------------------------------------------------------------------
 // THE INTERVENING-XFORM NEGATIVES, and why they live in THIS suite.
-//
 // They were written against tests/testRigExecEpochRests, which is where the
 // rest work keeps its fixtures. That suite carries REQUIRE_BAKE as of the
 // provider-ladder work, and a bake requirement reports a FALLBACK with the
@@ -2657,29 +2606,23 @@ TestEveryExampleStage(const std::string &examplesDir)
 // them weakened in the move: the comparison against the dynamic path is now
 // CompareEveryMap, which is every map domain the comparator has rather than
 // the four the other suite's local helper compared.
-// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
 // A plain Xform standing BETWEEN a provider and its anchor.
-//
 // Exec resolves such a prim as the identity and drops it, so the rig would
 // evaluate as if the grouping transform were not there at all. The dynamic
 // walk composes it back in at evaluation (_ComposeInterveningXforms): X(P)
 // lands BETWEEN a provider and its anchor, which is a uniform right-multiply
 // only while every such Xform sits above every chain root, and is not one
 // otherwise.
-//
 // The program refuses both shapes of it -- a non-identity transform, and one
 // that is identity today but animates -- and refused them BLIND: no rig and
 // no fixture in the tree tripped either, so there was no parity evidence
 // either way and no way to tell a correct bake from a plausible one.
-//
 // These fixtures are that evidence. They assert the refusal by NAME and then
 // assert the fallback generation is a plain dynamic evaluator's, every
 // published domain of it, so the refusal cannot quietly become a wrong
 // answer -- and the day the correction is baked, the one line each case
 // carries flips from false to true.
-//
 // WHY IT IS STILL REFUSED, measured rather than assumed. The correction is
 // not confined to the walk. It rewrites the REST frames as well as the base
 // ones, and the two halves do not reach the same consumers: the walk's
@@ -2692,7 +2635,6 @@ TestEveryExampleStage(const std::string &examplesDir)
 // measures both of them on this very fixture. A solver's element rests are
 // a third reader on the exec side: they come from computeRestFrame, which
 // no override touches.
-//
 // The program holds ONE rest per slot and derives both matrices from it, so
 // expressing that means holding an exec rest and a walk rest side by side
 // and routing every consumer to the right one -- which is the same rework
@@ -2701,7 +2643,6 @@ TestEveryExampleStage(const std::string &examplesDir)
 // one rest the program has would publish the right joint matrices and move
 // a skinned mesh somewhere nobody asked for, or the reverse; that is
 // exactly the shape of wrong the refusal is in front of.
-// ---------------------------------------------------------------------------
 
 // \p animated keys the grouping transform instead of authoring it plainly;
 // \p identityToday additionally makes every sample the identity at the frames
@@ -2883,7 +2824,6 @@ TestAnAnimatedXformAboveAProvider()
 
 // WHY the refusals above are still refusals, as a running measurement of the
 // DYNAMIC path rather than a paragraph about it.
-//
 // The correction rewrites the walk's rest frames as well as its base ones,
 // and the two halves do not reach the same consumers. The walk's frames are
 // pushed BACK INTO EXEC as computePointFrame overrides before the
@@ -2893,13 +2833,9 @@ TestAnAnimatedXformAboveAProvider()
 // touches, goes on reading the authored rest:space and rest avars and knows
 // nothing about the grouping transform. So exec's computeMatrix, which a
 // geometry mover reads in the base phase, is
-//
 //     PointsToMatrix(rest_exec, pose_corrected)
-//
 // while pose.jointMatricesFinal, built in the walk, is
-//
 //     PointsToMatrix(rest_corrected, pose_corrected).
-//
 // On this fixture those are two different matrices -- translate (2, 3, 1)
 // and translate (2, 0, 1) -- and both are published in the same generation.
 // A program that holds ONE rest per slot can produce one of them or the
@@ -2908,7 +2844,6 @@ TestAnAnimatedXformAboveAProvider()
 // reverse. That is the rework the refusals above are in front of (an exec
 // rest and a walk rest side by side, every consumer routed to the right
 // one), and it is the same rework an animated rest:tx needs.
-//
 // Pinned here as three assertions about today's dynamic answers, so the
 // branch that lands the correction has to decide about this case
 // deliberately: if any of the three moves, the dynamic path's answer

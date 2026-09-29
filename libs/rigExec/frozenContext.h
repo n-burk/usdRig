@@ -1,7 +1,5 @@
-//
 // RigExec frozen evaluation contexts: everything a background frame job may
 // read, sampled up front on the UI thread.
-//
 // A worker must never touch live evaluator state, the registry mutex, or the
 // USD stage. So the UI thread samples every per-frame input a job needs --
 // varying attribute queries, chain-resolved inputs, interactive overrides --
@@ -12,7 +10,6 @@
 // running the baked serial executor end to end (never Work/TBB: a
 // kernel-level parallel call would leak the work back onto the shared arena
 // at normal priority, past the priority boundary).
-//
 // The context carries digests and counts, never handles: no UsdStage, no
 // UsdAttribute, no UsdAttributeQuery, no evaluator pointer. Anything that
 // cannot be named without one of those is sampled into the input vector
@@ -23,7 +20,6 @@
 // unimplemented, inconsistent, stale, or cancelled -- answers with an invalid
 // pose, which is the fail-closed stub the caller falls back from into live
 // evaluation.
-//
 // THREADING. The context is trivially copyable plain data: safe to build on
 // the UI thread, hand across threads, and hold past the stage edit that
 // cancels the job it was sampled for. The input vector is likewise plain
@@ -32,8 +28,6 @@
 // checked condition. The arena is strictly thread-confined: one arena per
 // job, never shared, never moved while a run reads it. The serial scope is
 // thread-local: it constrains the thread that entered it and no other.
-//
-
 #ifndef RIGEXEC_FROZEN_CONTEXT_H
 #define RIGEXEC_FROZEN_CONTEXT_H
 

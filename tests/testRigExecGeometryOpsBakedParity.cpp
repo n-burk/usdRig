@@ -1,6 +1,4 @@
-//
 // The geometry operators that bake with no shipped rig to say so.
-//
 // blendShape, curvenet, emitGuidePoints, ribbon and every read phase but the
 // default one bake, and not one of them is reachable from an example that
 // bakes: 04, 12 and 13 bind a weight object, 05 and ArmRig drive their curve
@@ -8,7 +6,6 @@
 // remove. Left at that, five operations would ship with their only evidence
 // in somebody's scratch directory, and a regression in any of them would sit
 // invisible until another group's work happened to uncover it.
-//
 // So this suite takes the shipped rigs and removes the OTHER group's blocker
 // in memory, on a session layer: a face whose weight object is unbound is
 // still the same blend shape over the same channels and in-between samples,
@@ -16,14 +13,11 @@
 // on anyone. When the weights and solvers groups land, the example entries
 // pick up the weighted and ribbon-driven halves and these cases keep holding
 // the unweighted ones.
-//
 // The claim, per case, is the one testRigExecExampleParity makes: every
 // frame agrees with the dynamic path exactly, and every generation CAME FROM
 // THE PROGRAM -- a rig that quietly declined would otherwise compare the
 // dynamic path with itself and pass having proved nothing.
-//
 // argv[1] = the examples directory, argv[2] = the ribbon probe layer.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 

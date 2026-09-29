@@ -113,6 +113,25 @@ pivot, so the points move by what the handle does inside the space
 and not by the space's motion -- a localized cluster, for geometry
 that is deformed at rest before it is skinned to that space.
 
+#### `rigExec:referenceTransform`
+
+*Relationship.*
+
+Optional neutral-solve provider sharing transform's authored
+rest frame. Normalizes the transform as inverse(M(reference)) *
+M(transform), so the fitted neutral solve produces identity even
+when a solver has rest residuals or controls have default offsets.
+Read at transformReadPhase; the reference must have animation
+channels neutralized while sharing the live fitting parameters.
+
+#### `rigExec:referenceTransformSpace`
+
+*Relationship.*
+
+Neutral counterpart of transformSpace. Required when both
+referenceTransform and transformSpace are supplied. Normalize both
+transforms independently before removing the space's motion.
+
 #### `rigExec:transformReadPhase`
 
 *Type:* `uniform token`. *Default:* `"base"`.

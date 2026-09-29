@@ -7,7 +7,7 @@ row geometry, a real Qt event loop and a real undo stack:
 
   * a CLICK on a value cell opens the inline editor; typing and Return
     author the value and push exactly one undo entry.
-  * a DRAG on the same cell changes the value along a Houdini-style step
+  * a DRAG on the same cell changes the value along a step
     ladder, live, and commits as exactly ONE undo entry on release.
   * a token with ``allowedTokens`` opens a popup listing EXACTLY those
     tokens, and picking one authors at Default because the attribute is
@@ -379,7 +379,7 @@ def testUsdviewInputFunction(appController):
         _pump(app, 10)
         _Check(not view._draggingLink, "the connection drag did not finish")
 
-    # --- 7. Esc cancels, in the editor and mid-drag ----------------------
+
     undo.clear()
     dblAttr = valuesPrim.GetAttribute("dbl")
     _Check(abs(dblAttr.Get() - 2.5) < 1e-9, "dbl started at %r" % dblAttr.Get())

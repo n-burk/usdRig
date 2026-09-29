@@ -1,6 +1,4 @@
-//
 // SCRATCH BENCHMARK -- which USD reads stop scaling across threads.
-//
 // Compile runs several readers of one stage at once (the structure digest's
 // prefetch lanes, the exec lane, the compiling thread), and they slow each
 // other down: the Solvers prefetch on the biped takes ~12 ms alone and ~24 ms
@@ -9,9 +7,7 @@
 // prims, on 1..N threads, against a pure-CPU control that has no shared
 // state, so a read whose speedup falls behind the control's is contending on
 // something inside USD.
-//
 // Not a test: it asserts nothing and is not registered with ctest.
-//
 #include "pxr/base/tf/token.h"
 #include "pxr/usd/sdf/attributeSpec.h"
 #include "pxr/usd/sdf/path.h"
@@ -116,7 +112,6 @@ main(int argc, char **argv)
     std::printf("%s %s: %zu prims, %zu attributes\n", stagePath.c_str(),
                 rigPath.c_str(), prims.size(), attrs.size());
 
-    // ---- the digest's hop read, two ways ----------------------------------
     // One attribute as the digest records it.
     using Fact = std::tuple<SdfPath, TfToken, SdfPathVector>;
     const auto connectionsOf = [](const UsdAttribute &a) {

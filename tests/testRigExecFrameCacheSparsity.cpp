@@ -1,16 +1,12 @@
-//
 // RigExec sparse cross-frame reuse, Stream D: the output-affected index, the
 // task-list cache, retained-frame planning, candidate lookup, capture-index
 // epoch invalidation, and executed-cluster counts.
-//
 // Style follows testRigExecFrameCache.cpp: plain C++ with main + CHECK over
 // synthetic programs and in-memory stages. The synthetic programs below are
 // hand-built clusterings closed by the REAL RigExecBakedBuildCones -- the
 // closures under test are never hand-drawn -- and the capture-index test
 // builds a REAL baked program over a REAL in-memory rig and routes REAL
 // stage notices through it.
-//
-
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/bakedSchedule.h"
 
@@ -73,14 +69,11 @@ MakeInputs(UsdTimeCode time,
 }
 
 // Diamond plus tail plus isolate, closed by the real BuildCones:
-//
 //   0 -> 1 -> 3 -> 4
 //   0 -> 2 -> 3
 //   5 (no edges)
-//
 // cone[0]={0,1,2,3,4} cone[1]={1,3,4} cone[2]={2,3,4} cone[3]={3,4}
 // cone[4]={4} cone[5]={5}
-//
 // With \p alwaysStep, one step reading outside the graph sits in cluster 4,
 // so the always-dirty set is {4}.
 RigExecBakedProgramImpl
@@ -629,7 +622,6 @@ TestRunSparsePlan()
 // predecessor's slots from the retained frame, not this one. The plan runs
 // in the stored topological order instead, and the runner checks that every
 // planned predecessor of a cluster ran before it.
-//
 //   3 -> 0 -> 1
 //        2 -> 1
 //   4 (no edges)

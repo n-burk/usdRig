@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 """Pure value model for the node graph's inline attribute value cells.
@@ -26,14 +26,12 @@ from pxr import Gf, Sdf, Usd
 from ._schema_pin_names import get_attribute_type_name
 
 
-# ---------------------------------------------------------------------------
 # The type whitelist
 #
 # Membership is tested against ``str(attr.GetTypeName())``, which is what
 # ``_schema_pin_names.get_attribute_type_name`` returns.  Array types
 # stringify with a ``[]`` suffix ("float3[]"), so they fall out of every set
 # here automatically and need no separate rejection.
-# ---------------------------------------------------------------------------
 
 SCALAR_BOOL = frozenset({"bool"})
 SCALAR_INT = frozenset({"int", "int64", "uint", "uint64"})
@@ -181,9 +179,7 @@ def is_mungable(kind):
     return kind in (KIND_INT, KIND_FLOAT)
 
 
-# ---------------------------------------------------------------------------
 # Reading
-# ---------------------------------------------------------------------------
 
 
 def read_components(prim, property_name, time_code=None):
@@ -344,9 +340,7 @@ def value_is_editable(stage, prim, attr):
     return True, ""
 
 
-# ---------------------------------------------------------------------------
 # Formatting
-# ---------------------------------------------------------------------------
 
 
 def format_component(value, type_name, decimals=4):
@@ -486,15 +480,13 @@ def parse_component(text, type_name):
         return False, None
 
 
-# ---------------------------------------------------------------------------
 # The mung ladder
-# ---------------------------------------------------------------------------
 
 
 def ladder_step(base, type_name):
     """World units of value per pixel of horizontal drag.
 
-    Houdini-flavoured: the step tracks the magnitude of the value being
+    the editor-flavoured: the step tracks the magnitude of the value being
     dragged, so a value near 1 moves by 0.01/px (a 100 px drag adds 1.0)
     and a value near 100 moves by 1.0/px.  Integers always step exactly 1.
     """
@@ -543,9 +535,7 @@ def apply_delta(original, comp_index, value, type_name):
     return tuple(components)
 
 
-# ---------------------------------------------------------------------------
 # Authoring
-# ---------------------------------------------------------------------------
 
 
 def pack_components(components, type_name):
@@ -622,9 +612,7 @@ def _warn_edit_target(stage):
         pass
 
 
-# ---------------------------------------------------------------------------
 # One row's worth of value state
-# ---------------------------------------------------------------------------
 
 ValueRow = namedtuple(
     "ValueRow",

@@ -1,6 +1,4 @@
-//
 // Strict, schema-backed authoring for codeless RigExec schemas.
-//
 #include "schemaAuthoring.h"
 
 #include "rigExecMath/avarScale.h"

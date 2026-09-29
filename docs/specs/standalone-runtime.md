@@ -82,6 +82,4 @@ per-element `GfVec3f` inputs to blend sample computations. It exercises repeated
 rest edits, unrelated-source dirty isolation, relationship and connection
 rewiring, type/cardinality validation, activity removal/revival, complete transient
 states, unsupported requests and retained snapshots after source-stage destruction.
-`testRigExecPack` covers the independent producer/loader boundary. The preliminary
-[Esf compatibility probe](esf-compatibility-probe.md) remains a separately buildable
-check of the internal exported request hooks used by this version.
+`testRigExecPack` covers the independent producer/loader boundary. The internal exported request hooks are version-specific and require compatibility checks when upgrading OpenUSD.

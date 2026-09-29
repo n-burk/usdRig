@@ -1,7 +1,4 @@
-//
 // .rigexec capture.
-//
-
 #include "rigExecBake/capture.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"

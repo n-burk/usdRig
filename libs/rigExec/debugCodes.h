@@ -1,13 +1,9 @@
-//
 // RigExec debug codes.
-//
 // Off by default and free at runtime (one array lookup). Enable with
 // TF_DEBUG=RIGEXEC_TAP_TIMING, or TF_DEBUG=RIGEXEC_* for all of them.
-//
 // Deliberately NOT inside namespace rigExec: TF_DEBUG_CODES specializes
 // TfDebug::_Traits, and a specialization of a pxr template cannot be
 // defined inside an unrelated namespace (MSVC C2888).
-//
 #ifndef RIGEXEC_DEBUG_CODES_H
 #define RIGEXEC_DEBUG_CODES_H
 

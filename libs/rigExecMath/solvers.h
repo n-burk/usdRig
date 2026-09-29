@@ -1,9 +1,6 @@
-//
 // RigExec solver kernels (spec §4.1 solver schemas, §5 math).
-//
 // Pure, deterministic, stateless functions consumed by the OpenExec
 // computation callbacks. All frames are in rig-common space.
-//
 #ifndef RIGEXEC_MATH_SOLVERS_H
 #define RIGEXEC_MATH_SOLVERS_H
 

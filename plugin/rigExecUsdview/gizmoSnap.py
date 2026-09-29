@@ -1,5 +1,5 @@
 #
-# RigExec usdview gizmo: Maya-style snap maths. Qt-free, so the
+# RigExec usdview gizmo: snap maths. Qt-free, so the
 # world-grid rule, the handle constraint, screen-space ranking and
 # the perspective-correct edge parameter are testable with a
 # synthetic Gf.Camera and no stage.

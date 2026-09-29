@@ -235,7 +235,7 @@ need a permutation-proof composition use a commutative mode.
 
 Combines nest, and nesting is how mixed modes are expressed: one combine
 carries one mode, so a relationship never has to carry per-target
-metadata. (Maya's falloff list attaches a mode to each entry; a USD
+metadata. (falloff list attaches a mode to each entry; a USD
 relationship cannot, and nesting is the composition-native answer.)
 
 A length mismatch between inputs is a **structural error**, not a

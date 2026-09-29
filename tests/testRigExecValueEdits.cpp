@@ -1,8 +1,6 @@
-//
 // Stage VALUE edits routed to the per-frame inputs they reach (unified-program
 // spec rules S2, S3): what the program re-runs after one, and that what it
 // then publishes is what a program built fresh on the edited stage publishes.
-//
 // A value edit the capture index misses used to bump the program stamp, and
 // the next generation ran everything. Now an edit on an input a step reads
 // every frame marks that input edited and the next run re-runs its cone, the
@@ -12,14 +10,11 @@
 // reads does nothing. Each case below edits once, evaluates, and compares the
 // pose with a second evaluator compiled on the edited stage, which ran the
 // whole program on its first generation and so cannot have skipped anything.
-//
 // Registered plain (baked) and under the parity entries, where every
 // generation is also compared with the dynamic walk and, with
 // RIGEXEC_BAKED_VERIFY_CONES, the cone run with a forced run of everything:
 // the edited-vs-forced check this routing has to pass.
-//
 // argv[1] = path to the examples directory.
-//
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
@@ -264,9 +259,7 @@ RunCase(const Case &c)
                   moved);
 }
 
-// ---------------------------------------------------------------------------
 // The edit-latency bench's tiers, on the biped.
-// ---------------------------------------------------------------------------
 
 const SdfPath kBiped("/Biped/Rig");
 const SdfPath kHips("/Biped/Rig/Controls/hips_ctl");
@@ -383,9 +376,7 @@ TestAnUnreadValueOutsideTheRigRunsNothing(const std::string &examplesDir)
     RunCase(c);
 }
 
-// ---------------------------------------------------------------------------
 // A constraint's per-frame input, on a small rig.
-// ---------------------------------------------------------------------------
 
 const SdfPath kAimRig("/World/RigRoot");
 const SdfPath kAim("/World/RigRoot/Movers/RigExecAimConstraint1");

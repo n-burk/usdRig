@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -633,12 +633,12 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
         self.assertEqual(mock_push.call_args[0][0], "Reconnect")
 
     def test_create_connection_invalidates_back_reference_cache(self):
-        # Regression: the back-reference link cache is populated from
-        # collect_links_for_prim and consulted whenever a node is re-added to
-        # the editor.  USD notices are suppressed across _createConnection, so
-        # _handleUsdChanges cannot drop the cache for us -- without an
-        # explicit invalidation here, removing the involved prims from the
-        # editor and re-adding them would resurrect the stale connection.
+
+
+
+
+
+
         stage = MagicMock()
         root_layer = MagicMock()
         edit_target = MagicMock()
@@ -687,11 +687,11 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
         view._invalidateBackReferenceLinkDataCache.assert_called_once()
 
     def test_delete_connection_invalidates_back_reference_cache(self):
-        # Regression for the user's reported bug: remove a relationship in the
-        # editor, remove the prims from the editor, then re-add them.  Without
-        # invalidating the back-reference cache here, the cached
-        # collect_links_for_prim snapshot still reports the deleted target and
-        # the editor resurrects the connection on re-add.
+
+
+
+
+
         library = MagicMock()
         library.delete_connection.return_value = True
         output_prim = MagicMock()
@@ -1235,11 +1235,11 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
 
         self.assertEqual(added_paths, ["/Scope/DriverNode", "/Scope/DrivenNode"])
         view._showPopupMessage.assert_called_with("Added 2 node(s)")
-        # The canvas started empty, so there is no view worth preserving and
-        # the nodes land at the world origin: frame them. This is the positive
-        # control for test_adding_into_an_existing_graph_leaves_the_camera_alone
-        # below -- without it, "never frame" would pass and the editor would
-        # open staring at nothing.
+
+
+
+
+
         view._frameNodeBounds.assert_called_once()
 
     def test_add_nodes_from_prim_tree_selection_deduplicates(self):
@@ -2647,10 +2647,10 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
         self.assertGreater(base_b[0], tip[0])
 
     def test_prim_target_relationship_link_detected_for_shader_inset(self):
-        # The end-shorten that used to live in _relationshipRenderEnd now happens
-        # in the vertex shader, gated on the prim-target predicate (mirrored by
-        # the C++ isPrimTarget). Verify the predicate still identifies a whole-prim
-        # relationship target and excludes port/property targets.
+
+
+
+
         link = _relationship_link()
         link.targetPort = ""
         link.targetPropertyName = ""
@@ -2963,12 +2963,12 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
         self.assertGreater(tip_y, base2_y)
 
     def test_render_temporary_link_triangle_tip_sits_on_prim_top_edge(self):
-        # Regression: previously the snap-target arrow was offset by
-        # arrow_length/2 DOWN from endPos, which put the tip inside the
-        # prim's body and made the arrowhead read as "under" the node
-        # while rerouting a relationship link. The tip must land exactly on
-        # the prim's top edge so the drag visual matches the persistent
-        # arrow drawn after the drop completes.
+
+
+
+
+
+
         view, render_tri = self._render_temp_link_triangle_view(
             end_pos=Gf.Vec2d(50.0, 30.0),
             start_pos=Gf.Vec2d(10.0, 10.0),

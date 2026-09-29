@@ -183,9 +183,7 @@ def _Color(rgb, opacity=1.0):
                         int(round(max(0.0, min(1.0, opacity)) * 255)))
 
 
-# ---------------------------------------------------------------------------
 # Overlay
-# ---------------------------------------------------------------------------
 
 class GizmoOverlay(QtWidgets.QWidget):
     """
@@ -412,9 +410,7 @@ class GizmoOverlay(QtWidgets.QWidget):
         painter.drawPolygon(self._Polygon(polygon, ratio))
 
 
-# ---------------------------------------------------------------------------
 # Toolbar
-# ---------------------------------------------------------------------------
 
 class ViewportStatusBar(QtWidgets.QLabel):
     """
@@ -988,9 +984,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
         return self._status
 
 
-# ---------------------------------------------------------------------------
 # Tool settings window
-# ---------------------------------------------------------------------------
 
 class ToolSettingsPanel(QtWidgets.QWidget):
     """
@@ -1387,9 +1381,7 @@ class ViewportHotkeyFilter(QtCore.QObject):
             return False
 
 
-# ---------------------------------------------------------------------------
 # Controller
-# ---------------------------------------------------------------------------
 
 class GizmoController(QtCore.QObject):
     """
@@ -1814,7 +1806,7 @@ class GizmoController(QtCore.QObject):
         Lead last because that is what gizmoMath.MakeGroupTarget takes,
         and because the LAST-picked control is what orients the group
         frame and answers to the Last Selected pivot -- the conventional tool and
-        Blender convention.
+        the editor convention.
 
         NOT the focus prim, and this was measured the hard way.
         usdview's focus prim is getPrimPaths()[0] (selectionDataModel
@@ -1823,7 +1815,7 @@ class GizmoController(QtCore.QObject):
         live usdview gives api.prim == arm_l_fk_shoulder_l_bind, so
         treating the focus prim as the lead put the FIRST control picked
         in charge of the gizmo's axes, which is backwards from every
-        DCC. The selection is insertion-ordered, so the last real entry
+        application. The selection is insertion-ordered, so the last real entry
         IS the last-picked prim.
 
         The pseudo-root is dropped rather than led: usdview leaves `/`
@@ -1993,20 +1985,20 @@ class GizmoController(QtCore.QObject):
         return False
 
     def _RebuildHandles(self):
-        # EVERY tool rebuilds its handles live during a drag, rotate
-        # included. Rotate used to keep the handles it started with, on the
-        # reasoning that a ring that turns under a held cursor makes the
-        # manipulator chase itself -- but the drag never reads these
-        # handles: gizmoDrag.DragState holds its OWN frozen copy of the
-        # grabbed handle and turns about that axis for the whole drag. So the
-        # freeze only froze the DRAWING, and the rotate gizmo sat at the
-        # pre-drag orientation until release while the control turned.
-        # Rotating about an axis leaves that axis's own ring where it is;
-        # the others follow the object, which is what the artist expects.
-        #
-        # resolveCamera() can emit signalFrustumChanged, whose handler
-        # lands back here; without the guard the first paint after a
-        # camera move recurses until the stack runs out.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         if self._rebuilding:
             return
         self._rebuilding = True
@@ -4015,9 +4007,7 @@ class GizmoController(QtCore.QObject):
         self.usdviewApi.UpdateViewport()
 
 
-# ---------------------------------------------------------------------------
 # Installation
-# ---------------------------------------------------------------------------
 
 def _WriterStage(drag):
     """The stage a drag's writer collects for, or None."""

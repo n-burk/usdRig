@@ -1,6 +1,4 @@
-//
 // RigExec property-domain math kernels.
-//
 #include "propertyMath.h"
 #include "envelope.h"
 

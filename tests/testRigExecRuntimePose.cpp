@@ -1,9 +1,6 @@
-//
 // rigExecRuntime pose-family parity (M2): baked program vs runtime over
 // every baking fixture, comparing fin/base versions, rest -> pose
 // matrices and joint matrices bit for bit. Owned by the pose-port worker.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"

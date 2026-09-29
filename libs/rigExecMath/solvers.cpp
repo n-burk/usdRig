@@ -1,6 +1,4 @@
-//
 // RigExec solver kernels.
-//
 #include "solvers.h"
 #include "envelope.h"
 

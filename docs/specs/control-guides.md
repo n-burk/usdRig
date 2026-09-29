@@ -175,7 +175,7 @@ time forwarding):
    when one exists, else a rest-pose fallback computed purely from
    authored attrs (`rest:space` chain × unit shape × normalized avar-scale
    magnitude × positive per-axis guide multiplier).
-   `UsdGeomBBoxCache` — what usdview, Solaris, and mayaUsd consult — then
+   `UsdGeomBBoxCache` — what usdview, other USD clients consult — then
    answers natively in every host, and the usdview monkeypatch is deleted
    (the C API bounds exports remain for hosts that want live bounds
    directly).

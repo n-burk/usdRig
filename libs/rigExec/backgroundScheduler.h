@@ -1,7 +1,5 @@
-//
 // RigExec background scheduler: the frame-job queue and the generation fence
 // in front of it.
-//
 // Frame jobs warm the per-frame cache on a small pool of below-normal OS
 // priority workers, each job running the baked serial executor end to end
 // under a frozen serial scope. Workers never call Work*/TBB: a kernel-level
@@ -10,8 +8,7 @@
 // should hold. The pool only warms: the playhead always evaluates live on the
 // calling thread, so the playhead frame is never enqueued here. Background
 // order is scrub neighbors (+-1..N of the playhead) first, then the
-// Premonition-style sweep of the surrounding range.
-//
+// nearest-frame-first sweep of the surrounding range.
 // Warming is triggered by edit-commit (drag release / value commit), not by
 // idle detection, with an idle signal as a secondary trigger. There are no
 // timers inside the scheduler: both triggers are explicit calls from the
@@ -21,7 +18,6 @@
 // publishes -- a mismatch at any fence drops the result. A dropped job frees
 // its inputs promptly; the frame it would have warmed simply evaluates live
 // when asked.
-//
 // Switches (plan D6): RIGEXEC_FRAME_CACHE={on,off,warm-off}, default on,
 // where off restores exact current behavior and warm-off keeps cache reads
 // while disabling background fill; RIGEXEC_ENABLE_PARALLEL_EVAL=0 likewise
@@ -29,7 +25,6 @@
 // every Enqueue declines and every trigger enqueues nothing, so the caller
 // evaluates live -- the fail-closed answer -- while the generation fence
 // keeps working: edits still bump, tokens still compare.
-//
 #ifndef RIGEXEC_BACKGROUND_SCHEDULER_H
 #define RIGEXEC_BACKGROUND_SCHEDULER_H
 

@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -12,7 +12,7 @@ verify what was authored persists.
 
 Regression guard for the class of bug where Noodles-authored graph state
 doesn't survive save-reload — specifically the historical failure mode
-where connections authored via the editor were not persisted to USD on
+where connections authored vian editor were not persisted to USD on
 Cmd+S (fixed in an earlier landed change).
 
 Tests use pure pxr.Usd / pxr.Sdf (no GraphView / GL imports) so they run

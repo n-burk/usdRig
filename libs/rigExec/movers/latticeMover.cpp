@@ -1,14 +1,10 @@
-//
 // RigExecLatticeMover: everything about the lattice mover (spec §4.1).
-//
 // A lattice mover deforms points through a posed lattice cage measured
 // against its rest cage. This TU owns its exec-side
 // computeMoverParameters registration and builder, its revision binder,
 // and its parity-oracle branch, and registers the row that points at
 // them. Compile validation is the generic points-target + single-target
 // rules.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 
@@ -98,7 +94,6 @@ _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
     // parity oracle, so it resolves its own inputs off the stage. A
     // reference that called the assembler would have agreed with the
     // SurfaceProject strength bug instead of catching it.
-    //
     // The rest cage is the cage at Default time. That is exactly
     // what the deleted compiler captured into
     // rigExec:restCagePoints -- a Default-time read and nothing

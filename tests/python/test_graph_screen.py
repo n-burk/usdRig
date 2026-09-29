@@ -103,8 +103,8 @@ def TestFrame():
     transform.Frame(0.0, 10.0, -1.0, 1.0, padding=0.0)
     _Check(_ClosePoint(transform.timeRange, (0.0, 10.0)),
            "zero padding: %s" % (transform.timeRange,))
-    # A single key has no extent; Maya frames a unit window round it
-    # rather than collapsing the view.
+
+
     transform.Frame(5.0, 5.0, 2.0, 2.0)
     _Check(_ClosePoint(transform.timeRange, (4.0, 6.0))
            and _ClosePoint(transform.valueRange, (1.0, 3.0)),

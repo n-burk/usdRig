@@ -1,6 +1,4 @@
-//
 // RigExec compiled mover graph (spec §7.2). See moverGraph.h.
-//
 #include "moverGraph.h"
 #include "parallel.h"
 #include "movers/moverRegistry.h"
@@ -19,6 +17,7 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/base/tf/staticTokens.h"
+#include "pxr/exec/exec/typeRegistry.h"
 #include "pxr/exec/vdf/connectorSpecs.h"
 #include "pxr/exec/vdf/context.h"
 #include "pxr/exec/vdf/dataManagerVector.h"
@@ -65,6 +64,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((blendShape, "blendShape"))
     ((volumeCorrect, "volumeCorrect"))
     ((smooth, "smooth"))
+    ((deltaMush, "deltaMush"))
     ((lattice, "lattice"))
     ((surfaceProject, "surfaceProject"))
     ((ribbon, "ribbon"))
@@ -115,7 +115,6 @@ namespace rigExec {
 namespace {
 
 // One revision of an exact native point3f[] target.
-//
 // The connector shape is VDF's own idiom for this: `previous` is a READWRITE
 // connector associated with `out`, so an unmodified revision passes its input
 // straight through (SetOutputToReferenceInput) with no copy, and a modified one
@@ -159,7 +158,6 @@ _StatusAllowsApply(const VdfContext &ctx)
 }
 
 // The kind token an assembled packet must carry to be the packet for \p op.
-//
 // One table, read by the revision node's guard and by the shared kernel
 // entry point, so the two cannot disagree about which packet belongs to
 // which operation.
@@ -177,6 +175,8 @@ _RevisionKindToken(RigExecRevisionOp op)
         return _kindTokens->volumeCorrect;
     case RigExecRevisionOp::Smooth:
         return _kindTokens->smooth;
+    case RigExecRevisionOp::DeltaMush:
+        return _kindTokens->deltaMush;
     case RigExecRevisionOp::Lattice:
         return _kindTokens->lattice;
     case RigExecRevisionOp::SurfaceProject:
@@ -206,7 +206,6 @@ _RevisionKindToken(RigExecRevisionOp op)
 // (spec §6.5: transient scratch is released before the callback returns).
 // Peer of _EvaluateScratchKernel in moverKernels.cpp, with the write-back
 // changed from Allocate to in-place through the READWRITE connector.
-//
 // Everything between the collect and the write-back is
 // RigExecRunRevisionKernel: the kind check, the full-strength fast path, the
 // operation itself and the "apply once" blend. The baked geometry loop calls
@@ -295,7 +294,6 @@ RigExecRevisionKindToken(RigExecRevisionOp op)
 // baked program. Unlike the point3f[] ops the envelope is NOT a separate
 // blend here: the weighted-matrix rule folds it into the movement itself
 // (p' = q + w (T q - q)), so resolving it is part of the kernel.
-//
 // One definition, so a second caller cannot drift into a different movement
 // -- including over the SIMD choice, which must be the same on both paths or
 // the two disagree in the last bits.
@@ -486,7 +484,6 @@ RigExecBlendEnvelopeAll(const GfVec3f *preceding, const float *envelope,
 // baked program, which runs the same operation with no VdfNetwork around
 // it. One definition, so a second caller cannot drift into a different
 // deformation.
-//
 // It is now three pieces rather than one, because a chunked caller needs the
 // per-vertex body without the decisions AROUND it -- and every one of those
 // decisions is a statement about the WHOLE array, not about a vertex:
@@ -623,7 +620,6 @@ RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
     GfVec3f *const points = pts->data();
     static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
 
-    // ---- Method dispatch ---------------------------------------------
     // The one point where the skinning methods part. Everything above is
     // the shared per-point gather (indices, weights, influence matrices,
     // rest point); only the accumulation differs.
@@ -647,7 +643,6 @@ RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
         // point transform. Weight shortfall enters as an identity influence
         // (see RigExecApplyDualQuatSkin). Scalar only; a degenerate blend
         // fails atomically.
-        //
         // The split is per matrix, so a caller skinning several ranges
         // against one table hands the palette in and pays for it once.
         std::vector<RigExecScaledDualQuat> local;
@@ -756,7 +751,6 @@ RigExecApplySkinKernel(const RigExecMoverParameters &p,
 // envelope is NOT a separate blend: the deltas are added to the preceding
 // revision and the result blended back against it in one pass, so resolving
 // the envelope is part of the kernel.
-//
 // One definition, so a second caller cannot drift into a different blend.
 bool
 RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
@@ -792,7 +786,6 @@ RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
     // about the arithmetic, only who performs it. Everything above stays on
     // this thread, because the envelope resolve and the surface transport
     // are statements about the WHOLE array and fail it atomically.
-    //
     // WORTH KNOWING WHAT THIS DID NOT FIX. On a 26,276-point body with 161
     // corrective targets the blend-shape revision is the largest deformer
     // cost left in an interactive drag once the skin kernel learned to
@@ -825,7 +818,6 @@ RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
 // by the baked program: normal3f[] and float3[] hosts recomputed from the
 // final same-generation points rather than from the preceding revision
 // (spec §7.6). Self-enveloping, like the matrix and blend-shape kernels.
-//
 // One definition, so the size rules and the envelope cannot drift between the
 // two paths that maintain the same property.
 bool
@@ -863,11 +855,9 @@ RigExecApplyDerivedKernel(RigExecRevisionOp op,
 // they were lambdas inside its VdfContext callback. \p controlFrames receives
 // the curvenet adjuster's fully adjusted control frames and is unread by every
 // other operation.
-//
 // ONE definition, called by the mover-graph revision node and by the baked
 // program: a second copy of a deformation agrees on the fixtures that exist
 // and drifts on the ones that do not.
-//
 // The envelope is NOT applied here for the ops that take a separate blend --
 // RigExecRunRevisionKernel wraps this, which is where the "apply once" rule
 // lives; matrix, blendShape and the two derived recomputations fold it into
@@ -892,6 +882,10 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
         RigExecApplyLaplacianSmooth(
             pts, p.topologyCounts, p.topologyIndices, p.strength);
         return true;
+    case RigExecRevisionOp::DeltaMush:
+        return RigExecApplyDeltaMush(pts, p.restPoints, p.topologyCounts,
+            p.topologyIndices, p.mushIterations, p.mushStep, p.mushPinBorders,
+            p.mushDistanceWeight, p.mushDisplacement);
     case RigExecRevisionOp::Lattice:
         if (p.restPoints.size() != pts->size()) {
             return false;  // cardinality mismatch fails atomically
@@ -1051,7 +1045,6 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
 // One revision, envelope included: the packet check, the full-strength fast
 // path, RigExecApplyRevisionKernel and the "apply once" blend against the
 // preceding revision.
-//
 // ONE definition of "apply once", called by the mover-graph revision node and
 // by the baked geometry loop. Two hand-written wrappers would have to agree
 // about which operations blend and which fold the envelope into their own
@@ -1410,17 +1403,35 @@ _Token(const UsdPrim &prim, const TfToken &attr, const TfToken &fallback)
 // Every scalar mover input consults the generation's resolved property set
 // before the authored stage. This is what lets a property-domain mover drive
 // another mover's common envelope without a second evaluation model.
-float
-_Float(const UsdPrim &prim, const TfToken &attr, float fallback,
+template<class T> T
+_Read(const UsdPrim &prim, const TfToken &attr, T fallback,
        UsdTimeCode time, const RigExecResolvedInputs *resolved)
 {
-    float value = fallback;
+    T value = fallback;
     if (const UsdAttribute a = prim.GetAttribute(attr)) {
         if (resolved && resolved->GetAttribute(a, time, &value)) {
             return value;
         }
         a.Get(&value, time);
     }
+    return value;
+}
+
+float _Float(const UsdPrim &prim, const TfToken &attr, float fallback,
+             UsdTimeCode time, const RigExecResolvedInputs *resolved)
+{
+    return _Read<float>(prim, attr, fallback, time, resolved);
+}
+
+template<class T> T
+_RecordedInput(const UsdPrim &prim, const TfToken &name, T fallback,
+               UsdTimeCode time, const RigExecResolvedInputs *resolved)
+{
+    const T value = _Read<T>(prim, name, fallback, time, resolved);
+    const UsdAttribute attr = prim.GetAttribute(name);
+    RigExecRecordStageRead(resolved, resolved ? resolved->bakeRecorder : nullptr,
+                          prim.GetPath().AppendProperty(name), attr, time,
+                          VtValue(value), /*forceFrame=*/true);
     return value;
 }
 
@@ -1597,7 +1608,6 @@ RigExecStatusForParameters(
 namespace {
 
 // Reads a typed array from an exact property path on the mover's stage.
-//
 // \p resolved is null for BIND-TIME reads and only for those. A rest cage, a
 // rest curvenet, a bind-time topology: those are the authored neutral pose the
 // deformation is measured against, so a read phase has nothing to say about
@@ -1929,7 +1939,6 @@ RigExecAssembleSkinParameters(
 }
 
 // Adds `scale` times one sample's delta into `deltas`.
-//
 // The point of the sparse form: a real corrective moves 1,279 of 26,276
 // points, so the indexed loop touches 4.87% of what the dense one does. The
 // dense branch here exists for a sample that carries a layout with empty
@@ -2118,6 +2127,9 @@ RigExecAssembleParameters(
     case RigExecRevisionOp::Smooth:
         params.kind = _kindTokens->smooth;
         break;
+    case RigExecRevisionOp::DeltaMush:
+        params.kind = _kindTokens->deltaMush;
+        break;
     case RigExecRevisionOp::Lattice:
         params.kind = _kindTokens->lattice;
         break;
@@ -2202,6 +2214,18 @@ RigExecAssembleParameters(
         params.valid = !params.topologyCounts.empty();
         break;
 
+    case RigExecRevisionOp::DeltaMush:
+        params.restPoints = _Array<GfVec3f>(moverPrim, moverPrim.GetPath().AppendProperty(TfToken("inputs:restPoints")), UsdTimeCode::Default(), values.resolved, _RecorderOf(values.resolved));
+        if (params.restPoints.empty()) params.restPoints = values.basePoints;
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved, _RecorderOf(values.resolved));
+        params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved, _RecorderOf(values.resolved));
+        params.mushIterations = _RecordedInput<int>(moverPrim, TfToken("inputs:iterations"), 10, time, values.resolved);
+        params.mushStep = _RecordedInput<float>(moverPrim, TfToken("inputs:step"), 0.5f, time, values.resolved);
+        params.mushPinBorders = _RecordedInput<bool>(moverPrim, TfToken("inputs:pinBorders"), true, time, values.resolved);
+        params.mushDistanceWeight = _RecordedInput<float>(moverPrim, TfToken("inputs:distanceWeight"), 0.0f, time, values.resolved);
+        params.mushDisplacement = _RecordedInput<float>(moverPrim, TfToken("inputs:displacement"), 1.0f, time, values.resolved);
+        params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
+        break;
     case RigExecRevisionOp::Curvenet: {
         params.strength = 1.0f;
         const UsdPrim netPrim =
@@ -2637,7 +2661,12 @@ struct RigExecMoverGraph::_Runtime {
     }
 };
 
-RigExecMoverGraph::RigExecMoverGraph() : _runtime(new _Runtime) {}
+RigExecMoverGraph::RigExecMoverGraph() : _runtime(new _Runtime)
+{
+    // A geometry-only rig may never create an Exec request. Register packet
+    // types before constructing Vdf inputs even in that standalone case.
+    ExecTypeRegistry::GetInstance();
+}
 RigExecMoverGraph::~RigExecMoverGraph() = default;
 
 VdfMaskedOutput

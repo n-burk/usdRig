@@ -1,7 +1,5 @@
-//
 // TouchPose geometry: the posed mesh a touch lands on, and the questions a
 // pick asks of it.
-//
 // WHY THIS IS C++. The Python version cast every ray against all 52,548
 // triangles of the biped's body with numpy -- 1.6 ms a ray measured in
 // usdview, paid on every hover sample -- and rebuilt its derived arrays
@@ -9,17 +7,14 @@
 // hierarchy built ONCE per topology and REFIT per pose, so a pose change is
 // one parallel pass over the triangle bounds plus a bottom-up sweep of the
 // nodes, and a ray is a few dozen box tests and a handful of triangle tests.
-//
 // WHICH POINTS. The mesh is posed by RigExec, and the posed points never
 // reach the stage: `points` on the stage is the rest mesh. The caller hands
 // this class whatever the viewport is drawing (see touchPoseApi.cpp, which
 // reads the RigExec snapshot the results scene index publishes from), plus
 // the mesh's local-to-world transform, and every query below is answered
 // against exactly that.
-//
 // Everything here is plain data with no Hydra and no USD stage in it, so a
 // unit test can build a cube, pose it, and cast at it.
-//
 #ifndef RIGEXEC_IMAGING_TOUCH_POSE_MESH_H
 #define RIGEXEC_IMAGING_TOUCH_POSE_MESH_H
 

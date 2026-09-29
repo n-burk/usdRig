@@ -1,7 +1,5 @@
-//
 // rigExecRuntime geometry family (M2): RevisionStatic, InfluenceFold,
 // RevisionChunk, RevisionFuse, ChainStatus, Derived.
-//
 // A zero-USD port of the baked geometry loop (libs/rigExec/bakedGeometry.cpp
 // driven by the movers in libs/rigExec/moverGraph.cpp and the kernels in
 // libs/rigExecMath). Stage reads replay from the frame record's pathReads;
@@ -10,6 +8,7 @@
 // order, float stays float.
 
 #include "rigExecRuntime/store.h"
+#include "rigExecMath/deltaMushKernel.h"
 
 #include <algorithm>
 #include <array>
@@ -47,7 +46,7 @@ namespace rigExec {
 namespace {
 
 // Operation ordinals, in RigExecRevisionOp order. The wire stores the
-// ordinal; anything outside [0, 13] is a corrupt program and fails the
+// ordinal; anything outside [0, 14] is a corrupt program and fails the
 // step naming it.
 enum RrGeoOp {
     RrGeoOpMatrix = 0,
@@ -64,6 +63,7 @@ enum RrGeoOp {
     RrGeoOpCurvenetAdjuster = 11,
     RrGeoOpRecomputeNormals = 12,
     RrGeoOpRecomputeExtent = 13,
+    RrGeoOpDeltaMush = 14,
 };
 
 const char *
@@ -75,6 +75,7 @@ RrGeoOpName(int op)
     case RrGeoOpBlendShape: return "BlendShape";
     case RrGeoOpVolumeCorrect: return "VolumeCorrect";
     case RrGeoOpSmooth: return "Smooth";
+    case RrGeoOpDeltaMush: return "DeltaMush";
     case RrGeoOpLattice: return "Lattice";
     case RrGeoOpSurfaceProject: return "SurfaceProject";
     case RrGeoOpRibbon: return "Ribbon";
@@ -98,6 +99,7 @@ RrGeoKindToken(int op)
     case RrGeoOpBlendShape: return "blendShape";
     case RrGeoOpVolumeCorrect: return "volumeCorrect";
     case RrGeoOpSmooth: return "smooth";
+    case RrGeoOpDeltaMush: return "deltaMush";
     case RrGeoOpLattice: return "lattice";
     case RrGeoOpSurfaceProject: return "surfaceProject";
     case RrGeoOpRibbon: return "ribbon";
@@ -241,11 +243,9 @@ RrGeoGetenvBool(const char *name, bool fallback)
     return fallback;
 }
 
-// ---------------------------------------------------------------------------
 // Packet mirrors: the per-mover parameter packet and its shared layouts,
 // compared exactly the way RigExecMoverParameters::operator== compares
 // (layouts and bindings by pointer, everything else by value).
-// ---------------------------------------------------------------------------
 
 struct RrGeoWeightPacket {
     std::string representation;
@@ -453,6 +453,11 @@ struct RrGeoMoverParameters {
     bool blendSurfaceFrame = false;
     double referenceVolume = 0.0;
     float strength = 0.0f;
+    int mushIterations = 10;
+    float mushStep = 0.5f;
+    bool mushPinBorders = true;
+    float mushDistanceWeight = 0.0f;
+    float mushDisplacement = 1.0f;
     std::vector<int> topologyCounts;
     std::vector<int> topologyIndices;
     std::vector<RrVec3f> auxPoints;
@@ -489,6 +494,10 @@ struct RrGeoMoverParameters {
                blendSurfaceFrame == o.blendSurfaceFrame &&
                referenceVolume == o.referenceVolume &&
                strength == o.strength &&
+               mushIterations == o.mushIterations && mushStep == o.mushStep &&
+               mushPinBorders == o.mushPinBorders &&
+               mushDistanceWeight == o.mushDistanceWeight &&
+               mushDisplacement == o.mushDisplacement &&
                topologyCounts == o.topologyCounts &&
                topologyIndices == o.topologyIndices &&
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&
@@ -530,10 +539,8 @@ struct RrGeoMoverStatus {
     bool AllowsApply() const { return state == "ok"; }
 };
 
-// ---------------------------------------------------------------------------
 // Envelope (envelope.h, solvers.cpp, moverGraph.cpp): the common blend,
 // the weighted-matrix rule, and the full-strength predicate.
-// ---------------------------------------------------------------------------
 
 template <class T, class Weight>
 T
@@ -592,9 +599,7 @@ RrGeoBlendEnvelopeAll(const RrVec3f *preceding, const float *envelope,
     RrGeoBlendEnvelopeRange(preceding, envelope, 0, count, blended);
 }
 
-// ---------------------------------------------------------------------------
 // Skin tables (simdKernels.*, dualQuat.*, solvers.cpp, pointFrame.cpp).
-// ---------------------------------------------------------------------------
 
 enum { RrGeoSkinRowStride = 16 };
 
@@ -832,11 +837,9 @@ RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Dual-quaternion skinning (dualQuat.*, pointFrame.cpp): the per-matrix
 // stretch/rotation split, the weighted palette blend, and the Kabsch SVD
 // the non-rigid split fits through.
-// ---------------------------------------------------------------------------
 
 constexpr double RrGeoDualQuatEpsilon = 1e-9;
 
@@ -1423,12 +1426,10 @@ RrGeoApplyDualQuatSkin(const RrVec3f *in, RrVec3f *out,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Geometry kernels (geometryKernels.cpp): volume, smooth, normals, extent,
 // lattice, surface projection, wire/NURBS. RMF sampling, ribbon transport,
 // wire binding and the sparse wire apply are unreachable from the revision
 // path and stay out.
-// ---------------------------------------------------------------------------
 
 double
 RrGeoBoundVolume(const RrVec3f *points, size_t count)
@@ -1514,79 +1515,8 @@ RrGeoTransportSurfaceOffsets(const std::vector<RrVec3f> &rest,
                             const std::vector<RrVec3f> &deltas,
                             std::vector<RrVec3f> *out)
 {
-    if (!out || rest.size() != posed.size() || rest.size() != deltas.size()) return false;
-    for (size_t i = 0; i < rest.size(); ++i) {
-        for (int axis = 0; axis < 3; ++axis) {
-            if (!std::isfinite(rest[i][axis]) || !std::isfinite(posed[i][axis]) ||
-                !std::isfinite(deltas[i][axis])) return false;
-        }
-    }
-    size_t offset = 0;
-    std::vector<RrVec3d> restNormals(rest.size(), RrVec3d(0.0));
-    std::vector<RrVec3d> posedNormals(rest.size(), RrVec3d(0.0));
-    for (int count : faceCounts) {
-        if (count < 3 || static_cast<size_t>(count) > faceIndices.size() - offset) return false;
-        for (int corner = 0; corner < count; ++corner) {
-            const int index = faceIndices[offset + corner];
-            if (index < 0 || static_cast<size_t>(index) >= rest.size()) return false;
-        }
-        const int origin = faceIndices[offset];
-        RrVec3d restArea(0.0), posedArea(0.0);
-        for (int corner = 1; corner + 1 < count; ++corner) {
-            const int a = faceIndices[offset + corner];
-            const int b = faceIndices[offset + corner + 1];
-            restArea += RrCross(RrGeoToVec3d(rest[a]) - RrGeoToVec3d(rest[origin]),
-                                RrGeoToVec3d(rest[b]) - RrGeoToVec3d(rest[origin]));
-            posedArea += RrCross(RrGeoToVec3d(posed[a]) - RrGeoToVec3d(posed[origin]),
-                                 RrGeoToVec3d(posed[b]) - RrGeoToVec3d(posed[origin]));
-        }
-        for (int corner = 0; corner < count; ++corner) {
-            const int index = faceIndices[offset + corner];
-            restNormals[index] += restArea;
-            posedNormals[index] += posedArea;
-        }
-        offset += static_cast<size_t>(count);
-    }
-    if (offset != faceIndices.size()) return false;
-    const auto adjacency = RrGeoBuildAdjacency(rest.size(), faceCounts, faceIndices);
-    auto normalize = [](RrVec3d *value) {
-        const double length = value->GetLength();
-        if (!(length > 0) || !std::isfinite(length)) return false;
-        *value /= length;
-        return true;
-    };
-    std::vector<RrVec3f> result = deltas;
-    for (size_t i = 0; i < rest.size(); ++i) {
-        if (deltas[i] == RrVec3f(0.0f)) continue;
-        RrVec3d nr = restNormals[i], np = posedNormals[i];
-        if (!normalize(&nr) || !normalize(&np)) return false;
-        int neighbor = -1;
-        double longest = 0;
-        RrVec3d tr(0.0);
-        for (int candidate : adjacency[i]) {
-            const RrVec3d edge = RrGeoToVec3d(rest[candidate]) - RrGeoToVec3d(rest[i]);
-            const RrVec3d projected = edge - RrDot(edge, nr) * nr;
-            const double length2 = projected.GetLengthSq();
-            if (length2 > longest) {
-                neighbor = candidate;
-                longest = length2;
-                tr = projected;
-            }
-        }
-        if (neighbor < 0 || !normalize(&tr)) return false;
-        const RrVec3d edge = RrGeoToVec3d(posed[neighbor]) - RrGeoToVec3d(posed[i]);
-        RrVec3d tp = edge - RrDot(edge, np) * np;
-        if (tp.GetLengthSq() <= edge.GetLengthSq() * 1e-24 || !normalize(&tp)) return false;
-        const RrVec3d br = RrCross(nr, tr), bp = RrCross(np, tp);
-        const RrVec3d delta = RrGeoToVec3d(deltas[i]);
-        const RrVec3d rotated = RrDot(delta, tr) * tp + RrDot(delta, br) * bp + RrDot(delta, nr) * np;
-        result[i] = RrGeoToVec3f(rotated);
-        for (int axis = 0; axis < 3; ++axis) {
-            if (!std::isfinite(result[i][axis])) return false;
-        }
-    }
-    *out = std::move(result);
-    return true;
+    return RigExecTransportSurfaceOffsetsKernel<RrVec3f, RrVec3d>(
+        rest, posed, faceCounts, faceIndices, deltas, out);
 }
 
 void
@@ -2032,10 +1962,8 @@ RrGeoApplyWire(std::vector<RrVec3f> *points,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Sparse Cholesky (sparseSolve.*): minimum-degree ordering, elimination
 // tree, up-looking numeric factorization.
-// ---------------------------------------------------------------------------
 
 struct RrGeoSparseBuilder {
     RrGeoSparseBuilder() = default;
@@ -2476,10 +2404,8 @@ struct RrGeoSparseCholesky {
     bool _factorized = false;
 };
 
-// ---------------------------------------------------------------------------
 // Curvenets (curvenet.*): topology, sampling, scaled frames, gradients.
 // Matrices here are MATH (column-vector) convention, as in the source.
-// ---------------------------------------------------------------------------
 
 constexpr double RrGeoCurvenetEps = 1e-12;
 
@@ -3572,10 +3498,8 @@ RrGeoRemapGradientsToSamples(const RrGeoCurvenetTopology &topology,
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Cut meshes (cutMesh.*): projection, tracing, per-face arrangement, the
 // polygonal Laplacian and system assembly.
-// ---------------------------------------------------------------------------
 
 struct RrGeoMeshPoint {
     int face = -1;
@@ -5691,10 +5615,8 @@ RrGeoEvaluateProfileMover(
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Curvenet adjustments (curvenetAdjustments.*): adjustment frames from a
 // rest/posed pair, then each command's local transform about its frame.
-// ---------------------------------------------------------------------------
 
 constexpr double RrGeoAdjustEps = 1e-12;
 
@@ -6383,6 +6305,11 @@ RrGeoApplyRevisionKernel(
         RrGeoApplyLaplacianSmooth(
             pts, p.topologyCounts, p.topologyIndices, p.strength);
         return true;
+    case RrGeoOpDeltaMush:
+        return RigExecApplyDeltaMushKernel<RrVec3f, RrVec3d>(
+            pts, p.restPoints, p.topologyCounts, p.topologyIndices,
+            p.mushIterations, p.mushStep, p.mushPinBorders,
+            p.mushDistanceWeight, p.mushDisplacement);
     case RrGeoOpLattice:
         if (p.restPoints.size() != pts->size()) {
             return false;  // cardinality mismatch fails atomically
@@ -6572,11 +6499,9 @@ RrGeoStatusForParameters(const RrGeoMoverParameters &parameters,
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Scratch: revision packets, influence tables, output buffers, chunks, skin
 // topologies, blend layouts, curvenet binds, the pathReads lookup and the
 // per-frame record pointer. Mirrors GeomChain/GeomRevision/GeomChunk.
-// ---------------------------------------------------------------------------
 
 struct RrGeometryScratch {
     struct Chunk {
@@ -7089,9 +7014,7 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
 
 namespace {
 
-// ---------------------------------------------------------------------------
 // Step plumbing: the frame record, step labels, mover-attribute paths.
-// ---------------------------------------------------------------------------
 
 const RigExecWireFrameInputs *
 RrGeoFindRecord(const RrProgram *program, double time)
@@ -7248,11 +7171,9 @@ RrGeoResolveRevisionPhases(RrProgram *program, RrGeometryScratch *scratch,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Assembly: one revision's packet out of the record, the path reads and the
 // epoch tables. A port of AssembleRevision plus the RigExecAssemble*
 // per-operation bodies it ends in.
-// ---------------------------------------------------------------------------
 
 struct RrGeoAssembleInputs {
     RrProgram *program = nullptr;
@@ -7857,6 +7778,30 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
                           false, &params.topologyIndices);
         params.valid = !params.topologyCounts.empty();
         break;
+    case RrGeoOpDeltaMush: {
+        const auto attr = [&](const char *name) {
+            return RrGeoMoverAttrId(in.program, in.scratch, *in.wire, name);
+        };
+        RrGeoReadBindingVec3fArray(in, attr("inputs:restPoints"), true,
+                                 &params.restPoints);
+        if (params.restPoints.empty()) params.restPoints = base;
+        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyCounts,
+                         false, &params.topologyCounts);
+        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices,
+                         false, &params.topologyIndices);
+        params.mushIterations = RrGeoReadInt(in.scratch,
+            attr("inputs:iterations"), false, 10);
+        params.mushStep = RrGeoReadFloat(in.program, in.scratch,
+            attr("inputs:step"), false, 0.5f);
+        params.mushPinBorders = RrGeoReadBool(in.program, in.scratch,
+            attr("inputs:pinBorders"), false, true);
+        params.mushDistanceWeight = RrGeoReadFloat(in.program, in.scratch,
+            attr("inputs:distanceWeight"), false, 0.0f);
+        params.mushDisplacement = RrGeoReadFloat(in.program, in.scratch,
+            attr("inputs:displacement"), false, 1.0f);
+        params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
+        break;
+    }
     case RrGeoOpLattice:
         RrGeoAssembleLattice(in, base, &params);
         break;
@@ -7895,10 +7840,8 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
     return params;
 }
 
-// ---------------------------------------------------------------------------
 // The fold: influence tables out of the pose half's matrices. A port of
 // FoldInfluences, FoldTransformForms, GatherChunkTransforms and SkinRange.
-// ---------------------------------------------------------------------------
 
 bool
 RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
@@ -7952,6 +7895,22 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
             rev->haveTransform = true;
         }
     }
+    const bool hasReference = wire.op == uint8_t(RrGeoOpMatrix) &&
+                              !wire.influenceSlots.empty();
+    const auto normalize = [&](size_t index, RrMat4d *value) {
+        const RrMat4d *reference = nullptr;
+        if (!matrixAt(wire.influenceSlots[index], &reference)) {
+            if (error) *error = "reference slot names no provider matrix";
+            return false;
+        }
+        *value = reference->GetInverse() * *value;
+        (*value)[0][3] = (*value)[1][3] = (*value)[2][3] = 0.0;
+        (*value)[3][3] = 1.0;
+        return true;
+    };
+    if (rev->haveTransform && hasReference && !normalize(0, &rev->transform)) {
+        return false;
+    }
     if (rev->haveTransform && wire.transformSpaceSlot >= 0) {
         const RrMat4d *space = nullptr;
         if (!matrixAt(wire.transformSpaceSlot, &space)) {
@@ -7960,7 +7919,12 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
             }
             return false;
         }
-        rev->transform = RrGeoMeasureInSpace(rev->transform, *space);
+        RrMat4d measuredSpace = *space;
+        if (hasReference && wire.influenceSlots.size() > 1 &&
+            !normalize(1, &measuredSpace)) {
+            return false;
+        }
+        rev->transform = RrGeoMeasureInSpace(rev->transform, measuredSpace);
     }
     if (rev->influences.size() != wire.influenceSlots.size()) {
         if (error) {
@@ -8168,10 +8132,8 @@ RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
                           count, true);
 }
 
-// ---------------------------------------------------------------------------
 // The partition re-cut, for the frame an epoch-fixed layout moved under.
 // A port of RigExecBakedPartitionRevision.
-// ---------------------------------------------------------------------------
 
 int
 RrGeoGetenvInt(const char *name, int fallback)
@@ -8339,10 +8301,8 @@ RrGeoPartitionRevision(RrGeometryScratch::Revision *rev, size_t influences,
     rev->chunked = keyed;
 }
 
-// ---------------------------------------------------------------------------
 // The Profile Mover re-bind: the same build the baked prologue runs, from
 // the retained bind inputs, reporting the same line on a (re)bind.
-// ---------------------------------------------------------------------------
 
 std::string
 RrGeoBindDigest(const RigExecWireRevision &wire)

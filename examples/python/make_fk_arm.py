@@ -97,9 +97,7 @@ _bootstrap()
 from pxr import Usd, UsdGeom  # noqa: E402
 import rigexec                 # noqa: E402
 
-# ---------------------------------------------------------------------------
 # Layout constants.
-# ---------------------------------------------------------------------------
 
 RIG = "/ArmAsset/Rig"
 POINTS_ATTR = "/ArmAsset/Geom/ArmStrip.points"
@@ -120,9 +118,7 @@ def _joint_path(i):
     return RIG + "/Joints/" + "/".join(n for n, _ in JOINTS[:i + 1])
 
 
-# ---------------------------------------------------------------------------
 # Geometry and weights.
-# ---------------------------------------------------------------------------
 
 def strip_points():
     """Two rows of points along the arm: one column per unit x, z = +/-0.5."""
@@ -144,9 +140,7 @@ WEIGHTS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Small math helpers (row-major matrix4d == USD convention).
-# ---------------------------------------------------------------------------
 
 def tx(x, y=0.0, z=0.0):
     """Row-major matrix4d translating by (x, y, z)."""
@@ -168,9 +162,7 @@ def dist(a, b):
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
 
 
-# ---------------------------------------------------------------------------
 # Authoring.
-# ---------------------------------------------------------------------------
 
 def build(out_path):
     rigexec.load_schema_plugin()  # register the codeless schema first
@@ -238,9 +230,7 @@ def build(out_path):
     stage.Export(str(out_path))
 
 
-# ---------------------------------------------------------------------------
 # Verification: reopen the saved file and evaluate it.
-# ---------------------------------------------------------------------------
 
 def verify(path):
     stage = Usd.Stage.Open(str(path))

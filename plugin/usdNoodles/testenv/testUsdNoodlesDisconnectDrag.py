@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -29,9 +29,7 @@ import unittest
 from unittest.mock import MagicMock
 
 
-# ---------------------------------------------------------------------------
 # Shim: _make_connection_edit  (graphView.py:104)
-# ---------------------------------------------------------------------------
 
 
 def _make_connection_edit(gv, src_id, src_port, tgt_id, tgt_port, create):
@@ -59,9 +57,7 @@ def _make_connection_edit(gv, src_id, src_port, tgt_id, tgt_port, create):
     return _fn
 
 
-# ---------------------------------------------------------------------------
 # Shim: _make_reconnect_edits  (graphView.py:140)
-# ---------------------------------------------------------------------------
 
 
 def _make_reconnect_edits(
@@ -124,9 +120,7 @@ def _make_reconnect_edits(
     return redo, undo
 
 
-# ---------------------------------------------------------------------------
 # Shim: _startLinkReconnect  (graphView.py:4329)
-# ---------------------------------------------------------------------------
 
 
 def _start_link_reconnect(view, linkIndex, worldClickPos):
@@ -173,9 +167,7 @@ def _start_link_reconnect(view, linkIndex, worldClickPos):
         view._dragLinkTempLink.start = worldClickPos
 
 
-# ---------------------------------------------------------------------------
 # Shim: _clearReconnectState  (graphView.py:4377)
-# ---------------------------------------------------------------------------
 
 
 def _clear_reconnect_state(view):
@@ -187,9 +179,7 @@ def _clear_reconnect_state(view):
     view._reconnectOldTargetPort = None
 
 
-# ---------------------------------------------------------------------------
 # Shim: _cancelLinkReconnect  (graphView.py:4384)
-# ---------------------------------------------------------------------------
 
 
 def _cancel_link_reconnect(view):
@@ -206,9 +196,7 @@ def _cancel_link_reconnect(view):
         view._addLinkToGraph(srcId, srcPort, tgtId, tgtPort, srcNode, tgtNode)
 
 
-# ---------------------------------------------------------------------------
 # Shim: _finishReconnectDisconnect  (graphView.py:4394)
-# ---------------------------------------------------------------------------
 
 
 def _finish_reconnect_disconnect(view, push_undo_fn):
@@ -291,9 +279,7 @@ def _finish_reconnect_disconnect(view, push_undo_fn):
         view._noticeHandler.setEnabled(True)
 
 
-# ---------------------------------------------------------------------------
 # Shim: _abortConnection  (graphView.py:5027)
-# ---------------------------------------------------------------------------
 
 
 def _abort_connection(view, message):
@@ -303,9 +289,7 @@ def _abort_connection(view, message):
         _cancel_link_reconnect(view)
 
 
-# ---------------------------------------------------------------------------
 # Shim: _resolveConnectionEndpoints  (graphView.py:5032)
-# ---------------------------------------------------------------------------
 
 
 def _resolve_connection_endpoints(view, outputNodeId, inputNodeId):
@@ -334,9 +318,7 @@ def _resolve_connection_endpoints(view, outputNodeId, inputNodeId):
     return outputNode, inputNode, outputPrim, inputPrim, library
 
 
-# ---------------------------------------------------------------------------
 # Shim: _deleteOldConnection  (graphView.py:5054)
-# ---------------------------------------------------------------------------
 
 
 def _delete_old_connection(view, stage, oldSrcId, oldSrcPort, oldTgtId, oldTgtPort):
@@ -361,9 +343,7 @@ def _delete_old_connection(view, stage, oldSrcId, oldSrcPort, oldTgtId, oldTgtPo
     )
 
 
-# ---------------------------------------------------------------------------
 # Shim: same-pin no-op check from _completeLinkDrag  (graphView.py:4593)
-# ---------------------------------------------------------------------------
 
 
 def _is_same_pin_reconnect(view, outputNodeId, outputPort, inputNodeId, inputPort):
@@ -379,9 +359,7 @@ def _is_same_pin_reconnect(view, outputNodeId, outputPort, inputNodeId, inputPor
     return False
 
 
-# ---------------------------------------------------------------------------
 # Mock helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_link(src_node_id, src_port, tgt_node_id, tgt_port, start, end):
@@ -451,10 +429,8 @@ def _set_reconnect_state(view, src_id, src_port, tgt_id, tgt_port):
     view._reconnectOldTargetPort = tgt_port
 
 
-# ---------------------------------------------------------------------------
 # Shim: connected-input-port lift logic added to _startLinkDrag
 #       (graphView.py:5184)
-# ---------------------------------------------------------------------------
 
 
 def _apply_connected_input_lift(view, nodeId, portName):
@@ -462,7 +438,7 @@ def _apply_connected_input_lift(view, nodeId, portName):
 
     When dragging from an input port that already has a connection, enter
     reconnect mode so that releasing on empty space or an invalid target
-    deletes the existing connection (T262819088 — Presto parity).
+    deletes the existing connection (T262819088 — the editor parity).
     """
     if view._reconnectingLink:
         return
@@ -490,9 +466,7 @@ def _apply_connected_input_lift(view, nodeId, portName):
     )
 
 
-# ===========================================================================
 # Tests
-# ===========================================================================
 
 
 class TestStartLinkReconnect(unittest.TestCase):
@@ -1130,7 +1104,7 @@ class TestConnectedInputLift(unittest.TestCase):
 
     When the user drags from an input port that already has a connection,
     Noodles enters reconnect mode so releasing on empty or an invalid target
-    deletes that connection (T262819088 — Presto parity).
+    deletes that connection (T262819088 — the editor parity).
 
     Branch map:
       1. Already reconnecting (from _startLinkReconnect) → no-op
@@ -1229,9 +1203,7 @@ class TestConnectedInputLiftIntegration(unittest.TestCase):
         _apply_connected_input_lift(view, "/B", "inp")
         return view, _mock_push
 
-    # ------------------------------------------------------------------
     # Scenario 1: drag input → release on empty → delete
-    # ------------------------------------------------------------------
 
     def test_release_on_empty_calls_delete_connection(self):
         """Lift + release on empty must invoke library.delete_connection."""
@@ -1262,9 +1234,7 @@ class TestConnectedInputLiftIntegration(unittest.TestCase):
         self.assertEqual(call_args[0][2], "out")  # srcPort
         self.assertEqual(call_args[0][4], "inp")  # tgtPort
 
-    # ------------------------------------------------------------------
     # Scenario 2: drag input → drop on same original source → cancel
-    # ------------------------------------------------------------------
 
     def test_drop_on_same_source_cancels_reconnect(self):
         """Dropping on the original source port must cancel, not delete."""
@@ -1290,9 +1260,7 @@ class TestConnectedInputLiftIntegration(unittest.TestCase):
         _is_same_pin_reconnect(view, "/A", "out", "/B", "inp")
         view._library.delete_connection.assert_not_called()
 
-    # ------------------------------------------------------------------
     # Scenario 3: output port drag → empty → no deletion
-    # ------------------------------------------------------------------
 
     def test_output_port_drag_does_not_enter_reconnect_mode(self):
         """Dragging from an output port must not set _reconnectingLink."""
@@ -1316,9 +1284,7 @@ class TestConnectedInputLiftIntegration(unittest.TestCase):
         self.assertEqual(push_calls, [])
         view._library.delete_connection.assert_not_called()
 
-    # ------------------------------------------------------------------
     # Scenario 4: lift + Escape (cancel) → restore visual, no USD change
-    # ------------------------------------------------------------------
 
     def test_cancel_reconnect_after_lift_restores_link(self):
         """Escaping a port-drag (cancel) must restore the link visually."""

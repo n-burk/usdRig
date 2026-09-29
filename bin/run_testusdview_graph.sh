@@ -6,7 +6,7 @@
 # itself reports for its keys and tangent handles, and asserts what
 # landed on the stage: the curve set for a prim and for a property
 # selection, a key drag written into the session layer, the Ctrl+Z round
-# trip, insert and delete, the Maya tangent types, a tangent handle drag
+# trip, insert and delete, the the editor tangent types, a tangent handle drag
 # weighted and not, break/unify, the infinity mapping, the ruler scrub
 # and marquee selection. Prints RIGEXEC_GRAPH_OK.
 #

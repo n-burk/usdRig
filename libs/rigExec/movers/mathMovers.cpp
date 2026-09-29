@@ -1,6 +1,4 @@
-//
 // RigExec math movers: the three property-domain movers (spec §4.1).
-//
 // A math mover revises one exact scalar property -- a float (or a
 // control avar's double), a float3-family vector, or a matrix4d -- the
 // way another mover revises a points array. The three share everything
@@ -9,8 +7,6 @@
 // exec-side computation, no revision binding, and no parity-oracle
 // branch; compile validation is the generic property-target rules plus
 // the shared operation check below.
-//
-
 #include "moverRegistry.h"
 
 #include "rigExecMath/propertyMath.h"

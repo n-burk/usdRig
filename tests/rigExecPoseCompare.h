@@ -1,6 +1,4 @@
-//
 // One definition of "the same published generation", for the tests.
-//
 // The baked-mode suite grew three comparisons with three different
 // coverages -- one that omitted the provider transforms, one that omitted
 // every scalar, one that omitted the diagnostics -- and none of them matched
@@ -8,17 +6,14 @@
 // makes. Three coverages means three different answers to "did the two paths
 // publish the same generation", and the one a failing test happened to call
 // decided whether a defect was seen at all.
-//
 // So: one set of functions, mirroring RigExecComparePoses domain for domain
 // -- every published map including the provider transforms and the two
 // weight domains, the compared scalars, and the diagnostics in order. A
 // domain added to the comparator is added here, and a test that wants less
 // than the whole generation says so by calling the narrower function rather
 // than by having the broader one quietly cover less.
-//
 // Reports through a caller-owned failure counter rather than a global, so a
 // suite keeps its own `failures` and its own CHECK macro.
-//
 #ifndef RIGEXEC_TESTS_POSE_COMPARE_H
 #define RIGEXEC_TESTS_POSE_COMPARE_H
 

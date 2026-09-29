@@ -1,7 +1,4 @@
-//
 // .rigexec DomainPose section: wire encoding.
-//
-
 #include "rigExecBinary/pose.h"
 
 namespace rigExec {

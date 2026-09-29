@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Generate Houdini-style node pages from schema.usda + operator notes.
+"""Generate node pages from schema.usda + operator notes.
 
 Usage: python docs/build_pages.py
 
@@ -28,7 +28,6 @@ GIFS_DIR = os.path.join(RIG, "docs", "gifs")
 CONCEPTS_DIR = os.path.join(RIG, "docs", "concepts")
 
 
-# ---- concept pages ---------------------------------------------------
 # Hand-written prose, one Markdown file per page in docs/concepts/. The
 # sources are the Markdown output -- nothing is generated for them here --
 # and build_html.py renders the same files into docs/site/concepts/.
@@ -362,7 +361,7 @@ def render_page(key, note, classes):
     schema = classes[note["schema"]]
     stage = example_stage(key, note)
     lines = []
-    lines.append("# ![%s](../../icons/%s.png) %s" % (note["title"], key, note["title"]))
+    lines.append("# ![%s](../../icons/%s.png) %s" % (note["title"], (key if os.path.isfile(os.path.join(RIG, "icons", key + ".png")) else "concept"), note["title"]))
     lines.append("")
     lines.append("*%s*" % note["summary"])
     lines.append("")
@@ -473,7 +472,7 @@ def render_index(concepts=()):
         for key in keys:
             note = OPERATORS[key]
             lines.append("| ![%s](../icons/%s.png) | [%s](nodes/%s.md) | %s |"
-                         % (note["title"], key, note["title"], key, note["summary"]))
+                         % (note["title"], (key if os.path.isfile(os.path.join(RIG, "icons", key + ".png")) else "concept"), note["title"], key, note["summary"]))
         lines.append("")
     lines.append("Implementation and design notes live in [specs](specs/).")
     lines.append("")
@@ -497,14 +496,14 @@ def main():
     os.makedirs(NODES_DIR, exist_ok=True)
     for key, note in OPERATORS.items():
         page = render_page(key, note, classes)
-        with open(os.path.join(NODES_DIR, key + ".md"), "w") as stream:
+        with open(os.path.join(NODES_DIR, key + ".md"), "w", encoding="utf-8") as stream:
             stream.write(page)
         print("wrote nodes/%s.md" % key)
     concepts = load_concepts()
     for page in concepts:
         print("concept concepts/%s.md (order %d)"
               % (page["slug"], page["order"]))
-    with open(os.path.join(RIG, "docs", "index.md"), "w") as stream:
+    with open(os.path.join(RIG, "docs", "index.md"), "w", encoding="utf-8") as stream:
         stream.write(render_index(concepts))
     print("wrote index.md")
 

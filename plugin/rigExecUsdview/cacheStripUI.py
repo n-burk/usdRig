@@ -1,20 +1,20 @@
-#
-# RigExec -> General Editors -> Cache Strip: per-frame cached / warming /
-# dirty / uncached over the stage range, with clear-cache and warm-range
-# actions.
-#
-# The panel face of the headless `cacheStripPanel` model beside it: one
-# poll/skip/action logic behind both the dialog and the ctest suite, so
-# the states you see here are the states the tests assert. Colors come
-# from cacheStripModel's once-defined Maya palette, never a second copy.
-#
-# Updates are poll-based, never pushed: the dialog repaints on the
-# recurring warming-driver tick (the container forwards each tick with
-# its enqueue knowledge) and on SetTime (via currentFrameChanged, which
-# the container's own handler runs first -- it connected at plugin load
-# and this panel connects when opened). A tick whose completions counter
-# is still, with an unchanged playhead and range, skips the repaint.
-#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import os
 import sys
 
@@ -53,7 +53,7 @@ def _FrameFloat(frame):
 
 
 class _StripWidget(QtWidgets.QWidget):
-    """One cell per frame, painted in the shared Maya palette."""
+    """One cell per frame, painted in the shared the editor palette."""
 
     def __init__(self, panel, parent=None):
         super(_StripWidget, self).__init__(parent)

@@ -1,6 +1,4 @@
-//
 // RigExec imaging registry and C activation surface.
-//
 #include <fstream>
 #include "registry.h"
 #include "rigExec/frameCacheSparsity.h"
@@ -124,7 +122,7 @@ _ProductionRunner(const RigExecFrozenStepRunner &runner)
     return runner ? runner : RigExecMakeProductionStepRunner();
 }
 
-// The Premonition-style sweep around \p playhead: closest-first, skipping
+// The nearest-frame-first sweep around \p playhead: closest-first, skipping
 // the neighbor band the commit trigger already covers (+-1..N) and the
 // playhead itself. 64 frames: one full commit burst (16 neighbors + 64
 // sweep) fits the default per-rig in-flight cap with room to spare.
@@ -146,9 +144,7 @@ _SweepTimes(UsdTimeCode playhead)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // The directory: stage -> imaging context (registry.h, "PER-STAGE CONTEXTS").
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -1285,9 +1281,7 @@ RigExecImagingRegistry::_Activate(
 
     // Edit-driven re-evaluation: listen on the source stage so property
     // edits under any active character asset republish at the current time.
-    //
     // REGISTERED FIRST, BEFORE Compile(), AND THAT ORDER IS LOAD-BEARING.
-    //
     // Tf_NoticeRegistry::_Register PREPENDS its deliverer, so listeners are
     // delivered most-recently-registered FIRST. OpenExec's own
     // ExecUsdSystem::_NoticeListener -- the thing that invalidates every
@@ -1302,12 +1296,10 @@ RigExecImagingRegistry::_Activate(
     // field was the previous one, and a second Evaluate in the same
     // dispatch was equally stale -- only an evaluation after the dispatch
     // ended came back fresh.
-    //
     // Registering first puts us at the BACK of the list, which is where a
     // re-evaluating listener belongs: every recompile builds a new
     // ExecUsdSystem that prepends ahead of us again, so this holds for the
     // life of the rig rather than only until the first structural edit.
-    //
     // Registering this early also arms _OnObjectsChanged across the whole
     // compile-and-evaluate window, so _assetRoots -- what arms it -- stays
     // empty until the commit below, and a failure retains the previously
@@ -1618,14 +1610,12 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     if (!_EvaluateSessions(
             &_sessions, _stage, time, &snapshot, &epoch, nullptr)) {
         // A rig that can no longer evaluate stops driving the scene.
-        //
         // The per-session bridge already cleared its own store on the way
         // out, but this COMBINED generation is the one the scene indices
         // read, and returning here left the last good one current: remove a
         // mover's rigExec:moves and the recompile fails, so the mesh under
         // the driven Xform stayed where the constraint had put it through
         // every later edit and frame change.
-        //
         // Cleared exactly the way Deactivate does, and broadcast for the
         // same reason: the store being right is worth nothing if the
         // observers are never told.
@@ -2840,10 +2830,8 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
     return SetTime(time);
 }
 
-// ---------------------------------------------------------------------------
 // Manipulation preview (docs/superpowers/specs/
 // 2026-09-10-hydra-preview-manipulation-design.md)
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -3050,7 +3038,6 @@ RigExecImagingRegistry::_ComposeXformDelta(
     }
 
     // delta = parentToWorld^-1 . local^-1 . local' . parentToWorld
-    //
     // which is exactly xform^-1 . xform', the quantity
     // RigExecXformOverrideSceneIndex post-multiplies. A prim that resets the
     // xform stack has no parent contribution, and then the conjugation
@@ -3170,7 +3157,6 @@ RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
     }
     // Republished OUTSIDE the lock: SetTime takes the same non-recursive mutex
     // (the rule _OnObjectsChanged and SetWeightOverlay both follow).
-    //
     // Only when a rig is involved. An xform-lane drag has already dirtied what
     // it changed, and evaluating every active rig to redraw a prim no rig
     // drives would make the cheap lane pay for the expensive one.
@@ -3308,7 +3294,6 @@ RigExecImagingRegistry::_OnObjectsChanged(
             // A value-only edit keeps the cached dependency regions. Resyncs
             // and connection/relationship edits may introduce a new external
             // input even when the evaluator's binding epoch stays unchanged.
-            //
             // A property resync that names only a value (a spec created by
             // its first authored value, or removed by the undo of it) is a
             // value edit here too: a new connection or target would arrive
@@ -3560,9 +3545,7 @@ RigExecImagingRegistry::_Broadcast(
 
 }  // namespace rigExec
 
-// ---------------------------------------------------------------------------
 // C activation surface.
-// ---------------------------------------------------------------------------
 
 using rigExec::RigExecImagingRegistry;
 
@@ -3606,7 +3589,6 @@ _AccumulateGuideBounds(
     // which this registry must not depend on, and using it would make the
     // framing distance jump around as an author retypes guide:shape
     // between a sphere and a flat circle.
-    //
     // It must bound what is actually DRAWN, though, so it asks the scene
     // index's own predicate whether anything is: an unrecognized
     // shape/drawMode pair synthesizes no prim, and reporting a box for it
@@ -3670,7 +3652,6 @@ _AccumulateGuideBounds(
 
 // The union of everything published beneath \p path that shares its
 // PURPOSE, including \p path itself.
-//
 // A Boundable's extent is authoritative for its whole subtree:
 // UsdGeomBBoxCache stops descending at one ("Boundables should always
 // provide their own extent and do not require participation from
@@ -3678,7 +3659,6 @@ _AccumulateGuideBounds(
 // course -- a joint chain is joints under joints -- so an extent covering
 // only its own guide silently drops every descendant from any ancestor's
 // bound, and framing a rig framed its first joint.
-//
 // Purpose-scoped, though, because one extent carries ONE purpose: the
 // cache files this box under the boundable's own resolved purpose. Folding
 // a default-purpose control nested under a guide-purpose joint into that
@@ -3723,7 +3703,6 @@ _ResolvedPurpose(const PXR_NS::UsdPrim &prim)
 // same way RigExecJointRestSpace does it in computations.cpp: the rest
 // avars as a local delta preceding the authored rest:space, orthonormalized
 // (rest spaces always are, per the Ir contract).
-//
 // Duplicated rather than shared with the evaluator on purpose. This runs
 // with no compiled rig and no exec system -- the whole point of the rest
 // fallback is to answer for a stage nobody has evaluated -- so it can only
@@ -3797,7 +3776,6 @@ _AuthoredRestSpace(const PXR_NS::UsdPrim &prim, const PXR_NS::UsdTimeCode &time,
 
 // The bounds a provider's guide would draw AT REST, from authored
 // attributes alone.
-//
 // This is the answer for a stage that has never been evaluated -- opened in
 // a host that has not activated RigExec, or queried before the first
 // generation is published. It is deliberately the rest pose rather than
@@ -4108,7 +4086,6 @@ _WriteBounds(const PXR_NS::GfRange3d &range, double outMinMax[6])
 
 // UsdGeomBoundable::ComputeExtentFromPlugins entry point for every RigExec
 // transform provider (spec §10.3 extension, host-durability redesign).
-//
 // This is what makes framing a control work in EVERY host rather than in
 // the one whose Python we could reach. UsdGeomBBoxCache is what usdview
 // and Solaris both consult, and it asks a Boundable for its extent;
@@ -4116,11 +4093,9 @@ _WriteBounds(const PXR_NS::GfRange3d &range, double outMinMax[6])
 // rig had no bounds anywhere and framing a control moved the camera not at
 // all. The usdview adapter used to monkeypatch computeWorldBound to paper
 // over that -- a patch for one host, replaced by this.
-//
 // The extent BAKES the posed frame, because the prim carries no stage
 // transform of its own: rest:space plus avars are the only transform
 // authority (the Ir alignment), and they are asset-relative.
-//
 // "Asset-relative" is not "local", and an extent is LOCAL --
 // UsdGeomBBoxCache multiplies it by the prim's own local-to-world. The two
 // coincide only while nothing between the asset root and the provider
@@ -4129,7 +4104,6 @@ _WriteBounds(const PXR_NS::GfRange3d &range, double outMinMax[6])
 // (RigExecRigEvaluator::_ComposeInterveningXforms), so the snapshot branch
 // below divides it back out. Leaving it in draws the guide in one place and
 // its bounding box in another, offset by exactly that Xform.
-//
 // The rest fallback needs no such division: it reads authored rest
 // attributes alone, which never carried the intervening transform in the
 // first place. Both branches therefore return the same local quantity, and
@@ -4137,13 +4111,11 @@ _WriteBounds(const PXR_NS::GfRange3d &range, double outMinMax[6])
 // The published bounds expressed in the prim's OWN space, by dividing out
 // everything UsdGeomBBoxCache is about to re-apply between the asset root
 // and this prim.
-//
 // That is the whole namespace chain, the prim's own xformOps included. Ops
 // authored on a provider are not a transform authority for EVALUATION --
 // rest:space and the avars are -- but BBoxCache applies them regardless, so
 // an extent that ignored them would be wrong in the same way and for the
 // same reason.
-//
 // Conservative rather than tight: an inverse-rotated box has to be
 // re-aligned to axes to be expressed as a min/max pair, and USD re-aligns
 // it again on the way out, so a rotated chain grows the box slightly.
@@ -4248,11 +4220,9 @@ PXR_NAMESPACE_OPEN_SCOPE
 // type still exists -- Plug declares it from the schema plugInfo, and its
 // ancestor chain reaches UsdGeomBoundable -- which is all
 // ComputeExtentFromPlugins needs to find this.
-//
 // Registered on the abstract base, not on each concrete type: the lookup
 // walks a prim's ancestor types, so one registration answers for every
 // provider that inherits it.
-//
 // Inside PXR_NAMESPACE_OPEN_SCOPE, like every other TF_REGISTRY_FUNCTION in
 // this tree -- the macro's tag type has to resolve the way usdGeom's own
 // subscription resolves it, and at global scope with a PXR_NS:: qualifier
@@ -4729,10 +4699,8 @@ RigExecImaging_GetAllGuideBoundsAssetSpace(double outMinMax[6])
     return _AllGuideBounds(_Legacy(), outMinMax);
 }
 
-// ---------------------------------------------------------------------------
 // Stage-scoped surface: each twin acts on its stage's context only and never
 // moves the legacy current context (registry.h).
-// ---------------------------------------------------------------------------
 
 int
 RigExecImaging_SetTimeForStage(long long stageCacheId, double frame)

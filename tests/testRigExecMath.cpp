@@ -1,9 +1,7 @@
-//
 // RigExec math conformance tests (spec §5, §14.3 exit criteria):
 // Points -> Matrix -> Points round trips including reflection and shear;
 // reconstruction policies; IK reach/stretch; blend endpoints; twist
 // distribution; weighted matrix movement.
-//
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/geometryKernels.h"

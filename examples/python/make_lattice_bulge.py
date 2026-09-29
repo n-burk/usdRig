@@ -91,9 +91,7 @@ _bootstrap()
 from pxr import Usd, UsdGeom  # noqa: E402
 import rigexec                 # noqa: E402
 
-# ---------------------------------------------------------------------------
 # Layout constants.
-# ---------------------------------------------------------------------------
 
 RIG = "/LatticeAsset/Rig"
 CAGE = "/LatticeAsset/Geom/Cage"
@@ -125,9 +123,7 @@ def dist(a, b):
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
 
 
-# ---------------------------------------------------------------------------
 # Authoring.
-# ---------------------------------------------------------------------------
 
 def build(out_path):
     rigexec.load_schema_plugin()  # register the codeless schema first
@@ -179,9 +175,7 @@ def build(out_path):
     stage.Export(str(out_path))
 
 
-# ---------------------------------------------------------------------------
 # Verification: reopen the saved file and evaluate it.
-# ---------------------------------------------------------------------------
 
 def verify(path):
     stage = Usd.Stage.Open(str(path))

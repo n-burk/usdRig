@@ -1,9 +1,6 @@
-//
 // rigExecRuntime loader conformance: bake every baking fixture in-process,
 // open the bytes with the zero-USD reader, and check sections, frames,
 // frame selection, and malformed-input refusal.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecRuntime/runtime.h"

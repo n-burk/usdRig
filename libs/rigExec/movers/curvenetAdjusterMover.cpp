@@ -1,15 +1,11 @@
-//
 // RigExecCurvenetAdjusterMover: everything about the curvenet-adjuster
 // mover (spec §4.1).
-//
 // An adjuster mover poses the knots of a RigExecCurvenet through
 // RigExecCurvenetAdjustment prims. The adjuster has no exec-side
 // computation: its packet is assembled directly by
 // RigExecAssembleCurvenetAdjusterParameters below. This TU owns that
 // assembler, its revision binder, its compile validator, and its
 // parity-oracle branch, and registers the row that points at them.
-//
-
 #include "moverRegistry.h"
 #include "rigExecMath/avarScale.h"
 #include "pxr/base/gf/rotation.h"

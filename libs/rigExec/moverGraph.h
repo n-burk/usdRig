@@ -1,12 +1,9 @@
-//
 // RigExec compiled mover graph (spec §7.2).
-//
 // The per-(mover, target) revision chain is a VdfNetwork built in memory from
 // the relationships already authored on the user's stage. Nothing is authored
 // anywhere to express it: no generated prims, no compiler, no derived stage, and
 // no schema types for the revisions themselves. Compiled nodes live only on the
 // graph side.
-//
 // This is what the write-set authoring model always meant. A mover says "I
 // write this target" and its namespace position says "in this order"; the chain
 // of revisions that implies is dataflow, and dataflow is what a VdfNetwork is
@@ -15,7 +12,6 @@
 // still not being able to express the optimizations the graph form makes
 // natural (splitting one revision across face sets, cloning legs, per-element
 // masks driving sparse recomputation).
-//
 #ifndef RIGEXEC_MOVER_GRAPH_H
 #define RIGEXEC_MOVER_GRAPH_H
 
@@ -75,6 +71,8 @@ enum class RigExecRevisionOp {
     CurvenetAdjuster,
     RecomputeNormals,
     RecomputeExtent,
+    // Append new ops: existing values are pinned by the binary wire format.
+    DeltaMush,
 };
 
 /// When in the walk a side input takes its value from.
@@ -627,6 +625,8 @@ struct RigExecRevisionBinding {
     SdfPath transformSpace;
     /// Ordered computeMatrix providers (skin): rigExec:influences, which
     /// rigExec:jointIndices index. Every entry shares transformPhase.
+    /// Matrix movers use [referenceTransform, referenceTransformSpace]
+    /// here when an explicit neutral solve supplies the deformation bind.
     std::vector<SdfPath> influences;
     SdfPath weightObject;     ///< computeWeightPacket provider
     SdfPath base;             ///< authored-base points (blend/volume/lattice)
@@ -974,6 +974,17 @@ RigExecMeasureInSpace(const GfMatrix4d &transform, const GfMatrix4d &space)
     m[0][3] = 0.0;
     m[1][3] = 0.0;
     m[2][3] = 0.0;
+    m[3][3] = 1.0;
+    return m;
+}
+
+/// Remove an explicit neutral solve before applying the animated map.
+/// As above, restore the exact affine column after inverse multiplication.
+inline GfMatrix4d
+RigExecMeasureFromReference(const GfMatrix4d &transform, const GfMatrix4d &reference)
+{
+    GfMatrix4d m = reference.GetInverse() * transform;
+    m[0][3] = m[1][3] = m[2][3] = 0.0;
     m[3][3] = 1.0;
     return m;
 }

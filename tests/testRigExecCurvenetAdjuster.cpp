@@ -66,7 +66,6 @@ static UsdStageRefPtr MakeACurvenetWeightRig() {
 }
 
 // A RigExecCurvenetWeight driving a matrix mover, in the BAKED program.
-//
 // The sixth weight-object schema, and the one the program left out: its
 // field is not a formula over a few floats but the solution of a factorized
 // Laplacian over the cut mesh, so a packet cannot be built without the BIND
@@ -74,7 +73,6 @@ static UsdStageRefPtr MakeACurvenetWeightRig() {
 // LRU behind a mutex; a step body may take no lock, so the program resolves
 // its own -- in the prologue, into program-owned state -- and the step then
 // evaluates the same right-hand side through the same kernel.
-//
 // cpuParityMode is deliberately OFF: it asks for the dynamic path, so an
 // evaluator that pinned it would never build a program at all. Under
 // RIGEXEC_EVALUATION_MODE=parity this generation runs both paths over one

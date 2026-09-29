@@ -2118,8 +2118,8 @@ def TestSolverCacheRetarget():
         _Check(cache.For(rigRoot) == {child.GetPath()},
                "the first SetTargets reached the memo: %s"
                % cache.For(rigRoot))
-        # The one that used to be missed: the relationship already has
-        # targets, so USD reports an info-only change.
+
+
         rel.SetTargets([parent.GetPath()])
         _Check(not listener.resynced and listener.changed,
                "retargeting is info-only, not a resync: resynced=%s "
@@ -2215,7 +2215,7 @@ def _Group(stage, prims, time, channels=None):
 def TestGroupPivotAndFrame():
     """
     The pivot is the centroid of the members' evaluated origins,
-    oriented like the LEAD (last-selected) control -- the conventional-tool/Blender
+    oriented like the LEAD (last-selected) control -- the conventional-tool/the editor
     convention.
     """
     stage, root, mid, tip, side, _ = _GroupStage()
@@ -2561,7 +2561,7 @@ def _Centroid3(points):
 def TestGroupPivotModes():
     """
     WHERE a group turns: the CENTRE by default, and the two other
-    answers a DCC offers.
+    answers a application offers.
 
     The default is the point of the option. "Rotate these together"
     means about their middle -- the centroid has to come out of the
@@ -2675,7 +2675,7 @@ def TestGroupRotateTurnsEveryoneWhateverThePivot():
     selected control turns about itself, so a control that hangs off
     another selected control gets its own turn AND its ancestor's: Mid
     and Side turn 30 degrees, and Tip -- a child of Mid -- turns 60.
-    That is Blender's behaviour for this mode, and it is the reason an
+    That is behaviour for this mode, and it is the reason an
     animator reaches for it: selecting a finger chain and dragging the
     ring CURLS the finger instead of swinging it rigidly.
     """
@@ -2907,17 +2907,17 @@ def TestGroupOnBiped():
     elbow = shoulder + "/arm_l_fk_elbow_l_bind"
     wrist = elbow + "/arm_l_fk_wrist_l_bind"
     spine = control + "/hips_ctl/spine_root_pivot/spine_root_ctl"
-    # The finger ROOT is now posable, and the prim the rig overwrites is
-    # the FOLLOW HELPER above it. `build_fingers.py` used to parent-
-    # constrain the root control itself to the wrist so the hand rode the
-    # arm -- but a constraint overwrites the frame it writes, so the
-    # control's own avars were discarded and ten finger roots moved 0 of
-    # 26,276 skinned points on any avar. The constraint now targets a
-    # helper and the control hangs off it by namespace, so it carries the
-    # hand AND stays posable (measured: 612 points, 8.18 cm on rz=30).
-    #
-    # This case wants a prim the rig really does overwrite, so it uses the
-    # helper. `arm_l_params` would do as well.
+
+
+
+
+
+
+
+
+
+
+
     fingerHelper = control + "/index_001_l_bind_fk_follow"
     finger = fingerHelper + "/index_001_l_bind_fk"
     witnesses = [control + "/hips_ctl", control + "/arm_l_ik"]

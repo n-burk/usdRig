@@ -1,15 +1,11 @@
-//
 // RigExecVolumeCorrectMover: everything about the volume-correct mover
 // (spec §4.1).
-//
 // A volume-correct mover preserves the authored base bound volume
 // against the deformation the chain has applied so far. This TU owns
 // its exec-side computeMoverParameters registration and builder, its
 // revision binder, and its parity-oracle branch, and registers the row
 // that points at them. Compile validation is the generic points-target
 // + single-target rules.
-//
-
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 

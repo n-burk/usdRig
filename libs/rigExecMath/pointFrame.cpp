@@ -1,6 +1,4 @@
-//
 // RigExec point-frame math (spec §5).
-//
 #include "pointFrame.h"
 
 #include "pxr/base/gf/matrix3d.h"

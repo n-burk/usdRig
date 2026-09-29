@@ -1,12 +1,9 @@
-//
 // ONE hierarchical pose stack over aggregate solvers AND frame constraints.
-//
 // rigExec:joints is an ordered WRITE, not an exclusive claim: two or more
 // solvers may name one joint, and a pose constraint that moves a joint is a
 // step of the SAME KIND in the SAME stack. All of them run, their commits
 // serialize into one chain per joint, and the LAST step in that chain supplies
 // the joint's final frame.
-//
 // The order is the reverse composed pre-order of the WHOLE RIG -- bottom
 // sibling first, a parent after its descendants, the rule the mover stack
 // already used -- and NOTHING ELSE breaks a tie. A constraint BELOW a solver
@@ -16,18 +13,14 @@
 // AGGREGATE read cannot be resolved that way, so a solver whose aggregate
 // another solver reads is a PRODUCER with no stack position at all and is
 // scheduled by data flow.
-//
 // The order decides the RELATIVE order of two steps that touch the same
 // joint, and nothing else: two limbs that share no joint share a Kahn level
 // and evaluate concurrently (TestUnrelatedLimbsShareALevel).
-//
 // Every fixture here is authored as .usda TEXT rather than built prim by
 // prim, because the thing under test is COMPOSED ORDER: `reorder nameChildren`
 // is a layer opinion, and authoring it the way a rigger does is the only way
 // the test exercises what a rigger would hit.
-//
 // argv[1] = path to the examples directory (for the schema plugin).
-//
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -74,9 +67,7 @@ const SdfPath kLegFk("/Asset/Rig/Solvers/LegFK");
 const SdfPath kLegIk("/Asset/Rig/Solvers/LegIK");
 const SdfPath kProbePoints("/Asset/Geom/Probe.points");
 
-// ---------------------------------------------------------------------------
 // The fixture.
-// ---------------------------------------------------------------------------
 
 /// Which solvers the stage carries and how they are wired.
 struct RigSpec {
@@ -434,9 +425,7 @@ SolversLast()
     return {"Controls", "Joints", "Movers", "Solvers"};
 }
 
-// ---------------------------------------------------------------------------
 // Small helpers.
-// ---------------------------------------------------------------------------
 
 bool
 Near(const GfVec3d &a, const GfVec3d &b, double tolerance)
@@ -588,11 +577,9 @@ ProbePoint(const RigExecRigPose &pose, GfVec3f *out)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Two fixtures written as their own text, because what they need is writer
 // SUBSETS that differ per joint and an ordering that runs through a
 // CONSTRAINT -- neither of which the RigSpec above spells.
-// ---------------------------------------------------------------------------
 
 /// A control chain <name>Hip/Knee/Ankle curling by \p degrees at frame 5.
 std::string
@@ -799,10 +786,8 @@ OpenText(const std::string &text)
     return UsdStage::Open(layer);
 }
 
-// ---------------------------------------------------------------------------
 // The baked half: the parity harness testRigExecSolverBake uses, over the
 // stacking fixtures.
-// ---------------------------------------------------------------------------
 
 void
 CheckParity(const char *what, const RigSpec &spec,
@@ -871,9 +856,7 @@ CheckParity(const char *what, const RigSpec &spec,
     }
 }
 
-// ---------------------------------------------------------------------------
 // The cases.
-// ---------------------------------------------------------------------------
 
 /// Compile succeeds SILENTLY, and the chains carry the stack order.
 ///

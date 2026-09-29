@@ -1,17 +1,13 @@
-//
 // RigExec influence-overlay and volume-guide tests (spec §4.1 volumetric
 // extension, drawn side; spec §10.3 influence-overlay extension).
-//
 // The thing under test is a PICTURE: a rigger placing an influence volume
 // must see the region it grabs painted onto the geometry, and must see the
 // falloff band's own iso-surfaces as wire guides. Both are only useful if
 // they agree with the field that actually deformed the mesh, so every case
 // here starts from a real evaluated pose and asserts against the weights
 // the mover consumed -- never against a re-derivation.
-//
 // argv[1] = path to the examples directory; the codeless schema plugin is
 // expected at <examples>/../plugin/rigExecSchema/resources.
-//
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
@@ -298,7 +294,6 @@ TestOverlayPublishesDisplayColor()
         RigExecResultsSceneIndex::New(binding, store);
     bridge.SetSceneIndices(binding, results);
 
-    // ---- overlay OFF: an ordinary render, untouched.
     CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
     HdSceneIndexPrim mesh = results->GetPrim(_kMeshPath);
     CHECK(mesh.dataSource);
@@ -307,7 +302,6 @@ TestOverlayPublishesDisplayColor()
     const VtVec3fArray movedWithoutOverlay = _GetPointsPrimvar(mesh);
     CHECK(movedWithoutOverlay.size() == 4);
 
-    // ---- overlay ON.
     bridge.SetWeightOverlay(_kVolumePath);
     CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
     mesh = results->GetPrim(_kMeshPath);
@@ -355,7 +349,6 @@ TestOverlayPublishesDisplayColor()
                    f.base[i] + GfVec3f(0, _kExpectedWeights[i] * 2.0f, 0)));
     }
 
-    // ---- overlay OFF again: the primvar goes away with it.
     bridge.SetWeightOverlay(SdfPath());
     CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
     mesh = results->GetPrim(_kMeshPath);
@@ -1101,7 +1094,6 @@ TestCurveGeometryVolumeGuides()
 // The plane guide's SIZE comes from inputs:extentU/extentV and from
 // nothing else; the falloff band only slides the two rectangles apart
 // along the axis.
-//
 // This is the regression test for the reported bug. The guide used to size
 // itself max(1, |falloffMin|, |falloffMax|), so a rigger dragging the band
 // watched the square grow and shrink instead of watching the two surfaces
@@ -1263,7 +1255,6 @@ TestPlaneGuideSizeIsExtentsNotBand()
 }
 
 // The registry entry point behind RigExecImaging_SetWeightOverlay.
-//
 // Its one real hazard is a self-deadlock: it takes the same plain
 // std::mutex SetTime takes, and it has to call SetTime to republish. This
 // case would hang rather than fail if that were got wrong, which is the
@@ -1302,7 +1293,6 @@ TestRegistrySetWeightOverlay()
     }
     const uint64_t before = registry.GetStore()->Get()->generation;
 
-    // ---- on. Returns success, republishes, and the mesh carries the field.
     CHECK(registry.SetWeightOverlay(_kVolumePath.GetString()));
     CHECK(registry.GetStore()->Get()->generation > before);
     published = meshOverlay();
@@ -1318,7 +1308,6 @@ TestRegistrySetWeightOverlay()
         }
     }
 
-    // ---- off, by empty string, which is the C surface's null case.
     CHECK(registry.SetWeightOverlay(std::string()));
     published = meshOverlay();
     CHECK(published != nullptr);
@@ -1337,13 +1326,11 @@ TestRegistrySetWeightOverlay()
 
 // An authored edit republishes the field THAT EDIT produced, not the one
 // before it.
-//
 // This is the artist-visible bug it was written for: with the overlay on,
 // dragging inputs:falloffMax repainted the gradient one drag-step late, so
 // the picture always described the previous value. It looked like a
 // missing invalidation and was not one -- every notice was emitted, and
 // the values inside them were simply stale.
-//
 // The cause is delivery ORDER, and it is why this case has to go through
 // the registry's own UsdNotice::ObjectsChanged handler rather than calling
 // SetTime directly. Tf_NoticeRegistry::_Register prepends, so the
@@ -1354,7 +1341,6 @@ TestRegistrySetWeightOverlay()
 // A direct SetTime() call cannot see that: by then the dispatch has ended
 // and exec is invalidated, which is exactly why the original bug survived
 // a test suite full of SetTime assertions.
-//
 // Both authoring shapes are covered because they are NOT equivalent
 // through USD's change classification: a plain default Set and the spline
 // knot the authoring panel writes arrive as different notices, and only
@@ -1417,7 +1403,6 @@ TestAuthoredEditRepublishesFreshField()
         _kVolumePath.AppendProperty(TfToken("inputs:falloffMax")));
     CHECK(bool(falloffMax));
 
-    // ---- a default-value edit. Band [0, 4] over radii 0, 0.5, 1, 2.
     falloffMax.Set(4.0f);
     const uint64_t afterDefaultEdit = overlay(&field);
     CHECK(afterDefaultEdit > generation);  // the notice republished at all
@@ -1425,7 +1410,6 @@ TestAuthoredEditRepublishesFreshField()
     expect(field, wideBand, "after inputs:falloffMax = 4 (default)");
     generation = afterDefaultEdit;
 
-    // ---- the shape the authoring panel writes: a knot on the attribute's
     // spline at the current frame. Band [0, 1], so the outer two points
     // fall out of the field entirely.
     TsSpline spline = falloffMax.GetSpline();
@@ -1445,7 +1429,6 @@ TestAuthoredEditRepublishesFreshField()
 
 // The overlay staying ON while the field underneath it CHANGES -- which is
 // what every scrub, every avar drag, and every falloff edit does.
-//
 // Distinct from the toggle case, and the one a rigger actually lives in.
 // The toggle changes the owned leaf set and is published as structural, so
 // it dirties universally and would redraw even if the narrow locator were
@@ -1454,7 +1437,6 @@ TestAuthoredEditRepublishesFreshField()
 // while the geometry keeps deforming -- a stale picture that still looks
 // like a plausible influence field, which is the failure this whole
 // visualisation exists to prevent.
-//
 // Asserted through a real HdSceneIndexObserver rather than off the snapshot
 // diff: the diff only proves the bridge noticed, not that Hydra was told.
 static void

@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    defaultPrim = "Rig"
+    startTimeCode = 1
+    endTimeCode = 48
+    timeCodesPerSecond = 24
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def RigExecRoot "Rig"
+{
+    def Mesh "Body"
+    {
+        uniform token subdivisionScheme = "none"
+        point3f[] points = [(1,0,0), (0,1.2,0), (-1,0,0), (0,-1,0), (0.7,0,1.2), (0,0,-1)]
+        int[] faceVertexCounts = [3,3,3,3,3,3,3,3]
+        int[] faceVertexIndices = [0,1,4, 1,2,4, 2,3,4, 3,0,4, 1,0,5, 2,1,5, 3,2,5, 0,3,5]
+        color3f[] primvars:displayColor = [(0.15,0.65,0.75)]
+    }
+    def Scope "Movers"
+    {
+        def Scope "Deform"
+        {
+            def RigExecDeltaMushMover "Detail" (
+                prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:moves = </Rig/Body.points>
+                point3f[] inputs:restPoints = [(1,0,0), (0,1.2,0), (-1,0,0), (0,-1,0), (0,0,1), (0,0,-1)]
+                int inputs:iterations = 3
+                float inputs:defaultWeight = 1
+                float inputs:defaultWeight.timeSamples = {1: 0, 24: 1, 48: 0}
+            }
+        }
+    }
+}

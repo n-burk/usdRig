@@ -1,6 +1,4 @@
-//
 // RigExec per-frame cache. See frameCache.h.
-//
 #include "frameCache.h"
 
 #include "frozenContext.h"

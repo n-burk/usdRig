@@ -1,16 +1,12 @@
-//
 // Sparse symmetric positive-definite direct solver.
-//
 // The Profile Mover factorizes one matrix per binding epoch and reuses it for
 // twelve right-hand sides every frame (nine gradient columns, three position
 // columns), which is exactly the shape a direct method is for. The USD build
 // carries no sparse linear algebra -- no Eigen, no CHOLMOD, which the paper
 // itself uses -- so this supplies the minimum: a fill-reducing ordering, a
 // symbolic analysis, and an up-looking sparse Cholesky.
-//
 // Only what the solver needs is here. It is not a general linear algebra
 // library and deliberately does not try to be one.
-//
 #ifndef RIGEXEC_MATH_SPARSE_SOLVE_H
 #define RIGEXEC_MATH_SPARSE_SOLVE_H
 

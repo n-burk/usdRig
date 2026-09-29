@@ -1,6 +1,4 @@
-//
 // TouchPose geometry -- see touchPoseMesh.h.
-//
 #include "touchPoseMesh.h"
 
 #include "pxr/base/work/loops.h"
@@ -163,9 +161,7 @@ RigExecTouchPoseMesh::SetFaceRegions(const int32_t *regionOf, size_t count)
     }
 }
 
-// ---------------------------------------------------------------------------
 // acceleration
-// ---------------------------------------------------------------------------
 
 void
 RigExecTouchPoseMesh::_ComputeTriangleBounds(std::vector<float> *bounds) const
@@ -421,9 +417,7 @@ RigExecTouchPoseMesh::Prepare() const
     _bvhVersion = _pointsVersion;
 }
 
-// ---------------------------------------------------------------------------
 // the cast
-// ---------------------------------------------------------------------------
 
 bool
 RigExecTouchPoseMesh::_HitTriangle(
@@ -605,9 +599,7 @@ RigExecTouchPoseMesh::CastBruteForce(
     return _triFace[bestTri];
 }
 
-// ---------------------------------------------------------------------------
 // per-face queries
-// ---------------------------------------------------------------------------
 
 void
 RigExecTouchPoseMesh::_ComputeCentroids() const

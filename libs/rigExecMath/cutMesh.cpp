@@ -1,7 +1,6 @@
-//
+// Method reference: de Goes et al. (2022), https://doi.org/10.1145/3528223.3530060
 // Cut-mesh construction and the cut-aware polygonal Laplacian.
 // See cutMesh.h for the two documented departures from the paper's text.
-//
 #include "cutMesh.h"
 
 #include "pxr/base/gf/matrix3d.h"
@@ -559,9 +558,7 @@ GfVec3d RigExecCutMesh::EvaluateBinding(
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // §4.1: mesh cutting
-// ---------------------------------------------------------------------------
 
 bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
                          const RigExecCurvenetSampling &sampling,
@@ -615,7 +612,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
     // surface bounding box".
     const double tolerance = std::max(view.bboxDiagonal * 1e-5, 1e-9);
 
-    // ---- node table ----------------------------------------------------
     std::vector<_NodeDraft> nodes;
     std::vector<int> nodeOfVertex(meshPoints.size(), -1);
     // Nodes on a mesh edge, keyed by the edge and a quantized parameter.
@@ -666,7 +662,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
             (snap > kEps) ? tolerance / snap : 1e-9;
 
         // A crossing that lands on an endpoint IS that mesh vertex.
-        //
         // Creating a separate node there instead leaves two coincident
         // cut-vertices, and the arrangement's angular sort around them is
         // then meaningless -- which shows up as sliver faces, cracks that
@@ -732,7 +727,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
         }
     }
 
-    // ---- project samples ----------------------------------------------
     const size_t sampleCount = sampling.GetSampleCount();
     std::vector<int> nodeOfSample(sampleCount, -1);
     std::vector<int> faceOfSample(sampleCount, -1);
@@ -829,7 +823,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
         }
     }
 
-    // ---- trace segments -------------------------------------------------
     std::vector<_SubEdge> subEdges;
     // One hop of a segment that runs along the mesh's own edges. Kept as
     // explicit parameters rather than derived from the two samples' sites,
@@ -1248,7 +1241,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
         report->warnings.push_back(buffer);
     }
 
-    // ---- per-face arrangement -------------------------------------------
     std::vector<std::vector<int>> subEdgesOfFace(view.GetFaceCount());
     for (size_t i = 0; i < subEdges.size(); ++i) {
         subEdgesOfFace[subEdges[i].face].push_back(int(i));
@@ -1571,7 +1563,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
         return fail("cutting the target by this curvenet produced no faces");
     }
 
-    // ---- nodes into the cut-mesh ----------------------------------------
     cutMesh->nodePosition.resize(nodes.size());
     cutMesh->nodeBinding.resize(nodes.size());
     cutMesh->nodeMeshVertex.resize(nodes.size());
@@ -1605,7 +1596,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
     }
     cutMesh->constraintCount = int(2 * sampleCount);
 
-    // ---- unknown numbering ----------------------------------------------
     // §4.2 precedence: a cut-vertex that is both a mesh vertex and a curvenet
     // sample belongs to the curvenet, so it carries no unknown.
     cutMesh->vertexUnknown.assign(meshPoints.size(), -1);
@@ -1614,7 +1604,6 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
     // A mesh vertex is an unknown when at least one of its CORNERS is
     // unconstrained -- decided from the corner assignment rather than from
     // whether a sample happened to land on it.
-    //
     // Those are not the same test. A curve running along an edge loop passes
     // through vertices no sample lands on, and every corner there still reads
     // a curvenet constraint; giving such a vertex an unknown produces a row
@@ -1714,9 +1703,7 @@ bool RigExecBuildCutMesh(const RigExecCurvenetTopology &topology,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Appendix A: the polygonal Laplacian
-// ---------------------------------------------------------------------------
 
 void RigExecPolygonLaplacian(const std::vector<GfVec3d> &corners,
                              std::vector<double> *out)
@@ -1788,9 +1775,7 @@ void RigExecPolygonLaplacian(const std::vector<GfVec3d> &corners,
     }
 }
 
-// ---------------------------------------------------------------------------
 // System assembly
-// ---------------------------------------------------------------------------
 
 void RigExecAssembleCutSystem(const RigExecCutMesh &cutMesh,
                               const std::vector<GfVec3d> &cornerPositions,

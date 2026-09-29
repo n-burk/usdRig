@@ -1,7 +1,5 @@
-//
 // TouchPose, below the app: the pick geometry, the generated shader, and the
 // scene index that carries the highlight to Hydra.
-//
 //   1. THE CAST. The BVH answer must equal the brute-force answer for every
 //      ray -- at rest, after a pose that only refits, after a pose so large
 //      it forces a rebuild, and through a non-identity mesh transform.
@@ -17,10 +15,8 @@
 //      interpolation, wraps exactly the materials bound to the mesh and its
 //      GeomSubsets, and dirties the right locators; a table change dirties
 //      ONLY the table's value; detaching puts everything back.
-//
 // No GL: nothing here draws. The drawn result is asserted in usdview by
 // tests/testUsdviewTouchPose.py.
-//
 #include "rigExecImaging/touchPose.h"
 #include "rigExecImaging/touchPoseHighlight.h"
 #include "rigExecImaging/touchPoseMesh.h"

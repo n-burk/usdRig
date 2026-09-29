@@ -1,13 +1,10 @@
-//
 // RigExec RBF parity: libs/rigExecMath/rbf.{h,cpp} against the studio's
 // an independent reference implementation, which is the ORACLE.
-//
 // The Python is not imported. tools/biped/gen_psd_parity.py ran it once, by
 // hand, over every interpolator in the biped's the conventional tool PSD export plus a set of
 // hand-built solvers, and froze the answers into
 // tests/fixtures/psd_parity.json. This file reads that fixture and asserts
 // the C++ agrees to 1e-6 in double precision.
-//
 // WHY A FIXTURE AND NOT A UNIT TEST OF EACH PIECE. The failure mode for this
 // port is a sign or an ordering convention that is wrong in a way only a
 // specific pose exposes -- the transposed inverse in Solve() and the
@@ -16,7 +13,6 @@
 // interpolators at 200 driver poses each is what catches them. Every case in
 // the fixture carries a `why`, printed on failure, so a red line says what
 // was being pinned rather than only which index disagreed.
-//
 // DO NOT DELETE THE HAND-BUILT CASES AS REDUNDANT WITH THE REAL DATA. They
 // are not redundant, and the measurement is in the docstring on SAMPLES in
 // tools/biped/gen_psd_parity.py. Summarised: breaking the per-pose radii so
@@ -24,22 +20,18 @@
 // interpolators, at any sample count. Every one of them uses a single
 // poseType throughout, which makes its distance metric symmetric and hides a
 // direction error completely; only `pose_type_mixed` mixes them.
-//
 // The same sweep shows the reverse too -- an error that lives in the
 // per-frame path and leaves every solve constant intact is caught ONLY by
 // the sampled real data, and degrades with sample count: moving the
 // normalisation refusal threshold falls from 82 failures and 10 distinct
 // catchers at 200 samples to four failures and 2 at 25, with none of the
 // biped's interpolators among them.
-//
 // So the two halves of this fixture cover different failure classes and
 // neither substitutes for the other. Cutting either one leaves this file
 // passing while it stops testing.
-//
 // The fixture is parsed with a small hand-written JSON reader rather than
 // through a library: rigExecMath links arch/tf/gf/vt and nothing else, and a
 // dependency added for a test is a dependency the shipped library carries.
-//
 #include "rigExecMath/rbf.h"
 
 #include <algorithm>
@@ -66,9 +58,7 @@ static int failures = 0;
         }                                                                  \
     } while (0)
 
-// ---------------------------------------------------------------------------
 // A minimal JSON value
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -439,9 +429,7 @@ CompareRow(const std::vector<double> &found,
     return ok;
 }
 
-// ---------------------------------------------------------------------------
 // The suites
-// ---------------------------------------------------------------------------
 
 /// The pieces that can be asserted without the fixture, so a build that is
 /// broken outright says so in one line instead of in 13400.
@@ -829,7 +817,6 @@ TestInterpolators(const Json &fixture, Worst *worst, int *refusedSeen,
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 
 int
 main(int argc, char **argv)

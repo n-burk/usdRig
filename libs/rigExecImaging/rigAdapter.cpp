@@ -1,13 +1,10 @@
-//
 // Keyless UsdImaging API schema adapter: the rig's time trigger.
-//
 // WHY THIS FILE EXISTS. The results scene index overlays evaluated data, but
 // nothing in a stock UsdImaging host says WHEN to evaluate: usdview drives
 // the registry through the ctypes plugin's frame signal, and usdrecord has no
 // such hook -- its FrameRecorder only calls UsdImagingStageSceneIndex::SetTime
 // per frame. So a rig recorded with usdrecord renders its rest pose on every
 // frame: evaluation never runs.
-//
 // This adapter closes that gap with no application code (docs/specs/
 // imaging-datasource-redesign.md §3.2). It contributes one time-varying leaf,
 // rigExec/time, to every RigExecRoot prim's data; it notes each root at
@@ -17,14 +14,12 @@
 // populated unobserved. From then on SetTime dirties the leaf,
 // RigExecResultsSceneIndex::_PrimsDirtied pulls the frame out of it and
 // evaluates, and the recorded frames are the evaluated ones.
-//
 // Keyless (apiSchemaName is the empty string in plugInfo -- omitting the key
 // is a discovery error) rather than a prim adapter on purpose: a prim adapter
 // would REPLACE the fallback data source a RigExecRoot prim gets today, while
 // an API schema adapter's contribution is OVERLAID onto it
 // (apiSchemaAdapter.h:71-74). The rig prim keeps the exact representation it
 // has always had; this file only adds one container to it.
-//
 // THE STAGE KEY (docs/multistage-imaging.md). Several stages may be imaged in
 // one process, each with its own imaging context, and a scene-index chain is
 // built with no stage at all. So the same container also carries
@@ -35,8 +30,6 @@
 // context binding"). Every other prim is untouched: a prim that is neither a
 // RigExecRoot nor top-level pays one type-name and one path-length
 // comparison and gets no subprim data, exactly as before.
-//
-
 #include "registry.h"
 #include "sceneIndices.h"
 

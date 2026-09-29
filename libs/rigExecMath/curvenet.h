@@ -1,16 +1,12 @@
-//
 // Curvenet representation and scaled frames (de Goes, Sheffler & Fleischer,
 // "Character Articulation through Profile Curves", ACM TOG 41(4) 2022, §3).
 // See docs/specs/curvenet.md; section numbers below are that paper's.
-//
 // A curvenet is a pool of control points plus a list of four-index tuples
 // naming cubic splines over it. Connectivity is index SHARING -- two splines
 // meet because they name the same pool entry -- which is what detaches the
 // rig from the surface tessellation.
-//
 // Everything here is pure geometry over that encoding: no USD, no exec, no
 // mesh. The mesh only enters in cutMesh.h.
-//
 #ifndef RIGEXEC_MATH_CURVENET_H
 #define RIGEXEC_MATH_CURVENET_H
 

@@ -16,19 +16,19 @@ discovered beneath, and the unit that gets compiled and evaluated.
 
 Inside it there are four jobs:
 
-- **Controls carry the animation.** A [control](nodes/control.md) is the
+- **Controls carry the animation.** A [control](../nodes/control.md) is the
   animator's handle. Keys go on its `avars:*` channels, composed over its
   `rest:space`. Nothing in the rig revises a control — its base frame *is* its
   posed frame — so everything downstream simply follows it.
-- **Solvers and constraints pose joints.** An [FK chain](nodes/fk_chain.md),
-  a [two-bone IK](nodes/two_bone_ik.md) or an
-  [aim constraint](nodes/aim_constraint.md) reads controls and writes frames
-  onto [joints](nodes/joint.md). A joint is where solved posing becomes
+- **Solvers and constraints pose joints.** An [FK chain](../nodes/fk_chain.md),
+  a [two-bone IK](../nodes/two_bone_ik.md) or an
+  [aim constraint](../nodes/aim_constraint.md) reads controls and writes frames
+  onto [joints](../nodes/joint.md). A joint is where solved posing becomes
   readable data.
-- **Weights say how much.** A [static weight](nodes/static_weight.md) is one
+- **Weights say how much.** A [static weight](../nodes/static_weight.md) is one
   scalar per moved point, painted once and held for the shot. Bound through a
   mover's `rigExec:weightObject`, it scales that mover's effect per point.
-- **Movers move geometry.** A [matrix mover](nodes/matrix_mover.md) reads a
+- **Movers move geometry.** A [matrix mover](../nodes/matrix_mover.md) reads a
   provider's rest-to-posed delta and carries points by it, per point, under the
   bound weight.
 
@@ -105,7 +105,7 @@ ignores the aim constraint stacked above it. Nothing else in the file moves.
 
 ## A frame, walked through
 
-![Two-bone IK](gifs/two_bone_ik.gif)
+![Two-bone IK](../gifs/two_bone_ik.gif)
 
 `two_bone_ik.usda` is a two-card arm. Under the rig root, in composed order:
 `Controls`, `Solvers`, `Joints`, `Weights`, `Movers`.

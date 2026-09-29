@@ -1,17 +1,13 @@
-//
 // RigExec Hydra 2.0 filtering scene indices (spec §10.1):
-//
 //   upstream (UsdImaging chain)
 //     -> RigExecInternalPrimPruningSceneIndex   (owned generated paths only)
 //     -> RigExecBindingResolvingSceneIndex      (immutable binding epoch)
 //     -> RigExecResultsSceneIndex               (cached snapshot overlays)
 //     -> downstream (merging scene index / renderer)
-//
 // The public boundary contains only standard Hydra data (spec §10.2):
 // HdXformSchema matrices, flat HdPrimvarsSchema entries for points and
 // normals, HdExtentSchema min/max, and HdBlockDataSource masks for the
 // derivative entries of owned points. Renderers never call RigExec.
-//
 #ifndef RIGEXEC_IMAGING_SCENE_INDICES_H
 #define RIGEXEC_IMAGING_SCENE_INDICES_H
 

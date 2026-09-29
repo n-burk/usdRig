@@ -1,9 +1,5 @@
-#
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
-#
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
 """What a rig's evaluation schedule looks like, and where its time goes.
 
 Headless: no Qt, so the CLI (`tools/rigexec_schedule.py`) and the usdview
@@ -69,9 +65,7 @@ def _percentiles(values):
             "mean": sum(ordered) / len(ordered), "worst": ordered[-1]}
 
 
-# ---------------------------------------------------------------------------
 # Structure
-# ---------------------------------------------------------------------------
 
 def schedule_shape(stage, rig, rig_root):
     """Levels, widths and depth: the part no thread count can change."""
@@ -129,9 +123,7 @@ def chain_shape(rig):
     return out
 
 
-# ---------------------------------------------------------------------------
 # Cost
-# ---------------------------------------------------------------------------
 
 def _drive(stage, rig, control_path, avar):
     attr = stage.GetAttributeAtPath(Sdf.Path(control_path + "." + avar))
@@ -226,9 +218,7 @@ def _threads(events):
     }
 
 
-# ---------------------------------------------------------------------------
 # Report
-# ---------------------------------------------------------------------------
 
 def render(report, top):
     L = []
@@ -328,9 +318,7 @@ def render(report, top):
     return "\n".join(L)
 
 
-# ---------------------------------------------------------------------------
 # The one entry point both callers use
-# ---------------------------------------------------------------------------
 
 def build_report(stage, rig_root="/Biped/Rig", samples=40, control=None,
                  avar="avars:ry", rig=None):

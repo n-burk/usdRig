@@ -2,7 +2,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 from pxr import Tf
@@ -16,12 +16,12 @@ from pathlib import Path
 from pxr import Plug, Tf
 
 
-# Sample graphs the editor cycles through for its "load a test graph"
-# action. Three saved production graphs used to live here as well; each
-# carried asset paths from the scene it was captured in, which is not ours
-# to publish -- and a saved graph is a record of one specific scene, so
-# there is little left of it once the paths are gone. Gitignored rather
-# than scrubbed.
+
+
+
+
+
+
 TEST_GRAPH_FILES = [
     "test_single_node.json",
 ]

@@ -1,6 +1,4 @@
-//
 // Proving a cone: RIGEXEC_BAKED_VERIFY_CONES.
-//
 // Cone re-execution is an argument -- "nothing outside the closure could
 // have moved, so last run's values are this run's" -- and an argument about
 // floating-point state is worth exactly what a machine can check of it. So
@@ -8,12 +6,10 @@
 // whole answer is shadowed, the starting point is put back, every step runs,
 // and the two answers are compared slot by slot, counter by counter and
 // diagnostic by diagnostic.
-//
 // Nothing here is on a production path. It is deliberately a deep copy of
 // everything a step can touch, because a shadow that left a field out would
 // agree with the cone run about the one thing the cone got wrong. What it
 // leaves out on purpose, and why, is listed beside RigExecBakedRunShadow.
-//
 #include "bakedProgramImpl.h"
 
 #include "pxr/base/tf/getenv.h"
@@ -36,15 +32,11 @@ RigExecBakedVerifyConesRequested()
 
 namespace {
 
-// ---------------------------------------------------------------------------
 // Equality, with a NaN counted equal to a NaN.
-// ---------------------------------------------------------------------------
-//
 // The two runs compared here are the SAME program over the SAME inputs, so a
 // field holding a non-finite number in one holds the identical one in the
 // other -- and `==` calls every one of them a difference, because a NaN is
 // equal to nothing, itself included.
-//
 // Rigs carry non-finite numbers into slots on purpose. A mover whose inputs
 // the kernel rejects still publishes the packet it rejected, NaN and all,
 // which is how the pass-through diagnostic can name the value; an override
@@ -52,7 +44,6 @@ namespace {
 // those with `==` turned a correct cone into three "baked cone mismatch"
 // lines and a failed parity run -- the instrument crying wolf on the one
 // generation a reader most needs to trust it.
-//
 // So every floating-point comparison below goes through Same(), which counts
 // two NaNs as the same value and is `==` otherwise. ANY type with a float or
 // a double anywhere in it needs its own overload: the fallback at the end of
@@ -736,7 +727,6 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
         CompareVector(differences, &count, where + " deltaOk",
                       commits[c].deltaOk, program.commits[c].deltaOk);
         // Every delta a candidate is PRESENT for, with nothing excused.
-        //
         // This comparison used to be guarded, because two runs of one
         // generation disagreed about the deltas of commits with no
         // propagation pairs while agreeing about `present`, `frames`,

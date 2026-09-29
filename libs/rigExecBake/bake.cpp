@@ -1,7 +1,4 @@
-//
 // .rigexec baking.
-//
-
 #include "rigExecBake/bake.h"
 #include "rigExecBake/serialize.h"
 #include "rigExecBake/capture.h"

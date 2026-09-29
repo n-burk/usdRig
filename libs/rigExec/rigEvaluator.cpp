@@ -1,6 +1,4 @@
-//
 // RigExec rig evaluator implementation.
-//
 #include "rigEvaluator.h"
 #include "curvenetWeightComputations.h"
 #include "parallel.h"
@@ -75,7 +73,6 @@ namespace {
 
 // Composed connections for an attribute, skipping the composition entirely
 // when the attribute carries no authored connection opinion.
-//
 // UsdAttribute::GetConnections builds a Pcp property index and then a target
 // index for the attribute on every call, and PcpBuildTargetIndex derives its
 // targets from authored ConnectionPaths opinions alone -- so on an attribute
@@ -95,7 +92,6 @@ _AuthoredConnections(const UsdAttribute &attribute)
 
 // A static input read that prefers what the current generation already
 // resolved.
-//
 // The evaluator and the packet assemblers both read a mover's authored
 // inputs directly off the stage; neither goes through exec, so neither sees
 // a value override. Routing both through this is what makes a property
@@ -119,7 +115,6 @@ _ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
 }
 
 // The composed AUTHORED value of one attribute, or \p fallback.
-//
 // The compile-time twin of _ResolvedRead above, and deliberately not the same
 // function: a solve that happens once per epoch has no generation's resolved
 // inputs to consult and no time code that means anything, so it reads the
@@ -163,7 +158,6 @@ const TfToken _samplePhaseAttr("rigExec:samplePhase");
 // parent executes after all of its descendants, and the top branch executes
 // last. This is therefore post-order within a branch and REVERSE composed
 // child order between sibling branches.
-//
 // Keep this as the one traversal primitive for both the structural digest and
 // compilation. If those walks ever disagree, an order edit can retain the old
 // epoch digest while executing a different chain.
@@ -549,7 +543,6 @@ _GetLandmarks(
 // Resolves a READ-side geometry input: naming a PointBased prim means its
 // .points property, because a geometry input has exactly one thing to read.
 // Property paths stay exact (spec §4.2).
-//
 // This rule is deliberately NOT applied to write targets. On the write side a
 // bare prim path names the transform domain and <prim>.points names the
 // geometry domain -- two different write sets on the same prim -- so inferring
@@ -964,7 +957,6 @@ _ValidateWeightObjectDomain(
 // under the rig is what makes a prim a joint output. Returned in namespace
 // pre-order, which reproduces the parent-before-child ordering the authored
 // lists used and keeps the binding-epoch digest stable against unrelated edits.
-//
 // Operator-declared joints are unioned in afterwards. Solver rigExec:joints
 // targets are validated to be RigExecJoint prims later in Compile, so in a
 // valid rig they are already a subset of the namespace walk; including them
@@ -1020,7 +1012,6 @@ _DiscoverJointOutputs(const UsdStageRefPtr &stage, const SdfPath &rigPath,
 
 // Discovers the rig's pose interpolators the same implicit way: being a
 // RigExecPoseInterpolator under the rig is what makes a prim one.
-//
 // The interpolators conventionally live at <rig>/PoseInterpolators/<name>,
 // but like every other rig element they are found by type wherever they sit.
 // An interpolator writes no transform and no points, so it carries no
@@ -1047,7 +1038,6 @@ _DiscoverPoseInterpolators(const UsdStageRefPtr &stage, const SdfPath &rigPath)
 // RigExecControl under the rig is what makes a prim a control. Returned in
 // namespace pre-order so the discovered order -- and with it the epoch
 // digest -- is stable against unrelated edits.
-//
 // No union pass over operator wiring, unlike the joints. A solver's
 // rigExec:controls names inputs it READS, and reading a control does not
 // make it one; the type does. And no emptiness rule either: a rig whose
@@ -1288,7 +1278,6 @@ _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
     // stage at all there is nothing for it to find, so the whole walk -- every
     // attribute of every rig prim, every connection it reaches, every
     // default-space fallback -- is skipped without changing the answer.
-    //
     // The test scans the whole stage, not the rig subtree, because the walk
     // follows connections and relationship targets that may leave the rig; and
     // it uses the all-prims predicate plus instance proxies so that an
@@ -1428,6 +1417,13 @@ _CollectPoseInputInfo(const UsdPrim &prim)
         const SdfPathVector sources = _AuthoredConnections(attribute);
         for (const SdfPath &source : sources) pending.emplace_back(source, true);
         const UsdPrim provider = attribute.GetPrim();
+        SdfPathVector frameInputs;
+        if (auto rel = provider.GetRelationship(TfToken("rigExec:poseInputs")))
+            rel.GetTargets(&frameInputs);
+        for (const SdfPath &input : frameInputs) {
+            info.providers.insert(input);
+            info.connectedPose = info.connectedPose || connected;
+        }
         if (provider.GetTypeName() != "RigExecJoint" &&
             provider.GetTypeName() != "RigExecControl" &&
             !_IsVolumeWeightType(provider.GetTypeName())) continue;
@@ -1477,14 +1473,12 @@ _PoseInfoVerifyRequested()
 }
 
 // _CollectPoseInputInfo for many prims at once.
-//
 // The per-prim walker re-reads every attribute for every prim that reaches
 // it -- a namespace parent's rest channels, a shared connection source, the
 // default-space chain up to the rig root -- which on the biped is 45,678
 // attribute visits for 15,727 distinct attributes. Here each attribute is
 // read once, as a node of one graph over (attribute path, connected) whose
 // edges are that walker's successor rules:
-//
 //   * every authored connection source, as a connected node;
 //   * on a joint, control or volume weight, and with the same connected
 //     flag: parent:defaultSpace to the namespace frame provider's
@@ -1492,7 +1486,6 @@ _PoseInfoVerifyRequested()
 //     avars:defaultSpace to default:space; default:space to
 //     parent:defaultSpace, its own default and rest channels, and the
 //     namespace frame provider's rest channels.
-//
 // A parent:space node on such a prim is where the walker records a
 // provider, the prim's namespace frame provider, and, when the node is
 // connected, the sticky connectedPose. A missing attribute is a node too:
@@ -1503,9 +1496,7 @@ _PoseInfoVerifyRequested()
 // connected components: every node of a component reaches every other, so a
 // component's providers and connectedPose are its own nodes' facts plus
 // those of the components it reaches.
-//
 // Two phases, because only the reads are worth a pool.
-//
 // Phase A discovers the graph a level at a time. A level is one task per
 // prim, run in parallel: the prim's type and namespace frame provider, and
 // the existence and connection sources of either all of its attributes (a
@@ -1514,17 +1505,14 @@ _PoseInfoVerifyRequested()
 // namespace parents as well as the prims asked for). The level's results are
 // merged on this thread, which is also where the successors of every node
 // whose attribute is now read are found, and those name the next level.
-//
 // Phase B is a serial iterative Tarjan over the nodes. Tarjan completes a
 // component only after every component it reaches, so each component is
 // folded the moment it completes.
-//
 // The prims whose closures are asked for grow the way the closure walks
 // that consume them do: a closure's providers, and the namespace frame
 // provider of a prim that is not a frame provider itself, are asked for in
 // turn. Asking for the provider of every parent:space node reached is that
 // same set, since each reached node is reached from some prim asked for.
-//
 // The attribute sets are not built here. They were most of the walker's
 // allocation, and only the solver-input index reads them, so
 // MaterializeAttributes builds them where that index is built -- in the
@@ -1561,6 +1549,7 @@ private:
         bool asked = false;         // asked for, or skipped, already
         bool providerType = false;  // a joint, control or volume weight
         uint32_t nsProvider = _None;
+        std::vector<uint32_t> frameInputs;
         uint32_t rootsBegin = 0;    // its attributes, in _roots
         uint32_t rootsEnd = 0;
         std::vector<uint32_t> pendingAttrs;  // reached, not yet read
@@ -1584,6 +1573,7 @@ private:
     struct _Read {
         bool providerType = false;
         SdfPath nsProvider;
+        SdfPathVector frameInputs;
         std::vector<std::pair<SdfPath, SdfPathVector>> listed;
         std::vector<std::pair<bool, SdfPathVector>> named;
     };
@@ -1797,6 +1787,10 @@ _PoseInputGraph::_ExpandNode(uint32_t node,
             edgeTo(source, 1);
         }
         const uint32_t owner = _attrs[attr].prim;
+        // Native expression schemas declare frame reads that are carried by
+        // Exec relationship inputs rather than USD attribute connections.
+        for (size_t i = 0; i < _prims[owner].frameInputs.size(); ++i)
+            _Ask(_prims[owner].frameInputs[i], skip);
         const TfToken &name = _attrs[attr].path.GetNameToken();
         const bool ruled = name == parentSpace ||
             name == parentDefaultSpace || name == posedDefaultSpace ||
@@ -1877,6 +1871,12 @@ _PoseInputGraph::_Tarjan()
             if (_nodeProvider[node] != _None) {
                 own.push_back(_nodeProvider[node]);
                 connected = connected || (node & 1u);
+            }
+            const auto &attr = _attrs[node >> 1];
+            if (attr.exists && attr.prim != _None) {
+                const auto &inputs = _prims[attr.prim].frameInputs;
+                own.insert(own.end(), inputs.begin(), inputs.end());
+                connected = connected || (!inputs.empty() && (node & 1u));
             }
             const uint32_t edgesEnd = _edgeBegin[node] + _edgeCount[node];
             for (uint32_t e = _edgeBegin[node]; e < edgesEnd; ++e) {
@@ -2042,6 +2042,8 @@ _PoseInputGraph::Extend(
                     const UsdPrim prim =
                         stage->GetPrimAtPath(_prims[task.prim].path);
                     if (prim && !_prims[task.prim].read) {
+                        if (auto rel = prim.GetRelationship(TfToken("rigExec:poseInputs")))
+                            rel.GetTargets(&read.frameInputs);
                         const TfToken type = prim.GetTypeName();
                         read.providerType = type == "RigExecJoint" ||
                             type == "RigExecControl" ||
@@ -2094,6 +2096,10 @@ _PoseInputGraph::Extend(
                 if (!_prims[prim].read) {
                     _prims[prim].read = true;
                     _prims[prim].providerType = read.providerType;
+                    for (const SdfPath &input : read.frameInputs) {
+                        const uint32_t provider = _PrimOf(input);
+                        _prims[prim].frameInputs.push_back(provider);
+                    }
                     if (!read.nsProvider.IsEmpty()) {
                         const uint32_t parent = _PrimOf(read.nsProvider);
                         _prims[prim].nsProvider = parent;
@@ -2248,7 +2254,6 @@ _PoseInputGraph::MaterializeAttributes(
 // The solver-input index (_solverInputBatches): authored input prim -> the
 // batches that read it, which is how the notice handler turns an edit into
 // the batch.dirty and batch.cache resets the dynamic pose walk honours.
-//
 // A pure function of the stage and of four things the compile decided: which
 // solvers each batch holds; the joint binding, where a bound joint stops the
 // upward walk because its frame is the evaluator's and not the stage's; the
@@ -2261,7 +2266,6 @@ _PoseInputGraph::MaterializeAttributes(
 // own connection closure does not (a namespace parent's rest channels, the
 // source of a connected default:space), and an edit to one of those has to
 // reach the batch.
-//
 // Three passes, because only the middle one is stage work worth a pool: the
 // walk that decides which prims a batch registers is path arithmetic and one
 // relationship read per solver; each registered prim's connection closure is
@@ -2400,7 +2404,6 @@ _BuildSolverInputIndex(
 namespace {
 
 // What RIGEXEC_EVALUATION_MODE asked this process for, if anything.
-//
 // Not a code path: it selects the initial value of a setting callers can set
 // themselves, so nothing here behaves differently for having been reached
 // through the environment. It exists so an EXISTING suite can be re-run under
@@ -2408,11 +2411,9 @@ namespace {
 // the only way to check the program against the several hundred rigs those
 // suites already build. Unset means nothing was asked and the rig's own
 // rigExec:baked gets to answer instead.
-//
 // `reference` pins ExecReference, the exec-authoritative oracle, so that a
 // suite written against the oracle can be re-run against it by name rather
 // than against whatever Dynamic runs.
-//
 // `authored` is the half the mode alone cannot carry, and it is about
 // PRECEDENCE rather than about the value: an unset variable and
 // RIGEXEC_EVALUATION_MODE=dynamic both mean Dynamic, and only the second is
@@ -2421,7 +2422,6 @@ namespace {
 // program. An unrecognised value counts as authored for the same reason: a
 // typo must not silently hand the decision back to the stage, so it warns,
 // means dynamic, and still outranks the attribute.
-//
 // Read ONCE per process, at the construction of the first evaluator, and
 // fixed from then on: the function-local static below is initialised on its
 // first call and never re-reads the environment. Changing the variable after
@@ -2467,7 +2467,6 @@ _BakedAttributeName()
 }
 
 // Whether a fallback to the dynamic path is a FAILURE.
-//
 // Not a code path either: it changes no evaluated value and no dispatch,
 // only whether a generation that ran dynamically while the mode asked for
 // the program says so on the pose it publishes. It exists because a suite
@@ -2475,7 +2474,6 @@ _BakedAttributeName()
 // goes green having compared nothing -- which is the one way a parity run
 // can lie, and the way it lies about exactly the rigs a new operator was
 // supposed to make bakeable.
-//
 // Read ONCE per process, in a function-local static for the same reason the
 // mode above is: a tool sets it before the first evaluator exists, and
 // nothing may change the answer between two tests in one binary.
@@ -2488,7 +2486,6 @@ _BakeRequired()
 }
 
 // Every authored input computeRestFrame reads.
-//
 // Exactly the seven AttributeValue inputs of the computation
 // (computations.cpp, RIGEXEC_REGISTER_XFORMABLE) -- rest:space and the six
 // rest avars. Its eighth input is the NamespaceAncestor's own
@@ -2516,7 +2513,6 @@ _IsRestInputName(const TfToken &name)
 
 // Whether any override in \p overrides could reach a cached blend sample
 // shape.
-//
 // A shape is a function of exactly `offsets` and `pointIndices` on the
 // UsdSkelBlendShape a sparse sample names, so an avar drag -- which is what
 // every interactive override is -- cannot move one, and dropping 169
@@ -2538,7 +2534,6 @@ _OverridesReachBlendShapes(const std::vector<RigExecValueOverride> &overrides)
 }
 
 // Whether any rest channel of \p provider can move within an epoch.
-//
 // Three ways it can, and the epoch-constant rest path is refused for all
 // three: an authored connection (which can reach anything, including an
 // animated avar, so it counts without being followed); time samples anywhere
@@ -3146,7 +3141,6 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // Never evaluate in a notice callback: ExecUsd must finish invalidating
     // its own caches before the next pull. External inputs can live anywhere
     // on the stage, so retain conservative structural checks after edits.
-    //
     // EXCEPT for a notice that is provably nothing but new VALUES on the
     // numeric avar channels: an Avar Editor slider tick, a typed value, a
     // key moved, a released gizmo. The structure digest never reads an
@@ -3156,7 +3150,6 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // changed" at ~115 ms per slider tick on the biped. Anything else in the
     // notice -- a resync, a non-avar property, a field other than a value --
     // keeps the conservative path.
-    //
     // A RESYNC on one of those channels still qualifies when it is on the
     // property alone. The first value a layer holds for an avar creates its
     // property spec, which USD reports as a property resync carrying only
@@ -3164,14 +3157,12 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // Every released gizmo drag and its undo is exactly that pair, and
     // treating it as structure rebaked the program for ~250 ms per release.
     // A prim resync is never a value edit and keeps the conservative path.
-    //
     // And a notice that is not avar values reaches the digest only when it
     // could move it: _NoticeIsDigestSuspect is the prim-granular gate over
     // what the committed digest read outside the rig. An edit on a material
     // beside the rig, or on another rig, leaves the digest where it was and
     // costs the next settle nothing. The digest itself still trusts no
     // incremental invalidation: a suspect notice recomputes it whole.
-    //
     // A suspect notice also names, for the settle to judge, the paths that
     // could make it CERTAINLY structural: a prim whose path the digest
     // writes because of its type, a relationship whose targets it writes, a
@@ -3278,7 +3269,6 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // rest attribute, a weight, a goal transform) still changes what they
     // compute. Any stage edit therefore retires their cached snapshots, the
     // same way it retires the affected solver batches below.
-    //
     // Retire means CLEAR, not just flagging: the seed and batch caches
     // are time-keyed LRUs, and the dirty flag only forces the FIRST
     // post-edit call to recompute. Once it clears, the other times would
@@ -3376,7 +3366,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // phases, weight-descriptor shape, and blend membership/activations
     // (spec §4.2, §6.3). Structural edits change it; numeric values and
     // shape-preserving enables do not.
-    //
     // Returned as TEXT, of only the segments \p segments selects, so the
     // three can be computed on three tasks and hashed once at the join
     // (_JoinStructureDigest). Everything a segment appends is local to this
@@ -3429,7 +3418,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // targets as composed, and stays "sorted" only while every place that
     // wrote it sorted them; a prim is recorded where its path is written
     // because of its type.
-    //
     // Only relationships that exist. The digest also writes an empty list
     // for each one a prim's type could carry and does not -- most of the
     // mover segment's names, on any one mover -- and recording those too
@@ -3532,7 +3520,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += '|';
     };
     auto appendAttributeBinding =
-        [this, &digest, &noteRead, &pathText](const UsdPrim &prim,
+        [this, &digest, &noteRead, &pathText, &appendRelTargets](const UsdPrim &prim,
                                               const char *name) {
         const UsdAttribute attr = prim.GetAttribute(TfToken(name));
         digest += name;
@@ -3551,6 +3539,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 return;
             }
             digest += pathText(a.GetPath());
+            const auto frameInputs = appendRelTargets(a.GetPrim(), "rigExec:poseInputs", false);
+            for (const SdfPath &input : frameInputs) noteRead(input);
             digest += ":" +
                       a.GetTypeName().GetAsToken().GetString() + ":samples:" +
                       std::to_string(a.GetNumTimeSamples()) + "->";
@@ -3610,11 +3600,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
 
     // Weight-object descriptor shape is epoch identity (spec §4.1):
     // target, representation, policy, and canonical sparse support.
-    //
     // Recursive, because a combine's field shape is its inputs' shapes:
     // an edit inside a composed input has to re-epoch the combine that
     // folds it, or the baked falloff tables replay stale.
-    //
     // Cycle-TRACKED rather than depth-limited. A depth cap terminates,
     // but it terminates by silently dropping everything below it, so a
     // legitimately deep composition stops contributing to the epoch
@@ -3717,7 +3705,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         appendRelTargets(w, "rigExec:sampleSource", true);
         // The falloff curve is structural: it is resampled to a table
         // once per epoch, so an edit to it has to begin a new one.
-        //
         // What gets hashed is the BAKED TABLE, not the knots. Hashing
         // knot times and values misses everything else that changes the
         // curve's shape -- interpolation mode, tangent slopes and widths,
@@ -3727,7 +3714,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // live spline. Hashing the table is exact by construction: it is
         // precisely the bytes exec consumes, so anything that changes
         // them re-epochs and nothing that does not, does.
-        //
         // This also folds in rigExec:falloffProfile, which is why that
         // token is not hashed separately.
         if (_IsVolumeWeightType(w.GetTypeName())) {
@@ -3823,7 +3809,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // Numeric though most of those are, an edit to one has to reach a solve
         // that has already happened, and nothing else in this digest hashes an
         // interpolator.
-        //
         // inputs:enabled on a POSE is hashed and inputs:enabled on the
         // INTERPOLATOR is not, which is the same distinction the schema draws: a
         // disabled pose is left out of the solve entirely (leaving it in would
@@ -3869,13 +3854,11 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // self-extracts which aggregate element, so adding, removing, or
     // reordering joints changes what compile Pass 0 synthesizes. Order is
     // semantic (position = element index), so this list is never sorted.
-    //
     // The block a prim contributes is a pure function of (prim, composed
     // stage) -- it reads connections and namespace-frame providers and
     // nothing else -- and the stage cannot change underneath a const digest
     // computation, so memoizing it for the duration of THIS digest emits
     // exactly the bytes the uncached walk emits.
-    //
     // MEASURED 2026-09-13, biped (24 solvers): uncached, this emission was
     // 1.15 MILLION UsdAttribute::GetConnections calls per digest -- 2.33 s --
     // and one digest is computed on EVERY evaluate that follows ANY stage
@@ -3884,7 +3867,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // solver, and each run re-walked the same pose-input closure from
     // scratch, so a few hundred prims were re-closed tens of thousands of
     // times: O(n^2) in solver count, the 455 + 51n + 6.2n^2 ms measured.
-    //
     // The caches are function-local: nothing survives the call, so a stage
     // edit between two digests is still seen. They are deliberately NOT
     // evaluator members -- a member cache would have to be invalidated by
@@ -3911,7 +3893,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     };
     std::unordered_map<SdfPath, _DigestHop, SdfPath::Hash> digestHops;
     // THE READ MEMO: what this segment knows about one attribute path.
-    //
     // Every attribute the walks below touch is read for the same three
     // facts -- whether it exists, its type name, its authored connection
     // sources -- and most are read by three walks: hopFor lists them,
@@ -3923,7 +3904,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // connection (a source on another prim, or a missing one) is read with
     // GetAttributeAtPath on first use. Function-local for the same reason as
     // the caches above.
-    //
     // _DigestUnmemoizedReads turns the memo off -- every read goes back to
     // the stage, as it did before the memo existed -- which is what
     // RIGEXEC_VERIFY_DIGEST_MEMO compares this segment's bytes against.
@@ -4020,7 +4000,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             return;
         }
         // THE TRANSITIVE POSE-INPUT CLOSURE, AS A MERKLE TOKEN.
-        //
         // This used to flatten a prim's whole provider closure into one set
         // of attribute paths and hash the text of all of them -- rebuilt
         // from scratch per prim, because every prim's closure is a
@@ -4030,7 +4009,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // and the digest over N such prims was CUBIC. Measured on one
         // RigExecFkChain over a nested chain: 2.0 s at 100 joints, 191 s at
         // 400, all of it in Digest.Solvers.
-        //
         // Now each provider's closure is a token computed once: the text of
         // its OWN attributes plus the tokens of the providers it reads, in
         // path order. A provider is shared by every closure that reaches
@@ -4040,7 +4018,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // and therefore every token that folds it in -- and it also
         // distinguishes WHICH provider an attribute arrived through, which
         // the flat set merged.
-        //
         // Iterative post-order, not recursion: closures run hundreds deep.
         // A cycle cannot be closed over, so the edge that closes one
         // contributes a marker naming the path instead; Compile reports the
@@ -4065,7 +4042,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // namespace frame provider, the default-space fallback -- but it
         // stops at the first foreign prim instead of following it, because
         // that prim's own token already covers everything past it.
-        //
         // _CollectPoseInputInfo follows the default-space fallback to the
         // root, so a prim at depth d returns ~13 attributes per ancestor in
         // a std::set whose SdfPath comparisons also walk depth. Built for
@@ -4309,7 +4285,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         solverInputTokens.emplace(primPath, std::move(token));
     };
     // THE ANCESTOR CHAIN OF A RELATIONSHIP TARGET, AS ONE TOKEN PER PATH.
-    //
     // Every aggregate-solver target contributes its whole ancestor chain --
     // each ancestor's path, type and input closure -- because a rewire
     // anywhere above a joint changes the frame it resolves against. That
@@ -4319,14 +4294,12 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // one RigExecFkChain over a nested chain: 287 ms at 50 joints, 2.0 s at
     // 100, 188 s at 400 -- and 224 of the biped's 372 ms compile, the
     // largest single cost left after the pose-schedule work.
-    //
     // Siblings share every ancestor above them, and a chain's joints share
     // all of theirs, so each path's chain is computed once and folds in its
     // parent's token. The identity is the same kind the closure tokens above
     // already use: a hash of the exact text plus its length, so any change
     // to any ancestor's path, type or closure still changes every token
     // below it. Function-local for the same reason as the caches above.
-    //
     // Iterative, not recursive: a chain can be hundreds of joints deep.
     std::unordered_map<SdfPath, std::string, SdfPath::Hash> ancestorChainTokens;
     const auto ancestorChainToken =
@@ -4385,7 +4358,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // connection sources, its namespace frame provider -- and the text those
     // attributes are written out as, and every piece of that is a pure
     // function of one prim and the composed stage.
-    //
     // So it is all made here, up front, in parallel, for exactly the prims
     // the walk will ask hopFor about. The walk runs a pose-input closure from
     // every aggregate solver and from every ancestor of every target of one
@@ -4397,7 +4369,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // the biped, whose walk reaches 227 of its 611 prims. Each result sits in
     // its own slot until hopFor adopts it, in walk order; a path that names
     // no prim is left to the walk, which writes it as a missing provider.
-    //
     // Off with the read memo: the unmemoized walk exists to check the memo
     // against, and a prefetch is a memo.
     if (rig && memoizeReads) {
@@ -4554,7 +4525,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // solvers live wherever the author put them, so every scope's
         // wiring must contribute to epoch identity
         // (consistent with mover discovery and compile Pass 0).
-        //
         // This walk's ORDER is now evaluation semantics, not only identity:
         // the solver stack ordinal is the reverse of exactly this composed
         // pre-order, so two solvers writing one joint commit in the order
@@ -4716,6 +4686,17 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     }
 
     if (segments & _DigestSolvers) {
+        // Native expression schemas can read posed frames via Exec
+        // relationships. Retargeting those reads changes the pose schedule.
+        if (rig) for (const UsdPrim &expression : UsdPrimRange(rig)) {
+            if (!expression.GetRelationship(TfToken("rigExec:poseInputs"))) continue;
+            digest += pathText(expression.GetPath());
+            const auto inputs = appendRelTargets(expression, "rigExec:poseInputs", false);
+            appendSolverInputConnections(expression);
+            for (const SdfPath &input : inputs) {
+                digest += ancestorChainToken(input);
+            }
+        }
         stampDigestRegion("Digest.Solvers");
     }
     // The whole rig, the same walk Compile's mover discovery takes: a mover
@@ -4813,6 +4794,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             // Declared dependency wiring and read phases.
             appendRelTargets(prim, "rigExec:transform", true);
             appendRelTargets(prim, "rigExec:transformSpace", true);
+            appendRelTargets(prim, "rigExec:referenceTransform", true);
+            appendRelTargets(prim, "rigExec:referenceTransformSpace", true);
             appendRelTargets(prim, "rigExec:driverTransforms", false);
             appendRelTargets(prim, "rigExec:driverTransformSpaces", false);
             appendRelTargets(prim, "rigExec:driverBaseTransforms", false);
@@ -4858,6 +4841,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 appendToken(prim, "rigExec:solverMode");
                 appendToken(prim, "rigExec:poleVectorMode");
                 appendToken(prim, "rigExec:evaluationMode");
+                appendToken(prim, "rigExec:orientationMode");
             }
             // Static-input relationships captured at compile into generated
             // resolved*/rest* wiring (lattice cage, surface, curve bind/
@@ -5033,9 +5017,7 @@ RigExecRigEvaluator::_SettleStructureDigest(_DigestGate *gate) const
     return _JoinStructureDigest(parts);
 }
 
-// ---------------------------------------------------------------------------
 // Pose interpolators (the conventional poseInterpolator)
-// ---------------------------------------------------------------------------
 
 bool
 RigExecRigEvaluator::_CompilePoseInterpolators(
@@ -5276,7 +5258,6 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
 
     // ORDERING, ASSERTED RATHER THAN TRUSTED (first half; the second is at
     // the head of the geometry chains).
-    //
     // WHAT THIS PHASE MUST RUN AFTER: the complete pose walk. Not the pose
     // SEED -- the full pose, every constraint included, and the driver
     // constraints in particular. the conventional pose drivers are hidden joints
@@ -5358,10 +5339,8 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
         // The driver's LOCAL rotation relative to its own REST, which is what
         // every authored pose is measured from and why a rig standing still
         // reads its neutral at 1.000000.
-        //
         //   local = parent^-1 * world       (row-vector; see RigExecFrameRotation)
         //   delta = restLocal^-1 * local
-        //
         // Exactly the `neutral^-1 * pose` the authored quaternions were
         // rebased by (schema RigExecPose.rigExec:rotation), and therefore
         // directly comparable to them. The rest local is taken from the
@@ -5585,21 +5564,18 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 }
 
 // ONE BROKEN OPERATION DOES NOT TAKE THE RIG DOWN.
-//
 // A compile error that is ONE operation's fault -- a mover whose target is not
 // on this stage, a solver naming a prim that is not a joint, a constraint with
 // nothing to move -- used to fail the whole rig, so nothing published: not the
 // controls, not the joints, not the operations that were fine. A rig layer
 // opened on its own, before the model layer that supplies its geometry is
 // composed in, drew nothing at all.
-//
 // So the error is attributed to the operation it names, that operation is set
 // aside -- warned about, and treated as though it were not on the stage -- and
 // the rig compiles again without it. Repeated until the compile succeeds, or
 // fails for a reason no single operation owns (no rig prim, no outputs, an
 // error naming no operation), which still fails the rig as before and leaves
 // the program it had running.
-//
 // What is skipped is a function of structure alone, and the structure digest
 // already covers it: supplying the missing target, or fixing the operation, is
 // a structural edit, and the recompile it leads to tries every operation again.
@@ -5688,7 +5664,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // MEASURED: 5 hangs in 12 runs of testRigExecStageEdits, 0 in 15
     // with RIGEXEC_ENABLE_PARALLEL_EVAL=0. Intermittent because it is a
     // race for who reaches the registry first.
-    //
     // Scoped to the whole function, not to the Wait() calls: a
     // WorkDispatcher also waits in its DESTRUCTOR, and Compile has
     // early returns between the exec lane's Run() and its Wait(), so a
@@ -5699,7 +5674,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // Sequential region stamps: Compile is flat code with early returns,
     // so RAII scopes cannot span its phases; each stamp closes the
     // previous region and opens the next. One branch when disabled.
-    //
     // The clock starts on the FIRST line of the body rather than beside the
     // first stamped phase, where it used to start. Everything above that
     // point could only ever measure as zero, and the trace had 6.1 ms sitting
@@ -5765,14 +5739,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // (which the digest reads, deterministically, as composed targets). So
     // it runs beside the WHOLE of
     // compile rather than beside only its tail.
-    //
     // MEASURED (biped_stack_anim, 201.3 ms compile): dispatched at the old
     // site -- after DiscoverValidate, at t=35.7 ms -- the digest's 107 ms
     // landed at t=143.1 ms, while the main thread reached the join below at
     // t=122.3 ms and then sat idle for 23.4 ms. Compile was paying for the
     // digest after all, in waiting rather than in work. Dispatched here it
     // lands around t=107 ms, comfortably ahead of the join.
-    //
     // Safe to hoist past DiscoverValidate because that phase AUTHORS NOTHING:
     // it reads the composed stage and reports, so there is no edit for the
     // digest to race. And a rig malformed enough for DiscoverValidate to
@@ -5783,13 +5755,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // which the old site sat downstream of; hence the guard in the lambda.
     // The 0 that guard leaves behind is never read -- Compile returns false
     // on a null stage long before the commit below.
-    //
     // It runs as three tasks, one per segment (_DigestSegment), each
     // writing only its own string; the join below concatenates them in
     // segment order and hashes the result, which is the digest one serial
     // walk produces. The Solvers segment is most of the work, so it is
     // dispatched first.
-    //
     // digestParts is declared before the dispatcher so it outlives it, and
     // WorkDispatcher's destructor waits -- which is what covers the early
     // returns between here and the join, now the whole of compile rather
@@ -5845,7 +5815,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // not among them. Read once, here, so that every site below agrees --
     // half a deferred epoch would be a request nothing prepares and nothing
     // knows to.
-    //
     // Deferred wherever the program is the answer and the walk only a
     // fallback: every mode that runs the program except the parity check,
     // which pulls the walk beside it every frame. That is Baked, and Dynamic
@@ -5916,7 +5885,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     std::vector<SdfPath> newJointPaths =
         _DiscoverJointOutputs(_stage, _rigPath, _skippedOperations);
     // A rig with no joints is legal.
-    //
     // It used to be rejected here, on the reading that a joint is what a rig
     // publishes. That was never true of the evaluator, only of this check: a
     // mover writes an exact target, and a target is a points array, a plain
@@ -5926,7 +5894,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // vestigial one to rigs that pose none (10_AimXformTurret says so in a
     // comment), and rejected outright the simplest rig there is: a constraint
     // aiming one Xform at another.
-    //
     // What the rig DOES need is at least one output, and that cannot be known
     // until the mover walk below has run. The check moved there.
     // Controls and placed volumes are discovered alongside the joints. Zero
@@ -5964,10 +5931,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // one, the guides in a deferred one -- so every millisecond it starts
     // earlier is one off the compile. MEASURED on puppetA: those two passes
     // are ~1.9 ms that used to sit in front of the dispatch.
-    //
     // Warm the shared exec network, off the critical path, in an epoch that
     // prepares its requests here.
-    //
     // Every request an eager epoch prepares -- the solver batches, the
     // first-frame pose, the main epoch request, the guides -- compiles into
     // the SAME exec network for this stage, and whichever request asks for a
@@ -5978,7 +5943,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // is read from it, and a request that cannot be built valid simply
     // leaves the real preparations to compile what they need, and to report
     // their own failure.
-    //
     // A deferred epoch (deferExecPrep) warms nothing. The warm-up only pays
     // for itself through the preparations behind it, and a deferred epoch
     // leaves the big three to _RealizeDeferredExecPrep; what it still
@@ -5992,7 +5956,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // provider, a computation it does not define) is no longer handed to
     // Compile's caller at the lane join; it is raised, if at all, by the
     // first request that asks for that provider.
-    //
     // THE EXEC LANE. A stage has one ExecUsdSystem, shared by every tap set
     // on it, and nothing inside it is guarded for two callers: the system
     // itself is created lazily on first use, and requests compile into the
@@ -6010,7 +5973,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // ObjectsChanged would reach the tap context and tear requests down under
     // the task. Every exec call below goes through execCall(), which asserts
     // that no task owns the lane.
-    //
     // WHERE the join sits is a scheduling choice, not a data one: as late as
     // the first real exec call, so the lane task's tail overlaps as much
     // compiling-thread work as it can. Both kinds of epoch run the solver
@@ -6021,7 +5983,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // requests (deferExecPrep) and needs the lane back there only for a
     // connected-pose prepare, or failing that just ahead of the commit,
     // which publishes the guides the lane prepared.
-    //
     // Every object a lane task touches is declared here, ahead of both
     // dispatchers, so that it outlives them: a dispatcher's destructor waits,
     // so an early return anywhere in compile joins the task before anything
@@ -6029,7 +5990,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // dispatcher is declared ahead of the warm-up one for the same reason one
     // level down: it is destroyed after it, so the warm-up half is joined
     // before the rest half is waited on (see joinRestPull).
-    //
     // Null in a deferred epoch, which warms nothing (see above).
     std::unique_ptr<RigExecTapSet> warmupTaps;
     if (!deferExecPrep) {
@@ -6178,7 +6138,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     }
 
     // Transform-authority validation (host-durability redesign).
-    //
     // Neither condition can FAIL a compile, and both are reported rather
     // than fixed: the rig still evaluates exactly right, because the
     // evaluator reads rest:space and the avars and nothing else. What
@@ -6255,7 +6214,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
             // assembly -- under an Xform inside the asset is a supported
             // shape, and warning ten times per compile about a configuration
             // that works is noise nobody can act on.
-            //
             // The check above it stays. An op authored on the PROVIDER is
             // still not a transform authority, which is a different claim
             // and still true.
@@ -6377,7 +6335,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                 // rigExec:moves is the ordinary interactive edit, and taking
                 // every other mover down with it makes a node graph unusable
                 // the moment a wire is pulled.
-                //
                 // This is the same treatment a prim with no rigExec:moves at
                 // all already gets just above, with one difference: that case
                 // is silent because every scope, control and joint in the rig
@@ -6731,7 +6688,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                 }
             }
             // Read phases, validated from the AUTHORED stage.
-            //
             // Binding resolution parses these too, but it has to be total --
             // it returns a binding, not a verdict -- so an unparseable phase
             // there degrades to `base`. That is the wrong answer delivered
@@ -6890,7 +6846,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                 // the decomposed rotation and reconstructs, leaving
                 // translation and scale untouched. So the default needs no
                 // implementation; it is already the behavior.
-                //
                 // Any OTHER value does not. ["scale"] alone would ask an aim
                 // to move the origin too, which requires writing the
                 // translation group that Aim does not write. That is the
@@ -6928,7 +6883,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                 structuralTokens.insert(
                     structuralTokens.end(),
                     {"rigExec:solverMode", "rigExec:poleVectorMode",
-                     "rigExec:evaluationMode"});
+                     "rigExec:evaluationMode", "rigExec:orientationMode"});
             }
             for (const char *name : structuralTokens) {
                 const UsdAttribute a = prim.GetAttribute(TfToken(name));
@@ -6980,7 +6935,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                      "rigExec:poleVectorMode", {"vector", "object"}) ||
                  !validateToken(
                      "rigExec:evaluationMode",
-                     {"neverTS", "autoDetect", "alwaysTS"}))) {
+                     {"neverTS", "autoDetect", "alwaysTS"}) ||
+                 !validateToken("rigExec:orientationMode", {"aimX", "preserve"}))) {
                 return false;
             }
             newMovers.push_back(std::move(record));
@@ -6990,7 +6946,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     compileBlocks.Next("DiscoverValidate.OutputCheck");
     // A rig has to publish SOMETHING (the check the joint requirement used
     // to stand in for).
-    //
     // Controls, joints, volumes, and movers are the four ways it can: a control
     // publishes its posed frame for the synthesized viewport guide, a joint
     // publishes a frame whether or not anything moves it, a placed weight
@@ -7014,14 +6969,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     }
 
     // Multiple writers of one target are an ordinary stack, not an error.
-    //
     // Their order is the reverse-sibling post-order walk of the FINAL COMPOSED
     // hierarchy above. UsdPrim::GetChildrenNames() returns the displayed
     // top-to-bottom order with any parent child-order instruction (reorder
     // nameChildren) already folded in; the stack consumes that order in
     // reverse so the bottom branch runs first. A reorder is a convenience for
     // redirecting that order, never a precondition for having one.
-    //
     // This deliberately does not reason about HOW the composed order arose --
     // which layer authored a sibling, which arc contributed it, whether a
     // reorder opinion exists. The compiler reads the final stage and nothing
@@ -7111,14 +7064,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // restoration would re-hit the same invalid state). Recursive over the
     // composed Solvers subtree. Authored-conflict checks read the SOURCE
     // stage (_stage).
-    //
     // joint -> (posing solver, element). The validation below already
     // resolves and bounds-checks exactly this pair; keeping it is what lets
     // Evaluate extract each bound joint's frame from its solver's aggregate
     // and supply it as a value override, so the binding never has to be
     // authored anywhere (it used to become rigExec:frameSource /
     // rigExec:frameElement on the joint, in the derived layer).
-    //
     // rigExec:joints is an ordered WRITE, not an exclusive claim (spec §4.2,
     // "Solvers stack"), so the value is the ordered stack of writers rather
     // than one owner. Index 0 writes first; the last entry supplies the
@@ -7127,7 +7078,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // writers can be ordered by a solver -> constraint -> solver path and by
     // nothing else: data flow decides any pair it orders, and the solver
     // stack ordinal breaks every remaining tie.
-    //
     // The ordered solver walk is hoisted here because four passes need it --
     // this validation, the consumed-solver relaxation, the solver DAG and the
     // stack ordinal -- and it is a full UsdPrimRange over the rig each time
@@ -7143,7 +7093,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // after its descendants -- so "the bottom one executes first" reads the
     // same whichever kind of node a rigger is looking at, and a reorder in
     // usdview reorders the stack.
-    //
     // It is a pre-order of the WHOLE rig, not a sibling order: two solvers in
     // different scopes are ordered by where their scopes sit, and a nested
     // solver comes before its ancestor. This is deliberately the same walk
@@ -7222,7 +7171,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
             // solver does not pose anything itself -- the consumer that
             // reads it is what writes to the joints -- so its
             // rigExec:joints is a rest reference, not an output claim.
-            //
             // That is what lets an IK feeding an IK/FK blend name the
             // chain it solves for: the blend still claims those joints
             // exclusively, while the IK gets the joint REST frames it
@@ -7524,7 +7472,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                         // also author its own posed:space connection (the solver
                         // pose is supplied as an override and would silently win
                         // over the connection the raw stage shows).
-                        //
                         // There is no longer a companion check for a legacy
                         // authored rigExec:frameSource. Nothing reads that name
                         // now -- it is neither a schema property nor a
@@ -7616,7 +7563,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // therefore never introduce a feedback edge (IK -> blend is legal).
     // PRODUCERS: the solvers with no position in the pose stack at all
     // (spec §4.2). Two kinds, and both are scheduled by DATA FLOW alone:
-    //
     //   * a solver whose AGGREGATE another solver reads. It is already
     //     special -- the consumed-solver relaxation makes its rigExec:joints
     //     a rest reference wherever the consumer claims the same joint -- and
@@ -7625,16 +7571,13 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     //     about it. This is what keeps every IK/FK blend in the repo
     //     schedulable: reversed sibling order puts the blend BEFORE the
     //     solvers it blends, because a blend is authored last.
-    //
     //     (The relaxation is per JOINT, not per solver, so a consumed solver
     //     that also writes a joint its consumer does not name still writes --
     //     `docs/examples/blend_point_frames.usda` is exactly that shape. It
     //     is still a producer: what takes it out of the stack is being read,
     //     not being joint-less.)
-    //
     //   * a solver that writes no joint at all -- one whose aggregate only a
     //     geometry mover reads.
-    //
     // Every consumer of the ordinal map must therefore test membership rather
     // than use operator[].
     std::set<SdfPath> aggregateProducers;
@@ -7669,7 +7612,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // to the solvers IS the unified pose stack restricted to them; the
     // constraint half only interleaves between them and cannot reorder a
     // solver pair.
-    //
     // Only a READER that is itself a stack step consults it. A PRODUCER has no
     // position for the comparison to be about, so it keeps the unconditional
     // "wait for every writer of what I read" edge it always had -- which is
@@ -7693,7 +7635,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // failure, which is the worst kind here. Collected wherever a read is
     // resolved and applied once poseDependencies exists, because the two
     // halves are found on opposite sides of the constraint pass.
-    //
     // (waiter, waited-on): poseDependencies[first].insert(second).
     std::vector<std::pair<SdfPath, SdfPath>> poseReverseEdges;
     std::map<SdfPath, std::set<SdfPath>> newSolverDependencies;
@@ -7822,13 +7763,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     auto restorePreviousEpoch = [&]() {
         // Retain network checkpoints but require a valid binding plan before
         // another generation can be published.
-        //
         // Nothing to put back for the solver-input index: its absent flag
         // and its handover change only in the statements that commit
         // _solverBatches, so a return before the commit leaves the previous
         // epoch's batches and index state standing together, and one after
         // it leaves the new epoch's together.
-        //
         // The lane comes back first. Every failure return goes through here,
         // and the locals it is about to free include prepared tap sets (a
         // baked epoch's connected-pose taps, before their commit): freeing
@@ -7864,7 +7803,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // terminating.
     // Structural authoring errors on a volume weight, collected during
     // the walk below and reported before the epoch commits.
-    //
     // These are cardinality rules on the points-bearing relationships,
     // and they exist because the two evaluation paths CANNOT disagree
     // about them safely: the exec kernel receives a relationship's
@@ -7884,7 +7822,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
 
     // Returns true when this weight object, or anything it composes,
     // samples the in-flight points.
-    //
     // The answer has to propagate UP: the graph build loop tests the
     // weight object a mover actually binds, which for a composed field is
     // the combine, not the sphere inside it. Recording only the leaf left
@@ -8356,14 +8293,10 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
         }
         newFrameConstraints.push_back(std::move(constraint));
     }
-    // ---- the UNIFIED POSE STACK ORDINAL (spec §4.2) ----------------------
-    //
     // One order over two kinds of step that used to live in two phases:
-    //
     //   * an aggregate solver that WRITES at least one joint, and
     //   * a pose-domain frame constraint (one that moves a transform provider
     //     rather than points).
-    //
     // The order is the reverse of the composed pre-order of the WHOLE RIG --
     // the bottom composed sibling first, a parent after its descendants, the
     // rule _GetMoverExecutionOrder already gives movers -- and NOTHING else
@@ -8371,7 +8304,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // feeds it (the incoming frame becomes that solver's rest reference); a
     // constraint above it revises its output, which is what every shipped rig
     // authors and why they are unchanged.
-    //
     // A PRODUCER is deliberately ABSENT from this map (see
     // jointWritingSolvers above for what makes one), so every consumer of the
     // map must test membership rather than use operator[].
@@ -8405,7 +8337,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // When the hierarchy says otherwise and BOTH are stack steps, that is a
     // contradiction the author has to resolve, and it is named rather than
     // left to surface as a generic Kahn loop.
-    //
     // Unreachable while the consumed-solver relaxation stands (a solver whose
     // aggregate another solver reads writes no joint, so it is a producer and
     // has no position). This is the forward guard for the day that changes.
@@ -8547,7 +8478,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
 
     compileBlocks.Next("SolverSchedule.PropertyChains");
     // Property-domain chains, from the same mover execution walk.
-    //
     // Nothing to bind and nothing to tap: a math mover's inputs are all
     // authored on itself, and the chain's base is the target attribute's own
     // authored value. That is exactly what makes the chain evaluable BEFORE
@@ -8752,14 +8682,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                         _computePointFrameArray));
             }
             // No computeBlendChannel tap here, deliberately.
-            //
             // There used to be one per blend input, pushed into
             // revision.blendChannelTaps -- and NOTHING ever read that vector.
             // The packet is assembled from a direct stage read in
             // _EvaluateDynamic instead, so every dense sample's full points
             // array was pulled twice per frame: once through exec to fill a
             // value that was discarded, once again for real.
-            //
             // MEASURED (tools/biped/spikes/blend_cost.py, 64 dense samples on
             // a 26,276-point body, every channel weight 0): the taps cost
             // 7.72 ms/frame of AuthoritativeSnapshot, about 30% of the whole
@@ -8910,7 +8838,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // input path. The same joint is an input to many solvers, many
     // constraints and many batches, and each ask re-walks the whole chain to
     // the rig root.
-    //
     // It is a pure function of the composed stage and of the joint binding
     // this compile has already decided above; neither changes while a compile
     // runs, so a memoized answer is the answer a recomputation would give.
@@ -8926,7 +8853,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // the composed stage, so its answer does not depend on when it is
     // computed, which is what lets the walk below take one out of here
     // instead of paying for it in line.
-    //
     // Deliberately NOT newPoseInputInfo itself. That map is iterated as a
     // RESULT further down (the connected-pose taps, newPoseProviderInputs),
     // so it has to hold exactly the prims a closure walk actually reached
@@ -8964,7 +8890,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
                 // TWICE for the rest of compile -- which measured as ~13 ms
                 // added to the batch pass that runs after it, purely in
                 // allocator and locality cost.
-                //
                 // A prim the prefetch did not ask about is asked about now,
                 // through the same graph, so every closure of this compile
                 // materializes its attributes the same way.
@@ -9023,7 +8948,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // inherently serial (each prim's answer says which prim to ask about
     // next), but the ASKING is not: a level of the frontier is a set of
     // independent stage reads.
-    //
     // So the closures are computed here, all at once, by _PoseInputGraph:
     // its reads are spread across the pool a level at a time, and each
     // attribute any closure reaches is read once rather than once per prim
@@ -9031,7 +8955,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // computed and do set arithmetic only. Concurrent reads of a UsdStage
     // are what the digest thread, the tap warm-up and the two bake bind
     // loops already do.
-    //
     // Seeded with every path a closure will be asked for -- the solvers'
     // frame inputs, every constraint's inputs, and the joints and controls
     // that PrepareRequests seeds providers from -- plus each one's
@@ -9177,7 +9100,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
         // a writer ABOVE it must wait, or which version was read is undefined
         // and the schedule decides it by accident. A missed edge here does not
         // fail loudly; it silently reads the wrong version.
-        //
         // A geometry-domain constraint carries no stack position, so it keeps
         // the unconditional edge it always had.
         const bool positional = poseStackOrdinal.count(path) > 0;
@@ -9217,7 +9139,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // Which solvers must wait on which frame constraints. Asked the other way
     // round: for every pose a solver reads, walk UP to the rig root and pick
     // up the constraints that target each ancestor on the way.
-    //
     // This used to be the cross product -- constraints x requiredSolvers x
     // that solver's pose reads x that constraint's targets, with a call to an
     // `inheritsFrame` predicate per tuple, each call re-walking an ancestor
@@ -9232,7 +9153,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // is walked ONCE for all constraints instead of once per constraint,
     // because the map lookup answers "which constraints target this ancestor"
     // in one step. The predicate is gone with its only caller.
-    //
     // The walk reproduces that predicate exactly, half-open range included.
     // inheritsFrame(input, target) was `input.HasPrefix(target)` AND no
     // newJointBinding entry on any path in [input, target) -- its loop ran
@@ -9243,11 +9163,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // target does not disqualify that target, only bindings strictly below
     // it do. Reversing those two statements silently drops dependencies and
     // the schedule runs a solver before the constraint it reads.
-    //
     // Targets are prim paths (see _FrameConstraint::targets), so "ancestor
     // chain" and HasPrefix agree; a target that is somehow not on the chain
     // is simply never found, which is what the predicate answered for it too.
-    //
     // poseDependencies[solver] is a std::set, so the different insertion
     // ORDER this produces cannot change its contents, and the contents are
     // all pendingPose/poseConsumers below are built from -- same sets, same
@@ -9289,12 +9207,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
             }
         }
     }
-    // ---- the UNIFIED POSE STACK: one order over solvers and constraints ---
-    //
     // poseDependencies is complete here and nowhere earlier: the solver DAG
     // was finished above, but the constraint pass and the frame-inheritance
     // walk just added the solver <-> constraint edges.
-    //
     // The rule (spec §4.2) is now the NAMESPACE and nothing else. Every step
     // of the pose phase -- a solver that writes a joint, a constraint that
     // moves one -- carries a poseStackOrdinal taken from the reverse composed
@@ -9302,19 +9217,15 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // longer bends it: a frame read below its writer reads the earlier
     // version (the directional edges above), and an aggregate read that
     // contradicts it was rejected by name at compile time.
-    //
     // So this block does three things and no searching:
-    //
     //   1. put every joint's writer list into ordinal order;
     //   2. build that joint's INTERLEAVED writer chain -- its solvers and the
     //      constraints that move it, in one ordinal order;
     //   3. insert one edge per adjacent pair of that chain, so the schedule
     //      runs them in it.
-    //
     // A joint's chain is a restriction of one total order, so no two joints
     // can order the same pair in opposite directions and no edge inserted
     // here can close a loop.
-    //
     // WIDTH. The hierarchical order is never turned into a global serial
     // chain: an edge is only ever inserted between two steps that write the
     // SAME joint, and the only other edges in poseDependencies are the real
@@ -9468,7 +9379,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // The rest taps are added below, once the provider set is closed, because
     // whether they belong in the per-frame request or in the epoch request
     // depends on the whole set (see newRestsMightVary).
-    //
     // Already-seeded is a STOP, not a skip. A path only gets into
     // newFirstFramePoseFrames by way of this loop, which has no early exit of
     // its own and climbs from wherever it started all the way to the root --
@@ -9479,7 +9389,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // ancestors to reach a conclusion already reached. A non-provider still
     // has to `continue`: it says nothing about its ancestors, which may be
     // providers that no earlier call reached.
-    //
     // (Within a single call the guard cannot fire on a path this call itself
     // seeded: the chain strictly ascends, so no path is visited twice.)
     auto seedProvider = [&](SdfPath path) {
@@ -9516,22 +9425,18 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // the solver requests; a dynamic epoch prepares them only once the
     // schedule stands, in PrepareRequests.SolverBatches, and a baked one
     // never does (see the exec lane at the warm-up's dispatch).
-    // ---- one exec request per run of a level --------------------------------
-    //
     // Every exec request costs a fixed ~50-60 us before it computes anything
     // (ComputeWithOverrides on a one-tap request), which on the biped made
     // the pose walk's 24 solver requests a third of a dynamic frame. Solvers
     // that share a ready level have no edge between them, so the obvious
     // move is one request per level: union the tails, evaluate once, commit
     // each solver's joints at its own step, in the order the walk always did.
-    //
     // "No edge" is NOT "no interaction", though. In a shared request every
     // override one member pushes is an override every computation in the
     // request reads, and every member's tail is built before any member
     // commits. The merge is byte-identical only where neither can matter, so
     // a solver JOINS the open request only when, against every solver
     // already in it, all four of these hold both ways round:
-    //
     //  1. Their named joints (rigExec:joints) are unrelated: no joint one
     //     names is the same joint as, or a namespace ancestor or descendant
     //     of, a joint the other names. The one exception is two solvers that
@@ -9539,7 +9444,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     //     blend -- with the same restInputs (both none, or the same
     //     predecessor for every joint): they then push the same
     //     computeRestFrame overrides or none at all, and read the same rests.
-    //
     //  2. No computeRestFrame override one pushes -- live or pinned, since a
     //     pin is an override too -- is at or above anything whose rest the
     //     other can read, unless the other pushes the identical override
@@ -9549,7 +9453,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     //     frame inputs and their pose closure. This is the leak a naive
     //     per-level merge has: one solver's live rest reaching the joints
     //     another names.
-    //
     //  3. Nothing the other's tail reads out of the walk -- its frame inputs
     //     and its rest-input joints -- sits at or under a joint this one
     //     WRITES. The walk used to build each tail after the previous
@@ -9557,14 +9460,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     //     namespace descendants with no edge to say so (frame inputs skip
     //     rigExec:joints). Built before any commit, such a tail would read
     //     the pre-commit frame.
-    //
     //  4. No frame input one overrides that the other does not, and no
     //     joint one writes, is at or above a joint the other names. A
     //     solver's pose reads are its frame inputs, but its chain hangs off
     //     its named joints' parents, so a point-frame override there -- or
     //     an aggregate solved under the other's overrides, which is what a
     //     written joint's frame is -- is kept out of reach too.
-    //
     // Beyond that, point-frame overrides cannot leak. Every frame input a
     // solver has is a seeded pose provider, live from the frame seed on, so
     // each member's own tail overrides computePointFrame on ALL of its frame
@@ -9572,16 +9473,13 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // other members' frame-input and aggregate overrides therefore sit
     // outside its cone -- or on the same prim, where both push the finalFrame
     // the walk holds, and rule 3 is what makes that the same frame.
-    //
     // A solver whose pose closure reaches a connected pose provider never
     // shares: refreshPoseProvider runs exec and commits for those, and the
     // walk interleaved it with the previous solver's commit.
-    //
     // A request never spans a constraint: the run closes at the first
     // constraint of the level and at the end of it, so a follower's pose
     // step directly follows its leader's (or another follower's) and nothing
     // the walk does between them can change what the request read.
-    //
     // Deferred epochs group the same way, so a dynamic generation of a baked
     // epoch evaluates exactly what a dynamic epoch would. The baked program
     // reads batches, not requests, and does not see the grouping.
@@ -9707,7 +9605,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
         // ORDINAL order rather than "every solver first, then every
         // constraint". That is the whole structural difference between the two
         // phases this change collapses, and it is this one sort.
-        //
         // A producer carries no ordinal and sorts first: it publishes an
         // aggregate and writes no joint, so nothing can observe where in the
         // level it landed.
@@ -9740,7 +9637,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
             // hands it the authored rest, which is why a rig whose
             // constraints all sit above its solvers is bit-identical to what
             // it was before this rule existed.
-            //
             // EVERY named joint is listed, not only the live ones, and that
             // is not belt and braces: computeRestFrame reads its NAMESPACE
             // ANCESTOR's computeRestFrame, so an override on the hip would
@@ -9748,13 +9644,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
             // the baked path, whose rests are per-slot, does not do. Pinning
             // the authored value on the joints with no predecessor is what
             // makes the two paths compute the same description.
-            //
             // The map stays EMPTY unless at least one joint is live, so a rig
             // with no constraint below a solver pushes no override at all and
             // exec resolves computeRestFrame from the stage exactly as it
             // always has. That is the parity guarantee, and it is structural
             // rather than argued.
-            //
             // The named joints are read for every solver, not only for one
             // with a live rest: the request grouping below needs them too.
             SdfPathVector named;
@@ -9915,7 +9809,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // Built once the schedule is known to hold, from the finished batches,
     // rather than batch by batch inside the loop above: nothing in the loop
     // reads it, and a compile that turns back on a cycle has no use for it.
-    //
     // A deferred epoch builds none of it here. Its only reader routes edits
     // into state that only a dynamic generation reads, so it is built by
     // _RealizeDeferredExecPrep, from what the commit below hands over, and a
@@ -9942,19 +9835,15 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
             solverPoseReads, newPoseInputInfo);
     }
 
-    // ---- the pose stack: the walk order and the per-joint chains ----------
-    //
     // Everything above settles which steps exist and what must precede what;
     // the SCHEDULE is what finally puts them in a line. Read that line back
     // here, so that "the last writer supplies the joint's base frame" and
     // "AtPrim resolves against the order that actually runs" are facts rather
     // than hopes.
-    //
     // The chain is INTERLEAVED -- solvers and the constraints that move the
     // same joint, in one hierarchical order -- and it is built for every
     // written joint, because the constraint half of a chain is not
     // always-after.
-    //
     // Nothing here is REPORTED. Stacking is ordinary authoring under the
     // unified pose stack, not a shape worth a diagnostic, so the compile is
     // silent about it and GetFrameChains() is what a tool or a test reads to
@@ -10018,7 +9907,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     compileBlocks.Next("PrepareRequests.RestTaps");
     // Rest frames: one request for the whole epoch, or per-frame taps when
     // some provider's rest channels can move with time.
-    //
     // computeRestFrame reads rest:space and the six rest avars of the
     // provider and of every RigExec ancestor, and nothing else. When none of
     // those can change within the epoch, every frame's answer is the same
@@ -10026,13 +9914,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // rest channel that is connected, that carries time samples anywhere in
     // its composition, or that a property chain writes keeps the old
     // per-frame taps: the frozen value would be wrong for it.
-    //
     // Compile is not the last word on this. The epoch digest hashes no rest
     // channel, so an edit that ANIMATES one later does not recompile by
     // itself; _SettleEpoch re-asks the same question for every provider a
     // notice reached (the rest gate, _NoteRestEdits) and rebuilds the epoch
     // when the answer has changed.
-    //
     // The rest tap set and its ids are lane objects, declared with the
     // warm-up; this pass fills them before the pull is handed out.
     bool newRestsMightVary = false;
@@ -10049,7 +9935,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
         // only an early out -- a worker that finds it set stops asking --
         // and every rig whose rests are static (the common case, and the
         // one that pays for every provider) never sets it.
-        //
         // Decided HERE, from the stage, and not borrowed from anything the
         // bake later learns about varying inputs: it chooses where the rest
         // taps go, per-frame or per-epoch, before Bake has run.
@@ -10094,14 +9979,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // used to sit behind the join, with the warm-up's tail idling the
     // compiling thread in front of it. Now it runs beside the warm-up, and
     // the join waits only for what is left of it.
-    //
     // The preparations themselves are the ones the loop used to make as it
     // went, in the order it made them: the solver requests in closing
     // order, then the connected providers in path order, exactly as before.
     // The one thing the move changes is precedence between two failures: a
     // rig whose pose steps close a cycle AND whose requests would not
     // prepare now reports the cycle, which the schedule finds first.
-    //
     // A baked epoch prepares no solver request, and needs the lane here only
     // for a connected provider.
     if (!deferExecPrep || !newConnectedPoseTaps.empty()) {
@@ -10184,7 +10067,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // The epoch's rest frames, pulled once, at the stage's start time -- the
     // frame a session opens on, and, with no time-varying rest channel in
     // the epoch, the same frames every other time code would give.
-    //
     // A real time code and never Default: a Default pull is a different mode
     // for exec, not a different instant. Values it computes into the shared
     // executor are time-independent by construction and a later ChangeTime
@@ -10227,7 +10109,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
 
     compileBlocks.Next("PrepareRequests.WarmCompute");
     // Pay the first frame's warm compute here.
-    //
     // Every Evaluate warms the shared executor before its override-bearing
     // pull (see FirstFramePose), and the first warm of a session computes the whole
     // seed network from an empty cache -- which is most of what makes the
@@ -10235,7 +10116,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // depends on which frame is asked for first, so it is done once here, at
     // the time a session opens on. It is the same call the first Evaluate
     // would make; nothing is read from it and no value is published.
-    //
     // Before the rest pull below, not after: a provider's rest frame is an
     // input to its point frame, so the warm computes the rests too and the
     // pull becomes a copy-out of values that are already there.
@@ -10276,7 +10156,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     compileBlocks.Close();
     stampCompileRegion("Compile.PrepareRequests");
     // Commit the new epoch atomically with respect to evaluator state.
-    //
     // Every prepared tap set the previous epoch held is parked rather than
     // freed as its replacement lands: a baked epoch's rest pull can own the
     // lane from here to past the bake, and freeing a prepared set is an exec
@@ -10437,7 +10316,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
 
     stampCompileRegion("Compile.Commit");
     // Chain evaluation order.
-    //
     // A chain that reads another chain's target at a non-base phase cannot
     // run until that chain has. Collect those edges and sort; a cycle is a
     // compile error, because there is no order that satisfies it and the
@@ -10763,7 +10641,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors)
     // charge one interactive frame for the whole bake.
     // An epoch the program cannot express is not a compile error: the rig
     // evaluates dynamically and IsBakeable says why.
-    //
     // The rig's own request is re-read first, and here rather than at the
     // head of Compile: rigExec:baked is composed, so a reference swap or a
     // muted layer can change the answer with nothing else on the stage
@@ -11008,7 +10885,6 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     }
 
     // Placement.
-    //
     // Taken from the volume's own exec computeMatrix rather than
     // recomputed here. The oracle exists to check the WEIGHT FIELD math
     // independently, not the xformable frame chain -- that already has
@@ -11666,27 +11542,22 @@ _IsFinite(const GfMatrix4d &m)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // What a property chain re-reads every frame, bound once.
-//
 // The chains are the prologue, on BOTH paths: [P22] makes the baked program
 // call this very routine so the two agree line for line, so what is spent
 // here is spent twice over. Measured at 119-128us of a 662us biped frame,
 // and it is USD value resolution rather than arithmetic -- about 180 reads
 // at ~0.43us each, of which 0.38us is the resolution itself.
-//
 // A UsdAttributeQuery is the answer USD already has for that: it holds the
 // resolved value source, so a read at a new time skips the composition
 // lookup and goes straight to the layer. Nothing else about the routine
 // moves -- every diag() line, in the same order, off the same values -- so
 // the dynamic dumps are the proof that this changed no answer.
-//
 // The structural lookups come with it, because they are the same kind of
 // thing: the target attribute, its value type, the mover prim and the
 // weight-object relationship's targets are all things only a stage edit can
 // move, and a stage edit that reaches any of them marks the chain stale
 // (_ClearValueCaches) and the next run rebinds it.
-// ---------------------------------------------------------------------------
 
 struct RigExecPropertyChainBindings
 {
@@ -11737,7 +11608,6 @@ struct RigExecPropertyChainBindings
 
         // What the chain's answer can depend on, so a frame in which none of
         // it moved republishes the last answer instead of recomputing it.
-        //
         //  * `watch`: every input attribute, and every attribute along an
         //    input's connection chain -- where an interactive override can
         //    stand;
@@ -11875,11 +11745,9 @@ _ReadOperation(const RigExecPropertyChainBindings::Input &input,
 }
 
 // Reads the authored inputs of one float/vec3f math mover at \p time.
-//
 // Every field is read even though the operation uses only some of them: the
 // packet is the mover's whole authored state, and branching on the operation
 // while reading would put the same switch in two places.
-//
 // rigExec:operation is read at Default with no resolved inputs consulted,
 // which is what the unpinned form did: the operation names the arithmetic,
 // not a value, and a chain whose arithmetic an override could change is not
@@ -11910,7 +11778,6 @@ _ReadPinnedPropertyMathParams(
 namespace {
 
 // What one notice reaches, in the terms the value caches ask it.
-//
 // A notice names a composed change at every stage path that depends on the
 // edited spec -- through references, inherits and every other arc -- so a
 // cache keyed by the stage path it read is reached exactly where one of those
@@ -12572,7 +12439,6 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
 
 // Whether any of \p providers has a rest channel that can no longer be held
 // as an epoch constant.
-//
 // Asked only for the providers the rest gate saw a notice reach, never per
 // frame: the answer is a function of the provider's own seven rest
 // attributes and of the epoch's property chains, the chains change only with
@@ -12595,7 +12461,6 @@ RigExecRigEvaluator::_EpochRestsMightVary(
 }
 
 // The rest gate.
-//
 // The epoch's rest paths are p.rest:space and the six rest avars for every
 // provider p the rest request pulls -- every provider and every RigExec
 // ancestor of one, since seedProvider climbs to the root -- and
@@ -12610,10 +12475,8 @@ RigExecRigEvaluator::_EpochRestsMightVary(
 //     arrives, and reaches every provider as the case above.
 // A resolved-asset resync is read as a resync as well: it names prims the
 // same way, and reading it costs nothing.
-//
 // Membership is tested as "a rest name on a key of _restTapIds", which is the
 // same set without spelling out seven paths per provider at every commit.
-//
 // The keys are the providers the compile's type list recognizes, but
 // computeRestFrame is inherited -- a RigExecCurvenetAdjustment is a
 // RigExecControl to exec -- so a namespace ancestor that publishes a rest
@@ -12963,7 +12826,6 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     // every static input from the stage. Measured on the biped, a brow drag
     // spent 0.94 ms re-reading 161 blend-sample activations that are
     // authored constants, the largest single item in its frame.
-    //
     // It was never a correctness requirement, and the three ways it could
     // matter are each closed by construction:
     //   * an overridden attribute is written into the resolved inputs before
@@ -13042,7 +12904,6 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
 // Appends the interactive overrides to \p overrides, replacing any entry
 // already standing on the same key, and mirrors the attribute ones into
 // _resolvedInputs.
-//
 // Replacing rather than appending is not a tidiness preference: exec is given
 // a vector of key/value pairs and which of two entries on one key wins is not
 // a promise anything here should rely on. Removing the loser makes the answer
@@ -13078,7 +12939,6 @@ _ApplyInteractiveOverrides(
         // the viewport shows the chain's arithmetic while every exec consumer
         // sees the held one, which is the disagreement between the two
         // delivery routes that this function exists to prevent.
-        //
         // Only an entry that is already there is replaced. Inventing one would
         // publish an avar as a moved property of the generation, and an avar
         // is an input, not a result.
@@ -13102,13 +12962,11 @@ RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
 }
 
 // One per-frame array of constraint source parameters, read RAW.
-//
 // Straight off the attribute at the frame's time: no connection walk, no
 // resolved-input lookup, no interactive override. A source weight is an
 // input of the constraint operator, not of the rig, and the evaluator and
 // the program have to read it the same way -- so both read it here, and the
 // cardinality diagnostic has one wording rather than one per caller.
-//
 // An absent or empty array is not a failure: it means the neutral value on
 // every source, which is what an unauthored blend has always meant.
 bool
@@ -13242,13 +13100,11 @@ RigExecPrepareRestDerivedIkChain(
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // The pieces of the pose walk that are not the walk: frames read off the
 // stage, the deltas a native source rides, the placements a commit
 // republishes. Each one is called from the dynamic walk below and is written
 // to be callable from the baked program over its dense slots, because a
 // second implementation of any of them is a second answer.
-// ---------------------------------------------------------------------------
 
 bool
 RigExecRigEvaluator::_FrameFromXformRelativeToAsset(
@@ -13285,7 +13141,6 @@ RigExecApplyRevisedAncestorDelta(
     // sit beneath a constrained transform provider. The closest
     // revised ancestor contains all higher ancestor deltas, so apply
     // it once to the stage-derived source frame.
-    //
     // The comparison is over POINTS and not whole frames: a provider whose
     // flags differ from its base while its points do not has not moved, and
     // comparing the frames would make it the closest revised ancestor and
@@ -13379,12 +13234,10 @@ RigExecRigEvaluator::_IkUsesAnimatedTs(const std::vector<SdfPath> &chain) const
     return false;
 }
 
-// ---------------------------------------------------------------------------
 // The evaluation-mode dispatch. The dynamic generation below is unchanged by
 // it: Baked is a request that reaches _EvaluateDynamic whenever there is no
 // program to run, and the parity mode runs this same function as its
 // reference.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -13580,7 +13433,6 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
             // One reason, two audiences: the harness reads the first line
             // and an artist reads the second, and a generation that fell
             // back for one reason must not be able to name two.
-            //
             // A memoized bail names the failure the program last gave, which
             // is what the rebuild it stands in for would have said again.
             const std::string why =
@@ -13696,7 +13548,6 @@ RigExecRigEvaluator::_ReportAttributeBakeFallback(const std::string &detail,
     // dynamic path has been answered CORRECTLY, only slowly. Turning that
     // into a suite failure would make authoring the attribute the dangerous
     // choice, which is the opposite of what it is for.
-    //
     // No TF_WARN either: the fallback is a property of the epoch, so the
     // line would repeat on every frame of a session for as long as the
     // epoch stands. It goes on the pose, where a consumer reads it once per
@@ -13735,7 +13586,6 @@ RigExecRigEvaluator::_PeekEvaluationMode() const
     // reference swap can change it with nothing else moving, and the rebuild
     // wants the latest answer. Asking here rather than moving that call
     // keeps the documented ordering.
-    //
     // If the two ever disagreed -- composition changing mid-compile -- the
     // cost is a dynamic session whose first frame prepares its own requests.
     // Slower once, never wrong.
@@ -13765,7 +13615,6 @@ RigExecRigEvaluator::_RefreshAttributeEvaluationMode()
     // caller that chose knowing more than the asset does, and
     // RIGEXEC_EVALUATION_MODE is a whole session's answer that the parity
     // suites depend on being able to force onto any stage they open.
-    //
     // The failed-compile memo goes first, whatever the answer: this is the
     // mode being asked again, and a failure remembered under the last
     // answer is not evidence about the next compile.
@@ -13948,7 +13797,6 @@ RigExecRigEvaluator::_RebuildBakedProgram(
             // graph diagnostic, for nodes nothing rebuilt -- while the
             // dynamic path, whose graphs stood through the same edit, reports
             // none of it.
-            //
             // Only from a program that PUBLISHED a generation, which is what
             // makes the sentence above true: the whole of what an unrun
             // program carries here is `created = false` on nodes whose
@@ -13997,7 +13845,6 @@ RigExecRigEvaluator::_CompileUnlessKnownBroken(
     // of a key compare instead of a full compile (plus, at the structural
     // site, the digest ahead of it) on every frame of a scrub over a stage
     // somebody left broken.
-    //
     // The documented difference is what the compile says OUTSIDE the vector:
     // its TF_WARNs -- a derived start-frame note, the transform-authority
     // pass -- go to the host once, on the compile that failed, rather than
@@ -14046,18 +13893,15 @@ RigExecRigEvaluator::_SettleEpoch(std::vector<std::string> *diagnostics)
     }
     // Structural edits begin a new epoch: recompile when the composed
     // mover topology digest changed (spec §4.2, §6.3).
-    //
     // A standing failure memo answers ahead of the digest. It can only match
     // here when the failure it holds was this same structural recompile:
     // no notice has arrived since (the serial is the key), so the digest
     // would come out as it did then -- different from the committed one,
     // which a failed compile never replaces -- and the compile it leads to
     // would be answered from the memo anyway.
-    //
     // A digest that comes out equal commits the footprint it recorded: the
     // stage it read is the one the next notice will be judged against. One
     // that differs leaves that to the compile it leads to.
-    //
     // An edit that is CERTAINLY structural skips the digest here (rule T-e):
     // a prim the committed digest listed for its type, or a list it wrote,
     // has changed, so the digest has moved and would only be computed to
@@ -14127,7 +13971,6 @@ RigExecRigEvaluator::_SettleEpoch(std::vector<std::string> *diagnostics)
         // classification is re-asked here and answered by recompiling. This
         // is the only place the rest taps can be moved back into the
         // per-frame first-frame-pose request, which is what the fallback is.
-        //
         // Asked of the providers the rest gate saw reached and of no other:
         // a provider no notice reached has the kind it had at the commit.
         // Consumed before the answer, so that a recompile that fails is not
@@ -14306,7 +14149,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // Region stamps for the stretches that cannot take an RAII scope,
     // because a scope needs a block and the block would scope out the
     // lambdas the rest of the walk calls.
-    //
     // MEASURED 2026-09-13, biped: 3.3-3.9 ms/frame of this function sat
     // inside no profiler scope at all -- 24% of a no-change evaluate, more
     // than AuthoritativeSnapshot. The publish loops turned out to be only
@@ -14339,7 +14181,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
 
     // Property chains resolve FIRST, and their results ride in as attribute
     // overrides on every request below.
-    //
     // This is the whole point of evaluating them off the authored stage: a
     // math mover's inputs are all authored on itself, so its chain owes exec
     // nothing and can be computed before exec runs -- which means the value
@@ -14347,7 +14188,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // IK/FK weight then reaches RigExecBlendPointFrames as the weight it
     // reads, instead of that kernel reimplementing the author's clamp
     // internally and the authored mover meaning nothing.
-    //
     // No cycle is possible: nothing in a property chain reads a computation.
     _resolvedInputs.Clear();
     _chainSnapshots.Clear();
@@ -14355,13 +14195,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // Interactive overrides are applied on BOTH sides of the property chains,
     // because an override can be either end of one and the two ends want
     // opposite orderings.
-    //
     // Here, before the chains: an override on a value a chain READS -- a
     // control avar feeding a math mover -- has to be the value the chain
     // computes from, or dragging that control would move everything except
     // what the mover drives. _resolvedInputs is the route those reads take,
     // and it was cleared one line ago, so this has to come after the clear.
-    //
     // Again after them: an override on a property a chain WRITES has to beat
     // the chain's own result. Which of the two situations a given override is
     // in is not knowable here, and applying it twice means it does not have
@@ -14414,7 +14252,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // solver: its required inputs are unwired, so the kernel returned an
     // empty aggregate). They keep their natural rest-chain frame below, so
     // a rig mid-edit stays visible instead of vanishing.
-    //
     // (joint, (solver, element)) in POSE-WALK order, because under a stack
     // the joint is not enough: several solvers may write it and the one that
     // failed is not necessarily the one a joint->solver lookup would name.
@@ -14504,7 +14341,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // per frame with them, through the same request and at the frame's
         // own time code -- which is exactly what the per-frame rest taps
         // used to do.
-        //
         // Only a rest input can do it: computeRestFrame reads the seven
         // names below on the provider and on its RigExec ancestors and
         // nothing else (see _RestInputNames), and this epoch has no rest
@@ -14565,7 +14401,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // Compose the transform of any plain Xformable lying between the asset
     // root and a provider, which exec resolves as identity and therefore
     // drops (docs/superpowers/specs/2026-09-09-intervening-xform-design.md).
-    //
     // At evaluation, from the stage, into the frames in memory. Nothing is
     // authored: the rig follows the Xform the author wrote, wherever they
     // wrote it, and no layer is rewritten.
@@ -14725,7 +14560,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // of a 49 ms evaluate -- because commitConstraintFrames asks this once per
     // descendant joint per constraint, and the same handful of joints are
     // walked again for every constraint in the rig.
-    //
     // The predicate reads parent:space AT A TIME, and parent:space may carry
     // time samples, so a compile-time answer would be wrong on any frame but
     // the one it was baked at -- and this predicate decides whether a
@@ -14733,7 +14567,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // joints by centimetres (see verify_spine.py). Within one Evaluate,
     // `time` is fixed and the stage cannot change, so a memo is byte-identical
     // to recomputing.
-    //
     // Two tiers: _namespaceInheritsCache is a persistent member, cleared on
     // epoch change, that records only stage-constant answers (parent:space
     // with no time samples). Time-sampled attributes stay in the per-Evaluate
@@ -14778,7 +14611,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
 
     // Nearest pose-owning ancestor-or-self of a path, memoized for this
     // evaluation.
-    //
     // Namespace propagation stops at a path that owns its own pose -- a joint
     // a solver writes, or a provider whose parent:space is authored rather
     // than inherited. Both walks below need that answer for a provider
@@ -14787,7 +14619,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // once per propagated descendant: quadratic along a joint chain, and the
     // reason a long spine costs more at its root than at its tip. The nearest
     // owner depends only on the path, so it is computed once and shared.
-    //
     // The climb closes over every path element, not only the known providers:
     // a provider's parent need not itself be a provider.
     const auto ownsItsPose = [&](const SdfPath &path) {
@@ -15135,7 +14966,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // joint overrides into every level would itself be quadratic for a deep
     // chain, even if the kernels each executed only once. False when a
     // connected refresh failed, which ends the generation.
-    //
     // A shared request (see "one exec request per run" in Compile) builds
     // every member's tail here, back to back, before any member commits.
     // Compile only groups solvers for which that is the same tail the walk
@@ -15159,7 +14989,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
         }
         // "The incoming frame replaces the authored rest" (spec §4.2).
-        //
         // The joint prim publishes computePointFrame AND computeRestFrame,
         // and RigExecTwoBoneIk / RigExecSplineIk request the latter by
         // name off rigExec:joints -- so the whole of the dynamic-side
@@ -15167,7 +14996,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // rigExec:joints stays skipped in solverFrameInputs: overriding a
         // solver's own output joints as computePointFrame would feed the
         // solver back into itself, which is a different thing entirely.
-        //
         // A live entry takes the frame the preceding step left; an entry
         // with no predecessor pins the AUTHORED rest, because
         // computeRestFrame reads its namespace ancestor's and an override
@@ -15206,15 +15034,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         return true;
     };
 
-    // ---- the authoritative snapshot, overlapped with the constraint tail ---
-    //
     // Its overrides -- every solver aggregate and every provider's BASE
     // frame -- are final at the last solver commit: only a solver commit
     // writes baseFrames or solvedAggregates, apart from the connected-pose
     // refresh. So once the last solver has committed, the request can run on
     // a worker while this thread walks the constraints after it (on the
     // biped, everything past L30), instead of after them.
-    //
     // Only where that is the whole story:
     //  - No connected pose provider. refreshPoseProvider is then a no-op, so
     //    the constraint tail makes no exec call and moves no base frame --
@@ -15222,7 +15047,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     //  - Parallel evaluation on, and not inside a frozen run, whose thread
     //    must dispatch nothing.
     //  - Not a time-keyed cache hit, which needs no exec at all.
-    //
     // The JOIN sits where the snapshot used to be computed: after the
     // constraint tail and the fallback-joint diagnostics, and before
     // PublishProviders. So the snapshot's failure check and early return
@@ -15293,7 +15117,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // pass/fail pattern tracked which DLLs happened to resynchronise, not the
     // edit under test. Placement is irrelevant; verified green in both
     // positions at /O2 and /Od once the tree settled.
-    //
     // Left as a note because the methodological error is worth more than the
     // finding was: a single non-reproduced observation was treated as a
     // controlled experiment. Re-run the failing state before believing any
@@ -15390,7 +15213,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             } else if (batch.leader == step.index) {
                 // A SHARED request (see "one exec request per run" in
                 // Compile): the same steps as above, over every member.
-                //
                 // Each member's own tail is built and kept apart first, in
                 // walk order, because it is that member's input fingerprint;
                 // the request's tail is their union, in the same order, with
@@ -15596,7 +15418,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // A zero/negative envelope is an exact dormant pass-through. Do this
         // before resolving sources, effectors, or poles so malformed
         // disconnected inputs cannot make a disabled constraint fail.
-        //
         // A geometry-domain object is per point and resolves after the solve,
         // so it cannot short-circuit here. A transform object has already
         // resolved its one element and may use the ordinary dormant path.
@@ -15645,6 +15466,10 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
 
             RigExecSingleChainIkParams params;
+            TfToken orientationMode("aimX");
+            if (auto a = prim.GetAttribute(TfToken("rigExec:orientationMode")))
+                a.Get(&orientationMode);
+            params.preserveJointOrientation = orientationMode == "preserve";
             TfToken solverMode("rotatePlane");
             if (const UsdAttribute a =
                     prim.GetAttribute(TfToken("rigExec:solverMode"))) {
@@ -15998,9 +15823,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // The GEOMETRY domain. The solve produced the same full-strength
             // frame the transform domain would publish; the delta against the
             // prim's own base frame is what the points ride.
-            //
             //     D = F_solved * F_base^-1
-            //
             // Stashed here and consumed after the pose walk, the same
             // in-memory hand-off finalMatrices performs for a "final" read
             // phase. The prim's transform is NOT revised: a geometry-domain
@@ -16116,7 +15939,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
 
     // Publish final provider matrices after the atomic pose walk.
-    //
     // MEASURED 2026-09-13, biped: the three publish loops below cost 3.3-3.9
     // ms/frame -- 24% of a no-change evaluate, more than AuthoritativeSnapshot
     // -- and until these scopes existed NONE of it appeared in the profile.
@@ -16302,7 +16124,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // them.
 
     // 3c. THE POSE-INTERPOLATOR PHASE.
-    //
     // Here and nowhere else. It reads the FINAL pose -- so it runs after the
     // whole pose walk, every constraint included and the driver constraints
     // in particular -- and it writes floats that the geometry chains below
@@ -16357,19 +16178,16 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // 3b. The compiled mover graph, which is the ONLY producer of geometry
     // (spec §7.2): no generated prim and no derived-stage read stands between
     // the authored mover chain and the value written to movedProperties.
-    //
     // Every op reachable in a point chain has its provider values: matrix
     // (computeMatrix + computeWeightPacket), blendShape (summed
     // computeBlendChannel), ribbon / emitGuidePoints
     // (computePointFrameArray), and volumeCorrect / smooth / lattice /
     // surfaceProject, whose inputs are static reads through the binding plus
     // the authored base.
-    //
     // Keep topology and computed checkpoints across pulls. Updating a source
     // or packet invalidates only its downstream revisions. The independent
     // CPU reference is available in cpuParityMode for validation.
     // ORDERING, ASSERTED RATHER THAN TRUSTED (second half).
-    //
     // WHAT MUST RUN AFTER THE POSE-INTERPOLATOR PHASE: these chains. A
     // RigExecBlendInput's inputs:weight carries a single authored connection
     // to <pose>.outputs:weight, and RigExecResolvedInputs::GetAttribute
@@ -16378,7 +16196,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // anywhere and every corrective silently off. An assertion of exactly
     // this kind caught a real inversion on 2026-09-13, where the shapes chain
     // landed after the skin.
-    //
     // One map probe per published weight: 121 on the biped, and the whole
     // check measures below the profiler's resolution.
     if (!_poseWeightProperties.empty()) {
@@ -16405,7 +16222,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     size_t graphRevisionsBuilt = 0;
 
     // Chains run in dependency order, computed at compile (_chainOrder).
-    //
     // This used to be "curvenets first, then everything else", which was the
     // only cross-chain dependency that existed: a Profile Mover needs its
     // net's own chain already evaluated. A phased read is the same shape of
@@ -16414,7 +16230,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // edge in a topological sort and the heuristic went away.
     // What one chain produced, held apart from the pose until the walk folds
     // it in.
-    //
     // Independent chains can run at the same time, and two of them appending
     // to one diagnostics vector or inserting into one map would be a data
     // race -- and, worse, whichever finished first would decide the order the
@@ -16566,7 +16381,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // assembler reads inputs by path and never learns a phase exists
             // -- which is what lets a phase apply to any input, including
             // ones added later, without touching the assembler.
-            //
             // MEASURED 2026-09-13: declared phases are RARE -- almost every
             // revision has none -- and the copy this used to make
             // unconditionally was then bit-identical to _resolvedInputs, one
@@ -16639,6 +16453,24 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     }
                 }
             }
+            // Normalize against a matching neutral solve before removing
+            // the parent's delta. Both providers must have the same authored
+            // rest: inverse(R^-1 N) * (R^-1 P) = N^-1 P.
+            const auto referenceMatrix = [&](size_t index) {
+                GfMatrix4d matrix = snapshot.Get<GfMatrix4d>(
+                    revision.influenceTaps[index]);
+                if (revision.transformFinalPhase) {
+                    const auto it = finalMatrices.find(
+                        revision.binding.influences[index]);
+                    if (it != finalMatrices.end()) matrix = it->second;
+                }
+                return matrix;
+            };
+            const bool hasReference = revision.op == RigExecRevisionOp::Matrix &&
+                                      !revision.influenceTaps.empty();
+            if (values.transform && hasReference) {
+                transform = RigExecMeasureFromReference(transform, referenceMatrix(0));
+            }
             // A space provider: the transform measured against it, read at
             // the same phase, so the points take only the handle's motion
             // inside the space.
@@ -16651,6 +16483,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     if (revisedIt != finalMatrices.end()) {
                         space = revisedIt->second;
                     }
+                }
+                if (hasReference && revision.influenceTaps.size() > 1) {
+                    space = RigExecMeasureFromReference(space, referenceMatrix(1));
                 }
                 transform = RigExecMeasureInSpace(transform, space);
             }
@@ -16694,7 +16529,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 // against the points AS THEY STAND HERE, not the
                 // authored base, so the volume grabs whatever is inside
                 // it right now.
-                //
                 // It cannot come from exec. The revision node's only
                 // inputs are its parameters, its status, and the
                 // read-write point buffer, and the parameters are baked
@@ -16768,6 +16602,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 !revision.binding.blendInputs.empty() ||
                 revision.op == RigExecRevisionOp::BlendShape ||
                 revision.op == RigExecRevisionOp::VolumeCorrect ||
+                revision.op == RigExecRevisionOp::DeltaMush ||
                 revision.op == RigExecRevisionOp::Lattice ||
                 revision.op == RigExecRevisionOp::RecomputeNormals ||
                 revision.op == RigExecRevisionOp::RecomputeExtent;

@@ -1,12 +1,8 @@
-//
 // .rigexec DomainGeometry section: wire encoding.
-//
 // The scalar-list helpers here mirror pose.cpp's: a u32 list is a count plus
 // items on every section, so there is no format to fork. The bound-input
 // codec is NOT mirrored -- its tag order is real format -- and is shared
 // through RigExecWirePutInput/RigExecWireReadInput.
-//
-
 #include "rigExecBinary/geometry.h"
 
 namespace rigExec {

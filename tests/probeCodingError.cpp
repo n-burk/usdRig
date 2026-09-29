@@ -1,7 +1,5 @@
-//
 // Diagnostic probe: isolates which phase of evaluator compilation emits
 // the nonfatal "Applying predicate to invalid prim" coding error.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/tapSet.h"
 
@@ -30,7 +28,6 @@ Report(const char *phase, TfErrorMark &mark)
 }
 
 // The codeless schema's resource directory.
-//
 // The GENERATED one when the build supplied it: only that copy carries the
 // LibraryPath that lets Plug load the compute-extent registration on demand,
 // which is what makes UsdGeomBBoxCache answer for RigExec prims. The source
@@ -72,7 +69,6 @@ main(int argc, char **argv)
     }
 
     // Phase C: a rig whose solvers include RigExecRibbon.
-    //
     // This used to exercise chain compilation alone; there is no compiler
     // any more. The ribbon is what replaced its last remaining pass, and it
     // is the one solver whose inputs arrive as attribute value overrides

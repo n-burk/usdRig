@@ -1,6 +1,4 @@
-//
 // RigExec profiler: a lightweight scoped phase timer for rig evaluation.
-//
 // The evaluator already counts work (revisions created/executed, schedules
 // built, solver evaluations); this answers the complementary question of
 // where wall time goes. Recording is off by default and costs one branch per
@@ -8,16 +6,12 @@
 // outermost span and each phase, solver batch, constraint, and geometry
 // chain opens a child span, so the Chrome trace shows the critical path
 // directly.
-//
 // The output is the Chrome Trace Event format ("X" complete scopes, plus "I"
 // instant points and "C" counters for the per-frame cache lanes), which
 // Perfetto (ui.perfetto.dev) and chrome://tracing both open. Timestamps are
 // microseconds, normalized so the first recorded event starts at zero.
-//
 // This header depends only on the standard library, so the timing harness
 // itself is unit-testable without a stage or a USD build.
-//
-
 #ifndef RIGEXEC_PROFILER_H
 #define RIGEXEC_PROFILER_H
 

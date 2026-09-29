@@ -1066,9 +1066,9 @@ def testUsdviewInputFunction(appController):
             controller.Pick([region], touchPoseUI.MODE_REPLACE)
             appController._processEvents()
 
-            # What the same samples cost with TouchPose awake -- the
-            # number the animator feels, since this is what used to run
-            # on every mouse move of a manipulation.
+
+
+
             awakeStart = time.perf_counter()
             for i in range(samples):
                 spot = crossing[i % len(crossing)]

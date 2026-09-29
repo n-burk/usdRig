@@ -1,18 +1,14 @@
-//
 // RigExec end-to-end tests for volumetric weight objects (spec §4.1
 // volumetric extension): sphere, plane, and curve fields driving real
 // matrix movers, weight-object composition, the authored falloff spline,
 // and the reference/current sample phases.
-//
 // Every case also asserts pose.moverGraphParityMismatches == 0, which is
 // the assertion that actually matters: it means the OpenExec
 // computeWeightPacket kernels and the CPU oracle independently computed
 // the same field. A volumetric weight that only worked on one of those
 // paths would still move points, just not the same points.
-//
 // argv[1] = path to the examples directory; the codeless schema plugin is
 // expected at <examples>/../plugin/rigExecSchema/resources.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 
@@ -38,7 +34,6 @@ using namespace rigExec;
 static int failures = 0;
 
 // Whether this run asks for the BAKED program instead of the CPU oracle.
-//
 // The suite's default is cpuParityMode, which is what it was written for:
 // every expectation below is checked against an independently written CPU
 // resolver as well as against exec. That mode deliberately turns the baked
@@ -46,7 +41,6 @@ static int failures = 0;
 // the program shares exec's kernels -- so the whole of this suite's coverage
 // (every shape, both plane bounds, invert, strength, sampleSource, every
 // combine mode, both sample phases) was unreachable from the program.
-//
 // So the same binary is registered a second time with this set, and with
 // RIGEXEC_EVALUATION_MODE=parity and RIGEXEC_BAKE_REQUIRED=1 beside it: the
 // assertions are the same, the rig must bake, and the two paths are compared
@@ -61,7 +55,6 @@ BakedPathRequested()
 }
 
 // The vacuity guard, in whichever mode is running.
-//
 // "The parity harness ran" is what says a case tested a rig that actually
 // built a revision rather than passing because nothing happened. With the
 // oracle off there are no agreements to count, and what says the same thing
@@ -126,7 +119,6 @@ struct Fixture {
     static SdfPath Target() { return SdfPath("/Asset/Geom/M.points"); }
 
     // Puts \p prim at \p at, through the TRANSLATE AVARS.
-    //
     // An authored posed:space would say the same thing in one attribute --
     // it is what this fixture used to do -- and it is the one placement the
     // baked program declines, because a posed:space is whatever an arbitrary
@@ -273,14 +265,12 @@ TestSphereWeight()
 }
 
 // A volume placed by rest:space alone, with NOTHING animated.
-//
 // This is the case every other test here avoids, and it is the one that
 // matters most: MakeVolume places over an IDENTITY rest, and for that
 // configuration the rest->posed delta happens to equal the
 // desired placement. Author the placement on rest:space instead -- which
 // is how the shipped example places its mid-body volumes -- and the two
 // stop being the same thing.
-//
 // computeMatrix is documented as "the rest->posed target-local map"
 // (computations.cpp), i.e. a DEFORMATION, not a location. An unanimated
 // volume has posed == rest, so that map is the identity and a volume
@@ -341,7 +331,6 @@ TestSphereAxisScales()
 }
 
 // The TRANSFORM's scale avars are not part of a volume's placement.
-//
 // A volume weight is a pose provider, so it composes like a joint -- but
 // exec never binds avars:sx/sy/sz for one, and its shape is
 // inputs:scaleX/Y/Z's business alone. The two say opposite things about the
@@ -411,7 +400,6 @@ TestPlaneWeight()
 // rigExec:planeBounds = `bounded` clips the field to the in-plane
 // rectangle, and does nothing else: the same points inside it keep exactly
 // the weights the infinite plane gave them.
-//
 // This case earns its keep through the parity assertion Resolve() makes.
 // The bound lives in TWO independent implementations -- the exec kernel in
 // moverKernels.cpp and the CPU oracle in rigEvaluator.cpp -- and a bound
@@ -485,7 +473,6 @@ TestPlaneBounded()
 
 // The structural / animatable split in the epoch digest, for the two
 // properties this shape added.
-//
 // rigExec:planeBounds SELECTS WHICH FIELD FUNCTION RUNS, so it has to be
 // hashed: an unhashed structural token leaves exec replaying the epoch's
 // baked packet shape while the CPU oracle reads the live one. The
@@ -493,7 +480,6 @@ TestPlaneBounded()
 // that hashes an animatable value recompiles the whole rig on every
 // mouse-move of the scrub row that drives it -- which is a rig-sized
 // rebuild per frame, for a number exec re-reads for free.
-//
 // Both halves are asserted, and each half is what makes the other
 // meaningful: "the digest did not change" is only good news next to a
 // field that DID.
@@ -559,7 +545,6 @@ TestPlaneBoundsEpochSplit()
     const size_t digest = evaluator.GetBindingEpochDigest();
     CHECK(Near(GfVec3f(first.first, 0, 0), GfVec3f(0.0f, 0, 0)));
 
-    // ---- an ANIMATABLE edit: the field follows it and the epoch does not.
     extentU.Set(20.0f);
     extentV.Set(20.0f);
     const auto widened = weightOfFarPoint("wide extents");
@@ -575,7 +560,6 @@ TestPlaneBoundsEpochSplit()
         std::printf("FAIL inputs:extentU/V triggered an epoch rebuild\n");
     }
 
-    // ---- a STRUCTURAL edit: it must re-epoch, or exec replays the
     // bounded kernel while the oracle runs the unbounded one.
     bounds.Set(TfToken("unbounded"));
     const auto freed = weightOfFarPoint("unbounded");
@@ -593,7 +577,6 @@ TestPlaneBoundsEpochSplit()
 }
 
 // A bounded plane whose extents are not a rectangle.
-//
 // Both paths reject it -- the exec kernel returns an invalid packet and
 // the CPU oracle reports an error -- and the two rejections have to mean
 // the SAME THING downstream, or the parity harness is comparing a
@@ -790,7 +773,6 @@ TestCombineMaxOfTwoSpheres()
 // receives the targets through a VdfReadIterator. If exec delivered them
 // in any other order (sorted by path, say) the two would disagree and the
 // parity harness would fire -- which is exactly what this asserts.
-//
 // The commutative modes could never catch that.
 static void
 TestCombineSubtractOrder()
@@ -846,7 +828,6 @@ TestCombineSubtractOrder()
 // A combine whose inputs are ALL constant-representation. Nothing among
 // the inputs knows the cardinality, so the combine has to take it from
 // its own rigExec:weightTarget.
-//
 // This is not an exotic case: "constant" is the schema default for an
 // authored weight object, so it is what a rigger gets the first time they
 // multiply two freshly created static weights. Before the fix the exec
@@ -1194,9 +1175,7 @@ TestCombineCycleFailsCompile()
 }
 
 
-// ---------------------------------------------------------------------------
 // A volume weight object bound to a CONSTRAINT.
-//
 // The reachable shape of it is a GEOMETRY-DOMAIN constraint: a volumetric
 // field needs a point domain (_ValidateWeightObjectDomain refuses one on a
 // transform domain outright, composed inputs included), so the constraint
@@ -1205,11 +1184,9 @@ TestCombineCycleFailsCompile()
 // revision the constraint's delta feeds -- a constraint and its revision
 // being the same mover prim -- rather than as the one scalar a
 // transform-domain constraint would resolve.
-//
 // Nothing in examples/ and nothing in this suite reached it, which is why
 // the program refused "volume weight object on constraint" outright and
 // with no parity evidence either way.
-// ---------------------------------------------------------------------------
 namespace {
 
 struct ConstraintEnvelopeFixture {
@@ -1217,7 +1194,6 @@ struct ConstraintEnvelopeFixture {
     VtVec3fArray base;
 
     // \p volumeAt places the sphere through its own avars.
-    //
     // The sphere is deliberately NOT a constraint target here. Making one is
     // a rig the program refuses ("constraint target is both exec-seeded and
     // xform-derived"), for a reason that belongs to the dynamic path rather

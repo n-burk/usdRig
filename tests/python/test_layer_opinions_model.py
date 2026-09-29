@@ -343,10 +343,8 @@ def TestReadOnlyLayerIsNotEditable():
         weak.SetPermissionToEdit(True)
 
 
-# --------------------------------------------------------------------
 # Composition arcs: the rows a list-op field expands into, and the
 # operations that work on one entry of one.
-# --------------------------------------------------------------------
 
 
 ARCS_ROOT = '''#usda 1.0

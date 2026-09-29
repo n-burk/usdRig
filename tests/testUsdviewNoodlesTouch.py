@@ -83,7 +83,7 @@ def testUsdviewInputFunction(appController):
            "%d of %d regions bind no control"
            % (len(authored) - len(bound), len(authored)))
 
-    # --- 2. the editor's own loader turns them into nodes ---------------
+
     libraries = NodeLibraryRegistry().discover()
     _Check("TouchPose" in [lib.get_name() for lib in libraries],
            "the TouchPose node library was not discovered: %s"

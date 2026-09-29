@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -177,8 +177,8 @@ class TestPinAlignment(unittest.TestCase):
         self.assertEqual(pos["A"][1] + 100.0, pos["B"][1] + 2500.0)
 
     def test_two_tuple_edges_aim_at_the_centres(self):
-        # No offsets given: each end defaults to its own half height, so
-        # the boxes centre on each other exactly as they used to.
+
+
         sizes = {"A": (200.0, 1000.0), "B": (200.0, 3000.0)}
         pos = nl.layout_graph(sizes, [("A", "B")])
         self.assertEqual(pos["A"][1] + 500.0, pos["B"][1] + 1500.0)

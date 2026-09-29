@@ -1,6 +1,4 @@
-//
 // RigExecCurvenetMover: everything about the Profile Mover (spec §4.1).
-//
 // A curvenet mover deforms a mesh from a drawn curvenet: a mesh cut plus
 // two sparse solves. The Profile Mover has no exec-side computation and
 // no scalar oracle -- a second "independent" copy of a mesh cut plus two
@@ -9,8 +7,6 @@
 // testRigExecCurvenet covers it instead. This TU owns its revision
 // binder and registers the row that points at it. Compile validation is
 // the generic points-target + single-target rules.
-//
-
 #include "moverRegistry.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE

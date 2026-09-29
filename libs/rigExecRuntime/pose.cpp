@@ -1,14 +1,10 @@
-//
 // rigExecRuntime pose family (M2): ComposeSubtree, Solve, SolverCommit,
 // Constraint, CommitDelta, PropagateChunk, CommitApply, ProviderMatrix,
 // SnapshotFinals, PoseInterpolator. A zero-USD port of the baked pose
 // loop (libs/rigExec/bakedPose.cpp) over the RrStore domains.
-//
 // Fidelity rule: the same operations in the same order as the baked
 // path; double stays double, float stays float. This TU includes ONLY
 // store.h plus STL and <cmath>: no USD headers, no USD library.
-//
-
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
@@ -151,12 +147,10 @@ _RrLiveConstraint(const RrProgram *program, size_t constraint, int field)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Radial-basis pose interpolation (rbf.cpp): the per-frame evaluation
 // half plus the solved-table reconstitution. The width fitting and the
 // matrix inverse ran once at conversion time; what travels on the wire
 // is their answer.
-// ---------------------------------------------------------------------------
 
 constexpr double _RrRbfSingular = 1.0e-12;
 constexpr double _RrRbfNormalizeFloor = 1.0e-6;
@@ -2105,10 +2099,8 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
 
 namespace _RrPoseSteps {
 
-// ---------------------------------------------------------------------------
 // Solver kernels (rigExecMath/solvers.cpp, splineIk.cpp): Gf -> Rr, the
 // arithmetic untouched.
-// ---------------------------------------------------------------------------
 
 // Rotates v about unit axis by angle (Rodrigues).
 RrVec3d
@@ -3141,10 +3133,8 @@ _RrRunSolverCommitStep(RrProgram *program, size_t step,
     return _RrFinishCommit(program, step, size_t(wire.object), error);
 }
 
-// ---------------------------------------------------------------------------
 // Point-frame SRT substrate (pointFrame.cpp, matrix3d.cpp): the SVD
 // decomposition Blend, Twist and the FBX constraints solve through.
-// ---------------------------------------------------------------------------
 
 // GfMatrix3d::Orthonormalize (matrix3d.cpp): orthogonalize and
 // normalize the row vectors. The frame path never reads the result.
@@ -3685,9 +3675,7 @@ _RrDistributeTwist(const RrPointFrame &start, const RrPointFrame &end,
     return result;
 }
 
-// ---------------------------------------------------------------------------
 // Ribbon substrate (geometryKernels.cpp, solverKernels.cpp).
-// ---------------------------------------------------------------------------
 
 struct _RrCurveFrameSamples {
     std::vector<RrVec3f> positions;
@@ -3943,9 +3931,7 @@ _RrSolveTwistDistribution(
     return result;
 }
 
-// ---------------------------------------------------------------------------
 // Spline-IK solve (splineIk.cpp).
-// ---------------------------------------------------------------------------
 
 bool
 _RrSplineIsFinite(const RrVec3d &v)
@@ -4294,9 +4280,7 @@ _RrSolveSplineIk(const RrPoseSplineIkRest &rest,
     return allOk;
 }
 
-// ---------------------------------------------------------------------------
 // FBX constraint kernels (solvers.cpp).
-// ---------------------------------------------------------------------------
 
 enum class _RrEulerOrder : uint8_t {
     XYZ = 0,
@@ -5085,9 +5069,7 @@ _RrApplyAimLandmarks(const RrPointFrame &input,
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Single-chain IK (singleChainIk.cpp).
-// ---------------------------------------------------------------------------
 
 enum : int {
     _RrFabrikIterations = 128,
@@ -5745,9 +5727,7 @@ _RrPrepareRestDerivedIkChain(
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // The Constraint step (bakedPose.cpp).
-// ---------------------------------------------------------------------------
 
 // RigExecWeightPacket::ResolveAll (types.cpp), over an RrWeightPacket.
 bool

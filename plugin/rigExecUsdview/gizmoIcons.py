@@ -231,7 +231,7 @@ def _Global():
     A circle with one meridian and one parallel, and nothing else. The
     obvious alternative -- three labelled axes -- is four strokes and
     two glyph-sized letters at 16 px, which is mud; a globe reads at a
-    glance and is what every DCC uses for "world".
+    glance and is what every application uses for "world".
     """
     path = QtGui.QPainterPath()
     radius = (_BOX - 2 * _MARGIN) / 2.0

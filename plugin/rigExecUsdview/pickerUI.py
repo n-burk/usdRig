@@ -658,14 +658,14 @@ class PickerPanel(QtWidgets.QDialog):
         for picker in self._pickers:
             inner = QtWidgets.QTabWidget()
             for panel in picker.panels:
-                # A TAB OF THINGS THAT CANNOT BE CLICKED IS WORSE THAN NO
-                # TAB -- but which panel that is, is a question for the
-                # stage and not for a list of names in here. This used to
-                # skip "Facial" by name, because the face rig was not
-                # built and every one of that panel's buttons was dead;
-                # when the face arrived the tab stayed hidden, and the
-                # name was the only reason. So the test is the condition
-                # itself: a panel with something live on it gets a tab.
+
+
+
+
+
+
+
+
                 live = sum(1 for button in picker.buttons
                            if button.parent == panel.id
                            and button.live and not button.decoration)

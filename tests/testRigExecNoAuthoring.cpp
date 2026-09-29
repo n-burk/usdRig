@@ -1,16 +1,12 @@
-//
 // Proves the engine's central invariant: evaluation and Hydra publication
 // author NOTHING to the source stage (spec §7.2 revised).
-//
 // The existing assertions elsewhere probe for specific known artifacts -- the
 // absence of a __RigExecGenerated prim, a session layer with no sublayers.
 // Those only catch the mechanism that used to exist. This instead captures the
 // whole composed scene, runs everything, and demands byte equality, so it
 // catches any authoring at all, including a mechanism nobody has invented yet.
-//
 // argv[1] = path to the examples directory. The codeless schema plugin is
 // expected at <examples>/../plugin/rigExecSchema/resources.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExecImaging/registry.h"
 
@@ -201,7 +197,6 @@ TestImagingPublicationAuthorsNothing(const std::string &examplesDir)
 }
 
 // EVERY example, not one.
-//
 // ArmShotAnim above is the deepest rig, but depth is not the axis that
 // matters here: a write-back is introduced by a KIND of output, and the
 // examples are exactly the per-kind fixtures. The property-domain movers are
@@ -279,7 +274,6 @@ TestEveryExampleAuthorsNothing(const std::string &examplesDir)
 // The specific temptation the property movers create: a mover's result is a
 // value OF THE SAME TYPE as the attribute it targets, so writing it back is
 // one line and would look correct from every consumer's side.
-//
 // Assert against the attribute itself rather than the whole scene, so the
 // failure names the property instead of "the composed scene changed": the
 // authored opinion must survive an evaluation that published a different
@@ -363,7 +357,6 @@ TestPropertyMoverDoesNotWriteBack(const std::string &examplesDir)
 }  // namespace
 
 // The codeless schema's resource directory.
-//
 // The GENERATED one when the build supplied it: only that copy carries the
 // LibraryPath that lets Plug load the compute-extent registration on demand,
 // which is what makes UsdGeomBBoxCache answer for RigExec prims. The source

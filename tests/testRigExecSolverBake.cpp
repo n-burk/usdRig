@@ -1,13 +1,10 @@
-//
 // The baked program's solver half, on rigs the shipped examples do not have.
-//
 // Every solver the program expresses is exercised by some example, but only
 // through a rig that ALSO carries geometry the program cannot bake yet -- the
 // ribbon and twist stages decline for their mover operations, so a parity run
 // on them compares the dynamic path with itself and proves nothing about the
 // solver. The fixtures here are the same solvers with the geometry left off,
 // so the first generation each one bakes is measured.
-//
 // They are also where the authoring errors live. Every solver computation
 // answers a malformed binding with an empty aggregate and a warning that
 // never reaches the pose, so the only observable consequence is that the
@@ -15,9 +12,7 @@
 // answer with the same empty aggregate rather than with a partial solve or a
 // refusal. No shipped example is malformed, so these are the only rigs in
 // the tree where that agreement is checked at all.
-//
 // argv[1] = path to the examples directory (for the schema plugin).
-//
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -61,9 +56,7 @@ const SdfPath kRigPath("/Asset/Rig");
 /// A rig builder, so each fixture can be built twice over.
 using MakeStage = std::function<UsdStageRefPtr()>;
 
-// ---------------------------------------------------------------------------
 // The check every fixture is run through.
-// ---------------------------------------------------------------------------
 
 /// Builds \p make twice and compares the two paths over \p frames.
 ///
@@ -218,9 +211,7 @@ CheckDrag(const char *what, const MakeStage &make, const SdfPath &prim,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Authoring helpers.
-// ---------------------------------------------------------------------------
 
 UsdPrim
 Define(const UsdStageRefPtr &stage, const char *path, const char *type)
@@ -284,9 +275,7 @@ MakeFkSpine()
     return stage;
 }
 
-// ---------------------------------------------------------------------------
 // RigExecTwistDistribution.
-// ---------------------------------------------------------------------------
 
 /// The spine plus a twist distribution posing a middle joint, which is
 /// example 05's solver with its ribbon and its geometry left off.
@@ -367,9 +356,7 @@ MakeTwistRigWithNoEnd()
     return stage;
 }
 
-// ---------------------------------------------------------------------------
 // RigExecRibbon.
-// ---------------------------------------------------------------------------
 
 /// A native driver curve under /Asset/Geom, with a bind-time default and,
 /// when \p animated, a bend keyed over the sweep.
@@ -524,15 +511,12 @@ MakeGuideOnlyBlendRig()
     return stage;
 }
 
-// ---------------------------------------------------------------------------
 // The latent guards: RigExecTwoBoneIk, RigExecSplineIk and the blend.
-//
 // Every one of these malformed bindings makes the computation warn and
 // publish an EMPTY aggregate; the warning never reaches the pose, so the
 // only observable consequence is that the joints fall back to their rest
 // chains and say so. No shipped rig is malformed, so the bake's agreement
 // with that is checked here and nowhere else.
-// ---------------------------------------------------------------------------
 
 /// A two-bone IK leg with its three controls and its three bound joints:
 /// example 02's solver with the geometry left off.
@@ -683,7 +667,6 @@ MakeSplineIkRigWithUnsupportedRootTangent()
 //     "rigExec:jointElements length 2 must equal rigExec:joints length 3"
 // (the last one authored as a CUSTOM array, since RigExecTwoBoneIk does not
 // declare jointElements -- its positions are its elements).
-//
 // The bake's `degenerate` for all four is therefore defensive rather than
 // reachable. It stays, because the computations check them at runtime and
 // the two paths should answer the same hypothetical the same way; this
@@ -809,9 +792,7 @@ MakeBlendRigWithLinearRotationAndANonSolverInput()
     return stage;
 }
 
-// ---------------------------------------------------------------------------
 // The driver curve, which is the one solver input that is scene data.
-// ---------------------------------------------------------------------------
 
 /// The driver curve's bind pose is folded into bake state, so a drag on its
 /// points must be REFUSED rather than placed.
@@ -849,7 +830,6 @@ CheckRibbonPointsOverrideIsRefused()
     // Two reasons refuse it and either is enough -- the path is folded, and
     // it is in no binding table -- which is the point: no future rewiring
     // of one of them can make this drag placeable quietly.
-    //
     // The control: rigExec:sampleCount is a per-frame input of the same
     // solver and IS placeable, so a program that refused everything would
     // pass the line above while saying nothing.

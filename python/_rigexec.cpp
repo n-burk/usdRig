@@ -1,7 +1,5 @@
-//
 // _rigexec: native Python bindings for the RigExec rigging API (spec §4)
 // and the staged rig evaluator.
-//
 // Interop note: this OpenUSD build's pxr modules are Boost.Python, while
 // this module is pybind11. Both coexist in one interpreter because they load
 // the SAME USD shared libraries through Windows DLL caching. A pxr object
@@ -9,7 +7,6 @@
 // the instance attribute "__owner" (pxr/base/tf/pyIdentity.h: PyCapsule_New(
 // new TfRefPtr<T>(ptr), "refptr", dtor)). _ExtractStage recovers the stage
 // through that capsule and copies the refcounted pointer properly.
-//
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -45,9 +42,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
 
-// ---------------------------------------------------------------------------
 // pxr interop: recover a UsdStage* from a Boost.Python-wrapped pxr object.
-// ---------------------------------------------------------------------------
 
 /// True if \p obj's MRO contains the named pxr class (e.g. "pxr.Usd.Stage").
 bool
@@ -95,9 +90,7 @@ _ExtractStage(const py::object &obj)
     return result;
 }
 
-// ---------------------------------------------------------------------------
 // Value conversion helpers.
-// ---------------------------------------------------------------------------
 
 std::vector<double>
 _Mat4ToVec(const GfMatrix4d &m)
@@ -526,9 +519,7 @@ _PythonToDependencyPaths(
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Rig: the evaluator wrapper.
-// ---------------------------------------------------------------------------
 
 const char *
 _ModeName(rigExec::RigExecEvaluationMode mode)
@@ -589,7 +580,6 @@ struct _Rig {
     }
 
     // Compile and Evaluate run WITHOUT the GIL, and that is load-bearing.
-    //
     // Both dispatch work to TBB and wait for it. The first task to ask
     // OpenExec for a computation definition makes Exec_DefinitionRegistry
     // load the plugin that defines it, and TfDlopen finishes a load by
@@ -626,19 +616,15 @@ struct _Rig {
     }
 };
 
-// ---------------------------------------------------------------------------
 // RBF pose interpolators (libs/rigExecMath/rbf.h).
-//
 // Enough surface for the converter to stop importing a Python
 // solver: a fitter that hands back a solved TABLE as a plain dict,
 // and an evaluator that takes that same dict back. The dict is exactly the
 // record a converted rig writes out, so it round-trips through JSON and
 // through the schema without a second shape to keep in step.
-//
 // Free functions rather than a class on purpose. The solve is a build-time
 // step whose product is data; a live object would invite the per-frame path
 // to reach back through Python, which is the thing this port exists to stop.
-// ---------------------------------------------------------------------------
 
 std::vector<double>
 _SeqToDoubles(const py::object &obj)
@@ -801,15 +787,12 @@ _RbfSolverFromTable(const py::dict &table)
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // Module definition.
-// ---------------------------------------------------------------------------
 
 PYBIND11_MODULE(_rigexec, m) {
     m.doc() = "RigExec native bindings: rigging API (spec section 4) and the staged rig evaluator.";
     m.attr("__version__") = "0.1.0";
 
-    // ---- PointFrame -------------------------------------------------------
 
     py::class_<rigExec::RigExecPointFrame>(m, "PointFrame",
         "One point frame: origin O plus orthonormal-ish axes X, Y, Z (USD row-vector convention).")
@@ -836,7 +819,6 @@ PYBIND11_MODULE(_rigexec, m) {
                    std::to_string(o[1]) + ", " + std::to_string(o[2]) + ")>";
         });
 
-    // ---- Rig (evaluator) ---------------------------------------------------
 
     py::class_<_Rig>(m, "Rig",
         "Compiles and evaluates one RigExecRoot on a pxr.Usd.Stage.\n\n"
@@ -1086,7 +1068,6 @@ PYBIND11_MODULE(_rigexec, m) {
         }, "Every recorded scope in completion order, with the index of the\n"
            "thread that ran it. Use profile_summary for totals.");
 
-    // ---- Pose ---------------------------------------------------------------
 
     py::class_<rigExec::RigExecRigPose>(m, "Pose",
         "One evaluated generation of a rig.")
@@ -1210,7 +1191,6 @@ PYBIND11_MODULE(_rigexec, m) {
                 return _Mat4ToVec(it->second);
             }, py::arg("path"));
 
-    // ---- Strict low-level schema authoring ---------------------------------
 
     py::class_<rigExec::RigExecSchemaPrim>(m, "SchemaPrim",
         "A strict authoring view of one registered concrete schema prim.\n\n"
@@ -1313,7 +1293,6 @@ PYBIND11_MODULE(_rigexec, m) {
                    " '" + _PathStr(prim.GetPath()) + "'>";
         });
 
-    // ---- Rigging API: handles ----------------------------------------------
 
     using rigExec::RigExecHandleBase;
 
@@ -1970,6 +1949,17 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("property_name"), py::arg("phase"))
         .def("set_surface_read_phase", [](rigExec::RigExecSurfaceMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
+    py::class_<rigExec::RigExecDeltaMushMoverHandle, rigExec::RigExecMoverHandle>(m, "DeltaMushMover")
+        .def("set_rest_points", [](rigExec::RigExecDeltaMushMoverHandle &h, py::iterable values) {
+            std::vector<GfVec3f> points;for(const auto &p:values)points.push_back(_PythonToVec3f(p,"delta mush rest point"));
+            h.SetRestPoints(points);
+        }, py::arg("points"))
+        .def("set_iterations", &rigExec::RigExecDeltaMushMoverHandle::SetIterations, py::arg("iterations"))
+        .def("set_step", &rigExec::RigExecDeltaMushMoverHandle::SetStep, py::arg("step"))
+        .def("set_pin_borders", &rigExec::RigExecDeltaMushMoverHandle::SetPinBorders, py::arg("pin"))
+        .def("set_distance_weight", &rigExec::RigExecDeltaMushMoverHandle::SetDistanceWeight, py::arg("weight"))
+        .def("set_displacement", &rigExec::RigExecDeltaMushMoverHandle::SetDisplacement, py::arg("amount"));
+
     py::class_<rigExec::RigExecSmoothMoverHandle, rigExec::RigExecMoverHandle>(m, "SmoothMover")
         .def("set_strength", &rigExec::RigExecSmoothMoverHandle::SetStrength, py::arg("strength"));
 
@@ -2097,6 +2087,10 @@ PYBIND11_MODULE(_rigexec, m) {
                 TfToken(readPhase));
         }, py::arg("name"), py::arg("surface_prim"), py::arg("mode") = "attach",
            py::arg("target") = py::none(), py::arg("read_phase") = "base")
+        .def("add_delta_mush_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                         float weight, py::object target) {
+            return c.AddDeltaMushMover(name,weight,_PythonToDependencyPath(target,c.GetStage()));
+        }, py::arg("name"),py::arg("default_weight")=1.0f,py::arg("target")=py::none())
         .def("add_smooth_mover", [](rigExec::RigExecMoverChain &c, std::string name,
                                      float defaultWeight, py::object target) {
             return c.AddSmoothMover(name, defaultWeight,
@@ -2539,8 +2533,6 @@ PYBIND11_MODULE(_rigexec, m) {
              "Start a mover chain; operations added without an explicit target"
              " reuse default_target.");
 
-    // ---- RBF pose interpolators -------------------------------------------
-    //
     // See the note above _RbfDescFrom. These two entries are what let the
     // converter drop its Python solver import.
 

@@ -72,9 +72,7 @@ VOLUME_WEIGHT_TYPE_NAMES = (
 )
 
 
-# ---------------------------------------------------------------------------
 # Scalars and rotations
-# ---------------------------------------------------------------------------
 
 def NormalizeAvarScale(value):
     """
@@ -188,9 +186,7 @@ def DecomposeEuler(matrix, order, hint=None):
     return tuple(best[1])
 
 
-# ---------------------------------------------------------------------------
 # Rig frames (asset space)
-# ---------------------------------------------------------------------------
 
 def IsRigXformable(prim):
     xformable = Tf.Type.FindByName("RigExecXformable")
@@ -252,8 +248,8 @@ class _EvalContext(object):
 
     def __init__(self, time, frames=None):
         self.time = time
-        # The frame memo. Shared with a caller that passed the plain
-        # dict _frameCache used to be, so that contract still holds.
+
+
         self.frames = {} if frames is None else frames
         self.rigRoots = {}
         self.parents = {}
@@ -1401,16 +1397,14 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
     return frames
 
 
-# ---------------------------------------------------------------------------
 # Writing values: animation (spline knot at the frame) or default
-# ---------------------------------------------------------------------------
 
 WRITE_ANIMATION = "animation"
 WRITE_DEFAULT = "default"
 CHANNELS_POSE = "pose"
 CHANNELS_PIVOT = "pivot"
 
-# Where a MULTI-selection turns and scales about. Blender's Transform
+# Where a MULTI-selection turns and scales about. Transform
 # Pivot Point, and the conventional Move Tool "Pivot" row, restated for a rig:
 #
 #   GROUP_PIVOT_CENTER      the centroid of the selected controls'
@@ -1419,11 +1413,11 @@ CHANNELS_PIVOT = "pivot"
 #                           together" is about their middle -- not about
 #                           whichever one they happened to click last.
 #   GROUP_PIVOT_LEAD        the last-selected control's origin (the conventional tool's
-#                           "Object" / Blender's "Active Element"), for
+#                           "Object" / "Active Element"), for
 #                           swinging a group about one of its members.
 #   GROUP_PIVOT_INDIVIDUAL  each control about its OWN origin: they all
 #                           turn by the same angle and none of them
-#                           moves. Blender's "Individual Origins", and
+#                           moves. "Individual Origins", and
 #                           the only one of the three that is not a
 #                           rigid motion of the selection.
 #
@@ -1571,9 +1565,7 @@ class Writer(object):
         return list(self._warnings)
 
 
-# ---------------------------------------------------------------------------
 # Edit targets
-# ---------------------------------------------------------------------------
 
 def _Linear(matrix):
     """The 3x3 part as a 4x4 with zero translation."""
@@ -2773,9 +2765,7 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None,
         prim.GetName(), prim.GetTypeName() or "untyped")
 
 
-# ---------------------------------------------------------------------------
 # Group edits: one gizmo over several selected controls
-# ---------------------------------------------------------------------------
 
 def _PoseProvider(prim, time):
     """
@@ -2904,7 +2894,7 @@ class GroupTarget(Target):
     rotate or a scale turns the whole selection about it. That is the
     default and the point of the feature: "rotate these together" means
     about their middle, not about whichever control was clicked last.
-    SetPivotMode() offers the other two a DCC has -- GROUP_PIVOT_LEAD
+    SetPivotMode() offers the other two a application has -- GROUP_PIVOT_LEAD
     (the last-selected control's origin) and GROUP_PIVOT_INDIVIDUAL
     (each about its own) -- but neither is what a fresh selection does.
 
@@ -3040,7 +3030,7 @@ class GroupTarget(Target):
         what a rotate or a scale turns about.
 
         Individual origins draw at the centroid too. There is one
-        manipulator and it has to be somewhere; Blender puts it on the
+        manipulator and it has to be somewhere; the editor puts it on the
         median for this mode as well, and putting it on one member would
         say that member was special when the whole point is that none of
         them is.

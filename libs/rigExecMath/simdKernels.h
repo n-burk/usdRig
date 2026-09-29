@@ -1,11 +1,8 @@
-//
 // RigExec CPU SIMD kernels (spec §6.5).
-//
 // Direct SIMD over the stock contiguous element storage; scalar reference
 // kernels remain the correctness baseline and SIMD is accepted only under
 // output parity (spec §13.4: bulk float points within 1e-6 x character
 // scale).
-//
 #ifndef RIGEXEC_MATH_SIMD_KERNELS_H
 #define RIGEXEC_MATH_SIMD_KERNELS_H
 

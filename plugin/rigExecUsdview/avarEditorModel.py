@@ -75,7 +75,7 @@ KIND_LABELS = {
     KIND_OTHER: "Other",
 }
 
-# Value families the editor knows how to build a widget for.
+
 VALUE_FLOAT = "float"
 VALUE_INT = "int"
 VALUE_BOOL = "bool"
@@ -461,9 +461,7 @@ def FocusPrim(usdviewApi):
     return prim, others
 
 
-# ---------------------------------------------------------------------------
 # Writing
-# ---------------------------------------------------------------------------
 
 def _EditTargetSpec(attr):
     stage = attr.GetStage()

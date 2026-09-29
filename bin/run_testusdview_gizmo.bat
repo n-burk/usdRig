@@ -6,7 +6,7 @@ rem
 rem Drives synthetic mouse and key events through the gizmo's own projected
 rem handle positions and asserts what landed on the stage: the avars, the
 rem undo/redo round trip, Default vs Animation, Pivot vs Pose, a plain xform's
-rem op stack, and the Maya parity behaviours. Prints RIGEXEC_GIZMO_OK.
+rem op stack, and the the editor parity behaviours. Prints RIGEXEC_GIZMO_OK.
 rem
 rem Usage: run_testusdview_gizmo.bat [rendererDisplayName]   (e.g. Embree)
 rem Set RIGEXEC_GIZMO_SHOT=path.png to keep a window grab.

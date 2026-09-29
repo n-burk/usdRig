@@ -3,7 +3,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
+# in plugin/usdNoodles/ in this repository.
 #
 
 
@@ -724,16 +724,16 @@ class TestRelationshipLinks(unittest.TestCase):
     def test_collect_links_for_prim_respects_cleared_targets_on_strongest_layer(
         self,
     ):
-        # Regression: removing a relationship in the editor authors
-        # `SetTargets([])` on the edit target.  Composition then yields an
-        # empty target list, even if a weaker referenced/payload layer still
-        # has the original targets.  The previous fallback walked
-        # `GetPropertyStack` and "recovered" the weaker targets, so removing
-        # the source/target prims from the editor and re-adding them caused
-        # the deleted relationship to reappear with its old connection --
-        # contradicting USD composition and what the user just authored.
-        # `GetTargets` is the source of truth and an explicit clear is
-        # honoured here just like USD itself sees it.
+
+
+
+
+
+
+
+
+
+
         from UsdNoodles.pinUtils import collect_links_for_prim
 
         relationship = _mock_relationship("sources")

@@ -1,6 +1,4 @@
-//
 // The baked program's step graph must describe the straight line it replaced.
-//
 // Every other suite asserts on what a frame PUBLISHES, which the serial
 // executor gets right by running the steps in program order whatever the
 // edges say. That is exactly why the edges need a test of their own: they are
@@ -9,7 +7,6 @@
 // wrong answer makes a parallel run wrong while leaving a serial run
 // perfect (and the one whose wrong answer makes a CONE wrong while leaving
 // both executors perfect):
-//
 //   * every edge points FORWARD in program order, so running the steps in
 //     index order is always a topological order;
 //   * every declared read either has a writer earlier in the program or names
@@ -21,7 +18,6 @@
 //     cone can skip it in a generation that moved the slot;
 //   * the report is deterministic, so a schedule can be diffed between two
 //     builds of the same stage and a change in it is a change someone made.
-//
 // The geometry section below asks the two questions the vertex partition
 // adds: that the chunks of a skin revision cover every vertex exactly once
 // and that no chunk is missing an influence one of its own vertices names --
@@ -30,9 +26,7 @@
 // the frame rejects passes its preceding points through exactly as the
 // dynamic path does, which is the decision the fuse took over from the
 // kernel.
-//
 // argv[1] = path to the examples directory (containing biped/Biped.usda).
-//
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
@@ -461,7 +455,6 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
     // must fail a test rather than wait for someone to re-run the dumps at
     // grain 0. A revision this step writes RevisionDone for is its own fuse
     // deciding the indirection, and is excluded.
-    //
     // RevisionOut is indexed by CHUNK and RevisionDone by REVISION, so the
     // rule is stated over revisions and the buffer slots are mapped back to
     // the revision that owns them: a chunk of revision r reading any earlier
@@ -541,7 +534,6 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
     // here because the symptom is invisible in a serial run, and invisible
     // in every published value of a commit that has no descendants: what
     // caught it was the cone verifier at one cluster per step.
-    //
     // The same rule covers what the write-back CARRIES, on whichever step
     // performs it: FinishCommit copies the version it found into its own
     // storage wherever it declines to write, so a solver commit reads the
@@ -1661,16 +1653,13 @@ TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects()
     CHECK(!RigExecSkinTransformsAreUsable(table.data(), 0));
 }
 
-// ---------------------------------------------------------------------------
 // Cone re-execution (§7).
-//
 // The one part of the program whose correctness a published pose cannot
 // show: a frame that re-ran everything publishes exactly what a frame that
 // skipped the right half publishes, so every assertion below is in two
 // halves -- the values are the values the dynamic path produces, AND the run
 // actually skipped something. Either alone passes over the defect the other
 // one catches.
-// ---------------------------------------------------------------------------
 
 /// The two closures Build computes are closures (§7).
 ///

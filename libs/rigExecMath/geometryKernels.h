@@ -1,11 +1,8 @@
-//
 // RigExec geometry mover kernels (spec §7.5–§7.6).
-//
 // Pure, deterministic CPU reference kernels over exact native property
 // values. Callers collect the vectorized element stream into transient
 // scratch, apply one kernel, and write the result back before the
 // callback returns (spec §6.5 ephemeral-scratch rule).
-//
 #ifndef RIGEXEC_MATH_GEOMETRY_KERNELS_H
 #define RIGEXEC_MATH_GEOMETRY_KERNELS_H
 
@@ -18,6 +15,15 @@
 #include <vector>
 
 namespace rigExec {
+
+/// Smooth rest and posed meshes with identical rest-derived weights, then
+/// transport the rest detail onto the smoothed posed surface. No host runtime.
+/// Invalid input fails atomically; isolated vertices and pinned borders stay put.
+bool RigExecApplyDeltaMush(
+    std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
+    const std::vector<int> &counts, const std::vector<int> &indices,
+    int iterations = 10, double step = 0.5, bool pinBorders = true,
+    double distanceWeight = 0.0, double displacement = 1.0);
 
 /// Axis-aligned bound volume of a point set (zero for < 2 points).
 double RigExecBoundVolume(const GfVec3f *points, size_t count);

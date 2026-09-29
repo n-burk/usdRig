@@ -1,7 +1,4 @@
-//
 // RigExec task-list cache. See taskListCache.h.
-//
-
 #include "taskListCache.h"
 
 namespace rigExec {

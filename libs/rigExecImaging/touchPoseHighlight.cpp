@@ -1,6 +1,4 @@
-//
 // TouchPose highlight -- see touchPoseHighlight.h.
-//
 #include "touchPoseHighlight.h"
 
 #include "sceneIndices.h"
@@ -66,9 +64,7 @@ RigExecTouchPoseTokens::TablePrimvar()
     return _tokens->rigExecTouchTable;
 }
 
-// ===========================================================================
 // the generated shader
-// ===========================================================================
 
 namespace {
 
@@ -167,7 +163,6 @@ _JsonDefault(const TfToken &name, const VtValue &value)
 // The wrapper's own code. `rigExecTouchPose_BaseSurfaceShader` is the
 // original terminal, renamed by a #define around its source so its body is
 // compiled byte for byte as it was.
-//
 // The tint is mixed over the LIT colour, which is what the old overlay
 // patch did with its alpha, and it is shaded by a headlight term so a lit
 // region still reads as a surface with a shape rather than a flat decal.
@@ -350,9 +345,7 @@ RigExecTouchPoseGetWrappedSource(const TfToken &base)
     return _GetWrapper(base).source;
 }
 
-// ===========================================================================
 // the shared state
-// ===========================================================================
 
 RigExecTouchPoseHighlights &
 RigExecTouchPoseHighlights::GetInstance()
@@ -537,9 +530,7 @@ RigExecTouchPoseHighlights::_Notify(uint64_t contextKey, const SdfPath &path,
     }
 }
 
-// ===========================================================================
 // the scene index
-// ===========================================================================
 
 namespace {
 
@@ -836,7 +827,6 @@ RigExecTouchPoseSceneIndex::HighlightChanged(
         // themselves (not their primvarValue) is what makes the adapter
         // scene delegate drop its cached descriptors and Storm re-filter
         // the mesh's primvars against the new material.
-        //
         // Wrapped per what THIS index sees now rather than per the change's
         // kind: detaching an unscoped mesh leaves a keyed one of the same
         // path lit here, and vice versa.
@@ -972,9 +962,7 @@ RigExecTouchPoseSceneIndex::_PrimsDirtied(
 
 }  // namespace rigExec
 
-// ===========================================================================
 // registration
-// ===========================================================================
 
 PXR_NAMESPACE_OPEN_SCOPE
 

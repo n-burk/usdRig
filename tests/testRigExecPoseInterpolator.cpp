@@ -1,28 +1,22 @@
-//
 // The pose-interpolator phase: the conventional poseInterpolator, evaluated.
-//
 // A RigExecPoseInterpolator reads the FINAL local rotation of a driver and
 // publishes one float per authored RigExecPose. It is not a mover -- a
 // mover's inputs are resolved by the property chains, which run before exec
 // does and therefore cannot see the pose -- so it is its own phase of the
 // evaluate, sitting between the pose walk that produces the driver's frame
 // and the geometry chains that consume the weights.
-//
 // What each case here is protecting, in the order a failure would be found:
-//
 //   * the weights themselves, at rest and at a pose. An interpolator
 //     standing on one of its own poses must read 1.000000 there and zero
 //     everywhere else: that is what the radial basis function interpolates
 //     exactly, and a neutral that does not read 1 with the rig standing
 //     still is the failure mode that moved the biped's skin two millimetres
 //     before the poses were rebased.
-//
 //   * LOCAL, not world. The driver's parent is rotated underneath it and the
 //     weights must not move. This is the one that catches a
 //     `world * parent^-1` written the other way round, which is invisible on
 //     a rig whose driver sits at the root and wrong on every rig that does
 //     not.
-//
 //   * THE CONSUMER, and with it the ordering. A RigExecBlendInput's
 //     inputs:weight carries a single authored connection to
 //     <pose>.outputs:weight, and RigExecResolvedInputs::GetAttribute follows
@@ -31,7 +25,6 @@
 //     answered with the attribute's AUTHORED zero -- no error raised
 //     anywhere, every corrective silently off -- so the deformation is
 //     measured here rather than assumed.
-//
 //   * the two enables, which the schema deliberately treats differently: a
 //     disabled INTERPOLATOR publishes zeros (shape-preserving: a corrective
 //     that is off has to be off, not frozen), while a disabled POSE is left
@@ -39,12 +32,10 @@
 //     every other pose's matrix row and switching one off would quietly
 //     change all the others. The second of those needs a new binding epoch,
 //     so it is also the check that the epoch digest hashes a pose's enable.
-//
 //   * parity with libs/rigExecMath/rbf.h driven directly. The solver is
 //     already pinned against the studio's Python at 3.41e-11
 //     (testRigExecRbf); what this adds is that the EVALUATOR hands it the
 //     rotation it is supposed to.
-//
 #include "rigExec/rigEvaluator.h"
 #include "rigExecMath/rbf.h"
 
@@ -137,7 +128,6 @@ TargetPoints()
 // Two nested controls, an interpolator on the inner one with three poses
 // 45 degrees apart about Z, and a blend channel wired to the FORWARD pose's
 // weight so the mesh says what the weight was.
-//
 //   Shoulder            the driver's parent, so the delta is a LOCAL one
 //     Driver            avars:rz is the whole of the input
 //   Swing               neutral / Forward (+45) / Back (-45), whole-rotation
@@ -309,7 +299,6 @@ SetRotation(const UsdStageRefPtr &stage, const SdfPath &control,
         .Set(degrees);
 }
 
-// --------------------------------------------------------------------------
 
 // A rig standing still reads its neutral at 1 and everything else at 0, and
 // a rig standing on a pose reads THAT pose at 1. Exactly, not approximately:

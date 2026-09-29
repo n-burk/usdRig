@@ -1,15 +1,12 @@
-//
 // The baked program's pose half: the interleaved solver/constraint walk, at
 // bake and at run, plus the rest->pose matrices and the frame publication it
 // feeds.
-//
 // Split out of bakedProgram.cpp so that a domain's bake and its frame path
 // are read side by side -- the two have to agree about what was captured and
 // what is re-read, and that agreement is the whole correctness argument. The
 // evaluator is not visible here: everything this file needs of it was
 // captured into RigExecBakedProgramImpl at Build (see bakedProgramImpl.h),
 // and the compiled walk arrives restated as RigExecBakedWalkEntry.
-//
 #include "bakedProgramImpl.h"
 
 #include "frameExtraction.h"
@@ -43,9 +40,7 @@
 
 namespace rigExec {
 
-// ---------------------------------------------------------------------------
 // Bake.
-// ---------------------------------------------------------------------------
 
 void
 RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
@@ -130,7 +125,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // SplineIk rest loops in computations.cpp). Resolving against the
             // relationship's target count instead would remap by the wrong
             // index, and would keep remapping where exec gives up.
-            //
             // A FirstFramePose slot is what "publishes computeRestFrame" means: an
             // xform-derived slot exists in the table so a constraint can name
             // it, but exec seeds it from the stage and it declares no rest
@@ -416,7 +410,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // The two endpoint frames arrive on the batch request as FINAL
             // frames, the same way an FkChain's controls do, so they are
             // provider slots read out of `fin`.
-            //
             // A target that is no provider slot, or one the exec network
             // seeds from the stage rather than computing (an xform-derived
             // slot declares neither computePointFrame nor computeRestFrame),
@@ -497,7 +490,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 // it folded -- a value edit on the curve rebuilds, and an
                 // override on it cannot be placed, which is right because
                 // the dynamic path would ignore that override.
-                //
                 // Inside the read, and deliberately so: a resolved path
                 // that names nothing on this stage was never read, and the
                 // day an attribute appears there it is the epoch digest
@@ -572,7 +564,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
 
     // One plain Xformable a constraint reads off the stage, registered once
     // however many bindings name it.
-    //
     // The ancestor list is pure namespace topology -- every slot that is a
     // STRICT prefix of the path, shallowest first -- so it is settled here;
     // WHICH of them the source rides is a per-frame question about frames
@@ -605,7 +596,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         return int(B.nativeSources.size()) - 1;
     };
 
-    // ---- constraints --------------------------------------------------------
     auto bakeConstraint = [&](const RigExecBakedConstraintSpec &fc) {
         RigExecBakedProgramImpl::Constraint c;
         c.path = fc.moverPath;
@@ -671,7 +661,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         // between two parents bakes -- and the cardinality diagnostic the
         // dynamic walk gives a malformed one is reproduced from this run's
         // numbers rather than refused at bake.
-        //
         // FoldShape and not Fold: nothing about the VALUE is folded, so an
         // interactive override on one of these tables is not placeable --
         // which agrees with the dynamic path, whose raw read ignores such an
@@ -714,8 +703,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             B.deltaBasePaths.push_back(fc.targets[0]);
             B.prims.insert(fc.targets[0]);
         }
-        // ---- SingleChainIK ------------------------------------------------
-        //
         // Three uniform tokens, read the way the dynamic walk reads them
         // (plain Get, no time), plus the two bindings it resolves beside
         // them. The evaluation mode's "autoDetect" is settled here because
@@ -724,6 +711,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         // inspects are folded for their SHAPE so that authoring one rebuilds
         // the program rather than silently changing the answer.
         if (c.singleChainIk) {
+            c.preserveJointOrientation =
+                readToken(prim, "rigExec:orientationMode", "aimX") == "preserve";
             c.ikMode = readToken(prim, "rigExec:solverMode", "rotatePlane") ==
                                "singleChain"
                            ? RigExecSingleChainIkMode::SingleChain
@@ -864,7 +853,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         return int(B.constraints.size()) - 1;
     };
 
-    // ---- descendant propagation, decided once -------------------------------
     std::vector<bool> ownedBySolver(N, false);
     for (int i = 0; i < N; ++i) {
         ownedBySolver[i] = B.jointSolverBinding->count(B.paths[i]) > 0;
@@ -920,7 +908,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         }
     };
 
-    // ---- the walk ------------------------------------------------------------
     for (const RigExecBakedWalkEntry &entry : walk) {
         RigExecBakedProgramImpl::WalkStep st;
         st.solverBatch = entry.solverBatch;
@@ -977,14 +964,11 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
 }
 
 
-// ---------------------------------------------------------------------------
 // Build: the pose half of the program, in program order.
-//
 // Program order is today's straight line. What changes is that each piece of
 // it now says which slots it reads and which it writes, so that the edges
 // between the pieces follow from the declarations rather than from the order
 // -- and the order becomes one valid schedule instead of the only one.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -1265,8 +1249,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     RigExecBakedProgramImpl &B = *program;
     const int N = int(B.paths.size());
 
-    // ---- compose, partitioned into subtrees ---------------------------------
-    //
     // One step per provider would be ~2 500 steps on a biped for work that is
     // a few hundred nanoseconds each. The partition cuts the provider forest
     // into subtrees of about total/(4P) slots -- enough of them that the work
@@ -1344,7 +1326,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             RigExecBakedSlotDomain::PosedM, group.begin, group.end));
     }
 
-    // ---- the interleaved solver/constraint walk -----------------------------
     B.commits.resize(B.walkSteps.size());
     std::set<size_t> levels;
     // Where the next split commit's staging pairs start. The scratch behind
@@ -1724,8 +1705,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // that says which entry that is comes out of this sweep.
     BindPoseVersions(&B);
 
-    // ---- the solvers no batch runs ------------------------------------------
-    //
     // The dynamic path answers these from a second exec request, whose
     // per-provider override is the FINAL frame rather than the mid-walk one
     // a batch sees -- so they run HERE, after the whole walk, and read the
@@ -1733,13 +1712,11 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // counter: a solver that binds a joint or drives geometry is required
     // and therefore batched, so one of these poses nothing and the only
     // thing that reads it is the guide publication.
-    //
     // Not gated on the guide toggle. The toggle can move without the epoch
     // moving, so gating would be a runtime branch in a step body; running
     // and not publishing is the same published generation, because
     // RigExecBakedRead only READS the override table and the epilogue
     // consults the toggle where the dynamic path does.
-    //
     // The one thing it does move with the guides off is the static-input
     // cache: RigExecBakedRead's resolved path goes through
     // RigExecResolvedInputs::GetAttribute, whose hit/miss/bypass counters
@@ -1787,8 +1764,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             RigExecBakedOne(RigExecBakedSlotDomain::Candidates, si));
     }
 
-    // ---- the rest->pose matrices --------------------------------------------
-    //
     // Exactly the set today's lazy finalMatrixOf/baseMatrixOf computed:
     // final for every published joint, and final or base per use for every
     // matrix and influence a geometry revision reads. A ProviderMatrix step
@@ -1849,8 +1824,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         }
     }
 
-    // ---- the pose interpolators ---------------------------------------------
-    //
     // After the matrices and before the store's record, which is where the
     // dynamic path's phase sits: it reads the FINAL pose, every constraint
     // included, and writes what the geometry chains consume. One step per
@@ -1890,14 +1863,11 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     }
 }
 
-// ---------------------------------------------------------------------------
 // One frame, pose half.
-//
 // Everything below is a STEP BODY or one half of the serial prologue or
 // epilogue. A body touches no pose, takes no lock, opens no profile scope and
 // writes only the slots its step declared; whatever it has to say it says
 // into its own step.
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -2121,7 +2091,6 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     const RigExecResolvedInputs &R = *B.resolvedInputs;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
     // The provider ladder, before the avars that compose against it.
-    //
     // Three ways a frame can move it and nothing else can: a channel that
     // varies with time or resolves through a property chain (settled at
     // Build), a drag standing on one of its channels, and the frame after
@@ -2914,11 +2883,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // not go through exec at all, it calls _ResolveWeights and takes its
         // error string -- so this calls the same function with the same
         // arguments and the answer is identical by construction.
-        //
         // The finite-[0, 1] check belongs to the OTHER arm and must not be
         // applied to a resolved envelope: the dynamic path does not check
         // there, so checking would emit a diagnostic it never emits.
-        //
         // The third arm is a GEOMETRY-domain constraint that binds a weight
         // object, and it is the one this block did not have while the two
         // features lived on different branches: weight objects on
@@ -3038,6 +3005,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             RigExecSingleChainIkParams params;
             params.mode = c.ikMode;
+            params.preserveJointOrientation = c.preserveJointOrientation;
             params.weight = weight;
             // Read BEFORE the pole mode is consulted, and only in
             // RotatePlane mode, which is where the dynamic walk reads them:
@@ -3348,9 +3316,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             // The solve produced the same full-strength frame the transform
             // domain would publish; the delta against the prim's own base
             // transform is what the points ride.
-            //
             //     D = F_solved * F_base^-1
-            //
             // The prim's transform is NOT revised: a geometry-domain
             // constraint writes points and nothing else.
             const GfMatrix4d &baseMatrix =
@@ -3478,10 +3444,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // The driver's LOCAL rotation relative to its own REST, which is what
         // every authored pose is measured from and why a rig standing still
         // reads its neutral at 1.000000:
-        //
         //   local = parent^-1 * world       (row-vector; RigExecFrameRotation)
         //   delta = restLocal^-1 * local
-        //
         // The LAST version of the driver's slot, because this step runs after
         // the whole walk -- the driver constraints in particular, whose
         // parent subtracts the twist back out so the local rotation is the
@@ -3563,7 +3527,6 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // An incomplete solver is an authoring gap, not a silent one. Merged
     // here rather than accumulated during the walk, because the ORDER is a
     // property of the whole run and a step must not hold a shared one.
-    //
     // The dynamic walk's rule, expressed identically: one line per failing
     // WRITER (a stacked joint may have several, and the one that failed is
     // not necessarily the one a joint->solver lookup would name), collected
@@ -3572,7 +3535,6 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // joint another writer published keeps that writer's frame and fell back
     // to nothing. The two streams are compared verbatim, so neither half of
     // this may drift from the other.
-    //
     // The element comes from jointSolverBinding rather than from
     // Solver::fallbackJoints, which holds slot paths only: widening it would
     // change a serialized, round-trip-verified field for a diagnostic.
@@ -3659,7 +3621,6 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         // been in -- and the second fills the maps in PATH order, where
         // every key belongs immediately past the one before it and a hint at
         // the map's end makes the insertion one comparison.
-        //
         // Deciding first also settles the bail: a frame that cannot publish
         // returns before a single key is inserted, where it used to return
         // with the maps half filled. The caller drops the pose either way.
@@ -3751,11 +3712,9 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // beside the geometry it deformed (RigExecBakedPublishGeometry); and a
     // constraint may target a plain Xformable, so providerXforms and
     // providerBaseXforms are published from the seeded slots just above.
-    //
     // solverOverridesConverged is the one field that stays at its default,
     // and for a different reason than a refusal: it is cleared only by an
     // incomplete exec snapshot, and there is no exec here.
-    //
     // RigExecComparePoses compares all of them regardless, which is what
     // made the checklist safe to keep as a comment while it was true: the
     // parity mode says so on the first generation that publishes a domain on
@@ -3764,7 +3723,6 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.
-    //
     // propertyResults is itself an ordered map and movedProperties is empty
     // until here, so this walk is always ascending -- no flag to consult.
     for (const auto &[target, value] : B.propertyResults) {

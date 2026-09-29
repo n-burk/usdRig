@@ -1,9 +1,5 @@
-#
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# Licensed under the terms set forth in the LICENSE.txt file available
-# at the root of this repository.
-#
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
 """The rig's execution stack, as a filterable list.
 
 Answers "what runs, in what order, and what does it write" against the
@@ -87,7 +83,7 @@ def _CompilableStage(stage):
 _GROUPS = {
     "All": None,
     "Deformers": ("SkinMover", "MatrixMover", "CurveMover", "LatticeMover",
-                  "SurfaceMover", "SmoothMover", "BlendShapeMover",
+                  "SurfaceMover", "SmoothMover", "DeltaMushMover", "BlendShapeMover",
                   "VolumeCorrectMover", "CurvenetMover",
                   "CurvenetAdjusterMover"),
     "Constraints": ("Constraint",),
@@ -104,7 +100,7 @@ _SOLVER_TYPES = ("RigExecFkChain", "RigExecTwoBoneIk",
                  "RigExecRibbon", "RigExecSplineIk")
 
 _DEFORMER_TOKENS = ("SkinMover", "MatrixMover", "CurveMover",
-                    "LatticeMover", "SurfaceMover", "SmoothMover",
+                    "LatticeMover", "SurfaceMover", "SmoothMover", "DeltaMushMover",
                     "BlendShapeMover", "VolumeCorrectMover")
 
 
