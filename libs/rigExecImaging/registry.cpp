@@ -4006,8 +4006,7 @@ _AccumulateRestGuideBounds(
                 if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
                     !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) return false;
             }
-            // Wire mode draws falloffMax as a widened dotted curve and
-            // falloffMin as solid geometry, so only the exterior curve
+            // Wire mode draws dotted curves on both iso-surfaces, so each
             // carries guide:wireWidth. Geometry mode draws both solid.
             const double radii[2] = {falloffMin, falloffMax};
             bool found = false;
@@ -4016,7 +4015,7 @@ _AccumulateRestGuideBounds(
                 if (!std::isfinite(radius) || radius <= 0.0) {
                     continue;
                 }
-                const double pad = (wire && surface == 1) ? halfWidth : 0.0;
+                const double pad = wire ? halfWidth : 0.0;
                 PXR_NS::GfMatrix4d scale(1.0);
                 scale.SetScale(PXR_NS::GfVec3d(
                     radius * axisScale[0], radius * axisScale[1],

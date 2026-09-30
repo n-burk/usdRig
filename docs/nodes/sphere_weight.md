@@ -229,10 +229,11 @@ Valid values: `wire`, `geometry`, `none`.
 
 wire draws the falloffMin and falloffMax iso-surfaces as
 curves, widthed by guide:wireWidth. A sphere weight in wire mode
-draws the falloffMin surface, the max-weight interior, as solid
-geometry and the falloffMax surface as a dotted wire. geometry
-draws every iso-surface solid; none suppresses the guide without
-disturbing the field.
+draws the falloffMin surface, the max-weight interior, as geometry
+at 50% opacity with dotted great-circle rings on it, and the
+falloffMax surface as a dotted wire. geometry draws every
+iso-surface solid; none suppresses the guide without disturbing
+the field.
 
 #### `guide:wireWidth`
 
@@ -469,12 +470,13 @@ sphere authored inside the probe joint rides it, so the region the mover
 grabs travels and a bump walks back and forth. The plank is wider than
 the ball and the travel stops short of both ends, so the field never
 runs off an edge: it stays a complete red disc ringed by grey. In the
-default wire draw, the max-weight interior is solid geometry and the
-exterior falloff is a dotted wire — the solid ball is
-`inputs:falloffMin` 0.6, where the field is fully on and the plank is
-lifted the whole unit, and the dotted sphere is `inputs:falloffMax`
-1.6, where it is fully off; `linear` between them so the ramp reads
-as an even slope rather than a plateau with an edge.
+default wire draw, the max-weight interior is geometry at 50% opacity
+with dotted great-circle rings on it, and the exterior falloff is the
+same dotted wire — the translucent ball is `inputs:falloffMin` 0.6,
+where the field is fully on and the plank is lifted the whole unit,
+and the outer dotted sphere is `inputs:falloffMax` 1.6, where it is
+fully off; `linear` between them so the ramp reads as an even slope
+rather than a plateau with an edge.
 
 Open it live with:
 

@@ -325,6 +325,10 @@ constexpr int _kVolumeRingSegments = 32;
 constexpr int _kSphereWireDots = 48;
 constexpr double _kSphereWireDotDuty = 0.18;
 
+// Opacity of the max-weight interior fill. Half translucent, independent
+// of guide:displayOpacity, which the dotted rings still use.
+constexpr float _kSphereInteriorOpacity = 0.5f;
+
 // Segments around a curve weight's tube. Deliberately coarser: a curve
 // guide draws one of these per polyline vertex, so the vertex count is the
 // product of the two, and eight already reads as round at guide scale.
@@ -445,14 +449,14 @@ _ReadCurveGuidePoints(
 // The radius and shared axis scales ride in the transform. Directional
 // scales reshape the unit points; asymmetric geometry uses a closed mesh
 // because an implicit sphere cannot represent unequal half-axes.
-// \p wire selects the dotted exterior-falloff curves. The solid branch is
-// the max-weight interior, and what geometry draw mode uses for both
-// surfaces.
+// \p wire selects the dotted great circles. The solid branch is the
+// max-weight interior fill, and what geometry draw mode uses for both
+// surfaces. \p opacity replaces guide:displayOpacity when non-negative.
 void
 _AppendSphereVolumeGuide(
     double radius, const GfVec3d &axisScale,
     const GfVec3d &positiveScales, const GfVec3d &negativeScales, bool wire,
-    const GfMatrix4d &rigidToAsset, double wireWidth,
+    const GfMatrix4d &rigidToAsset, double wireWidth, float opacity,
     std::vector<RigExecVolumeGuideElement> *elements)
 {
     if (!std::isfinite(radius) || radius <= 0.0) {
@@ -468,6 +472,7 @@ _AppendSphereVolumeGuide(
 
     RigExecVolumeGuideElement element;
     element.xform = scale * rigidToAsset;
+    element.opacity = opacity;
     const bool asymmetric = positiveScales != negativeScales;
     if (!wire && !asymmetric) {
         GfMatrix4d directional(1.0);
@@ -528,9 +533,8 @@ _AppendSphereVolumeGuide(
     }
     element.primType = HdPrimTypeTokens->basisCurves;
     element.wireWidth = wireWidth;
-    // Three orthogonal great circles, dotted. The sphere wire path is the
-    // exterior falloff iso-surface; the max-weight interior is the solid
-    // branch above. Continuous rings would read as a second shell.
+    // Three orthogonal great circles, dotted. Wire mode draws this both
+    // on the exterior falloff and over the translucent interior fill.
     static const GfVec3f kX(1, 0, 0), kY(0, 1, 0), kZ(0, 0, 1);
     static const GfVec3f kOrigin(0, 0, 0);
     _AppendDottedVolumeRing(kOrigin, kX, kZ, &element.points, &element.counts);
@@ -1463,19 +1467,30 @@ RigExecImagingBridge::_FillVolumeGuides(
                         !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) scaleOk = false;
                 }
                 if (!scaleOk) continue;
-                // falloffMin is fully on: the max-weight interior, drawn
-                // solid. falloffMax is fully off: the exterior of the
-                // falloff, drawn as a dotted wire. geometry mode still
-                // draws both surfaces solid. A non-positive radius is
-                // skipped inside the append, so falloffMin = 0 draws the
-                // dotted exterior alone.
+                // falloffMin is fully on. In wire mode that interior is a
+                // half-translucent fill plus the same dotted great circles
+                // the exterior uses. falloffMax stays dotted wire only.
+                // geometry mode still draws both surfaces solid. A
+                // non-positive radius is skipped inside the append, so
+                // falloffMin = 0 draws the dotted exterior alone.
                 const double radii[2] = {falloffMin, falloffMax};
                 for (int surface = 0; surface < 2; ++surface) {
-                    const bool surfaceWire = wire && surface == 1;
-                    _AppendSphereVolumeGuide(
-                        radii[surface], axisScale, positiveScales,
-                        negativeScales, surfaceWire, rigid, wireWidth,
-                        &elements);
+                    const bool interior = wire && surface == 0;
+                    if (interior) {
+                        _AppendSphereVolumeGuide(
+                            radii[surface], axisScale, positiveScales,
+                            negativeScales, false, rigid, wireWidth,
+                            _kSphereInteriorOpacity, &elements);
+                        _AppendSphereVolumeGuide(
+                            radii[surface], axisScale, positiveScales,
+                            negativeScales, true, rigid, wireWidth, -1.0f,
+                            &elements);
+                    } else {
+                        _AppendSphereVolumeGuide(
+                            radii[surface], axisScale, positiveScales,
+                            negativeScales, wire, rigid, wireWidth, -1.0f,
+                            &elements);
+                    }
                 }
             } else if (typeName == "RigExecCurveWeight") {
                 VtVec3fArray curvePoints;

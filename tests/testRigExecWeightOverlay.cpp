@@ -186,6 +186,24 @@ _CheckDottedSphereWire(const HdSceneIndexPrim &guide)
     CHECK(gap > mark);
 }
 
+float
+_GetDisplayOpacity(const HdSceneIndexPrim &prim)
+{
+    HdPrimvarsSchema primvars =
+        HdPrimvarsSchema::GetFromParent(prim.dataSource);
+    HdPrimvarSchema opacity = primvars.GetPrimvar(HdTokens->displayOpacity);
+    if (HdSampledDataSourceHandle value = opacity.GetPrimvarValue()) {
+        const VtValue v = value->GetValue(0.0f);
+        if (v.IsHolding<VtFloatArray>()) {
+            const VtFloatArray a = v.UncheckedGet<VtFloatArray>();
+            if (a.size() == 1) {
+                return a[0];
+            }
+        }
+    }
+    return -1.0f;
+}
+
 // The displayColor primvar and its interpolation, or an empty array and an
 // empty token when the prim publishes none.
 VtVec3fArray
@@ -455,8 +473,9 @@ TestOverlayToggleDirtiesTheMesh()
 // The volume's own guides: the falloffMin and falloffMax iso-surfaces,
 // synthesized as children under the weight prim by the same protocol the
 // joint and control guides use. In wire mode the max-weight interior
-// (falloffMin) is solid and the exterior falloff (falloffMax) is a dotted
-// wire. geometry mode draws both surfaces solid.
+// (falloffMin) is a half-translucent fill with dotted great circles on
+// it, and the exterior falloff (falloffMax) is a dotted wire. geometry
+// mode draws both surfaces solid.
 static void
 TestSphereVolumeGuides()
 {
@@ -482,36 +501,40 @@ TestSphereVolumeGuides()
     bridge.SetSceneIndices(binding, results);
     CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
 
-    // Two surfaces, announced as traversable children.
+    // Translucent interior, dotted rings on that interior, dotted exterior.
     const SdfPathVector children = results->GetChildPrimPaths(_kVolumePath);
-    CHECK(children.size() == 2);
-    if (children.size() != 2) {
+    CHECK(children.size() == 3);
+    if (children.size() != 3) {
         return;
     }
 
     // Every announced child must be servable: a traversal that finds a
     // child GetPrim refuses to answer for is the one failure this whole
     // announcement protocol exists to prevent.
-    double radii[2] = {0.0, 0.0};
-    for (size_t i = 0; i < 2; ++i) {
+    const TfToken expectedType[3] = {HdPrimTypeTokens->sphere,
+                                     HdPrimTypeTokens->basisCurves,
+                                     HdPrimTypeTokens->basisCurves};
+    const float expectedRadius[3] = {1.0f, 1.0f, 2.0f};
+    for (size_t i = 0; i < 3; ++i) {
         const HdSceneIndexPrim guide = results->GetPrim(children[i]);
         CHECK(guide.dataSource);
-        // Symmetric wire mode: implicit sphere for the solid interior,
-        // dotted basis curves for the exterior falloff.
-        CHECK(guide.primType == (i == 0 ? HdPrimTypeTokens->sphere
-                                        : HdPrimTypeTokens->basisCurves));
+        CHECK(guide.primType == expectedType[i]);
         if (!guide.dataSource) {
             continue;
         }
-        if (i == 1) {
+        if (i > 0) {
             _CheckDottedSphereWire(guide);
+        } else {
+            CHECK(Near(_GetDisplayOpacity(guide), 0.5f));
         }
         // The radius rides in the transform, so the iso-surface's size is
-        // exactly the scale on the guide's matrix.
+        // exactly the scale on the guide's matrix. The interior rings share
+        // the fill's radius; the last child is the exterior falloff.
         HdXformSchema xform = HdXformSchema::GetFromParent(guide.dataSource);
         CHECK(static_cast<bool>(xform));
         if (HdMatrixDataSourceHandle ds = xform.GetMatrix()) {
-            radii[i] = ds->GetTypedValue(0.0f).GetRow3(0).GetLength();
+            CHECK(Near(float(ds->GetTypedValue(0.0f).GetRow3(0).GetLength()),
+                       expectedRadius[i]));
         }
         // Guide purpose and the schema's red default, so the volume and
         // the region it grabs read as one object.
@@ -531,9 +554,6 @@ TestSphereVolumeGuides()
             }
         }
     }
-    // The authored band, drawn: inner radius 1 and outer radius 2.
-    CHECK(Near(float(radii[0]), 1.0f));
-    CHECK(Near(float(radii[1]), 2.0f));
 
     const UsdPrim sphere = f.stage->GetPrimAtPath(_kVolumePath);
     CHECK(sphere.GetAttribute(TfToken("inputs:scaleXPos")).Set(2.0f));
@@ -543,14 +563,19 @@ TestSphereVolumeGuides()
         CHECK(sphere.GetAttribute(TfToken("guide:drawMode")).Set(TfToken(mode)));
         CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
         const SdfPathVector shaped = results->GetChildPrimPaths(_kVolumePath);
-        CHECK(shaped.size() == 2);
+        const size_t expectedChildren = wireMode ? 3 : 2;
+        CHECK(shaped.size() == expectedChildren);
         for (size_t i = 0; i < shaped.size(); ++i) {
             const auto guide = results->GetPrim(shaped[i]);
             // Asymmetric wire mode cannot use Hydra's implicit sphere, so
-            // the solid interior is a mesh. The exterior stays dotted.
-            const bool dotted = wireMode && i == 1;
+            // the interior fill is a mesh. Dotted rings sit on that fill
+            // and on the exterior falloff.
+            const bool dotted = wireMode && i > 0;
             CHECK(guide.primType == (dotted ? HdPrimTypeTokens->basisCurves
                                             : HdPrimTypeTokens->mesh));
+            if (wireMode && i == 0) {
+                CHECK(Near(_GetDisplayOpacity(guide), 0.5f));
+            }
             const auto points = _GetPointsPrimvar(guide);
             CHECK(!points.empty());
             float low = 0, high = 0;

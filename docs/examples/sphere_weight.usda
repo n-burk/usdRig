@@ -15,8 +15,9 @@
     inputs:falloffMin is the distance at which the field is fully ON and
     inputs:falloffMax the distance at which it is fully OFF, so for a
     sphere they read directly as the inner and outer radii -- 0.6 and 1.6
-    here. Wire draw mode shows the max-weight interior as solid geometry
-    and the exterior falloff as a dotted wire. Turn on
+    here. Wire draw mode shows the max-weight interior as geometry at
+    50% opacity with dotted great-circle rings on it, and the exterior
+    falloff as a dotted wire. Turn on
     Display -> Display Purposes -> Guide to see the two iso-surfaces.
     """
     defaultPrim = "SphereWeightAsset"

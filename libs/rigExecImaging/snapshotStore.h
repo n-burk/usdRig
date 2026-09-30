@@ -67,6 +67,11 @@ struct RigExecVolumeGuideElement {
     /// negative publishes no widths at all -- the hairline fallback, and
     /// what the non-wire draw modes always want.
     double wireWidth = 0.0;
+    /// Display opacity for this element. Negative inherits the prim's
+    /// guide:displayOpacity. The sphere weight's max-weight interior fill
+    /// sets 0.5 so that surface is half translucent while its rings keep
+    /// the authored guide opacity.
+    float opacity = -1.0f;
 
     bool operator==(const RigExecVolumeGuideElement &other) const {
         return xform == other.xform && primType == other.primType &&
@@ -74,7 +79,8 @@ struct RigExecVolumeGuideElement {
                indices == other.indices && normals == other.normals &&
                normalsInterpolation == other.normalsInterpolation &&
                doubleSided == other.doubleSided &&
-               wireWidth == other.wireWidth;
+               wireWidth == other.wireWidth &&
+               opacity == other.opacity;
     }
     bool operator!=(const RigExecVolumeGuideElement &other) const {
         return !(*this == other);

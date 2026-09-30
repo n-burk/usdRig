@@ -296,9 +296,10 @@ at 0 to red at 1 — the Rhythm & Hues Voodoo idiom. Pass `""` to turn it
 off. The volume's own falloffMin and falloffMax iso-surfaces draw as
 guides through the same synthesis protocol the control and joint guides
 use. A sphere weight in wire mode draws the max-weight interior
-(falloffMin) as solid geometry and the exterior falloff (falloffMax) as
-a dotted wire; plane and curve weights still draw both iso-surfaces as
-continuous wires. `geometry` draws every iso-surface solid.
+(falloffMin) as geometry at 50% opacity with dotted great-circle rings
+on that fill, and the exterior falloff (falloffMax) as a dotted wire.
+Plane and curve weights still draw both iso-surfaces as continuous
+wires. `geometry` draws every iso-surface solid.
 
 **A primvar appearing is a resync, not a dirty.**
 `HdSceneIndexAdapterSceneDelegate` caches each rprim's primvar

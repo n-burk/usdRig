@@ -512,13 +512,15 @@ _GuideHasSphere(const RigExecPublishedPrim &published, size_t index)
 // optional normals when an explicit mesh provides them.
 // \p wireWidth of zero authors no widths at all, which is the hairline
 // fallback and the only thing the joint sphere/cone guides ever want.
+// \p opacity replaces guide:displayOpacity when non-negative.
 HdContainerDataSourceHandle
 _BuildGuideStylePrimvars(
     const RigExecPublishedPrim &published,
     const VtVec3fArray &points = VtVec3fArray(),
     double wireWidth = 0.0,
     const VtVec3fArray &normals = VtVec3fArray(),
-    const TfToken &normalsInterpolation = TfToken())
+    const TfToken &normalsInterpolation = TfToken(),
+    float opacity = -1.0f)
 {
     TfTokenVector names{HdTokens->displayColor, HdTokens->displayOpacity};
     std::vector<HdDataSourceBaseHandle> values{
@@ -532,7 +534,8 @@ _BuildGuideStylePrimvars(
         HdPrimvarSchema::Builder()
             .SetPrimvarValue(
                 HdRetainedTypedSampledDataSource<VtFloatArray>::New(
-                    VtFloatArray{published.guideOpacity}))
+                    VtFloatArray{opacity >= 0.0f ? opacity
+                                                : published.guideOpacity}))
             .SetInterpolation(_Token(HdPrimvarSchemaTokens->constant))
             .Build()};
     if (!points.empty()) {
@@ -1204,7 +1207,7 @@ _BuildVolumeGuidePrim(
     names.push_back(HdPrimvarsSchemaTokens->primvars);
     values.push_back(_BuildGuideStylePrimvars(
         published, element.points, element.wireWidth, element.normals,
-        element.normalsInterpolation));
+        element.normalsInterpolation, element.opacity));
 
     if (element.primType == HdPrimTypeTokens->basisCurves) {
         if (element.wireWidth > 0.0) {
