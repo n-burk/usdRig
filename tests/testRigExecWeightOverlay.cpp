@@ -149,6 +149,43 @@ _GetPointsPrimvar(const HdSceneIndexPrim &prim)
     return VtVec3fArray();
 }
 
+// Sphere exterior falloff: three great circles broken into short marks.
+// Matches _kSphereWireDots / _kSphereWireDotDuty in bridge.cpp. A continuous
+// ring would be one curve of 33 vertices; a dotted ring is many two-point
+// curves whose gap is longer than the mark.
+void
+_CheckDottedSphereWire(const HdSceneIndexPrim &guide)
+{
+    HdBasisCurvesSchema curves =
+        HdBasisCurvesSchema::GetFromParent(guide.dataSource);
+    CHECK(static_cast<bool>(curves));
+    if (!curves) {
+        return;
+    }
+    HdIntArrayDataSourceHandle ds =
+        curves.GetTopology().GetCurveVertexCounts();
+    CHECK(static_cast<bool>(ds));
+    if (!ds) {
+        return;
+    }
+    const VtIntArray counts = ds->GetTypedValue(0.0f);
+    CHECK(counts.size() == size_t(48 * 3));
+    int total = 0;
+    for (const int n : counts) {
+        CHECK(n == 2);
+        total += n;
+    }
+    const VtVec3fArray points = _GetPointsPrimvar(guide);
+    CHECK(int(points.size()) == total);
+    if (points.size() < 4) {
+        return;
+    }
+    const float mark = (points[1] - points[0]).GetLength();
+    const float gap = (points[2] - points[1]).GetLength();
+    CHECK(mark > 0.0f);
+    CHECK(gap > mark);
+}
+
 // The displayColor primvar and its interpolation, or an empty array and an
 // empty token when the prim publishes none.
 VtVec3fArray
@@ -416,8 +453,10 @@ TestOverlayToggleDirtiesTheMesh()
 }
 
 // The volume's own guides: the falloffMin and falloffMax iso-surfaces,
-// synthesized as wire children under the weight prim by the same protocol
-// the joint and control guides use.
+// synthesized as children under the weight prim by the same protocol the
+// joint and control guides use. In wire mode the max-weight interior
+// (falloffMin) is solid and the exterior falloff (falloffMax) is a dotted
+// wire. geometry mode draws both surfaces solid.
 static void
 TestSphereVolumeGuides()
 {
@@ -457,19 +496,15 @@ TestSphereVolumeGuides()
     for (size_t i = 0; i < 2; ++i) {
         const HdSceneIndexPrim guide = results->GetPrim(children[i]);
         CHECK(guide.dataSource);
-        CHECK(guide.primType == HdPrimTypeTokens->basisCurves);
+        // Symmetric wire mode: implicit sphere for the solid interior,
+        // dotted basis curves for the exterior falloff.
+        CHECK(guide.primType == (i == 0 ? HdPrimTypeTokens->sphere
+                                        : HdPrimTypeTokens->basisCurves));
         if (!guide.dataSource) {
             continue;
         }
-        // Three orthogonal great circles: the classic wire sphere.
-        HdBasisCurvesSchema curves =
-            HdBasisCurvesSchema::GetFromParent(guide.dataSource);
-        CHECK(static_cast<bool>(curves));
-        if (HdIntArrayDataSourceHandle ds =
-                curves.GetTopology().GetCurveVertexCounts()) {
-            CHECK(ds->GetTypedValue(0.0f).size() == 3);
-        } else {
-            ++failures;
+        if (i == 1) {
+            _CheckDottedSphereWire(guide);
         }
         // The radius rides in the transform, so the iso-surface's size is
         // exactly the scale on the guide's matrix.
@@ -504,12 +539,18 @@ TestSphereVolumeGuides()
     CHECK(sphere.GetAttribute(TfToken("inputs:scaleXPos")).Set(2.0f));
     CHECK(sphere.GetAttribute(TfToken("inputs:scaleXNeg")).Set(0.5f));
     for (const char *mode : {"wire", "geometry"}) {
+        const bool wireMode = std::string(mode) == "wire";
         CHECK(sphere.GetAttribute(TfToken("guide:drawMode")).Set(TfToken(mode)));
         CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
-        for (const SdfPath &child : results->GetChildPrimPaths(_kVolumePath)) {
-            const auto guide = results->GetPrim(child);
-            CHECK(guide.primType == (std::string(mode) == "wire"
-                ? HdPrimTypeTokens->basisCurves : HdPrimTypeTokens->mesh));
+        const SdfPathVector shaped = results->GetChildPrimPaths(_kVolumePath);
+        CHECK(shaped.size() == 2);
+        for (size_t i = 0; i < shaped.size(); ++i) {
+            const auto guide = results->GetPrim(shaped[i]);
+            // Asymmetric wire mode cannot use Hydra's implicit sphere, so
+            // the solid interior is a mesh. The exterior stays dotted.
+            const bool dotted = wireMode && i == 1;
+            CHECK(guide.primType == (dotted ? HdPrimTypeTokens->basisCurves
+                                            : HdPrimTypeTokens->mesh));
             const auto points = _GetPointsPrimvar(guide);
             CHECK(!points.empty());
             float low = 0, high = 0;
@@ -535,6 +576,9 @@ TestSphereVolumeGuides()
                     offset += count;
                 }
                 CHECK(offset == indices.size());
+            }
+            if (dotted) {
+                _CheckDottedSphereWire(guide);
             }
         }
     }

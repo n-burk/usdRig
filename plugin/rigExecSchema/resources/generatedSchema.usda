@@ -1981,8 +1981,11 @@ class "RigExecVolumeWeight" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
             string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
-        none suppresses the guide without disturbing the field."""
+        curves, widthed by guide:wireWidth. A sphere weight in wire mode\r
+        draws the falloffMin surface, the max-weight interior, as solid\r
+        geometry and the falloffMax surface as a dotted wire. geometry\r
+        draws every iso-surface solid; none suppresses the guide without\r
+        disturbing the field."""
         }
     )
     double guide:wireWidth = 0.05 (
@@ -2195,8 +2198,11 @@ class RigExecSphereWeight "RigExecSphereWeight" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
             string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
-        none suppresses the guide without disturbing the field."""
+        curves, widthed by guide:wireWidth. A sphere weight in wire mode\r
+        draws the falloffMin surface, the max-weight interior, as solid\r
+        geometry and the falloffMax surface as a dotted wire. geometry\r
+        draws every iso-surface solid; none suppresses the guide without\r
+        disturbing the field."""
         }
     )
     double guide:wireWidth = 0.05 (
@@ -2449,8 +2455,11 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
             string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
-        none suppresses the guide without disturbing the field."""
+        curves, widthed by guide:wireWidth. A sphere weight in wire mode\r
+        draws the falloffMin surface, the max-weight interior, as solid\r
+        geometry and the falloffMax surface as a dotted wire. geometry\r
+        draws every iso-surface solid; none suppresses the guide without\r
+        disturbing the field."""
         }
     )
     double guide:wireWidth = 0.05 (
@@ -2702,8 +2711,11 @@ class RigExecCurveWeight "RigExecCurveWeight" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
             string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
-        none suppresses the guide without disturbing the field."""
+        curves, widthed by guide:wireWidth. A sphere weight in wire mode\r
+        draws the falloffMin surface, the max-weight interior, as solid\r
+        geometry and the falloffMax surface as a dotted wire. geometry\r
+        draws every iso-surface solid; none suppresses the guide without\r
+        disturbing the field."""
         }
     )
     double guide:wireWidth = 0.05 (

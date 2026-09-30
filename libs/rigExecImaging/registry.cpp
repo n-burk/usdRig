@@ -4006,16 +4006,22 @@ _AccumulateRestGuideBounds(
                 if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
                     !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) return false;
             }
+            // Wire mode draws falloffMax as a widened dotted curve and
+            // falloffMin as solid geometry, so only the exterior curve
+            // carries guide:wireWidth. Geometry mode draws both solid.
+            const double radii[2] = {falloffMin, falloffMax};
             bool found = false;
-            for (const double radius : {falloffMin, falloffMax}) {
+            for (int surface = 0; surface < 2; ++surface) {
+                const double radius = radii[surface];
                 if (!std::isfinite(radius) || radius <= 0.0) {
                     continue;
                 }
+                const double pad = (wire && surface == 1) ? halfWidth : 0.0;
                 PXR_NS::GfMatrix4d scale(1.0);
                 scale.SetScale(PXR_NS::GfVec3d(
                     radius * axisScale[0], radius * axisScale[1],
                     radius * axisScale[2]));
-                const PXR_NS::GfVec3d padding(halfWidth);
+                const PXR_NS::GfVec3d padding(pad);
                 range->UnionWith(
                     PXR_NS::GfBBox3d(PXR_NS::GfRange3d(-negativeScales - padding, positiveScales + padding),
                                      scale * rest)

@@ -316,6 +316,15 @@ const double _kTwoPi = 2.0 * std::acos(-1.0);
 // a sphere weight and a sphere control read as the same drawing.
 constexpr int _kVolumeRingSegments = 32;
 
+// Dots on one great circle of a sphere weight's exterior iso-surface.
+// Basis curves have no stipple, so each mark is its own short curve and
+// the gap is the absence of the next one. 48 marks, each covering 18% of
+// its period: on the unit sphere that arc is shorter than the default
+// guide:wireWidth, so a widened curve reads as a dot. The first mark
+// starts at angle 0, which keeps a sample on the ring's axisA cardinal.
+constexpr int _kSphereWireDots = 48;
+constexpr double _kSphereWireDotDuty = 0.18;
+
 // Segments around a curve weight's tube. Deliberately coarser: a curve
 // guide draws one of these per polyline vertex, so the vertex count is the
 // product of the two, and eight already reads as round at guide scale.
@@ -338,6 +347,30 @@ _AppendVolumeRing(
         points->push_back(center +
                           float(std::cos(theta)) * axisA +
                           float(std::sin(theta)) * axisB);
+    }
+}
+
+// One dotted ring in the same plane: _kSphereWireDots separate two-point
+// marks. Counts are appended beside the points so each mark is its own curve.
+void
+_AppendDottedVolumeRing(
+    const GfVec3f &center, const GfVec3f &axisA, const GfVec3f &axisB,
+    VtVec3fArray *points, VtIntArray *counts)
+{
+    constexpr int samples = 2;
+    for (int dot = 0; dot < _kSphereWireDots; ++dot) {
+        const double start =
+            _kTwoPi * double(dot) / double(_kSphereWireDots);
+        const double span =
+            _kTwoPi * _kSphereWireDotDuty / double(_kSphereWireDots);
+        for (int sample = 0; sample < samples; ++sample) {
+            const double theta =
+                start + span * (double(sample) / double(samples - 1));
+            points->push_back(center +
+                              float(std::cos(theta)) * axisA +
+                              float(std::sin(theta)) * axisB);
+        }
+        counts->push_back(samples);
     }
 }
 
@@ -412,6 +445,9 @@ _ReadCurveGuidePoints(
 // The radius and shared axis scales ride in the transform. Directional
 // scales reshape the unit points; asymmetric geometry uses a closed mesh
 // because an implicit sphere cannot represent unequal half-axes.
+// \p wire selects the dotted exterior-falloff curves. The solid branch is
+// the max-weight interior, and what geometry draw mode uses for both
+// surfaces.
 void
 _AppendSphereVolumeGuide(
     double radius, const GfVec3d &axisScale,
@@ -492,16 +528,15 @@ _AppendSphereVolumeGuide(
     }
     element.primType = HdPrimTypeTokens->basisCurves;
     element.wireWidth = wireWidth;
-    // Three orthogonal great circles: the classic wire sphere.
+    // Three orthogonal great circles, dotted. The sphere wire path is the
+    // exterior falloff iso-surface; the max-weight interior is the solid
+    // branch above. Continuous rings would read as a second shell.
     static const GfVec3f kX(1, 0, 0), kY(0, 1, 0), kZ(0, 0, 1);
     static const GfVec3f kOrigin(0, 0, 0);
-    _AppendVolumeRing(kOrigin, kX, kZ, _kVolumeRingSegments, &element.points);
-    _AppendVolumeRing(kOrigin, kX, kY, _kVolumeRingSegments, &element.points);
-    _AppendVolumeRing(kOrigin, kY, kZ, _kVolumeRingSegments, &element.points);
+    _AppendDottedVolumeRing(kOrigin, kX, kZ, &element.points, &element.counts);
+    _AppendDottedVolumeRing(kOrigin, kX, kY, &element.points, &element.counts);
+    _AppendDottedVolumeRing(kOrigin, kY, kZ, &element.points, &element.counts);
     for (GfVec3f &point : element.points) point = shapePoint(point);
-    element.counts = VtIntArray{_kVolumeRingSegments + 1,
-                                _kVolumeRingSegments + 1,
-                                _kVolumeRingSegments + 1};
     elements->push_back(std::move(element));
 }
 
@@ -1428,9 +1463,19 @@ RigExecImagingBridge::_FillVolumeGuides(
                         !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) scaleOk = false;
                 }
                 if (!scaleOk) continue;
-                for (const double radius : {falloffMin, falloffMax}) {
-                    _AppendSphereVolumeGuide(radius, axisScale, positiveScales, negativeScales, wire, rigid,
-                                             wireWidth, &elements);
+                // falloffMin is fully on: the max-weight interior, drawn
+                // solid. falloffMax is fully off: the exterior of the
+                // falloff, drawn as a dotted wire. geometry mode still
+                // draws both surfaces solid. A non-positive radius is
+                // skipped inside the append, so falloffMin = 0 draws the
+                // dotted exterior alone.
+                const double radii[2] = {falloffMin, falloffMax};
+                for (int surface = 0; surface < 2; ++surface) {
+                    const bool surfaceWire = wire && surface == 1;
+                    _AppendSphereVolumeGuide(
+                        radii[surface], axisScale, positiveScales,
+                        negativeScales, surfaceWire, rigid, wireWidth,
+                        &elements);
                 }
             } else if (typeName == "RigExecCurveWeight") {
                 VtVec3fArray curvePoints;

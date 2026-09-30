@@ -226,8 +226,11 @@ unposed reference copy. Ignored when samplePhase is `current`.
 Valid values: `wire`, `geometry`, `none`.
 
 wire draws the falloffMin and falloffMax iso-surfaces as
-curves, widthed by guide:wireWidth; geometry draws them solid;
-none suppresses the guide without disturbing the field.
+curves, widthed by guide:wireWidth. A sphere weight in wire mode
+draws the falloffMin surface, the max-weight interior, as solid
+geometry and the falloffMax surface as a dotted wire. geometry
+draws every iso-surface solid; none suppresses the guide without
+disturbing the field.
 
 #### `guide:wireWidth`
 
