@@ -21,18 +21,30 @@
 
 
 import math
+import os
+import sys
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, Vt
 
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
+    import rigExecUndo
     import sessionRegistry
 except ImportError:                    # loader that did not add our dir
-    import os as _os
-    import sys as _sys
-    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import rigExecUndo
     import sessionRegistry
+
+
+class _NoScope(object):
+    """What _Scope hands back when there is no undo stack to push onto."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, excType, exc, tb):
+        return False
 
 
 # stage helpers
@@ -532,11 +544,58 @@ class SurfacePicker(object):
         view = self.StageView()
         if view is None:
             return None
+        # Picked with GUIDES OFF, which is why this goes to the renderer
+        # rather than to StageView.pick: pick() takes showGuides from the
+        # viewer's own display settings, and a rig's decorations draw in
+        # FRONT of what they decorate -- an FK chain's guide runs straight
+        # down the middle of this viewport. pick() returns the frontmost
+        # hit only, so a guide there is not something a later filter can
+        # get past; it has to be left out of the intersection. The gizmo's
+        # snap pick does the same thing for the same reason.
+        try:
+            from pxr import UsdImagingGL
+            from OpenGL import GL
+        except ImportError as error:
+            Tf.Warn("curvenetUI: pick unavailable: %s" % error)
+            return None
         try:
             inBounds, frustum = view.computePickFrustum(x, y)
             if not inBounds:
                 return None
-            hits = view.pick(frustum)
+            stage = getattr(self._api, "stage", None)
+            if stage is None:
+                return None
+            dataModel = self._api.dataModel
+            viewSettings = dataModel.viewSettings
+            params = UsdImagingGL.RenderParams()
+            try:
+                params.frame = dataModel.currentFrame
+            except AttributeError:
+                params.frame = Usd.TimeCode.Default()
+            params.complexity = viewSettings.complexity.value
+            try:
+                params.drawMode = view._renderModeDict[
+                    viewSettings.renderMode]
+            except (AttributeError, KeyError):
+                # Read-only fallback: the artist's own draw mode, which
+                # reading never disturbs.
+                params.drawMode = view._renderParams.drawMode
+            params.showGuides = False
+            params.showProxy = viewSettings.displayProxy
+            params.showRender = viewSettings.displayRender
+            params.enableSceneMaterials = viewSettings.enableSceneMaterials
+            params.enableSceneLights = viewSettings.enableSceneLights
+            renderer = view._getRenderer()
+            if renderer is None:
+                return None
+            view.makeCurrent()
+            GL.glDepthMask(GL.GL_TRUE)
+            pickParams = UsdImagingGL.Engine.PickParams()
+            pickParams.resolveMode = "resolveNearestToCenter"
+            hits = renderer.TestIntersection(
+                pickParams, frustum.ComputeViewMatrix(),
+                frustum.ComputeProjectionMatrix(),
+                stage.GetPseudoRoot(), params)
         except Exception as error:
             Tf.Warn("curvenetUI: pick failed: %s" % error)
             return None
@@ -578,15 +637,24 @@ class CurvenetPanel(QtWidgets.QWidget):
     _sessions = sessionRegistry.SessionRegistry("curvenet panels")
 
     @classmethod
-    def GetInstance(cls, usdviewApi):
+    def GetInstance(cls, usdviewApi, undoStack=None):
         panel = cls._sessions.Get(usdviewApi)
         if panel is None:
-            panel = cls._sessions.Set(usdviewApi, CurvenetPanel(usdviewApi))
+            panel = cls._sessions.Set(
+                usdviewApi, CurvenetPanel(usdviewApi, undoStack=undoStack))
+        elif undoStack is not None:
+            panel._undo = undoStack
         return panel
 
-    def __init__(self, usdviewApi, parent=None):
+    def __init__(self, usdviewApi, parent=None, undoStack=None):
         super(CurvenetPanel, self).__init__(parent)
         self._api = usdviewApi
+        # The shared undo stack. Curvenet authoring BUILDS rig -- prims
+        # appear, relationships get targets -- so every edit here is
+        # bracketed by a SpecScope rather than the attribute recorder a
+        # pose edit uses; see rigExecUndo's header for why those differ.
+        self._undo = undoStack
+        self._gesture = None
         self._picker = SurfacePicker(usdviewApi)
         self._mode = MODE_OFF
         self._curvenetPath = None
@@ -719,6 +787,27 @@ class CurvenetPanel(QtWidgets.QWidget):
 
     def _Stage(self):
         return self._api.stage
+
+    def _Scope(self, label, paths=None):
+        """One undo entry covering `paths`, or the current curvenet.
+
+        Almost every edit in this panel rewrites one prim's `points` and
+        `rigExec:splineIndices`, so the default is that prim: a whole-spec
+        snapshot of it restores the geometry, the topology and anything
+        else an operation touched, without this method having to know
+        which operation ran.
+        """
+        stage = self._Stage()
+        if self._undo is None or stage is None:
+            return _NoScope()
+        if paths is None:
+            prim = self._Curvenet()
+            if not prim:
+                return _NoScope()
+            paths = [prim.GetPath()]
+        if not paths:
+            return _NoScope()
+        return rigExecUndo.SpecScope(stage, paths, self._undo, label)
 
     def _Curvenet(self):
         stage = self._Stage()
@@ -1017,6 +1106,12 @@ class CurvenetPanel(QtWidgets.QWidget):
         if not prim:
             self._SetStatus("No curvenet selected — press New.")
             return False
+        # ONE undo entry per gesture, not per mouse sample. Opened here
+        # before anything is authored and closed in _OnRelease, so a
+        # knot dragged across the face undoes in one step -- the same
+        # bracket the viewport gizmo puts around a drag. A press that
+        # turns out to author nothing commits nothing.
+        self._BeginGesture("Edit curvenet")
         x, y = self._Position(event)
         # The surface hit is only needed to PLACE a point. Selecting one is
         # pure screen-space projection, and requiring a hit for it made knots
@@ -1140,7 +1235,26 @@ class CurvenetPanel(QtWidgets.QWidget):
     def _OnRelease(self, event):
         self._dragKnot = -1
         self._dragHandle = None
+        self._EndGesture()
         return False
+
+    def _BeginGesture(self, label):
+        """Open the per-gesture undo scope, closing any left open.
+
+        A press without its release happens -- a modal dialog, a lost
+        focus, a view swapped out underneath -- and the recovery is to
+        commit what the abandoned gesture did rather than drop it or
+        stack a second scope on top of it.
+        """
+        self._EndGesture()
+        scope = self._Scope(label)
+        scope.__enter__()
+        self._gesture = scope
+
+    def _EndGesture(self):
+        scope, self._gesture = self._gesture, None
+        if scope is not None:
+            scope.__exit__(None, None, None)
 
     # -- edits ----------------------------------------------------------
 
@@ -1176,7 +1290,8 @@ class CurvenetPanel(QtWidgets.QWidget):
             self._SetStatus("Nothing to break: no shared endpoints.")
             return
         knot = shared[-1]
-        BreakKnot(prim, knot)
+        with self._Scope("Break knot"):
+            BreakKnot(prim, knot)
         self._SetStatus("Broke knot %d apart." % knot)
         self._Refresh()
 
@@ -1185,7 +1300,9 @@ class CurvenetPanel(QtWidgets.QWidget):
         if not prim:
             return
         count = len(GetSplines(prim)) // 4
-        if count and SplitSpline(prim, count - 1):
+        with self._Scope("Split spline") as scope:
+            split = count and SplitSpline(prim, count - 1)
+        if split:
             self._SetStatus("Split the last spline at its midpoint.")
             self._Refresh()
 
@@ -1194,7 +1311,9 @@ class CurvenetPanel(QtWidgets.QWidget):
         if not prim:
             return
         count = len(GetSplines(prim)) // 4
-        if count and DeleteSpline(prim, count - 1):
+        with self._Scope("Delete spline"):
+            deleted = count and DeleteSpline(prim, count - 1)
+        if deleted:
             self._chainKnot = -1
             self._SetStatus("Deleted the last spline. (Its pool points "
                             "remain; unused points are harmless.)")
@@ -1206,7 +1325,8 @@ class CurvenetPanel(QtWidgets.QWidget):
         if not prim or not mesh:
             self._SetStatus("Bind a mesh first: projection needs a surface.")
             return
-        moved = ProjectKnots(prim, mesh)
+        with self._Scope("Project knots"):
+            moved = ProjectKnots(prim, mesh)
         self._SetStatus("Projected %d point(s) onto %s."
                         % (moved, mesh.GetPath().name))
         self._Refresh()
@@ -1217,7 +1337,8 @@ class CurvenetPanel(QtWidgets.QWidget):
         if not prim or not mesh:
             self._SetStatus("Bind a mesh first: flatten needs a surface.")
             return
-        FlattenTangents(prim, mesh)
+        with self._Scope("Flatten tangents"):
+            FlattenTangents(prim, mesh)
         self._SetStatus("Flattened every tangent handle.")
         self._Refresh()
 
@@ -1231,7 +1352,8 @@ class CurvenetPanel(QtWidgets.QWidget):
         if len(anchors) < 2:
             self._SetStatus("Need two open ends to close.")
             return
-        AddSpline(prim, anchors[-1], anchors[0])
+        with self._Scope("Close loop"):
+            AddSpline(prim, anchors[-1], anchors[0])
         self._SetStatus("Closed the chain.")
         self._Refresh()
 
@@ -1248,10 +1370,37 @@ class CurvenetPanel(QtWidgets.QWidget):
         if parent is None or not parent.IsValid():
             rig = FindRigPrim(stage)
             parent = rig.GetParent() if rig else stage.GetPseudoRoot()
-        prim = CreateCurvenet(stage, parent)
+        # The name is resolved HERE so the scope can snapshot a path
+        # that does not exist yet -- an absent snapshot is what makes
+        # undo delete the new prim. MakeUniqueName leaves an unused name
+        # alone, so passing it back in cannot shift the path.
+        name = MakeUniqueName(parent, "Curvenet")
+        path = parent.GetPath().AppendChild(name)
+        with self._Scope("New curvenet", [path]):
+            prim = CreateCurvenet(stage, parent, name=name)
         self._curvenetPath = prim.GetPath()
         self._SetStatus("Created %s." % self._curvenetPath)
         self._Refresh()
+
+    @staticmethod
+    def _BindPaths(stage, rig):
+        """What BindCurvenet is about to author, for the undo scope.
+
+        The mover itself, plus any ANCESTOR SCOPE THAT IS STILL ABSENT --
+        those get created too, and undo has to take them away again. An
+        ancestor that already exists is left out on purpose: snapshotting
+        /Rig/Movers on a real character copies every mover under it, and
+        the only thing binding does to it is add one child, which the
+        child's own snapshot already undoes.
+        """
+        movers = rig.GetPath().AppendChild("Movers")
+        geometry = movers.AppendChild("Geometry")
+        paths = [p for p in (movers, geometry)
+                 if not stage.GetPrimAtPath(p)]
+        parent = stage.GetPrimAtPath(geometry)
+        name = MakeUniqueName(parent, "ProfileMover") if parent             else "ProfileMover"
+        paths.append(geometry.AppendChild(name))
+        return paths
 
     def _BoundMesh(self):
         """The mesh a Profile Mover already binds this curvenet to."""
@@ -1293,7 +1442,8 @@ class CurvenetPanel(QtWidgets.QWidget):
         if not rig:
             self._SetStatus("No RigExecRoot on this stage.")
             return
-        BindCurvenet(stage, prim, mesh, rig)
+        with self._Scope("Bind curvenet", self._BindPaths(stage, rig)):
+            BindCurvenet(stage, prim, mesh, rig)
         warnings = CheckBindPreconditions(stage, mesh, rig)
         message = "Bound %s to %s." % (prim.GetPath().name,
                                        mesh.GetPath().name)
@@ -1548,8 +1698,8 @@ def SurfaceNormalAt(mesh, point):
     return best
 
 
-def OpenCurvenetPanel(usdviewApi):
-    panel = CurvenetPanel.GetInstance(usdviewApi)
+def OpenCurvenetPanel(usdviewApi, undoStack=None):
+    panel = CurvenetPanel.GetInstance(usdviewApi, undoStack=undoStack)
     panel.show()
     panel.raise_()
     panel.activateWindow()

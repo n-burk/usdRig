@@ -237,7 +237,15 @@ struct RrProgram {
 
     // Uid routing, replayed at Open in capture order; -1 takes no uid.
     std::vector<std::array<int32_t, RrLadderFieldCount>> ladderUid;
+    std::vector<int32_t> spaceSwitchUid;
     std::vector<int32_t> interpUid;
+    // Per interpolator, one uid per numeric dial. Three because the
+    // compile reads at most three, one per axis, and refuses a fourth.
+    std::vector<std::array<int32_t, 3>> interpValueUid;
+    // Per provider slot: its space switch's index, or -1. Built once at
+    // Open so the compose pays one array lookup per slot and a rig with
+    // no switch pays nothing at all. Empty when the binary carries none.
+    std::vector<int32_t> spaceSwitchBySlot;
     std::vector<std::array<int32_t, RrSolverFieldCount>> solverUid;
     std::vector<std::array<int32_t, RrConstraintFieldCount>> constraintUid;
     std::vector<std::array<int32_t, RrWeightFieldCount>> weightUid;
@@ -325,6 +333,18 @@ struct RrProgram {
             poses->poseInterpolators[interp];
         return ReadUid(in.enabled, interpUid[interp]);
     }
+    RrInputValue ReadInterpValue(size_t interp, size_t axis) const
+    {
+        const RigExecWirePoseInterpolator &in =
+            poses->poseInterpolators[interp];
+        return ReadUid(in.valueInputs[axis],
+                       interpValueUid[interp][axis]);
+    }
+    RrInputValue ReadSpaceSwitch(size_t index) const
+    {
+        return ReadUid(poses->spaceSwitches[index].active,
+                       spaceSwitchUid[index]);
+    }
 };
 
 // The framework (closure.cpp, publish.cpp, runtime.cpp) implements the
@@ -387,6 +407,32 @@ RrMat4d RrElementOutSpace(const RrPointFrameArray *source, size_t index);
 RrPointFrame RrExtractElementFrame(const RrPointFrameArray *source,
                                    size_t index);
 RrMat4d RrRoundTrip(const RrMat4d &m);
+
+/// RigExecFrameTranslation: the driver's local translation measured against
+/// its own rest, which is what a pose interpolator's translation channel
+/// solves on. Null parents mean the driver's local frame is its world one.
+bool RrFrameTranslation(const RrPointFrame &driverFinal,
+                        const RrPointFrame &driverRest,
+                        const RrPointFrame *parentFinal,
+                        const RrPointFrame *parentRest, RrVec3d *out);
+
+/// RigExecBlendTransforms: decomposed lerp, with both endpoints returning
+/// their operand untouched so a space switch on a whole number is
+/// bit-identical to selecting that space.
+RrMat4d RrBlendTransforms(const RrMat4d &a, const RrMat4d &b, double weight);
+
+/// RigExecMaskTransform: zero the masked channels per axis, in the
+/// transform's own decomposition. An all-true mask returns \p m untouched.
+RrMat4d RrMaskTransform(const RrMat4d &m, const bool translation[3],
+                        const bool rotation[3], const bool scale[3]);
+
+/// Mirrors RigExecRotationFilter bit for bit.
+enum class RrRotationFilter : uint8_t { All = 0, Twist = 1, Swing = 2 };
+
+/// RigExecFilterSpaceRotation: keep only the twist of \p m's rotation about
+/// \p axis, or only the swing. `All` returns \p m untouched.
+RrMat4d RrFilterSpaceRotation(const RrMat4d &m, const RrVec3d &axis,
+                              RrRotationFilter filter);
 
 }  // namespace rigExec
 

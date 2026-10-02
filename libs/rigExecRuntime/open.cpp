@@ -12,12 +12,24 @@ namespace rigExec {
 
 namespace {
 
+/// Set from the InputPolicy section: the bake also gave uids to inputs an
+/// override can reach. File-scope rather than threaded through eight call
+/// sites, and set once per open before any routing runs.
+bool _gOverridableInputs = false;
+
 bool
 _RouteField(const RigExecWireInput &input,
             const std::vector<RigExecWireInputDirectoryEntry> &directory,
             size_t *nextUid, int32_t *uid, std::string *error)
 {
-    if (!input.varying || !input.bound) {
+    // The writer's rule, restated: live, or -- when the bake widened it --
+    // reachable by an override. The two have to agree exactly, because the
+    // directory is replayed positionally and one extra or missing entry
+    // shifts every uid after it.
+    const bool live = input.varying && input.bound;
+    const bool overridable =
+        _gOverridableInputs && input.overrideIndex >= 0 && input.head != 0;
+    if (!live && !overridable) {
         *uid = -1;
         return true;
     }
@@ -210,6 +222,13 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     };
     const uint8_t *data = nullptr;
     size_t bytesOut = 0;
+    // Before anything routes. Absent is the old rule, which is why a
+    // binary written before the section still replays exactly.
+    _gOverridableInputs = false;
+    if (reader.FindSection(RigExecBinarySection::InputPolicy, &data,
+                           &bytesOut)) {
+        _gOverridableInputs = bytesOut >= 1 && data[0] != 0;
+    }
     if (!section(RigExecBinarySection::Steps, "steps", &data, &bytesOut)) {
         return fail(*error);
     }
@@ -289,6 +308,45 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             solver.startRead = entry.read;
         }
     }
+    // Optional since minor 2: absent in older binaries, which load with
+    // every interpolator solving a transform's rotation alone. Present
+    // but dangling or malformed: fail.
+    if (section(RigExecBinarySection::PoseNumeric, "pose numerics", &data,
+                &bytesOut)) {
+        RigExecWireReader cursor(data, bytesOut);
+        std::vector<RigExecWirePoseNumeric> numerics;
+        if (!RigExecWireDecodePoseNumerics(&cursor, &numerics, error) ||
+            !cursor.Exhausted()) {
+            return fail("malformed pose-numeric section");
+        }
+        for (const RigExecWirePoseNumeric &entry : numerics) {
+            if (size_t(entry.interpolator) >=
+                self->_poses.poseInterpolators.size()) {
+                return fail("malformed pose-numeric section");
+            }
+            RigExecWirePoseInterpolator &interp =
+                self->_poses.poseInterpolators[size_t(entry.interpolator)];
+            // A numeric driver names no driver prim; a transform-driven
+            // one names a slot. A file that says both is corrupt.
+            if (!entry.values.empty() && interp.driverSlot >= 0) {
+                return fail("malformed pose-numeric section");
+            }
+            interp.enableTranslation = entry.enableTranslation;
+            interp.valueInputs = entry.values;
+        }
+    }
+    // Optional since minor 2, in the same way: absent means every
+    // provider composes against its authored parent.
+    if (section(RigExecBinarySection::SpaceSwitch, "space switches", &data,
+                &bytesOut)) {
+        RigExecWireReader cursor(data, bytesOut);
+        if (!RigExecWireDecodeSpaceSwitches(&cursor,
+                                            &self->_poses.spaceSwitches,
+                                            error) ||
+            !cursor.Exhausted()) {
+            return fail("malformed space-switch section");
+        }
+    }
     if (section(RigExecBinarySection::DomainGeometry, "geometry domain",
                 &data, &bytesOut)) {
         RigExecWireReader cursor(data, bytesOut);
@@ -362,12 +420,47 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             }
         }
     }
-    program.interpUid.assign(self->_poses.poseInterpolators.size(), -1);
-    for (size_t i = 0; i < self->_poses.poseInterpolators.size(); ++i) {
-        if (!_RouteField(self->_poses.poseInterpolators[i].enabled,
-                         directory, &nextUid, &program.interpUid[i],
-                         error)) {
+    program.spaceSwitchUid.assign(self->_poses.spaceSwitches.size(), -1);
+    for (size_t i = 0; i < self->_poses.spaceSwitches.size(); ++i) {
+        if (!_RouteField(self->_poses.spaceSwitches[i].active, directory,
+                         &nextUid, &program.spaceSwitchUid[i], error)) {
             return fail(*error);
+        }
+    }
+    // Switch index by provider slot, dense, so the compose reads one int
+    // per slot. Left empty when the rig has no switch, which is the
+    // branch the compose tests first.
+    if (!self->_poses.spaceSwitches.empty()) {
+        program.spaceSwitchBySlot.assign(slots, -1);
+        for (size_t i = 0; i < self->_poses.spaceSwitches.size(); ++i) {
+            const RigExecWireSpaceSwitch &sw =
+                self->_poses.spaceSwitches[i];
+            if (sw.slot < 0 || size_t(sw.slot) >= slots) {
+                return fail("space switch names no slot");
+            }
+            for (const int32_t source : sw.sourceSlots) {
+                if (source >= 0 && size_t(source) >= slots) {
+                    return fail("space switch names no source slot");
+                }
+            }
+            program.spaceSwitchBySlot[size_t(sw.slot)] = int32_t(i);
+        }
+    }
+    program.interpUid.assign(self->_poses.poseInterpolators.size(), -1);
+    program.interpValueUid.assign(self->_poses.poseInterpolators.size(),
+                                  {-1, -1, -1});
+    for (size_t i = 0; i < self->_poses.poseInterpolators.size(); ++i) {
+        const RigExecWirePoseInterpolator &interp =
+            self->_poses.poseInterpolators[i];
+        if (!_RouteField(interp.enabled, directory, &nextUid,
+                         &program.interpUid[i], error)) {
+            return fail(*error);
+        }
+        for (size_t v = 0; v < interp.valueInputs.size(); ++v) {
+            if (!_RouteField(interp.valueInputs[v], directory, &nextUid,
+                             &program.interpValueUid[i][v], error)) {
+                return fail(*error);
+            }
         }
     }
     program.solverUid.resize(self->_poses.solvers.size());
@@ -434,11 +527,25 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             }
         }
     }
+    for (size_t i = 0; i < program.spaceSwitchUid.size(); ++i) {
+        if (program.spaceSwitchUid[i] >= 0) {
+            store.inputHolders[size_t(program.spaceSwitchUid[i])] =
+                RrWireInputConstant(self->_poses.spaceSwitches[i].active);
+        }
+    }
     for (size_t i = 0; i < program.interpUid.size(); ++i) {
+        const RigExecWirePoseInterpolator &interp =
+            self->_poses.poseInterpolators[i];
         if (program.interpUid[i] >= 0) {
             store.inputHolders[size_t(program.interpUid[i])] =
-                RrWireInputConstant(
-                    self->_poses.poseInterpolators[i].enabled);
+                RrWireInputConstant(interp.enabled);
+        }
+        for (size_t v = 0; v < interp.valueInputs.size(); ++v) {
+            const int32_t uid = program.interpValueUid[i][v];
+            if (uid >= 0) {
+                store.inputHolders[size_t(uid)] =
+                    RrWireInputConstant(interp.valueInputs[v]);
+            }
         }
     }
     for (size_t i = 0; i < program.solverUid.size(); ++i) {

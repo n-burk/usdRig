@@ -1,7 +1,7 @@
 @echo off
 rem Headless end-to-end test of the TouchPose pick loop
-rem (tests\testUsdviewTouchPose.py) on examples\biped\Biped_touch.usda --
-rem the COMBINED layer, which sublayers Biped_touch_regions.usda over
+rem (tests\testUsdviewTouchPose.py) on examples\biped\Biped_stack.usda --
+rem the COMBINED stack, which sublayers the touch-region layers over
 rem Biped.usda. The touch-only layer alone has nothing to draw and
 rem nothing to select; it is asserted by the importer's own verify pass.
 rem
@@ -57,7 +57,7 @@ rem package from. Supply the package path explicitly.
 set "TOUCHPOSE_PLUGIN_DIR=%RIG%\plugin\touchPose"
 
 set "STAGE=%~1"
-if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_touch.usda"
+if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_stack.usda"
 if not exist "%STAGE%" (
     >&2 echo ERROR: stage not found: %STAGE%
     >&2 echo        Pass an existing stage containing RigExecTouchRegions.

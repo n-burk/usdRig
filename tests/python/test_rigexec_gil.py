@@ -42,7 +42,7 @@ _STAGE = os.path.join(_REPO, "examples", "biped", "Biped_anim.usda")
 _RIG = "/Biped/Rig"
 _POINTS = "/Biped/Geom/body_geo.points"
 _FRAMES = (1.0, 2.0, 3.0, 7.0, 12.0)
-_DRAG = ("hips_ctl", "avars:rz", 11.5)
+_DRAG = ("M_Body", "avars:rz", 11.5)
 # Under ctest's 120 s TIMEOUT, so a hang is reported by the dump below, which
 # names the frame every thread is stuck in, rather than by ctest's kill.
 _HANG_SECONDS = 90

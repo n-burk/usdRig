@@ -11,7 +11,7 @@ properties on a standard subset:
             uniform token elementType = "face"
             uniform token familyName  = "touchpose:L0"
             int[] indices = [21416, ...]
-            rel   touchpose:control = </Biped/Rig/.../thumb_003_r_bind>
+            rel   touchpose:control = </Biped/Rig/.../thumb_003_r_def>
             int   touchpose:hilight = 0
             color3f touchpose:color = (0.038, 0.449, 0.508)
         }

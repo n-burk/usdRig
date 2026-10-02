@@ -1,6 +1,6 @@
 @echo off
 rem Headless end-to-end test of TOUCHPOSE IN THE NODE GRAPH
-rem (tests\testUsdviewNoodlesTouch.py) on examples\biped\Biped_all.usda --
+rem (tests\testUsdviewNoodlesTouch.py) on examples\biped\Biped_stack.usda --
 rem the combined stage: the layered rig plus the TouchPose regions, which
 rem is the only one where both halves of the graph exist at once. Over
 rem the regions layer alone there are regions and no controls to link to,
@@ -9,7 +9,7 @@ rem
 rem Why it exists: usdNoodles builds its graph from whatever prims a load
 rem path hands it, and TouchPose is invisible to the one the editor uses
 rem when usdview opens a stage. MEASURED before this test existed:
-rem NodeGraphStage.load on Biped_all.usda produced ONE node -- /Biped --
+rem NodeGraphStage.load on the stack produced ONE node -- /Biped --
 rem and zero links, because that loader reads the stage's ROOT CHILDREN
 rem and the 98 regions hang off /Biped/TouchPose. Nothing about that is
 rem visible from a unit test of the pieces: each piece was already right
@@ -42,7 +42,7 @@ call "%~dp0..\_require_python.bat"
 if errorlevel 1 exit /b 1
 
 set "STAGE=%~1"
-if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_all.usda"
+if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_stack.usda"
 if not exist "%STAGE%" (
     >&2 echo ERROR: stage not found: %STAGE%
     >&2 echo        Pass an existing stage containing RigExecTouchRegions.

@@ -558,6 +558,13 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         out.poseSlots = _ToI32s(interp.poseSlots);
         out.disabledSlots = _ToI32s(interp.disabledSlots);
         out.solver = _ToRbf(interp.solver);
+        // Memory only: the interpolator record layout is frozen, so the
+        // PoseNumeric section carries these (see bake.cpp).
+        out.enableTranslation = interp.enableTranslation;
+        out.valueInputs.reserve(interp.valueInputs.size());
+        for (const auto &value : interp.valueInputs) {
+            out.valueInputs.push_back(_ToInput(value, writer));
+        }
         pose.poseInterpolators.push_back(std::move(out));
     }
     pose.poseWeightPaths.reserve(program.poseWeightPaths.size());
@@ -767,6 +774,7 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         out.worldUpPath =
             writer->AddString(constraint.worldUpPath.GetString());
         out.worldUpObjectNamed = constraint.worldUpObjectNamed;
+        out.spaceSlot = int32_t(constraint.spaceSlot);
         out.snapshotAfter = constraint.snapshotAfter;
         out.singleChainIk = constraint.singleChainIk;
         out.ikMode = uint8_t(constraint.ikMode);
@@ -828,6 +836,29 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         out.end = int32_t(group.end);
         out.parentSlots = _ToI32s(group.parentSlots);
         pose.composeGroups.push_back(std::move(out));
+    }
+    // Memory only: the SpaceSwitch section carries these (see bake.cpp).
+    // The program holds them in slot order already, which is the order the
+    // capture traversal and the loader's uid replay both walk.
+    pose.spaceSwitches.reserve(program.spaceSwitches.size());
+    for (const RigExecBakedProgramImpl::SpaceSwitch &sw :
+         program.spaceSwitches) {
+        RigExecWireSpaceSwitch out;
+        out.slot = int32_t(sw.slot);
+        out.sourceSlots = _ToI32s(sw.sourceSlots);
+        out.filters.reserve(sw.filters.size());
+        for (const RigExecRotationFilter filter : sw.filters) {
+            out.filters.push_back(uint8_t(filter));
+        }
+        out.twistAxis = _ToVec3d(sw.twistAxis);
+        out.spaceSlot = int32_t(sw.spaceSlot);
+        out.active = _ToInput(sw.activeInput, writer);
+        for (int axis = 0; axis < 3; ++axis) {
+            out.affectTranslation[axis] = sw.affectTranslation[axis];
+            out.affectRotation[axis] = sw.affectRotation[axis];
+            out.affectScale[axis] = sw.affectScale[axis];
+        }
+        pose.spaceSwitches.push_back(std::move(out));
     }
     pose.commits.reserve(program.commits.size());
     for (const RigExecBakedCommit &commit : program.commits) {
@@ -1133,6 +1164,7 @@ _ToRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     out.influenceSlots = _ToI32s(revision.influenceSlots);
     out.transformSlot = int32_t(revision.transformSlot);
     out.transformSpaceSlot = int32_t(revision.transformSpaceSlot);
+    out.carrySpaceSlot = int32_t(revision.carrySpaceSlot);
     out.constraintDelta = int32_t(revision.constraintDelta);
     out.driverFramesSolver = int32_t(revision.driverFramesSolver);
     out.finalPhase = revision.finalPhase;

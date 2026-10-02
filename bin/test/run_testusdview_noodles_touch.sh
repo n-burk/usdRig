@@ -1,12 +1,12 @@
 #!/bin/bash
 # bin/test/run_testusdview_noodles_touch.sh -- headless end-to-end test of
 # TOUCHPOSE IN THE NODE GRAPH (tests/testUsdviewNoodlesTouch.py) on
-# examples/biped/Biped_all.usda. The POSIX twin of
+# examples/biped/Biped_stack.usda. The POSIX twin of
 # run_testusdview_noodles_touch.bat, which carries the full rationale.
 #
 # In short: usdNoodles builds its graph from the prims a load path hands
 # it, and TouchPose was invisible to the one usdview uses when it opens a
-# stage -- measured, NodeGraphStage.load on Biped_all.usda produced one
+# stage -- measured, NodeGraphStage.load on the stack produced one
 # node (/Biped) and zero links, because it reads root children and the 98
 # regions hang off /Biped/TouchPose.
 #
@@ -29,7 +29,7 @@ set -euo pipefail
 rigexec_require_python
 rigexec_require_usd "$TESTUSDVIEW"
 
-STAGE="$RIG/examples/biped/Biped_all.usda"
+STAGE="$RIG/examples/biped/Biped_stack.usda"
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ -f "$1" ]; then
     STAGE="$1"
     shift

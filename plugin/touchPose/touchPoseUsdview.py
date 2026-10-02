@@ -110,6 +110,42 @@ class TouchPoseContainer(PluginContainer):
     def configureView(self, plugRegistry, plugUIBuilder):
         _AddToRigExecMenu(plugUIBuilder, "Animation Editors",
                           self._touchPose, 40)
+        self._ActivateByDefault()
+
+    def _ActivateByDefault(self):
+        """TouchPose is ON when a rig that has it opens.
+
+        The mode used to require opening the panel, and to switch itself
+        off again when the panel closed. Both are gone: the animator's
+        rule is that a rig with touch regions is touchable straight
+        away, and stays touchable until the toggle says otherwise.
+
+        DEFERRED to the event loop rather than run here. configureView
+        runs while usdview is still assembling itself, and the
+        controller needs a stage view and a stage to find regions on --
+        asked too early it finds neither and quietly answers False.
+
+        SetActive already refuses a stage with no touch regions, which
+        is what makes this safe to call unconditionally: on a rig
+        without them it is a no-op, not an error.
+        """
+        try:
+            from pxr.Usdviewq.qt import QtCore
+        except ImportError:
+            return                      # no Qt: nothing to activate into
+        QtCore.QTimer.singleShot(0, self._Activate)
+
+    def _Activate(self):
+        try:
+            import touchPoseUI
+            controller = touchPoseUI.TouchPoseController.GetInstance(
+                self._api)
+            controller.SetActive(True)
+        except Exception as error:
+            # Never take usdview down over a convenience. A rig with no
+            # regions, a stage still loading, or a Qt build without the
+            # view all land here and simply leave the mode off.
+            Tf.Warn("touchPose: could not activate by default: %s" % error)
 
     def _OpenPanel(self, usdviewApi=None):
         try:

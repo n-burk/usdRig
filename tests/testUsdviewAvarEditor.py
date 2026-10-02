@@ -12,10 +12,11 @@
 # generation counter (the viewport's republish), and against the
 # terminal Hydra scene index the viewport draws from.
 #
-# Opened on biped_full2.usda: 224 joints, an IK/FK blend per limb that
-# reads a CUSTOM `avars:ikfk` float, and a file-animated ikfk on the
-# left arm that the animated-channel policy has to keep intact. Every
-# edit lands in the SESSION layer; the file is never written.
+# Opened on examples/biped/Biped_anim_ikfk.usda: 254 joints, an IK/FK blend
+# per limb that reads a CUSTOM `avars:ikfk` float, and a file-animated
+# ikfk on the left arm that the animated-channel policy has to keep
+# intact. Every edit lands in the SESSION layer; the file is never
+# written.
 #
 # Set RIGEXEC_AVARS_SHOT=/path.png to save a window grab.
 #
@@ -25,18 +26,22 @@ import os
 
 from pxr import Gf, Sdf, Usd
 
+# The DELIVERED paths. The FK arm hangs off the body in namespace -- the
+# scratch stage this was written against had it flat under Controls -- and
+# the IK handles and the per-limb ikfk dials sit at the top.
 RIG = "/Biped/Rig"
-CONTROLS = RIG + "/Controls"
-FK_SHOULDER = CONTROLS + "/arm_l_fk_shoulder_l_bind"
-ARM_L_ROOT = CONTROLS + "/arm_l_root"
-ARM_R_ROOT = CONTROLS + "/arm_r_root"
-ARM_R_IK = CONTROLS + "/arm_r_ik"
-ARM_L_IK = CONTROLS + "/arm_l_ik"
-SPINE = ("/Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/"
-         "spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind")
-SHOULDER_L = SPINE + "/clavicle_l_bind/shoulder_l_bind"
-ELBOW_L = SHOULDER_L + "/elbow_l_bind"
-WRIST_R = SPINE + "/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind"
+CONTROLS = RIG + "/Main/Shot/Aux/Controls"
+FK_ARM = CONTROLS + "/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing"
+FK_SHOULDER = FK_ARM + "/L_UpArm"
+ARM_L_ROOT = CONTROLS + "/L_Arm"
+ARM_R_ROOT = CONTROLS + "/R_Arm"
+ARM_R_IK = CONTROLS + "/R_ArmIK"
+ARM_L_IK = CONTROLS + "/L_ArmIK"
+SPINE = ("/Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/"
+         "spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def")
+SHOULDER_L = SPINE + "/clavicle_l_def/shoulder_l_def"
+ELBOW_L = SHOULDER_L + "/elbow_l_def"
+WRIST_R = SPINE + "/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def"
 
 # The FK shoulder control's pivot is the shoulder joint; a 30 degree
 # rotation about its local Z carries the elbow, 25.5068 cm away, along a
@@ -141,40 +146,50 @@ def _Select(appController, path, *more):
     return prim
 
 
-def _DragSlider(appController, row, fraction):
-    """
-    A slider drag the way Qt delivers one: press, moves, release.
+def _Scrub(appController, row, pixels, modifiers=None):
+    """A horizontal drag across a row's field, as Qt delivers one.
 
-    setSliderDown emits sliderPressed / sliderReleased and
-    setSliderPosition emits sliderMoved and, with tracking on,
-    valueChanged -- the same signals a mouse produces, minus the pixel
-    arithmetic that would make the test depend on the widget's width.
+    Press, a few moves past the slop, release -- the same event stream a
+    mouse produces, without depending on the widget's width or on the
+    offscreen platform delivering real input.
     """
-    import gizmoPreview
-    slider = row.slider
-    attr = row.channel.attr
-    frame = appController._usdviewApi.frame
-    before = attr.Get(frame)
-    slider.setSliderDown(True)
-    _Check(row._dragging, "the press started a drag")
-    target = int(round(slider.maximum() * fraction))
-    start = slider.value()
-    for i in range(1, 5):
-        slider.setSliderPosition(int(start + (target - start) * i / 4.0))
+    from pxr.Usdviewq.qt import QtCore, QtGui
+    field = row.field
+    _Check(field is not None, "%s has a field" % row.channel.shortName)
+    mods = modifiers or QtCore.Qt.NoModifier
+    start = QtCore.QPointF(10.0, 8.0)
+
+    def _send(kind, x, buttons):
+        point = QtCore.QPointF(x, 8.0)
+        event = QtGui.QMouseEvent(kind, point, QtCore.Qt.LeftButton,
+                                  buttons, mods)
         appController._processEvents()
-    if gizmoPreview.HasSink():
-        # While the slider is held the value goes to Hydra through the
-        # preview channel and the stage is not written at all.
-        _Check(row._previewing and row._scope is None,
-               "the drag previews instead of authoring")
-        _Check(attr.Get(frame) == before,
-               "nothing was authored during the drag: %s -> %s"
-               % (before, attr.Get(frame)))
-    slider.setSliderDown(False)
+        field.event(event)
+
+    _send(QtCore.QEvent.MouseButtonPress, start.x(), QtCore.Qt.LeftButton)
+    for i in (1, 2, 3, 4):
+        _send(QtCore.QEvent.MouseMove, start.x() + pixels * i / 4.0,
+              QtCore.Qt.LeftButton)
+    _send(QtCore.QEvent.MouseButtonRelease, start.x() + pixels,
+          QtCore.Qt.NoButton)
     appController._processEvents()
-    _Check(row._scope is None and not row._dragging
-           and not gizmoPreview.IsPreviewing(),
-           "the release committed once and ended the preview")
+
+
+def _TypeValue(appController, row, text):
+    """Type into a row's field the way a person does.
+
+    The field commits on `editingFinished`, which Qt emits on Enter and
+    on focus-out; `setText` alone changes the text without committing,
+    exactly as typing without pressing Enter does. So the test sets the
+    text and then emits the signal, which is the same path the keystroke
+    takes and does not depend on the widget having focus in an offscreen
+    session.
+    """
+    field = row.field
+    _Check(field is not None, "%s has a typed field" % row.channel.shortName)
+    field.setText(text)
+    field.editingFinished.emit()
+    appController._processEvents()
 
 
 def _UndoDepth(stack):
@@ -218,9 +233,17 @@ def testUsdviewInputFunction(appController):
                "the panel is in the RigExec menu ONLY, not Window")
 
     # --- 2. the MENU path opens it on the selection ----------------------
-    frame = Usd.TimeCode(1)
-    appController._dataModel.currentFrame = frame
+    # Playback STOPPED first. This stage declares a time range, which
+    # gives usdview a live timeline: left playing, the frame advances
+    # between the test reading it and the panel reading it, and the two
+    # disagree about a number neither of them got wrong. Then frame 1 is
+    # asked for and read back, because the timeline has the last word on
+    # which frame is current.
+    appController._dataModel.playing = False
     appController._processEvents()
+    appController._dataModel.currentFrame = Usd.TimeCode(1)
+    appController._processEvents()
+    frame = appController._dataModel.currentFrame
     _Select(appController, FK_SHOULDER)
     action = [a for a in rigMenu.actions() if a.text() == "Avar Editor"][0]
     action.trigger()
@@ -235,7 +258,8 @@ def testUsdviewInputFunction(appController):
     _Check(panel._undo is undo,
            "the menu path hands it the container's shared undo stack")
     _Check(panel.Frame() == frame,
-           "the panel is on frame 1: %s" % panel.Frame())
+           "the panel is on frame %s, the app on %s"
+           % (panel.Frame(), frame))
     _Check(panel.WriteMode() == model.WRITE_ANIMATION,
            "Animation is the default write mode, like the gizmo")
 
@@ -252,16 +276,18 @@ def testUsdviewInputFunction(appController):
            "translation is labelled in the stage's centimetres: %r"
            % panel.Row("tx").unit.text())
     _Check(panel.Row("rz").unit.text() == "deg", "rotation is in degrees")
+    # The spans survive on the model -- they still decide a channel's
+    # decimals -- even though no slider draws them any more.
     _Check(panel.Row("rz").SliderRange() == (-180.0, 180.0),
-           "rotate slider spans +-180: %s" % (panel.Row("rz").SliderRange(),))
+           "rotate spans +-180: %s" % (panel.Row("rz").SliderRange(),))
     _Check(panel.Row("tx").SliderRange() == (-100.0, 100.0),
-           "translate slider spans one metre of centimetres: %s"
+           "translate spans one metre of centimetres: %s"
            % (panel.Row("tx").SliderRange(),))
     _Check(panel.Row("sx").SliderRange() == (0.0, 2.0),
-           "scale slider sits around 1.0: %s"
-           % (panel.Row("sx").SliderRange(),))
-    _Check(abs(panel.Row("sx").spin.value() - 1.0) < 1e-9,
-           "scale shows its rest value 1.0")
+           "scale sits around 1.0: %s" % (panel.Row("sx").SliderRange(),))
+    _Check(panel.Row("sx").field.text() == "1",
+           "scale shows its rest value 1.0, got %r"
+           % panel.Row("sx").field.text())
     order = panel.Row("rotationOrder")
     _Check(order.combo is not None and order.combo.count() == 6,
            "rotationOrder is a combo over the six allowed tokens")
@@ -286,8 +312,7 @@ def testUsdviewInputFunction(appController):
     _Check(session.GetAttributeAtPath(FK_SHOULDER + ".avars:rz") is None,
            "rz starts unauthored in the session layer")
     # setValue on a spin box emits valueChanged exactly as Enter does.
-    rz.spin.setValue(ROTATE_DEGREES)
-    appController._processEvents()
+    _TypeValue(appController, rz, str(ROTATE_DEGREES))
 
     _Check(abs(rzAttr.Get(frame) - ROTATE_DEGREES) < 1e-9,
            "the composed rz at frame 1 is 30: %s" % rzAttr.Get(frame))
@@ -327,8 +352,8 @@ def testUsdviewInputFunction(appController):
     _Check(abs(rzAttr.Get(frame)) < 1e-9, "undo put rz back to 0")
     _Check((evaluator.Origin(ELBOW_L, 1) - elbow0).GetLength() < 1e-9,
            "and the elbow back to rest")
-    _Check(abs(rz.spin.value()) < 1e-9,
-           "the row refreshed on the undo notice: %s" % rz.spin.value())
+    _Check(abs(float(rz.field.text() or 0)) < 1e-9,
+           "the row refreshed on the undo notice: %s" % float(rz.field.text() or 0))
     undo.Redo()
     appController._processEvents()
     _Check(abs(rzAttr.Get(frame) - ROTATE_DEGREES) < 1e-9,
@@ -349,33 +374,38 @@ def testUsdviewInputFunction(appController):
            "the panel followed the selection")
     ikfk = panel.Row("ikfk")
     _Check(ikfk is not None, "the custom avars:ikfk is discovered by prefix")
-    _Check(ikfk.channel.kind == model.KIND_CUSTOM and ikfk.slider is not None,
-           "and it is a custom float with a slider")
+    _Check(ikfk.channel.kind == model.KIND_CUSTOM and ikfk.field is not None,
+           "and it is a custom float with a typed field")
     _Check(ikfk.SliderRange() == (0.0, 1.0),
-           "a bare float avar gets a 0..1 slider: %s" % (ikfk.SliderRange(),))
-    _Check(abs(ikfk.spin.value()) < 1e-9, "it starts at 0 = FK")
+           "a bare float avar still reports a 0..1 span: %s"
+           % (ikfk.SliderRange(),))
+    _Check(ikfk.field.text() in ("0", "0.0"),
+           "it starts at 0 = FK, got %r" % ikfk.field.text())
     ikfkAttr = stage.GetPrimAtPath(ARM_R_ROOT).GetAttribute("avars:ikfk")
 
     wrist0 = evaluator.Origin(WRIST_R, 1)
     depth1 = _UndoDepth(undo)
-    _DragSlider(appController, ikfk, 1.0)
+    _TypeValue(appController, ikfk, "1")
     _Check(abs(ikfkAttr.Get(frame) - 1.0) < 1e-9,
-           "the slider drag wrote ikfk = 1 (IK): %s" % ikfkAttr.Get(frame))
+           "typing wrote ikfk = 1 (IK): %s" % ikfkAttr.Get(frame))
     _Check(_UndoDepth(undo) == depth1 + 1,
-           "the whole drag is ONE undo entry, not one per sample")
-    _Check(undo.UndoText() == "Drag ikfk", "labelled: %r" % undo.UndoText())
+           "one typed value is ONE undo entry")
+    _Check(undo.UndoText() == "Set ikfk", "labelled: %r" % undo.UndoText())
 
+    # From the pose the switch LEFT, not from the FK one: switching a limb
+    # to IK moves its end joint by whatever the two solutions disagree
+    # about at rest (3.32 cm on this rig's right arm), and measuring the
+    # handle's travel from before the switch adds that in.
+    wristAtIK = evaluator.Origin(WRIST_R, 1)
     _Select(appController, ARM_R_IK)
-    panel.Row("ty").spin.setValue(IK_TRANSLATE)
-    appController._processEvents()
+    _TypeValue(appController, panel.Row("ty"), str(IK_TRANSLATE))
     wristIK = evaluator.Origin(WRIST_R, 1)
-    ikMoved = (wristIK - wrist0).GetLength()
+    ikMoved = (wristIK - wristAtIK).GetLength()
     _Check(abs(ikMoved - abs(IK_TRANSLATE)) < 1e-6,
            "in IK the wrist followed the IK control by %.6f cm" % ikMoved)
 
     _Select(appController, ARM_R_ROOT)
-    panel.Row("ikfk").spin.setValue(0.0)
-    appController._processEvents()
+    _TypeValue(appController, panel.Row("ikfk"), str(0.0))
     wristFK = evaluator.Origin(WRIST_R, 1)
     fkMoved = (wristFK - wrist0).GetLength()
     _Check(fkMoved < 1e-9,
@@ -386,7 +416,7 @@ def testUsdviewInputFunction(appController):
     appController._processEvents()
 
     # --- 8. an animated channel keeps its other keys ---------------------
-    # arm_l_root.avars:ikfk is keyed IN THE FILE at 1:0, 24:0, 48:1. A
+    # L_UpArmSwing.avars:ikfk is keyed IN THE FILE at 1:0, 24:0, 48:1. A
     # session-layer sample at frame 36 alone would outrank all three and
     # hold 0.25 across the whole shot; the panel promotes the file's keys
     # into the session layer first, so only frame 36 changes.
@@ -400,10 +430,9 @@ def testUsdviewInputFunction(appController):
     animRow = panel.Row("ikfk")
     _Check(animRow.badge.text() == "anim",
            "the row says the channel is animated: %r" % animRow.badge.text())
-    _Check(abs(animRow.spin.value() - 0.5) < 1e-9,
+    _Check(abs(float(animRow.field.text() or 0) - 0.5) < 1e-9,
            "and shows the interpolated 0.5 at frame 36")
-    animRow.spin.setValue(0.25)
-    appController._processEvents()
+    _TypeValue(appController, animRow, str(0.25))
     values = [animAttr.Get(Usd.TimeCode(t)) for t in (1, 24, 36, 48)]
     _Check(abs(values[2] - 0.25) < 1e-9, "frame 36 is now 0.25: %s" % values)
     _Check(abs(values[0]) < 1e-9 and abs(values[1]) < 1e-9
@@ -427,8 +456,7 @@ def testUsdviewInputFunction(appController):
     # file's time samples, so the whole shot reads 0.75 -- and the
     # status line says exactly that, and one Ctrl+Z takes it back.
     panel.SetWriteMode(model.WRITE_DEFAULT)
-    animRow.spin.setValue(0.75)
-    appController._processEvents()
+    _TypeValue(appController, animRow, str(0.75))
     _Check("HIDES" in panel._status.text(),
            "Default mode warned that the default hides the keys: %r"
            % panel._status.text())
@@ -446,9 +474,8 @@ def testUsdviewInputFunction(appController):
     appController._dataModel.currentFrame = frame
     appController._processEvents()
     _Select(appController, ARM_L_IK)
-    panel.Row("tx").spin.setValue(3.0)
-    panel.Row("ry").spin.setValue(12.0)
-    appController._processEvents()
+    _TypeValue(appController, panel.Row("tx"), str(3.0))
+    _TypeValue(appController, panel.Row("ry"), str(12.0))
     ikPrim = stage.GetPrimAtPath(ARM_L_IK)
     _Check(abs(ikPrim.GetAttribute("avars:tx").Get(frame) - 3.0) < 1e-9
            and abs(ikPrim.GetAttribute("avars:ry").Get(frame) - 12.0) < 1e-9,
@@ -461,13 +488,69 @@ def testUsdviewInputFunction(appController):
            "Reset All returned both to rest")
     _Check(_UndoDepth(undo) == depth2 + 1, "Reset All is one undo entry")
 
-    # --- 10. multi-selection edits the focus prim and says so -----------
+    # --- 10. multi-selection shows the LAST picked and edits together ---
+    #
+    # The panel follows the tail of the selection, not usdview's focus
+    # prim: focus stays put on a shift-add, so following it showed the
+    # first control of a group while the hand was on the second.
     _Select(appController, ARM_L_IK, ARM_R_IK)
-    _Check(panel._header.toolTip() == ARM_L_IK,
-           "with two prims selected the focus prim is edited: %r"
-           % panel._header.toolTip())
+    _Check(panel._header.toolTip() == ARM_R_IK,
+           "the LAST selected is shown: %r" % panel._header.toolTip())
     _Check("1 more selected" in panel._note.text(),
            "and the panel says so: %r" % panel._note.text())
+    _Check("editing 2 prims together" in panel._status.text(),
+           "the status says what an edit will reach: %r"
+           % panel._status.text())
+
+    # An edit reaches BOTH, in one undo entry, because both carry tx.
+    leftIk = stage.GetPrimAtPath(ARM_L_IK)
+    rightIk = stage.GetPrimAtPath(ARM_R_IK)
+    depth3 = _UndoDepth(undo)
+    _TypeValue(appController, panel.Row("tx"), "4")
+    _Check(abs(leftIk.GetAttribute("avars:tx").Get(frame) - 4.0) < 1e-9,
+           "the other selected prim moved too: %s"
+           % leftIk.GetAttribute("avars:tx").Get(frame))
+    _Check(abs(rightIk.GetAttribute("avars:tx").Get(frame) - 4.0) < 1e-9,
+           "and so did the shown one")
+    _Check(_UndoDepth(undo) == depth3 + 1,
+           "the pair is ONE undo entry, not one per prim")
+    undo.Undo()
+    appController._processEvents()
+    _Check(abs(leftIk.GetAttribute("avars:tx").Get(frame)) < 1e-9
+           and abs(rightIk.GetAttribute("avars:tx").Get(frame)) < 1e-9,
+           "and one Ctrl+Z puts both back")
+
+    # --- 10b. dragging in a field scrubs it, at three speeds ------------
+    from pxr.Usdviewq.qt import QtCore
+    _Select(appController, ARM_R_IK)
+    tx = panel.Row("tx")
+    ikPrim = stage.GetPrimAtPath(ARM_R_IK)
+    attr = ikPrim.GetAttribute("avars:tx")
+
+    _TypeValue(appController, tx, "0")
+    depth = _UndoDepth(undo)
+    _Scrub(appController, tx, 40)
+    plain = attr.Get(frame)
+    _Check(abs(plain) > 1e-6, "a drag moved the value: %s" % plain)
+    _Check(_UndoDepth(undo) == depth + 1,
+           "the whole drag is ONE undo entry, not one per sample")
+
+    _TypeValue(appController, tx, "0")
+    _Scrub(appController, tx, 40, QtCore.Qt.ControlModifier)
+    slow = attr.Get(frame)
+    _TypeValue(appController, tx, "0")
+    _Scrub(appController, tx, 40,
+           QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)
+    fast = attr.Get(frame)
+    _Check(abs(slow) < abs(plain) < abs(fast),
+           "Ctrl is finer and Ctrl+Shift coarser: %.4f < %.4f < %.4f"
+           % (abs(slow), abs(plain), abs(fast)))
+    _Check(abs(abs(slow) * 10.0 - abs(plain)) < 1e-4,
+           "Ctrl is exactly ten times finer: %s vs %s" % (slow, plain))
+    _Check(abs(abs(fast) - abs(plain) * 10.0) < 1e-3,
+           "Ctrl+Shift is exactly ten times coarser: %s vs %s"
+           % (fast, plain))
+    _TypeValue(appController, tx, "0")
 
     # --- 11. a joint's avars are editable too ----------------------------
     _Select(appController, ELBOW_L)

@@ -10,7 +10,7 @@
 #     that region's control in usdview's own `dataModel.selection` --
 #     which is the whole point of the design, because selecting there is
 #     what makes the Avar Editor and the viewport gizmo follow;
-#   * the pick follows the DEFORMED mesh: `hips_ctl` is moved +12 cm, the
+#   * the pick follows the DEFORMED mesh: `M_Body` is moved +12 cm, the
 #     same region is picked again, and the pixel it is found at has moved
 #     by a measured number of pixels. A pick against the rest mesh would
 #     answer at the old pixel;
@@ -56,11 +56,11 @@ import os
 import sys
 import time
 
-from pxr import Gf, Sdf, UsdGeom
+from pxr import Gf, Sdf, UsdGeom, UsdShade
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 MESH = "/Biped/Geom/body_geo"
-HIPS = "/Biped/Rig/Controls/hips_ctl"
+HIPS = "/Biped/Rig/Main/Shot/Aux/Controls/M_Body"
 
 # A pixel counts as changed when it moves this far in 0-255 per-channel
 # terms, and the fraction is of SAMPLED pixels (every second pixel each
@@ -615,6 +615,10 @@ def testUsdviewInputFunction(appController):
            "the band over both regions catches both: %d regions, %s"
            % (len(caught), sorted(r.label for r in caught)[:6]))
 
+    # The marquee also picks the controls floating inside the band (the
+    # bend controls on a limb, say), so those are part of what it caught.
+    names |= set(str(p) for p in controller._ControlsInBand(a[0], a[1],
+                                                            b[0], b[1]))
     selection.clearPrims()
     appController._processEvents()
     controller.Marquee(a[0], a[1], b[0], b[1], touchPoseUI.MODE_REPLACE)
@@ -1041,8 +1045,10 @@ def testUsdviewInputFunction(appController):
                    "the hover patch stayed dark")
             _Check(controller.highlight.lead == leadBefore
                    and controller.highlight.selected == selectedBefore,
-                   "and the SELECTION patches were left alone -- blinking "
-                   "those off mid-drag would read as a bug")
+                   "the selection STATE is kept through the drag")
+            _Check(controller.highlight.suspended,
+                   "but nothing is drawn: the selection patches go dark "
+                   "while the rig moves")
             _Check(_Selected(selection) == litSelection,
                    "the selection itself is untouched: %s"
                    % _Selected(selection))
@@ -1092,10 +1098,30 @@ def testUsdviewInputFunction(appController):
             print("TouchPose: during a gizmo drag, %d hover samples across "
                   "region boundaries cost %.3f ms each and authored "
                   "nothing; awake the same samples cost %.2f ms each "
-                  "(%.0fx). The selection patches stayed lit; the first "
+                  "(%.0fx). Every highlight went dark; the first "
                   "hover after the drag highlighted again."
                   % (samples, suspendedMs, awakeMs,
                      awakeMs / max(suspendedMs, 1e-6)))
+
+            # Playback and scrubbing stand it down the same way: a frame
+            # change goes dark at once, and it lights up again once the
+            # timeline has been still for TIME_QUIET_MS.
+            dataModel = appController._usdviewApi.dataModel
+            frame = dataModel.currentFrame
+            from pxr import Usd as _TimeUsd
+            dataModel.currentFrame = _TimeUsd.TimeCode(frame.GetValue() + 1.0)
+            appController._processEvents()
+            _Check(controller.suspended and controller.highlight.suspended,
+                   "a frame change stands TouchPose down")
+            dataModel.currentFrame = frame
+            appController._processEvents()
+            _Check(controller.suspended, "and scrubbing keeps it down")
+            deadline = time.perf_counter() + 2.0
+            while controller.suspended and time.perf_counter() < deadline:
+                appController._processEvents()
+                time.sleep(0.02)
+            _Check(not controller.suspended,
+                   "the timeline sitting still brings it back")
 
             controller._highlight.Clear()
             selection.clearPrims()
@@ -1129,7 +1155,7 @@ def testUsdviewInputFunction(appController):
 
     # --- 6. the pick follows the DEFORMED mesh --------------------------
     #
-    # `hips_ctl` +12 cm, then the SAME region is found again -- at a
+    # `M_Body` +12 cm, then the SAME region is found again -- at a
     # different pixel. A pick that read `points` off the stage would
     # answer at the old pixel, because the stage's points are the rest
     # mesh and never move.
@@ -1285,6 +1311,16 @@ def testUsdviewInputFunction(appController):
     # patch growing onto the newly painted faces rather than a highlight
     # appearing out of nothing. The first is what a painter actually
     # sees, and it does not depend on whatever was lit beforehand.
+    # Measured at an opacity this test SETS, because the pixel threshold
+    # below and the shipped default are independent of each other: the
+    # default is an artist's preference that moves, and at 0.30 over the
+    # shaded body the highlight shifts a pixel by at most 12 of 255 --
+    # real, visible, and under the 20 this file counts as changed. What
+    # is under test is that painting GROWS the patch, not how strong the
+    # default happens to be.
+    _measureOpacity = 0.85
+    _openedAt = controller.highlight.opacity
+    controller.SetOpacity(_measureOpacity)
     controller.highlight.SetHover(region)
     appController._processEvents()
     before = _Capture(view)
@@ -1318,6 +1354,8 @@ def testUsdviewInputFunction(appController):
 
     after = _Capture(view)
     strokeMoved, _t = _Changed(before, after)
+    controller.SetOpacity(_openedAt)
+    appController._processEvents()
     _Check(strokeMoved > 5,
            "the highlight grew onto the painted faces: %d pixels changed"
            % strokeMoved)
@@ -1351,18 +1389,50 @@ def testUsdviewInputFunction(appController):
              " from %s" % donor.label if donor is not None else "",
              strokeMoved, generationBefore, strokeMs))
 
+    # --- 6b2. A STROKE IS ONE UNDO -------------------------------------
+    #
+    # Painting moves faces between regions in a numpy table, not on the
+    # stage, so rigExecUndo has no spec to snapshot and there was no way
+    # back from a stroke at all. The bracket is the brush going down and
+    # coming up, so ten dabs undo together -- and the entry goes onto the
+    # gizmo toolbar's stack, because that is what Ctrl+Z is bound to.
+    beforeStroke = touchModel.SnapshotFaces()
+    controller._BeginStroke()
+    for i in range(5):
+        controller.Paint(bx, by)
+    controller.stroke_faces = 1          # the event filter normally counts
+    controller._EndStroke()
+    appController._processEvents()
+    _Check(controller.CanUndo(), "the stroke pushed an undo entry")
+    _Check(not (touchModel.region_of == beforeStroke).all(),
+           "and the stroke actually changed the table")
+
+    _Check(controller.Undo(), "undo reported that it undid something")
+    appController._processEvents()
+    _Check((touchModel.region_of == beforeStroke).all(),
+           "five dabs came back in ONE undo")
+    _Check(not controller.CanUndo() or controller.CanRedo(),
+           "and the stroke moved to the redo branch")
+    _Check(controller.Redo(), "redo reported that it redid something")
+    appController._processEvents()
+    _Check(not (touchModel.region_of == beforeStroke).all(),
+           "redo put the stroke back")
+    controller.Undo()
+    appController._processEvents()
+    print("TouchPose: a five-dab stroke undid and redid in one step")
+
     # --- 6c. SAVE writes the touch layer, not the rig -------------------
     layerPath = controller.RegionLayerPath()
     _Check(layerPath and os.path.exists(layerPath),
            "the region layer was located: %r" % layerPath)
-    _Check("Biped_touch_regions" in os.path.basename(layerPath),
+    _Check("_touch_regions" in os.path.basename(layerPath),
            "...and it is the TOUCH layer, not the rig: %s"
            % os.path.basename(layerPath))
 
     rigPath = None
     for layer in stage.GetUsedLayers():
         name = os.path.basename(layer.realPath or layer.identifier)
-        if name in ("Biped.usda", "Biped_layered_center.usda"):
+        if name in ("Biped.usda", "Biped_body_center.usda"):
             rigPath = layer.realPath
             break
     rigBefore = os.path.getmtime(rigPath) if rigPath else None
@@ -1494,6 +1564,182 @@ def testUsdviewInputFunction(appController):
            "back, against the %d it lit" % (removed, moved))
     print("TouchPose: deactivating removed %d of the %d pixels the "
           "highlight lit" % (removed, moved))
+
+    # --- 10. EVERY region set is live, and the look survives a switch --
+    #
+    # Two bugs the animator hit, both asserted here because neither can
+    # be seen from a unit test: the sets are discovered off the composed
+    # stage and the pick runs through the live camera.
+    #
+    #   * the eyes. A set states the mesh its faces index -- the body set
+    #     indexes body_geo, TouchPoseEyeL/R index l_eye_geo and r_eye_geo
+    #     -- and with one model open the cast only ever reached the
+    #     active set's mesh. Measured at the pixel over the front of the
+    #     left eyeball: l_eye_geo hit at t = 332.45, body_geo at
+    #     t = 337.57, and the hover still answered body_geo's face 489,
+    #     which is unpainted, so hovering an eye lit nothing at all.
+    #
+    #   * the opacity. `Load` assigned HIGHLIGHT_OPACITY on every load,
+    #     so a layer change put a session set to 30% back to 85% while
+    #     the slider still read 30.
+    import touchPoseModel
+
+    controller.SetActive(True)
+    appController._processEvents()
+    panelLayers = [label for label, _path in controller.layers]
+    stageLayers = [label for label, _p, _s in touchPoseModel.FindLayers(stage)]
+    _Check(panelLayers == stageLayers,
+           "the switch offers every region set on the stage: %s against %s"
+           % (panelLayers, stageLayers))
+    _Check(len(panelLayers) > 1,
+           "...and there is more than one, or the switch hides itself "
+           "and the eyes cannot be reached: %s" % panelLayers)
+    meshes = sorted(set(m.mesh_path for m in controller.models))
+    _Check(len(meshes) == len(controller.models),
+           "one mesh per live set, no two sharing: %s" % meshes)
+
+    controller.SetOpacity(0.30)
+    panel._SyncLook()
+    other = next(l for l in panelLayers if l != controller.model.layer_name)
+    index = [panel._layer.itemText(i)
+             for i in range(panel._layer.count())].index(other)
+    panel._layer.setCurrentIndex(index)
+    panel._OnLayerChosen(index)
+    appController._processEvents()
+    _Check(controller.model.layer_name == other,
+           "the switch moved to %r, got %r" % (other,
+                                               controller.model.layer_name))
+    _Check(abs(controller.opacity - 0.30) < 1e-6,
+           "the opacity survived the layer change, got %.3f"
+           % controller.opacity)
+    _Check(panel._opacity.value() == 30,
+           "...and the slider agrees with it, reads %d%%"
+           % panel._opacity.value())
+    print("TouchPose: the switch offers %s; opacity set to 30%% stayed at "
+          "%.0f%% across a change to the %r set, slider %d%%"
+          % (panelLayers, 100.0 * controller.opacity, other,
+             panel._opacity.value()))
+
+    # The eye sets are live whichever one the switch is standing on, so
+    # put it back on the body first: that is the case that was broken.
+    panel._layer.setCurrentIndex(0)
+    panel._OnLayerChosen(0)
+    controller.SetOpacity(touchPoseUI.HIGHLIGHT_OPACITY)
+    appController._processEvents()
+    eyes = [m for m in controller.models
+            if m.mesh_path.endswith("eye_geo") and m.regions]
+    _Check(eyes, "the rig carries eye region sets: %s"
+           % [m.mesh_path for m in controller.models])
+    controller.SyncPose(force=True)
+    live = _Viewport(view)
+    hits = 0
+    # `region` and `pixel` are NOT rebound here: the closing report
+    # prints the body region and pixel this run measured against, and
+    # overwriting them would have it report the eye instead.
+    for eyeModel in eyes:
+        # The face nearest the camera is the front of the eyeball, which
+        # is the one a hover would land on.
+        centre, nearest = None, None
+        for eyeFace in range(eyeModel.face_count):
+            point = eyeModel.FaceCentroid(eyeFace)
+            if point is None:
+                continue
+            depth = live.viewProjection.Transform(
+                Gf.Vec3d(float(point[0]), float(point[1]),
+                         float(point[2])))[2]
+            if nearest is None or depth < nearest:
+                nearest, centre = depth, point
+        eyePixel = live.Project(centre) if centre is not None else None
+        if eyePixel is None:
+            continue
+        eyeRegion, eyeFace = controller.RegionAt(eyePixel[0], eyePixel[1])
+        _Check(eyeRegion is not None and eyeRegion.control
+               and eyeRegion.control.endswith("Eye"),
+               "hovering %s at (%.1f, %.1f) lands on its own region, got "
+               "%r (face %d)"
+               % (eyeModel.mesh_path.rsplit("/")[-1], eyePixel[0],
+                  eyePixel[1],
+                  eyeRegion.label if eyeRegion else None, eyeFace))
+        selection.clearPrims()
+        controller.Click(eyePixel[0], eyePixel[1])
+        appController._processEvents()
+        _Check(_Selected(selection) == set([eyeRegion.control]),
+               "...and a click there selects %s, got %s"
+               % (eyeRegion.control, _Selected(selection)))
+        hits += 1
+        print("TouchPose: %s is live while the %r set is active -- the "
+              "pixel over it hovers %s and clicks its control"
+              % (eyeModel.mesh_path.rsplit("/")[-1],
+                 controller.model.layer_name, eyeRegion.label))
+    _Check(hits == len(eyes),
+           "every eye set was reachable: %d of %d" % (hits, len(eyes)))
+    selection.clearPrims()
+    controller.SetActive(False)
+    appController._processEvents()
+
+    # --- 11. ...and the EYE SHADER is untouched by any of that ---------
+    #
+    # Making the eyes hoverable attaches the highlight to their mesh,
+    # and attaching wraps every material bound to it -- here
+    # /Biped/Materials/eye_sbe, a glslfx of the studio's own
+    # (shaders/sbe_eye.glslfx) that places the iris and the pupil from
+    # two primvars the rig publishes, eyeProjector and eyeDials. A
+    # wrapper that asked Storm only for its own two tint primvars
+    # revoked those, and the iris went: measured over this same close-up
+    # as 9,665 of 51,408 pixels changed and the mean lifted from
+    # (113, 108, 107) to (140, 134, 133), with no hover anywhere.
+    #
+    # So the assertion is the strict one. With the mode ON and NOTHING
+    # lit, the eyeball has to draw EXACTLY as it does with the mode off:
+    # the wrapped shader runs the base byte for byte, primvar reads
+    # included, and the only thing TouchPose may change is the tint
+    # under the cursor.
+    camera = appController._dataModel.viewSettings.freeCamera
+    if camera is None:
+        print("TouchPose: NOTE no free camera; the eye material is asserted "
+              "at the default framing only")
+    else:
+        eyeModel = eyes[0]
+        lo, hi = eyeModel.native.Bounds()
+        view.resetCam()
+        appController._processEvents()
+        camera = appController._dataModel.viewSettings.freeCamera
+        camera.center = Gf.Vec3d(*[(lo[i] + hi[i]) * 0.5 for i in range(3)])
+        camera.dist = 12.0
+        appController._processEvents()
+        shot = _Viewport(view)
+        crop = (shot.width * 0.3, shot.height * 0.3,
+                shot.width * 0.7, shot.height * 0.7)
+
+        def _EyeBox():
+            image = _Capture(view)
+            # _Capture samples every second pixel, so the crop is in its
+            # coordinates, not the viewport's.
+            x0, y0, x1, y1 = [int(v / 2) for v in crop]
+            return [row[x0:x1] for row in image[y0:y1]]
+
+        bare = _EyeBox()
+        controller.SetActive(True)
+        appController._processEvents()
+        wrapped = _EyeBox()
+        drift, counted = _Changed(bare, wrapped)
+        controller.SetActive(False)
+        appController._processEvents()
+        _Check(drift <= counted // 200,
+               "the eye material draws the same with TouchPose attached "
+               "and nothing lit: %d of %d pixels moved" % (drift, counted))
+        bound = UsdShade.MaterialBindingAPI(
+            stage.GetPrimAtPath(Sdf.Path(eyeModel.mesh_path))
+        ).ComputeBoundMaterial()[0]
+        _Check(bound and str(bound.GetPath()) == "/Biped/Materials/eye_sbe",
+               "and %s is still bound to its own material, got %s"
+               % (eyeModel.mesh_path.rsplit("/")[-1],
+                  bound.GetPath() if bound else None))
+        print("TouchPose: attaching the highlight to %s left its material "
+              "(%s) drawing identically -- %d of %d pixels moved over a "
+              "close-up of the eyeball"
+              % (eyeModel.mesh_path.rsplit("/")[-1], bound.GetPath(),
+                 drift, counted))
 
     # The whole session authored nothing: no prim was ever created for
     # the highlight, at the root or anywhere else.

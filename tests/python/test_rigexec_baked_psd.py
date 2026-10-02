@@ -31,12 +31,15 @@ import rigexec  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(os.path.dirname(_HERE))
-_STACK = os.path.join(_REPO, "examples", "biped", "Biped_psd_all.usda")
+_STACK = os.path.join(_REPO, "examples", "biped", "Biped_body.usda")
 _RIG = "/Biped/Rig"
+# The whole character: the face's correctives are TRANSLATION-driven.
+_FACE_STACK = os.path.join(_REPO, "examples", "biped", "Biped_stack.usda")
+_FACE_POSE = "/Biped/Rig/PoseInterpolators/mouth_corner_l_driver"
 _POINTS = "/Biped/Geom/body_geo.points"
 
 # A control whose rotation reaches an elbow driver, and the root.
-_PROBES = ("arm_l_fk_elbow_l_bind", "hips_ctl")
+_PROBES = ("L_LoArm", "M_Body")
 _VALUES = (35.0, -40.0)
 
 
@@ -93,6 +96,41 @@ def TestTheStackBakesWithParity():
         "release: %d baked parity mismatch(es)" % pose.baked_parity_mismatches)
 
 
+def TestTranslationDriversBakeWithParity():
+    """A driver's TRANSLATION, measured the same on both paths.
+
+    The face's mouth corner interpolator reads a hidden driver whose
+    translation copies the corner control's: moving the corner 3 cm out is
+    exactly the authored `mouth_l_wide` pose, so that pose must read 1 and
+    the neutral 0, with the program and the dynamic walk agreeing.
+    """
+    stage = Usd.Stage.Open(_FACE_STACK)
+    rig = rigexec.Rig(stage, _RIG)
+    rig.compile()
+    rig.evaluation_mode = "parity"
+    corner = [p.GetPath().pathString for p in stage.Traverse()
+              if p.GetName() == "L_Mouth"][0]
+    wide = _FACE_POSE + "/mouth_l_wide.outputs:weight"
+    neutral = _FACE_POSE + "/neutral.outputs:weight"
+    rest = rig.evaluate(1.0)
+    assert not rest.baked_parity_mismatches, rest.baked_parity_mismatches
+    assert abs(rest.moved_property(neutral) - 1.0) < 1e-5, (
+        "neutral at rest %g" % rest.moved_property(neutral))
+    for value, expect_wide in ((3.0, 1.0), (1.5, None), (0.0, 0.0)):
+        rig.set_interactive_overrides([(corner, "avars:tx", value)])
+        pose = rig.evaluate(1.0)
+        assert not pose.baked_parity_mismatches, (
+            "corner tx=%g: %d baked parity mismatch(es)"
+            % (value, pose.baked_parity_mismatches))
+        got = pose.moved_property(wide)
+        if expect_wide is not None:
+            assert abs(got - expect_wide) < 1e-5, (
+                "corner tx=%g: mouth_l_wide %g, expected %g"
+                % (value, got, expect_wide))
+        else:
+            assert 0.0 < got < 1.0, "halfway reads %g" % got
+
+
 def main():
     _RegisterSchema()
     if not os.path.exists(_STACK):
@@ -100,7 +138,12 @@ def main():
         return 0
     TestTheStackBakesWithParity()
     print("  ok: the stacked biped bakes with parity")
-    print("RIGEXEC_BAKED_PSD_OK (1 group)")
+    groups = 1
+    if os.path.exists(_FACE_STACK):
+        TestTranslationDriversBakeWithParity()
+        print("  ok: translation-driven correctives bake with parity")
+        groups += 1
+    print("RIGEXEC_BAKED_PSD_OK (%d groups)" % groups)
     return 0
 
 

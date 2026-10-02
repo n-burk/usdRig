@@ -28,6 +28,15 @@ MIN_HIT = 4.0
 IMPLEMENTED_COMMANDS = ("zero_ctrls",)
 
 
+# Shapes that are interface chrome rather than parts of the character:
+# they draw above everything, whatever their authored depth.
+_OVERLAY_SHAPES = frozenset(("widgetControl", "slider"))
+
+# Shapes this picker cannot draw yet. Skipped entirely rather than
+# approximated, so nothing false appears on the panel.
+_UNDRAWN_SHAPES = frozenset(("slider",))
+
+
 class Button(object):
     """One picker item, ready to draw and to click."""
 
@@ -36,6 +45,9 @@ class Button(object):
         self.type = record.get("type") or ""
         self.parent = record.get("parent") or ""
         self.z = float(record.get("z") or 0.0)
+        # The button this one mirrors, by prim path. Empty for the many
+        # that have no opposite number (anything on the centre line).
+        self.mirror = record.get("mirror") or ""
         self.x = float(record.get("x") or 0.0)
         self.y = float(record.get("y") or 0.0)
         self.w = max(float(record.get("w") or 1.0), MIN_HIT)
@@ -110,7 +122,7 @@ class Button(object):
         labels are BAKED from the conventional tool: `attributeButton675` ships value "FK"
         because L_Arm was in FK when the picker was exported, and it kept
         saying so however the rig's own `avars:ikfk` read. Measured in
-        usdview on Biped_all: with arm_l ikfk at 1.0 the reopened panel
+        usdview on Biped_stack: with arm_l ikfk at 1.0 the reopened panel
         still drew "Hand FK".
         """
         target = self.attr_target or {}
@@ -221,10 +233,39 @@ class Picker(object):
             # still counts them, so the gap stays measurable.
             if not button.decoration and not button.live and not edit:
                 continue
+            # A SLIDER IS NOT DRAWN UNTIL IT IS A SLIDER. The shape has no
+            # case in _path_for, so it fell through to the plain filled
+            # rectangle and landed as two 65x65 blocks -- one red, one
+            # grey -- sitting over the body. An unimplemented widget drawn
+            # as a coloured square reads as a bug, and it is: better to
+            # leave the space empty until the widget exists. The data
+            # stays in the layer, so implementing it is a rendering
+            # change and not a re-import.
+            if button.shape in _UNDRAWN_SHAPES:
+                continue
             if modes and button.mode and button.dial:
                 if modes.get(button.dial) not in (None, button.mode):
                     continue
             out.append(button)
+        # PAINTER ORDER IS THE SOURCE'S Z, not the order the prims happen
+        # to sit in the layer. Every button carries `ui:depth`, pickerScene
+        # has always parsed it into `z`, and nothing ever sorted by it --
+        # so a small button authored to sit ON TOP of a bigger one was
+        # drawn underneath whenever the layer listed it first. In the eye
+        # region that is most of them: 44 pairs of lid and socket buttons
+        # genuinely intersect, and b_l_eye_2 (15px) is concentric inside
+        # b_l_eye (25px) by design.
+        #
+        # Stable sort, so buttons sharing a depth keep the layer's order
+        # and nothing shuffles for free. `hits()` reverses this, which
+        # then makes the topmost button the first one a click finds.
+        # WIDGETS SIT ABOVE THE Z STACK. Every widgetControl on this
+        # picker carries the same z (0.0038) while ordinary buttons run
+        # to 0.06, so sorting on z alone buried each space and IK/FK
+        # switch under two or three body buttons -- the studio's own
+        # render has them plainly on top. They are chrome, not anatomy:
+        # they go last, and keep their own relative z among themselves.
+        out.sort(key=lambda b: (b.shape in _OVERLAY_SHAPES, b.z))
         return out
 
     def dials(self):

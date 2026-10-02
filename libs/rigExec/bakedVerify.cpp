@@ -195,6 +195,7 @@ Same(const RigExecMoverParameters &a, const RigExecMoverParameters &b)
     // IDENTITY, exactly as operator== compares them -- two packets naming
     // one epoch-fixed layout or one curvenet cut name the same object.
     return a.kind == b.kind && a.enabled == b.enabled && a.valid == b.valid &&
+           a.radialWeight == b.radialWeight &&
            Same(a.transform, b.transform) && Same(a.weights, b.weights) &&
            Same(a.blendDeltas, b.blendDeltas) &&
            a.blendSurfaceFrame == b.blendSurfaceFrame &&

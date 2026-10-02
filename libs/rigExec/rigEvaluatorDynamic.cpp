@@ -1,6 +1,8 @@
 // Dynamic evaluation: pose revisions followed by geometry revisions.
 
 #include "rigEvaluatorInternal.h"
+#include "rigExecMath/geometryKernels.h"
+#include "pxr/base/tf/getenv.h"
 #include "rigEvaluatorConstraints.h"
 #include "parallel.h"
 #include "frameExtraction.h"
@@ -174,6 +176,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     std::map<SdfPath, SdfPath> lastPublishingWriter;
     std::map<SdfPath, RigExecPointFrameArray> solvedAggregates;
     RigExecSnapshot seedSnapshot;
+    bool seedFromCache = false;
     if (_firstFramePoseTaps) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "FirstFramePose", "pose");
         // Warm the shared executor before anything else: every override
@@ -192,6 +195,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 : nullptr;
         if (seed != nullptr) {
             seedSnapshot = seed->snapshot;
+            seedFromCache = true;
         } else {
             seedSnapshot = _firstFramePoseTaps->Evaluate(time, baseOverrides);
             if (!seedSnapshot.IsValid() || !seedSnapshot.IsComplete()) {
@@ -201,6 +205,275 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
             _firstFramePoseCache.Store(baseOverrides, time, seedSnapshot);
             _firstFramePoseDirty = false;
+        }
+    }
+
+    // 1b. Space switches. Each one replaces its target's composed frame with
+    // the same compose taken against another parent, and republishes it as a
+    // value override so that every later reader -- the target's namespace
+    // children through exec, the solvers through their frame inputs, the
+    // manipulator through the frames this function returns -- sees one
+    // answer. See _SpaceSwitch for the algebra.
+    if (!_spaceSwitches.empty() && _firstFramePoseTaps &&
+        seedSnapshot.IsValid()) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SpaceSwitches", "pose");
+        const auto matrixOf = [&](RigExecTapId tap, bool *ok) {
+            GfMatrix4d m(1.0);
+            if (tap < 0) {
+                if (ok) *ok = true;
+                return m;
+            }
+            const RigExecPointFrame frame =
+                seedSnapshot.Get<RigExecPointFrame>(tap);
+            const bool valid = frame.IsValid() && !frame.IsDegenerate() &&
+                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                      frame.points, &m);
+            if (ok) *ok = valid;
+            return valid ? m : GfMatrix4d(1.0);
+        };
+        std::vector<RigExecValueOverride> switchOverrides;
+        // Where the base overrides end and this pass's begin. Each band
+        // REPLACES the switch overrides rather than appending to them, so a
+        // band that re-resolves an earlier band's switch cannot leave two
+        // opinions about one target standing.
+        const size_t baseCount = baseOverrides.size();
+        size_t published = 0;
+        // Band by band: everything in a band resolves from the seed standing
+        // now, and the seed is pulled again before the next one. The
+        // re-evaluation is what makes a descendant of a switched control
+        // read correctly here -- exec recomposes it from the override,
+        // which is the same arithmetic the baked compose performs.
+        size_t begin = 0;
+        while (begin < _spaceSwitches.size()) {
+            size_t end = begin;
+            while (end < _spaceSwitches.size() &&
+                   _spaceSwitches[end].band == _spaceSwitches[begin].band) {
+                ++end;
+            }
+        for (size_t i = begin; i < end; ++i) {
+            const _SpaceSwitch &sw = _spaceSwitches[i];
+            bool ok = true, partOk = true;
+            const GfMatrix4d targetWorld =
+                matrixOf(sw.targetPosedTap, &partOk);
+            ok = ok && partOk;
+            const GfMatrix4d parentPosed =
+                matrixOf(sw.parentPosedTap, &partOk);
+            ok = ok && partOk;
+            const GfMatrix4d parentDefault =
+                matrixOf(sw.parentDefaultTap, &partOk);
+            ok = ok && partOk;
+            if (!ok) {
+                pose.diagnostics.push_back(
+                    sw.switchPath.GetString() +
+                    " has no usable frame for its target " +
+                    sw.target.GetString() + "; the space is not applied");
+                continue;
+            }
+            // avars * default:space, with exec's own answer for both.
+            const GfMatrix4d local =
+                targetWorld * parentPosed.GetInverse() * parentDefault;
+
+            // Read per frame, not captured at compile: the active index is
+            // the animated channel, and the digest deliberately does not
+            // hash it so that keying a space never rebuilds the epoch.
+            double active = sw.activeFallback;
+            if (const UsdPrim switchPrim =
+                    _stage->GetPrimAtPath(sw.switchPath)) {
+                active = _ResolvedRead(_resolvedInputs, switchPrim,
+                                       "inputs:activeSpace",
+                                       sw.activeFallback, time);
+            }
+            if (!sw.activeAttribute.IsEmpty()) {
+                const UsdAttribute attribute =
+                    _stage->GetAttributeAtPath(sw.activeAttribute);
+                double value = 0.0;
+                float asFloat = 0.0f;
+                TfToken asToken;
+                // THE TOKEN IS TRIED FIRST, and deliberately. The numeric
+                // reads answer TRUE for a token-valued attribute -- with
+                // a zero -- so asking them first pins every named space
+                // to source 0 and the switch stops responding at all,
+                // silently. The declared type decides, not the order a
+                // reader happens to guess in.
+                const bool isToken =
+                    attribute.GetTypeName() == SdfValueTypeNames->Token;
+                if (isToken &&
+                    (_resolvedInputs.GetAttribute(attribute, time, &asToken) ||
+                     attribute.Get(&asToken, time))) {
+                    // A SPACE NAMED RATHER THAN NUMBERED. The labels are
+                    // already the switch's own, so the name an animator
+                    // sets is the name the rig published -- no index to
+                    // keep in step with the source order, and a source
+                    // inserted in the middle cannot silently repoint
+                    // every control that named a space after it.
+                    //
+                    // An index still reads as one, so a rig that never
+                    // migrates keeps working, and a numeric channel can
+                    // still blend between neighbours. A name is exact by
+                    // construction: there is no halfway between two of
+                    // them.
+                    bool matched = false;
+                    for (size_t i = 0; i < sw.labels.size(); ++i) {
+                        if (sw.labels[i] == asToken.GetString()) {
+                            active = double(i);
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched && !asToken.IsEmpty()) {
+                        pose.diagnostics.push_back(
+                            sw.switchPath.GetString() + " has no space named " +
+                            asToken.GetString() + "; holding " +
+                            (sw.labels.empty()
+                                 ? std::string("source 0")
+                                 : sw.labels[0]));
+                    }
+                } else if (_resolvedInputs.GetAttribute(attribute, time,
+                                                        &value) ||
+                           attribute.Get(&value, time)) {
+                    active = value;
+                } else if (_resolvedInputs.GetAttribute(attribute, time,
+                                                        &asFloat) ||
+                           attribute.Get(&asFloat, time)) {
+                    active = double(asFloat);
+                }
+            }
+            const int count = int(sw.sources.size());
+            if (!std::isfinite(active)) active = 0.0;
+            active = GfClamp(active, 0.0, double(count - 1));
+            const int lower = int(std::floor(active));
+            const int upper = std::min(lower + 1, count - 1);
+            const double blend = active - double(lower);
+
+            // The space's own delta, expressed in the TARGET's local frame:
+            //     L = (avars * D) * inverse(source default) * source posed
+            //         * inverse(avars * D)
+            // so that world = L * (avars * D). Masking L is therefore masking
+            // in the control's own axes, which is what makes a translation
+            // mask read as "orient only about my own pivot".
+
+            // rigExec:space. `local` above is composed over the target's
+            // DEFAULT ancestors, so a master's motion reaches a switched
+            // control only inside the source's motion -- and a twist or
+            // swing filter throws that carry away along with the part it
+            // was asked to drop. carryInverse strips the master map off
+            // before the filter runs and carry puts it back after, so the
+            // filter only ever sees the source's own master-free motion.
+            // Identity when no space is named: the pre-masters behaviour.
+            // hasCarry, not "carry == identity": a rig that names no space
+            // must take the branches below UNTOUCHED, not multiplied by an
+            // identity. `local * identity * local.GetInverse()` is identity
+            // in exact arithmetic and a few ulps off it in doubles, and
+            // that difference reaches verify_binary as a failure.
+            GfMatrix4d carry(1.0), carryInverse(1.0);
+            bool hasCarry = false;
+            if (sw.spacePosedTap >= 0 && sw.spaceDefaultTap >= 0) {
+                bool spacePosedOk = true, spaceDefaultOk = true;
+                const GfMatrix4d spacePosed =
+                    matrixOf(sw.spacePosedTap, &spacePosedOk);
+                const GfMatrix4d spaceDefault =
+                    matrixOf(sw.spaceDefaultTap, &spaceDefaultOk);
+                if (spacePosedOk && spaceDefaultOk) {
+                    carry = spaceDefault.GetInverse() * spacePosed;
+                    carryInverse = carry.GetInverse();
+                    hasCarry = true;
+                }
+            }
+            const auto deltaOf = [&](int index, bool *valid) {
+                const _SpaceSwitch::Source &source = sw.sources[size_t(index)];
+                *valid = true;
+                if (source.path.IsEmpty()) {
+                    // World: the source never moves, so the only motion
+                    // left is the space's own carry -- and with no space
+                    // named there is none, which is the pin-to-zero-pose
+                    // this branch has always meant.
+                    return hasCarry ? local * carry * local.GetInverse()
+                                    : GfMatrix4d(1.0);
+                }
+                // Both come from the seed standing NOW, which is why bands
+                // exist: a source that another switch moves was already
+                // republished into this seed before this band was reached.
+                bool frameOk = true;
+                const GfMatrix4d posed = matrixOf(source.posedTap, &frameOk);
+                const GfMatrix4d sourceDefault =
+                    matrixOf(source.defaultTap, valid);
+                *valid = *valid && frameOk;
+                // The source's own motion from its rest, in world, filtered
+                // before it is expressed in the target's frame: the twist
+                // axis is the SOURCE's, so the split has to happen while the
+                // motion is still measured against the source's rest.
+                const GfMatrix4d moved = sourceDefault.GetInverse() * posed;
+                const GfMatrix4d motion =
+                    hasCarry
+                        ? RigExecFilterSpaceRotation(
+                              moved * carryInverse,
+                              sourceDefault.TransformDir(sw.twistAxis),
+                              source.filter) * carry
+                        : RigExecFilterSpaceRotation(
+                              moved,
+                              sourceDefault.TransformDir(sw.twistAxis),
+                              source.filter);
+                return local * motion * local.GetInverse();
+            };
+            bool lowerOk = true, upperOk = true;
+            GfMatrix4d delta = deltaOf(lower, &lowerOk);
+            if (upper != lower && blend > 0.0) {
+                const GfMatrix4d other = deltaOf(upper, &upperOk);
+                delta = RigExecBlendTransforms(delta, other, blend);
+            }
+            if (!lowerOk || !upperOk) {
+                pose.diagnostics.push_back(
+                    sw.switchPath.GetString() +
+                    " has no usable frame for a space source; the space is "
+                    "not applied");
+                continue;
+            }
+            delta = RigExecMaskTransform(delta, sw.affectTranslation,
+                                         sw.affectRotation, sw.affectScale);
+            switchOverrides.push_back(RigExecValueOverride{
+                sw.target, _computePointFrame, TfToken(),
+                VtValue(RigExecFrameFromMatrix(delta * local))});
+        }
+            // The seed is pulled again between bands so that the next band
+            // reads the answers this one published, and once more after the
+            // last band so that every later reader -- the target's namespace
+            // children, the solvers, the frames this function returns --
+            // sees one answer. A rig with one band therefore pays exactly
+            // one extra pull, which is the common case.
+            begin = end;
+            if (switchOverrides.size() == published) {
+                // Nothing new this band: every switch in it declined.
+                continue;
+            }
+            baseOverrides.resize(baseCount);
+            baseOverrides.insert(baseOverrides.end(), switchOverrides.begin(),
+                                 switchOverrides.end());
+            published = switchOverrides.size();
+            const bool sameSwitch = seedFromCache && end >= _spaceSwitches.size() &&
+                _spaceSwitchSnapshot.IsValid() &&
+                switchOverrides.size() == _lastSpaceSwitchOverrides.size() &&
+                std::equal(switchOverrides.begin(), switchOverrides.end(),
+                           _lastSpaceSwitchOverrides.begin(),
+                           [](const RigExecValueOverride &a,
+                              const RigExecValueOverride &b) {
+                               return a.prim == b.prim && a.value == b.value;
+                           });
+            if (sameSwitch) {
+                seedSnapshot = _spaceSwitchSnapshot;
+                continue;
+            }
+            const RigExecSnapshot switched =
+                _firstFramePoseTaps->Evaluate(time, baseOverrides);
+            if (!switched.IsValid() || !switched.IsComplete()) {
+                pose.diagnostics.push_back(
+                    "space switch evaluation incomplete");
+                return pose;
+            }
+            seedSnapshot = switched;
+            if (begin >= _spaceSwitches.size()) {
+                _spaceSwitchSnapshot = switched;
+                _lastSpaceSwitchOverrides = switchOverrides;
+            }
         }
     }
 
@@ -1581,7 +1854,92 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // per operator, so adding an operator is a table entry rather than
         // another arm here. Aim falls through to the inline branch below,
         // which resolves a world-up binding the uniform context cannot carry.
-        if (solveHandler && solveHandler->solve) {
+        // A matrix mover in the transform domain: M' = T_w M, where T is
+        // the same rest->posed map its geometry twin uses, measured in
+        // rigExec:transformSpace by the shared helper.
+        //
+        // The falloff is applied to the frame's four LANDMARK POINTS with
+        // the identical rule the point kernel uses, rather than to a matrix
+        // built from it. That is what makes a transform placed where a point
+        // is land exactly where that point lands, for linear and radial
+        // alike, instead of merely close.
+        if (constraint.schemaType == "RigExecMatrixMover") {
+            auto mapOf = [&](const _FrameSourceBinding &binding,
+                             GfMatrix4d *out) {
+                RigExecPointFrame posed;
+                if (!resolveBinding(binding, &posed)) return false;
+                const auto ri = _providerIndex.find(binding.sourcePath);
+                const bool haveRest = ri != _providerIndex.end() &&
+                                      restLive[ri->second] &&
+                                      restFrames[ri->second].IsValid();
+                const auto &landmarks = haveRest
+                    ? restFrames[ri->second].points
+                    : RigExecIdentityLandmarks();
+                return RigExecPointsToMatrix(landmarks, posed, out);
+            };
+            GfMatrix4d transform(1.0);
+            if (constraint.sources.empty() ||
+                !mapOf(constraint.sources[0], &transform)) {
+                pose.diagnostics.push_back(
+                    constraint.moverPath.GetString() +
+                    " could not resolve rigExec:transform; mover passed "
+                    "through");
+                for (const SdfPath &target : constraint.targets) {
+                    recordFrame(target, constraint.moverPath);
+                }
+                continue;
+            }
+            if (constraint.sources.size() > 1) {
+                GfMatrix4d space(1.0);
+                if (!mapOf(constraint.sources[1], &space)) {
+                    pose.diagnostics.push_back(
+                        constraint.moverPath.GetString() +
+                        " could not resolve rigExec:transformSpace; mover "
+                        "passed through");
+                    for (const SdfPath &target : constraint.targets) {
+                        recordFrame(target, constraint.moverPath);
+                    }
+                    continue;
+                }
+                transform = RigExecMeasureInSpace(transform, space);
+            }
+            TfToken blend("linear");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:weightBlend"))) {
+                a.Get(&blend);
+            }
+            if (TfGetenvBool("RIGEXEC_DEBUG_XFORM_MOVER", false)) {
+                const auto ri =
+                    _providerIndex.find(constraint.sources[0].sourcePath);
+                const bool known =
+                    ri != _providerIndex.end() && restLive[ri->second];
+                pose.diagnostics.push_back(
+                    constraint.moverPath.GetName() + ": restFrame " +
+                    (!known
+                         ? "MISSING"
+                         : (restFrames[ri->second].IsValid() ? "ok"
+                                                             : "INVALID")) +
+                    ", T translation " +
+                    TfStringify(transform.ExtractTranslation().GetLength()) +
+                    ", w " + TfStringify(weight) +
+                    ", inputFrame origin " +
+                    TfStringify(inputFrame.Origin()));
+            }
+            RigExecPointFrame solved = inputFrame;
+            if (blend == "radial") {
+                const GfMatrix4d partial =
+                    RigExecPartialTransform(transform, weight);
+                for (GfVec3d &q : solved.points) {
+                    q = partial.TransformAffine(q);
+                }
+            } else {
+                for (GfVec3d &q : solved.points) {
+                    q = q + weight * (transform.TransformAffine(q) - q);
+                }
+            }
+            candidate = solved;
+            candidateReady = true;
+        } else if (solveHandler && solveHandler->solve) {
             _ConstraintSolveContext solveContext;
             solveContext.resolved = &_resolvedInputs;
             solveContext.prim = prim;
@@ -1595,6 +1953,36 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             solveContext.precompTranslation = constraint.precompTranslation;
             solveContext.precompRotation = constraint.precompRotation;
             solveContext.precompScale = constraint.precompScale;
+            // rigExec:space. The carry is the SEED's answer for the space,
+            // default^-1 * posed, exactly as the space switch takes it --
+            // and hasCarry, not "carry == identity": a constraint naming
+            // no space hands the kernel a null carry and takes its
+            // untouched branch, which is bit for bit what it did before.
+            GfMatrix4d carry(1.0);
+            bool hasCarry = false;
+            if (constraint.spacePosedTap >= 0 &&
+                constraint.spaceDefaultTap >= 0 && seedSnapshot.IsValid()) {
+                const auto matrixOfTap = [&](RigExecTapId tap,
+                                             GfMatrix4d *m) {
+                    const RigExecPointFrame frame =
+                        seedSnapshot.Get<RigExecPointFrame>(tap);
+                    return frame.IsValid() && !frame.IsDegenerate() &&
+                           RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                                 frame.points, m);
+                };
+                GfMatrix4d spacePosed(1.0), spaceDefault(1.0);
+                if (matrixOfTap(constraint.spacePosedTap, &spacePosed) &&
+                    matrixOfTap(constraint.spaceDefaultTap, &spaceDefault)) {
+                    carry = spaceDefault.GetInverse() * spacePosed;
+                    hasCarry = true;
+                } else {
+                    pose.diagnostics.push_back(
+                        constraint.moverPath.GetString() +
+                        " could not resolve rigExec:space; the axis mask "
+                        "runs without the carry");
+                }
+            }
+            solveContext.carry = hasCarry ? &carry : nullptr;
             candidate = solveHandler->solve(solveContext);
         } else {
             // Aim uses the same weighted source set, reduced to the target
@@ -1716,9 +2104,19 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                     " has a degenerate world-up object");
                                 candidateReady = false;
                             } else {
+                                // AN UP DIRECTION COMES FROM ROTATION,
+                                // NEVER FROM SCALE. Under a scaled rig
+                                // root the up object's frame carries that
+                                // scale, and ExtractRotation on a scaled
+                                // matrix does not return the rotation --
+                                // the derived up swung far enough to turn
+                                // the aim-constrained foot 90 degrees
+                                // between scale 1 and 2, dragging every
+                                // toe round with it.
                                 params.worldUpDirection =
-                                    upMatrix.ExtractRotation().TransformDir(
-                                        authoredWorldUp);
+                                    upMatrix.GetOrthonormalized(false)
+                                        .ExtractRotation()
+                                        .TransformDir(authoredWorldUp);
                             }
                         }
                     }

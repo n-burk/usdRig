@@ -2501,17 +2501,17 @@ main(int argc, char **argv)
         examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs");
     TestADragReturnedToItsValueExecutesNothing(
         examplesDir + "/biped/Biped.usda",
-        SdfPath("/Biped/Rig/Controls/hips_ctl"), TfToken("avars:ty"));
+        SdfPath("/Biped/Rig/Main/Shot/Aux/Controls/M_Body"),
+        TfToken("avars:ty"));
     TestAConstraintDragRunsOnlyItsCone(
         examplesDir + "/biped/Biped.usda",
-        SdfPath("/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim"),
+        SdfPath("/Biped/Rig/Movers/twist_aims/elbowTwist_l_def_aim"),
         TfToken("inputs:defaultWeight"));
     TestALeafControlDragRunsOnlyItsCone(
         examplesDir + "/biped/Biped.usda",
-        SdfPath("/Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/"
-                "spine_end_ctl/clavicle_l_ctl/arm_l_root/"
-                "arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/"
-                "arm_l_fk_wrist_l_bind"),
+        SdfPath("/Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/"
+                "M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm/"
+                "L_LoArm/L_Hand"),
         TfToken("avars:rz"));
     TestANonFiniteValueIsNotAConeMismatch(
         examplesDir + "/biped/Biped.usda", TfToken("inputs:defaultWeight"),

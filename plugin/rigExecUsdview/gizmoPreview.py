@@ -99,8 +99,14 @@ class PreviewChannel(object):
         # gizmoMath already holds these: Writer.Set put them in the preview
         # map as it collected them, so the handles and the frame maths are
         # reading them before this is called. What is left to do is tell
-        # Hydra.
-        if self._sink is None or not pending:
+        # Hydra -- and the listeners, who are told whether or not there is a
+        # Hydra to tell: a session with no sink (headless, or no
+        # rigExecImaging) still has a drag in flight, and the editor's
+        # fields should say so even when the viewport cannot.
+        if not pending:
+            return False
+        _Notify(pending)
+        if self._sink is None:
             return False
         keys = tuple(str(path) for path in pending.keys())
         values = []
@@ -138,6 +144,9 @@ class PreviewChannel(object):
         declared = bool(self._declared)
         self._declared = ()
         self._expected = 0
+        # AFTER the preview map is cleared: a listener that re-reads its
+        # values on End has to find the stage's, not the ones just dropped.
+        _Notify(None)
         if self._sink is None:
             return False
         if not declared:
@@ -155,6 +164,37 @@ _channels = sessionRegistry.SessionRegistry("gizmoPreview channels")
 # What a caller without a session reaches while no session has a channel:
 # the headless tests, and a process where no session installed its tools.
 _keylessChannel = PreviewChannel(keyless=True)
+
+
+# Who else is told what a drag is doing. The Avar Editor shows the number a
+# manipulator is dragging WHILE it is dragged, and this is how it hears each
+# sample: a listener is a callable, called with the same {Sdf.Path: value}
+# the sink gets on every Push and with None on End. Callables rather than a
+# Qt signal because this module is Qt-free.
+_listeners = []
+
+
+def AddListener(listener):
+    """Call `listener(pending)` on every Push and `listener(None)` on End."""
+    if listener is not None and listener not in _listeners:
+        _listeners.append(listener)
+
+
+def RemoveListener(listener):
+    try:
+        _listeners.remove(listener)
+    except ValueError:
+        pass
+
+
+def _Notify(pending):
+    # A listener that throws is dropped for that call only: a panel's bug
+    # must never kill a drag.
+    for listener in list(_listeners):
+        try:
+            listener(pending)
+        except Exception:
+            pass
 
 
 def Channel(session=None, create=False):
@@ -234,6 +274,10 @@ def Push(pending, session=None, stage=None):
     """
     channel = Channel(session)
     if channel is None:
+        # No channel, so no sink -- but the drag is real and the listeners
+        # are owed the sample.
+        if pending:
+            _Notify(pending)
         return False
     return channel.Push(pending, stage)
 
@@ -251,6 +295,7 @@ def End(session=None, stage=None):
     if channel is None:
         if stage is not None:
             gizmoMath.SetPreviewValues({}, stage=stage)
+        _Notify(None)
         return False
     return channel.End(stage)
 

@@ -265,6 +265,10 @@ struct RrPoseScratch {
     // Interpolator enables, read by the prologue so the step reads no
     // input table.
     std::vector<char> interpEnabled;
+    // A numeric driver's dials, read there for the same reason. Three per
+    // interpolator, one per axis; a transform-driven one leaves them at
+    // zero and never looks.
+    std::vector<std::array<double, 3>> interpValues;
     // The reconstituted RBF solvers plus one step's own scratch.
     std::vector<_RrRbfSolver> interpSolvers;
     std::vector<std::vector<double>> interpScratch;

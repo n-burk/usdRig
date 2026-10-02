@@ -4866,7 +4866,7 @@ TestPolicyRigActivationSurvivesItsOwnDerivation(
 {
     const char *files[] = {
         "/biped/Biped.usda",
-        "/biped/Biped_layered.usda",
+        "/biped/Biped_body.usda",
     };
     RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
     for (const char *file : files) {

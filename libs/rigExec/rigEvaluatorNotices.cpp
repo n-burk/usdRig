@@ -1,6 +1,7 @@
 // USD notice classification and epoch invalidation.
 
 #include "rigEvaluatorInternal.h"
+#include "rigEvaluatorPropertyBindings.h"
 #include "rigEvaluatorDependencies.h"
 #include "rigEvaluatorConstraints.h"
 
@@ -533,6 +534,32 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // connection inside a pose-input closure. When one of them has changed,
     // the digest has moved, and the settle compiles without computing it.
     const bool avarValuesOnly = _NoticeIsAvarValuesOnly(notice);
+    // ... unless the avar the notice names is one a property chain READS.
+    //
+    // A chain's inputs:value may be connected to a control's avar -- that is
+    // how every "distance from rest, from the control's own translate" chain
+    // in this rig is built -- and a binding that was resolved before the
+    // avar moved is resolved against a stale number. The bindings' own dirty
+    // test watches interactive overrides and upstream chains, not authored
+    // values, so a drag updated such a chain and AUTHORING the same avar did
+    // not: the cheeks followed the mouth corner while it was moving and
+    // stopped the moment it was let go.
+    const bool chainReadsAnEditedAvar = avarValuesOnly &&
+        !_propertyChainInputs.empty() && [this, &notice]() {
+            for (const SdfPath &path : notice.GetResyncedPaths()) {
+                if (_propertyChainInputs.count(path)) return true;
+            }
+            for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+                if (_propertyChainInputs.count(path)) return true;
+            }
+            return false;
+        }();
+    if (chainReadsAnEditedAvar) {
+        // The one thing an avar-only notice CAN invalidate, dropped on its
+        // own so the rest of the fast path is untouched: an Avar Editor tick
+        // still skips the skin layouts, the blend samples and the rest.
+        _propertyChainBindings.reset();
+    }
     if (!avarValuesOnly) {
         if (_NoticeIsDigestSuspect(notice)) {
             _structureDirty = true;

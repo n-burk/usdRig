@@ -580,4 +580,14 @@ RigExecParamsToMatrix(const RigExecTransformParams &params)
         params.translation[2], 1.0);
 }
 
+RigExecPointFrame
+RigExecTransformFrame(const RigExecPointFrame &frame, const GfMatrix4d &space)
+{
+    RigExecPointFrame out = frame;
+    for (auto &p : out.points) {
+        p = space.Transform(p);
+    }
+    return out;
+}
+
 }  // namespace rigExec

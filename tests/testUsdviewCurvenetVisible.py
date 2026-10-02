@@ -58,6 +58,18 @@ def _Require(observer, path, what):
 
 def testUsdviewInputFunction(appController):
     import curvenetUI
+    # testusdview execs this file, so there is no __file__ to locate the
+    # tests directory with. curvenetUI is imported from
+    # plugin/rigExecUsdview, which fixes the checkout root.
+    import os as _os
+    import sys as _sys
+    _tests = _os.path.join(
+        _os.path.dirname(_os.path.dirname(
+            _os.path.dirname(_os.path.abspath(curvenetUI.__file__)))),
+        "tests")
+    if _tests not in _sys.path:
+        _sys.path.insert(0, _tests)
+    import curvenet_test_stage
     from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
     api = appController._usdviewApi
@@ -65,14 +77,14 @@ def testUsdviewInputFunction(appController):
     panel = curvenetUI.CurvenetPanel.GetInstance(api)
 
     # A FRESH curvenet, the way an artist starts: New, then draw.
-    parent = stage.GetPrimAtPath("/puppetA")
+    parent = curvenet_test_stage.Model(stage)[1]
     net = curvenetUI.CreateCurvenet(stage, parent, "DrawnNet")
     panel._curvenetPath = net.GetPath()
     panel._Refresh()
 
     view = panel._picker.StageView()
     ratio = view.devicePixelRatioF()
-    body = stage.GetPrimAtPath("/puppetA/root/body_geo/node_0_Retopology")
+    body = curvenet_test_stage.Model(stage)[0]
     api.ClearPrimSelection()
     api.AddPrimToSelection(body)
     appController._frameSelection()

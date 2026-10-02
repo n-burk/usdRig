@@ -147,16 +147,37 @@ def testUsdviewInputFunction(appController):
            "%d region nodes sit at the origin" % len(origin))
     placed = sorted(regionNodes.values(), key=lambda n: n.position[1])
     overlapping = sum(1 for a, b in zip(placed, placed[1:]) if _Overlaps(a, b))
-    _Check(overlapping == 0,
-           "%d pairs of region nodes overlap" % overlapping)
+    if overlapping:
+        # Named, with their rectangles: two regions handed the same
+        # generated slot draw exactly on top of each other, and the
+        # coordinates are what say so.
+        names = {id(n): k for k, n in regionNodes.items()}
+        rows = ["%s@(%.0f,%.0f) %.0fx%.0f vs %s@(%.0f,%.0f) %.0fx%.0f"
+                % (names.get(id(x)), x.position[0], x.position[1],
+                   x.size[0], x.size[1],
+                   names.get(id(y)), y.position[0], y.position[1],
+                   y.size[0], y.size[1])
+                for x, y in zip(placed, placed[1:]) if _Overlaps(x, y)]
+        _Check(False, "%d pairs of region nodes overlap: %s"
+                      % (overlapping, " ;; ".join(rows[:4])))
 
     # --- 5. the face array is a row, not a payload ---------------------
     # up to 1,362 ints per region: it must cost a pin NAME and nothing
     # more. Node width is what would blow up if a value were rendered.
-    sample = stage.GetPrimAtPath(sorted(regionNodes)[0])
+    # The WORST region on the stage, not the first one alphabetically: the
+    # assertion is about a big array costing nothing, so it has to be made
+    # about the biggest array there is.
+    def _FaceCount(path):
+        attr = stage.GetPrimAtPath(path).GetAttribute("touchpose:faces")
+        return len((attr.Get() if attr else None) or [])
+
+    worst = max(sorted(regionNodes), key=_FaceCount)
+    sample = stage.GetPrimAtPath(worst)
     faces = sample.GetAttribute("touchpose:faces").Get()
     node = regionNodes[str(sample.GetPath())]
-    _Check(len(faces) > 100, "sample region has only %d faces" % len(faces))
+    _Check(len(faces) > 100,
+           "the biggest region on the stage has only %d faces, which is too "
+           "small to prove anything about rendering a payload" % len(faces))
     _Check(node.size[0] < 4000.0,
            "a region node is %.0f units wide -- the face array is being "
            "rendered" % node.size[0])

@@ -1126,10 +1126,77 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_biped_hand.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecTrsMastersPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_trs_masters.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecWireInvariantPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_wire_invariant.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # The deformation stack must keep running in the Maya order: the head
+    # wires are the first four deformers on the face and everything after
+    # them is shaped by what they leave behind.
+    add_test(NAME testRigExecDeformerOrderPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_deformer_order.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # A pose sample sitting on top of its neutral makes the RBF degenerate
+    # and the weights run away -- the right deltoid ballooned this way.
+    add_test(NAME testRigExecPoseRotationsPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_pose_rotations.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # The projector's ray is the SOURCE FRAME's Z axis, and the two eye
+    # bind joints are 180 degrees apart rather than mirrored, so the right
+    # eye once cast into the back of its own eyeball.
+    add_test(NAME testRigExecEyeSymmetryPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_eye_symmetry.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # A drag is a SWEEP: a deformer correct at both ends of one can
+    # still jump in the middle, and every other check here sets one
+    # value and looks once.
+    add_test(NAME testRigExecFaceSmoothPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_face_smooth.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # The spine's volume preservation must stay in the spine: an
+    # inherited shear rode through the head's scale constraints and grew
+    # the cranium 6.56% when the hips moved.
+    add_test(NAME testRigExecRigidHeadPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_rigid_head.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # A radial weight turns a fraction of the rotation about the pivot the
+    # transform turns about; a linear one follows the chord, which falls
+    # inside the arc. On a blink that walks the lid into the eyeball.
+    add_test(NAME testRigExecBlinkClearancePython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_blink_clearance.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+            "$<TARGET_FILE:rigExecBakeTool>" "$<TARGET_FILE:rigExecPose>")
+    add_test(NAME testRigExecFaceDrivesPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_face_drives.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # inputs:enabled must actually switch a deformer off: the Deformer
+    # Toggles panel is only a bisecting tool if the switch it writes is
+    # one the evaluator obeys.
+    add_test(NAME testRigExecDeformerEnabledPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_deformer_enabled.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecPoseCyclePython
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_pose_cycle.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecPsdNumeric COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_psd_numeric.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecSpaceSwitch COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_space_switch.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecBake COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_bake.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -1257,6 +1324,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecSplineIkPython
                          testRigExecFkControlSpacePython
                          testRigExecBake testRigExecInverse
+                         testRigExecPsdNumeric testRigExecSpaceSwitch
                          testRestLocal testRestMigration
                          testInterveningXform testRigExecEpochConstants
                          testRigExecBakedAvarPatch testRigExecWireMover

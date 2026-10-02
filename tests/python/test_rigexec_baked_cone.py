@@ -47,8 +47,8 @@ _POINTS = "/Biped/Geom/body_geo.points"
 
 # One probe per region the closure work found to be structurally different,
 # plus the root, which must skip the least.
-_PROBES = ("index_004_l_bind_fk", "arm_l_fk_wrist_l_bind", "toe_l",
-           "spine_end_ctl", "hips_ctl")
+_PROBES = ("L_IndexTip", "L_Hand", "L_Toe",
+           "M_ChestTop", "M_Body")
 _VALUES = (4.0, 19.5, -27.25)
 
 
@@ -122,7 +122,7 @@ def TestParityReportsNoMismatch():
 
 
 def TestABakedDragIsBitIdenticalToAFreshRig():
-    """A long baked drag must answer as the exec oracle that never saw one."""
+    """A long baked drag must answer as a dynamic rig that never saw one."""
     _, dragged, controls = _Open("baked")
     dragged.evaluate(1.0)
     for name in _PROBES:
@@ -131,7 +131,7 @@ def TestABakedDragIsBitIdenticalToAFreshRig():
                 [(controls[name], "avars:rz", value)])
             baked = _Snapshot(dragged.evaluate(1.0))
 
-            _, fresh, freshControls = _Open("reference")
+            _, fresh, freshControls = _Open("dynamic")
             fresh.set_interactive_overrides(
                 [(freshControls[name], "avars:rz", value)])
             full = _Snapshot(fresh.evaluate(1.0))
@@ -176,11 +176,11 @@ def TestTheConeSkipsAndKnowsHowMuch():
         rig.evaluate(1.0)
         return rig.baked_clusters_run_last_generation
 
-    leaf = _Drag("index_004_l_bind_fk")
+    leaf = _Drag("L_IndexTip")
     assert 0 < leaf < total, (
         "a fingertip drag ran %d of %d cluster(s); the cone skipped nothing"
         % (leaf, total))
-    root = _Drag("hips_ctl")
+    root = _Drag("M_Body")
     assert root > leaf, (
         "a root drag ran %d cluster(s) against a fingertip's %d; the root "
         "reaches every joint and the cone is too small" % (root, leaf))

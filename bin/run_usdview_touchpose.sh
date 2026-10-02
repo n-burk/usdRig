@@ -3,12 +3,12 @@
 # The POSIX twin of run_usdview_touchpose.bat.
 #
 # Usage: bin/run_usdview_touchpose.sh [stage.usda] [renderer | usdview flags...]
-#   stage defaults to examples/biped/Biped_all.usda: the touch
-#   regions stacked over the LAYERED rig, which is also the stage the
-#   Control Picker resolves against, so both panels work on it.
-#   Biped_touch.usda is the same regions over the FLAT rig, and
-#   Biped_touch_regions.usda is the touch data alone -- that one shows
-#   nothing opened by itself, being `over`s with no geometry under them.
+#   stage defaults to examples/biped/Biped_stack.usda: the whole
+#   character, whose body and face branches each carry their own touch
+#   regions and picker panel, so both panels work on it.
+#   Biped_body_touch_regions.usda and Biped_face_touch_regions.usda are
+#   the touch data alone -- they show nothing opened by themselves, being
+#   `over`s with no geometry under them.
 #
 # Then: RigExec -> Animation Editors -> TouchPose, tick the box, and hover the character. The
 # region under the cursor lights up; click it and the control that owns
@@ -27,7 +27,7 @@ rigexec_require_usd "$USDVIEW"
 export PXR_PLUGINPATH_NAME="${PXR_PLUGINPATH_NAME:-}:$RIG/plugin/touchPose"
 export PYTHONPATH="$RIG/plugin/touchPose:${PYTHONPATH:-}"
 
-STAGE="$RIG/examples/biped/Biped_all.usda"
+STAGE="$RIG/examples/biped/Biped_stack.usda"
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ -f "$1" ]; then
     STAGE="$1"
     shift

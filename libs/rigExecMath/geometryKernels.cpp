@@ -2,6 +2,7 @@
 #include "geometryKernels.h"
 #include "deltaMushKernel.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/gf/rotation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -106,6 +107,238 @@ RigExecTransportSurfaceOffsets(
 {
     return RigExecTransportSurfaceOffsetsKernel<GfVec3f, GfVec3d>(
         rest, posed, faceCounts, faceIndices, deltas, out);
+}
+
+bool
+RigExecRaycastSurface(
+    const std::vector<GfVec3f> &points,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const GfVec3d &origin,
+    const GfVec3d &direction,
+    RigExecSurfaceHit *hit)
+{
+    if (!hit || points.empty() || faceVertexCounts.empty()) return false;
+    GfVec3d dir = direction;
+    const double dirLength = dir.GetLength();
+    if (!(dirLength > 0) || !std::isfinite(dirLength)) return false;
+    dir /= dirLength;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(origin[axis])) return false;
+    }
+
+    // Nearest forward hit, tracked with its barycentric coordinates so the
+    // normal can be blended at exactly the point that won.
+    double nearest = std::numeric_limits<double>::infinity();
+    int hitA = -1, hitB = -1, hitC = -1;
+    double hitU = 0, hitV = 0;
+
+    size_t offset = 0;
+    for (int count : faceVertexCounts) {
+        if (count < 3 || static_cast<size_t>(count) > faceVertexIndices.size() - offset) {
+            return false;
+        }
+        for (int corner = 0; corner < count; ++corner) {
+            const int index = faceVertexIndices[offset + corner];
+            if (index < 0 || static_cast<size_t>(index) >= points.size()) return false;
+        }
+        const int origin0 = faceVertexIndices[offset];
+        for (int corner = 1; corner + 1 < count; ++corner) {
+            const int ia = origin0;
+            const int ib = faceVertexIndices[offset + corner];
+            const int ic = faceVertexIndices[offset + corner + 1];
+            const GfVec3d a(points[ia]), b(points[ib]), c(points[ic]);
+            const GfVec3d e1 = b - a, e2 = c - a;
+            const GfVec3d p = GfCross(dir, e2);
+            const double det = GfDot(e1, p);
+            // Two-sided: the ray starts INSIDE the eyeball, so the face it
+            // leaves through is back-facing to it and a one-sided test
+            // would find nothing at all.
+            if (std::abs(det) < 1e-16) continue;
+            const double inv = 1.0 / det;
+            const GfVec3d t = origin - a;
+            const double u = GfDot(t, p) * inv;
+            if (u < 0.0 || u > 1.0) continue;
+            const GfVec3d q = GfCross(t, e1);
+            const double v = GfDot(dir, q) * inv;
+            if (v < 0.0 || u + v > 1.0) continue;
+            const double distance = GfDot(e2, q) * inv;
+            if (distance <= 1e-9 || distance >= nearest) continue;
+            nearest = distance;
+            hitA = ia; hitB = ib; hitC = ic;
+            hitU = u; hitV = v;
+        }
+        offset += static_cast<size_t>(count);
+    }
+    if (offset != faceVertexIndices.size()) return false;
+    if (hitA < 0 || !std::isfinite(nearest)) return false;
+
+    hit->a = hitA; hit->b = hitB; hit->c = hitC;
+    hit->u = hitU; hit->v = hitV;
+    hit->distance = nearest;
+    return true;
+}
+
+bool
+RigExecSurfaceFrameAtHit(
+    const std::vector<GfVec3f> &points,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const RigExecSurfaceHit &hit,
+    const GfVec3d &upHint,
+    GfMatrix4d *frame)
+{
+    if (!frame || points.empty()) return false;
+    const int corners[3] = {hit.a, hit.b, hit.c};
+    for (int index : corners) {
+        if (index < 0 || static_cast<size_t>(index) >= points.size()) {
+            return false;
+        }
+    }
+    if (!std::isfinite(hit.u) || !std::isfinite(hit.v)) return false;
+
+    // The vertex normals validate the topology on the way: an invalid mesh
+    // yields none, and a frame on it would be a frame on nothing.
+    const std::vector<GfVec3f> normals = RigExecComputeVertexNormals(
+        points, faceVertexCounts, faceVertexIndices);
+    if (normals.size() != points.size()) return false;
+
+    const double w = 1.0 - hit.u - hit.v;
+    const GfVec3d a(points[hit.a]), b(points[hit.b]), c(points[hit.c]);
+    GfVec3d normal = w * GfVec3d(normals[hit.a])
+                   + hit.u * GfVec3d(normals[hit.b])
+                   + hit.v * GfVec3d(normals[hit.c]);
+    double length = normal.GetLength();
+    if (!(length > 0) || !std::isfinite(length)) {
+        // A degenerate blend still has the triangle itself to fall back on.
+        normal = GfCross(b - a, c - a);
+        length = normal.GetLength();
+        if (!(length > 0) || !std::isfinite(length)) return false;
+    }
+    normal /= length;
+
+    // Roll. The hint is only a hint: parallel to the normal it says
+    // nothing, and the least-aligned principal axis is the stable choice.
+    GfVec3d up = upHint - GfDot(upHint, normal) * normal;
+    if (up.GetLengthSq() < 1e-12) {
+        int axis = 0;
+        for (int i = 1; i < 3; ++i) {
+            if (std::abs(normal[i]) < std::abs(normal[axis])) axis = i;
+        }
+        GfVec3d fallback(0);
+        fallback[axis] = 1.0;
+        up = fallback - GfDot(fallback, normal) * normal;
+        if (up.GetLengthSq() < 1e-12) return false;
+    }
+    up.Normalize();
+    const GfVec3d side = GfCross(up, normal);
+
+    // The hit's own position on THESE points: the material point, wherever
+    // this point set has carried it.
+    const GfVec3d position = w * a + hit.u * b + hit.v * c;
+    frame->SetIdentity();
+    frame->SetRow3(0, side);
+    frame->SetRow3(1, up);
+    frame->SetRow3(2, normal);
+    frame->SetRow3(3, position);
+    return true;
+}
+
+bool
+RigExecRaycastSurfaceFrame(
+    const std::vector<GfVec3f> &points,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const GfVec3d &origin,
+    const GfVec3d &direction,
+    const GfVec3d &upHint,
+    GfMatrix4d *frame)
+{
+    if (!frame) return false;
+    RigExecSurfaceHit hit;
+    if (!RigExecRaycastSurface(points, faceVertexCounts, faceVertexIndices,
+                               origin, direction, &hit)) {
+        return false;
+    }
+    return RigExecSurfaceFrameAtHit(points, faceVertexCounts,
+                                    faceVertexIndices, hit, upHint, frame);
+}
+
+GfMatrix4d
+RigExecPartialTransform(const GfMatrix4d &transform, double weight)
+{
+    const double w = GfClamp(weight, 0.0, 1.0);
+    if (w <= 0.0) {
+        return GfMatrix4d(1.0);
+    }
+    if (w >= 1.0) {
+        return transform;
+    }
+
+    // Row lengths are the scale; dividing them out leaves the rotation.
+    GfMatrix4d basis = transform;
+    basis.SetTranslateOnly(GfVec3d(0));
+    GfVec3d scale(1.0);
+    for (int axis = 0; axis < 3; ++axis) {
+        const GfVec3d row(basis.GetRow3(axis));
+        const double length = row.GetLength();
+        if (length > 1e-12) {
+            scale[axis] = length;
+            basis.SetRow3(axis, row / length);
+        }
+    }
+
+    // The same axis, a fraction of the angle, ABOUT THE SAME PIVOT. The
+    // last part is what makes this radial rather than a rotation with a
+    // separately-faded slide bolted on.
+    //
+    // A cluster's transform rotates about a pivot that is nowhere near
+    // the origin -- a lid turning about an eyeball sits 165 units up --
+    // and a rotation about a distant pivot carries an enormous
+    // translation, P - R P. Scaling THAT by w while turning by w*theta
+    // does not put the point on the arc at all: it lands inside, so a
+    // half-weighted lid pulls back into the eye instead of sweeping
+    // round it. That is the "the falloff is turning it linear" report,
+    // and it is a weighting bug rather than a painting one.
+    //
+    // So recover the pivot the transform actually turns about -- its
+    // screw axis -- and turn a fraction about that.
+    const GfRotation rotation = basis.ExtractRotation();
+    const GfVec3d axis = rotation.GetAxis().GetNormalized();
+    const double angle = rotation.GetAngle();
+    const GfVec3d translation = transform.ExtractTranslation();
+
+    GfMatrix4d scaled(1.0);
+    scaled.SetScale(GfVec3d(1.0 + (scale[0] - 1.0) * w,
+                            1.0 + (scale[1] - 1.0) * w,
+                            1.0 + (scale[2] - 1.0) * w));
+
+    GfMatrix4d out(1.0);
+    out.SetRotate(GfRotation(axis, angle * w));
+    out = scaled * out;
+
+    // Below about a tenth of a degree there is no meaningful axis to
+    // turn about and the chord and the arc agree to within float noise,
+    // so the straight blend is both correct and better conditioned.
+    const double radians = GfDegreesToRadians(angle);
+    if (std::abs(std::sin(0.5 * radians)) < 1e-4) {
+        out.SetTranslateOnly(translation * w);
+        return out;
+    }
+
+    // Split the translation into the part along the axis (a screw's own
+    // travel, which stays linear in w) and the part across it, which is
+    // (I - R) applied to the pivot and so names where the pivot is.
+    const double along = GfDot(translation, axis);
+    const GfVec3d across = translation - axis * along;
+    const double half = 0.5 / std::tan(0.5 * radians);
+    const GfVec3d pivot = across * 0.5 + GfCross(axis, across) * half;
+
+    // p' = R_w (p - pivot) + pivot + w * along * axis.
+    const GfMatrix4d partial = out;
+    out.SetTranslateOnly(pivot - partial.TransformDir(pivot)
+                         + axis * (along * w));
+    return out;
 }
 
 void

@@ -24,6 +24,12 @@ struct _ConstraintSolveContext {
     RigExecConstraintAxisMask precompTranslation;
     RigExecConstraintAxisMask precompRotation;
     RigExecConstraintAxisMask precompScale;
+    /// rigExec:space, resolved: the carrying provider's rest->pose map,
+    /// or null when the constraint names no space. A POINTER, not an
+    /// identity matrix, because a constraint naming nothing must take
+    /// the kernel's untouched branch rather than one multiplied by an
+    /// identity (see RigExecRotationConstraintParams::carry).
+    const GfMatrix4d *carry = nullptr;
 };
 
 using _ConstraintSolveFn =

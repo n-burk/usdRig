@@ -48,9 +48,37 @@ struct RigExecTwoBoneIkParams {
     double softness = 0.0;       ///< inputs:softness: soft-reach distance
     double preferredBendRadians = 0.0;  ///< fallback bend plane when the
                                         ///< pole degenerates
+    /// rigExec:space composed with rigExec:spaceMatrix: the space the
+    /// chain is measured in. It sets the bone lengths AND the length of
+    /// the published frames' axis handles, which is how a child that is
+    /// not itself solver-posed inherits the scale -- the pose ladder
+    /// reads posed/rest axis length as the scale factor, so a solver
+    /// that publishes rest-length handles pins every descendant back to
+    /// unscaled. Identity leaves both exactly as they were.
+    GfMatrix4d space = GfMatrix4d(1.0);
     // stretchPolicy: v0.1 implements "uniformSegments".
     // unreachablePolicy: v0.1 implements "clampWithSoftness".
 };
+
+/// The chain's bone lengths, measured in \p space (RigExecTwoBoneIk).
+///
+/// The rests are authored unscaled and the solver's root/goal/pole arrive
+/// posed, so the two only agree while whatever the rig hangs from is
+/// unscaled. \p space -- rigExec:spaceMatrix, normally the posed space of
+/// a TRS master -- carries the rest points into the space the frames are
+/// already in. Identity reproduces the old measurement exactly.
+///
+/// The authored offsets are lengths, so each rides its own bone's factor:
+/// a chain that scales while its offset does not changes proportion as
+/// the rig resizes, which is the one thing scaling must not do.
+///
+/// Shared so the dynamic computation and the baked program cannot drift:
+/// they measured separately before, and a difference here is an IK that
+/// solves one way in the viewport and another in a bake.
+void RigExecTwoBoneIkLengths(
+    const std::array<std::array<GfVec3d, 4>, 3> &restPoints,
+    const GfMatrix4d &space, double upperOffset, double lowerOffset,
+    double *upperLength, double *lowerLength);
 
 /// Analytic two-bone IK with pole vector (RigExecTwoBoneIk).
 ///
@@ -268,6 +296,23 @@ struct RigExecRotationConstraintParams {
     RigExecConstraintAxisMask affect;
     RigExecEulerOrder rotationOrder = RigExecEulerOrder::XYZ;
     double weight = 1.0;
+    /// rigExec:space -- the rest->pose map of the provider that carries the
+    /// whole rig (the TRS masters on the biped), or nullptr when none is
+    /// named. Picking Euler axes out of a rotation is not equivariant under
+    /// an outer rotation: under a master rotation R the source reads Q*R,
+    /// and the X component of Q*R has nothing to do with the X component of
+    /// Q, so a partial mask throws part of the master's carry away with the
+    /// axes it was told to drop. With a carry named, the input and every
+    /// source are measured with the carry stripped (frame * carry^-1), the
+    /// mask runs in the rig's own space, and the answer is carried back
+    /// (result * carry). A full mask is a plain copy and equivariant
+    /// already, so it needs no carry.
+    ///
+    /// The guard is "a carry was NAMED", never "the carry is identity":
+    /// `carry^-1 * m * carry` for a master standing at rest is m to the last
+    /// few ulps and not bit for bit, and a rig naming nothing must take the
+    /// untouched branch. Same rule as RigExecClusterInPointFrame.
+    const GfMatrix4d *carry = nullptr;
 };
 
 struct RigExecScaleConstraintParams {
@@ -284,6 +329,12 @@ struct RigExecParentConstraintParams {
     RigExecConstraintAxisMask scaleAxes{false, false, false};
     RigExecEulerOrder rotationOrder = RigExecEulerOrder::XYZ;
     double weight = 1.0;
+    /// rigExec:space, or nullptr. A Parent with ONE source is a plain copy
+    /// and equivariant already; with two or more it averages the sources'
+    /// Euler angles, and a mean of Euler angles moves under an outer
+    /// rotation exactly as a masked axis does. Same contract as
+    /// RigExecRotationConstraintParams::carry.
+    const GfMatrix4d *carry = nullptr;
 };
 
 /// Deterministic multi-source FBX-equivalent constraints over asset-space

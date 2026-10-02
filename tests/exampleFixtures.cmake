@@ -45,9 +45,9 @@
 # Not listed, deliberately -- rigExecPose exits 2 on the first five and 1 on
 # the last two, so an entry for any of them could never pass:
 #   aimtest_xform_flattened.usd, spider_legs_assembly.usd, arcTestAsset.usda,
-#   biped/Biped_layered_left.usda, biped/Biped_layered_right.usda
+#   biped/Biped_body_left.usda, biped/Biped_body_right.usda
 #       carry no RigExecRoot -- they are geometry or layer fragments
-#   simple_rig_flattened.usd, biped/Biped_layered_center.usda
+#   simple_rig_flattened.usd, biped/Biped_body_center.usda
 #       are sublayer arms that do not compile when opened on their own
 # Every other stage under examples/, examples/biped/ and examples/components/
 # has an entry, so a new example that nobody wired up is a visible omission
@@ -90,9 +90,15 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "simple_rig.usd|1,2,3|/World/RigExecRoot/Controllers/Root|avars:tx|/World/RigExecRoot/Movers/RigExecMatrixMover1|inputs:defaultWeight|YES|-"
     "simple_rig_anim.usd|0,12,40,51,79,100|/World/RigExecRoot/Controllers/Root|avars:tx|/World/RigExecRoot/Movers/RigExecMatrixMover1|inputs:defaultWeight|YES|-"
     "spider_legs_assembly_ref.usda|1,2,3|/World/RigExecRoot1/Xform1/Controller/hip|avars:ry|/World/RigExecRoot1/Xform1/Solvers/RigExecTwoBoneIk1|inputs:softness|YES|-"
-    "biped/Biped.usda|1,2,3|/Biped/Rig/Controls/hips_ctl|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim|inputs:defaultWeight|YES|-"
-    "biped/Biped_layered.usda|1,2,3|/Biped/Rig/Controls/hips_ctl|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim|inputs:defaultWeight|YES|-"
-    "biped/Biped_anim.usda|1,50,100,150,200|/Biped/Rig/Controls/hips_ctl|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim|inputs:defaultWeight|YES|-"
+    "biped/Biped.usda|1,2,3|/Biped/Rig/Main/Shot/Aux/Controls/M_Body|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_def_aim|inputs:defaultWeight|YES|-"
+    "biped/Biped_body.usda|1,2,3|/Biped/Rig/Main/Shot/Aux/Controls/M_Body|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_def_aim|inputs:defaultWeight|YES|-"
+    "biped/Biped_anim.usda|1,2,3,4,5,6,7,8|/Biped/Rig/Main/Shot/Aux/Controls/M_Body|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_def_aim|inputs:defaultWeight|YES|-"
+    # The whole character: body and face together, plus the space switches
+    # and the squetch layer that span both. The one fixture that carries a
+    # RigExecSpaceSwitch, so it is what holds the switched compose -- and
+    # its ordering against the groups that publish its sources -- to the
+    # binary runtime.
+    "biped/Biped_stack.usda|1,2,3|/Biped/Rig/Main/Shot/Aux/Controls/M_Body|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_def_aim|inputs:defaultWeight|YES|-"
 )
 
 # The C++ half of the single source of truth: the same records, as the rows

@@ -30,6 +30,11 @@ struct RigExecBakeOpts {
     /// The reader major version the binary must load under. The writer only
     /// knows its own (see RigExecBinaryVersion), so anything else fails.
     uint32_t targetReaderVersion = RigExecBinaryMajor(RigExecBinaryVersion);
+    /// Give a uid to every input an override can reach, not only the ones
+    /// that vary -- what a client needs to POSE the baked rig rather than
+    /// replay it. See the comment at the top of capture.h. Off by default:
+    /// it widens the directory, and a bake made to replay does not need it.
+    bool overridableInputs = false;
 };
 
 /// What a bake produced.

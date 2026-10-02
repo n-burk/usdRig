@@ -348,7 +348,7 @@ def build_report(stage, rig_root="/Biped/Rig", samples=40, control=None,
     if not controls:
         raise ValueError("no controls under %s" % rig_root)
     if control is None:
-        control = "hips_ctl" if "hips_ctl" in controls else sorted(controls)[0]
+        control = "M_Body" if "M_Body" in controls else sorted(controls)[0]
     if control not in controls:
         raise ValueError("no control %s; have e.g. %s"
                          % (control, sorted(controls)[:8]))

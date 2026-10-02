@@ -1,7 +1,7 @@
 #!/bin/bash
 # bin/test/run_testusdview_touchpose.sh -- headless end-to-end test of the
 # TouchPose pick loop (tests/testUsdviewTouchPose.py) on
-# examples/biped/Biped_touch.usda. The POSIX twin of
+# examples/biped/Biped_stack.usda. The POSIX twin of
 # run_testusdview_touchpose.bat, which carries the full rationale.
 #
 # In short, three of TouchPose's claims cannot be checked from a script:
@@ -41,7 +41,7 @@ export PYTHONPATH="$RIG/plugin/touchPose:${PYTHONPATH:-}"
 # package from. Handed over explicitly rather than guessed at.
 export TOUCHPOSE_PLUGIN_DIR="$RIG/plugin/touchPose"
 
-STAGE="$RIG/examples/biped/Biped_touch.usda"
+STAGE="$RIG/examples/biped/Biped_stack.usda"
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ -f "$1" ]; then
     STAGE="$1"
     shift

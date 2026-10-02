@@ -162,10 +162,10 @@ def _LoadRigExecImaging():
 # stay independent; keep the ranks in step.
 #
 #   Reactivate RigExec Evaluation   0
-#   Viewport            10: Viewport Tools 10, View Cube 20
-#   General Editors     20: Avar Editor 10, Layer Opinions 20,
-#                           Execution Stack 30, Profiler 40,
-#                           Cache Strip 50
+#   Viewport            10: Viewport Tools 10, View Cube 20, View Axis 30
+#   General Editors     20: Avar Editor 10, Layer Stack 15,
+#                           Layer Opinions 20, Execution Stack 30,
+#                           Profiler 40
 #   Animation Editors   30: Graph Editor 10, Shape Editor 20,
 #                           Control Picker 30, TouchPose 40,
 #                           Volume Weight Editor 50, Curvenet Authoring 60
@@ -281,6 +281,8 @@ class RigExecUsdviewContainer(PluginContainer):
         self._viewportToolsFailed = False
         self._viewCube = None
         self._viewCubeFailed = False
+        self._viewAxis = None
+        self._viewAxisFailed = False
 
         # Release the stage BEFORE the interpreter finalizes.
         #
@@ -329,12 +331,28 @@ class RigExecUsdviewContainer(PluginContainer):
             "Layer Opinions",
             lambda api: self._OpenLayerOpinionsPanel(api))
 
+        # The layer stack: the stage's sublayer tree, with a checkbox to
+        # mute any layer and switch that branch of the character off.
+        # Same lazy-import reasoning as the panels above.
+        self._layerStack = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.layerStack",
+            "Layer Stack",
+            lambda api: self._OpenLayerStackPanel(api))
+
         # The execution stack: what runs, in what order, and what it
         # writes. Same lazy-import reasoning as the panels above.
         self._execStack = plugRegistry.registerCommandPlugin(
             "RigExecUsdviewContainer.execStack",
             "Execution Stack",
             lambda api: self._OpenExecStackPanel(api))
+
+        # Deformer toggles: every mover that writes a mesh, with a
+        # checkbox, so "the face breaks when I move the head" can be
+        # bisected in the viewport instead of by editing the asset.
+        self._deformerToggles = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.deformerToggles",
+            "Deformer Toggles",
+            lambda api: self._OpenDeformerTogglesPanel(api))
 
         # The avar editor: the selected control's avar channels as
         # sliders and number fields, writing through the shared undo
@@ -368,6 +386,13 @@ class RigExecUsdviewContainer(PluginContainer):
             "View Cube",
             lambda api: self._ToggleViewCube())
 
+        # The navigation axis gizmo, bottom-left. Same lazy-import and
+        # toggle reasoning as the view cube.
+        self._viewAxisCommand = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.viewAxis",
+            "View Axis",
+            lambda api: self._ToggleViewAxis())
+
         # The profiler: where the open rig's time goes, how deep its
         # schedule is, and how many threads any of it actually ran on.
         # Same lazy-import reasoning as the panels above.
@@ -400,12 +425,18 @@ class RigExecUsdviewContainer(PluginContainer):
                          self._viewportToolsCommand, 10)
         AddToRigExecMenu(plugUIBuilder, "Viewport",
                          self._viewCubeCommand, 20)
+        AddToRigExecMenu(plugUIBuilder, "Viewport",
+                         self._viewAxisCommand, 30)
         AddToRigExecMenu(plugUIBuilder, "General Editors",
                          self._avarEditor, 10)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._layerStack, 15)
         AddToRigExecMenu(plugUIBuilder, "General Editors",
                          self._layerOpinions, 20)
         AddToRigExecMenu(plugUIBuilder, "General Editors",
                          self._execStack, 30)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._deformerToggles, 35)
         AddToRigExecMenu(plugUIBuilder, "General Editors",
                          self._profiler, 40)
         AddToRigExecMenu(plugUIBuilder, "General Editors",
@@ -557,7 +588,8 @@ class RigExecUsdviewContainer(PluginContainer):
         return volumeWeightUI.OpenVolumeWeightPanel(
             usdviewApi,
             setWeightOverlay=self._SetWeightOverlay,
-            hasWeightOverlay=self._HasWeightOverlay)
+            hasWeightOverlay=self._HasWeightOverlay,
+            undoStack=self._UndoStack())
 
     def _OpenCurvenetPanel(self, usdviewApi):
         # Same lazy sibling import as _OpenVolumeWeightPanel.
@@ -568,7 +600,7 @@ class RigExecUsdviewContainer(PluginContainer):
                 0, os.path.dirname(os.path.abspath(__file__)))
             import curvenetUI
 
-        return curvenetUI.OpenCurvenetPanel(usdviewApi)
+        return curvenetUI.OpenCurvenetPanel(usdviewApi, self._UndoStack())
 
     def _OpenLayerOpinionsPanel(self, usdviewApi):
         # Same lazy sibling import as _OpenVolumeWeightPanel. Shares the
@@ -582,6 +614,45 @@ class RigExecUsdviewContainer(PluginContainer):
 
         return layerOpinionsUI.OpenLayerOpinionsPanel(
             usdviewApi or self._api, self._UndoStack())
+
+    def _OpenLayerStackPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenLayerOpinionsPanel.
+        try:
+            import layerStackUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import layerStackUI
+
+        return layerStackUI.OpenLayerStackPanel(
+            usdviewApi or self._api, self.MuteLayers, self._UndoStack())
+
+    def MuteLayers(self, change):
+        """Run `change(stage)`, a layer mute or unmute, with RigExec
+        evaluation released around it.
+
+        Muting a layer resyncs the whole stage, and OpenExec's stage
+        listener does not take a resync of the pseudo-root: it fails a
+        verification and leaves the exec network as it was. So the rig is
+        deactivated first, the layers change with no exec system
+        listening, and the rig is activated again on the recomposed stage,
+        which compiles it fresh. Returns what `change` returned.
+        """
+        stage = self._api.dataModel.stage
+        if not stage:
+            return change(stage)
+        wasActive = self._active
+        self._activating = True
+        try:
+            if self._lib:
+                self._lib.RigExecImaging_Deactivate()
+            self._active = False
+            result = change(stage)
+        finally:
+            self._activating = False
+        if wasActive or self._FindRigPaths(stage):
+            self._ActivateCurrentStage()
+        return result
 
     def _OpenProfilerPanel(self, usdviewApi=None):
         # Same lazy sibling import as _OpenExecStackPanel: profilerUI
@@ -597,40 +668,18 @@ class RigExecUsdviewContainer(PluginContainer):
 
         return profilerUI.OpenProfilerPanel(usdviewApi or self._api)
 
-    def _OpenCacheStripPanel(self, usdviewApi=None):
-        # Same lazy sibling import as _OpenProfilerPanel: cacheStripUI
-        # pulls in Qt, and this container must stay importable headless.
-        # cacheStripPanel beside it does not, which is what lets the
-        # headless tests drive the same poll/skip/action logic.
+    def _OpenDeformerTogglesPanel(self, usdviewApi=None):
+        # Same lazy sibling import as the other panels: this module pulls
+        # in Qt and the container must stay importable headless.
         try:
-            import cacheStripUI
+            import deformerTogglesUI
         except ImportError:
             sys.path.insert(
                 0, os.path.dirname(os.path.abspath(__file__)))
-            import cacheStripUI
+            import deformerTogglesUI
 
-        panel = cacheStripUI.OpenCacheStripPanel(
-            usdviewApi or self._api, self)
-        self._stripPanel = panel
-        return panel
-
-    def StripLibrary(self):
-        """
-        This session's imaging handle, or None before the library loads.
-
-        A handle, not the raw library: it answers to the same
-        RigExecImaging_* names (cacheStripModel looks them up by name) and
-        routes every one of them to THIS session's stage.
-        """
-        return self._Imaging()
-
-    def StripRigs(self):
-        """Active rig paths as strings, for the strip chooser."""
-        return [str(path) for path in self._rigPaths]
-
-    def StripWakeDriver(self):
-        """Restart the recurring driver after a strip action."""
-        self._WakeWarmingDriver()
+        return deformerTogglesUI.OpenDeformerTogglesPanel(
+            usdviewApi or self._api)
 
     def _OpenExecStackPanel(self, usdviewApi=None):
         # Same lazy sibling import as _OpenVolumeWeightPanel: execStackUI
@@ -673,7 +722,8 @@ class RigExecUsdviewContainer(PluginContainer):
                 0, os.path.dirname(os.path.abspath(__file__)))
             import pickerUI
 
-        return pickerUI.OpenPickerPanel(usdviewApi or self._api)
+        return pickerUI.OpenPickerPanel(
+            usdviewApi or self._api, self._UndoStack())
 
     def _OpenGraphEditor(self, usdviewApi=None):
         """
@@ -871,6 +921,34 @@ class RigExecUsdviewContainer(PluginContainer):
         controller.SetVisible(not controller.IsVisible())
         return controller
 
+    def _EnsureViewAxis(self):
+        """Install the view axis gizmo; see _EnsureViewCube."""
+        if getattr(self, "_viewAxis", None) is not None:
+            return self._viewAxis
+        if getattr(self, "_viewAxisFailed", False):
+            return None
+        try:
+            try:
+                import viewAxisUI
+            except ImportError:
+                sys.path.insert(
+                    0, os.path.dirname(os.path.abspath(__file__)))
+                import viewAxisUI
+            self._viewAxis = viewAxisUI.InstallViewAxis(self._api)
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: view axis unavailable: %s" % error)
+            self._viewAxis = None
+            self._viewAxisFailed = True
+        return self._viewAxis
+
+    def _ToggleViewAxis(self):
+        """Menu item: show or hide the view axis gizmo."""
+        controller = self._EnsureViewAxis()
+        if controller is None:
+            return None
+        controller.SetVisible(not controller.IsVisible())
+        return controller
+
     def _FrameValue(self, frame=None):
         """
         \\p frame as a plain double, defaulting to the data model's
@@ -1055,6 +1133,7 @@ class RigExecUsdviewContainer(PluginContainer):
         # against a stage the evaluator has already published.
         self._EnsureViewportTools()
         self._EnsureViewCube()
+        self._EnsureViewAxis()
 
     def _ActivateCurrentStage(self):
         stage = self._api.dataModel.stage

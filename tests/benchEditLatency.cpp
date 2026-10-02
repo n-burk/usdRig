@@ -239,7 +239,8 @@ FindTargets(const UsdStageRefPtr &stage, const SdfPath &rig)
     Targets t;
     t.rig = rig;
     const UsdPrim root = stage->GetPrimAtPath(rig);
-    const SdfPath hips = rig.AppendPath(SdfPath("Controls/hips_ctl"));
+    const SdfPath hips =
+        rig.AppendPath(SdfPath("Main/Shot/Aux/Controls/M_Body"));
     if (IsControl(stage->GetPrimAtPath(hips))) {
         t.hips = hips;
     }

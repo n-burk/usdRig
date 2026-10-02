@@ -303,6 +303,24 @@ RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
                               size_t begin, size_t end, GfVec3f *pts)
 {
     static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
+    if (p.radialWeight) {
+        // A fraction of the ROTATION, not of the position: the linear form
+        // below follows the chord of the arc, and a chord falls inside its
+        // arc, toward the axis. Factored per WEIGHT rather than per point,
+        // so a falloff that is mostly 0 and 1 -- which is most of them --
+        // costs two factorizations and not one per point.
+        double cachedWeight = -1.0;
+        GfMatrix4d partial(1.0);
+        for (size_t i = begin; i < end; ++i) {
+            const double w = envelope[i];
+            if (w != cachedWeight) {
+                partial = RigExecPartialTransform(p.transform, w);
+                cachedWeight = w;
+            }
+            pts[i] = GfVec3f(partial.TransformAffine(GfVec3d(pts[i])));
+        }
+        return;
+    }
     if (useSimd) {
         RigExecApplyWeightedMatrixSimd(
             pts + begin, pts + begin, envelope + begin, end - begin,
@@ -434,6 +452,31 @@ RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
             return true;  // at rest every weighted point maps to itself
         }
         GfVec3f *data = pts->data();
+        if (p.radialWeight) {
+            // The sparse walk must take the same arc the dense kernel
+            // does. A painted cluster falloff is almost always sparse --
+            // the upper blink weights 414 points of a 26276-point body --
+            // so EVERY radial cluster on this rig arrived here and got a
+            // linear blend, the one case RigExecPartialTransform exists to
+            // prevent. Measured: at a full blink the lid's half-weighted
+            // points cut the chord and sank 0.2951 into an eyeball of
+            // radius 2.4846, which is the lid clipping through the eye.
+            //
+            // Factored per WEIGHT, as the dense kernel is, and for the
+            // same reason: a falloff is mostly a few distinct values.
+            double cachedWeight = -1.0;
+            GfMatrix4d partial(1.0);
+            for (size_t k = 0; k < w.indices.size(); ++k) {
+                const double value = w.values[k];
+                if (value != cachedWeight) {
+                    partial = RigExecPartialTransform(p.transform, value);
+                    cachedWeight = value;
+                }
+                GfVec3f &point = data[size_t(w.indices[k])];
+                point = GfVec3f(partial.TransformAffine(GfVec3d(point)));
+            }
+            return true;
+        }
         for (size_t k = 0; k < w.indices.size(); ++k) {
             GfVec3f &point = data[size_t(w.indices[k])];
             point = GfVec3f(RigExecApplyWeightedMatrix(
@@ -1552,6 +1595,37 @@ RigExecAssembleMatrixParameters(
 {
     RigExecMoverParameters params;
     params.kind = _kindTokens->matrix;
+
+
+    // Read HERE, in the assembly both paths share, and not only in the
+    // exec parameter builder. The biped runs its BAKED program, which
+    // fills these parameters through this function and never touched the
+    // exec builder -- so a flag set only there is silently ignored on
+    // exactly the rig it was turned on for.
+    // Guarded on the prim, as _Enabled is: the frozen replay calls this
+    // with no stage prim at all, and reading one would throw.
+    if (moverPrim) {
+        static const TfToken radial("radial");
+        static const TfToken weightBlend("rigExec:weightBlend");
+        TfToken blend;
+        // RECORDED, like rigExec:pointFrame below and for the same reason:
+        // the zero-USD runtime has no stage to ask, it replays this read,
+        // and a read nobody records replays as the empty token -- a linear
+        // blend on a mover the two USD paths turn radially.
+        if (const UsdAttribute a = moverPrim.GetAttribute(weightBlend)) {
+            a.Get(&blend, time);
+            RigExecRecordStageRead(nullptr, _RecorderOf(resolved),
+                                   a.GetPath(), a, time, VtValue(blend),
+                                   /*forceFrame=*/false);
+        } else {
+            RigExecRecordStageRead(nullptr, _RecorderOf(resolved),
+                                   moverPrim.GetPath().AppendProperty(
+                                       weightBlend),
+                                   UsdAttribute(), time, VtValue(blend),
+                                   /*forceFrame=*/false);
+        }
+        params.radialWeight = blend == radial;
+    }
 
     params.enabled =
         _Enabled(moverPrim, time, resolved, _RecorderOf(resolved));

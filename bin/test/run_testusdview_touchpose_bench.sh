@@ -7,7 +7,7 @@
 # number means.
 #
 # Usage: bin/test/run_testusdview_touchpose_bench.sh [stage.usda]
-#   stage defaults to examples/biped/Biped_all.usda.
+#   stage defaults to examples/biped/Biped_stack.usda.
 # TOUCHPOSE_BENCH_REPEATS sets the samples per measurement (default 30).
 #
 # No build step, for the same reason as run_testusdview_touchpose.sh.
@@ -21,7 +21,7 @@ export PXR_PLUGINPATH_NAME="${PXR_PLUGINPATH_NAME:-}:$RIG/plugin/touchPose"
 export PYTHONPATH="$RIG/plugin/touchPose:${PYTHONPATH:-}"
 export TOUCHPOSE_PLUGIN_DIR="$RIG/plugin/touchPose"
 
-STAGE="$RIG/examples/biped/Biped_all.usda"
+STAGE="$RIG/examples/biped/Biped_stack.usda"
 if [ $# -gt 0 ] && [ -f "$1" ]; then
     STAGE="$1"
     shift

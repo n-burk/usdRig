@@ -7,6 +7,6 @@ call "%~dp0..\_env.bat"
 call "%~dp0..\_require_python.bat"
 if errorlevel 1 exit /b 1
 set "STAGE=%~1"
-if "%STAGE%"=="" set "STAGE=%RIG%\..\chars\puppetA\puppetA_curvenet.usda"
+if "%STAGE%"=="" set "STAGE=%RIG%\examples\12_CurvenetProfile.usda"
 "%PY%" "%USD%\bin\testusdview" --testScript "%RIG%\tests\testUsdviewCurvenetPuppet.py" "%STAGE%"
 exit /b %errorlevel%

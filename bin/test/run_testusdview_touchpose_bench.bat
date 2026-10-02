@@ -4,7 +4,7 @@ rem real usdview. The Windows twin of run_testusdview_touchpose_bench.sh,
 rem which describes the numbers it prints.
 rem
 rem Usage: run_testusdview_touchpose_bench.bat [stage.usda]
-rem   stage defaults to examples\biped\Biped_all.usda.
+rem   stage defaults to examples\biped\Biped_stack.usda.
 setlocal EnableDelayedExpansion
 call "%~dp0..\_env.bat"
 call "%~dp0..\_require_python.bat"
@@ -15,7 +15,7 @@ set "PYTHONPATH=%RIG%\plugin\touchPose;%PYTHONPATH%"
 set "TOUCHPOSE_PLUGIN_DIR=%RIG%\plugin\touchPose"
 
 set "STAGE=%~1"
-if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_all.usda"
+if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_stack.usda"
 
 "%PY%" "%USD%\bin\testusdview" --testScript "%RIG%\tests\testUsdviewTouchPoseBench.py" "%STAGE%"
 exit /b %errorlevel%

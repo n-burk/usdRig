@@ -1,0 +1,553 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = "Breathing: the chest and belly dials on the chest control and the two pose interpolators they drive, wired to the body's breath shapes. Adds prims and overrides nothing, so dropping this sublayer leaves the character exactly as it was."
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        over "PoseInterpolators"
+        {
+            def RigExecPoseInterpolator "breathing_chest" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = None
+                rel rigExec:driverAttributes = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>
+                bool rigExec:enableRotation = 0
+                bool rigExec:enableTranslation = 1
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, 0]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "chest_breath_out_10" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [10, 0]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (10, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "chest_breath_in_10" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [-10, 0]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (-10, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "chest_breath_out_100" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [100, 0]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (100, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "chest_breath_in_100" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [-100, 0]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (-100, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+            }
+
+            def RigExecPoseInterpolator "breathing_belly" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = None
+                rel rigExec:driverAttributes = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>
+                bool rigExec:enableRotation = 0
+                bool rigExec:enableTranslation = 1
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, 0]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "belly_breath_in_10" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, 10]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (10, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "belly_breath_out_10" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -10]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (-10, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "belly_breath_in_100" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, 100]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (100, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+
+                def RigExecPose "belly_breath_out_100" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:chest>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:belly>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -100]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.5707964
+                    float3 rigExec:translation = (-100, 0, 0)
+                    float rigExec:translationRadius = 216
+                }
+            }
+        }
+
+        over "Movers"
+        {
+            reorder nameChildren = ["param_follow", "bendy_geo", "skin_body_geo", "bodyWires_geo", "squetch_geo", "mouth_geo", "cheeks_geo", "brows_geo", "eyes_r_geo", "eyes_l_geo", "lashes_geo", "bendy_pose", "face_shapes_geo", "shapes_body_geo", "headwire_follow_pose", "jaw_drivers", "face_psd_drivers", "squetch_drivers", "breathing_drivers", "cheeks_drivers", "brows_drivers", "mouth_drivers", "eyes_l_drivers", "eyes_r_drivers", "pose_drivers", "twist_aims", "eyes_r_pose", "eyes_l_pose", "mouth_pose", "face_eyes", "eye_converge_drivers", "face_brow_joints", "face_inner_joints", "nose_bridge_compress_scale_w", "face_brow_pivots", "face_pivots", "nose_compress_w", "nose_bridge_compress_w", "nose_bridge_follow_w", "face_mid_compress_w", "teeth_tongue_drivers", "teeth_upper_drivers", "face_outer_joints", "eye_socket_follow_drivers", "bodyWires_pose", "neck_to_bind", "girdles", "spine_to_bind", "hips_follow", "leg_fk_ball_drivers", "ball_l_bind_scAim", "ankle_l_bind_scAim", "ballRoll_l_down_rc", "ballRoll_l_down_w", "ballRoll_l_up_rc", "ballRoll_l_up_w", "toe_l_roll_rc", "toe_l_roll_w", "heel_l_roll_rc", "heel_l_roll_w", "bankOut_l_pivot_rc", "bankOut_l_pivot_w", "bankIn_l_pivot_rc", "bankIn_l_pivot_w", "ball_r_bind_scAim", "ankle_r_bind_scAim", "ballRoll_r_down_rc", "ballRoll_r_down_w", "ballRoll_r_up_rc", "ballRoll_r_up_w", "toe_r_roll_rc", "toe_r_roll_w", "heel_r_roll_rc", "heel_r_roll_w", "bankOut_r_pivot_rc", "bankOut_r_pivot_w", "bankIn_r_pivot_rc", "bankIn_r_pivot_w", "hand_l_follow", "hand_r_follow", "spine_mid_follow", "foot_roll_total"]
+            over "shapes_body_geo"
+            {
+                over "body_geo_shapes"
+                {
+                    over "chest_breath_out_10"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_chest/chest_breath_out_10.outputs:weight>
+                    }
+
+                    over "chest_breath_in_10"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_chest/chest_breath_in_10.outputs:weight>
+                    }
+
+                    over "chest_breath_out_100"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_chest/chest_breath_out_100.outputs:weight>
+                    }
+
+                    over "chest_breath_in_100"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_chest/chest_breath_in_100.outputs:weight>
+                    }
+
+                    over "belly_breath_in_10"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_belly/belly_breath_in_10.outputs:weight>
+                    }
+
+                    over "belly_breath_out_10"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_belly/belly_breath_out_10.outputs:weight>
+                    }
+
+                    over "belly_breath_in_100"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_belly/belly_breath_in_100.outputs:weight>
+                    }
+
+                    over "belly_breath_out_100"
+                    {
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/breathing_belly/belly_breath_out_100.outputs:weight>
+                    }
+                }
+            }
+
+            def Scope "breathing_drivers"
+            {
+                reorder nameChildren = ["arm_r_root_avars_tz_0_add", "arm_r_root_breath_tz_avars_slide_1_multiply", "arm_r_root_breath_tz_avars_slide_0_blend", "arm_r_root_avars_tx_0_add", "arm_r_root_breath_tx_avars_slide_1_multiply", "arm_r_root_breath_tx_avars_slide_0_blend", "arm_l_root_avars_tz_0_add", "arm_l_root_breath_tz_avars_slide_1_multiply", "arm_l_root_breath_tz_avars_slide_0_blend", "arm_l_root_avars_tx_0_add", "arm_l_root_breath_tx_avars_slide_1_multiply", "arm_l_root_breath_tx_avars_slide_0_blend"]
+                def RigExecFloatMathMover "R_UpArmSwing_avars_tz_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tz.avars:slide>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing.avars:tz>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_UpArmSwing_breath_tz_avars_slide_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 0.1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tz.avars:slide>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_UpArmSwing_breath_tz_avars_slide_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:shoulders>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tz.avars:slide>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "R_UpArmSwing_avars_tx_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tx.avars:slide>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing.avars:tx>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "R_UpArmSwing_breath_tx_avars_slide_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = -0.0063
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tx.avars:slide>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "R_UpArmSwing_breath_tx_avars_slide_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:shoulders>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/arm_r_root_breath_tx.avars:slide>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "L_UpArmSwing_avars_tz_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tz.avars:slide>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing.avars:tz>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "L_UpArmSwing_breath_tz_avars_slide_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 0.1
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tz.avars:slide>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "L_UpArmSwing_breath_tz_avars_slide_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:shoulders>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tz.avars:slide>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "L_UpArmSwing_avars_tx_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tx.avars:slide>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing.avars:tx>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "L_UpArmSwing_breath_tx_avars_slide_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 0.0063
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tx.avars:slide>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "L_UpArmSwing_breath_tx_avars_slide_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop.avars:breathing:shoulders>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/arm_l_root_breath_tx.avars:slide>
+                    uniform token rigExec:operation = "blend"
+                }
+            }
+        }
+
+        def RigExecControl "Main"
+        {
+            def RigExecControl "Shot"
+            {
+                def RigExecControl "Aux"
+                {
+                    over "Controls"
+                    {
+                        over "M_Body"
+                        {
+                            over "M_Torso"
+                            {
+                                over "M_Chest"
+                                {
+                                    over "M_ChestTop"
+                                    {
+                                        custom double avars:breathing:belly = 0 (
+                                            customData = {
+                                                dictionary limits = {
+                                                    dictionary hard = {
+                                                        double maximum = 100
+                                                        double minimum = -100
+                                                    }
+                                                    dictionary soft = {
+                                                        double maximum = 10
+                                                        double minimum = -10
+                                                    }
+                                                }
+                                            }
+                                            doc = "Breathe with the belly: positive breathes in, negative out. The belly breath shapes sit at +-10 and +-100."
+                                        )
+                                        custom double avars:breathing:chest = 0 (
+                                            customData = {
+                                                dictionary limits = {
+                                                    dictionary hard = {
+                                                        double maximum = 100
+                                                        double minimum = -100
+                                                    }
+                                                    dictionary soft = {
+                                                        double maximum = 10
+                                                        double minimum = -10
+                                                    }
+                                                }
+                                            }
+                                            doc = "Breathe with the chest: positive breathes out, negative in. The chest breath shapes sit at +-10 and +-100."
+                                        )
+                                        custom double avars:breathing:shoulders = 0 (
+                                            customData = {
+                                                dictionary limits = {
+                                                    dictionary hard = {
+                                                        double maximum = 100
+                                                        double minimum = -100
+                                                    }
+                                                    dictionary soft = {
+                                                        double maximum = 10
+                                                        double minimum = -10
+                                                    }
+                                                }
+                                            }
+                                            doc = "Breathe with the shoulders: they slide out and forward as the chest fills. The source rig's keys reach their full slide at 10."
+                                        )
+                                        custom token guide:shape = "circle"
+
+                                        def RigExecControl "breathing_drivers" (
+                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                        )
+                                        {
+                                            double guide:scaleX = 0
+                                            double guide:scaleY = 0
+                                            double guide:scaleZ = 0
+                                            uniform token purpose = "default"
+                                            matrix4d rest:space = ( (1, 0, 1.8488927466117445e-32, 0), (1.232595164407831e-32, 1, -2.465190328815662e-32, 0), (1.8488927466117467e-32, 2.465190328815662e-32, 1, 0), (0, 0, 0, 1) )
+                                        }
+
+                                        over "L_Shldr"
+                                        {
+                                            custom token guide:shape = "circle"
+
+                                            over "L_UpArmSwing"
+                                            {
+                                                def RigExecControl "arm_l_root_breath_tx" (
+                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                )
+                                                {
+                                                    custom double avars:slide = 0 (
+                                                        doc = "The shoulder breath's share of this swing, in centimetres. Computed from breathing:shoulders."
+                                                    )
+                                                    double guide:scaleX = 0
+                                                    double guide:scaleY = 0
+                                                    double guide:scaleZ = 0
+                                                    uniform token purpose = "default"
+                                                    matrix4d rest:space = ( (0.9999999999999999, -3.469446951953614e-18, 5.5294310796760726e-17, 0), (3.469446951953614e-18, 1, 0, 0), (-4.336808689942018e-19, -6.938893903907228e-18, 0.9999999999999999, 0), (0, 0, -1.4210854715202004e-14, 1) )
+                                                }
+
+                                                def RigExecControl "arm_l_root_breath_tz" (
+                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                )
+                                                {
+                                                    custom double avars:slide = 0 (
+                                                        doc = "The shoulder breath's share of this swing, in centimetres. Computed from breathing:shoulders."
+                                                    )
+                                                    double guide:scaleX = 0
+                                                    double guide:scaleY = 0
+                                                    double guide:scaleZ = 0
+                                                    uniform token purpose = "default"
+                                                    matrix4d rest:space = ( (0.9999999999999999, -3.469446951953614e-18, 5.5294310796760726e-17, 0), (3.469446951953614e-18, 1, 0, 0), (-4.336808689942018e-19, -6.938893903907228e-18, 0.9999999999999999, 0), (0, 0, -1.4210854715202004e-14, 1) )
+                                                }
+                                            }
+                                        }
+
+                                        over "R_Shldr"
+                                        {
+                                            custom token guide:shape = "circle"
+
+                                            over "R_UpArmSwing"
+                                            {
+                                                def RigExecControl "arm_r_root_breath_tx" (
+                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                )
+                                                {
+                                                    custom double avars:slide = 0 (
+                                                        doc = "The shoulder breath's share of this swing, in centimetres. Computed from breathing:shoulders."
+                                                    )
+                                                    double guide:scaleX = 0
+                                                    double guide:scaleY = 0
+                                                    double guide:scaleZ = 0
+                                                    uniform token purpose = "default"
+                                                    matrix4d rest:space = ( (0.9999999999999999, 0, -4.716279450311944e-17, 0), (-6.938893903907228e-18, 1, 0, 0), (8.131516293641283e-18, 0, 0.9999999999999999, 0), (-1.4210854715202004e-14, 0, 1.4210854715202004e-14, 1) )
+                                                }
+
+                                                def RigExecControl "arm_r_root_breath_tz" (
+                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                )
+                                                {
+                                                    custom double avars:slide = 0 (
+                                                        doc = "The shoulder breath's share of this swing, in centimetres. Computed from breathing:shoulders."
+                                                    )
+                                                    double guide:scaleX = 0
+                                                    double guide:scaleY = 0
+                                                    double guide:scaleZ = 0
+                                                    uniform token purpose = "default"
+                                                    matrix4d rest:space = ( (0.9999999999999999, 0, -4.716279450311944e-17, 0), (-6.938893903907228e-18, 1, 0, 0), (8.131516293641283e-18, 0, 0.9999999999999999, 0), (-1.4210854715202004e-14, 0, 1.4210854715202004e-14, 1) )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

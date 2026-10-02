@@ -69,8 +69,10 @@ _FormatFrame(double frame)
 
 RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
                                        RigExecBinaryWriter *writer,
-                                       std::string *error)
-    : _evaluator(&evaluator), _writer(writer)
+                                       std::string *error,
+                                       bool overridableInputs)
+    : _evaluator(&evaluator), _writer(writer),
+      _overridableInputs(overridableInputs)
 {
     auto Fail = [&](const std::string &what) {
         if (error) {
@@ -90,10 +92,15 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
     const RigExecBakedProgramImpl &program = _program->GetStepGraph();
     auto Add = [&](const auto &input, RigExecWireInput::Tag tag) {
         using T = std::decay_t<decltype(input.constant)>;
-        (void)sizeof(T);
         const bool bound =
             input.query.IsValid() || bool(input.resolvedAttr);
-        if (!input.varying || !bound) {
+        const bool live = input.varying && bound;
+        // A constant input an override can reach: no per-frame read, but a
+        // client has to be able to name it. Its authored value is seeded
+        // below so playback without an override is unchanged.
+        const bool overridable =
+            _overridableInputs && input.overrideIndex >= 0 && bool(input.head);
+        if (!live && !overridable) {
             return true;
         }
         const void *key = &input;
@@ -110,6 +117,9 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
                                input.head.GetPath().GetString())
                          : 0;
         _table.directory.push_back(entry);
+        if (!live) {
+            _seeds.emplace_back(uid, VtValue(T(input.constant)));
+        }
         return true;
     };
     for (const RigExecBakedProgramImpl::Ladder &ladder : program.ladders) {
@@ -124,9 +134,19 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
         }
         Add(ladder.rotationOrder, RigExecWireInput::Tag::Token);
     }
+    // With the ladders, because a space switch is read by the compose the
+    // ladder feeds. A rig with no switch adds nothing here, which is why
+    // the uids of every other input are where they always were.
+    for (const RigExecBakedProgramImpl::SpaceSwitch &sw :
+         program.spaceSwitches) {
+        Add(sw.activeInput, RigExecWireInput::Tag::Double);
+    }
     for (const RigExecBakedProgramImpl::PoseInterpolator &interp :
          program.poseInterpolators) {
         Add(interp.enabled, RigExecWireInput::Tag::Bool);
+        for (const auto &value : interp.valueInputs) {
+            Add(value, RigExecWireInput::Tag::Double);
+        }
     }
     for (const RigExecBakedProgramImpl::Solver &solver : program.solvers) {
         Add(solver.bend, RigExecWireInput::Tag::Double);
@@ -269,6 +289,19 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
                             _FormatFrame(frame));
             }
             ordered[found->second] = entry.second;
+        }
+    }
+    // The constant overridable inputs, once. They never record -- nothing
+    // reads them, they ARE their constant -- so without this their slots
+    // would start at zero and an unposed playback would differ from the
+    // rig. Written into the first record only, because the runtime holds
+    // the last value it saw and a constant never changes. A seed loses to
+    // a real read at the same uid, which cannot happen (a recorded input
+    // is live, and live inputs get no seed) but costs nothing to honour.
+    if (!_seeded) {
+        _seeded = true;
+        for (const auto &seed : _seeds) {
+            ordered.emplace(seed.first, seed.second);
         }
     }
     record.uids.reserve(ordered.size());

@@ -562,6 +562,7 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                     size_t(i) >= scratch->rotOrder.size() ||
                     size_t(i) >= scratch->selfD.size() ||
                     size_t(i) >= scratch->parentDinv.size() ||
+                    size_t(i) >= scratch->defaultRoundTrip.size() ||
                     size_t(i) >= meta.parent.size()) {
                     if (error) {
                         *error = _RrStepHead(program, step) +
@@ -591,9 +592,136 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                 const RrMat4d parentPosed =
                     parent >= 0 ? store.posedM[size_t(parent)]
                                 : _RrIdentity();
-                store.base[size_t(i)] = RrFrameFromMatrix(
-                    avars * scratch->selfD[size_t(i)] *
-                    scratch->parentDinv[size_t(i)] * parentPosed);
+                // One int per slot, and only on a rig that has a switch
+                // at all: the ordinary compose falls straight through.
+                const int switchIndex =
+                    program->spaceSwitchBySlot.empty()
+                        ? -1
+                        : program->spaceSwitchBySlot[size_t(i)];
+                if (switchIndex >= 0) {
+                    // A switched slot composes against the SELECTED
+                    // source's pair of spaces instead of its namespace
+                    // parent's. Both halves come from one source, so at
+                    // rest they cancel and no space moves the rig
+                    // standing still.
+                    const RigExecWireSpaceSwitch &sw =
+                        program->poses->spaceSwitches[size_t(switchIndex)];
+                    if (parent >= 0 &&
+                        size_t(parent) >=
+                            scratch->defaultRoundTrip.size()) {
+                        if (error) {
+                            *error = _RrStepHead(program, step) +
+                                     " names no slot";
+                        }
+                        return false;
+                    }
+                    // `local` is avars * default:space reached the long
+                    // way round -- compose the UNSWITCHED world, then
+                    // divide the namespace parent back out -- rather than
+                    // as `avars * selfD`, which is the same quantity in
+                    // exact arithmetic and NOT the same in doubles. The
+                    // program can only reach it this way, the two answers
+                    // are compared bit for bit, and 4e-15 of disagreement
+                    // here propagates to every descendant.
+                    const RrMat4d parentDefault =
+                        parent >= 0
+                            ? scratch->defaultRoundTrip[size_t(parent)]
+                            : _RrIdentity();
+                    const RrMat4d local =
+                        RrRoundTrip(avars * scratch->selfD[size_t(i)] *
+                                    scratch->parentDinv[size_t(i)] *
+                                    parentPosed) *
+                        parentPosed.GetInverse() * parentDefault;
+                    const RrMat4d localInverse = local.GetInverse();
+                    const int count = int(sw.sourceSlots.size());
+                    if (count <= 0) {
+                        if (error) {
+                            *error = _RrStepHead(program, step) +
+                                     " names no space";
+                        }
+                        return false;
+                    }
+                    double active =
+                        program->ReadSpaceSwitch(size_t(switchIndex)).f64;
+                    if (!std::isfinite(active)) active = 0.0;
+                    active = RrClamp(active, 0.0, double(count - 1));
+                    const int lower = int(std::floor(active));
+                    const int upper = std::min(lower + 1, count - 1);
+                    const double blend = active - double(lower);
+                    const RrVec3d twistAxis(sw.twistAxis[0],
+                                            sw.twistAxis[1],
+                                            sw.twistAxis[2]);
+                    // rigExec:space. `local` composes over the target's
+                    // DEFAULT ancestors, so a master's motion reaches a
+                    // switched control only inside the source's motion --
+                    // and a twist or swing filter drops that carry along
+                    // with the part it was asked to drop. Strip the master
+                    // map off before the filter and put it back after.
+                    // Identity when no space is named, which is every
+                    // binary baked before the field existed.
+                    // The branches below must be UNTOUCHED when no space is
+                    // named, not multiplied by an identity: the round trip
+                    // through `local` is identity in exact arithmetic and a
+                    // few ulps off it in doubles, and this path is compared
+                    // against the baked one bit for bit.
+                    const bool hasCarry = sw.spaceSlot >= 0;
+                    RrMat4d carry = _RrIdentity();
+                    RrMat4d carryInverse = _RrIdentity();
+                    if (hasCarry) {
+                        carry = scratch->defaultRoundTrip[size_t(sw.spaceSlot)]
+                                    .GetInverse() *
+                                store.posedM[size_t(sw.spaceSlot)];
+                        carryInverse = carry.GetInverse();
+                    }
+                    const auto deltaOf = [&](int index) {
+                        const int slot = sw.sourceSlots[size_t(index)];
+                        if (slot < 0) {
+                            // World: the source never moves, so the only
+                            // motion left is the space's own carry -- and
+                            // with no space named there is none.
+                            return hasCarry ? local * carry * localInverse
+                                            : _RrIdentity();
+                        }
+                        // defaultRoundTrip, not selfD: a space source has
+                        // to be read the same way a namespace parent
+                        // would be, or the two paths disagree in the last
+                        // few digits on every descendant. Filtered while
+                        // the motion is still measured against the
+                        // SOURCE's rest, because the twist axis is the
+                        // source's.
+                        const RrMat4d sourceDefault =
+                            scratch->defaultRoundTrip[size_t(slot)];
+                        const RrRotationFilter filter =
+                            sw.filters.empty()
+                                ? RrRotationFilter::All
+                                : RrRotationFilter(sw.filters[size_t(index)]);
+                        const RrVec3d axis =
+                            sourceDefault.TransformDir(twistAxis);
+                        const RrMat4d moved = sourceDefault.GetInverse() *
+                                              store.posedM[size_t(slot)];
+                        const RrMat4d motion =
+                            hasCarry
+                                ? RrFilterSpaceRotation(moved * carryInverse,
+                                                        axis, filter) *
+                                      carry
+                                : RrFilterSpaceRotation(moved, axis, filter);
+                        return local * motion * localInverse;
+                    };
+                    RrMat4d delta = deltaOf(lower);
+                    if (upper != lower && blend > 0.0) {
+                        delta = RrBlendTransforms(delta, deltaOf(upper),
+                                                  blend);
+                    }
+                    delta = RrMaskTransform(delta, sw.affectTranslation,
+                                            sw.affectRotation,
+                                            sw.affectScale);
+                    store.base[size_t(i)] =
+                        RrFrameFromMatrix(delta * local);
+                } else {
+                    store.base[size_t(i)] = RrFrameFromMatrix(
+                        avars * scratch->selfD[size_t(i)] *
+                        scratch->parentDinv[size_t(i)] * parentPosed);
+                }
             }
             store.fin[size_t(i)] = store.base[size_t(i)];
             RrMat4d space = _RrIdentity();
@@ -768,23 +896,28 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
             interp.poseSlots.empty()) {
             return true;
         }
-        if (interp.driverSlot < 0 ||
-            size_t(interp.driverSlot) >= store.finLast.size() ||
-            size_t(interp.driverSlot) >= scratch->restFrames.size() ||
-            size_t(interp.driverSlot) >=
-                program->slotMeta->paths.size() ||
-            (interp.parentSlot >= 0 &&
-             (size_t(interp.parentSlot) >= store.finLast.size() ||
-              size_t(interp.parentSlot) >=
-                  scratch->restFrames.size()))) {
+        // A NUMERIC driver reads dials, not a frame: it names no driver
+        // prim and takes no slot, and its rotation channel is the
+        // identity, so every frame lookup below is skipped.
+        const bool numeric = !interp.valueInputs.empty();
+        if (!numeric &&
+            (interp.driverSlot < 0 ||
+             size_t(interp.driverSlot) >= store.finLast.size() ||
+             size_t(interp.driverSlot) >= scratch->restFrames.size() ||
+             size_t(interp.driverSlot) >=
+                 program->slotMeta->paths.size() ||
+             (interp.parentSlot >= 0 &&
+              (size_t(interp.parentSlot) >= store.finLast.size() ||
+               size_t(interp.parentSlot) >=
+                   scratch->restFrames.size())))) {
             if (error) {
                 *error = _RrStepHead(program, step) +
                          " names no driver slot";
             }
             return false;
         }
-        const size_t d = size_t(interp.driverSlot);
-        if (size_t(store.finLast[d]) >= store.fin.size()) {
+        const size_t d = size_t(numeric ? 0 : interp.driverSlot);
+        if (!numeric && size_t(store.finLast[d]) >= store.fin.size()) {
             if (error) {
                 *error = _RrStepHead(program, step) +
                          " names no fin version";
@@ -793,11 +926,11 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
         }
         RrQuatd driverFinal(1.0), driverRest(1.0);
         RrQuatd parentFinal(1.0), parentRest(1.0);
-        bool usable =
-            RrFrameRotation(store.fin[size_t(store.finLast[d])],
-                            &driverFinal) &&
-            RrFrameRotation(scratch->restFrames[d], &driverRest);
-        if (usable && interp.parentSlot >= 0) {
+        bool usable = numeric ||
+            (RrFrameRotation(store.fin[size_t(store.finLast[d])],
+                             &driverFinal) &&
+             RrFrameRotation(scratch->restFrames[d], &driverRest));
+        if (!numeric && usable && interp.parentSlot >= 0) {
             const size_t p = size_t(interp.parentSlot);
             if (size_t(store.finLast[p]) >= store.fin.size()) {
                 if (error) {
@@ -824,10 +957,43 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
         const RrQuatd restLocal = parentRest.GetInverse() * driverRest;
         const RrQuatd delta =
             (restLocal.GetInverse() * local).GetNormalized();
+        // The translation channel, in metres for the solver: a numeric
+        // driver's dials stand in for it directly, and a transform-driven
+        // one measures its driver's local translation against its rest.
+        RrVec3d translation(0.0);
+        const RrVec3d *translationPtr = nullptr;
+        if (numeric) {
+            const std::array<double, 3> &values =
+                scratch->interpValues[size_t(wire.object)];
+            for (size_t i = 0; i < interp.valueInputs.size() && i < 3; ++i) {
+                translation[i] = values[i];
+            }
+            translation /= 100.0;
+            translationPtr = &translation;
+        } else if (interp.enableTranslation) {
+            const RrPointFrame *pf = nullptr, *pr = nullptr;
+            if (interp.parentSlot >= 0) {
+                const size_t p = size_t(interp.parentSlot);
+                pf = &store.fin[size_t(store.finLast[p])];
+                pr = &scratch->restFrames[p];
+            }
+            if (!RrFrameTranslation(store.fin[size_t(store.finLast[d])],
+                                    scratch->restFrames[d], pf, pr,
+                                    &translation)) {
+                output.diagnostics.push_back(
+                    "pose interpolator " +
+                    program->TextOrEmpty(interp.path) +
+                    " could not measure its driver's translation; its "
+                    "weights are zero this generation");
+                return true;
+            }
+            translation /= 100.0;
+            translationPtr = &translation;
+        }
         std::vector<double> &interpScratch =
             scratch->interpScratch[size_t(wire.object)];
         scratch->interpSolvers[size_t(wire.object)].Evaluate(
-            _RrRbfEulerFromQuaternion(delta), nullptr, &interpScratch,
+            _RrRbfEulerFromQuaternion(delta), translationPtr, &interpScratch,
             interp.allowNegativeWeights);
         if (interpScratch.size() != interp.poseSlots.size()) {
             output.diagnostics.push_back(

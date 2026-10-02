@@ -343,6 +343,8 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
     scratch->lastPosedAuthored = scratch->posedAuthored;
     scratch->lastRotOrder = scratch->rotOrder;
     scratch->interpEnabled.assign(poses.poseInterpolators.size(), 0);
+    scratch->interpValues.assign(poses.poseInterpolators.size(),
+                                 {0.0, 0.0, 0.0});
     scratch->interpSolvers.assign(poses.poseInterpolators.size(),
                                   _RrRbfSolver());
     scratch->interpScratch.assign(poses.poseInterpolators.size(), {});
@@ -552,6 +554,13 @@ RrProloguePose(RrProgram *program,
          i < scratch->interpEnabled.size(); ++i) {
         scratch->interpEnabled[i] =
             program->ReadInterp(i).boolean ? 1 : 0;
+        // A numeric driver's dials, read here for the same reason.
+        const size_t dials =
+            poses.poseInterpolators[i].valueInputs.size();
+        for (size_t v = 0; v < dials && v < 3; ++v) {
+            scratch->interpValues[i][v] =
+                program->ReadInterpValue(i, v).f64;
+        }
     }
     // Live ribbon driver points, swapped against last run's by value.
     for (size_t s = 0; s < poses.solvers.size(); ++s) {

@@ -1,12 +1,30 @@
 #
-# testusdview smoke test for the curvenet authoring panel on a real
-# character (chars/puppetA/puppetA_curvenet.usda) rather than on the
-# synthetic example. Different meshes break different things: puppetA's body
-# is quad-dominant with tris, pentagons and hexagons, 110 boundary edges and
-# 4 non-manifold ones, which is the kind of surface an artist actually has.
+# testusdview smoke test for the curvenet authoring panel against whatever
+# net and model the stage it is given carries.
+#
+# It was written for one character, naming that character's prims and the
+# ring and anchor counts of that character's net. The character is not in
+# this repository, so the test could not run in a fresh checkout at all --
+# usdview failed to open the stage. The model now comes from the stage
+# (curvenet_test_stage.Model), and the counts are replaced by the invariant
+# they were standing in for: every point of the net is classified exactly
+# once, and no curve is isolated. Those hold for any net; 18 rings and 12
+# anchors held only for that one.
 #
 def testUsdviewInputFunction(appController):
     import curvenetUI
+    # testusdview execs this file, so there is no __file__ to locate the
+    # tests directory with. curvenetUI is imported from
+    # plugin/rigExecUsdview, which fixes the checkout root.
+    import os as _os
+    import sys as _sys
+    _tests = _os.path.join(
+        _os.path.dirname(_os.path.dirname(
+            _os.path.dirname(_os.path.abspath(curvenetUI.__file__)))),
+        "tests")
+    if _tests not in _sys.path:
+        _sys.path.insert(0, _tests)
+    import curvenet_test_stage
 
     api = appController._usdviewApi
     stage = api.stage
@@ -20,24 +38,27 @@ def testUsdviewInputFunction(appController):
     if panel._curvenetPath != net.GetPath():
         raise AssertionError("panel selected %s" % panel._curvenetPath)
 
-    topology = curvenetUI.Topology(len(curvenetUI.GetPoints(net)),
-                                   curvenetUI.GetSplines(net))
+    pointCount = len(curvenetUI.GetPoints(net))
+    topology = curvenetUI.Topology(pointCount, curvenetUI.GetSplines(net))
     counts = topology.CountsByKind()
-    intersections = counts.get(curvenetUI.KIND_INTERSECTION, 0)
-    if intersections != 18:
+    # Exactly once each: a point the classifier misses is a point the
+    # deformation gradient has no rule for, and a point counted twice
+    # means two rules disagree about it.
+    if sum(counts.values()) != pointCount:
         raise AssertionError(
-            "expected 18 ring intersections (3 rings x 6 spokes), got %d"
-            % intersections)
-    if counts.get(curvenetUI.KIND_ANCHOR, 0) != 12:
-        raise AssertionError("expected 12 rail anchors, got %d"
-                             % counts.get(curvenetUI.KIND_ANCHOR, 0))
+            "%d point(s) classified for a net of %d: %s"
+            % (sum(counts.values()), pointCount, counts))
+    if not counts.get(curvenetUI.KIND_INTERSECTION, 0):
+        raise AssertionError(
+            "the net has no intersections, so nothing in it can express a "
+            "width or twist change: %s" % counts)
     if topology.IsolatedCurves():
         raise AssertionError("the head net should have no isolated curves")
 
     # The pick path, on the puppet. Frame the head first: testusdview starts
     # on an unframed default camera, and picking is only meaningful once
     # something is actually under the cursor.
-    body = stage.GetPrimAtPath("/puppetA/root/body_geo/node_0_Retopology")
+    body = curvenet_test_stage.Model(stage)[0]
     if not body:
         raise AssertionError("no body mesh")
     api.ClearPrimSelection()
@@ -69,10 +90,10 @@ def testUsdviewInputFunction(appController):
     # The panel's own bind preconditions must pass on this asset -- vertex
     # normals and identity to the asset root are what the engine needs.
     rig = curvenetUI.FindRigPrim(stage)
-    body = stage.GetPrimAtPath("/puppetA/root/body_geo/node_0_Retopology")
+    body = curvenet_test_stage.Model(stage)[0]
     warnings = curvenetUI.CheckBindPreconditions(stage, body, rig)
     if warnings:
-        raise AssertionError("puppetA body fails bind preconditions: %s"
+        raise AssertionError("the model fails bind preconditions: %s"
                              % warnings)
 
     # Drawing must work on this surface: place two knots and connect them.
@@ -90,6 +111,8 @@ def testUsdviewInputFunction(appController):
     if stage.GetRootLayer().GetPrimAtPath(panel._DisplayPath()):
         raise AssertionError("display prim leaked into the root layer")
 
-    print("RIGEXEC_CURVENET_PUPPET_OK %d intersections, %d anchors, "
-          "centre pick on %s" % (intersections,
-                                 counts.get(curvenetUI.KIND_ANCHOR, 0), path))
+    print("RIGEXEC_CURVENET_PUPPET_OK %d point(s) classified %s, "
+          "centre pick on %s"
+          % (pointCount,
+             ", ".join("%d %s" % (n, kind)
+                       for kind, n in sorted(counts.items())), path))

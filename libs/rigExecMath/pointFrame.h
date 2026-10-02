@@ -90,6 +90,14 @@ bool RigExecPointsToMatrix(
     const std::array<GfVec3d, 4> &posePoints,
     GfMatrix4d *matrix);
 
+/// A frame carried into \p space: every landmark transformed, nothing else.
+///
+/// Used to measure a solver's REST description in the space the posed
+/// frames already live in, so that scaling whatever the rig hangs from
+/// does not read as stretch. Identity returns the frame unchanged.
+RigExecPointFrame RigExecTransformFrame(
+    const RigExecPointFrame &frame, const GfMatrix4d &space);
+
 /// Convenience overload evaluating a frame against its rest landmarks.
 bool RigExecPointsToMatrix(
     const std::array<GfVec3d, 4> &restPoints,

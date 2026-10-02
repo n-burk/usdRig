@@ -192,6 +192,22 @@ class RigExecControl "RigExecControl" (
         the conventional rigging distinction between the two box-ish
         tokens."""
     )
+    uniform token guide:planeNormal = "Y" (
+        allowedTokens = ["X", "Y", "Z"]
+        doc = """Which LOCAL axis the planar guides' normal points along,
+        for circle and box. Ignored by the volumetric shapes.
+
+        The planar guides were drawn in the XZ plane and nowhere else,
+        while a rig's control curves lie in whichever plane the rigger
+        drew them in. Measured on the biped's own control curves: 37 lie
+        in the local YZ plane, 26 in XY and only 7 in XZ, so 181 of 213
+        planar controls were drawn edge-on as slivers -- correct sizes,
+        wrong plane. The only ones that looked right were the uniform
+        TRS masters and the leg bendys, which genuinely are thin in Y.
+
+        Y is the default and reproduces the historical drawing exactly,
+        so a control that does not author this is unchanged."""
+    )
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry"]
         doc = """wire draws the guide as curves, widthed by
@@ -644,6 +660,40 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         (view-free extraction). Position is the element index; the compiler
         binds each joint to one aggregate element."""
     )
+    rel rigExec:space (
+        doc = """The prim whose movement away from its rest defines the
+        space this chain is measured in -- normally a TRS master.
+
+        A RELATIONSHIP, not a connection to `posed:space`: a control's
+        posed space is computed, not authored, so an attribute connection
+        to it resolves to the unauthored identity and the solver silently
+        keeps its old lengths. Naming the prim instead pulls the same
+        computed frame the root, effector and pole already come through.
+
+        The space used is rest-inverse-times-posed, so a master sitting
+        at its rest contributes identity and a rig that names nothing is
+        unchanged."""
+    )
+    matrix4d rigExec:spaceMatrix = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """The space the chain's REST measurements are carried into
+        before they are compared with the posed goal.
+
+        Bone lengths are measured from the bound joints' rests, and the
+        root, goal and pole arrive as posed frames. The two agree only
+        while whatever sits above the rig is unscaled: put the rig under a
+        scaled master and the goal moves twice as far away while the
+        chain keeps its authored length, so the solve clamps and the limb
+        straightens instead of scaling.
+
+        Connect this to the posed space of whatever the rig hangs from --
+        a TRS master, a shot transform -- and the rests are carried into
+        the same space the frames are already in. Identity, the fallback,
+        is exactly the old behaviour, so a rig that connects nothing is
+        unchanged. The matrix is an INPUT rather than a name the solver
+        looks up: which prim defines the space is the asset's business,
+        not this schema's, and a rig with several nested masters connects
+        the one it means."""
+    )
     double guide:radius = 1.0 (
         doc = """Radius of the sphere and cone drawn at each aggregate
         element: the exact counterpart of RigExecJoint's guide:radius,
@@ -986,6 +1036,23 @@ class RigExecSplineIk "RigExecSplineIk" (
     )
     color3f guide:displayColor = (0.3, 0.6, 1.0)
     float guide:displayOpacity = 0.5
+    rel rigExec:space (
+        doc = """The prim whose movement away from its rest defines the
+        space this chain is measured in -- normally a TRS master.
+
+        The spline places joint i at `arcLength / restArcLength` along the
+        posed curve. The curve is posed and the rest is not, so scaling
+        whatever the rig hangs from doubles the ratio and the solve reads
+        a pure scale as a 2x STRETCH: the chain still spans the curve, but
+        every stretch-driven effect -- volume preservation, twist
+        distribution -- fires as though the spine had been pulled.
+
+        Naming the space carries the rest description into it, so the
+        ratio stays 1 and only real stretching stretches. A relationship
+        rather than a connection for the same reason as RigExecTwoBoneIk:
+        a control's posed space is computed, never authored."""
+    )
+
 }
 
 ################################################################
@@ -1255,6 +1322,120 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
         neverTS ignores animated T/S and uses rest-derived lengths, autoDetect
         uses current T/S when animation is detected, and alwaysTS always uses
         the current T/S."""
+    )
+}
+
+class RigExecSpaceSwitch "RigExecSpaceSwitch" (
+    inherits = </RigExecSourceConstraint>
+    customData = {
+        string className = "SpaceSwitch"
+    }
+    doc = """A labelled list of parent spaces for one xformable, with a live
+    index selecting between them.
+
+    It is NOT a pose constraint: it does not write the target's pose. It
+    replaces the target's PARENT SPACE, which is the whole point -- the
+    control keeps composing from its own avars, so it still drags, still
+    carries its namespace children, and its avars still read as local
+    offsets in whatever space is selected.
+
+    The composition, in row-vector convention, is
+
+        world = avars * default:space * inverse(source default:space)
+                      * source posed:space
+
+    which is the ordinary xformable ladder with the namespace parent's pair
+    of spaces swapped for the selected source's pair. Both halves come from
+    the same source, so at rest the two cancel and EVERY space gives the
+    same answer: adding or changing a space switch cannot move a rig at
+    rest, and cannot move it at all while the selected source is unposed.
+    Switching mid-pose DOES move the control, exactly as a Maya space switch
+    does; compensating for that is a tool's job, not the engine's.
+
+    A source that is not an xformable provider -- the RigExecRoot itself is
+    the idiomatic one -- contributes identity, which is how "world" is
+    spelled without inventing a prim to stand for it.
+
+    The inherited per-axis masks apply to the delta the space contributes,
+    expressed in the TARGET's own default frame, so masking translation off
+    leaves an orient-only space that rotates the control about its own
+    pivot, and masking rotation off leaves a point-only one. The inherited
+    inputs:sourceWeights plays no part here -- inputs:activeSpace is the
+    selector -- and authoring it is a compile error rather than a silent
+    no-op."""
+)
+{
+    rel rigExec:target (
+        doc = """The one RigExecXformable whose parent space is switched.
+        Exactly one target; zero or several is a compile error."""
+    )
+    rel rigExec:space (
+        doc = """The prim whose movement away from its rest carries the
+        whole rig -- normally a TRS master.
+
+        A switch composes its target over the target's DEFAULT ancestors,
+        so a master's motion reaches a switched control only INSIDE the
+        source's motion. With rigExec:rotationFilters left at `all` that
+        is harmless: the mask is the identity and the carry passes
+        through. Ask for `twist` or `swing` and the filter throws the
+        master's rotation away along with the part it was told to drop --
+        on the biped, rotating a master left 44 of 430 providers behind,
+        all of them the leg chain, because L_LegPV sits in its foot's
+        space behind a twist filter.
+
+        Naming the space runs the filter on the master-free motion and
+        re-applies the carry afterwards, so only the source's own
+        rotation is ever filtered. The space used is
+        rest-inverse-times-posed, so a master sitting at its rest
+        contributes identity and a rig that names nothing is unchanged.
+
+        A RELATIONSHIP, not a connection to `posed:space`, for the same
+        reason as RigExecTwoBoneIk: a control's posed space is computed,
+        never authored, so an attribute connection to it resolves to the
+        unauthored identity and the filter silently keeps eating the
+        carry."""
+    )
+    uniform token[] rigExec:spaceLabels = [] (
+        doc = """UI labels parallel to rigExec:sources. Empty falls back to
+        the source prims' names. A non-empty array must have exactly one
+        entry per source."""
+    )
+    double inputs:activeSpace = 0 (
+        doc = """Index into rigExec:sources, clamped to the list. A whole
+        number selects that space exactly; a fractional value blends the two
+        it lies between, so a switch can be eased rather than stepped.
+        Ignored when rigExec:activeSpaceAttribute names a property."""
+    )
+    rel rigExec:activeSpaceAttribute (
+        doc = """Optional single float or double PROPERTY supplying the
+        index, so the animator-facing channel can live on the control itself
+        -- `space:active` beside its avars -- rather than on this prim. When
+        authored it is authoritative and inputs:activeSpace is ignored."""
+    )
+    uniform token[] rigExec:rotationFilters = [] (
+        allowedTokens = ["all", "twist", "swing"]
+        doc = """Optional per-source rotation filter, parallel to
+        rigExec:sources. Empty, or "all", passes the source's rotation
+        through whole.
+
+        "twist" passes only the source's rotation ABOUT rigExec:twistAxis
+        and drops everything else; "swing" passes only the remainder. The
+        split is the exact swing-twist decomposition of the source's
+        rotation delta, not an Euler mask, so it stays well behaved at
+        large angles where per-axis masking does not.
+
+        This is what a pole vector living in its hand's or foot's space
+        wants: the elbow should follow the forearm's TWIST and must not
+        swing around with the wrist, because a pole that swings with the
+        thing it aims is a pole that fights the animator.
+
+        Translation and scale are unaffected: the pole still follows the
+        hand's position."""
+    )
+    double3 rigExec:twistAxis = (1, 0, 0) (
+        doc = """Twist axis for rigExec:rotationFilters, in the SOURCE's own
+        rest axes -- the limb axis for a wrist or an ankle. One axis serves
+        every filtered source; a switch needing two would be two switches."""
     )
 }
 
@@ -1766,11 +1947,93 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     customData = {
         string className = "MatrixMover"
     }
-    doc = """Moves the preceding native point3f[] points value through one
-    declared target-local affine transform and blends each point with the
-    common MoverAPI envelope: p' = q + w (T q - q) (spec section 7.4)."""
+    doc = """Moves the preceding value through one declared target-local
+    affine transform, blended by the common MoverAPI envelope.
+
+    Two domains, chosen by what rigExec:moves names -- the same split the
+    write side draws everywhere: <prim>.points is the geometry domain and a
+    bare prim path is the transform domain.
+
+    GEOMETRY. One native point3f[] points property. Each point blends
+    p' = q + w (T q - q) (spec section 7.4).
+
+    TRANSFORM. One Xformable, RigExecControl or RigExecJoint. Its frame
+    blends M' = T_w M, the exact twin of the point form and of UsdSkel's own
+    pairing of ComputeSkinnedPoints with ComputeSkinnedTransform. The weight
+    is one element, so inputs:defaultWeight is it unless a weight object with
+    a single element is bound, and rigExec:weightBlend chooses the falloff
+    exactly as it does for points.
+
+    A transform placed where a point is, given the same deformers in the same
+    order at the same weights, lands where that point lands. That invariant
+    is what makes a transform able to ride a deformer stack instead of
+    approximating one with a blend of constraint sources."""
 )
 {
+    uniform token rigExec:pointFrame = "rest" (
+        allowedTokens = ["rest", "posed"]
+        doc = """WHICH FRAME the points this cluster moves are already in.
+        Only meaningful with rigExec:transformSpace, and only in the
+        geometry domain.
+
+        rest, the fallback, is a cluster that runs BEFORE the skin and so
+        moves points still in the asset's own units. posed is one that
+        runs after it and moves points a skin has already carried into the
+        rig's posed frame.
+
+        The distinction is invisible until something above the rig is
+        scaled, which is exactly why it needs saying. The offset
+        rigExec:transformSpace measures is INVARIANT under a master scale
+        -- both the transform and the space carry it on the right, so
+        T * S^-1 gives the same answer either way -- and that is correct
+        for a pre-skin cluster, whose own skin is still to come and will
+        apply the scale itself. A post-skin cluster gets a mesh twice as
+        big and an offset that has not grown, so it pulls the doubled mesh
+        by the original distance: on the biped, the six squetch clusters
+        left M_HeadwireTop tx=2.0 short by 25.09 units with every wire
+        disabled, and 0.000031 with those clusters off.
+
+        posed conjugates the offset by the rig's CARRY, C^-1 M C, where C
+        is rigExec:space's own rest->pose map. That is the whole
+        correction and not a scale correction: for a master moved by T,
+        (p + T) * T^-1 M T is p*M + T, which is what rigidity wants, and
+        a rotated or scaled master needs nothing else said. One blanket
+        answer cannot serve both families -- rest and posed need it in
+        opposite directions -- which is why this says which, exactly as
+        it does on RigExecCurveMover.
+
+        WITHOUT rigExec:space the conjugation falls back to the measuring
+        space's own SCALE, which is all this could do before a carry
+        could be named: it fixes a scaled master and does nothing at all
+        for a translated or rotated one. A space nothing has scaled then
+        measures (1,1,1) and the correction is skipped, so every rig
+        without a scaled master and without a named carry is
+        bit-identical."""
+    )
+    rel rigExec:space (
+        doc = """The prim whose movement away from its rest carries the
+        whole rig -- normally a TRS master. Only meaningful with
+        rigExec:pointFrame = "posed", and only in the geometry domain.
+
+        NOT the same thing as rigExec:transformSpace. That one is what the
+        offset is MEASURED against -- the handle's own parent, so the
+        points take the handle's motion inside it and not the space's.
+        This one is what the POINTS the offset is applied to have already
+        been carried by, which for a post-skin cluster is everything above
+        the rig. The measured offset is invariant under the masters by
+        construction (both terms carry them on the right and they cancel),
+        so applying it to carried points shears them by T*R - T, growing
+        with the master's motion and zero only when the offset has no
+        rotation. Measured on the biped with the face posed and Main moved
+        (40, 0, 25): head_top_aim_cluster, which is aim-driven and so has
+        a real rotation, put 5.70 units of shear into body_geo on its own.
+
+        The carry used is the named prim's own rest->pose map -- what
+        computeMatrix publishes -- so a master sitting at its rest
+        contributes identity and a rig naming no space is unchanged, down
+        to taking the same arithmetic branch it always did rather than
+        multiplying by an identity."""
+    )
     rel rigExec:transform (
         doc = "Exactly one GfMatrix4d provider (computeMatrix)."
     )
@@ -1798,6 +2061,22 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     )
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
+    )
+    uniform token rigExec:weightBlend = "linear" (
+        allowedTokens = ["linear", "radial"]
+        doc = """How a partial weight is taken.
+
+        linear is the historical form and the default: p' = q + w(Tq - q),
+        exact at both ends and a straight line between them.
+
+        radial takes a fraction of the transform's ROTATION instead, so a
+        point keeps its distance from the axis at every weight. The two
+        agree exactly at weight 0 and weight 1 and differ only in the
+        falloff, where linear follows the chord of the arc. A chord always
+        falls inside its arc, toward the axis, so a cluster that rotates a
+        lid about an eyeball drives it INTO the eyeball at mid weight --
+        by r(1 - cos(theta/2)), which is a tenth of the radius at a 56
+        degree sweep."""
     )
 }
 
@@ -1981,6 +2260,24 @@ class RigExecPoseInterpolator "RigExecPoseInterpolator" (
         orientation is the joint orient the authored data removes from
         poseRotation, so a driver sitting at its rest measures as identity and
         the neutral pose reads 1.000 with the rig standing still."""
+    )
+    rel rigExec:driverAttributes (
+        doc = """A NUMERIC driver: one to three float or double PROPERTIES --
+        avars, usually -- read in order as the driver's position, in place of
+        a transform's translation.
+
+        This is what lets a corrective be driven by a dial rather than by
+        something the rig moves: a breath, a squash amount, a shot-specific
+        knob. Each pose carries the values it stands at in
+        rigExec:translation and their width in rigExec:translationRadius, so
+        the solve, the fit and the baked program are the ones the translation
+        channel already had -- the only difference is where the position
+        comes from.
+
+        Authoring this makes rigExec:driver optional and measures no
+        rotation: there is no frame to take one from. Up to three because
+        that is what one position is; a corrective wanting more channels is
+        two interpolators whose weights multiply."""
     )
     uniform token rigExec:kernel = "gaussian" (
         allowedTokens = ["gaussian", "linear"]
@@ -2237,6 +2534,75 @@ class RigExecCurveMover "RigExecCurveMover" (
         doc = """wire: the space each driver transform is measured against,
         parallel to rigExec:driverTransforms, or one for all, or none."""
     )
+    uniform token rigExec:driverDeltaFrame = "local" (
+        allowedTokens = ["local", "posed"]
+        doc = """wire: WHICH FRAME the driver's offset from its space is
+        applied in. Only meaningful with rigExec:driverTransformSpaces.
+
+        local is what the measurement M = T * S^-1 gives, and in USD's
+        row-vector convention that product is exactly the driver's LOCAL
+        matrix: world = local * parent, so T * S^-1 cancels the space
+        entirely. The curve's control points are world positions, so
+        applying it to them uses a local offset as though it were a world
+        one -- the offset points wherever it pointed at the bind pose, no
+        matter where the space has since been carried. Measured on the
+        biped's arm bendies: swing the shoulder 70 degrees, push a bend
+        control, and the bulge comes out in the same world direction to
+        0.00 degrees.
+
+        posed conjugates that offset into the space's current frame,
+        S^-1 * T, which is S^-1 * local * S. The offset then rides the
+        space: same measurement gives 69.93 degrees against the arm's
+        70.00, with the length preserved exactly.
+
+        Both are IDENTITY when the driver sits at its space, at rest and
+        posed alike, so neither makes the curve move merely because the
+        space moved -- that is the skin's job and would be a double
+        transform. They differ only once an animator touches the control.
+
+        local remains the default because the shipped face rig was built
+        and measured against it; posed is what a wire riding a deforming
+        limb wants. Set per mover, so the two can coexist while rigs
+        migrate."""
+    )
+    uniform token rigExec:pointFrame = "rest" (
+        allowedTokens = ["rest", "posed"]
+        doc = """wire: WHICH FRAME the points this wire moves are
+        already in when it runs.
+
+        A wire adds a displacement read off its driver curve to the
+        points it moves. The curve, the bind distances measured against
+        it and the mesh rest points are all authored at the ASSET'S
+        scale; a skin is what carries those points out of it. So the
+        same displacement means two different things depending on where
+        in the chain the wire sits, and only the asset knows which.
+
+        rest is a wire that runs BEFORE the skin on its target. Its
+        displacement stays in the asset's units, because the skin will
+        apply the rig's scale to it afterwards and applying it here too
+        applies it twice -- measured on the biped's blink wires under a
+        master scaled to 2, that is the difference between a mesh that
+        scales and one that comes apart by 1.54 units with the torso
+        merely turned 15 degrees.
+
+        posed is a wire that runs AFTER it, adding to points a skin has
+        already carried into the rig's posed frame. Its displacement is
+        carried there too: the scale the driver measurement took out
+        goes back on, and nothing else does, so the wire moves the posed
+        mesh as far as the posed rig moved.
+
+        The two corrections are in OPPOSITE directions, which is why one
+        blanket rule cannot serve both families and why the wire has to
+        say. Which one a given wire is, is not a rigging choice -- it is
+        where the compiler put it relative to its skin -- so
+        tools/biped/wire_point_frame.py reads the compiled mover order
+        and authors this, rather than asking for a list kept by hand.
+
+        Both are IDENTICAL while nothing above the rig is scaled,
+        because the scale in question measures one. A rig with no scaled
+        master is therefore bit for bit what it was, whichever of the
+        two it says."""
+    )
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "final"]
         doc = "wire: which revision of the driver transforms is read."
@@ -2263,6 +2629,8 @@ class RigExecCurveMover "RigExecCurveMover" (
         falls to zero, as 1 - smoothstep(0, dropoffDistance, d) with d the
         point's rest distance from the curve. 0 applies no falloff."""
     )
+
+
 }
 
 class RigExecVec3fMathMover "RigExecVec3fMathMover" (
@@ -2346,6 +2714,181 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
     )
     uniform token rigExec:surfaceReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecSurfaceProjector "RigExecSurfaceProjector" (
+    inherits = </Typed>
+    customData = {
+        string className = "SurfaceProjector"
+    }
+    doc = """Carries a projector on a deforming surface: casts a ray at
+    the surface's rest points to pick a material point on it, follows
+    that point onto the surface's OWN posed points, and moves the target
+    so that the frame there -- its position and its interpolated surface
+    normal -- drives the prim's transform while the geometry stays
+    exactly where the deformation put it (spec sections 4.1, 7.5).
+
+    THE HIT IS A MATERIAL POINT, not a place on a line. The ray is cast
+    once, at the rest surface; what it names is a triangle and a place
+    inside it, and the posed surface says where that went. Re-casting at
+    the posed surface would find wherever the deformed surface crosses
+    the same fixed ray, which is a different material point whenever the
+    surface slides across it -- and then the iris under the projector
+    could move while the projector read the surface as standing still.
+
+    This is the shrinkwrapped-follicle arrangement without the follicle.
+    A projector pinned to an eyeball has to ride the surface and turn
+    with it, and the rig does that with a point stuck to a bindplane
+    that is itself shrinkwrapped to the eye. The ray asks the same
+    question of the surface directly: nothing binds to a vertex, so
+    nothing needs rebinding when the mesh changes, and the hit slides
+    continuously instead of stepping between bound points.
+
+    THE OFFSET IS THE POINT. The projector does not sit at the hit -- it
+    keeps its own placement, and the hit supplies only its MOTION,
+    exactly as a parent constraint with an offset would. The delta
+    between the hit frame on the base points and the hit frame on the
+    posed points is applied to the prim's transform, and the inverse of
+    that delta is applied to the points, so composed world geometry is
+    unchanged and the transform alone has moved. A consumer reading the
+    prim's transform as a projector therefore sees the surface's motion
+    without the surface appearing to move.
+
+    The transform is published for the renderer to inherit, the same way
+    a constraint-driven transform on a plain Xformable is."""
+)
+{
+    rel rigExec:space (
+        doc = """The prim whose movement away from its rest carries
+        the whole rig -- normally a TRS master.
+
+        The REST cast needs it taken back off. The rest ray is
+        built from the source's BASE frame, and a base frame still
+        composes through the masters' posed avars, while the base
+        POINTS it is cast at are the mesh exactly as authored and
+        carry nothing. At the origin the two agree. Move a master
+        forty units and the ray starts forty units from the rest
+        surface: on the biped the cast simply missed, both eyes,
+        and the projector published no shader matrix at all.
+
+        The carry used is rest-inverse-times-posed, so a master
+        sitting at its rest contributes identity and a rig naming
+        no space is unchanged. Distinct from rigExec:sourceSpace,
+        which is the source's SIBLING space and shapes the ray's
+        own motion rather than undoing the rig's carry."""
+    )
+    rel rigExec:sourceSpace (
+        doc = """The SIBLING SPACE rigExec:sources is measured against --
+        for an eye, the socket bone its bind joint hangs from.
+
+        Without it the source's WORLD frame is mapped into the mesh's
+        object space through UsdGeomXformCache, which reads the STAGE. A
+        rig moves points, not xforms, so the eye mesh's stage transform is
+        the identity and the ray origin comes out as the bind's world
+        position -- measured on the biped, 164 units from a unit eyeball
+        authored at the origin. It hits only because the direction happens
+        to point back at the ball, and past about 20 degrees of head turn
+        it stops hitting: the projector published no matrix for either eye
+        at head ry 30, in both projection modes.
+
+        With it, the source is measured against the space and the ray is
+        that motion applied to the authored rigExec:rayOrigin and
+        rigExec:rayDirection. The head and the face are common to both
+        frames and cancel exactly, so moving them carries the projector
+        instead of breaking it, and what is left is the eye's own look.
+        The same space is used for the look term, or turning the head
+        would swing the iris as though the eye had looked."""
+    )
+    uniform token rigExec:projectionMode = "material" (
+        allowedTokens = ["material", "reproject"]
+        doc = """WHICH SURFACE the posed frame is read from.
+
+        material is the historical form and the default. The ray is cast
+        ONCE, at the rest surface, and names a triangle and a place
+        inside it; the posed frame is where that same material point
+        ended up. The projector then rides the skin, so a deformer that
+        slides the surface along the ray carries the projector with it --
+        on the biped's eyes the socket stretch drags the iris and pupil
+        across the eyeball, which is what this mode is for and what makes
+        it wrong here.
+
+        reproject casts the ray AGAIN at the posed surface, so the frame
+        is wherever the look meets the deformed eyeball now. A surface
+        sliding along the ray then changes nothing: the hit stays on the
+        line the eye is looking down. The rest frame is still the first
+        cast's, because that is the projector's own placement and the
+        shader offset is quoted against it.
+
+        reproject is what the Maya rig does, and it is worth naming the
+        node: eye_?_pupil_bindplane is skinned to eye_?_bind for the look
+        and then SHRINKWRAPPED onto eye_?_projection_sphere, which itself
+        carries socketStretch_?_cluster. A shrink wrap re-projects onto
+        the deformed target every frame; it does not follow a material
+        point. There is no lattice anywhere in that setup."""
+    )
+    double3 rigExec:rayOrigin = (0, 0, 0) (
+        doc = """Ray origin in the target's own object space. The default
+        is the object origin, which for a mesh authored about its own
+        centre is where a look vector would start."""
+    )
+    double3 rigExec:rayDirection = (0, 0, 1) (
+        doc = """Ray direction in the target's own object space; need not
+        be normalized. The hit is the nearest intersection strictly in
+        front of the origin, tested two-sided because a ray starting
+        inside a closed surface leaves through a back-facing polygon."""
+    )
+    double3 rigExec:rayUp = (0, 1, 0) (
+        doc = """Fixes the roll the normal alone cannot. Orthogonalized
+        against the hit normal; parallel to it (or degenerate) falls back
+        to the least-aligned principal axis, so a frame always resolves
+        rather than failing at a pole."""
+    )
+    rel rigExec:sources (
+        doc = """Frame the projector is anchored to -- the eye's bind
+        joint, normally. Its posed frame is what a look-at reaches the
+        iris through: the control turns the joint, the joint turns the
+        projector, and the iris goes with it. Without this the projector
+        only follows the surface's deformation and a look-at moves
+        nothing."""
+    )
+    matrix4d rigExec:shaderOffset = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """The projector's own placement relative to the source
+        frame, pre-multiplied into the published primvar. The rig hangs
+        the projector off its frame with a scale -- the radius the
+        shader's unit eyeball is quoted against -- and that scale has to
+        travel with the matrix, because the surface prim's transform is
+        its placement and no longer carries it."""
+    )
+    uniform token rigExec:shaderPrimvar = "eyeProjector" (
+        doc = """Name of the constant matrix primvar published on the
+        surface prim carrying the projector's frame. A shader reads it as
+        HdGet_<name>(), which for a glslfx sourceAsset requires the name
+        to appear in that shader's "attributes" configuration block --
+        Storm filters every other primvar out before the shader sees
+        it."""
+    )
+    rel rigExec:shaderDialSources (
+        doc = """Scalar properties an animator turns, published to the
+        surface prim's shader. Ordered: entry i lands in slot i of the
+        matrix named by rigExec:shaderDialPrimvar, row i/4 column i%4, so
+        sixteen dials fit and the shader reads a fixed slot.
+
+        Packed into a matrix rather than published as sixteen float
+        primvars because a matrix primvar is a road that already exists
+        end to end -- the projector's own frame travels it -- and because
+        one primvar with one dirty flag is cheaper to push per frame than
+        sixteen. The shader unpacks it; nothing else needs to know.
+
+        How a dial reaches a shader at all: the value lives on a control
+        as an ordinary avar, so it keys, it shows in the avar editor, and
+        it undoes like any other channel."""
+    )
+    uniform token rigExec:shaderDialPrimvar = "" (
+        doc = """Name of the constant matrix primvar carrying the packed
+        rigExec:shaderDialSources. Empty publishes nothing. Same rule as
+        rigExec:shaderPrimvar: a glslfx sourceAsset sees the name only if
+        its own "attributes" block lists it."""
     )
 }
 
@@ -2750,6 +3293,27 @@ class RigExecTouchRegions "RigExecTouchRegions" (
     )
     uniform float rigExec:touch:alpha = 1 (
         doc = "Opacity the overlay draws the regions at."
+    )
+    uniform token rigExec:touch:layerName = "" (
+        doc = """This scope's name as a LAYER, for the editor's switch.
+        Empty falls back to the prim's own name.
+
+        One scope is one layer: a mesh may carry several, each with its
+        own regions, its own palette and its own paint, and exactly one
+        of them is live at a time. That is what lets a body set and a
+        face set annotate the same mesh without fighting over faces --
+        the face -> region table is one to one WITHIN a layer, and
+        carries no obligation across them.
+
+        Note what this is NOT: it is not a USD layer. A touch layer is a
+        prim, composed like any other, and a stage's sublayers can each
+        contribute one."""
+    )
+    uniform int rigExec:touch:layerOrder = 0 (
+        doc = """Where this layer sits in the editor's list, and which
+        one opens live: the lowest order wins. Ties break on the layer
+        name, so the order is total and an unordered file still opens
+        the same way twice."""
     )
 }
 

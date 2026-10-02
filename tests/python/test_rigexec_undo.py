@@ -253,6 +253,128 @@ def TestSingleNoticePerEdit():
     counter.Revoke()
 
 
+# ---------------------------------------------------------------------
+# SpecSnapshot: the structural half, and the reason it exists.
+# ---------------------------------------------------------------------
+
+def TestSpecSnapshotUndoesPrimCreation():
+    """The gap that let a panel build rig with an empty undo stack.
+
+    AttributeSnapshot restores the ATTRIBUTE and leaves the prim, so a
+    "New curvenet" or "Create sphere weight" undone through it removed
+    the values and kept the prim -- a half-built thing on the stage with
+    nothing left on the stack to finish taking it away.
+    """
+    stage = _Stage()
+    layer = stage.GetRootLayer()
+    path = Sdf.Path("/Rig/Made")
+
+    attrRec = rigExecUndo.EditRecorder(stage, ["/Rig/Made.avars:tx"])
+    attrRec.Begin()
+    stage.DefinePrim(path, "RigExecControl").GetAttribute("avars:tx").Set(4.0)
+    edit = attrRec.Commit("attribute only")
+    edit.Undo()
+    _Check(bool(stage.GetPrimAtPath(path)),
+           "precondition: an attribute recorder leaves the prim behind")
+
+    stage.RemovePrim(path)
+    rec = rigExecUndo.SpecRecorder(stage, [path])
+    rec.Begin()
+    stage.DefinePrim(path, "RigExecControl").GetAttribute("avars:tx").Set(4.0)
+    edit = rec.Commit("Create")
+    _Check(edit is not None, "creating a prim is a recordable change")
+    edit.Undo()
+    _Check(not stage.GetPrimAtPath(path),
+           "undo must remove a prim that did not exist before")
+    edit.Redo()
+    _Check(bool(stage.GetPrimAtPath(path))
+           and stage.GetAttributeAtPath("/Rig/Made.avars:tx").Get() == 4.0,
+           "redo must bring the prim back with its values")
+
+
+def TestSpecSnapshotRoundTripsRelationships():
+    """A relationship is invisible to the attribute recorder entirely."""
+    stage = _Stage()
+    prim = stage.GetPrimAtPath("/Rig/Ctl")
+    prim.CreateRelationship("rigExec:moves").SetTargets(["/Rig"])
+    path = Sdf.Path("/Rig/Ctl.rigExec:moves")
+
+    attrRec = rigExecUndo.EditRecorder(stage, [path])
+    attrRec.Begin()
+    prim.GetRelationship("rigExec:moves").SetTargets([])
+    _Check(attrRec.Commit("attribute only") is None,
+           "precondition: the attribute recorder sees no relationship")
+
+    prim.GetRelationship("rigExec:moves").SetTargets(["/Rig"])
+    rec = rigExecUndo.SpecRecorder(stage, [path])
+    rec.Begin()
+    prim.GetRelationship("rigExec:moves").SetTargets(["/Rig/Ctl"])
+    edit = rec.Commit("Retarget")
+    _Check(edit is not None, "retargeting is a recordable change")
+    edit.Undo()
+    _Check([str(t) for t in
+            prim.GetRelationship("rigExec:moves").GetTargets()] == ["/Rig"],
+           "undo must put the original targets back")
+    edit.Redo()
+    _Check([str(t) for t in
+            prim.GetRelationship("rigExec:moves").GetTargets()]
+           == ["/Rig/Ctl"], "redo must reapply the new targets")
+
+
+def TestSpecSnapshotKeepsSiblingOrder():
+    """Mover evaluation order IS sibling order, so undo must preserve it."""
+    stage = _Stage()
+    for name in ("A", "B", "C"):
+        stage.DefinePrim("/Rig/%s" % name, "RigExecControl")
+    rec = rigExecUndo.SpecRecorder(stage, ["/Rig/B"])
+    rec.Begin()
+    stage.GetAttributeAtPath("/Rig/B.avars:tx")
+    stage.GetPrimAtPath("/Rig/B").GetAttribute("avars:tx").Set(1.0)
+    edit = rec.Commit("Pose B")
+    edit.Undo()
+    names = [p.GetName() for p in stage.GetPrimAtPath("/Rig").GetChildren()]
+    _Check(names == ["Ctl", "A", "B", "C"],
+           "undo reordered the siblings: %s" % names)
+
+
+def TestSpecScopeIsQuietWhenNothingChanged():
+    stage = _Stage()
+    undo = rigExecUndo.UndoStack()
+    with rigExecUndo.SpecScope(stage, ["/Rig/Ctl"], undo, "No-op"):
+        pass
+    _Check(not undo.CanUndo(), "a scope that changed nothing pushes nothing")
+
+    with rigExecUndo.SpecScope(stage, ["/Rig/Ctl"], undo, "Pose"):
+        stage.GetPrimAtPath("/Rig/Ctl").GetAttribute("avars:tx").Set(2.0)
+    _Check(undo.CanUndo() and undo.UndoText() == "Pose",
+           "a scope that changed something pushes one labelled entry")
+    undo.Undo()
+    # HasAuthoredValue, not Get(): avars:tx has a schema fallback of 0,
+    # so an unauthored avar reads 0.0 rather than None and a Get() check
+    # would pass whether the spec came away or not.
+    _Check(not stage.GetAttributeAtPath(
+               "/Rig/Ctl.avars:tx").HasAuthoredValue(),
+           "undo through the scope clears the authored value")
+    undo.Redo()
+    _Check(stage.GetAttributeAtPath("/Rig/Ctl.avars:tx").Get() == 2.0,
+           "redo through the scope puts it back")
+
+
+def TestSpecScopeAbortsOnException():
+    stage = _Stage()
+    undo = rigExecUndo.UndoStack()
+    try:
+        with rigExecUndo.SpecScope(stage, ["/Rig/Ctl"], undo, "Boom"):
+            stage.GetPrimAtPath("/Rig/Ctl").GetAttribute("avars:tx").Set(9.0)
+            raise RuntimeError("half way through")
+    except RuntimeError:
+        pass
+    _Check(not stage.GetAttributeAtPath(
+               "/Rig/Ctl.avars:tx").HasAuthoredValue(),
+           "an exception inside the scope rolls the edit back")
+    _Check(not undo.CanUndo(), "a rolled-back edit is not on the stack")
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -262,6 +384,15 @@ def main():
         ("undo stack", TestUndoStack),
         ("edit recorder", TestEditRecorder),
         ("one notice per edit", TestSingleNoticePerEdit),
+        ("spec snapshot undoes prim creation",
+         TestSpecSnapshotUndoesPrimCreation),
+        ("spec snapshot round-trips relationships",
+         TestSpecSnapshotRoundTripsRelationships),
+        ("spec snapshot keeps sibling order",
+         TestSpecSnapshotKeepsSiblingOrder),
+        ("spec scope is quiet when nothing changed",
+         TestSpecScopeIsQuietWhenNothingChanged),
+        ("spec scope aborts on exception", TestSpecScopeAbortsOnException),
     ]
     for name, fn in groups:
         fn()

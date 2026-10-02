@@ -1678,128 +1678,16 @@ class RelocatesSnapshot(object):
             self.layer.ClearRelocates()
 
 
-class SpecCopySnapshot(object):
-    """
-    A whole spec (property or prim), copied aside verbatim.
-
-    Sdf.CopySpec is what makes this general: it carries an attribute's
-    default, time samples and metadata, a relationship's target list op,
-    and a prim spec's entire subtree, without this module having to
-    enumerate any of them.
-    """
-
-    def __init__(self, layer, specPath):
-        self.layer = layer
-        self.specPath = Sdf.Path(specPath)
-        self.existed = False
-        # Names of the siblings that followed this prim spec, so its
-        # position among them can be put back. See _RestoreSiblingOrder.
-        self.following = []
-        self._scratch = None
-
-    @classmethod
-    def Capture(cls, layer, specPath):
-        snap = cls(layer, specPath)
-        if layer.GetObjectAtPath(snap.specPath) is None:
-            return snap
-        snap.existed = True
-        snap.following = _FollowingSiblingNames(layer, snap.specPath)
-        snap._scratch = _ScratchLayer()
-        _EnsureAncestors(snap._scratch, snap.specPath)
-        Sdf.CopySpec(layer, snap.specPath, snap._scratch, snap.specPath)
-        return snap
-
-    def Restore(self):
-        _RemoveSpec(self.layer, self.specPath)
-        if not self.existed:
-            return
-        _EnsureAncestors(self.layer, self.specPath)
-        Sdf.CopySpec(self._scratch, self.specPath, self.layer, self.specPath)
-        self._RestoreSiblingOrder()
-
-    def _RestoreSiblingOrder(self):
-        """
-        Put the spec back at the position it held among its siblings.
-
-        Sdf.CopySpec APPENDS, so a spec restored into the middle of its
-        parent lands at the end: undoing an edit to /A/C turns B,C,D
-        into B,D,C. In RigExec that is not cosmetic -- mover evaluation
-        order IS sibling order (README, "the bottom sibling fires first")
-        -- so an undo would silently change which mover runs when.
-
-        The children proxy cannot move a live spec (insert() rejects a
-        handle that is already parented, and rejects a dead one after a
-        delete), so the order is fixed by pushing everything that used to
-        follow this spec back behind it, in its original order.
-        """
-        for name in self.following:
-            _MoveToEnd(self.layer,
-                       self.specPath.GetParentPath().AppendChild(name))
-
-
-def _EnsureAncestors(layer, specPath):
-    """
-    Create the spec's parent chain in `layer`.
-
-    Sdf.CopySpec will not invent ancestors: copying </Rig/IK> into a
-    layer with no </Rig> fails inside SdfData rather than returning
-    false, so the parent has to exist before the copy either way.
-    """
-    parent = (specPath.GetPrimPath() if specPath.IsPropertyPath()
-              else specPath.GetParentPath())
-    if parent and not parent.IsAbsoluteRootPath():
-        Sdf.CreatePrimInLayer(layer, parent)
-
-
-def _SiblingNames(layer, primPath):
-    """The names of primPath's parent's children, in layer order."""
-    parent = primPath.GetParentPath()
-    if parent.IsAbsoluteRootPath():
-        return list(layer.rootPrims.keys())
-    spec = layer.GetPrimAtPath(parent)
-    return list(spec.nameChildren.keys()) if spec is not None else []
-
-
-def _FollowingSiblingNames(layer, specPath):
-    """
-    The prim siblings that come after specPath, or [] for a property.
-
-    Property order carries no composition meaning, so it is not worth
-    the copies it would cost to preserve.
-    """
-    if specPath.IsPropertyPath() or not specPath.IsPrimPath():
-        return []
-    names = _SiblingNames(layer, specPath)
-    if specPath.name not in names:
-        return []
-    return names[names.index(specPath.name) + 1:]
-
-
-def _MoveToEnd(layer, primPath):
-    """Re-append one prim spec, unchanged, so it sits last again."""
-    if layer.GetPrimAtPath(primPath) is None:
-        return
-    scratch = _ScratchLayer()
-    _EnsureAncestors(scratch, primPath)
-    Sdf.CopySpec(layer, primPath, scratch, primPath)
-    _RemoveSpec(layer, primPath)
-    Sdf.CopySpec(scratch, primPath, layer, primPath)
-
-
-def _RemoveSpec(layer, specPath):
-    if specPath.IsPropertyPath():
-        prop = layer.GetPropertyAtPath(specPath)
-        if prop is not None:
-            prop.owner.RemoveProperty(prop)
-        return
-    spec = layer.GetPrimAtPath(specPath)
-    if spec is None:
-        return
-    parent = spec.nameParent
-    if parent is None:
-        del layer.rootPrims[spec.name]
-    else:
-        del parent.nameChildren[spec.name]
+# Moved to rigExecUndo, where the gizmo and the panels that build rig
+# structure can reach it too. Kept under its old name here because every
+# operation below reads SpecCopySnapshot.Capture, and the name says what
+# it is: the whole spec, copied.
+SpecCopySnapshot = rigExecUndo.SpecSnapshot
+_EnsureAncestors = rigExecUndo._EnsureAncestors
+_SiblingNames = rigExecUndo._SiblingNames
+_FollowingSiblingNames = rigExecUndo._FollowingSiblingNames
+_MoveToEnd = rigExecUndo._MoveToEnd
+_RemoveSpec = rigExecUndo._RemoveSpec
 
 
 def _Commit(label, layer, specPath, before, after):

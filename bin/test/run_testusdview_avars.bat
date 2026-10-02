@@ -1,6 +1,6 @@
 @echo off
 rem Headless end-to-end test of the Avar Editor panel
-rem (tests\testUsdviewAvarEditor.py) on biped_full2.usda. The Windows twin
+rem (tests\testUsdviewAvarEditor.py) on examples\biped\Biped_anim_ikfk.usda. The Windows twin
 rem of run_testusdview_avars.sh.
 rem
 rem Asserts the RigExec menu item is registered, that the panel follows
@@ -23,5 +23,5 @@ if exist "%RIG%\build\CMakeCache.txt" (
 )
 set RENDERER_ARG=
 if not "%~1"=="" set RENDERER_ARG=--renderer %~1
-"%PY%" "%USD%\bin\testusdview" --testScript "%RIG%\tests\testUsdviewAvarEditor.py" %RENDERER_ARG% "%RIG%\biped_full2.usda"
+"%PY%" "%USD%\bin\testusdview" --testScript "%RIG%\tests\testUsdviewAvarEditor.py" %RENDERER_ARG% "%RIG%\examples\biped\Biped_anim_ikfk.usda"
 exit /b %errorlevel%

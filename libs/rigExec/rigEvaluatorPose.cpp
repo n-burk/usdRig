@@ -98,6 +98,7 @@ _SolveRotationConstraint(const _ConstraintSolveContext &c)
     params.affect = c.affect;
     params.rotationOrder = c.order;
     params.weight = c.weight;
+    params.carry = c.carry;
     return RigExecApplyRotationConstraint(c.inputFrame, *c.sources, params);
 }
 
@@ -135,6 +136,7 @@ _SolveParentConstraint(const _ConstraintSolveContext &c)
     }
     params.rotationOrder = c.order;
     params.weight = c.weight;
+    params.carry = c.carry;
     return RigExecApplyParentConstraint(c.inputFrame, *c.sources, params);
 }
 
@@ -275,30 +277,64 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
         _PoseInterpolator record;
         record.prim = path;
 
+        // A NUMERIC driver reads properties instead of a frame: one to
+        // three of them, in order, as the driver's position.
+        if (const UsdRelationship rel =
+                prim.GetRelationship(TfToken("rigExec:driverAttributes"))) {
+            SdfPathVector values;
+            rel.GetTargets(&values);
+            for (const SdfPath &value : values) {
+                if (!value.IsPropertyPath() ||
+                    !_stage->GetAttributeAtPath(value)) {
+                    *error = "pose interpolator " + path.GetString() +
+                             " names a rigExec:driverAttributes target, " +
+                             value.GetString() +
+                             ", that is not an attribute of this stage";
+                    return false;
+                }
+                record.driverAttributes.push_back(value);
+            }
+            if (record.driverAttributes.size() > 3) {
+                *error = "pose interpolator " + path.GetString() + " names " +
+                         std::to_string(record.driverAttributes.size()) +
+                         " rigExec:driverAttributes; at most three are read, "
+                         "one per axis of the position they stand for";
+                return false;
+            }
+        }
+
         SdfPathVector driverTargets;
         if (const UsdRelationship rel = prim.GetRelationship(kDriver)) {
             rel.GetTargets(&driverTargets);
         }
-        if (driverTargets.size() != 1) {
+        if (!record.driverAttributes.empty() && driverTargets.empty()) {
+            // Numeric: there is no frame to measure, so there is no driver
+            // prim to name and nothing asks for one.
+        } else if (driverTargets.size() != 1) {
             *error = "pose interpolator " + path.GetString() + " names " +
                      std::to_string(driverTargets.size()) +
                      " rigExec:driver targets; exactly one is required";
             return false;
         }
-        record.driver = driverTargets[0].GetPrimPath();
-        if (!providers.count(record.driver)) {
-            *error = "pose interpolator " + path.GetString() +
-                     " names a rigExec:driver, " + record.driver.GetString() +
-                     ", that is not a RigExecJoint or RigExecControl of this "
-                     "rig and therefore publishes no frame to measure";
-            return false;
+        if (!driverTargets.empty()) {
+            record.driver = driverTargets[0].GetPrimPath();
+            if (!providers.count(record.driver)) {
+                *error = "pose interpolator " + path.GetString() +
+                         " names a rigExec:driver, " +
+                         record.driver.GetString() +
+                         ", that is not a RigExecJoint or RigExecControl of "
+                         "this rig and therefore publishes no frame to "
+                         "measure";
+                return false;
+            }
         }
         // The driver's local rotation is measured against its nearest
         // frame-publishing ancestor. That is the immediate namespace parent on
         // every rig this has been run on; anything else is REPORTED rather
         // than silently accepted, because it means the delta is being measured
         // across a prim that may carry a transform of its own.
-        for (SdfPath walk = record.driver.GetParentPath();
+        for (SdfPath walk = record.driver.IsEmpty()
+                 ? SdfPath() : record.driver.GetParentPath();
              !walk.IsEmpty() && !walk.IsAbsoluteRootPath() &&
                  walk != _rigPath.GetParentPath();
              walk = walk.GetParentPath()) {
@@ -337,17 +373,13 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
         desc.twistAxis = axis == TfToken("Y")   ? GfVec3d(0.0, 1.0, 0.0)
                          : axis == TfToken("Z") ? GfVec3d(0.0, 0.0, 1.0)
                                                 : GfVec3d(1.0, 0.0, 0.0);
-        if (desc.enableTranslation && notes) {
-            // Said once, plainly, rather than measured wrongly. This phase
-            // reads the driver's ROTATION; no interpolator of the shipped
-            // biped enables the translation channel (0 of 29), so the
-            // arithmetic that would measure it has never been run against
-            // anything and is not being guessed at here.
-            notes->push_back(
-                "warning: pose interpolator " + path.GetString() +
-                " sets rigExec:enableTranslation, which the evaluation phase "
-                "does not measure; its poses are judged on rotation alone");
+        if (!record.driverAttributes.empty()) {
+            // The numeric driver IS the translation channel, and there is no
+            // rotation to measure whatever the prim says.
+            desc.enableTranslation = true;
+            desc.enableRotation = false;
         }
+        record.enableTranslation = desc.enableTranslation;
 
         std::vector<double> radii;
         std::vector<double> translationRadii;
@@ -539,13 +571,15 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
 
         GfQuatd driverFinal(1.0), driverRest(1.0);
         GfQuatd parentFinal(1.0), parentRest(1.0);
-        if (!rotationOfFinal(interpolator.driver, &driverFinal) ||
+        const bool numeric = !interpolator.driverAttributes.empty();
+        if (!numeric &&
+            (!rotationOfFinal(interpolator.driver, &driverFinal) ||
             !rotationOf(interpolator.driver, &driverRest) ||
             (!interpolator.driverParent.IsEmpty() &&
              (!rotationOfFinal(interpolator.driverParent,
                           &parentFinal) ||
               !rotationOf(interpolator.driverParent,
-                          &parentRest)))) {
+                          &parentRest))))) {
             pose->diagnostics.push_back(
                 "pose interpolator " + interpolator.prim.GetString() +
                 " has no usable frame for its driver " +
@@ -576,8 +610,71 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
         // takes an euler and converts it back inside Evaluate. Taking the same
         // route makes the gate's numbers and the engine's the same
         // floating-point values and not merely the same rotation.
+        // The translation channel, when the interpolator measures one: the
+        // driver's origin relative to its rest, in its rest frame
+        // (RigExecFrameTranslation), in METRES because the solver's poses
+        // were converted from the schema's centimetres at compile.
+        GfVec3d translation(0.0);
+        const GfVec3d *translationPtr = nullptr;
+        if (numeric) {
+            // The dial's own value, per axis, through the resolved inputs so
+            // a property chain writing it (and an interactive override on
+            // that chain's head) is what this reads.
+            for (size_t i = 0; i < interpolator.driverAttributes.size(); ++i) {
+                const SdfPath &at = interpolator.driverAttributes[i];
+                const UsdAttribute attribute =
+                    _stage->GetAttributeAtPath(at);
+                double value = 0.0;
+                float asFloat = 0.0f;
+                if (_resolvedInputs.GetAttribute(attribute, time, &value) ||
+                    attribute.Get(&value, time)) {
+                    translation[int(i)] = value;
+                } else if (_resolvedInputs.GetAttribute(attribute, time,
+                                                        &asFloat) ||
+                           attribute.Get(&asFloat, time)) {
+                    translation[int(i)] = double(asFloat);
+                }
+            }
+            translation /= 100.0;
+            translationPtr = &translation;
+        } else if (interpolator.enableTranslation) {
+            const auto frameOfRest =
+                [&](const SdfPath &at) -> const RigExecPointFrame * {
+                    const auto fi = _providerIndex.find(at);
+                    if (fi == _providerIndex.end() || !restLive[fi->second]) {
+                        return nullptr;
+                    }
+                    return &restFrames[fi->second];
+                };
+            const auto frameOfFinal =
+                [&](const SdfPath &at) -> const RigExecPointFrame * {
+                    const auto fi = _providerIndex.find(at);
+                    if (fi == _providerIndex.end() || !finalLive[fi->second]) {
+                        return nullptr;
+                    }
+                    return &finalFrames[fi->second];
+                };
+            const bool parented = !interpolator.driverParent.IsEmpty();
+            const RigExecPointFrame *pf =
+                parented ? frameOfFinal(interpolator.driverParent) : nullptr;
+            const RigExecPointFrame *pr =
+                parented ? frameOfRest(interpolator.driverParent) : nullptr;
+            const RigExecPointFrame *df = frameOfFinal(interpolator.driver);
+            const RigExecPointFrame *dr = frameOfRest(interpolator.driver);
+            if (!df || !dr ||
+                !RigExecFrameTranslation(*df, *dr, pf, pr, &translation)) {
+                pose->diagnostics.push_back(
+                    "pose interpolator " + interpolator.prim.GetString() +
+                    " could not measure its driver's translation; its "
+                    "weights are zero this generation");
+                publishAllZero();
+                continue;
+            }
+            translation /= 100.0;
+            translationPtr = &translation;
+        }
         interpolator.solver.Evaluate(
-            RigExecRbfEulerFromQuaternion(delta), nullptr, &weights,
+            RigExecRbfEulerFromQuaternion(delta), translationPtr, &weights,
             interpolator.allowNegativeWeights);
         if (weights.size() != interpolator.poseWeights.size()) {
             pose->diagnostics.push_back(

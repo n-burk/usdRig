@@ -262,9 +262,9 @@ RunCase(const Case &c)
 // The edit-latency bench's tiers, on the biped.
 
 const SdfPath kBiped("/Biped/Rig");
-const SdfPath kHips("/Biped/Rig/Controls/hips_ctl");
+const SdfPath kHips("/Biped/Rig/Main/Shot/Aux/Controls/M_Body");
 const SdfPath kMover(
-    "/Biped/Rig/Movers/ballRoll_l_down_w/ballRoll_l_down_w_4_multiply");
+    "/Biped/Rig/Movers/ballRoll_l_down_w/L_BallRoll_down_w_4_multiply");
 const SdfPath kCornea("/Biped/Materials/cornea_mat");
 constexpr double kHeld = 10.0;
 
@@ -713,6 +713,12 @@ main(int argc, char **argv)
         return 2;
     }
     std::printf("mode: %s\n", Parity() ? "parity" : "baked");
+    // Unbuffered, and with the whole run inside a catch: an exception out of
+    // the evaluator reaches ucrtbase's abort, which discards the buffer and
+    // leaves ctest reporting 0xc0000409 with no output at all. A test that
+    // cannot say what went wrong costs more than the two lines.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    try {
 
     TestAKeyedAvarSampleRunsItsCone(examplesDir);
     TestAGuideValueRunsNothing(examplesDir);
@@ -723,6 +729,11 @@ main(int argc, char **argv)
     TestLayerMetadataRebuilds(examplesDir);
     TestANamedInputNoStepDeclaresBumpsTheStamp(examplesDir);
     TestAConnectedChainSourceIsReported(examplesDir);
+
+    } catch (const std::exception &error) {
+        std::printf("FAIL: threw: %s\n", error.what());
+        return 1;
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

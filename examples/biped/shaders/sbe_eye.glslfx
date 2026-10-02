@@ -1,0 +1,1767 @@
+-- glslfx version 0.1
+
+// ==========================================================================
+// Squarebit Eye - Copyright (c) 2026 Squarebit LLC. All rights reserved.
+// Proprietary and confidential.
+//
+// Licensed under the Squarebit Eye End User License Agreement:
+//   https://www.squarebitstudios.com/squarebit-eye/eula
+// Use, copying, modification and distribution are permitted only under the
+// terms of that agreement; not for redistribution outside those terms.
+//
+// SPDX-License-Identifier: LicenseRef-SquarebitEye-EULA
+// Source: Squarebit Eye, github.com/squarebit-studios/SquarebitEye
+//
+// GENERATED FILE - DO NOT EDIT.
+//   Generator:       tools/gen_storm_glslfx.py
+//   Source of truth: core/eye_core.glsl
+//
+// hdStorm native eye material: surface (parametric) + SPEC 6b
+// displacement (params baked, since Storm doesn't expose material
+// params to the geom stage).
+// ==========================================================================
+
+-- configuration
+{
+    "attributes": {
+        "eyeProjector": { "default": [1.0, 0.0, 0.0, 0.0] },
+        "eyeDials":     { "default": [0.0, 0.0, 0.0, 0.0] }
+    },
+    "parameters": {
+        "pupilBleedAmount":     { "default": 0.2,  "description": "How much light bleeds out of the pupil." },
+        "pupilBleedWidth":      { "default": 1.0,  "description": "How far the bleed reaches." },
+        "pupilBleedExponent":   { "default": 2.0,  "description": "Falloff of the bleed." },
+        "pupilBleedLight":      { "default": 1.0,  "description": "Brightness of the bleed." },
+        "pupilBleedSaturation": { "default": 0.5,  "description": "Saturation of the bleed." },
+        "pupilRadius":  { "default": 0.1667, "description": "Pupil radius, the eye control's dial." },
+        "irisRadius":   { "default": 0.4875, "description": "Iris outer radius (the limbus)." },
+        "irisWidth":    { "default": 1.0,    "description": "Iris width scale; 1 is round." },
+        "irisHeight":   { "default": 1.0,    "description": "Iris height scale; 1 is round." },
+        "pupilWidth":   { "default": 1.0,    "description": "Pupil width scale; 1 is round." },
+        "pupilHeight":  { "default": 1.0,    "description": "Pupil height scale; 1 is round." }
+    },
+    "techniques": {
+        "default": {
+            "displacementShader": {
+                "source": [ "SquarebitEye.Core", "SquarebitEye.Displacement" ]
+            },
+            "surfaceShader": {
+                "source": [ "SquarebitEye.Core", "SquarebitEye.Surface" ]
+            }
+        }
+    }
+}
+
+-- glsl SquarebitEye.Core
+
+float ec_saturate(float x) { return clamp(x, 0.0f, 1.0f); }
+
+// The SHIPPED iris radius (gen_materialx.SCALARS LimbusRadius) and the
+// height of its limbus rim on the unit eyeball, sqrt(1 - L^2). These are
+// the REFERENCE the iris plane is quoted against, so the authored
+// irisPlaneZ means exactly what it says on the default eye and scales from
+// there. tools/check_bulge_mirrors.py gates them against SCALARS - a
+// reference that drifts from the default it refers to is silently wrong.
+// The anatomical corneal index, and the fraction of the limbus radius that
+// the head-on limbus ray lands at on the SHIPPED eye. That fraction IS the
+// refraction behaviour - how much of its aperture the iris fills - and
+// ecCorneaIor holds it constant as the iris moves. Both are gated against
+// SCALARS by tools/check_bulge_mirrors.py.
+
+// ---------------------------------------------------------------------
+// LOCAL EDIT, and the only one: the eye reads its own OBJECT space.
+//
+// As generated this shader projects against a unit eyeball at the WORLD
+// origin looking down +Z -- the centre and forward are literals in the
+// eye_project call below, because Storm cannot hand material parameters
+// to the geometry stage. That is exact for the reference stage, whose
+// eye is at the origin, and wrong for an eye in a head: ours sits at
+// (3.38, 164.30, 1.38), so every fragment projected far outside the
+// iris and the eye shaded as plain sclera.
+//
+// Dividing out the prim's own transform puts the fragment back in the
+// space the literals describe. HD_HAS_transform is Storm's guard for a
+// prim that has one; without it this is the identity and the generated
+// behaviour is untouched, so the reference stage still renders exactly
+// as it did.
+//
+// Uniform scale and a translation is all the eye carries, so the normal
+// needs no inverse-transpose -- transform and renormalise is exact here.
+//
+// IN CORE, not in Surface. The configuration builds the surface shader
+// from Core + Surface and the displacement shader from Core +
+// Displacement, and both call this. Declared in Surface it is missing
+// from the displacement compile, that shader fails, and Storm drops the
+// whole material and draws its fallback -- which is a white eye that
+// looks exactly like a shader working on the wrong geometry.
+// ---------------------------------------------------------------------
+mat4 ecWorldToObject()
+{
+    // The PROJECTOR first, when the rig publishes one.
+    //
+    // The eyeball is moved by a skin and a socket-stretch cluster, so its
+    // transform is its placement and cannot also be the frame the iris is
+    // quoted against. The rig computes the projector separately and hands
+    // it over as a primvar, which is the only channel a per-evaluation
+    // matrix has into the geometry stage.
+    //
+    // The cast is not cosmetic: where the device reports double
+    // precision Storm uploads a matrix4d primvar as dmat4, and assigning
+    // that to a mat4 fails to compile -- which drops the whole material
+    // to the grey fallback and reports nothing.
+    //
+    // Falling back to the prim's transform keeps every stage that has no
+    // rig -- the eye's own reference stage among them -- as it was.
+#if defined(HD_HAS_eyeProjector)
+    return inverse(mat4(HdGet_eyeProjector()));
+#elif defined(HD_HAS_transform)
+    return inverse(HdGet_transform());
+#else
+    return mat4(1.0);
+#endif
+}
+
+
+
+// ------------------------------------------- pupil bleed inputs ---
+// The light that bleeds out of the pupil, as Shader inputs. Same
+// fallback rule as the iris and pupil above: a material that
+// declares none of them renders exactly as the generator wrote it.
+
+float ecInput_pupilBleedAmount(float baked)
+{
+#if defined(HD_HAS_pupilBleedAmount)
+    return HdGet_pupilBleedAmount();
+#else
+    return baked;
+#endif
+}
+
+float ecInput_pupilBleedWidth(float baked)
+{
+#if defined(HD_HAS_pupilBleedWidth)
+    return HdGet_pupilBleedWidth();
+#else
+    return baked;
+#endif
+}
+
+float ecInput_pupilBleedExponent(float baked)
+{
+#if defined(HD_HAS_pupilBleedExponent)
+    return HdGet_pupilBleedExponent();
+#else
+    return baked;
+#endif
+}
+
+float ecInput_pupilBleedLight(float baked)
+{
+#if defined(HD_HAS_pupilBleedLight)
+    return HdGet_pupilBleedLight();
+#else
+    return baked;
+#endif
+}
+
+float ecInput_pupilBleedSaturation(float baked)
+{
+#if defined(HD_HAS_pupilBleedSaturation)
+    return HdGet_pupilBleedSaturation();
+#else
+    return baked;
+#endif
+}
+
+// ------------------------------------------------ eye look inputs ---
+// The iris and pupil as Shader inputs, each falling back to the
+// literal the generator baked. Storm declares HD_HAS_<name> for an
+// input the material actually carries, so a material that declares
+// none of these is byte-for-byte the generated behaviour.
+
+// ---------------------------------------------------------------------
+// The rig's shape dials.
+//
+// The rig publishes them packed into one constant matrix primvar rather
+// than as eight floats: a matrix primvar is a road that already exists
+// (the projector's frame travels it) and one dirty flag per frame beats
+// eight. Slot i is row i/4, column i%4, in the order the projector's
+// rigExec:shaderDialSources lists them -- which
+// tools/biped/eye_shape_avars.py writes in exactly this order:
+//
+//   0 pupilX   1 pupilY   2 irisX        3 irisY
+//   4 pupilTX  5 pupilTY  6 pupilRadius  7 irisRadius
+//
+// ZERO IS NEUTRAL on every one, so an unbound primvar (all zeros) leaves
+// the model's own value untouched, which is what makes this safe to ship
+// switched on. Sizes MULTIPLY -- the rig is a factor on top of what the
+// model says -- and the two pupil offsets ADD, because an offset's
+// neutral can only be zero.
+float ecDial(int slot)
+{
+#if defined(HD_HAS_eyeDials)
+    mat4 dials = mat4(HdGet_eyeDials());
+    return dials[slot / 4][slot % 4];
+#else
+    return 0.0;
+#endif
+}
+
+float ecDialScale(float baked, int slot) { return baked * (1.0 + ecDial(slot)); }
+float ecDialOffset(float baked, int slot) { return baked + ecDial(slot); }
+
+float ecInput_pupilRadius(float baked)
+{
+#if defined(HD_HAS_pupilRadius)
+    // The dial multiplies whatever base is in force. The material
+    // binds this parameter, so HD_HAS_ is ALWAYS defined and the
+    // #else below is dead -- putting the dial only there is why
+    // turning one did nothing.
+    return ecDialScale(HdGet_pupilRadius(), 6);
+#else
+    return ecDialScale(baked, 6);
+#endif
+}
+
+float ecInput_irisRadius(float baked)
+{
+#if defined(HD_HAS_irisRadius)
+    // The dial multiplies whatever base is in force. The material
+    // binds this parameter, so HD_HAS_ is ALWAYS defined and the
+    // #else below is dead -- putting the dial only there is why
+    // turning one did nothing.
+    return ecDialScale(HdGet_irisRadius(), 7);
+#else
+    return ecDialScale(baked, 7);
+#endif
+}
+
+float ecInput_irisWidth(float baked)
+{
+#if defined(HD_HAS_irisWidth)
+    // The dial multiplies whatever base is in force. The material
+    // binds this parameter, so HD_HAS_ is ALWAYS defined and the
+    // #else below is dead -- putting the dial only there is why
+    // turning one did nothing.
+    return ecDialScale(HdGet_irisWidth(), 2);
+#else
+    return ecDialScale(baked, 2);
+#endif
+}
+
+float ecInput_irisHeight(float baked)
+{
+#if defined(HD_HAS_irisHeight)
+    // The dial multiplies whatever base is in force. The material
+    // binds this parameter, so HD_HAS_ is ALWAYS defined and the
+    // #else below is dead -- putting the dial only there is why
+    // turning one did nothing.
+    return ecDialScale(HdGet_irisHeight(), 3);
+#else
+    return ecDialScale(baked, 3);
+#endif
+}
+
+float ecInput_pupilWidth(float baked)
+{
+#if defined(HD_HAS_pupilWidth)
+    // The dial multiplies whatever base is in force. The material
+    // binds this parameter, so HD_HAS_ is ALWAYS defined and the
+    // #else below is dead -- putting the dial only there is why
+    // turning one did nothing.
+    return ecDialScale(HdGet_pupilWidth(), 0);
+#else
+    return ecDialScale(baked, 0);
+#endif
+}
+
+float ecInput_pupilOffsetX(float baked) { return ecDialOffset(baked, 4); }
+float ecInput_pupilOffsetY(float baked) { return ecDialOffset(baked, 5); }
+
+float ecInput_pupilHeight(float baked)
+{
+#if defined(HD_HAS_pupilHeight)
+    // The dial multiplies whatever base is in force. The material
+    // binds this parameter, so HD_HAS_ is ALWAYS defined and the
+    // #else below is dead -- putting the dial only there is why
+    // turning one did nothing.
+    return ecDialScale(HdGet_pupilHeight(), 1);
+#else
+    return ecDialScale(baked, 1);
+#endif
+}
+
+// swizzle-free accessors (portability rule)
+vec2 ecXY(vec3 v)          { return vec2(v.x, v.y); }
+vec3 ecV3(vec2 v, float z) { return vec3(v.x, v.y, z); }
+
+// ------------------------------------------------------------------ types ---
+
+// Shared look parameters (§4). eta / F0 / corneaCenterZ are CPU-derived (§2):
+//   eta = 1/ior;  F0 = ((ior-1)/(ior+1))^2;
+//   corneaCenterZ = ecCorneaCenterZ(limbusRadius, corneaApexZ, corneaRadius)
+// corneaRadius is a SCALE on the fitted radius, not a length - see
+// ecCorneaFitRadius. Hosts must derive the centre with that function and not
+// with apex - radius, or the shading cornea sits where the mesh is not.
+struct EcLook {
+  float eta;
+  float F0;
+  float limbusRadius;
+  float limbusWidth;
+  float limbusDarkening;
+  float irisPlaneZ;
+  float corneaCenterZ;
+  float refPupilRadius;
+  float irisHeightScale;
+  float causticStrength;
+  float causticExponent;
+  float causticShadowStrength;
+  float scleraWrapAmount;
+  int   refractionMode;      // 0 = MESH_NORMAL, 1 = VIRTUAL_CORNEA (§4)
+  // §4.4 — elliptical iris/pupil + decentered pupil. All default-neutral:
+  // scales 1, offsets 0 reproduce the circular pipeline bit-for-bit.
+  float irisScaleX;          // limbus semi-axis multiplier, X = width
+  float irisScaleY;          // limbus semi-axis multiplier, Y = height
+  float pupilScaleX;         // pupil semi-axis multiplier, X = width
+  float pupilScaleY;         // pupil semi-axis multiplier, Y = height
+  float pupilOffsetX;        // pupil center, projector plane units
+  float pupilOffsetY;        //   (containment-clamped inside the limbus)
+  // §4.6 — pupil shape: superellipse squareness + rim noise. All
+  // default-neutral: squareness 0 and noiseAmount 0 reproduce the §4.4
+  // elliptical pipeline bit-for-bit.
+  float pupilSquareness;     // 0 = ellipse ... 1 = rounded rectangle (goat)
+  float pupilNoiseAmount;    // rim-noise amplitude, fraction of pupil radius
+  float pupilNoiseFreq;      // rim-noise base lobe count (integer-snapped)
+  float pupilNoiseSeed;      // phase seed — re-rolls the rim pattern
+  float pupilNoiseType;      // 0 = lattice (default), 1 = billow (creased
+                             //   abs-FBM), 2 = ridged (sharp crests),
+                             //   3 = scallop (1-D cellular: rounded lobes
+                             //   with sharp notches — pupillary ruff)
+  // §4.6 — soft pupil edge: the pupil fades into the iris instead of a hard
+  // cut. Default-neutral toward the legacy edge too — pupilBlend 0 + exp 1
+  // gives the crisp 0.01-AA boundary. Independent of the §4.7 light bleed.
+  float pupilBlend;          // fringe width, fraction of pupil->limbus span
+  float pupilBlendExp;       // edge profile exponent (>1 pushes the fade deeper)
+  // §4.7 — pupil light bleed: veiling scatter of rim light into the pupil,
+  // CIE disability-glare style falloff (L_v ~ 1/theta^x). Default-neutral:
+  // amount 0 reproduces §4.4/§4.6 bit-for-bit.
+  float pupilBleedAmount;    // veil strength at the pupil rim (0 = off)
+  float pupilBleedWidth;     // reach into the pupil, fraction of the
+                             //   local pupil radius (1 = center)
+  float pupilBleedExponent;  // falloff shape (CIE glare x ≈ 1.5..2)
+  // §4.7b — light-reactive bleed. Response 0 = uniform veil (§4.7 as-is);
+  // 1 = the veil concentrates into a far-side crescent, same sign
+  // convention and exponent family as the §4.2 caustic. bleedLightPS is
+  // HOST-SET (not artist-facing): the projector-space primary light XY the
+  // caustic already uses; |xy| < 1e-4 falls back to the uniform veil.
+  float pupilBleedLight;     // 0 = uniform ... 1 = fully light-driven
+  vec2  bleedLightPS;        // projector-space light dir XY (host-set)
+  // §4.8 — limbal ring breakup: per-angle modulation of ring darkening
+  // and width via the §4.6 lattice noise. All default-neutral: amount 0
+  // reproduces the uniform ring bit-for-bit. Hosts may ALSO sample an
+  // optional grayscale limbus texture at EcIrisProj.limbusUV to scale
+  // the darkening (white / no map = neutral).
+  float limbusNoiseAmount;   // ring breakup amplitude (0 = uniform)
+  float limbusNoiseFreq;     // base lobe count around the ring
+  float limbusNoiseSeed;     // re-rolls the breakup pattern
+  // §4.8b — light-dependent limbus: the dark limbal ring is a cornea-
+  // refraction effect (TLOU2 tech-art), so it FADES as the primary light
+  // comes head-on (down the eye axis) and is strongest at grazing/side light.
+  // 0 = static ring (legacy, bit-for-bit); 1 = fully light-driven (fades to
+  // nothing head-on). Uses bleedLightPS, so it needs the host's light dir.
+  float limbusLightResponse;
+};
+
+struct EcPolar {
+  float r;
+  float theta;
+};
+
+// Result of the projection pipeline steps 1-5 + region weights (§3).
+// The host samples T_iris at .uv (after optional parallax), then composes.
+struct EcIrisProj {
+  vec2  uv;           // iris disc UV in [0,1]^2, clamped (§12.3)
+  float pupilMask;    // 1 inside pupil (render pupilColor), soft §4.6 edge
+  float irisWeight;   // 1 = iris/limbus region, 0 = sclera (by surface radius)
+  float ringMul;      // limbus darkening multiplier, apply to iris+sclera blend
+  vec2  limbusUV;     // §4.8 ring-band UV: x = angle01, y = across-band 0..1
+                      //   (for the host's OPTIONAL limbus breakup texture)
+  float fresnel;      // Schlick cornea Fresnel — reflection lerp weight (§3.10)
+  vec3  refractedDir; // unit ray inside the eye (feed to parallax)
+  float hitR;         // iris-plane hit radius (diagnostics / caustic)
+  vec2  hitXY;        // iris-plane hit point (caustic)
+  float bleedWeight;  // §4.7 additive rim-veil weight (see ecPupilDilate)
+};
+
+// ------------------------------------------------------- core functions -----
+
+// §3.3 — refraction with clamped discriminant. I = unit incident dir pointing
+// INTO the surface (i.e. -V), N = unit outward normal, eta = 1/ior (< 1 on
+// entry, so real TIR cannot occur; the clamp guards fp noise at grazing).
+// Result stays unit-length for unit inputs (at k==0 it is the unit tangent).
+vec3 ecCorneaRefract(vec3 I, vec3 N, float eta) {
+  float NdotI = clamp(dot(N, I), -1.0f, 1.0f);
+  float k = 1.0f - eta * eta * (1.0f - NdotI * NdotI);
+  k = max(k, 0.0f);
+  return eta * I - (eta * NdotI + sqrt(k)) * N;
+}
+
+// §6 / PLAN §6 — virtual-cornea normal: implicit sphere centered on the
+// projector axis. Makes refraction independent of the (possibly coarse,
+// recomputed, or LOD-swapped) mesh normal.
+vec3 ecVirtualCorneaNormal(vec3 P, float corneaCenterZ) {
+  vec3 d = P - vec3(0.0f, 0.0f, corneaCenterZ);
+  return d / max(length(d), 1e-5f);
+}
+
+// SPEC §3.4/§2 — THE IRIS PLANE FOLLOWS THE IRIS. The limbus rim sits on the
+// eyeball at height h = sqrt(1 - L^2), and the iris is the disc whose EDGE IS
+// that rim, set back by the anterior chamber. Read as an absolute depth,
+// irisPlaneZ broke that relationship the moment the iris grew: at limbus 0.75
+// the rim has dropped to 0.661 while the plane stayed at 0.75, so the plane
+// sat IN FRONT of its own rim and the disc poked out through the sclera.
+// Refracted rays from the surface near the limbus then hit that plane BEHIND
+// the viewer (t < 0 in ecIrisPlaneIntersect) - which is the radial smear, and
+// why the pupil stopped reading as something inside the eye.
+//
+// So the depth rides the rim and the chamber keeps its proportion:
+//
+//     z = irisPlaneZ * h(L) / h(0.4875f)
+//
+// That is the IDENTITY at the shipped iris - the authored number still means
+// exactly what it says there - and it keeps the disc inside the eyeball at
+// every size: L^2 + (0.85897 h)^2 = 0.2621 L^2 + 0.7379 <= 1 for all L <= 1,
+// with equality only at L = 1, where the iris IS the front hemisphere.
+//
+// ONE plane for an elliptical iris, driven by the mean semi-axis: a plane has
+// a single z, and a per-azimuth depth would not be a plane at all.
+float ecIrisPlaneZ(float irisPlaneZ, float limbusRadius,
+                   float irisScaleX, float irisScaleY) {
+  float L = clamp(limbusRadius * sqrt(max(irisScaleX * irisScaleY, 0.0f)),
+                  0.0f, 1.0f);
+  return irisPlaneZ * sqrt(max(1.0f - L * L, 0.0f)) / 0.8731230f;
+}
+
+// §3.4 — ray/plane intersection with plane z = irisPlaneZ. fp32 (§9).
+// Valid rays travel -Z (into the eye); the guard keeps t finite for any input
+// and t is clamped >= 0 so we never march backwards out of the eye.
+vec2 ecIrisPlaneIntersect(vec3 P, vec3 R, float irisPlaneZ) {
+  float rz = (R.z >= 0.0f) ? max(R.z, 1e-5f) : min(R.z, -1e-5f);
+  float t = (irisPlaneZ - P.z) / rz;
+  t = max(t, 0.0f);
+  return ecXY(P) + t * ecXY(R);
+}
+
+// §1 — polar iris coordinates. theta is meaningless at r ~ 0; every consumer
+// of theta multiplies by a radius-derived factor, so this is safe by contract.
+EcPolar ecPolar(vec2 p) {
+  EcPolar o;
+  o.r = length(p);
+  o.theta = atan(p.y, p.x);
+  return o;
+}
+
+// §4.4 — radius of an axis-aligned ellipse (semi-axes a, b) along the unit
+// direction (cosT, sinT). Circular case (a == b) returns a for any direction.
+float ecEllipseRadius(float a, float b, float cosT, float sinT) {
+  float d = b * b * cosT * cosT + a * a * sinT * sinT;
+  return a * b / sqrt(max(d, 1e-5f));
+}
+
+// §4.4 — distance from an interior point c to the boundary of the
+// axis-aligned ellipse (semi-axes a, b) along unit direction u. Exact
+// ray-ellipse intersection; the positive root always exists for c inside
+// (guaranteed by the ecPupilGeom containment clamp).
+float ecEllipseExit(vec2 c, vec2 u, float a, float b) {
+  vec2 cn = vec2(c.x / a, c.y / b);
+  vec2 un = vec2(u.x / a, u.y / b);
+  float A = max(dot(un, un), 1e-5f);
+  float B = dot(cn, un);
+  float C = dot(cn, cn) - 1.0f;                    // < 0 strictly inside
+  float disc = max(B * B - A * C, 0.0f);
+  return (sqrt(disc) - B) / A;
+}
+
+// §4.6 — superellipse exponent from the artist-facing squareness dial.
+// 0 -> n = 2 (ellipse, the §4.4 pipeline), 1 -> n = 20 (rounded rectangle —
+// with pupilScaleX >> pupilScaleY this is the goat/sheep bar pupil).
+float ecPupilExponent(float squareness) {
+  return 2.0f / max(1.0f - 0.9f * ec_saturate(squareness), 0.1f);
+}
+
+// §4.6 — radius of the axis-aligned superellipse |x/a|^n + |y/b|^n = 1 along
+// the unit direction (cosT, sinT). n = 2 is the ellipse; consumers keep the
+// exact ecEllipseRadius path at neutral squareness (pow vs sqrt would move
+// last-bit results, and neutrality is bit-for-bit normative).
+float ecSuperellipseRadius(float a, float b, float cosT, float sinT, float n) {
+  float ca = pow(abs(cosT) / max(a, 1e-4f), n);
+  float sb = pow(abs(sinT) / max(b, 1e-4f), n);
+  return pow(max(ca + sb, 1e-5f), -1.0f / n);
+}
+
+// §4.6 — seamless periodic pupil rim noise (v2, hashed lattice). Sine
+// harmonics gave every lobe an identical depth — a uniform starburst;
+// seed/freq only relocated it. Here every lobe draws an independent random
+// depth from a permutation-polynomial hash, smoothly interpolated around
+// the circle (1-D periodic value noise), with a second octave for width
+// variation and a LOW-frequency amplitude envelope so stretches of rim go
+// nearly smooth while others crenellate deeply — irregular by design, and
+// the seed re-rolls the whole pattern. The hash uses only *, +, floor on
+// values kept inside fp32's exact-integer range, so it is bit-identical
+// across every dialect (no precision-fragile sin hashes). Range ⊂ [-1, 1].
+float ecMod289(float x) { return x - floor(x * (1.0f / 289.0f)) * 289.0f; }
+float ecPermute(float x) { return ecMod289((34.0f * x + 1.0f) * x); }
+// Random value in [-1, 1] for wrapped lattice index i of a k-lobe ring.
+float ecLatticeVal(float i, float k, float s) {
+  float idx = i - floor(i / k) * k;
+  return ecPermute(ecPermute(idx + s) + idx) * (2.0f / 288.0f) - 1.0f;
+}
+// Periodic 1-D value noise over the ring: t01 in [0,1] wraps seamlessly.
+float ecNoiseOctave(float t01, float k, float s) {
+  float x = t01 * k;
+  float j = floor(x);
+  float t = x - j;
+  t = t * t * (3.0f - 2.0f * t);
+  return mix(ecLatticeVal(j, k, s), ecLatticeVal(j + 1.0f, k, s), t);
+}
+float ecPupilNoise(float theta, float freq, float seed) {
+  float k = max(floor(freq + 0.5f), 1.0f);
+  float s = floor(seed + 0.5f);
+  float t01 = theta * (1.0f / 6.2831853f) + 0.5f;   // [-π,π] -> [0,1]
+  // per-lobe depths + half-amplitude off-harmonic octave (widths vary)
+  float detail = ecNoiseOctave(t01, k, s)
+               + 0.5f * ecNoiseOctave(t01, 2.0f * k + 1.0f, s + 101.0f);
+  // slow envelope, squared for contrast: smooth stretches vs deep clusters
+  float env = 0.5f + 0.5f * ecNoiseOctave(
+      t01, max(floor(k * 0.25f + 0.5f), 2.0f), s + 17.0f);
+  return detail * (1.0f / 1.5f) * env * env;
+}
+
+// §4.6 — billow variant: abs-FBM over the SAME periodic lattice octaves
+// (2·|octave| − 1 maps each octave to [-1,1] with sharp creases at its
+// zero crossings — the bunched, ridged breakup of billow noise). Same
+// amplitude envelope and range ⊂ [-1, 1], so the §4.6 containment bound
+// holds unchanged.
+float ecPupilNoiseBillow(float theta, float freq, float seed) {
+  float k = max(floor(freq + 0.5f), 1.0f);
+  float s = floor(seed + 0.5f);
+  float t01 = theta * (1.0f / 6.2831853f) + 0.5f;
+  float detail = (2.0f * abs(ecNoiseOctave(t01, k, s)) - 1.0f)
+               + 0.5f * (2.0f * abs(ecNoiseOctave(t01, 2.0f * k + 1.0f,
+                                                  s + 101.0f)) - 1.0f);
+  float env = 0.5f + 0.5f * ecNoiseOctave(
+      t01, max(floor(k * 0.25f + 0.5f), 2.0f), s + 17.0f);
+  return detail * (1.0f / 1.5f) * env * env;
+}
+
+// §4.6 — ridged variant: 1 − 2·|octave| (billow negated) — sharp bright
+// crests at octave zero crossings read as outward rim spikes. Same
+// envelope; range ⊂ [-1, 1].
+float ecPupilNoiseRidged(float theta, float freq, float seed) {
+  float k = max(floor(freq + 0.5f), 1.0f);
+  float s = floor(seed + 0.5f);
+  float t01 = theta * (1.0f / 6.2831853f) + 0.5f;
+  float detail = (1.0f - 2.0f * abs(ecNoiseOctave(t01, k, s)))
+               + 0.5f * (1.0f - 2.0f * abs(ecNoiseOctave(
+                     t01, 2.0f * k + 1.0f, s + 101.0f)));
+  float env = 0.5f + 0.5f * ecNoiseOctave(
+      t01, max(floor(k * 0.25f + 0.5f), 2.0f), s + 17.0f);
+  return detail * (1.0f / 1.5f) * env * env;
+}
+
+// §4.6 — scallop variant: 1-D periodic cellular (Worley F1) over the
+// angular lattice — one jittered feature point per lobe cell; the value
+// peaks at each feature and drops in a sharp V between neighbors, giving
+// rounded lobes with crisp notches (the scalloped pupillary-ruff margin).
+// Same envelope; range ⊂ [-1, 1].
+float ecPupilNoiseScallop(float theta, float freq, float seed) {
+  float k = max(floor(freq + 0.5f), 1.0f);
+  float s = floor(seed + 0.5f);
+  float t01 = theta * (1.0f / 6.2831853f) + 0.5f;
+  float x = t01 * k;
+  float j = floor(x);
+  float f1 = 2.0f;
+  for (int c = -1; c <= 1; ++c) {
+    float cell = j + float(c);
+    // jittered feature point inside the (wrapped) cell
+    float p = cell + 0.5f + 0.4f * ecLatticeVal(cell, k, s + 53.0f);
+    f1 = min(f1, abs(x - p));
+  }
+  float env = 0.5f + 0.5f * ecNoiseOctave(
+      t01, max(floor(k * 0.25f + 0.5f), 2.0f), s + 17.0f);
+  return clamp(1.0f - 2.2f * f1, -1.0f, 1.0f) * env * env;
+}
+
+// §4.4/§4.6 — sanitized pupil/limbus geometry (normative). The pupil
+// ellipse is capped relative to the limbus and its center is clamped so the
+// WHOLE pupil stays inside the limbus for any input: in limbus-normalized
+// space the pupil fits a disc of its largest normalized semi-axis times the
+// worst-case §4.6 boundary reach, so |center_n| <= 1 - that reach
+// guarantees containment.
+struct EcPupilGeom {
+  vec2 center;        // clamped pupil center (plane units)
+  vec2 pupilAxes;     // pupil ellipse semi-axes  (Pa, Pb)
+  vec2 limbusAxes;    // limbus ellipse semi-axes (La, Lb)
+  // §4.6 pupil boundary shape, carried to ecPupilDilate:
+  float exponent;     // superellipse exponent (2 = ellipse)
+  float noiseAmount;  // rim-noise amplitude (0 = off)
+  float noiseFreq;    // rim-noise base lobe count
+  float noiseSeed;    // rim-noise phase seed
+  float noiseType;    // 0 = lattice, 1 = billow
+  // §4.7 pupil light bleed, carried to ecPupilDilate:
+  float bleedAmount;  // veil strength at the rim (0 = off)
+  float bleedWidth;   // reach into the pupil, dilation-f units
+  float bleedExp;     // falloff exponent
+  float bleedLight;   // §4.7b light response (0 = uniform)
+  float bleedLightExp;// crescent shaping (= causticExponent, §4.2 family)
+  vec2  bleedLightPS; // projector-space light XY (host-set)
+  // §4.6 soft pupil edge, carried to ecPupilDilate:
+  float blend;        // fringe width (fraction of pupil->limbus span)
+  float blendExp;     // edge profile exponent (>1 = wider halo)
+};
+EcPupilGeom ecPupilGeom(float pupilRadius, EcLook look) {
+  EcPupilGeom g;
+  g.exponent = ecPupilExponent(look.pupilSquareness);
+  g.noiseAmount = max(look.pupilNoiseAmount, 0.0f);
+  g.noiseFreq = look.pupilNoiseFreq;
+  g.noiseSeed = look.pupilNoiseSeed;
+  g.noiseType = look.pupilNoiseType;
+  g.bleedAmount = ec_saturate(look.pupilBleedAmount);   // §4.7
+  g.bleedWidth = look.pupilBleedWidth;
+  g.bleedExp = look.pupilBleedExponent;
+  g.bleedLight = ec_saturate(look.pupilBleedLight);     // §4.7b
+  g.bleedLightExp = look.causticExponent;
+  g.bleedLightPS = look.bleedLightPS;
+  g.blend = look.pupilBlend;                         // §4.6 soft pupil edge
+  g.blendExp = look.pupilBlendExp;
+  // §4.6 worst-case boundary reach vs the ellipse: superellipse corners
+  // extend by at most 2^(1/2 - 1/n) (p-norm equivalence; exactly 1 at
+  // n = 2) and rim noise by (1 + amount). Folding the reach into the caps
+  // keeps rP < rL along every ray for ANY input; neutral params keep both
+  // factors exactly 1 (exp2(0) = 1), preserving §4.4 bit-for-bit.
+  float reach = exp2(0.5f - 1.0f / g.exponent) * (1.0f + g.noiseAmount);
+  g.limbusAxes = vec2(max(look.limbusRadius * look.irisScaleX, 1e-4f),
+                      max(look.limbusRadius * look.irisScaleY, 1e-4f));
+  g.pupilAxes = vec2(
+      clamp(pupilRadius * look.pupilScaleX, 1e-4f,
+            0.98f * g.limbusAxes.x / reach),
+      clamp(pupilRadius * look.pupilScaleY, 1e-4f,
+            0.98f * g.limbusAxes.y / reach));
+  vec2 cn = vec2(look.pupilOffsetX / g.limbusAxes.x,
+                 look.pupilOffsetY / g.limbusAxes.y);
+  float limit = max(1.0f - reach * max(g.pupilAxes.x / g.limbusAxes.x,
+                                       g.pupilAxes.y / g.limbusAxes.y), 0.0f);
+  float cl = length(cn);
+  float k = (cl > limit) ? limit / max(cl, 1e-5f) : 1.0f;
+  g.center = vec2(cn.x * k * g.limbusAxes.x, cn.y * k * g.limbusAxes.y);
+  return g;
+}
+
+// §4.1/§4.4 — feature-preserving pupil dilation (normative formula),
+// generalized to elliptical, decentered pupils. Along each ray from the
+// pupil center, [pupil boundary, limbus boundary] maps linearly to the
+// authored texture's [refPupilRadius, limbusRadius] — the texture stays
+// circular and centered; limbus features stay pinned to the limbus.
+// f < 0 => pupil. Neutral geometry reduces to the classic
+// (rHit - pupilRadius) / (limbusRadius - pupilRadius).
+struct EcDilated {
+  vec2  uv;
+  float pupilMask;
+  float bleedWeight;  // §4.7 rim-veil weight — host composites ADDITIVELY
+};
+EcDilated ecPupilDilate(vec2 hit, EcPupilGeom g,
+                        float refPupilRadius, float limbusRadius) {
+  vec2 d = vec2(hit.x - g.center.x, hit.y - g.center.y);
+  float rHit = length(d);
+  // Direction from the pupil center. At the exact center it is undefined —
+  // pick +X so rP/rL stay finite: §4.7 reads f's MAGNITUDE deep inside the
+  // pupil (pre-§4.7 only its sign mattered there). The center pixel is
+  // occluded by pupilMask = 1 either way, so neutral output is unchanged.
+  vec2 u = (rHit > 1e-4f) ? d / rHit : vec2(1.0f, 0.0f);
+  // §4.6 pupil boundary along u: ellipse at neutral squareness (exact §4.4
+  // path — bit-for-bit normative), superellipse when squared off; rim noise
+  // rides the boundary (amount 0 multiplies by exactly 1). The dilation
+  // remap below follows automatically, so iris fibers compress/wobble with
+  // the boundary like a real sphincter.
+  float rP = (g.exponent <= 2.0f)
+      ? ecEllipseRadius(g.pupilAxes.x, g.pupilAxes.y, u.x, u.y)
+      : ecSuperellipseRadius(g.pupilAxes.x, g.pupilAxes.y, u.x, u.y,
+                             g.exponent);
+  // noiseType selects the algorithm; 0 keeps the exact lattice path.
+  float thN = atan(u.y, u.x);
+  float nz = (g.noiseType < 0.5f)
+      ? ecPupilNoise(thN, g.noiseFreq, g.noiseSeed)
+      : (g.noiseType < 1.5f)
+          ? ecPupilNoiseBillow(thN, g.noiseFreq, g.noiseSeed)
+          : (g.noiseType < 2.5f)
+              ? ecPupilNoiseRidged(thN, g.noiseFreq, g.noiseSeed)
+              : ecPupilNoiseScallop(thN, g.noiseFreq, g.noiseSeed);
+  rP = rP * (1.0f + g.noiseAmount * nz);
+  float rL = ecEllipseExit(g.center, u, g.limbusAxes.x, g.limbusAxes.y);
+  // f: signed pupil->limbus distance, 0 at the pupil boundary, 1 at the limbus.
+  float f = (rHit - rP) / max(rL - rP, 1e-4f);
+
+  EcDilated o;
+  // §4.6 — soft pupil edge: fade black -> iris over [0, g.blend] of the span
+  // (0.01 AA floor), shaped by g.blendExp (>1 keeps the pupil darker further
+  // out then falls off, a wider halo). blend 0 + exp 1 reproduces the legacy
+  // crisp 0.01-AA edge, so neutral output is bit-for-bit unchanged.
+  float m = smoothstep(0.0f, max(0.01f, g.blend), f);
+  m = pow(m, max(g.blendExp, 1e-5f));
+  o.pupilMask = 1.0f - m;
+  // §4.7 pupil light bleed — a WEIGHT the host composites as ADDITIVE
+  // veiling light over the dark pupil (never a mask ease: replacing the
+  // pupil with full-brightness rim albedo read as paint, not glare).
+  // Strongest at the rim (bt = 0), gone by bleedWidth (bt = 1) — the
+  // pupil center stays dark. The clamped remap below samples the rim
+  // ring inside the pupil, so the host's iris sample supplies the rim
+  // hue. Amount 0 => weight 0 (neutral); follows the §4.6 boundary
+  // since f is measured from the noisy superellipse.
+  // Veil depth is a FRACTION of the local pupil radius along u
+  // (bleedWidth 1 = reaches the center). An earlier form divided by the
+  // per-direction iris band (rL − rP), which collapses along the long
+  // axis of squared/bar pupils — the halo pinched into a bowtie meeting
+  // at the center. Radius-proportional depth hugs the whole boundary at
+  // a thickness scaling with local pupil size for ANY shape.
+  float bt = ec_saturate((1.0f - rHit / max(rP, 1e-4f)) /
+                      max(g.bleedWidth, 1e-4f));
+  float veil = g.bleedAmount * pow(max(1.0f - bt, 0.0f),
+                                   max(g.bleedExp, 1.0f));
+  // §4.7b — light-reactive veil: concentrate into the far-side crescent
+  // (same sign convention as ecCausticKick: scatter exits opposite the
+  // light), shaped by the §4.2 caustic exponent. Response 0 mixes by
+  // exactly 0 (neutral §4.7); a degenerate light (|xy| ~ 0, e.g. light
+  // straight down the eye axis) falls back to the uniform veil.
+  float lLen = length(g.bleedLightPS);
+  float sSide = dot(u, g.bleedLightPS / max(lLen, 1e-4f));
+  float crescent = pow(ec_saturate(-sSide), max(g.bleedLightExp, 1.0f));
+  float lightGate = g.bleedLight * step(1e-4f, lLen);
+  o.bleedWeight = veil * mix(1.0f, crescent, lightGate);
+
+  float fc = clamp(f, 0.0f, 1.0f);
+  float rTex = refPupilRadius + fc * (limbusRadius - refPupilRadius);
+  float rn = 0.5f * (rTex / max(limbusRadius, 1e-4f));
+  o.uv = vec2(0.5f + rn * u.x, 0.5f + rn * u.y);
+  return o;
+}
+
+// §3.8 — region weight by SURFACE radial coordinate (not the hit radius):
+// 1 = iris side of the limbus band, 0 = sclera side. Arithmetic, branchless.
+float ecIrisWeight(float rSurface, float limbusRadius, float limbusWidth) {
+  return 1.0f - smoothstep(limbusRadius - limbusWidth,
+                           limbusRadius + limbusWidth, rSurface);
+}
+
+// §4/§4.8 — procedural limbal ring (in-core always procedural; the host's
+// optional texture modulates ON TOP via limbusUV). Returns a multiplier:
+// 1 away from the ring, (1 - darkening) at its center. theta = surface
+// azimuth; nAmount 0 scales width and darkening by exactly 1 (neutral).
+float ecLimbusRing(float rSurface, float theta, float limbusRadius,
+                   float limbusWidth, float darkening,
+                   float nAmount, float nFreq, float nSeed) {
+  float t01 = theta * (1.0f / 6.2831853f) + 0.5f;
+  float k = max(floor(nFreq + 0.5f), 1.0f);
+  float s = floor(nSeed + 0.5f);
+  // independent lobes for darkening and width — the ring thins where it
+  // lightens sometimes and not others, like a real limbal ring
+  float nD = ecNoiseOctave(t01, k, s + 7.0f);
+  float nW = ecNoiseOctave(t01, 2.0f * k + 1.0f, s + 43.0f);
+  float w = max(limbusWidth * (1.0f + nAmount * 0.6f * nW), 1e-4f);
+  float d = ec_saturate(darkening * (1.0f + nAmount * nD));
+  float ring = smoothstep(limbusRadius - 2.0f * w, limbusRadius, rSurface)
+             * (1.0f - smoothstep(limbusRadius, limbusRadius + 2.0f * w, rSurface));
+  return 1.0f - d * ring;
+}
+
+// §4.9 — sclera emissive MASK: where the white self-illuminates, as a plain
+// multiplier for scleraColor * scleraEmissive. Texture-free and P-only, so a
+// host can evaluate it on an EMISSION pin that never ran ecProjectIris — which
+// is exactly Unreal's shape: the emissive Custom node rebuilds P from the
+// primitive packs and has no projection result to read.
+//
+// Two earlier shapes were authored and REJECTED; they are recorded here so
+// they do not get re-invented:
+//   * a HARD region test (step at the limbus) draws a visible line where the
+//     glow switches on;
+//   * (1 - irisWeight) ALONE fills the limbal ring back in and flattens it,
+//     because emission is not subject to the ring darkening that base colour
+//     carries.
+// The shipped mask is BOTH: the sclera's OWN §3.8 falloff, attenuated by the
+// §4.8 ring, gated to the front hemisphere (the back pole also has small
+// radial xy, so ungated it would mirror the glow onto the back of the eye).
+//
+// The ring term here is the STATIC darkening, NOT the §4.8b light-responsive
+// one ecProjectIris applies to base colour: the glow has no light-response
+// term of its own (it would need the primary light direction, which an
+// emission pin does not carry), and the ring's static darkening is what the
+// glow must respect.
+float ecScleraEmissiveMask(vec3 P, float limbusRadius, float limbusWidth,
+                           float irisScaleX, float irisScaleY,
+                           float limbusDarkening, float nAmount,
+                           float nFreq, float nSeed) {
+  vec2 axes = vec2(max(limbusRadius * irisScaleX, 1e-4f),
+                   max(limbusRadius * irisScaleY, 1e-4f));
+  float rSurf = limbusRadius * length(vec2(P.x / axes.x, P.y / axes.y));
+  float thSurf = atan(P.y, P.x);
+  float frontGate = step(0.0f, P.z);
+  float ringMul = mix(1.0f,
+                      ecLimbusRing(rSurf, thSurf, limbusRadius, limbusWidth,
+                                   limbusDarkening, nAmount, nFreq, nSeed),
+                      frontGate);
+  float scleraFrac =
+      ec_saturate(1.0f - ecIrisWeight(rSurf, limbusRadius, limbusWidth));
+  return scleraFrac * ringMul * frontGate;
+}
+
+// §3.10 — Schlick Fresnel. F0 ~ 0.025 for the cornea (§2).
+float ecFresnelSchlick(float NdotV, float F0) {
+  float m = ec_saturate(1.0f - ec_saturate(NdotV));
+  float m2 = m * m;
+  return F0 + (1.0f - F0) * m2 * m2 * m;
+}
+
+// §7 — surface response: how the tear film and the tissue beneath it reach the
+// host BSDF. The eye is a smooth dielectric film over tissue, so hosts split
+// two ways and BOTH are served from here:
+//   LAYERED  (Arnold coat, MDL fresnel_layer, MaterialX coat, Substrate coat
+//            slab, three.js clearcoat) -> .coatF0 + .filmRoughness on the
+//            coat, .baseRoughness on the base, and the host's own layering
+//            supplies the energy split (do NOT also apply .baseMul there, it
+//            would double-count). coatWeight goes on the host's coat weight,
+//            gated to the front hemisphere by the host — .baseRoughness and
+//            .filmRoughness are the two surfaces, not a blend of them.
+//   SINGLE LOBE (UE Default Lit, hosts without a coat input) -> .roughness,
+//            .specular and .baseMul, which collapse the layers. The collapse
+//            costs little HERE specifically: under the cornea the base is a
+//            REFRACTED image (§3), not a directly-lit rough surface, so the
+//            second lobe was carrying far less than it does on a general
+//            material.
+// coatWeight 0 MUST reproduce the uncoated tissue exactly, and that state is a
+// DRY eye: matte, no catchlight, no veiling sheen. It is reached by ROUGHNESS
+// alone. The outermost interface is n ~ 1.376 either way (tear film 1.376,
+// corneal epithelium / conjunctiva ~1.37-1.40), so drying the eye changes how
+// the reflection SPREADS, never how much of it there is.
+struct EcSurface {
+  float roughness;      // single-lobe roughness   (UE MP_Roughness)
+  float specular;       // single-lobe UE Specular (F0 = 0.08 * specular)
+  float baseRoughness;  // tissue under the film   (layered hosts' base)
+  float filmRoughness;  // the film itself         (layered hosts' coat)
+  float coatF0;         // tear-film F0 at normal incidence (§2: ~0.025)
+  float baseMul;        // §3.10 energy the base keeps under the film
+};
+
+EcSurface ecSurfaceResponse(float irisWeight, float frontGate, float NdotV,
+                            float coatWeight, float coatRoughness,
+                            float irisRoughness, float scleraRoughness,
+                            float scleraFilmRoughness, float coatIor) {
+  EcSurface o;
+  float f  = (coatIor - 1.0f) / (coatIor + 1.0f);
+  o.coatF0 = f * f;                       // 1.376 -> 0.0250 (§2, ecFresnelSchlick)
+  // UNCOATED tissue — the dry eye. Desiccated stroma inside the limbus, dry
+  // conjunctiva outside. Same smoothstep the sclera albedo and the §4.9
+  // emissive blend by, so the roughness break lands exactly on the limbus and
+  // never draws a seam.
+  o.baseRoughness = mix(scleraRoughness, irisRoughness, irisWeight);
+  // The film itself: optically smooth over the cornea, smooth but NOT a mirror
+  // over the sclera, where the meniscus is thin and follows conjunctival
+  // texture. That outer value needs its OWN scalar: reusing scleraRoughness
+  // here made both ends of this blend identical at irisWeight 0, so coatWeight
+  // was a no-op on the white and the sclera stayed pinned at its dry value
+  // however wet the eye was dialled.
+  o.filmRoughness = mix(scleraFilmRoughness, coatRoughness, irisWeight);
+  // frontGate is the caller's film gate — a SMOOTH roll-off behind the
+  // projector-space equator (smoothstep(-0.35, 0.0, Pp.z) at every host call
+  // site), never a hard step: a step cut the film on the equator and drew a
+  // shading seam down the sclera wherever that great circle swung into view.
+  float w = ec_saturate(coatWeight) * frontGate;   // no tear film on the back
+  o.roughness = mix(o.baseRoughness, o.filmRoughness, w);
+  // UE Specular 0.5 == F0 0.04 (IOR 1.5). coatF0 is what finally puts Unreal on
+  // the same tear film as every other host. NOT blended by w: per the dry-eye
+  // note above the wet and dry surfaces share the interface, and blending
+  // toward 0.04 made the DRY eye the more reflective of the two — a broad
+  // mid-roughness lobe at a HIGHER F0, which is exactly what reads as fog.
+  o.specular  = o.coatF0 * 12.5f;                // 12.5 = 1/0.08
+  // §3.10 energy. Light that lit the base crossed the film twice, so the base
+  // keeps (1 - F)^2 of it. UE's clear coat applied precisely this and Default
+  // Lit applies nothing: ShadingModels.ush:507-508 has RefractedDiffuse =
+  // FresnelCoeff * Transmission * DefaultDiffuse with Lighting.Diffuse =
+  // lerp(DefaultDiffuse, RefractedDiffuse, ClearCoat), FresnelCoeff = (1 - F)^2
+  // at :435-437, and Transmission == 1 while Metallic is 0 (BRDF.ush:753). Drop
+  // it and the film's own reflection lands on an unattenuated base, so the
+  // refracted iris reads hazy instead of glazed.
+  float t = 1.0f - ecFresnelSchlick(NdotV, o.coatF0);
+  o.baseMul = mix(1.0f, t * t, w);
+  return o;
+}
+
+// §4.2 — caustic kick (normative formula). Returns a color multiplier for the
+// iris. lightPS = primary light direction in projector space, host-supplied
+// (§4.2 host note); host sets causticStrength = 0 when |light.xy| < 1e-4.
+float ecCausticKick(vec2 hitXY, float hitR, vec2 lightXY,
+                    float strength, float exponent, float shadowStrength) {
+  vec2 d2 = hitXY / max(hitR, 1e-4f);
+  vec2 L2 = lightXY / max(length(lightXY), 1e-4f);
+  float s = dot(d2, L2);                                  // -1 far ... +1 near
+  float kick = strength * pow(ec_saturate(-s), exponent);    // far-side brighten
+  float shadow = shadowStrength * ec_saturate(s);            // near-side darken
+  return (1.0f + kick) * (1.0f - shadow);
+}
+
+// §4.5c — placed spec by DIRECTION. `sdir` is the highlight centre as a
+// projector-space direction and need not be unit. This is the transform-driven
+// entry point: a host converts a spec locator's world position with the same
+// world->projector matrix it already builds (SPEC §5) and passes the result.
+// Unlike (px, py) it can express the BACK hemisphere, where the front gate
+// returns 0 instead of mirroring the highlight onto the front.
+//
+// §4.5b shape: `sides` names ONE OF THREE FORMS and is snapped to a whole
+// number — 0 (or 1/2) = circle, 3 = triangle, 4 = square — with 5..12 kept
+// as regular n-gons for looks that stored one. `roundness` eases the corners
+// back toward the circle (0 = the shape as named, 1 = fully round),
+// `wide`/`tall` scale it along its OWN axes so they turn with `rotate`, and
+// core/falloff shape the edge that used to be a fixed smoothstep(0.35w, w).
+// The RADIAL measure stays the angle to the centre; shape only decides how
+// far the edge reaches per bearing, and every scale term is 1.0 at its
+// default, so the unshaped path is arithmetically untouched.
+float ecPlacedSpecDir(vec3 P, vec3 sdir, float size,
+                      float sides, float roundness,
+                      float wide, float tall, float rotate,
+                      float core, float falloff) {
+  vec3 d = P / max(length(P), 1e-5f);
+  vec3 s = sdir / max(length(sdir), 1e-5f);
+  float ang = acos(clamp(dot(d, s), -1.0f, 1.0f));
+
+  // Shape ids are whole numbers. A fractional `sides` used to build a
+  // fractional n-gon — 3.5 gave a lopsided shape with one split corner,
+  // which is what made the dial read as "adds points" rather than "picks a
+  // shape". Snapping means the slider lands on a form, never between two.
+  float ns = floor(sides + 0.5f);
+
+  float reach = 1.0f;
+  // Inlined, not held in a `bool`: OSL reserves that word without providing
+  // the type, so a named flag here compiled everywhere except Cycles and
+  // Arnold-OSL — where it took the whole shader out, not just the branch.
+  if ((ns >= 3.0f) || (wide != 1.0f) || (tall != 1.0f)) {
+    // Tangent frame at the highlight centre: shape is a function of the
+    // BEARING of the offset, which only exists in this frame.
+    //
+    // `up` is the PROJECTOR's up, not the axis furthest from s. Seeding the
+    // frame with +Z — the old choice — degenerates exactly where catchlights
+    // live: cross(+Z, s) vanishes at the cornea apex, so tx swung from +X to
+    // +Y within a few degrees of centre and flipped again by placement
+    // quadrant. `wide` therefore widened horizontally on a dead-centre
+    // highlight and VERTICALLY on one nudged aside, and `rotate` had no
+    // fixed zero. Seeding with +Y keeps tx horizontal and ty vertical for
+    // every placement on the eye; +Z takes over only for a highlight at the
+    // poles, where "horizontal" has no meaning left to preserve.
+    vec3 up = (abs(s.y) > 0.999f) ? vec3(0.0f, 0.0f, 1.0f)
+                                  : vec3(0.0f, 1.0f, 0.0f);
+    vec3 tx = cross(up, s);
+    tx = tx / max(length(tx), 1e-5f);
+    vec3 ty = cross(s, tx);
+    vec2 e = vec2(dot(d, tx), dot(d, ty));
+    float el = length(e);
+    vec2 b = (el > 1e-5f) ? e / el : vec2(1.0f, 0.0f);   // unit bearing
+
+    // Into SHAPE space: undo `rotate`, then divide by the axes. Both happen
+    // BEFORE the polygon is measured, and that order is the point. Scaling a
+    // polygon's polar radius by an ellipse's afterwards — the old order —
+    // multiplies two radii that peak at different bearings, so a square with
+    // wide = 2 came out as a pincushioned star whose corners were pulled
+    // INSIDE the circle it started from, not as a rectangle. Dividing first
+    // makes the scale an affine map of the shape, and an affine map of a
+    // polygon is still a polygon: a stretched square is a true rectangle, a
+    // stretched triangle keeps straight edges with `wide` as its base and
+    // `tall` as its height.
+    float cs = cos(rotate), sn = sin(rotate);
+    vec2 c = vec2(( b.x * cs + b.y * sn) / max(wide, 1e-5f),
+                  (-b.x * sn + b.y * cs) / max(tall, 1e-5f));
+    float cl = max(length(c), 1e-5f);
+
+    // Normalized shape radius: 1 exactly on the boundary. Circle first, so
+    // the ellipse case is the same arithmetic it always was. Deliberately
+    // not called s-n-o-r-m: that spelling is an HLSL type modifier, and the
+    // Maya VP2 and Unreal translations stop compiling on it.
+    float shapeR = cl;
+    if (ns >= 3.0f) {
+      // Regular n-gon inscribed in the unit circle: its radius runs from
+      // cos(pi/n) at an edge midpoint out to 1 at a corner.
+      float k = 6.28318530718f / ns;
+      // `phase` turns the n-gon into the shape the NAME promises. The bare
+      // convention puts a corner at bearing 0, which draws the triangle
+      // lying on its side pointing left and the square as a diamond — the
+      // two things nobody means by "triangle" and "square". +30 deg stands
+      // the triangle on its base with its apex up; +45 deg sits the square
+      // flat, which is also what makes `wide`/`tall` read as width and
+      // height rather than as diagonals.
+      float phase = (ns == 3.0f) ? 0.52359877560f
+                                 : ((ns == 4.0f) ? 0.78539816340f : 0.0f);
+      float th = atan(c.y, c.x) - phase;
+      // GLSL mod() by hand: HLSL fmod and C++ fmod keep the sign of the
+      // dividend, which folds the wedge wrong for negative bearings.
+      float wrap = (th + 3.14159265359f) / k;
+      float a = (wrap - floor(wrap)) * k - 0.5f * k;
+      float poly = cl * cos(a) / max(cos(0.5f * k), 1e-5f);
+      shapeR = mix(poly, cl, ec_saturate(roundness));
+    }
+    reach = 1.0f / max(shapeR, 1e-5f);
+  }
+
+  // core = where the gradient STARTS as a fraction of the reach, so it is the
+  // sharp/soft dial: 0.999 leaves almost no ramp (hard-edged light), 0 ramps
+  // from the very centre (soft glow). falloff then biases that ramp.
+  float w = max(size * reach, 1e-4f);
+  float t = smoothstep(clamp(core, 0.0f, 0.999f) * w, w, ang);
+  if (falloff != 1.0f) t = pow(t, max(falloff, 1e-5f));
+  // bright core, soft edge; front-gated (no mirror dot on the back pole)
+  return (1.0f - t) * step(0.0f, d.z);
+}
+
+// Unchanged signature. The (px, py) form DERIVES z, so it can only ever place
+// the highlight on the FRONT hemisphere; kept because every existing scene and
+// look file stores those two scalars.
+float ecPlacedSpecShaped(vec3 P, float px, float py, float size,
+                         float sides, float roundness,
+                         float wide, float tall, float rotate,
+                         float core, float falloff) {
+  float rr = px * px + py * py;
+  vec3 s = vec3(px, py, sqrt(max(1.0f - rr, 0.0f)));  // rr > 1: rim placement
+  return ecPlacedSpecDir(P, s, size, sides, roundness, wide, tall, rotate,
+                         core, falloff);
+}
+
+// §4.5 — art-directed placed specular highlight ("placed spec"). Lighters
+// pin the tear-film highlight to a spot ON the eye: (px, py) locate its
+// center on the front unit hemisphere in projector XY (0,0 = cornea apex),
+// size = outer angular radius in radians. The mask is glued to the surface
+// (view-independent BY DESIGN — that is the art direction) and follows the
+// projector, so it rides the gaze like everything else. Returns [0,1];
+// the host multiplies by specPlaceIntensity and ADDS as emission (offline)
+// or into the composite (realtime preview). Intensity 0 = feature off.
+
+float ecPlacedSpec(vec3 P, float px, float py, float size) {
+  // Round, default falloff: the historical highlight, kept as the two-arg
+  // entry point so hosts that have not adopted the shaped form still link.
+  // 0.35 = SCALARS/SpecPlaceCore, the single source every host reads; it is
+  // spelled out here only because this shim takes no core argument.
+  // sides 0 is the circle, so the roundness argument is inert here; it is
+  // spelled 0 to match the shipped default rather than to mean anything.
+  return ecPlacedSpecShaped(P, px, py, size, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f,
+                            0.35f, 1.0f);
+}
+
+// PLAN §5 — red-dominant wrap lighting for realtime sclera SSS. Host applies
+// per light; offline targets use the renderer's BSSRDF instead.
+float ecScleraWrap(float NdotL, float wrapAmount) {
+  return ec_saturate((NdotL + wrapAmount) / (1.0f + wrapAmount));
+}
+
+// SPEC §2/§6b — THE CORNEA FOLLOWS THE IRIS. Radius of the corneal sphere
+// that lands its rim exactly on the limbus. The sphere sits on the projector
+// axis with its apex at corneaApexZ; the limbus is the circle of radius
+// limbusRadius on the unit eyeball, so its rim is at height
+// h = sqrt(1 - limbusRadius^2). Requiring the sphere through both the apex
+// (0,0,apex) and the rim (L,0,h), with R = apex - centerZ, fixes R:
+//
+//     L^2 + (h - cz)^2 = R^2          =>   R = (apex^2 - 2 h apex + 1)
+//     R = apex - cz                        / (2 (apex - h))
+//
+// so DIALLING THE IRIS MOVES THE CORNEA. It used to be an independent length,
+// and the two drifted apart the moment anyone touched the iris: the cap ended
+// inside the eyeball well before the iris edge (at the shipped 0.65 against a
+// 0.4875 limbus it crossed at 28 degrees, denting a ring outside the iris) or
+// sailed past it. Fitted, the rim meets the sclera at the seam every time,
+// which is what the scleral sulcus is.
+//
+// ecEyeballRadiusAniso applies this PER AZIMUTH, so an elliptical iris gets a
+// cornea of the matching shape rather than a round cap on an oval iris - the
+// width and height dials carry the cornea with them.
+float ecCorneaFitRadius(float limbusRadius, float corneaApexZ) {
+  float L = clamp(limbusRadius, 0.0f, 1.0f);
+  float h = sqrt(max(1.0f - L * L, 0.0f));
+  float den = 2.0f * (corneaApexZ - h);
+  // Apex at or behind the limbus plane. No sphere passes through both with the
+  // apex in front, and there is no bulge to describe: the cap would lie inside
+  // the eyeball everywhere and the outward-only clamp below flattens it to
+  // nothing anyway. A small positive radius keeps the arithmetic finite.
+  if (den <= 1e-5f) return 1e-4f;
+  float num = corneaApexZ * corneaApexZ - 2.0f * h * corneaApexZ + 1.0f;
+  // Across the shipped ranges (apex 1.0-1.5, limbus 0-1) this lands between
+  // about 0.02 and 1.09; the ceiling only catches degenerate input.
+  return clamp(num / den, 1e-4f, 16.0f);
+}
+
+// §2 — centre of the corneal sphere on the projector axis: the fitted radius
+// scaled by the artist's corneaRadius dial (1 = on the limbus, below 1 a
+// smaller cap that tapers off inside it, above 1 a flatter one that carries
+// past it). THE one definition. The displacement path and the shading path
+// (ecVirtualCorneaNormal) have to describe the SAME sphere - derive the centre
+// two different ways and refraction is computed against a surface the mesh is
+// not sitting on.
+float ecCorneaCenterZ(float limbusRadius, float corneaApexZ,
+                      float corneaRadius) {
+  return corneaApexZ - ecCorneaFitRadius(limbusRadius, corneaApexZ) *
+                       max(corneaRadius, 0.0f);
+}
+
+// SPEC §3.3/§2 — THE REFRACTION FOLLOWS THE IRIS, so an artist dials iris size
+// without re-tuning the index behind it.
+//
+// Fix a head-on view and follow the ray that meets the eyeball exactly at the
+// limbus. It refracts at the virtual cornea and lands on the iris plane at some
+// fraction of the limbus radius - that fraction is how much of its own aperture
+// the iris fills, and it is what the eye LOOKS like. On the shipped eye it is
+// 0.9296612f. Held at a fixed index it is not stable, because the cornea and
+// the plane both move with the iris now and the index did not:
+//
+//     iris 0.2   fills 0.74      iris 0.6   fills 0.94
+//     iris 0.3   fills 0.87      iris 0.8   fills 0.96
+//
+// so the texture compressed into the middle at a small iris and crept outward
+// at a large one. Solving the refraction for the index that holds the fraction:
+//
+//     d = h - cz                       incidence arm at the limbus
+//     T = (1 - 0.9296612f) * L / (h - zp)      the tilt that lands it
+//     ior = L * sqrt(1 + T*T) / (L - T*d)
+//
+// which is exact (it is the sine rule with the half-angle written out, so no
+// trig survives) and returns EXACTLY 1.376f on the shipped eye.
+//
+// THE DIAL IS RELATIVE. `ior` is read against 1.376f, so authoring the
+// anatomical 1.376 asks for the derived curve and anything else scales it -
+// the artist keeps a number that still reads as an index rather than a bare
+// multiplier, and it means the same thing it always did on the default eye.
+//
+// FRESNEL DOES NOT FOLLOW. look.F0 stays derived from the AUTHORED index: how
+// much the cornea bends light is geometry and tracks the iris, how much it
+// REFLECTS is a material property and must not change because someone resized
+// an iris. Deriving F0 from this would swing the tear film from 0.025 to 0.13
+// across the iris range and read as glass.
+//
+// CPU-DERIVED (§2), like eta and corneaCenterZ: it depends only on look
+// parameters, never on P or V, so it costs the pixel shader nothing.
+float ecCorneaIor(float ior, float limbusRadius, float irisScaleX,
+                  float irisScaleY, float corneaApexZ, float corneaRadius,
+                  float irisPlaneZ) {
+  float L = clamp(limbusRadius * sqrt(max(irisScaleX * irisScaleY, 0.0f)),
+                  1e-4f, 1.0f);
+  float h = sqrt(max(1.0f - L * L, 0.0f));
+  float d = h - ecCorneaCenterZ(L, corneaApexZ, corneaRadius);
+  float zp = ecIrisPlaneZ(irisPlaneZ, L, 1.0f, 1.0f);
+  float T = (1.0f - 0.9296612f) * L / max(h - zp, 1e-4f);
+  float base = L * sqrt(1.0f + T * T) / max(L - T * d, 1e-5f);
+  // Clamped to the parameter's own domain. Past about limbus 0.93 the fraction
+  // would need an index above 2 and cannot be held exactly; the fill drifts to
+  // 0.97 at limbus 0.99 rather than the shader doing something unphysical.
+  return clamp(base * (ior / 1.376f), 1.0f, 2.0f);
+}
+
+// SPEC §2/§6 — the canonical eyeball radius at polar direction dz (= the
+// z component of the unit direction in projector space): 1.0 over the
+// sclera, blending onto the corneal sphere (apex at corneaApexZ) inside the
+// limbus, with the natural scleral sulcus at the seam. This is THE bulge
+// definition — mesh generators bake it; displacement hosts (UE WPO,
+// vertex-shader paths, Cycles/Arnold displacement) evaluate it live so the
+// bulge follows the projector (gaze-tracking cornea on stylized eyes).
+float ecEyeballRadius(float dz, float corneaApexZ, float corneaRadius,
+                      float limbusRadius, float blendAngle) {
+  float theta = acos(clamp(dz, -1.0f, 1.0f));
+  float thetaLimbus = asin(clamp(limbusRadius, 0.0f, 1.0f));
+  float w = 1.0f - smoothstep(thetaLimbus - blendAngle,
+                              thetaLimbus + blendAngle, theta);
+  // Both from ecCorneaCenterZ, so this sphere and the shading one are the
+  // same sphere by construction rather than by two lines agreeing.
+  float centerZ = ecCorneaCenterZ(limbusRadius, corneaApexZ, corneaRadius);
+  float fitted = corneaApexZ - centerZ;
+  float disc = centerZ * centerZ * dz * dz +
+               fitted * fitted - centerZ * centerZ;
+  float t = centerZ * dz + sqrt(max(disc, 0.0f));
+  // OUTWARD ONLY. `t` is the distance to the cornea sphere, and past the point
+  // where that sphere crosses the unit eyeball it is INSIDE it - t < 1, while
+  // the blend `w` is still non-zero out there. The unclamped form returned
+  // f < 1 and every displacement host faithfully pulled the mesh IN: with the
+  // old independent radius (apex 1.05, cornea 0.65, limbus 0.4875) a ring from
+  // about 22 to 36 degrees sank to f = 0.985, a visible crease just outside the
+  // iris, while the apex only rose 5%.
+  //
+  // At scale 1 the fit above puts the crossing ON the limbus, where w has
+  // already faded, so nothing is clamped. Below 1 the cap crosses early and
+  // this is what keeps the leftover blend from denting the sclera. A cornea
+  // that dents the eyeball is never what is wanted, so the contribution is held
+  // at zero rather than allowed to go negative - here rather than by narrowing
+  // the blend, because the blend that is correct depends on the parameters and
+  // this invariant must hold for all of them.
+  return 1.0f + max(t - 1.0f, 0.0f) * w;
+}
+
+// §6b/§4.4 — eyeball radius with an ELLIPTICAL limbus: the bulge boundary
+// follows the limbus ellipse (semi-axes limbusRadius * irisScaleX/Y) by
+// evaluating the canonical profile with the azimuth-dependent limbus radius.
+// d = unit direction in projector space. Neutral scales reduce to
+// ecEyeballRadius exactly.
+float ecEyeballRadiusAniso(vec3 d, float corneaApexZ, float corneaRadius,
+                           float limbusRadius, float irisScaleX,
+                           float irisScaleY, float blendAngle) {
+  float rxy = max(length(ecXY(d)), 1e-5f);
+  float La = max(limbusRadius * irisScaleX, 1e-4f);
+  float Lb = max(limbusRadius * irisScaleY, 1e-4f);
+  float leff = ecEllipseRadius(La, Lb, d.x / rxy, d.y / rxy);
+  return ecEyeballRadius(d.z, corneaApexZ, corneaRadius,
+                         clamp(leff, 0.0f, 1.0f), blendAngle);
+}
+
+// §3.6 — single-tap parallax along the refracted ray (T0/T1).
+// height01: T_iris alpha (1 = surface, 0 = deepest crevice).
+// UV scale: the disc spans 2*La x 2*Lb plane units over 1 UV unit — the
+// shift converts per axis (§4.4); circular limbus makes them equal.
+vec2 ecIrisParallax(vec2 uv, vec3 R, float height01,
+                    float heightScale, vec2 limbusAxes) {
+  float rz = (R.z >= 0.0f) ? max(R.z, 1e-5f) : min(R.z, -1e-5f);
+  float depth = (1.0f - ec_saturate(height01)) * heightScale;
+  vec2 shift = (ecXY(R) / abs(rz)) * depth;
+  return uv + vec2(shift.x * (0.5f / max(limbusAxes.x, 1e-4f)),
+                   shift.y * (0.5f / max(limbusAxes.y, 1e-4f)));
+}
+
+// -------------------------------------------------- texture encoding -------
+
+// SPEC 6 — decode a SAMPLED texel into the linear value the core expects.
+// The host owns the sampler, so the host owns the decode; the core owns the
+// transfer functions so every host agrees on the NUMBERS.
+//
+//   0 = Raw / linear  identity. The canonical Squarebit iris and sclera bakes
+//                     hold LINEAR bytes (tools/export_web_iris.mjs: "the
+//                     correct colourspace handling is the IDENTITY"), which is
+//                     why this is the default in every host and reproduces the
+//                     shipped look bit for bit.
+//   1 = sRGB          IEC 61966-2-1 EOTF - what a paint package writes when an
+//                     artist exports a hand-painted iris.
+//   2 = Gamma 2.2     pure power, for a legacy 2.2-encoded plate.
+//
+// COLOUR channels ONLY. Iris alpha (height, SPEC 6), sclera alpha (cavity/AO)
+// and the whole limbus map (grayscale breakup, SPEC 4.8) are DATA: running a
+// transfer function over them is a bug, not a preference, so no host exposes
+// a colour space for them.
+//
+// This is an ENCODING decode, not a colour-management transform: it changes
+// the transfer function and never the primaries. That is deliberate - it is
+// the part that is identical in every host and survives the SPEC 7 params
+// round-trip, where an OCIO space name (which only means anything next to the
+// config that defines it) would not.
+float ecDecodeChannel(float c, int mode) {
+  if (mode == 2) return pow(max(c, 0.0f), 2.2f);
+  if (mode == 1) {
+    float s = max(c, 0.0f);
+    return (s <= 0.04045f) ? (s * (1.0f / 12.92f))
+                           : pow((s + 0.055f) * (1.0f / 1.055f), 2.4f);
+  }
+  return c;
+}
+
+vec3 ecDecodeTexColor(vec3 c, int mode) {
+  return vec3(ecDecodeChannel(c.x, mode), ecDecodeChannel(c.y, mode),
+              ecDecodeChannel(c.z, mode));
+}
+
+// ------------------------------------------------------------- entry -------
+
+// §3 pipeline steps 1-5 + 8 + 10 precursors, in normative order.
+// P/V/N in projector space, V normalized surface->camera, N normalized.
+// pupilRadius/lodBlend are the per-eye animated params (§4). The host then:
+//   - applies ecIrisParallax with the sampled height (tier-gated),
+//   - samples T_iris / T_sclera,
+//   - applies ecCausticKick / ecScleraWrap / ringMul (T1+),
+//   - composes with its native BSDF using .fresnel (§3.10).
+EcIrisProj ecProjectIris(vec3 P, vec3 V, vec3 N,
+                         float pupilRadius, float lodBlend, EcLook look) {
+  // §3.2 refraction normal
+  vec3 Nr = (look.refractionMode == 1)
+              ? ecVirtualCorneaNormal(P, look.corneaCenterZ)
+              : N;
+
+  // §3.3 refract the view ray into the eye
+  vec3 R = ecCorneaRefract(-V, Nr, look.eta);
+
+  // §3.4 iris plane hit; §8 distance LOD lerps the UV INPUT (hit point)
+  // toward the static front-facing projection (R = (0,0,-1) => hit = P.xy).
+  // The plane rides the limbus rim (ecIrisPlaneZ); look.irisPlaneZ is the
+  // authored depth AT THE REFERENCE IRIS, never the plane itself.
+  vec2 hit = ecIrisPlaneIntersect(
+      P, R, ecIrisPlaneZ(look.irisPlaneZ, look.limbusRadius,
+                         look.irisScaleX, look.irisScaleY));
+  hit = mix(hit, ecXY(P), ec_saturate(lodBlend));
+
+  // §3.5/§4.4 pupil geometry (containment-clamped) + dilation remap
+  EcPupilGeom g = ecPupilGeom(pupilRadius, look);
+  EcDilated dil = ecPupilDilate(hit, g, look.refPupilRadius,
+                                look.limbusRadius);
+  vec2 hitP = vec2(hit.x - g.center.x, hit.y - g.center.y);
+
+  // §3.8 region weights from the SURFACE point via the equivalent circular
+  // radius (elliptical limbus normalized back to limbusRadius units), gated
+  // to the front hemisphere (the back pole also has small radial xy).
+  float rSurf = look.limbusRadius *
+      length(vec2(P.x / g.limbusAxes.x, P.y / g.limbusAxes.y));
+  float frontGate = step(0.0f, P.z);
+
+  EcIrisProj o;
+  o.uv           = clamp(dil.uv, vec2(0.0f, 0.0f), vec2(1.0f, 1.0f));
+  o.pupilMask    = dil.pupilMask * frontGate;
+  o.bleedWeight  = dil.bleedWeight * frontGate;
+  o.irisWeight   = ecIrisWeight(rSurf, look.limbusRadius, look.limbusWidth)
+                 * frontGate;
+  float thSurf = atan(P.y, P.x);
+  // §4.8b light-dependent limbus: fade the ring as the light goes head-on.
+  // lGraze = projector-space light XY magnitude (~0 head-on ... 1 grazing).
+  // response 0 keeps the static darkening (legacy, bit-for-bit); response 1
+  // scales it by lGraze so the ring nearly vanishes under direct frontal light.
+  float lGraze = ec_saturate(length(look.bleedLightPS));
+  float limbusDark = look.limbusDarkening
+                   * mix(1.0f, lGraze, ec_saturate(look.limbusLightResponse));
+  o.ringMul      = mix(1.0f,
+                       ecLimbusRing(rSurf, thSurf, look.limbusRadius,
+                                    look.limbusWidth, limbusDark,
+                                    look.limbusNoiseAmount,
+                                    look.limbusNoiseFreq,
+                                    look.limbusNoiseSeed),
+                       frontGate);  // no mirror ring on the back hemisphere
+  // §4.8 ring-band UV for the host's optional limbus texture: x wraps the
+  // ring, y spans the ring band (inner 0 .. outer 1).
+  float lw4 = max(4.0f * look.limbusWidth, 1e-4f);
+  o.limbusUV     = vec2(thSurf * (1.0f / 6.2831853f) + 0.5f,
+                        ec_saturate((rSurf - (look.limbusRadius -
+                                           2.0f * look.limbusWidth)) / lw4));
+  o.fresnel      = ecFresnelSchlick(dot(N, V), look.F0);
+  o.refractedDir = R;
+  o.hitR         = length(hitP);   // pupil-centered (caustic focuses there)
+  o.hitXY        = hitP;
+  return o;
+}
+
+void eye_project(
+    vec3 Pw, vec3 Nw, vec3 Vw,
+    vec3 Origin, vec3 Fwd, vec3 Up,
+    vec3 Scale, float PupilRadius, float LodBlend,
+    float Ior, float LimbusRadius, float LimbusWidth,
+    float LimbusDarkening, float IrisPlaneZ, float CorneaRadius,
+    float CorneaApexZ, float RefPupilRadius, float IrisHeightScale,
+    float CausticStrength, float CausticExponent, float CausticShadowStrength,
+    float RefractionMode, float DisplacementWeight, float IrisWidth,
+    float IrisHeight, float PupilWidth, float PupilHeight,
+    float PupilOffsetX, float PupilOffsetY, float PupilSquareness,
+    float PupilNoiseAmount, float PupilNoiseFreq, float PupilNoiseSeed,
+    float PupilNoiseType, float PupilBlend, float PupilBlendExp,
+    float PupilBleedAmount, float PupilBleedWidth, float PupilBleedExponent,
+    float PupilBleedLight, float PupilBleedSaturation, float LimbusNoiseAmount,
+    float LimbusNoiseFreq, float LimbusNoiseSeed, float LimbusLightResponse,
+    float ScleraEmissive, float ScleraSssWeight, float CoatWeight,
+    float CoatRoughness, float CoatIor, float IrisRoughness,
+    float ScleraRoughness, float ScleraFilmRoughness, vec3 LightDirWorld,
+    out vec2 uv, out float caustic, out float ringMul,
+    out float irisWeight, out float pupilMask, out float bleedWeight,
+    out float baseRoughness, out float filmRoughness, out float scleraEmissive)
+{
+    // reconstruct the projector basis (SPEC 1: X = cross(Y, Z))
+    vec3 Zax = normalize(Fwd);
+    vec3 Yax = normalize(Up - Zax * dot(Up, Zax));
+    vec3 Xax = cross(Yax, Zax);
+    float scaleX = max(abs(Scale.x), 1e-6f);
+    float scaleY = max(abs(Scale.y), 1e-6f);
+    float scaleZ = max(abs(Scale.z), 1e-6f);
+
+    vec3 rel = Pw - Origin;
+    vec3 Pp = vec3(dot(rel, Xax) / scaleX,
+                   dot(rel, Yax) / scaleY,
+                   dot(rel, Zax) / scaleZ);
+    // NOTE: no bulge-snap here. Storm displaces the geometry (eye_displace), so
+    // the shader already receives the displaced cornea position + normal (same
+    // as the web's vertex-displaced mesh). Snapping again would double-count.
+    vec3 Np = normalize(vec3(dot(Nw, Xax) / scaleX,
+                             dot(Nw, Yax) / scaleY,
+                             dot(Nw, Zax) / scaleZ));
+    // fall back to the eye's forward axis if the host gives no view dir (e.g.
+    // Arnold has no ND_viewdirection nodedef, so UsdMtlx leaves Vw null). Zax
+    // is a single coherent orthographic-front view - the per-point normal would
+    // give each point its own view and collapse the projection to all-sclera.
+    vec3 Vwf = (dot(Vw, Vw) < 1e-8f) ? Zax : Vw;
+    vec3 Vp = normalize(vec3(dot(Vwf, Xax) / scaleX,
+                             dot(Vwf, Yax) / scaleY,
+                             dot(Vwf, Zax) / scaleZ));
+    vec3 Lp = normalize(vec3(dot(LightDirWorld, Xax),
+                             dot(LightDirWorld, Yax),
+                             dot(LightDirWorld, Zax)));
+
+    EcLook look;
+    // eta follows the iris (ecCorneaIor); F0 stays on the AUTHORED index.
+    look.eta = 1.0f / ecCorneaIor(Ior, LimbusRadius, IrisWidth,
+                              IrisHeight, CorneaApexZ, CorneaRadius,
+                              IrisPlaneZ);
+    float fr = (Ior - 1.0f) / (Ior + 1.0f);
+    look.F0 = fr * fr;
+    look.limbusRadius = LimbusRadius;
+    look.limbusWidth = LimbusWidth;
+    look.limbusDarkening = LimbusDarkening;
+    look.irisPlaneZ = IrisPlaneZ;
+    look.corneaCenterZ = ecCorneaCenterZ(LimbusRadius, CorneaApexZ, CorneaRadius);
+    look.refPupilRadius = RefPupilRadius;
+    look.irisHeightScale = IrisHeightScale;
+    look.causticStrength = CausticStrength;
+    look.causticExponent = CausticExponent;
+    look.causticShadowStrength = CausticShadowStrength;
+    // realtime sclera SSS: warm wrap-lighting, driven by the single-source
+    // weight (SCALARS/ScleraSssWeight). Offline hosts use a real BSSRDF instead.
+    look.scleraWrapAmount = ScleraSssWeight;
+    look.refractionMode =
+        (RefractionMode > 0.5f || DisplacementWeight > 1e-3f) ? 1 : 0;
+    look.irisScaleX = IrisWidth;
+    look.irisScaleY = IrisHeight;
+    look.pupilScaleX = PupilWidth;
+    look.pupilScaleY = PupilHeight;
+    look.pupilOffsetX = PupilOffsetX;
+    look.pupilOffsetY = PupilOffsetY;
+    look.pupilSquareness = PupilSquareness;
+    look.pupilNoiseAmount = PupilNoiseAmount;
+    look.pupilNoiseFreq = PupilNoiseFreq;
+    look.pupilNoiseSeed = PupilNoiseSeed;
+    look.pupilNoiseType = PupilNoiseType;
+    look.pupilBlend = PupilBlend;
+    look.pupilBlendExp = PupilBlendExp;
+    look.pupilBleedAmount = PupilBleedAmount;
+    look.pupilBleedWidth = PupilBleedWidth;
+    look.pupilBleedExponent = PupilBleedExponent;
+    look.pupilBleedLight = PupilBleedLight;
+    look.bleedLightPS = vec2(Lp.x, Lp.y);
+    look.limbusNoiseAmount = LimbusNoiseAmount;
+    look.limbusNoiseFreq = LimbusNoiseFreq;
+    look.limbusNoiseSeed = LimbusNoiseSeed;
+    look.limbusLightResponse = LimbusLightResponse;
+
+    EcIrisProj o = ecProjectIris(Pp, Vp, Np, PupilRadius, LodBlend, look);
+    uv = o.uv;
+    caustic = ecCausticKick(o.hitXY, o.hitR, vec2(Lp.x, Lp.y),
+                            CausticStrength, CausticExponent,
+                            CausticShadowStrength);
+    ringMul = o.ringMul;
+    irisWeight = o.irisWeight;
+    pupilMask = o.pupilMask;
+    bleedWeight = o.bleedWeight;
+    // §7 surface response. standard_surface layers its own coat, so it takes
+    // .baseRoughness (dry tissue under the film) and .filmRoughness (the film)
+    // and NOT .baseMul. Coat weight/IOR are constants on the surface node.
+    // The film is front-gated: no tear film on the back of the eyeball.
+    // NOT a hard step: step(0.0f, Pp.z) cut the film 1 -> 0 exactly on the
+    // projector-space equator, and the coat both adds its own specular and
+    // attenuates the base under it, so the cut drew a visible shading seam
+    // down the sclera — a great circle locked to the gaze frame, showing
+    // wherever the equator swings into view. Roll the film off smoothly
+    // instead: full film over the whole front hemisphere, gone ~20 deg
+    // behind the equator; smoothstep is C1 at both ends, so no crease
+    // survives at either edge of the band.
+    float frontGate = smoothstep(-0.35f, 0.0f, Pp.z);
+    EcSurface surf = ecSurfaceResponse(o.irisWeight, frontGate,
+                                       ec_saturate(dot(Np, Vp)),
+                                       CoatWeight, CoatRoughness,
+                                       IrisRoughness, ScleraRoughness,
+                                       ScleraFilmRoughness, CoatIor);
+    baseRoughness = surf.baseRoughness;
+    filmRoughness = surf.filmRoughness;
+    // §4.9 sclera emissive: the sclera's own falloff attenuated by the STATIC
+    // limbal ring, front-gated — the shipped Unreal mask verbatim. It leaves
+    // eye_compose (base colour) entirely and drives standard_surface.emission
+    // instead; a bare (1 - irisWeight) on base colour fills the limbal ring
+    // back in and flattens it.
+    scleraEmissive = ScleraEmissive * ecScleraEmissiveMask(
+        Pp, LimbusRadius, LimbusWidth, IrisWidth, IrisHeight,
+        LimbusDarkening, LimbusNoiseAmount, LimbusNoiseFreq, LimbusNoiseSeed);
+}
+
+void eye_compose(
+    vec3 irisAlbedo, vec3 scleraSample, float caustic,
+    float ringMul, float irisWeight, float pupilMask,
+    float bleedWeight, vec3 PupilColor, vec3 ScleraColor,
+    vec3 LightColorWorld, vec3 SpecPlaceColor, float PupilBleedSaturation,
+    out vec3 result)
+{
+    float bleedLuma = dot(irisAlbedo, vec3(0.2126f, 0.7152f, 0.0722f));
+    vec3 bleedCol = LightColorWorld *
+        mix(vec3(bleedLuma), irisAlbedo, PupilBleedSaturation);
+    vec3 iris = mix(irisAlbedo * caustic,
+                    PupilColor + bleedCol * bleedWeight, pupilMask);
+    vec3 sclera = ScleraColor * scleraSample;
+    result = mix(sclera, iris, irisWeight) * ringMul;
+}
+
+void eye_displace(
+    vec3 Pw, vec3 Origin, vec3 Fwd,
+    vec3 Up, vec3 Scale, float LimbusRadius,
+    float CorneaRadius, float CorneaApexZ, float IrisWidth,
+    float IrisHeight, float DisplacementWeight, out float height)
+{
+    vec3 Zax = normalize(Fwd);
+    vec3 Yax = normalize(Up - Zax * dot(Up, Zax));
+    vec3 Xax = cross(Yax, Zax);
+    float sx = max(abs(Scale.x), 1e-6f);
+    float sy = max(abs(Scale.y), 1e-6f);
+    float sz = max(abs(Scale.z), 1e-6f);
+    vec3 rel = Pw - Origin;
+    vec3 Pp = vec3(dot(rel, Xax) / sx, dot(rel, Yax) / sy, dot(rel, Zax) / sz);
+    float r = max(length(Pp), 1e-6f);
+    float factor = ecEyeballRadiusAniso(Pp / r, CorneaApexZ, CorneaRadius,
+                                        LimbusRadius, IrisWidth, IrisHeight,
+                                        0.12f);
+    // NOTE hdStorm ignores MaterialX displacement (verified) so this only
+    // bulges in displacement-capable renderers (Karma/Arnold/RenderMan via
+    // genosl). Sign: Storm/most renderers displace along +N, so a positive
+    // outward push is (factor-1) (>0 over the cornea).
+    height = (factor - 1.0f) * clamp(DisplacementWeight, 0.0f, 1.5f) * r;
+}
+
+// ============================================================================
+// iris_core.glsl - procedural iris generator, GLSL port of the byte-exact
+// single-source iris (maya/python/squarebit_eye/iris_procedural.py
+// _iris_rgba_py == web eye-textures.js generateIrisRGBA == Blender embed).
+//
+// A faithful transcription of the per-pixel loop so hosts that can't bind a
+// baked texture (hdStorm - it segfaults on textures in sourceAsset glslfx
+// materials) can compute the SAME iris in-shader. GLSL is fp32 vs the fp64 of
+// the reference impls, so the sin()-hash noise is the same generator/params but
+// not bit-identical to the fp64 bake.
+//
+// sbeIris(dxy, ...) returns linear RGB for a point dxy in [-1,1]^2 (dxy = uv*2-1
+// where uv is the projected iris-disc uv). Alpha (height) is omitted - parallax
+// is a separate pass.
+// ============================================================================
+
+float irHash2(float x, float y) {
+  float s = sin(x * 127.1f + y * 311.7f) * 43758.5453f;
+  return s - floor(s);
+}
+
+float irSmooth(float v) { return v * v * (3.0f - 2.0f * v); }
+
+float irVNoise(float x, float y) {
+  float xi = floor(x);
+  float yi = floor(y);
+  float tx = irSmooth(x - xi);
+  float ty = irSmooth(y - yi);
+  float a = irHash2(xi, yi);
+  float b = irHash2(xi + 1.0f, yi);
+  float c = irHash2(xi, yi + 1.0f);
+  float d = irHash2(xi + 1.0f, yi + 1.0f);
+  return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty;
+}
+
+float irANoise(float theta, float freq, float seed) {
+  return irVNoise(cos(theta) * freq * 0.5f + 37.7f * seed,
+                  sin(theta) * freq * 0.5f + 11.3f * seed);
+}
+
+// Full param set matches generate_iris_rgba(). fiberStyle: 0 wispy, 1 billow,
+// 2 ridged. Spots + heterochromia included (0 amounts leave the base iris).
+vec3 sbeIris(vec2 dxy, float refPupil01, vec3 inner, vec3 outer, float detail,
+             float fiber, float haloSize, float haloStrength,
+             float spotDensity, float spotScale, float spotSpread,
+             float spotSeed, vec3 spotColor, float fiberWaviness,
+             float fiberClumping, float spotIrregularity, int style,
+             float spotOpacity, float spotColorVary, float fiberGaps,
+             float fiberCrypts, float heteroAmount, float heteroAngle,
+             float heteroSoftness, vec3 heteroColor) {
+  vec3 dark = outer * vec3(0.12f, 0.17f, 0.16f);
+  vec3 teal = outer * vec3(0.78f, 0.94f, 1.11f);
+  vec3 heteroDark = heteroColor * vec3(0.12f, 0.17f, 0.16f);
+  float heteroRad = heteroAngle * 3.14159265358979f / 180.0f;
+
+  float dx = dxy.x;
+  float dy = dxy.y;
+  float rho = min(length(dxy), 1.0f);
+  float th = atan(dy, dx);
+  float t = clamp((rho - refPupil01) / (1.0f - refPupil01), 0.0f, 1.0f);
+
+  float wav = fiberWaviness *
+      (0.30f * (irVNoise(cos(th) * 3.0f + 91.7f,
+                         sin(th) * 3.0f + t * 6.0f + 13.1f) - 0.5f) +
+       0.12f * (irVNoise(cos(th) * 8.0f + 47.3f,
+                         sin(th) * 8.0f + t * 14.0f + 67.9f) - 0.5f));
+  float thw = th + wav;
+  float drift1 = 2.2f * t + 1.2f * irANoise(thw, 5.0f, 1.0f);
+  float drift2 = 3.6f * t + 0.8f * irANoise(thw, 9.0f, 2.0f);
+  float w1 = irANoise(thw + drift1 * 0.08f, 110.0f * detail, 3.0f);
+  float w2 = irANoise(thw + drift2 * 0.05f, 230.0f * detail, 4.0f);
+  float w3 = irANoise(thw + drift1 * 0.03f, 420.0f * detail, 5.0f);
+  float w4 = irANoise(thw - drift2 * 0.04f, 60.0f * detail, 6.0f);
+
+  float wisp;
+  if (style == 1) {
+    wisp = 0.4f * abs(2.0f * w1 - 1.0f) + 0.3f * abs(2.0f * w2 - 1.0f) +
+           0.18f * abs(2.0f * w3 - 1.0f) + 0.12f * abs(2.0f * w4 - 1.0f);
+    wisp = clamp(wisp * 1.25f, 0.0f, 1.0f);
+  } else if (style == 2) {
+    float r1 = 1.0f - abs(2.0f * w1 - 1.0f);
+    float r2 = 1.0f - abs(2.0f * w2 - 1.0f);
+    float r3 = 1.0f - abs(2.0f * w3 - 1.0f);
+    wisp = clamp((0.5f * r1 * r1 + 0.3f * r2 * r2 + 0.2f * r3 * r3) * 1.3f
+                 - 0.12f, 0.0f, 1.0f);
+  } else {
+    wisp = 0.34f * w1 + 0.26f * w2 + 0.18f * w3 + 0.22f * w4 +
+           0.35f * max(w1, w2) - 0.28f;
+    wisp = clamp(wisp * 1.35f, 0.0f, 1.0f);
+  }
+  wisp *= wisp * (1.6f - 0.6f * wisp);
+
+  float band = 0.42f + 0.58f * exp(-pow((t - 0.45f) / 0.34f, 2.0f));
+  float rimFade = 1.0f - 0.52f * irSmooth(clamp((t - 0.55f) / 0.45f, 0.0f, 1.0f));
+  float clump = clamp(1.0f - fiberClumping *
+      (0.7f * irANoise(th, 6.0f, 21.0f) + 0.3f * irANoise(th, 13.0f, 22.0f)),
+      0.0f, 1.0f);
+  float gapN = irANoise(thw + drift1 * 0.06f, 30.0f * detail, 51.0f);
+  float gaps = fiberGaps * irSmooth(clamp((0.42f - gapN) / 0.22f, 0.0f, 1.0f));
+  float cca = 13.0f * detail;
+  float ccr = 4.2f;
+  float cf = 0.55f * irVNoise(cos(thw) * cca + 21.0f,
+                              sin(thw) * cca + t * ccr + 5.0f) +
+             0.30f * irVNoise(cos(thw) * cca * 2.1f + 61.0f,
+                              sin(thw) * cca * 2.1f + t * ccr * 2.0f + 33.0f) +
+             0.15f * irVNoise(cos(thw) * cca * 4.3f + 9.0f,
+                              sin(thw) * cca * 4.3f + t * ccr * 3.7f + 77.0f);
+  float holeS = irSmooth(clamp((0.46f - cf) / 0.16f, 0.0f, 1.0f));
+  float cryptHole = fiberCrypts * holeS;
+  float cryptRim = fiberCrypts * 4.0f * holeS * (1.0f - holeS);
+  float carve = clamp(1.0f - 0.92f * gaps - 0.95f * cryptHole, 0.0f, 1.0f);
+  float strength = clamp(wisp * band * rimFade * fiber * clump * carve,
+                         0.0f, 1.0f);
+  strength = clamp(strength + cryptRim * 0.8f * band * rimFade, 0.0f, 1.0f);
+
+  float heteroM = 0.0f;
+  if (heteroAmount > 0.0f) {
+    float da = abs(th - heteroRad);
+    da = min(da, 2.0f * 3.14159265358979f - da) / 3.14159265358979f;
+    float wobble = 0.10f * (irANoise(th, 9.0f, 71.0f) - 0.5f) * 2.0f +
+                   0.05f * (irANoise(th + t * 1.7f, 17.0f, 72.0f) - 0.5f) * 2.0f;
+    float heteroHalf = min(heteroAmount, 1.0f) * 0.5f;
+    heteroM = irSmooth(clamp((heteroHalf - da + wobble) /
+                             max(heteroSoftness * 0.5f, 1e-3f), 0.0f, 1.0f));
+  }
+
+  float cool = clamp(0.5f + (irANoise(th, 7.0f, 7.0f) - 0.5f) * 1.4f, 0.0f, 1.0f);
+  float spike = 0.05f + 0.12f * pow(irANoise(th, 46.0f, 8.0f), 2.0f) +
+                0.05f * irANoise(th, 15.0f, 9.0f);
+  float halo = clamp(exp(-pow(t / ((0.11f + spike) * haloSize), 2.0f)) *
+                     (0.6f + 0.4f * wisp) * haloStrength, 0.0f, 1.0f);
+  float warm = clamp(exp(-pow((t - 0.18f * haloSize) / 0.2f, 2.0f)) *
+                     max(0.0f, w4 - 0.55f) * 1.5f * haloStrength, 0.0f, 1.0f);
+  float grain = 0.92f + 0.16f * (irVNoise(dx * 28.0f + 7.3f,
+                                          dy * 28.0f + 41.1f) - 0.5f);
+
+  vec3 fil = outer + (teal - outer) * cool;
+  vec3 rgb = dark + (fil - dark) * strength;
+  if (heteroAmount > 0.0f) {
+    vec3 sector = heteroDark + (heteroColor - heteroDark) * strength;
+    rgb = rgb + (sector - rgb) * heteroM;
+  }
+  rgb = rgb + (inner - rgb) * halo;
+  rgb = rgb + (inner - rgb) * warm;
+
+  if (spotDensity > 0.0f) {
+    float sf = 7.0f / max(spotScale, 1e-3f);
+    float swb = spotIrregularity * 1.6f;
+    float swx = swb * (irVNoise(dx * sf * 0.37f + 5.1f,
+                                dy * sf * 0.37f + 9.2f) - 0.5f);
+    float swy = swb * (irVNoise(dx * sf * 0.37f + 77.7f,
+                                dy * sf * 0.37f + 31.4f) - 0.5f);
+    float sxx = dx * sf + swx + 53.1f * (spotSeed + 1.0f);
+    float syy = dy * sf + swy + 17.7f * (spotSeed + 1.0f);
+    float sn = 0.55f * irVNoise(sxx, syy) +
+               0.3f * irVNoise(sxx * 2.3f + 11.4f, syy * 2.3f + 71.2f) +
+               0.15f * irVNoise(sxx * 5.1f + 37.9f, syy * 5.1f + 5.3f);
+    float gate = exp(-pow((t - 0.5f) / max(0.3f * spotSpread, 1e-4f), 2.0f));
+    float thr = 0.97f - 0.42f * min(spotDensity, 1.0f);
+    float spotMask = irSmooth(clamp((sn * gate - thr) / 0.07f, 0.0f, 1.0f));
+    float vt = (irVNoise(sxx * 0.45f + 91.3f, syy * 0.45f + 47.7f) - 0.5f) * 2.0f;
+    float vOpacity = spotOpacity *
+        (1.0f - spotColorVary * 0.3f * (0.5f - 0.5f * vt));
+    vec3 vary = vec3(0.51f, 0.45f, 0.39f);
+    vec3 vCol = clamp(spotColor * (1.0f + spotColorVary * vt * vary),
+                      0.0f, 1.0f);
+    rgb = rgb + (vCol - rgb) * (spotMask * vOpacity);
+  }
+
+  return clamp(rgb * grain, 0.0f, 1.0f);
+}
+
+-- glsl SquarebitEye.Surface
+
+vec4 surfaceShader(vec4 Peye, vec3 Neye, vec4 color, vec4 patchCoord)
+{
+
+
+    mat4 e2w = ecWorldToObject() * GetWorldToViewInverseMatrix();
+    vec3 Pw = (e2w * Peye).xyz;
+    vec3 Nw = normalize((e2w * vec4(normalize(Neye), 0.0)).xyz);
+    vec3 Vw = normalize((e2w * vec4(normalize(-Peye.xyz), 0.0)).xyz);
+
+    vec2 uv;
+    float caustic;
+    float ringMul;
+    float irisWeight;
+    float pupilMask;
+    float bleedWeight;
+    float baseRoughness;
+    float filmRoughness;
+    float scleraEmissive;
+    eye_project(Pw, Nw, Vw, vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), ecInput_pupilRadius(0.1667f), 0.0f, 1.376f, ecInput_irisRadius(0.4875f), 0.04f, 0.6f, 0.75f, 0.65f, 1.0932f, 0.1667f, 0.0f, 0.5f, 2.0f, 0.35f, 0.0f, 1.0f, ecInput_irisWidth(1.0f), ecInput_irisHeight(1.0f), ecInput_pupilWidth(1.0f), ecInput_pupilHeight(1.0f), ecInput_pupilOffsetX(0.0f), ecInput_pupilOffsetY(0.0f), 0.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.18f, 1.4f, ecInput_pupilBleedAmount(0.2f), ecInput_pupilBleedWidth(1.0f), ecInput_pupilBleedExponent(2.0f), ecInput_pupilBleedLight(1.0f), ecInput_pupilBleedSaturation(0.0f), 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.25f, 1.0f, 0.02f, 1.376f, 0.6f, 0.3f, 0.08f, vec3(0.0, 0.0, 1.0), uv, caustic, ringMul, irisWeight, pupilMask, bleedWeight, baseRoughness, filmRoughness, scleraEmissive);
+
+    // hdStorm (OpenUSD 24.08) segfaults on textures bound to a sourceAsset
+    // glslfx material, so the iris is computed PROCEDURALLY in-shader via the
+    // byte-exact single-source generator (core/iris_core.glsl). Params match the
+    // baked iris.png (gen_usd_sample.IRIS): lifelike hazel, billow fibers.
+    vec3 irisAlbedo = sbeIris(
+        uv * 2.0f - 1.0f,
+        0.342f,                          // refPupil01
+        vec3(0.470588f, 0.278431f, 0.101961f),       // inner (single-source: gen_usd_sample.IRIS.inner_color)
+        vec3(0.458824f, 0.619608f, 0.470588f),       // outer (single-source: gen_usd_sample.IRIS.outer_color)
+        1.0f, 0.7f, 1.0f, 1.0f,          // detail, fiber, haloSize, haloStrength
+        0.0f, 1.0f, 1.0f, 0.0f,          // spotDensity/Scale/Spread/Seed
+        vec3(0.55f, 0.42f, 0.32f),       // spotColor (unused)
+        0.3f, 0.4f, 0.0f, 1,             // waviness, clumping, spotIrreg, style=billow
+        0.9f, 0.0f, 0.0f, 0.45f,         // spotOpacity/Vary, fiberGaps, fiberCrypts
+        0.0f, 0.0f, 0.15f,               // hetero amount/angle/softness
+        vec3(0.40f, 0.50f, 0.70f));      // heteroColor (unused)
+    vec3 scleraSample = vec3(1.0f);
+    vec3 eyeColor;
+    eye_compose(irisAlbedo, scleraSample, caustic, ringMul, irisWeight, pupilMask, bleedWeight, vec3(0.02, 0.02, 0.02), vec3(0.93, 0.91, 0.88), vec3(1.0, 1.0, 1.0), vec3(1.0, 1.0, 1.0), 0.5f, eyeColor);
+
+    // simple view-facing headlight so the sclera reads (real lights still apply
+    // through Storm on top of this base color)
+    float ndv = clamp(dot(normalize(Neye), normalize(-Peye.xyz)), 0.0, 1.0);
+    float lit = 0.35f + 0.65f * ndv;
+    // SINGLE-SOURCE sclera SSS (realtime wrap approximation): ADD a warm fill in
+    // the sclera's shadow so the terminator softens + warms - never darkening,
+    // never touching the iris. wrapLift = ecScleraWrap(ndv,w) - ndv is the extra
+    // shadow fill the wrap adds vs plain, gated to the WHITE by (1 - irisWeight)
+    // and tinted by SCLERA_SSS_COLOR. Weight = SCALARS/ScleraSssWeight.
+    float scleraFrac = clamp(1.0f - irisWeight, 0.0f, 1.0f);
+    float wrapLift = max(ecScleraWrap(ndv, 0.2500f) - ndv, 0.0f);
+    vec3 sssFill = vec3(0.9600f, 0.9000f, 0.8600f) * (scleraFrac * wrapLift);
+    // SPEC 4.9 sclera emissive. A glslfx surfaceShader returns ONE colour and
+    // has no emission pin, so this rides the composite ADDITIVELY - the same
+    // compromise the Maya VP2 fragment makes, and the same one this file makes
+    // for the placed spec. scleraEmissive is eye_project's already-masked,
+    // already-scaled output (sclera falloff * STATIC limbal ring * front gate),
+    // so the ring stays a ring instead of being filled back in.
+    // (baseRoughness/filmRoughness come out of eye_project too and are unused
+    // here on purpose: Storm's glslfx face has no BSDF to feed them to.)
+    vec3 emissive = vec3(0.930000f, 0.910000f, 0.880000f) * scleraEmissive;
+    return vec4(eyeColor * (lit + sssFill) + emissive, 1.0);
+}
+
+-- glsl SquarebitEye.Displacement
+
+vec4 displacementShader(int index, vec4 Peye, vec3 Neye, vec4 patchCoord)
+{
+    // Same correction as the surface; see ecWorldToObject.
+    mat4 e2w = ecWorldToObject() * GetWorldToViewInverseMatrix();
+    vec3 Pw = (e2w * Peye).xyz;
+    float height;
+    eye_displace(Pw, vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), 0.4875f, 1.0f, 1.0932f, 1.0f, 1.0f, 1.0f, height);
+    return Peye + vec4(normalize(Neye) * height, 0.0);
+}

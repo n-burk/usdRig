@@ -154,19 +154,34 @@ def testUsdviewInputFunction(appController):
     # 3. Dragging must actually move it.
     before = Gf.Vec3d(curvenetUI.GetPoints(net)[index])
     moved = False
+    tried = []
+    # A knot follows the SURFACE, so the destination has to be over the
+    # model. One diagonal was enough on the body this was written for and
+    # runs straight off a narrower one, so the directions are tried until a
+    # pick at the destination says it is still on the model. The drag that
+    # matters to an artist is the one that stays on the mesh.
     for offset in (18, 30, 46, 64):
-        QtWidgets.QApplication.sendEvent(
-            view, _Mouse(QtCore, QtGui, view, QtCore.QEvent.Type.MouseMove,
-                         logical[0] + offset, logical[1] + offset))
-        appController._processEvents()
-        if (Gf.Vec3d(curvenetUI.GetPoints(net)[index]) - before).GetLength() \
-                > 1e-6:
-            moved = True
+        for dx, dy in ((1, 1), (1, 0), (0, 1), (1, -1),
+                       (-1, 0), (0, -1), (-1, 1), (-1, -1)):
+            toX, toY = logical[0] + offset * dx, logical[1] + offset * dy
+            if panel._picker.Pick(int(toX * ratio), int(toY * ratio)) is None:
+                continue
+            tried.append("(%+d,%+d)x%d" % (dx, dy, offset))
+            QtWidgets.QApplication.sendEvent(
+                view, _Mouse(QtCore, QtGui, view,
+                             QtCore.QEvent.Type.MouseMove, toX, toY))
+            appController._processEvents()
+            if (Gf.Vec3d(curvenetUI.GetPoints(net)[index])
+                    - before).GetLength() > 1e-6:
+                moved = True
+                break
+        if moved:
             break
     if not moved:
         raise AssertionError(
-            "a left-drag did not move the selected knot (status %r)"
-            % panel._status.text())
+            "a left-drag did not move the selected knot (status %r; "
+            "destinations on the model tried: %s)"
+            % (panel._status.text(), ", ".join(tried) or "none"))
     QtWidgets.QApplication.sendEvent(
         view, _Mouse(QtCore, QtGui, view,
                      QtCore.QEvent.Type.MouseButtonRelease, logical[0] + 64,

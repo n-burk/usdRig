@@ -139,6 +139,12 @@ struct RigExecWireRevision {
     std::vector<int32_t> influenceSlots;
     int32_t transformSlot = -1;
     int32_t transformSpaceSlot = -1;
+    /// rigExec:space -- the provider whose own rest->pose map carries the
+    /// whole rig, normally a TRS master. Written as a TRAILING block of the
+    /// geometry section rather than a field inside each revision, so a
+    /// binary baked before it existed decodes as -1 everywhere, which is
+    /// the answer those files were baked from.
+    int32_t carrySpaceSlot = -1;
     int32_t constraintDelta = -1;
     int32_t driverFramesSolver = -1;
     bool finalPhase = false;

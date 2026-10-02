@@ -34,6 +34,18 @@ BUTTON_TYPE = Tf.Type.FindByName("RigExecPickerButton")
 PICKER_ROOT_SAFE = "RigExecRoot"
 
 
+def _mirror_of(prim):
+    """The path of the button this one mirrors, or "".
+
+    Authored from the studio picker's own <mirror> element -- a pairing
+    the rig author made, carried across rather than derived from L_/R_ in
+    a name, because it also pairs the buttons whose names carry no side.
+    """
+    rel = prim.GetRelationship("rigExec:picker:mirror")
+    targets = rel.GetTargets() if rel else []
+    return str(targets[0]) if targets else ""
+
+
 def _v(prim, name, default=None):
     attr = prim.GetAttribute(name)
     if not attr or not attr.IsValid():
@@ -121,6 +133,11 @@ def _button_record(prim, panel_id):
         "leftSlope": float(_v(prim, "ui:slopeLeft", 0.0)),
         "rightSlope": float(_v(prim, "ui:slopeRight", 0.0)),
         "polygon": _pairs(_v(prim, "ui:polygon")),
+        # The button this one mirrors, as a prim path. Authored from the
+        # studio picker's own <mirror> element -- a pairing the rig
+        # author made, which is why it is carried rather than derived
+        # from L_/R_ in a name.
+        "mirror": _mirror_of(prim),
         "bezier": bezier,
         "rotation": float(_v(prim, "ui:rotation", 0.0)),
         "alternate": bool(_v(prim, "ui:alternate", False)),

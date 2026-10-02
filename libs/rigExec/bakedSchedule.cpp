@@ -1108,6 +1108,15 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             step.externalReads =
                 !walk.solverBatch && walk.index >= 0 &&
                 !B.constraints[size_t(walk.index)].weightObject.IsEmpty();
+        } else if (step.kind == RigExecBakedStepKind::PoseInterpolator) {
+            // A NUMERIC driver reads its dials off the stage, and no slot
+            // names them: like a constraint's envelope object, that is a
+            // read outside the program, so the cluster is dirty every run
+            // and the solve's own answer decides the rest. A
+            // transform-driven interpolator reads its driver's slot and is
+            // scheduled by it, exactly as before.
+            step.externalReads =
+                !B.poseInterpolators[size_t(step.object)].valueInputs.empty();
         } else if (step.kind == RigExecBakedStepKind::Derived) {
             // A derived target assembles its own packet against its own
             // inputs, and does it after the chain it maintains has published

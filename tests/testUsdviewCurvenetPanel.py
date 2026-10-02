@@ -86,7 +86,11 @@ def testUsdviewInputFunction(appController):
             "example's tube fills the frame, so the pick path is broken")
     path, point, _ = hit
     if not str(path).startswith("/CurvenetAsset/Geom/Tube"):
-        raise AssertionError("centre pick hit %s, expected the tube" % path)
+        raise AssertionError(
+            "centre pick hit %s, expected the tube. A rig's decorations are "
+            "guide purpose and draw in FRONT of what they decorate, so the "
+            "pick has to skip them: an FK chain's guide runs straight down "
+            "the middle of this viewport." % path)
 
     # Event filter install/remove, which draw mode depends on.
     panel._SetMode(curvenetUI.MODE_DRAW)

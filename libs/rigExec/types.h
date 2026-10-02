@@ -261,6 +261,12 @@ struct RigExecMoverParameters {
     bool enabled = true;
     bool valid = false;    ///< false => MoverFailed pass-through
     GfMatrix4d transform{1.0};
+
+    /// Take a fraction of the transform's ROTATION rather than of the
+    /// resulting position, so a weighted point keeps its distance from
+    /// the axis instead of cutting the chord. See
+    /// RigExecPartialTransform.
+    bool radialWeight = false;
     /// Common MoverAPI envelope. A bound rigExec:weightObject supplies this
     /// packet; otherwise it is the constant packet synthesized from
     /// inputs:defaultWeight. It is applied after the operation computes its

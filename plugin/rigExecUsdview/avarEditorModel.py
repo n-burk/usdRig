@@ -22,6 +22,7 @@
 import math
 import os
 import sys
+import weakref
 
 from pxr import Sdf, Tf, Usd, UsdGeom
 
@@ -38,12 +39,20 @@ AVAR_PREFIX = "avars:"
 
 # Other namespaces a rig parks animator dials in. `foot:` is the reverse
 # foot's roll/bank/toePlantAngle on `bank_?` -- the conventional footRoll and
-# footRock. They are float customs rather than avars because a
-# RigExecFloatMathMover target must be `float` while every avar is
-# `double`, so they could never have BEEN avars; that is a typing detail,
-# not a reason to hide the three dials that roll the foot from the panel
+# footRock. `face:` is the head's: lookAt on the eye target, head_topAim and
+# head_lowAim on the head wire's ends. `spaces:active` is which
+# space a switchable control is parented into, an index into that
+# control's own switch spaceLabels. They are float customs rather than
+# avars because a RigExecFloatMathMover target must be `float` while every
+# avar is `double`, so they could never have BEEN avars; that is a typing
+# detail, not a reason to hide the dials that roll the foot from the panel
 # an animator uses to roll the foot.
-RIG_PREFIXES = (AVAR_PREFIX, "foot:")
+#
+# A namespace holds a rig's WORKINGS as well as its dials, though --
+# `face:head_topRatio` is a distance the squetch network recomputes every
+# evaluation -- so a prefix alone is not enough to decide what an animator
+# may edit. DrivenProperties below is the second half of the rule.
+RIG_PREFIXES = (AVAR_PREFIX, "foot:", "face:", "spaces:")
 
 
 def RigPrefixOf(name):
@@ -105,6 +114,87 @@ _SCHEMA_RANK = {name: i for i, name in enumerate((
 # avar evaluation") -- authoring it from a slider would be wrong, and it
 # is not a channel an animator poses. Listed in the footnote instead.
 _HIDDEN = ("avars:defaultSpace",)
+
+# Rig channels that configure a control rather than pose it. Zeroing a
+# rig must not touch these: clearing avars:rotationOrder would silently
+# re-order a control's rotations, which is not what "zero" means to
+# anyone. Kept here beside _HIDDEN because it is the same distinction,
+# drawn for a different consumer -- the panel still SHOWS these.
+CONFIG_CHANNELS = ("avars:rotationOrder", "avars:unitScaleFactor",
+                   "avars:defaultSpace")
+
+
+def PoseChannels(prim, stage=None):
+    """Every rig channel on `prim` that carries a POSE, as attributes.
+
+    What "zero this control" has to clear. Wider than the nine transform
+    avars: a limb left in IK, a foot mid-roll, a pole vector switched
+    into another space and an eye still following the look target are all
+    poses an animator expects a zero to undo, and all of them live in a
+    namespace of their own rather than under `avars:`.
+
+    Left out are the config channels above, and anything a mover
+    recomputes -- clearing a driven channel writes nothing an evaluation
+    will not immediately overwrite, and it would put a pointless entry on
+    the undo stack.
+    """
+    if not prim or not prim.IsValid():
+        return []
+    driven = DrivenProperties(stage or prim.GetStage())
+    out = []
+    for attr in prim.GetAttributes():
+        name = attr.GetName()
+        if RigPrefixOf(name) is None or name in CONFIG_CHANNELS:
+            continue
+        if attr.GetPath() in driven:
+            continue
+        out.append(attr)
+    return out
+
+
+
+# Properties some mover writes, by stage. A channel the rig recomputes is
+# not a channel an animator poses: typing a number into
+# `face:head_topRatio` looks like it worked and is gone by the next
+# evaluation, because the squetch network's first step multiplies it by
+# zero. So the panel lists those as present and refuses to edit them,
+# which is the same answer it already gives for avars:defaultSpace.
+#
+# Found by asking every mover what it moves -- there is no back-pointer
+# from a property to the movers that write it -- so it is done once per
+# stage and remembered. On the biped that is a thousand movers and about
+# forty milliseconds, paid on the first prim the panel shows and never
+# again; ForgetDrivenProperties drops it when the stage changes shape.
+_DRIVEN = {}
+
+
+def DrivenProperties(stage):
+    """The set of property paths on `stage` that a mover writes."""
+    if stage is None:
+        return frozenset()
+    key = id(stage)
+    hit = _DRIVEN.get(key)
+    if hit is not None and hit[0]() is stage:
+        return hit[1]
+    driven = set()
+    for prim in stage.TraverseAll():
+        moves = prim.GetRelationship("rigExec:moves")
+        if not moves:
+            continue
+        for target in moves.GetTargets():
+            if target.IsPropertyPath():
+                driven.add(target)
+    driven = frozenset(driven)
+    _DRIVEN[key] = (weakref.ref(stage), driven)
+    return driven
+
+
+def ForgetDrivenProperties(stage=None):
+    """Drop the cache for `stage`, or for every stage."""
+    if stage is None:
+        _DRIVEN.clear()
+    else:
+        _DRIVEN.pop(id(stage), None)
 
 _FLOAT_TYPES = ("double", "float", "half")
 _INT_TYPES = ("int", "uint", "int64", "uint64", "uchar")
@@ -265,7 +355,32 @@ class Channel(object):
             return "deg"
         return ""
 
+    def PendingValue(self):
+        """
+        The value a manipulator is holding for this channel mid-drag, or
+        None when nothing is in flight.
+
+        A gizmo drag authors nothing until release: each sample lands in
+        gizmoMath's preview map (Writer.Set, gizmoMath.py) and Hydra is
+        fed from there. That map is therefore the ONE place the number
+        the artist is looking at lives before the stage has it, and the
+        editor reads it from the same place the handles do rather than
+        being handed a copy that could disagree.
+        """
+        attr = self.attr
+        if not attr:
+            return None
+        return gizmoMath.PreviewValues().get(attr.GetPath())
+
     def Value(self, time):
+        """
+        What to SHOW for this channel at `time`: the uncommitted value of
+        a drag in flight, else the stage's. Never what to WRITE -- the
+        write path reads the attribute itself.
+        """
+        pending = self.PendingValue()
+        if pending is not None:
+            return pending
         return self.attr.Get(time)
 
     def Animated(self):
@@ -413,19 +528,22 @@ def DiscoverChannels(prim, stage=None):
     and custom ones alphabetically after them.
 
     Returns (channels, hidden) where `hidden` names the avars that are
-    present but not editable here (avars:defaultSpace and any array or
-    matrix typed avar), so the panel can say they exist.
+    present but not editable here -- avars:defaultSpace, any array or
+    matrix typed avar, and any channel a mover recomputes -- so the panel
+    can say they exist.
     """
     if not prim or not prim.IsValid():
         return [], []
     stage = stage or prim.GetStage()
+    driven = DrivenProperties(stage)
     channels = []
     hidden = []
     for attr in prim.GetAttributes():
         name = attr.GetName()
         if RigPrefixOf(name) is None:
             continue
-        if name in _HIDDEN or ValueFamily(attr) == VALUE_OTHER:
+        if (name in _HIDDEN or ValueFamily(attr) == VALUE_OTHER
+                or attr.GetPath() in driven):
             hidden.append(name)
             continue
         channels.append(Channel(prim, attr, stage))
@@ -443,18 +561,30 @@ def FocusPrim(usdviewApi):
     """
     The prim the editor edits, and how many OTHER prims are selected.
 
-    usdview's focus prim, with the gizmo's fallback (gizmoUI._FocusPrim):
-    the selection model keeps the pseudo-root focused when a prim is
-    added to an already-cleared selection, which is what every script
-    driving usdview does. With several prims selected the editor edits
-    the focus prim only and reports the count so the panel can say so.
+    THE LAST SELECTED, which is the one the hand just moved to. usdview's
+    selection is an OrderedDict keyed by path in insertion order, so the
+    tail of `selectedPrims` is the most recent pick whatever put it there
+    -- viewport, prim tree, picker or TouchPose.
+
+    It is deliberately NOT usdview's focus prim. Focus stays put when a
+    prim is shift-added to a selection, so an editor following it shows
+    the first control of a group while the animator is looking at the
+    one they just clicked. Focus is kept only as the fallback for a
+    selection that is somehow empty of usable prims, which is also the
+    case (the pseudo-root stays focused on a cleared-then-added
+    selection) the gizmo's `_FocusPrim` was written for.
+
+    The count of OTHERS comes back with it so the panel can say how many
+    more the edit will reach.
     """
     api = usdviewApi
     selected = [p for p in (api.selectedPrims or [])
                 if p and p.IsValid() and not p.IsPseudoRoot()]
-    prim = api.prim
-    if not (prim and prim.IsValid() and not prim.IsPseudoRoot()):
-        prim = selected[-1] if selected else None
+    prim = selected[-1] if selected else None
+    if prim is None:
+        prim = api.prim
+        if not (prim and prim.IsValid() and not prim.IsPseudoRoot()):
+            prim = None
     if prim is None:
         return None, 0
     others = len([p for p in selected if p.GetPath() != prim.GetPath()])
@@ -617,6 +747,41 @@ def ResetValue(channel, time, mode):
     return None
 
 
+def PeerChannels(channel, prims):
+    """The same avar on the OTHER selected prims, as Channels.
+
+    An edit in the panel applies to every selected prim that carries the
+    channel being edited -- which is what "select both shoulders and dial
+    them together" means. A prim without that avar is skipped rather than
+    having one created on it: selecting a control and a joint must not
+    quietly give the joint a channel it never had.
+
+    Matched on the attribute's NAME, so `avars:tx` reaches `avars:tx` and
+    nothing else; a rig whose two controls spell the same idea
+    differently is two different avars and is left alone.
+
+    The channel's own prim is never in the result, so a caller can write
+    its own first and then the peers without writing it twice.
+    """
+    own = channel.prim.GetPath()
+    name = channel.name
+    stage = channel.attr.GetStage()
+    peers = []
+    for prim in prims or []:
+        if prim is None or not prim.IsValid() or prim.GetPath() == own:
+            continue
+        attr = prim.GetAttribute(name)
+        if not (attr and attr.IsValid()):
+            continue
+        peer = Channel(prim, attr, stage)
+        # Same name, different TYPE is not the same channel: writing a
+        # float into a token would either throw or author nonsense.
+        if peer.family != channel.family:
+            continue
+        peers.append(peer)
+    return peers
+
+
 class EditScope(object):
     """
     One undoable edit over a set of channels: snapshots them on entry,
@@ -653,3 +818,22 @@ class EditScope(object):
 
     def Abort(self):
         self._recorder.Abort()
+
+
+def Matches(text, query):
+    """True when *text* survives a search box holding *query*.
+
+    Every space-separated word has to appear in *text*, case-insensitively
+    and in any order. An empty or whitespace query keeps everything, which
+    is what makes clearing the box the way back.
+
+    Pure, and local to this plugin on purpose: the editors load
+    independently of one another, so a shared helper would mean one
+    plugin importing another's module and failing to open when it is
+    absent. The rule is eight lines; the coupling would cost more.
+    """
+    words = (query or "").split()
+    if not words:
+        return True
+    hay = (text or "").lower()
+    return all(word.lower() in hay for word in words)

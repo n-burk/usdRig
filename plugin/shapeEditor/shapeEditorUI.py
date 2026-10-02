@@ -164,6 +164,18 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         self.resize(560, 720)
         layout = QtWidgets.QVBoxLayout(self)
 
+        self._search = QtWidgets.QLineEdit()
+        self._search.setPlaceholderText("find a pose or interpolator...")
+        self._search.setClearButtonEnabled(True)
+        self._search.setToolTip(
+            "Filter the tree. Matches an interpolator's name, a pose's "
+            "name and its corrective target, case-insensitively; "
+            "space-separated words all have to match, in any order. An "
+            "interpolator whose own name matches keeps all its poses, so "
+            "typing a limb gives you that limb's whole stack.")
+        self._search.textChanged.connect(self._Populate)
+        layout.addWidget(self._search)
+
         row = QtWidgets.QHBoxLayout()
         self._firingOnly = QtWidgets.QCheckBox("Firing only")
         self._firingOnly.setToolTip(
@@ -382,10 +394,21 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         self._tree.clear()
         self._items = {}
         firingOnly = self._firingOnly.isChecked()
+        query = self._search.text() if hasattr(self, "_search") else ""
         for interp in self._interpolators:
             poses = interp.firing if firingOnly else interp.poses
             if firingOnly and not poses:
                 continue
+            # An interpolator whose OWN name matches keeps every pose:
+            # searching for a limb should hand you that limb's whole
+            # stack, not the one pose that happens to repeat its name.
+            whole = model.Matches(interp.name, query)
+            if not whole:
+                poses = [p for p in poses
+                         if model.Matches(p.name, query)
+                         or model.Matches(p.target or "", query)]
+                if query.split() and not poses:
+                    continue
             top = QtWidgets.QTreeWidgetItem(self._tree)
             top.setText(0, interp.name)
             top.setText(2, interp.kernel or "")
@@ -393,7 +416,9 @@ class ShapeEditorPanel(QtWidgets.QDialog):
             top.setCheckState(3, QtCore.Qt.Checked if interp.enabled
                               else QtCore.Qt.Unchecked)
             top.setData(0, QtCore.Qt.UserRole + 1, str(interp.path))
-            top.setExpanded(firingOnly)
+            # A search that narrowed the poses opens the parent: a filter
+            # whose hits are behind a closed triangle has not helped.
+            top.setExpanded(firingOnly or bool(query.split()))
             for entry in poses:
                 item = QtWidgets.QTreeWidgetItem(top)
                 item.setText(0, entry.name)

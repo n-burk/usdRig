@@ -826,6 +826,20 @@ RigExecWireEncodeDomainGeometry(const RigExecWireDomainGeometry &geometry,
     }
     _PutU32s(out, geometry.currentPhaseWeights);
     _PutU32s(out, geometry.deltaBasePaths);
+    // The carry slots, as one trailing block rather than a field inside
+    // each revision: a binary written before rigExec:space reached the
+    // matrix mover simply ends above, and the decoder reads that as -1
+    // everywhere -- which is what those files were baked from. Walked in
+    // exactly the order the chains were written in, revisions then derived,
+    // because that order is the only key the block has.
+    for (const RigExecWireChain &chain : geometry.chains) {
+        for (const RigExecWireRevision &revision : chain.revisions) {
+            RigExecWirePutI32(out, revision.carrySpaceSlot);
+        }
+        for (const RigExecWireDerived &derived : chain.derived) {
+            RigExecWirePutI32(out, derived.revision.carrySpaceSlot);
+        }
+    }
     return true;
 }
 
@@ -900,6 +914,23 @@ RigExecWireDecodeDomainGeometry(RigExecWireReader *reader,
     if (!_ReadU32s(reader, &geometry->currentPhaseWeights) ||
         !_ReadU32s(reader, &geometry->deltaBasePaths)) {
         return _Fail(error);
+    }
+    // The optional trailing carry block. Absent on every binary baked
+    // before rigExec:space reached the matrix mover, and its absence is the
+    // old answer -- no carry -- so this is a read, not a requirement.
+    if (!reader->Exhausted()) {
+        for (RigExecWireChain &chain : geometry->chains) {
+            for (RigExecWireRevision &revision : chain.revisions) {
+                if (!reader->ReadI32(&revision.carrySpaceSlot)) {
+                    return _Fail(error);
+                }
+            }
+            for (RigExecWireDerived &derived : chain.derived) {
+                if (!reader->ReadI32(&derived.revision.carrySpaceSlot)) {
+                    return _Fail(error);
+                }
+            }
+        }
     }
     if (!reader->Exhausted()) {
         if (error) {

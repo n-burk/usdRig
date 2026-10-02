@@ -82,3 +82,11 @@ desktop.ini
 .windsurf/
 .pytest_cache/
 *.egg-info/
+
+# Build output and one-off captures. Both were committed once by a
+# careless `git add -A` and had to be purged from history before the
+# branch was pushed; an ignore rule does not untrack what is already in.
+# Packaged archives: built, never committed (AGENTS.md).
+/dist/
+# Viewport captures from investigating the arm.
+/arm_*.png

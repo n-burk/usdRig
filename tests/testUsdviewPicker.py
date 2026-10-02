@@ -29,7 +29,7 @@ def _Check(condition, message):
         raise AssertionError(message)
 
 
-from pxr.Usdviewq.qt import QtWidgets
+from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 
 def _RigExecMenu(appController):
@@ -92,7 +92,7 @@ def testUsdviewInputFunction(appController):
     _Check(not hasattr(pickerModel, "load_for"),
            "the JSON loader is gone from pickerModel")
     other = Usd.Stage.Open(os.path.join(os.path.dirname(
-        stage.GetRootLayer().realPath), "Biped_layered.usda"))
+        stage.GetRootLayer().realPath), "Biped.usda"))
     _Check(not pickerScene.find(other),
            "a stage without the picker layer carries no picker")
 
@@ -210,9 +210,26 @@ def testUsdviewInputFunction(appController):
     appController._processEvents()
 
     # --- 6. the IK/FK buttons actually switch ---------------------------
-    switches = [b for b in picker.buttons if b.attr_target]
+    # Attribute buttons are no longer only the limb switches: the space
+    # switches are bound the same way (twelve of them, on spaces:active),
+    # so the four this section is about are picked out by the channel
+    # they drive rather than by being all there is.
+    bound = [b for b in picker.buttons if b.attr_target]
+    switches = [b for b in bound
+                if b.attr_target["attr"] == "avars:ikfk"]
     _Check(len(switches) == 4,
-           "all four limb IK/FK switches are bound, got %d" % len(switches))
+           "all four limb IK/FK switches are bound, got %d of %d attribute "
+           "buttons" % (len(switches), len(bound)))
+    # avars:space is the eye look-at's weight. It was called face:lookAt
+    # until it was renamed to the name every other control uses for the
+    # same kind of channel, and this list was not moved with it -- which
+    # nothing caught, because this test runs from bin/run_testusdview_
+    # picker and is not one of the 198 in ctest.
+    _Check(all(b.attr_target["attr"] in ("avars:ikfk", "avars:space",
+                                         "spaces:active")
+               for b in bound),
+           "every attribute button drives a channel this test knows: %s"
+           % sorted(set(b.attr_target["attr"] for b in bound)))
     switch = switches[0]
     target = switch.attr_target
     prim = stage.GetPrimAtPath(target["path"])
@@ -278,20 +295,29 @@ def testUsdviewInputFunction(appController):
     # the thing the user asked for, so assert the effect not the plumbing.
     flipped = dict(modes)
     for path in flipped:
-        if "arm" in path:
+        # CASE-INSENSITIVE. The dials are on the delivered control names
+        # (L_Arm, R_Arm), not the build names (arm_l), so a lowercase
+        # "arm" matched nothing and the flip was a no-op comparing a set
+        # against itself.
+        if "arm" in path.lower():
             flipped[path] = "ik" if flipped[path] == "fk" else "fk"
     after = picker.visible(body.id, modes=flipped)
     _Check(len(after) != len(with_modes),
            "switching the arms changes what is drawn: %d -> %d"
            % (len(with_modes), len(after)))
 
-
-
-
-
-
-
-    dial = next(p for p in modes if "arm_l" in p)
+    # ...and the panel must notice a dial moved from OUTSIDE it -- the
+    # Avar Editor, a gizmo on `avars:ikfk`, an undo, a scrub. It used to
+    # refresh only on its own switch click, so measured on Biped_stack,
+    # setting L_Arm back to 0 (FK) from outside still drew L_ArmIK and
+    # L_ArmPV and still hid L_UpArm/L_LoArm/L_Hand until the panel was
+    # reopened. That is the "the IK controls are always on" report.
+    #
+    # L_Arm, the DELIVERED name. This said "arm_l", the build name, and
+    # matched nothing once the controls were renamed -- the generator
+    # raised StopIteration rather than failing an assertion, which is
+    # why it read as a crash and not as a stale test.
+    dial = next(p for p in modes if "L_Arm" in p)
     was = modes[dial]
     attr = stage.GetAttributeAtPath(Sdf.Path(dial))
     knob = next(b for b in picker.buttons if b.attr_target
@@ -348,6 +374,29 @@ def testUsdviewInputFunction(appController):
     _Check(b_attr.HasAuthoredValue() and float(b_attr.Get()) == 4.0,
            "the unselected one kept its pose, got %s" % b_attr.Get())
 
+    # --- 9. and it is undoable -----------------------------------------
+    #
+    # This is the assertion the bug needed. The panel always LOOKED like
+    # it recorded -- it opened an undo scope around the clear -- but the
+    # scope covered an empty list of paths, which snapshots nothing and
+    # pushes nothing, and OpenPickerPanel threw away the stack it was
+    # handed on top of that. So zeroing was a one-way door, and zeroing
+    # with nothing selected took the whole rig through it.
+    undo = getattr(panel, "_undo", None)
+    _Check(undo is not None, "the picker panel was handed the undo stack")
+    _Check(undo.CanUndo(), "zeroing pushed an undo entry")
+    undo.Undo()
+    appController._processEvents()
+    a_attr = stage.GetPrimAtPath(a_path).GetAttribute("avars:tx")
+    _Check(a_attr.HasAuthoredValue() and float(a_attr.Get()) == 4.0,
+           "undo put the zeroed pose back, got %s"
+           % (a_attr.Get() if a_attr.HasAuthoredValue() else "nothing"))
+    undo.Redo()
+    appController._processEvents()
+    _Check(not stage.GetPrimAtPath(a_path)
+           .GetAttribute("avars:tx").HasAuthoredValue(),
+           "redo zeroed it again")
+
     # Nothing selected -> everything.
     selection.clearPrims()
     appController._processEvents()
@@ -355,6 +404,53 @@ def testUsdviewInputFunction(appController):
     appController._processEvents()
     _Check(not b_attr.HasAuthoredValue(),
            "with nothing selected it zeroed the whole rig")
+
+    _Check(undo.CanUndo(), "zeroing the whole rig pushed an undo entry too")
+    undo.Undo()
+    appController._processEvents()
+    b_attr = stage.GetPrimAtPath(b_path).GetAttribute("avars:tx")
+    _Check(b_attr.HasAuthoredValue() and float(b_attr.Get()) == 4.0,
+           "the whole-rig zero came back in one step, got %s"
+           % (b_attr.Get() if b_attr.HasAuthoredValue() else "nothing"))
+
+    # F FRAMES THE SELECTION FROM THE PICKER, as it does over the
+    # viewport. It does not arrive on its own: usdview routes F through
+    # one application-wide AppEventFilter that only reaches widgets in
+    # the main window, and the picker is a QDialog -- its own top-level
+    # window -- so the key landed and nothing framed.
+    #
+    # The ACTION is what is watched, not the camera. Framing moves the
+    # camera by an amount that depends on the selection's bound and the
+    # viewport's aspect, so asserting on the camera would be asserting
+    # on usdview's framing maths; what this owns is that the picker asks
+    # for it.
+    actionType = getattr(QtGui, "QAction", None) or QtWidgets.QAction
+    frameAction = appController._mainWindow.findChild(
+        actionType, "actionFrame_Selected")
+    _Check(frameAction is not None,
+           "usdview has no actionFrame_Selected to frame through")
+    fired = []
+    frameAction.triggered.connect(lambda *a: fired.append(1))
+
+    panel._FrameSelection()
+    _Check(len(fired) == 1,
+           "the picker's frame helper did not trigger Frame Selected")
+
+    panel.keyPressEvent(QtGui.QKeyEvent(
+        QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key_F,
+        QtCore.Qt.NoModifier))
+    appController._processEvents()
+    _Check(len(fired) == 2,
+           "F in the picker did not frame the selection (fired %d times)"
+           % len(fired))
+
+    # A modifier is somebody else's shortcut, so the panel must not claim it.
+    panel.keyPressEvent(QtGui.QKeyEvent(
+        QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key_F,
+        QtCore.Qt.ControlModifier))
+    appController._processEvents()
+    _Check(len(fired) == 2,
+           "Ctrl+F was swallowed by the picker and framed the selection")
 
     shot = os.getenv("RIGEXEC_PICKER_SHOT")
     if shot:

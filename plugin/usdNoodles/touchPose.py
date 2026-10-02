@@ -38,6 +38,14 @@ from __future__ import annotations
 
 FACES_ATTR = "touchpose:faces"
 CONTROL_REL = "touchpose:control"
+# The schema-typed relationship, which is authoritative where a region
+# carries both. A region retargeted from the joint it used to select onto
+# the control that now drives it updates the TYPED rel; the custom one
+# beside it is the older spelling and can still name the joint. Reading
+# the custom one first is how a touch on the jaw selects `jaw_bind`
+# instead of `jaw_ctl` -- the joint moves, so it looks like it worked.
+# touchPoseModel.py has always resolved typed-first; this matches it.
+TYPED_CONTROL_REL = "rigExec:touch:control"
 MESH_ATTR = "touchpose:mesh"
 PALETTE_ATTR = "touchpose:palette"
 NAMESPACE = "touchpose:"
@@ -78,10 +86,14 @@ def control_paths(prim) -> list:
     """
     if not is_touch_region(prim):
         return []
-    rel = prim.GetRelationship(CONTROL_REL)
-    if not rel or not rel.IsValid():
-        return []
-    return [path for path in rel.GetTargets() if path.IsPrimPath()]
+    for name in (TYPED_CONTROL_REL, CONTROL_REL):
+        rel = prim.GetRelationship(name)
+        if not rel or not rel.IsValid():
+            continue
+        targets = [path for path in rel.GetTargets() if path.IsPrimPath()]
+        if targets:
+            return targets
+    return []
 
 
 def group_regions(group_prim) -> list:
@@ -114,7 +126,7 @@ def find_touch_groups(stage) -> list:
     ALL prims, not the default predicate. A regions layer is written as an
     `over` on the character (so it can be re-imported without rewriting 4
     MB of rig), and everything under an `over` ancestor is undefined:
-    measured on `Biped_touch_regions.usda` opened on its own, the default
+    measured on `Biped_body_touch_regions.usda` opened on its own, the default
     traversal yields 0 prims and the all-prims traversal yields 102. The
     editor is a graph over authored opinions, so the layer alone has to
     read as the graph it is.

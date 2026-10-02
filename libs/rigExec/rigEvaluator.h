@@ -12,6 +12,7 @@
 #include "bakedProgram.h"
 #include "moverGraph.h"
 #include "profiler.h"
+#include "solverKernels.h"
 #include "tapSet.h"
 #include "types.h"
 
@@ -105,6 +106,19 @@ struct RigExecRigPose {
     /// native-instancing prototype resolves to prototype-common space).
     /// Keyed identically, so a lookup that finds one finds the other.
     std::map<SdfPath, GfMatrix4d> providerBaseXforms;
+
+    /// Prim path -> constant matrices the rig computed for a SHADER on that prim,
+    /// by primvar name.
+    ///
+    /// The eye's projector is why this exists. Its shader needs a frame
+    /// that is NOT the prim's own placement: the eyeball is moved by a
+    /// skin and a cluster, so its transform is its placement, while the
+    /// projector is anchored to the eye's bind joint and rides the
+    /// deforming surface. Storm cannot hand a material a matrix that
+    /// changes per evaluation, but it does expose a primvar to a glslfx
+    /// as HdGet_<name>(), so a constant matrix primvar is the one
+    /// channel a rig-computed frame has into the geometry stage.
+    std::map<SdfPath, std::map<TfToken, GfMatrix4d>> shaderMatrices;
 
     /// Aggregate solver path -> posed frame elements straight from the
     /// solver's computePointFrameArray (guide drawing and inspection).
@@ -757,8 +771,36 @@ private:
     bool _CompileEpochAttempt(std::vector<std::string> *errors,
                               _CompileFailure *failure);
 
+    /// RigExecSurfaceProjector prims, with the points property each one
+    /// rides. Kept OUT of _movers on purpose: a projector is resolved in
+    /// one post-geometry pass that both counter-moves the points and
+    /// publishes the transform, because the two are the same answer and
+    /// splitting them across the mover graph and the pose walk would let
+    /// them disagree. See _ApplySurfaceProjectors.
+    struct _SurfaceProjectorRecord {
+        SdfPath path;
+        SdfPath target;   ///< the points property it rides
+        GfVec3d rayOrigin;
+        GfVec3d rayDirection;
+        GfVec3d rayUp;
+        SdfPath source;          ///< frame the projector is anchored to
+        SdfPath sourceSpace;     ///< the source's sibling space, if any
+        /// rigExec:space -- the provider whose own rest->pose map
+        /// carries the whole rig, normally a TRS master. The REST
+        /// cast needs it taken back off: the rest ray is built from
+        /// the source's base frame, which composes through the
+        /// masters' posed avars, while the base POINTS it is cast at
+        /// are the mesh as authored and carry nothing. Move a master
+        /// forty units and the ray starts forty units off the rest
+        /// eyeball and misses, and the projector publishes nothing.
+        SdfPath space;
+        GfMatrix4d shaderOffset{1.0};
+        TfToken shaderPrimvar;
+    };
+
     /// Discover and validate movers without changing the active epoch.
     bool _DiscoverMovers(std::vector<RigExecMoverRecord> &movers,
+                         std::vector<_SurfaceProjectorRecord> &projectors,
                          size_t &inertMovers, std::vector<std::string> *errors,
                          _CompileFailure *failure) const;
 
@@ -1373,6 +1415,13 @@ private:
         /// one. Resolved at compile: namespace topology does not move.
         SdfPath driverParent;
         bool allowNegativeWeights = true;
+        /// rigExec:enableTranslation: measure the driver's translation too.
+        bool enableTranslation = false;
+        /// rigExec:driverAttributes: a NUMERIC driver. One to three float or
+        /// double properties read in order as the driver's position, in
+        /// place of a transform's translation; empty on a transform-driven
+        /// interpolator.
+        std::vector<SdfPath> driverAttributes;
         /// <pose>.outputs:weight for the poses that are in the solve, in the
         /// solver's own index order.
         std::vector<SdfPath> poseWeights;
@@ -1420,6 +1469,11 @@ private:
         RigExecTapId transformTap = -1;
         /// computeMatrix of binding.transformSpace, or -1 (matrix).
         RigExecTapId transformSpaceTap = -1;
+        /// computeMatrix of binding.carrySpace, or -1 (matrix): the rig's
+        /// own rest->pose map, normally a TRS master's. The baked path's
+        /// counterpart is carrySpaceSlot against the same base/final
+        /// matrix table, so the two paths read the same value.
+        RigExecTapId carrySpaceTap = -1;
         /// computeMatrix per binding.influences entry, in that order (skin).
         std::vector<RigExecTapId> influenceTaps;
         RigExecTapId weightTap = -1;
@@ -1428,6 +1482,13 @@ private:
         /// is the aim-revised matrix computed in memory rather than the
         /// provider's own tapped computeMatrix.
         bool transformFinalPhase = false;
+        /// rigExec:pointFrame == "posed": the points this cluster moves
+        /// have already been carried into the rig's posed frame by a skin,
+        /// so the offset measured in its space has to be conjugated by
+        /// the rig's carry -- or, with no rigExec:space named, by the
+        /// measuring space's scale alone, which is all the correction
+        /// there was before. See RigExecClusterInPointFrame.
+        bool transformPosedPoints = false;
         /// Skin only: none of rigExec:jointIndices, jointWeights or
         /// elementSize can change within this epoch, so the layout may be
         /// resolved once and shared rather than re-read per frame. False
@@ -1612,6 +1673,18 @@ private:
         std::vector<SdfPath> targets;
         std::vector<_FrameSourceBinding> sources;
         _FrameSourceBinding worldUpObject;
+        /// rigExec:space on a Rotation or Parent constraint -- the provider
+        /// whose own rest->pose map carries the whole rig (the TRS masters
+        /// on the biped). A partial axis mask needs it: picking Euler axes
+        /// out of a rotation is not equivariant under an outer rotation, so
+        /// under a turned master the mask throws part of the carry away
+        /// with the axes it was told to drop. The same pair of taps the
+        /// space switch reads (posed and default), so the two derive one
+        /// carry. Both stay -1 when no space is named, and the kernel then
+        /// runs its untouched branch.
+        SdfPath spacePath;
+        RigExecTapId spacePosedTap = -1;
+        RigExecTapId spaceDefaultTap = -1;
         _FrameSourceBinding effector;
         std::vector<_FrameSourceBinding> poleObjects;
         std::vector<SdfPath> ikChain;
@@ -1643,6 +1716,111 @@ private:
         RigExecConstraintAxisMask precompScale;
     };
 
+    /// One compiled RigExecSpaceSwitch: a labelled parent-space list for one
+    /// xformable, with a live index selecting between them.
+    ///
+    /// The switch does not write a pose. It replaces the target's composed
+    /// frame with the SAME compose taken against another parent:
+    ///
+    ///     world = avars * default:space * inverse(source default:space)
+    ///                   * source posed:space
+    ///
+    /// which is the ordinary ladder with the namespace parent's pair of
+    /// spaces swapped for the selected source's pair. Both halves come from
+    /// one source, so at rest they cancel and no space can move the rig.
+    ///
+    /// It is published as a value override on the target's computePointFrame,
+    /// not as an authored parent:space, for two reasons. A matrix expression
+    /// treats an IDENTITY authored value as "use the fallback", and world
+    /// space is exactly the identity, so the one space an animator reaches
+    /// for most would silently mean "no switch at all". And an override on
+    /// the computation is what every namespace descendant already reads
+    /// through NamespaceAncestor<computePointFrame>, so the children of a
+    /// switched control follow it without a propagation pass.
+    /// The correction is taken against the frame exec ALREADY composed for
+    /// the target rather than by recomposing its avars here:
+    ///
+    ///     exec:  W = avars * D * inverse(parentDefault) * parentPosed
+    ///     so:    W * inverse(parentPosed) * parentDefault = avars * D
+    ///     and:   W' = W * inverse(parentPosed) * parentDefault
+    ///                   * inverse(source default) * source posed
+    ///
+    /// which is the switched compose exactly, with no second opinion about
+    /// rotation order, unit scale or avar order to drift from exec's.
+    struct _SpaceSwitch {
+        SdfPath switchPath;
+        SdfPath target;
+        /// computePointFrame of the target: the unswitched compose.
+        RigExecTapId targetPosedTap = -1;
+        /// The namespace frame provider the target would otherwise follow.
+        /// Both taps stay -1 when there is none, and the pair reads as
+        /// identity, which is what exec resolves for it.
+        RigExecTapId parentPosedTap = -1;
+        RigExecTapId parentDefaultTap = -1;
+        /// rigExec:space -- the provider whose own rest->pose map carries
+        /// the whole rig (the TRS masters on the biped). A filtered source
+        /// needs it: `local` below is composed over the target's DEFAULT
+        /// ancestors, so a master's motion reaches a switched control only
+        /// through the source's motion, and a twist or swing filter cuts
+        /// that carry away with the part it was asked to drop. Naming the
+        /// space lets the filter run on the master-free motion and the
+        /// carry be re-applied afterwards. Both taps stay -1 when no space
+        /// is named, and the pair reads as identity -- which is exactly the
+        /// pre-masters behaviour.
+        SdfPath spacePath;
+        RigExecTapId spacePosedTap = -1;
+        RigExecTapId spaceDefaultTap = -1;
+        struct Source {
+            /// Empty for a source that is not an xformable provider, which
+            /// contributes identity -- how "world" is spelled without
+            /// inventing a prim to stand for it.
+            SdfPath path;
+            RigExecTapId posedTap = -1;
+            RigExecTapId defaultTap = -1;
+            /// Which part of this source's rotation reaches the target. A
+            /// pole vector in its hand's space takes the forearm's TWIST and
+            /// not its swing; everything else takes the whole rotation.
+            RigExecRotationFilter filter = RigExecRotationFilter::All;
+        };
+        std::vector<Source> sources;
+        std::vector<std::string> labels;
+        /// Optional float/double property supplying the index, so the
+        /// animator-facing channel can live on the control beside its avars.
+        SdfPath activeAttribute;
+        double activeFallback = 0.0;
+        /// Per-axis masks over the delta the space contributes, expressed in
+        /// the target's own default frame: translation, rotation, scale.
+        bool affectTranslation[3] = {true, true, true};
+        bool affectRotation[3] = {true, true, true};
+        bool affectScale[3] = {true, true, true};
+        /// Twist axis for the per-source filters, in the SOURCE's own rest
+        /// axes. One axis serves every filtered source of one switch.
+        GfVec3d twistAxis = GfVec3d(1, 0, 0);
+        /// Resolution round. A switch reading a space that some OTHER switch
+        /// moves -- a pole vector in its own IK handle's space, a head whose
+        /// namespace parent hangs under a switched neck -- cannot be
+        /// resolved from the same seed as that switch; it needs the seed
+        /// RE-EVALUATED with that switch's answer standing. So switches are
+        /// banded: everything in band 0 resolves from the plain seed, the
+        /// seed is pulled again, band 1 resolves from that, and so on. Most
+        /// rigs have exactly one band.
+        ///
+        /// Re-evaluating rather than correcting the source frame by hand is
+        /// deliberate: exec recomposing a descendant of a switched control
+        /// is the same arithmetic the baked program's compose performs, and
+        /// the two are compared bit for bit.
+        int band = 0;
+    };
+    /// Sorted by band, so one pass over them resolves the whole set.
+    std::vector<_SpaceSwitch> _spaceSwitches;
+    /// The switched seed, and the overrides that produced it. A rig whose
+    /// spaces did not move this frame re-uses the snapshot rather than
+    /// paying a second seed evaluation for the same answer -- which is
+    /// every frame of ordinary animation, because an active-space channel is
+    /// stepped once and then held.
+    std::vector<RigExecValueOverride> _lastSpaceSwitchOverrides;
+    RigExecSnapshot _spaceSwitchSnapshot;
+
     /// One property-domain revision: a float/vec3f/matrix math mover's
     /// operation over the preceding value of an exact scalar property.
     ///
@@ -1663,6 +1841,13 @@ private:
         std::vector<SdfPath> &order, _CompileFailure *failure) const;
     /// Exact scalar property target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;
+
+    /// Every attribute a property chain READS through a connection, so that
+    /// an avar-only notice naming one of them still drops the chain
+    /// bindings. See the comment beside it in Compile: a float chain input
+    /// CAN be connected to a double avar, and the avar-only fast path was
+    /// built on the assumption that it could not.
+    std::set<SdfPath> _propertyChainInputs;
 
     /// Property targets in dependency order. A chain that revises an input of
     /// another property mover (or of its bound weight object) runs first, so
@@ -1895,6 +2080,20 @@ private:
     };
     std::map<SdfPath, _DerivedResult> _derivedCache;
     std::vector<RigExecMoverRecord> _movers;
+
+    std::vector<_SurfaceProjectorRecord> _surfaceProjectors;
+
+    /// Resolve every surface projector against the posed geometry: the
+    /// ray cast at the base points names a material point, and the delta
+    /// is how the surface frame at that point moved on the posed points. Fills
+    /// providerXforms and rewrites the posed points so composed world
+    /// geometry is unchanged.
+    void _ApplySurfaceProjectors(RigExecRigPose *pose, UsdTimeCode time) const;
+
+    /// Resolve projectors on the pose Evaluate is about to publish,
+    /// whichever path produced it.
+    RigExecRigPose _WithSurfaceProjectors(RigExecRigPose pose,
+                                          UsdTimeCode time);
 
     /// Baked falloff remaps for every volumetric weight object reachable
     /// in this epoch, ready to hand to RigExecTapSet::Evaluate as value
