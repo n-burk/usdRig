@@ -132,7 +132,7 @@ class PreviewChannel(object):
             return False
         return bool(self._sink.Update(values))
 
-    def End(self, stage=None):
+    def End(self, stage=None, publish=True):
         """See the module-level End."""
         if self._keyless and stage is None and not self._stages:
             gizmoMath.SetPreviewValues({})
@@ -155,7 +155,14 @@ class PreviewChannel(object):
             # the biped), and every selection change aborts a drag and
             # lands here.
             return True
-        return bool(self._sink.End())
+        if publish:
+            return bool(self._sink.End())
+        try:
+            return bool(self._sink.End(publish=False))
+        except TypeError:
+            # A sink that cannot defer its republish (a test double, an
+            # older host) ends the ordinary way.
+            return bool(self._sink.End())
 
 
 # Every session's channel, filed under its main window.
@@ -282,7 +289,7 @@ def Push(pending, session=None, stage=None):
     return channel.Push(pending, stage)
 
 
-def End(session=None, stage=None):
+def End(session=None, stage=None, publish=True):
     """
     The manipulation is over: drop the preview on both sides.
 
@@ -290,6 +297,11 @@ def End(session=None, stage=None):
     because an abort and a commit both arrive here and neither knows which
     samples the sink accepted. Drops the uncommitted values of the stages
     this session pushed for (and of `stage`), never another session's.
+
+    `publish=False` is for a COMMIT about to author: the host drops its
+    overrides without republishing, and the commit's own stage notice
+    publishes the committed rig -- one evaluation instead of two, and no
+    frame of the pre-drag pose in between.
     """
     channel = Channel(session)
     if channel is None:
@@ -297,9 +309,25 @@ def End(session=None, stage=None):
             gizmoMath.SetPreviewValues({}, stage=stage)
         _Notify(None)
         return False
-    return channel.End(stage)
+    return channel.End(stage, publish)
 
 
 def IsPreviewing(session=None):
     channel = Channel(session)
     return channel is not None and channel.IsPreviewing()
+
+
+def Republish(session=None):
+    """
+    Ask the host to publish the authored rig again.
+
+    For the one case End(publish=False) cannot cover: a commit that was
+    expected to author, and whose stage notice would have published, but
+    authored nothing. The host's end is idempotent -- with no preview left
+    to drop it only republishes -- so the drag pose does not stay on screen.
+    """
+    channel = Channel(session)
+    sink = getattr(channel, "_sink", None) if channel is not None else None
+    if sink is None:
+        return False
+    return bool(sink.End())

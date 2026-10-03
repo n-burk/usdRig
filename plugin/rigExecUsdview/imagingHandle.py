@@ -68,6 +68,7 @@ _PER_STAGE = {
     "BeginPreview": (_i, [_s]),
     "UpdatePreview": (_i, [_dp, _i]),
     "EndPreview": (_i, []),
+    "EndPreviewWithoutPublish": (_i, []),
     "GetGuideBoundsAssetSpace": (_i, [_s, _dp]),
     "GetAllGuideBoundsAssetSpace": (_i, [_dp]),
 }

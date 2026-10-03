@@ -903,6 +903,52 @@ RigExecImagingBridge::InvalidateGuideCaches()
     _controlSpaceJoints.clear();
 }
 
+void
+RigExecImagingBridge::NoteGuideEdits(const UsdNotice::ObjectsChanged &notice)
+{
+    _guideNoticesForwarded = true;
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        if (!path.IsPropertyPath()) {
+            // A prim added, removed, retyped or re-parented can move the
+            // joint hierarchy and which joints sit in control space, as well
+            // as any styling: everything goes.
+            InvalidateGuideCaches();
+            return;
+        }
+    }
+    static const TfToken kPurpose("purpose");
+    // Property resyncs (a spec created or removed -- the first time an avar
+    // is authored in a session) are judged exactly like value edits.
+    std::vector<SdfPath> edited;
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        edited.push_back(path);
+    }
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        edited.push_back(path);
+    }
+    for (const SdfPath &path : edited) {
+        const SdfPath prim = path.GetPrimPath();
+        if (!path.IsPropertyPath()) {
+            // Prim metadata: be conservative for the prim and below.
+            for (auto it = _guideInputs.begin(); it != _guideInputs.end();) {
+                it = it->first.HasPrefix(prim) ? _guideInputs.erase(it)
+                                               : std::next(it);
+            }
+            continue;
+        }
+        const TfToken &name = path.GetNameToken();
+        if (name == kPurpose) {
+            // Purpose inherits: every cached descendant read it.
+            for (auto it = _guideInputs.begin(); it != _guideInputs.end();) {
+                it = it->first.HasPrefix(prim) ? _guideInputs.erase(it)
+                                               : std::next(it);
+            }
+        } else if (TfStringStartsWith(name.GetString(), "guide:")) {
+            _guideInputs.erase(prim);
+        }
+    }
+}
+
 bool
 RigExecImagingBridge::_IsControlSpaceJoint(const SdfPath &path) const
 {
@@ -966,6 +1012,12 @@ RigExecImagingBridge::_IsControlSpaceJoint(const SdfPath &path) const
 void
 RigExecImagingBridge::_SyncGuideCaches() const
 {
+    // A bridge the registry forwards notices to has had every edit applied
+    // selectively by NoteGuideEdits; clearing on the serial as well would
+    // throw that away on every pose edit.
+    if (_guideNoticesForwarded) {
+        return;
+    }
     // Every stage edit the evaluator saw -- through the registry or not;
     // a bridge driven directly (tests, headless tools) gets no registry
     // notice forwarding, and must not publish stale styling for it.
@@ -1972,6 +2024,9 @@ bool
 RigExecImagingBridge::NoteCaptureIndex(
     const UsdNotice::ObjectsChanged &notice)
 {
+    // First and unconditionally: the pinned bindings serve every live sample,
+    // with or without a frame cache.
+    _NoteChainBindings(notice);
     const RigExecBakedProgram *program = _evaluator->GetBakedProgram();
     if (!program || !_frameCache) {
         return false;
@@ -2008,6 +2063,115 @@ RigExecImagingBridge::GetFrameCacheStats() const
     return _frameCache->Stats();
 }
 
+void
+RigExecImagingBridge::_NoteChainBindings(
+    const UsdNotice::ObjectsChanged &notice)
+{
+    if (!_liveChainValid) {
+        return;
+    }
+    // Whether an edit to `path` -- a value, a connection, or a property spec
+    // created or removed -- can move a bound chain: ON a chain mover or a
+    // target's prim, or anywhere under a weight object.
+    const auto touchesChain = [this](const SdfPath &path) {
+        const SdfPath prim = path.GetPrimPath();
+        if (std::binary_search(_liveChainPrims.begin(),
+                               _liveChainPrims.end(), prim)) {
+            return true;
+        }
+        for (const SdfPath &weight : _liveChainWeights) {
+            if (prim.HasPrefix(weight)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        // A PRIM resync can add, remove or retype a mover or a target before
+        // the epoch digest has been recomputed: rebind on the next sample. A
+        // PROPERTY resync is a spec created or removed -- the first time an
+        // avar is authored in a session is one -- and is judged like a value
+        // edit, by its prim.
+        if (!path.IsPropertyPath() || touchesChain(path)) {
+            _liveChainValid = false;
+            return;
+        }
+    }
+    // A value or connection edit on a chain-relevant prim can change a
+    // folded constant, a connection, or a weight object's answer -- none of
+    // which moves the epoch digest. Anything else (an avar on a control, a
+    // pose edit) leaves every bound chain exactly as it was.
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        if (touchesChain(path)) {
+            _liveChainValid = false;
+            return;
+        }
+    }
+}
+
+bool
+RigExecImagingBridge::_EnsureChainBindings() const
+{
+    const size_t epoch = _evaluator->GetBindingEpochDigest();
+    if (_liveChainValid && _liveChainEpoch == epoch) {
+        return true;
+    }
+    _liveChainValid = false;
+    _liveChainPrims.clear();
+    _liveChainWeights.clear();
+    RigExecChainSampleBindings bound;
+    if (!RigExecBindChainSampleInputs(*_evaluator, &bound)) {
+        return false;
+    }
+    for (const RigExecChainSampleChain &chain : bound.chains) {
+        _liveChainPrims.push_back(chain.targetPath.GetPrimPath());
+        for (const RigExecChainSampleRevision &revision : chain.revisions) {
+            _liveChainPrims.push_back(revision.moverPath);
+            _liveChainWeights.insert(_liveChainWeights.end(),
+                                     revision.weightObjects.begin(),
+                                     revision.weightObjects.end());
+        }
+    }
+    for (std::vector<SdfPath> *list : {&_liveChainPrims, &_liveChainWeights}) {
+        std::sort(list->begin(), list->end());
+        list->erase(std::unique(list->begin(), list->end()), list->end());
+    }
+    _liveChainBindings = std::move(bound);
+    _liveChainEpoch = epoch;
+    _liveChainValid = true;
+    ++_liveChainGeneration;
+    return true;
+}
+
+const RigExecChainSampleBindings *
+RigExecImagingBridge::AcquireChainBindings(uint64_t *generation) const
+{
+    if (!_EnsureChainBindings()) {
+        return nullptr;
+    }
+    if (generation) {
+        *generation = _liveChainGeneration;
+    }
+    return &_liveChainBindings;
+}
+
+bool
+RigExecImagingBridge::_SampleLive(
+    UsdTimeCode time, RigExecFrameInputs *out) const
+{
+    if (_EnsureChainBindings() &&
+        RigExecSampleFrameInputsWithTrustedChainBindings(
+            *_evaluator, time, _interactiveOverrides, _liveChainBindings,
+            out)) {
+        return true;
+    }
+    // The pinned route declined (a bind that failed, an override it cannot
+    // place, a hook that refused): the self-binding sampler answers exactly
+    // as it always has, at its own cost.
+    return RigExecSampleFrameInputs(*_evaluator, time, _interactiveOverrides,
+                                    out);
+}
+
 bool
 RigExecImagingBridge::_ComputeCacheKey(
     UsdTimeCode time, RigExecFrameCacheKey *key) const
@@ -2016,8 +2180,7 @@ RigExecImagingBridge::_ComputeCacheKey(
         return false;
     }
     RigExecFrameInputs inputs;
-    if (!RigExecSampleFrameInputs(
-            *_evaluator, time, _interactiveOverrides, &inputs)) {
+    if (!_SampleLive(time, &inputs)) {
         // D7: a rig with no baked program (a bake refusal, or an explicitly
         // dynamic rig) cannot sample a vector, so it memoizes on time plus
         // the evaluator's stage-edit serial plus the standing overrides.
@@ -2373,8 +2536,7 @@ RigExecImagingBridge::_TryPublishCachedResult(
     {
         RigExecProfileScope sampleScope(
             MutableProfiler(), "Imaging.LookupSampleDigest", "imaging");
-        if (!RigExecSampleFrameInputs(*_evaluator, time,
-                                      _interactiveOverrides, &inputs) ||
+        if (!_SampleLive(time, &inputs) ||
             !RigExecControlStateDigestible(inputs, _interactiveOverrides)) {
             return false;
         }
@@ -2447,9 +2609,7 @@ RigExecImagingBridge::_MemoizeLiveResult(
         RigExecProfileScope scope(MutableProfiler(),
                                   "Imaging.MemoizeSampleDigest", "imaging");
         if (_evaluator->GetBakedProgram()) {
-            if (!RigExecSampleFrameInputs(*_evaluator, time,
-                                          _interactiveOverrides,
-                                          &memoInputs) ||
+            if (!_SampleLive(time, &memoInputs) ||
                 !RigExecControlStateDigestible(memoInputs,
                                                _interactiveOverrides)) {
                 return;

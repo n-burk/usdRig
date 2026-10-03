@@ -339,6 +339,25 @@ public:
     /// notice hit. Called from the registry's notice path, under its lock;
     /// the cache and memo serialize bare-bridge callers too.
     bool NoteCaptureIndex(const UsdNotice::ObjectsChanged &notice);
+    /// Every stage notice that reaches the rig: drops the live sampler's
+    /// pinned chain bindings when the notice could move a chain without
+    /// moving the epoch digest. The registry calls it for EVERY affected
+    /// notice, whatever its disposition -- NoteCaptureIndex runs for only
+    /// some of them.
+    void NoteChainEdits(const UsdNotice::ObjectsChanged &notice)
+    {
+        _NoteChainBindings(notice);
+    }
+
+    /// The rig's chain bindings, pinned for the current binding epoch and
+    /// kept current by NoteChainEdits -- the ones the live sampler uses --
+    /// rebound first when a notice or a recompile dropped them. Null when
+    /// the chains cannot be bound. \p generation, when given, receives a
+    /// counter that moves on every rebind, so a holder of a copy (the
+    /// warming session) refreshes it only when it actually changed instead
+    /// of re-verifying it after every edit. UI thread only.
+    const RigExecChainSampleBindings *AcquireChainBindings(
+        uint64_t *generation = nullptr) const;
 
     /// Lifetime counters of this rig's frame cache (zeros when empty).
     RigExecFrameCacheStats GetFrameCacheStats() const;
@@ -383,6 +402,24 @@ private:
     /// stage-edit serial plus the standing overrides instead of a sampled
     /// vector.
     bool _ComputeCacheKey(UsdTimeCode time, RigExecFrameCacheKey *key) const;
+
+    /// Samples one frame's input vector for the live lookup and memoize
+    /// paths: through chain bindings pinned for the current epoch and kept
+    /// current by stage notices (NoteCaptureIndex drops them), falling back
+    /// to the self-binding sampler whenever the pinned route declines. The
+    /// vector is the plain sampler's, element for element; only the cost
+    /// differs. MEASURED on the full biped stack: the self-binding sampler
+    /// re-discovers and re-orders every property chain on each call
+    /// (103.5 ms bind), and the release path sampled twice.
+    bool _SampleLive(UsdTimeCode time, RigExecFrameInputs *out) const;
+    /// Binds the live chain bindings when they are not current; true when
+    /// they are usable afterwards.
+    bool _EnsureChainBindings() const;
+
+    /// Drops the pinned chain bindings when \p notice could move a chain
+    /// without moving the epoch digest: any resync, or an edit under a
+    /// chain mover, one of its weight objects, or its target's prim.
+    void _NoteChainBindings(const UsdNotice::ObjectsChanged &notice);
 
     /// Publishes \p pose -- live or cached, already stamped for \p time --
     /// as one complete immutable generation: geometry, guides, the binding
@@ -477,6 +514,17 @@ public:
     /// touches the rig and on every recompile: the caches hold AUTHORED
     /// styling, and only an edit can move that.
     void InvalidateGuideCaches();
+    /// The registry's per-notice entry: drops only the guide-cache entries
+    /// \p notice can change -- everything on a resync, one prim's styling
+    /// on a guide:* edit, a subtree's on a purpose edit (it inherits) --
+    /// and leaves the rest standing. A pose edit (avars, rest channels,
+    /// mover inputs) changes no guide styling and no hierarchy, so it drops
+    /// nothing. MEASURED on the full biped stack: clearing everything on
+    /// every edit re-read 1,049 providers' styling on each release (72 ms).
+    /// The first call also tells the bridge that notices ARE being
+    /// forwarded, which retires the coarse stage-edit-serial clear in
+    /// _SyncGuideCaches; a bridge driven directly keeps that.
+    void NoteGuideEdits(const UsdNotice::ObjectsChanged &notice);
 
 private:
     /// A prim's guide styling, read once and republished every generation.
@@ -536,6 +584,25 @@ private:
     /// The memoized affected-set table for sparse planning (Stream D): the
     /// capture index retires its epochs here, beside the frames.
     RigExecTaskListCache _taskListMemo;
+    /// The live sampler's pinned chain bindings (see _SampleLive): bound
+    /// once per BINDING epoch (the compiled mover topology -- the chains
+    /// are a function of nothing else) and dropped by _NoteChainBindings.
+    /// Not the frame-cache epoch: that also counts baked-program rebuilds,
+    /// which a release triggers and which move no chain. Mutable because
+    /// _ComputeCacheKey, a const query, samples through them.
+    mutable RigExecChainSampleBindings _liveChainBindings;
+    mutable size_t _liveChainEpoch = 0;
+    mutable bool _liveChainValid = false;
+    /// Moves on every rebind: what a holder of a copy compares.
+    mutable uint64_t _liveChainGeneration = 0;
+    /// The prims an edit ON can move a bound chain: every chain mover and
+    /// every target's prim. Exact matches only -- a chain targeting an
+    /// attribute on a control high in the hierarchy is not moved by an edit
+    /// to a control below it.
+    mutable std::vector<SdfPath> _liveChainPrims;
+    /// The weight objects the chains read, matched with their subtrees: a
+    /// weight's answer can come from geometry parented under it.
+    mutable std::vector<SdfPath> _liveChainWeights;
     /// The epoch half of the last memoized key. Atomic for bare bridges,
     /// which serialize on no lock (registry callers hold its mutex on both
     /// the memoizing and the notice paths). A notice that finds it drifted
@@ -589,6 +656,9 @@ private:
     mutable bool _jointChildrenValid = false;
     /// The evaluator's stage-edit serial the guide caches were filled under.
     mutable uint64_t _guideCacheSerial = 0;
+    /// True once NoteGuideEdits has run: the registry forwards every notice
+    /// that reaches the rig, so the serial clear is no longer needed.
+    bool _guideNoticesForwarded = false;
     /// Drops the guide caches if any stage edit has happened since they
     /// were filled. Called at the top of every fill that reads them.
     void _SyncGuideCaches() const;

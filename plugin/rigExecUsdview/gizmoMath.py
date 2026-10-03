@@ -47,6 +47,7 @@ AVAR_R = ("avars:rx", "avars:ry", "avars:rz")
 AVAR_S = ("avars:sx", "avars:sy", "avars:sz")
 AVAR_RSPIN = "avars:rspin"
 AVAR_ORDER = "avars:rotationOrder"
+AVAR_ROTATION_SIGN = "avars:rotationSign"
 REST_T = ("rest:tx", "rest:ty", "rest:tz")
 REST_R = ("rest:rx", "rest:ry", "rest:rz")
 REST_SPACE = "rest:space"
@@ -125,6 +126,22 @@ def ComposeAvarMatrix(tx, ty, tz, sx, sy, sz, rx, ry, rz, rspin, order):
     t = Gf.Matrix4d(1.0)
     t.SetTranslate(Gf.Vec3d(tx, ty, tz))
     return m * t
+
+
+def RotationSign(prim):
+    """
+    avars:rotationSign as a 3-tuple of +1.0/-1.0 (RigExecNormalizeRotation-
+    Sign: negative selects -1, everything else +1). A mirrored limb
+    declares it so the same avar value turns both sides the same way; the
+    sign multiplies the avar, so the gizmo reads the EFFECTIVE angle as
+    raw * sign and writes raw = effective * sign back (the sign is its own
+    inverse). rspin takes the x sign, being a rotation about +X.
+    """
+    attr = prim.GetAttribute(AVAR_ROTATION_SIGN) if prim else None
+    value = attr.Get() if attr and attr.IsValid() else None
+    if value is None:
+        return (1.0, 1.0, 1.0)
+    return tuple(-1.0 if float(v) < 0.0 else 1.0 for v in value)
 
 
 def _Unwrap(angle, hint):
@@ -1037,6 +1054,7 @@ def AvarsMatrix(prim, time, _ctx=None):
     # volume weight substitutes identity scale rather than reading avars.
     scaled = ReadsScaleAvars(prim)
     units = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0, _ctx)
+    sign = RotationSign(prim)
     return ComposeAvarMatrix(
         ScalarAvar(prim, AVAR_T[0], time, 0.0, _ctx) * units,
         ScalarAvar(prim, AVAR_T[1], time, 0.0, _ctx) * units,
@@ -1044,10 +1062,10 @@ def AvarsMatrix(prim, time, _ctx=None):
         ScalarAvar(prim, AVAR_S[0], time, 1.0, _ctx) if scaled else 1.0,
         ScalarAvar(prim, AVAR_S[1], time, 1.0, _ctx) if scaled else 1.0,
         ScalarAvar(prim, AVAR_S[2], time, 1.0, _ctx) if scaled else 1.0,
-        ScalarAvar(prim, AVAR_R[0], time, 0.0, _ctx),
-        ScalarAvar(prim, AVAR_R[1], time, 0.0, _ctx),
-        ScalarAvar(prim, AVAR_R[2], time, 0.0, _ctx),
-        ScalarAvar(prim, AVAR_RSPIN, time, 0.0, _ctx),
+        ScalarAvar(prim, AVAR_R[0], time, 0.0, _ctx) * sign[0],
+        ScalarAvar(prim, AVAR_R[1], time, 0.0, _ctx) * sign[1],
+        ScalarAvar(prim, AVAR_R[2], time, 0.0, _ctx) * sign[2],
+        ScalarAvar(prim, AVAR_RSPIN, time, 0.0, _ctx) * sign[0],
         orderValue or "XYZ")
 
 
@@ -1470,15 +1488,15 @@ CHANNELS_POSE = "pose"
 CHANNELS_PIVOT = "pivot"
 
 # Where a MULTI-selection turns and scales about. Transform
-# Pivot Point, and the conventional Move Tool "Pivot" row, restated for a rig:
+# Pivot Point, restated for a rig:
 #
 #   GROUP_PIVOT_CENTER      the centroid of the selected controls'
 #                           evaluated origins. THE DEFAULT, because the
 #                           thing an animator means by "rotate these
 #                           together" is about their middle -- not about
 #                           whichever one they happened to click last.
-#   GROUP_PIVOT_LEAD        the last-selected control's origin (the conventional tool's
-#                           "Object" / "Active Element"), for
+#   GROUP_PIVOT_LEAD        the last-selected control's origin (the
+#                           "Active Element"), for
 #                           swinging a group about one of its members.
 #   GROUP_PIVOT_INDIVIDUAL  each control about its OWN origin: they all
 #                           turn by the same angle and none of them
@@ -1504,7 +1522,7 @@ def SetAnimated(attr, value, time):
     curve-interpolated knot on the attribute's spline.
 
     The knot itself comes from graphModel.AuthorKnot, so a gizmo drag
-    and a graph-editor insert produce the SAME key -- the conventional default new
+    and a graph-editor insert produce the SAME key -- the default new
     key, AutoEase on both tangents (graph editor design spec 1.2) -- and
     a key the artist has already shaped keeps its tangents.
     """
@@ -1590,6 +1608,10 @@ class Writer(object):
         _DropFromPreview(self.stage, list(self._pending))
         self._pending.clear()
 
+    def HasPending(self):
+        """Whether CommitToStage would author anything."""
+        return bool(self._pending)
+
     def CommitToStage(self):
         """
         Author every collected value, once, inside one change block.
@@ -1658,7 +1680,7 @@ def _FrameAt(matrix, origin):
 
 def _SnapValue(value, step):
     """
-    `value` rounded to the nearest multiple of `step` (the conventional Step Snap),
+    `value` rounded to the nearest multiple of `step` (Step Snap),
     or `value` unchanged when `step` is None or 0.
 
     Halves go AWAY from zero. Python's round() sends them to even, which
@@ -1696,7 +1718,7 @@ def _ScaleAxes(axisIndex):
     """
     Which scale channels a drag touches: None for all three (the centre
     cube), an int for one (an axis handle), or ANY iterable of ints for a
-    planar handle -- (0, 1) is the conventional XY square.
+    planar handle -- (0, 1) is the XY square.
 
     The iterable case is duck-typed rather than a list of accepted
     classes: the controller hands over whatever its handle description
@@ -1858,8 +1880,8 @@ class Target(object):
     Three frames, all orthonormal and all translated to the gizmo origin,
     feed the Axis Orientation option (design spec 8.2):
 
-      ObjectFrame()   "Object" in the conventional tool: the target's own posed orientation
-      ChannelFrame()  "Parent" in the conventional tool: the space the channels are written
+      ObjectFrame()   "Object": the target's own posed orientation
+      ChannelFrame()  "Parent": the space the channels are written
                       in (P or Q for a rig prim, the parent xform
                       otherwise)
       GimbalFrame()   the space the ROTATE channels compose in; equal to
@@ -1960,7 +1982,7 @@ class Target(object):
 
     def SetPreserveChildren(self, enabled):
         """
-        The conventional "Preserve Children". A target that cannot honour it stays
+        "Preserve Children". A target that cannot honour it stays
         off however often it is asked, so a stale toolbar checkbox can
         never make a drag silently skip the compensation.
         """
@@ -1992,7 +2014,7 @@ class Target(object):
     def ApplyTranslate(self, worldDelta, *, snapStep=None,
                        snapAbsolute=False):
         """
-        Move by a WORLD delta, optionally with the conventional Step Snap.
+        Move by a WORLD delta, optionally with Step Snap.
 
         `snapStep` quantises in CHANNEL space, where the values that get
         written live; see _SnapTranslation for why that is not the same
@@ -2017,7 +2039,7 @@ class Target(object):
         others held at their drag base. `snapStep` quantises the angle
         exactly as it does for ApplyRotate.
 
-        This is the conventional Gimbal mode (design spec 8.3, "each ring changes
+        This is Gimbal mode (design spec 8.3, "each ring changes
         exactly one Euler channel"), and it needs its own entry point
         because ApplyRotate cannot deliver it: ApplyRotate takes a world
         axis and promises the drawn frame turns by the dragged angle,
@@ -2034,7 +2056,7 @@ class Target(object):
 
         `axisIndex` picks them: None for all three (the centre cube), an
         int for one (an axis handle), or a tuple or list for a planar
-        handle -- (0, 1) is the conventional XY square. `snapStep` quantises the
+        handle -- (0, 1) is the XY square. `snapStep` quantises the
         RESULTING value of each channel the drag touches, before the
         evaluator's 1e-4 floor. Channels the drag does not touch keep
         their authored value rather than being nudged onto the grid.
@@ -2124,6 +2146,12 @@ class RigPoseTarget(_RigTarget):
         value = attr.Get(self.time) if attr else None
         return _NormalizeOrder(value)
 
+    def _Sign(self):
+        # avars:rotationSign: the drag works in EFFECTIVE angles, which is
+        # what the limb actually turns by and what the gizmo draws, and
+        # signs them back on the way to the stage.
+        return RotationSign(self.prim)
+
     def AttributePaths(self):
         return [self.prim.GetPath().AppendProperty(n)
                 for n in AVAR_T + AVAR_R + AVAR_S]
@@ -2140,13 +2168,15 @@ class RigPoseTarget(_RigTarget):
 
     def GimbalFrame(self):
         spin = _AxisRotation(0, ScalarAvar(
-            self.prim, AVAR_RSPIN, self.time, 0.0))
+            self.prim, AVAR_RSPIN, self.time, 0.0) * self._Sign()[0])
         return _FrameAt(spin * self._Pw(),
                         self.GizmoMatrix().ExtractTranslation())
 
     def RotationState(self):
+        sign = self._Sign()
         return (self._Order(),
-                [ScalarAvar(self.prim, n, self.time, 0.0) for n in AVAR_R])
+                [ScalarAvar(self.prim, n, self.time, 0.0) * sign[i]
+                 for i, n in enumerate(AVAR_R)])
 
     def ApplyTranslate(self, worldDelta, *, snapStep=None,
                        snapAbsolute=False):
@@ -2157,18 +2187,26 @@ class RigPoseTarget(_RigTarget):
             base, local, snapStep, snapAbsolute))
 
     def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
-        base = [self._base[n] for n in AVAR_R]
+        sign = self._Sign()
+        base = [self._base[n] * sign[i] for i, n in enumerate(AVAR_R)]
         order = self._Order()
         # World linear = S * R * spin * linear(P*assetToWorld); only R is
         # ours to move, so spin * P is the channel frame it turns inside.
-        channel = _AxisRotation(0, self._base[AVAR_RSPIN]) * self._Pw()
+        channel = _AxisRotation(
+            0, self._base[AVAR_RSPIN] * sign[0]) * self._Pw()
         rNew = SolveWorldRotation(RotationFromEuler(order, *base), channel,
                                   worldAxis, _SnapValue(degrees, snapStep))
-        self._WriteVector(AVAR_R, DecomposeEuler(rNew, order, hint=base))
+        solved = DecomposeEuler(rNew, order, hint=base)
+        self._WriteVector(AVAR_R, [v * sign[i]
+                                   for i, v in enumerate(solved)])
 
     def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
+        # The channel handle turns the limb by `degrees` about its own
+        # effective axis, so a mirrored channel takes the negated step.
         values = [self._base[n] for n in AVAR_R]
-        values[axisIndex] = values[axisIndex] + _SnapValue(degrees, snapStep)
+        values[axisIndex] = (values[axisIndex] +
+                             _SnapValue(degrees, snapStep) *
+                             self._Sign()[axisIndex])
         self._WriteVector(AVAR_R, values)
 
     def ApplyScale(self, axisIndex, factor, *, snapStep=None):
@@ -2706,7 +2744,7 @@ class XformPivotTarget(_XformTarget):
     # rotate or a scale, since the pivot is part of the local matrix.
     # The brief still puts Preserve Children out of scope for pivot
     # mode (design spec 1.2: a pivot edit is uncompensated by design,
-    # like moving a pivot without compensation in the conventional tool), so say that
+    # like moving any pivot without compensation), so say that
     # rather than claiming the children hold still on their own.
     preserveChildrenReason = ("pivot edits are not compensated, on this "
                               "prim or its children (spec 1.2)")
@@ -2871,8 +2909,7 @@ def PoseProviderChain(prim, time):
     GroupTarget._Solve).
 
     That distinction is the whole design. This rig nests its FK controls
-    in a namespace chain -- rigExec:controlSpace = "parentRelative"
-    (tools/biped/build_biped_rigexec.py:211, build_fingers.py:225) --
+    in a namespace chain -- rigExec:controlSpace = "parentRelative" --
     where another rig would use constraints, so L_UpArm
     > elbow > wrist is one line of descent and so is every finger, leg
     and spine chain. An earlier version SKIPPED a member whose ancestor
@@ -2968,7 +3005,7 @@ class GroupTarget(Target):
     (Global/World, Local/Object, Parent, Gimbal) and feeds the frame to
     gizmoScreen. ObjectFrame / ChannelFrame / GimbalFrame below answer
     with the LEAD control's frames moved onto the group pivot, which is
-    the conventional meaning of "Local" for a multi-selection -- an
+    the usual meaning of "Local" for a multi-selection -- an
     orientation averaged over the members points nowhere in particular,
     and the first-selected control's frame would move the gizmo whenever
     the artist added to the selection from the other end.

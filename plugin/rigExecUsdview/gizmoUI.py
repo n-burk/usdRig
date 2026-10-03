@@ -1,6 +1,6 @@
 #
-# RigExec usdview plugin: the viewport manipulator toolbar -- conventional-style
-# Move / Rotate / Scale gizmos over the stage view, undoable through the
+# RigExec usdview plugin: the viewport manipulator toolbar -- Move / Rotate /
+# Scale gizmos over the stage view, undoable through the
 # shared rigExecUndo stack.
 #
 # Layering, and why: everything that can be decided without Qt already
@@ -39,7 +39,7 @@
 # and AppEventFilter. Neither key below is given up, but both are
 # shared:
 #   J  -- "Toggle Framed View" (actionToggle_Framed_View, connected,
-#         application-wide). the conventional J is hold-to-step-snap and only
+#         application-wide). J as a modifier is hold-to-step-snap and only
 #         means anything WHILE dragging, so a live drag claims it in
 #         ShortcutOverride and the rest of the time J still toggles the
 #         framed view.
@@ -110,7 +110,7 @@ TOOL_TRANSLATE = gizmoScreen.TOOL_TRANSLATE
 TOOL_ROTATE = gizmoScreen.TOOL_ROTATE
 TOOL_SCALE = gizmoScreen.TOOL_SCALE
 
-# the conventional names, not USD's: an animator reaches for "Move", not
+# animator names, not USD's: an animator reaches for "Move", not
 # "Translate". The token stays gizmoScreen's so one spelling reaches the
 # geometry code.
 TOOL_LABELS = {
@@ -153,7 +153,7 @@ COLOR_SNAP = (1.0, 0.55, 0.1)
 LEADER_OPACITY = 0.35
 
 # An arrowhead this many times its base radius long, which is the
-# proportion the conventional move cones use.
+# proportion that reads clearly at manipulator size.
 CONE_LENGTH_RATIO = 3.0
 
 # How near a click has to land, in LOGICAL pixels, before it counts as
@@ -270,7 +270,7 @@ class GizmoOverlay(QtWidgets.QWidget):
 
     def _HandleColor(self, handle, opacity=1.0):
         """
-        the conventional three states: the handle under the cursor is the pale
+        Three states: the handle under the cursor is the pale
         pre-selection highlight, the last-dragged handle stays yellow
         (middle-drag repeats it), and an ungrabbable one is its own
         colour dimmed so the artist can see it is there and inert.
@@ -340,7 +340,7 @@ class GizmoOverlay(QtWidgets.QWidget):
 
     def _DrawRing(self, painter, handle, ratio):
         """
-        Only frontPoints: the conventional tool hides the half of each ring behind the
+        Only frontPoints: the half of each ring behind the
         ring centre so three overlapping circles stay tellable apart,
         and a fully visible run already repeats its first point, so one
         drawPolyline closes it without a chord across the manipulator.
@@ -396,7 +396,7 @@ class GizmoOverlay(QtWidgets.QWidget):
 
     def _DrawPie(self, painter, ratio):
         """
-        the conventional rotation-amount wedge, from where the ring was grabbed to
+        The rotation-amount wedge, from where the ring was grabbed to
         where the sweep has reached.
         """
         wedge = self._controller.PieSlice()
@@ -590,14 +590,14 @@ class ViewportToolbar(QtWidgets.QToolBar):
         into an overflow chevron from the END, and the row was measured
         against usdview's default ~598 logical px. A two-state pair costs
         twice the width to say one thing. This shows the mode it is IN
-        -- the conventional axis-orientation button does the same -- and clicking
+        -- like an axis-orientation button -- and clicking
         moves to the other.
 
         For ONE selected prim these mean what they always have: Global
-        (the conventional "World") draws on the world axes, Local (the conventional "Object")
+        ("World") draws on the world axes, Local ("Object")
         on the prim's own posed frame. For a MULTI-selection Local means
-        the LAST-SELECTED control's frame, which is the conventional
-        answer and the only stable one; it changes the AXES only. WHERE
+        the LAST-SELECTED control's frame, which is the usual answer and
+        the only stable one; it changes the AXES only. WHERE
         a group turns is a separate setting (Tool Settings > Group
         Pivot) and defaults to the selection centre either way.
         """
@@ -833,7 +833,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
 
         self.redoAction = QtActionWidgets.QAction("Redo", self)
         self.redoAction.setIcon(gizmoIcons.Icon("redo"))
-        # Ctrl+Shift+Z is the user's ask, Shift+Z is the conventional tool's, Ctrl+Y is
+        # Ctrl+Shift+Z is the user's ask, Shift+Z is a common redo, Ctrl+Y is
         # what a Windows-trained hand reaches for.
         self.redoAction.setShortcuts([QtGui.QKeySequence("Ctrl+Shift+Z"),
                                       QtGui.QKeySequence("Shift+Z"),
@@ -988,7 +988,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
 
 class ToolSettingsPanel(QtWidgets.QWidget):
     """
-    the conventional Tool Settings for the active tool (design spec 8.6).
+    The Tool Settings for the active tool (design spec 8.6).
 
     One window per session, parented to usdview's main window exactly
     like VolumeWeightPanel, and rebuilt whenever the tool changes so it
@@ -1040,7 +1040,7 @@ class ToolSettingsPanel(QtWidgets.QWidget):
 
         self._resetButton = QtWidgets.QPushButton("Reset Tool")
         self._resetButton.setToolTip(
-            "Restore this tool's the conventional tool defaults.")
+            "Restore this tool's defaults.")
         self._resetButton.clicked.connect(self._onReset)
         outer.addWidget(self._resetButton)
 
@@ -1417,6 +1417,9 @@ class GizmoController(QtCore.QObject):
         self._warnings = []
         self._handles = []
         self._drag = None
+        # (target, {path: value}) while a release authors its drag's values:
+        # see _IsOwnCommit.
+        self._committing = None
         self._selected = None
         self._hover = None
         self._holdSnap = False
@@ -1487,7 +1490,7 @@ class GizmoController(QtCore.QObject):
             # application filter above (see ViewportHotkeyFilter).
             view.installEventFilter(self)
             view.destroyed.connect(self._onViewDestroyed)
-            # WA_Hover, not setMouseTracking: the conventional pre-selection
+            # WA_Hover, not setMouseTracking: the pre-selection
             # highlight needs mouse moves with no button down, and Qt
             # delivers those to a widget only if it tracks the mouse --
             # which for usdview's stage view would also turn on a GPU
@@ -1805,8 +1808,8 @@ class GizmoController(QtCore.QObject):
 
         Lead last because that is what gizmoMath.MakeGroupTarget takes,
         and because the LAST-picked control is what orients the group
-        frame and answers to the Last Selected pivot -- the conventional tool and
-        the editor convention.
+        frame and answers to the Last Selected pivot -- the editor
+        convention.
 
         NOT the focus prim, and this was measured the hard way.
         usdview's focus prim is getPrimPaths()[0] (selectionDataModel
@@ -2379,7 +2382,7 @@ class GizmoController(QtCore.QObject):
     # -- undo -----------------------------------------------------------
 
     def Undo(self):
-        # the conventional tool ignores undo while a manipulator is held. Running it here
+        # Undo is ignored while a manipulator is held. Running it here
         # would restore an earlier edit that the drag's next event then
         # overwrites from its own base, and the release would push over
         # the redo branch -- the earlier edit lost from history with its
@@ -2596,12 +2599,36 @@ class GizmoController(QtCore.QObject):
                 resynced, changed, path, target.RigRootPath())
                 for path in self._TargetPrimPaths(target)):
             return
+        if self._IsOwnCommit(target, resynced, changed):
+            return
         try:
             target.Refresh()
         except Exception:
             self.RefreshTarget()
             return
         self._RebuildHandles()
+
+    def _IsOwnCommit(self, target, resynced, changed):
+        """
+        Whether this notice is a release authoring exactly the values its
+        drag last previewed, and nothing else. The drag's last tick posed
+        the target from those values and the rig keeps the pose it
+        published for them, so the frames already hold; _EndDrag rebuilds
+        the handles. A value the stage stores differently (a float
+        attribute rounding a double) is not the previewed pose.
+        """
+        if self._committing is None or self._committing[0] is not target:
+            return False
+        values = self._committing[1]
+        for paths in (resynced, changed):
+            for path in paths:
+                if path not in values:
+                    return False
+        for path, value in values.items():
+            attr = target.stage.GetAttributeAtPath(path)
+            if not attr or attr.Get(target.time) != value:
+                return False
+        return True
 
     # -- event filter ---------------------------------------------------
 
@@ -2718,7 +2745,7 @@ class GizmoController(QtCore.QObject):
             self._Repaint()
             return True
         if event.button() == QtCore.Qt.MiddleButton:
-            # the conventional "middle-drag anywhere repeats the selected handle":
+            # "Middle-drag anywhere repeats the selected handle":
             # the artist does not have to hit the handle again.
             handle = self._Handle(self._selected)
             if handle is None or not handle.grabbable:
@@ -4011,22 +4038,37 @@ class GizmoController(QtCore.QObject):
             return
         label = "%s %s" % (_EDIT_VERBS.get(drag.tool, drag.tool),
                            drag.target.label)
+        # With values to commit, the preview ends FIRST and WITHOUT a
+        # republish: the host drops its overrides and leaves the drag pose
+        # on screen, and the commit below fires the one stage notice that
+        # evaluates and publishes the committed rig. Ending after the commit
+        # evaluated twice -- the notice with the overrides still standing,
+        # then the end -- and ending first WITH a republish would flash the
+        # pre-drag pose. With nothing to commit the end publishes, as an
+        # abort's does.
+        pending = drag.target.writer.HasPending()
+        gizmoPreview.End(session=self.usdviewApi,
+                         stage=_WriterStage(drag), publish=not pending)
+        authored = []
         try:
             # Author BEFORE the recorder commits: Begin() captured the layer as
             # it was, Commit() captures it as it now is, and the difference
             # between the two IS the undo entry -- so the values have to be on
             # the stage by now. The whole drag authors here, once.
-            drag.target.writer.CommitToStage()
+            self._committing = (drag.target, drag.target.writer.Pending())
+            try:
+                authored = drag.target.writer.CommitToStage()
+            finally:
+                self._committing = None
             edit = drag.recorder.Commit(label)
         except Exception as error:
             Tf.Warn("rigExecUsdview: could not record the gizmo edit: %s"
                     % error)
             edit = None
-        # AFTER authoring: the generation this republishes is the committed
-        # one, so the artist sees the value they released on rather than a
-        # frame of the pre-drag rig between the two.
-        gizmoPreview.End(session=self.usdviewApi,
-                         stage=_WriterStage(drag))
+        if pending and not authored:
+            # The commit was expected to publish through its notice and
+            # authored nothing: put the authored rig back on screen.
+            gizmoPreview.Republish(session=self.usdviewApi)
         if edit is not None:
             self.undoStack.Push(edit)
         self._warnings = drag.target.writer.Warnings()
