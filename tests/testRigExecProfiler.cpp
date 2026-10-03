@@ -52,6 +52,31 @@ main()
         CHECK(profiler.GetEventCount() == 0);
     }
 
+    // Disabling stops every record path, and re-enabling resumes it: the
+    // early-outs an unprofiled generation takes must record nothing while
+    // leaving the enabled path intact.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.SetEnabled(true);
+        profiler.Record("kept", "rig", 0, 10);
+        CHECK(profiler.GetEventCount() == 1);
+        profiler.SetEnabled(false);
+        CHECK(!profiler.IsEnabled());
+        {
+            RIGEXEC_PROFILE_SCOPE_CAT(profiler, "never", "pose");
+        }
+        profiler.Record("never", "rig", 0, 10);
+        profiler.RecordInstant("never", "frameCache", 11);
+        profiler.RecordCounter("never", "scheduler", 12, {{"q", 1}});
+        profiler.RecordCacheLookup(true, 13.0);
+        profiler.RecordSchedulerQueue(1, 0, 0);
+        profiler.RecordSchedulerCancel(1, "edit");
+        CHECK(profiler.GetEventCount() == 1);
+        profiler.SetEnabled(true);
+        profiler.Record("kept", "rig", 0, 10);
+        CHECK(profiler.GetEventCount() == 2);
+    }
+
     // The macro does not evaluate its name expression when disabled, so
     // unprofiled evaluation pays no string building.
     {

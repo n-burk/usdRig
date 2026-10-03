@@ -45,30 +45,47 @@ const std::vector<_ConstraintHandler> &
 _ConstraintHandlers()
 {
     static const std::vector<_ConstraintHandler> handlers = {
-        {"RigExecAimConstraint", true, true, true, true,
+        {TfToken("RigExecAimConstraint"), true, true, true, true,
          _ChannelGroup::Rotation, _ChannelGroup::Rotation, nullptr},
-        {"RigExecPositionConstraint", true, true, false, false,
+        {TfToken("RigExecPositionConstraint"), true, true, false, false,
          _ChannelGroup::Translation, _ChannelGroup::Translation,
          _SolvePositionConstraint},
-        {"RigExecRotationConstraint", true, true, true, false,
+        {TfToken("RigExecRotationConstraint"), true, true, true, false,
          _ChannelGroup::Rotation, _ChannelGroup::Rotation,
          _SolveRotationConstraint},
-        {"RigExecScaleConstraint", true, true, false, false,
+        {TfToken("RigExecScaleConstraint"), true, true, false, false,
          _ChannelGroup::Scale, _ChannelGroup::Scale,
          _SolveScaleConstraint},
-        {"RigExecParentConstraint", true, true, true, false,
+        {TfToken("RigExecParentConstraint"), true, true, true, false,
          _ChannelGroup::All, _ChannelGroup::None,
          _SolveParentConstraint},
-        {"RigExecSingleChainIkConstraint", false, true, false, true,
+        {TfToken("RigExecSingleChainIkConstraint"), false, true, false, true,
          _ChannelGroup::None, _ChannelGroup::None, nullptr},
     };
     return handlers;
 }
 
+// Attribute names read per constraint per frame, interned once. Each is
+// spelled here rather than at its call site because the parent solve and the
+// group-mask reader name the same nine.
+const TfToken _kAffectTranslationX("inputs:affectTranslationX");
+const TfToken _kAffectTranslationY("inputs:affectTranslationY");
+const TfToken _kAffectTranslationZ("inputs:affectTranslationZ");
+const TfToken _kAffectRotationX("inputs:affectRotationX");
+const TfToken _kAffectRotationY("inputs:affectRotationY");
+const TfToken _kAffectRotationZ("inputs:affectRotationZ");
+const TfToken _kAffectScaleX("inputs:affectScaleX");
+const TfToken _kAffectScaleY("inputs:affectScaleY");
+const TfToken _kAffectScaleZ("inputs:affectScaleZ");
+const TfToken _kTranslationOffset("inputs:translationOffset");
+const TfToken _kRotationOffset("inputs:rotationOffset");
+const TfToken _kScaleOffset("inputs:scaleOffset");
+const TfToken _kInputsEnabled("inputs:enabled");
+
 RigExecConstraintAxisMask
 _ReadConstraintAxisMask(
     const RigExecResolvedInputs &resolved, const UsdPrim &prim,
-    const char *x, const char *y, const char *z, UsdTimeCode time,
+    const TfToken &x, const TfToken &y, const TfToken &z, UsdTimeCode time,
     bool fallback = true)
 {
     RigExecConstraintAxisMask mask;
@@ -83,7 +100,7 @@ _SolvePositionConstraint(const _ConstraintSolveContext &c)
 {
     RigExecPositionConstraintParams params;
     params.offset = _ResolvedRead(
-        *c.resolved, c.prim, "inputs:translationOffset", GfVec3d(0), c.time);
+        *c.resolved, c.prim, _kTranslationOffset, GfVec3d(0), c.time);
     params.affect = c.affect;
     params.weight = c.weight;
     return RigExecApplyPositionConstraint(c.inputFrame, *c.sources, params);
@@ -94,7 +111,7 @@ _SolveRotationConstraint(const _ConstraintSolveContext &c)
 {
     RigExecRotationConstraintParams params;
     params.offsetDegrees = _ResolvedRead(
-        *c.resolved, c.prim, "inputs:rotationOffset", GfVec3d(0), c.time);
+        *c.resolved, c.prim, _kRotationOffset, GfVec3d(0), c.time);
     params.affect = c.affect;
     params.rotationOrder = c.order;
     params.weight = c.weight;
@@ -106,7 +123,7 @@ _SolveScaleConstraint(const _ConstraintSolveContext &c)
 {
     RigExecScaleConstraintParams params;
     params.offset = _ResolvedRead(
-        *c.resolved, c.prim, "inputs:scaleOffset", GfVec3d(0), c.time);
+        *c.resolved, c.prim, _kScaleOffset, GfVec3d(0), c.time);
     params.affect = c.affect;
     params.weight = c.weight;
     return RigExecApplyScaleConstraint(c.inputFrame, *c.sources, params);
@@ -122,16 +139,16 @@ _SolveParentConstraint(const _ConstraintSolveContext &c)
         params.scaleAxes = c.precompScale;
     } else {
         params.translationAxes = _ReadConstraintAxisMask(
-            *c.resolved, c.prim, "inputs:affectTranslationX",
-            "inputs:affectTranslationY", "inputs:affectTranslationZ", c.time);
+            *c.resolved, c.prim, _kAffectTranslationX,
+            _kAffectTranslationY, _kAffectTranslationZ, c.time);
         params.rotationAxes = _ReadConstraintAxisMask(
-            *c.resolved, c.prim, "inputs:affectRotationX",
-            "inputs:affectRotationY", "inputs:affectRotationZ", c.time);
+            *c.resolved, c.prim, _kAffectRotationX,
+            _kAffectRotationY, _kAffectRotationZ, c.time);
         // FBX disables scale by default; the explicit false fallback is the
         // authored contract, not an oversight (schema.usda:769-771).
         params.scaleAxes = _ReadConstraintAxisMask(
-            *c.resolved, c.prim, "inputs:affectScaleX",
-            "inputs:affectScaleY", "inputs:affectScaleZ", c.time, false);
+            *c.resolved, c.prim, _kAffectScaleX,
+            _kAffectScaleY, _kAffectScaleZ, c.time, false);
     }
     params.rotationOrder = c.order;
     params.weight = c.weight;
@@ -172,11 +189,18 @@ _IsFrameConstraintType(const TfToken &typeName)
 RigExecEulerOrder
 _ParseConstraintEulerOrder(const TfToken &token)
 {
-    if (token == "XZY") return RigExecEulerOrder::XZY;
-    if (token == "YXZ") return RigExecEulerOrder::YXZ;
-    if (token == "YZX") return RigExecEulerOrder::YZX;
-    if (token == "ZXY") return RigExecEulerOrder::ZXY;
-    if (token == "ZYX") return RigExecEulerOrder::ZYX;
+    // Interned once: the parse runs per constraint per frame, and token
+    // comparison is a pointer comparison while literal comparison is not.
+    static const TfToken kXzy("XZY");
+    static const TfToken kYxz("YXZ");
+    static const TfToken kYzx("YZX");
+    static const TfToken kZxy("ZXY");
+    static const TfToken kZyx("ZYX");
+    if (token == kXzy) return RigExecEulerOrder::XZY;
+    if (token == kYxz) return RigExecEulerOrder::YXZ;
+    if (token == kYzx) return RigExecEulerOrder::YZX;
+    if (token == kZxy) return RigExecEulerOrder::ZXY;
+    if (token == kZyx) return RigExecEulerOrder::ZYX;
     return RigExecEulerOrder::XYZ;
 }
 
@@ -214,16 +238,16 @@ _ReadGroupMask(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
     switch (group) {
     case _ChannelGroup::Translation:
         return _ReadConstraintAxisMask(
-            resolved, prim, "inputs:affectTranslationX",
-            "inputs:affectTranslationY", "inputs:affectTranslationZ", time);
+            resolved, prim, _kAffectTranslationX,
+            _kAffectTranslationY, _kAffectTranslationZ, time);
     case _ChannelGroup::Rotation:
         return _ReadConstraintAxisMask(
-            resolved, prim, "inputs:affectRotationX", "inputs:affectRotationY",
-            "inputs:affectRotationZ", time);
+            resolved, prim, _kAffectRotationX, _kAffectRotationY,
+            _kAffectRotationZ, time);
     case _ChannelGroup::Scale:
         return _ReadConstraintAxisMask(
-            resolved, prim, "inputs:affectScaleX", "inputs:affectScaleY",
-            "inputs:affectScaleZ", time);
+            resolved, prim, _kAffectScaleX, _kAffectScaleY,
+            _kAffectScaleZ, time);
     case _ChannelGroup::All:
     case _ChannelGroup::None:
         break;
@@ -373,7 +397,7 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
                     return false;
                 }
             }
-            if (!_ReadAttribute(child, "inputs:enabled", true)) {
+            if (!_ReadAttribute(child, _kInputsEnabled, true)) {
                 record.disabledPoseWeights.push_back(weightPath);
                 continue;
             }
@@ -509,7 +533,7 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
     for (const _PoseInterpolator &interpolator : _poseInterpolators) {
         const UsdPrim prim = _stage->GetPrimAtPath(interpolator.prim);
         const bool enabled =
-            _ResolvedRead(_resolvedInputs, prim, "inputs:enabled", true, time);
+            _ResolvedRead(_resolvedInputs, prim, _kInputsEnabled, true, time);
 
         // Publishes into BOTH: _resolvedInputs is what a consumer's read
         // resolves through (a RigExecBlendInput's inputs:weight follows its
@@ -1055,19 +1079,19 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
 bool
 RigExecRigEvaluator::_ReadConstraintSourceWeights(
     const UsdPrim &prim,
-    const char *name,
+    const TfToken &name,
     size_t count,
     UsdTimeCode time,
     std::vector<std::string> *diagnostics,
     std::vector<double> *weights)
 {
     VtFloatArray authored;
-    if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+    if (const UsdAttribute a = prim.GetAttribute(name)) {
         a.Get(&authored, time);
     }
     if (!authored.empty() && authored.size() != count) {
         diagnostics->push_back(
-            prim.GetPath().GetString() + " " + name + " has " +
+            prim.GetPath().GetString() + " " + name.GetText() + " has " +
             std::to_string(authored.size()) + " entries for " +
             std::to_string(count) + " sources");
         return false;
@@ -1083,19 +1107,19 @@ RigExecRigEvaluator::_ReadConstraintSourceWeights(
 bool
 RigExecRigEvaluator::_ReadConstraintSourceOffsets(
     const UsdPrim &prim,
-    const char *name,
+    const TfToken &name,
     size_t count,
     UsdTimeCode time,
     std::vector<std::string> *diagnostics,
     std::vector<GfVec3d> *offsets)
 {
     VtVec3dArray authored;
-    if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+    if (const UsdAttribute a = prim.GetAttribute(name)) {
         a.Get(&authored, time);
     }
     if (!authored.empty() && authored.size() != count) {
         diagnostics->push_back(
-            prim.GetPath().GetString() + " " + name + " has " +
+            prim.GetPath().GetString() + " " + name.GetText() + " has " +
             std::to_string(authored.size()) + " entries for " +
             std::to_string(count) + " sources");
         return false;
@@ -1326,7 +1350,7 @@ RigExecRigEvaluator::GetConstraintOperatorTypeNames()
         std::vector<TfToken> types;
         types.reserve(_ConstraintHandlers().size());
         for (const _ConstraintHandler &handler : _ConstraintHandlers()) {
-            types.push_back(TfToken(handler.schemaType));
+            types.push_back(handler.schemaType);
         }
         return types;
     }();

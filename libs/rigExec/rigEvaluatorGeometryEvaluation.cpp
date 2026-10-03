@@ -27,6 +27,17 @@ namespace rigExec {
 
 using namespace evaluatorDetail;
 
+namespace {
+
+// Blend attribute names read per channel per frame, interned once.
+const TfToken _kEvalBlendWeight("inputs:weight");
+const TfToken _kEvalBlendActivation("rigExec:activation");
+const TfToken _kEvalDense("dense");
+const TfToken _kEvalWeightTarget("rigExec:weightTarget");
+const TfToken _kEvalDefaultWeight("inputs:defaultWeight");
+
+} // namespace
+
 bool
 RigExecRigEvaluator::_EvaluateGeometry(
     UsdTimeCode time, const RigExecSnapshot &snapshot,
@@ -443,7 +454,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
                     if (_ResolveWeights(revision.binding.weightObject,
                                         currentPoints.size(), time, &field,
                                         &weightError, &currentPoints)) {
-                        weights.representation = TfToken("dense");
+                        weights.representation = _kEvalDense;
                         weights.values = std::move(field);
                         weights.indices.clear();
                         weights.defaultWeight = 0.0f;
@@ -467,7 +478,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
                             revision.binding.weightObject)) {
                         if (const UsdRelationship rel =
                                 weightPrim.GetRelationship(
-                                    TfToken("rigExec:weightTarget"))) {
+                                    _kEvalWeightTarget)) {
                             rel.GetTargets(&declaredTargets);
                         }
                     }
@@ -511,14 +522,14 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 for (const SdfPath &input : revision.binding.blendInputs) {
                     RigExecBlendChannel channel;
                     const UsdPrim inputPrim = _stage->GetPrimAtPath(input);
-                    _resolvedInputs.GetAttribute(inputPrim.GetAttribute(TfToken("inputs:weight")),
+                    _resolvedInputs.GetAttribute(inputPrim.GetAttribute(_kEvalBlendWeight),
                                                  time, &channel.weight);
                     const auto sampleBindings = revision.binding.blendSamples.find(input);
                     if (sampleBindings != revision.binding.blendSamples.end()) {
                         for (const auto &binding : sampleBindings->second) {
                             RigExecBlendSampleData sample;
                             const UsdPrim samplePrim = _stage->GetPrimAtPath(binding.sample);
-                            _resolvedInputs.GetAttribute(samplePrim.GetAttribute(TfToken("rigExec:activation")),
+                            _resolvedInputs.GetAttribute(samplePrim.GetAttribute(_kEvalBlendActivation),
                                                          time, &sample.activation);
                             if (!binding.blendShape.IsEmpty()) {
                                 // Sparse: the shape is epoch-constant, so it
@@ -586,7 +597,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
             if (parameters.enabled && !parameters.valid &&
                 revision.binding.weightObject.IsEmpty()) {
                 const float scalar = _ResolvedRead(
-                    _resolvedInputs, moverPrim, "inputs:defaultWeight",
+                    _resolvedInputs, moverPrim, _kEvalDefaultWeight,
                     1.0f, time);
                 if (!std::isfinite(scalar) || scalar < 0.0f ||
                     scalar > 1.0f) {

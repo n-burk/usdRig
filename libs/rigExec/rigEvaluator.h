@@ -727,8 +727,8 @@ private:
     /// authored value at \p time. Accepts either an exact property path
     /// or a prim path canonicalizing to .points.
     bool _ReadTargetPoints(
-        const UsdPrim &prim, const char *relationshipName, UsdTimeCode time,
-        std::vector<GfVec3f> *points) const;
+        const UsdPrim &prim, const TfToken &relationshipName,
+        UsdTimeCode time, std::vector<GfVec3f> *points) const;
 
     /// Compiles if this rig never has, recompiles if a structural edit moved
     /// the epoch digest, and clears the structure-dirty flag. False when the
@@ -1764,15 +1764,16 @@ private:
     /// evaluator and the baked program have to read it the same way -- so
     /// both read it here, and the cardinality diagnostic has one wording
     /// rather than one per caller. An absent or empty array is not a
-    /// failure: it means the neutral value on every source.
+    /// failure: it means the neutral value on every source. The name
+    /// arrives already interned: both frame paths read it every frame.
     static bool _ReadConstraintSourceWeights(
-        const UsdPrim &prim, const char *name, size_t count,
+        const UsdPrim &prim, const TfToken &name, size_t count,
         UsdTimeCode time, std::vector<std::string> *diagnostics,
         std::vector<double> *weights);
 
     /// The same read for a per-source offset array, whose neutral is zero.
     static bool _ReadConstraintSourceOffsets(
-        const UsdPrim &prim, const char *name, size_t count,
+        const UsdPrim &prim, const TfToken &name, size_t count,
         UsdTimeCode time, std::vector<std::string> *diagnostics,
         std::vector<GfVec3d> *offsets);
 

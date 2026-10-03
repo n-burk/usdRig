@@ -16,6 +16,7 @@
 #define RIGEXEC_PROFILER_H
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -81,7 +82,7 @@ public:
     void SetEnabled(bool enabled)
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        _enabled = enabled;
+        _enabled.store(enabled, std::memory_order_relaxed);
         if (enabled) {
             // Claim index 0 for whoever turns recording on. Without this the
             // indices fall out of the order threads happen to FIRST record,
@@ -95,10 +96,12 @@ public:
         }
     }
 
+    /// Lock-free: the profile-scope macros and every per-frame record site
+    /// ask this on generations that record nothing, so it must not take the
+    /// event mutex to answer.
     bool IsEnabled() const
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-        return _enabled;
+        return _enabled.load(std::memory_order_relaxed);
     }
 
     /// Drops every recorded event. Does not change the enabled state.
@@ -141,8 +144,13 @@ public:
                   std::string category, uint64_t startUs, uint64_t endUs,
                   std::map<std::string, std::string> args = {}) const
     {
+        // Asked before the lock: an unprofiled generation must neither
+        // contend on the event mutex nor pay for one to be told no.
+        if (!IsEnabled()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(_mutex);
-        if (!_enabled) {
+        if (!IsEnabled()) {
             return;
         }
         RigExecProfileEvent event;
@@ -163,8 +171,11 @@ public:
                        uint64_t timeUs,
                        std::map<std::string, std::string> args = {}) const
     {
+        if (!IsEnabled()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(_mutex);
-        if (!_enabled) {
+        if (!IsEnabled()) {
             return;
         }
         RigExecProfileEvent event;
@@ -185,8 +196,11 @@ public:
                        uint64_t timeUs,
                        std::map<std::string, double> counters) const
     {
+        if (!IsEnabled()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(_mutex);
-        if (!_enabled) {
+        if (!IsEnabled()) {
             return;
         }
         RigExecProfileEvent event;
@@ -206,6 +220,11 @@ public:
     /// string arg for the trace reader. No-op unless enabled.
     void RecordCacheLookup(bool hit, double frame) const
     {
+        // A lookup happens per frame whether or not anyone is tracing; the
+        // clock read and the arg map it builds must not happen either.
+        if (!IsEnabled()) {
+            return;
+        }
         RecordInstant(hit ? "cacheHit" : "cacheMiss",
                       kRigExecProfileCategoryFrameCache, NowUs(),
                       {{"frame", std::to_string(frame)}});
@@ -217,6 +236,9 @@ public:
     void RecordSchedulerQueue(size_t queuedDepth, size_t running,
                               size_t canceled) const
     {
+        if (!IsEnabled()) {
+            return;
+        }
         RecordCounter("warmQueue", kRigExecProfileCategoryScheduler,
                       NowUs(),
                       {{"queuedDepth", double(queuedDepth)},
@@ -230,6 +252,9 @@ public:
     void RecordSchedulerCancel(size_t purged,
                                const std::string &cause) const
     {
+        if (!IsEnabled()) {
+            return;
+        }
         RecordInstant("warmCancel", kRigExecProfileCategoryScheduler,
                       NowUs(),
                       {{"purged", std::to_string(purged)},
@@ -449,7 +474,7 @@ private:
     }
 
     mutable std::mutex _mutex;
-    bool _enabled = false;
+    std::atomic<bool> _enabled{false};
     mutable std::vector<RigExecProfileEvent> _events;
     mutable std::map<std::thread::id, uint64_t> _threadIds;
 };

@@ -197,17 +197,21 @@ _GetMoverExecutionOrder(const UsdPrim &rig)
 bool
 _IsVolumeWeightType(const TfToken &typeName)
 {
-    return typeName == "RigExecSphereWeight" ||
-           typeName == "RigExecPlaneWeight" ||
-           typeName == "RigExecCurveWeight";
+    // Interned once: asked per weight object per frame, and token
+    // comparison is a pointer comparison while literal comparison is not.
+    static const TfToken kSphere("RigExecSphereWeight");
+    static const TfToken kPlane("RigExecPlaneWeight");
+    static const TfToken kCurve("RigExecCurveWeight");
+    return typeName == kSphere || typeName == kPlane || typeName == kCurve;
 }
 
 // Types whose frames participate in namespace-based pose dependencies.
 bool
 _IsFrameProviderType(const TfToken &type)
 {
-    return type == "RigExecJoint" || type == "RigExecControl" ||
-           _IsVolumeWeightType(type);
+    static const TfToken kJoint("RigExecJoint");
+    static const TfToken kControl("RigExecControl");
+    return type == kJoint || type == kControl || _IsVolumeWeightType(type);
 }
 
 bool
@@ -226,10 +230,11 @@ _IsFrameProvider(const UsdPrim &prim)
 bool
 _IsWeightObjectType(const TfToken &typeName)
 {
-    return typeName == "RigExecStaticWeight" ||
-           typeName == "RigExecDynamicWeight" ||
-           typeName == "RigExecCombineWeight" ||
-           _IsVolumeWeightType(typeName);
+    static const TfToken kStatic("RigExecStaticWeight");
+    static const TfToken kDynamic("RigExecDynamicWeight");
+    static const TfToken kCombine("RigExecCombineWeight");
+    return typeName == kStatic || typeName == kDynamic ||
+           typeName == kCombine || _IsVolumeWeightType(typeName);
 }
 
 bool
