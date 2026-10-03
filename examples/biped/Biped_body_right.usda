@@ -1491,6 +1491,7 @@ over "Biped"
                             prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/L_LegIK>
                         )
                         {
+                            double3 avars:rotationSign = (1, -1, -1)
                             custom double avars:space = 0
                             color3f guide:displayColor = (1, 0, 0)
                             float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:ikfk>
@@ -1843,6 +1844,7 @@ over "Biped"
                             prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK>
                         )
                         {
+                            double3 avars:rotationSign = (1, -1, -1)
                             custom double avars:space = 0
                             color3f guide:displayColor = (1, 0, 0)
                             float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
@@ -1873,6 +1875,7 @@ over "Biped"
                             prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/L_LegPV>
                         )
                         {
+                            double3 avars:rotationSign = (1, -1, -1)
                             custom double avars:space = 2
                             color3f guide:displayColor = (1, 0, 0)
                             float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:ikfk>
@@ -1887,6 +1890,7 @@ over "Biped"
                             prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/L_ArmPV>
                         )
                         {
+                            double3 avars:rotationSign = (1, -1, -1)
                             custom double avars:space = 0
                             color3f guide:displayColor = (1, 0, 0)
                             float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
@@ -1947,6 +1951,7 @@ over "Biped"
                                                 prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing>
                                             )
                                             {
+                                                double3 avars:rotationSign = (-1, -1, 1)
                                                 color3f guide:displayColor = (1, 0, 0)
                                                 double3 guide:offset = (-2.7185500000000364, 0.1202000000000272, -16.48535)
                                                 uniform token guide:planeNormal = "Y"
@@ -1960,6 +1965,7 @@ over "Biped"
                                                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm>
                                                 )
                                                 {
+                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                     custom double avars:space = 0
                                                     color3f guide:displayColor = (1, 0, 0)
                                                     float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
@@ -1976,6 +1982,7 @@ over "Biped"
                                                         prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm/L_LoArm>
                                                     )
                                                     {
+                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                         color3f guide:displayColor = (1, 0, 0)
                                                         float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
                                                         double3 guide:offset = (-0.08100000000005281, -0.04079999999999728, 0.818199999999905)
@@ -2054,6 +2061,7 @@ over "Biped"
                                             prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/L_Hip/L_UpLegSwing>
                                         )
                                         {
+                                            double3 avars:rotationSign = (-1, -1, 1)
                                             color3f guide:displayColor = (1, 0, 0)
                                             double3 guide:offset = (8.029049999999998, 0.08319999999999972, 11.11325)
                                             uniform token guide:planeNormal = "Y"
@@ -2064,6 +2072,7 @@ over "Biped"
                                                 prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/L_Hip/L_UpLegSwing/L_UpLeg>
                                             )
                                             {
+                                                double3 avars:rotationSign = (-1, -1, 1)
                                                 color3f guide:displayColor = (1, 0, 0)
                                                 float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:ikfk>
                                                 double3 guide:offset = (5.902550000000005, 0.055800000000000516, 0.4422499999999996)
@@ -2079,6 +2088,7 @@ over "Biped"
                                                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/L_Hip/L_UpLegSwing/L_UpLeg/L_LoLeg>
                                                 )
                                                 {
+                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                     color3f guide:displayColor = (1, 0, 0)
                                                     float guide:displayOpacity.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:ikfk>
                                                     uniform token guide:planeNormal = "X"

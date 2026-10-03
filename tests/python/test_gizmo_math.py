@@ -644,6 +644,75 @@ def TestRigPoseTarget():
            "connected avar refused: %r" % reason)
 
 
+def TestRotationSignMirrorsTheDrag():
+    """
+    avars:rotationSign is the mirrored limb's declaration, so the gizmo has
+    to work in EFFECTIVE angles: the ring the artist turns must turn the
+    control the way they dragged it, and the value that lands on the stage
+    is that angle signed back.
+    """
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    child.GetAttribute("avars:rx").Set(0.0)
+    plain = gizmoMath.ComputeRigFrames(stage, child, time)
+
+    sign = Gf.Vec3d(-1, 1, -1)
+    child.GetAttribute("avars:rotationSign").Set(sign)
+    _Check(gizmoMath.RotationSign(child) == (-1.0, 1.0, -1.0),
+           "the sign reads back as a triple of +/-1")
+    # A magnitude is not a sign, and zero is not an erased axis.
+    child.GetAttribute("avars:rotationSign").Set(Gf.Vec3d(-4, 0, -0.5))
+    _Check(gizmoMath.RotationSign(child) == (-1.0, 1.0, -1.0),
+           "a magnitude is discarded and zero selects +1")
+    child.GetAttribute("avars:rotationSign").Set(sign)
+
+    # The posed frame: signed avars are the unsigned frame at the negated
+    # angles, and the sign alone moves nothing.
+    _Check(_MatClose(gizmoMath.ComputeRigFrames(stage, child, time).posed,
+                     plain.posed, 1e-12),
+           "declaring a sign does not move a control at rest")
+    child.GetAttribute("avars:rx").Set(25.0)
+    child.GetAttribute("avars:rz").Set(10.0)
+    signed = gizmoMath.ComputeRigFrames(stage, child, time).posed
+    child.GetAttribute("avars:rotationSign").Set(Gf.Vec3d(1, 1, 1))
+    child.GetAttribute("avars:rx").Set(-25.0)
+    child.GetAttribute("avars:rz").Set(-10.0)
+    _Check(_MatClose(gizmoMath.ComputeRigFrames(stage, child, time).posed,
+                     signed, 1e-12),
+           "a signed avar composes as the negated unsigned avar")
+
+    # The drag itself: the world rotation the artist asked for is the world
+    # rotation they get, and the stage keeps the signed value.
+    child.GetAttribute("avars:rotationSign").Set(sign)
+    child.GetAttribute("avars:rx").Set(0.0)
+    child.GetAttribute("avars:rz").Set(0.0)
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None and reason == "", "signed child is a target")
+    base = gizmoMath.ComputeRigFrames(stage, child, time)
+    baseWorld = (base.posed * base.assetToWorld).GetOrthonormalized(False)
+    _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(0, 0, 1), 30.0))
+    rotated = gizmoMath.ComputeRigFrames(stage, child, time)
+    rotWorld = (rotated.posed * rotated.assetToWorld)        .GetOrthonormalized(False)
+    expected = baseWorld * _Rot(Gf.Vec3d(0, 0, 1), 30.0)
+    expected.SetTranslateOnly(rotWorld.ExtractTranslation())
+    _Check(_MatClose(rotWorld, expected, 1e-6),
+           "a world rotate on a signed control lands where it was dragged")
+
+    # The channel handle, which adds to one avar: the limb turns by the
+    # step, so the stage takes the signed step.
+    target.Refresh()
+    order, before = target.RotationState()
+    _Drag(target, lambda: target.ApplyRotateChannel(0, 10.0))
+    target.Refresh()
+    after = target.RotationState()[1]
+    _Check(_Close(after[0], before[0] + 10.0, 1e-9),
+           "the channel step is an effective-angle step")
+    _Check(_Close(child.GetAttribute("avars:rx").Get(), -after[0], 1e-9),
+           "and the stage keeps it signed")
+
+
 def TestRigPivotTarget():
     stage, parent, child = _ChainStage()
     time = Usd.TimeCode.Default()
@@ -2215,7 +2284,7 @@ def _Group(stage, prims, time, channels=None):
 def TestGroupPivotAndFrame():
     """
     The pivot is the centroid of the members' evaluated origins,
-    oriented like the LEAD (last-selected) control -- the conventional-tool/Blender
+    oriented like the LEAD (last-selected) control -- the usual DCC
     convention.
     """
     stage, root, mid, tip, side, _ = _GroupStage()
@@ -3251,6 +3320,8 @@ def main():
         ("group on the biped", TestGroupOnBiped),
         ("space-switch manipulators",
          TestSpaceSwitchTargetsAreClaimed),
+        ("rotation sign mirrors the drag",
+         TestRotationSignMirrorsTheDrag),
     ]
     for name, fn in groups:
         fn()

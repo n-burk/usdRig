@@ -256,6 +256,8 @@ struct RrPoseScratch {
     std::vector<uint32_t> rotOrder;
     std::vector<char> posedAuthored;
     std::vector<char> noScaleAvars;
+    /// avars:rotationSign per slot, packed as RigExecRotationSignMask does.
+    std::vector<unsigned char> rotationSign;
     std::vector<RrMat4d> lastRestM, lastSelfD, lastParentDinv;
     std::vector<RrMat4d> lastPosedAuthoredM;
     std::vector<char> lastPosedAuthored;

@@ -1,8 +1,6 @@
-// RigExec RBF parity: libs/rigExecMath/rbf.{h,cpp} against the studio's
-// an independent reference implementation, which is the ORACLE.
-// The Python is not imported. tools/biped/gen_psd_parity.py ran it once, by
-// hand, over every interpolator in the biped's the conventional tool PSD export plus a set of
-// hand-built solvers, and froze the answers into
+// RigExec RBF parity: libs/rigExecMath/rbf.{h,cpp} against a fixed ORACLE.
+// The reference solver was run once over every interpolator in the biped
+// plus a set of hand-built solvers, and its answers were frozen into
 // tests/fixtures/psd_parity.json. This file reads that fixture and asserts
 // the C++ agrees to 1e-6 in double precision.
 // WHY A FIXTURE AND NOT A UNIT TEST OF EACH PIECE. The failure mode for this
@@ -14,8 +12,7 @@
 // the fixture carries a `why`, printed on failure, so a red line says what
 // was being pinned rather than only which index disagreed.
 // DO NOT DELETE THE HAND-BUILT CASES AS REDUNDANT WITH THE REAL DATA. They
-// are not redundant, and the measurement is in the docstring on SAMPLES in
-// tools/biped/gen_psd_parity.py. Summarised: breaking the per-pose radii so
+// are not redundant. Measured: breaking the per-pose radii so
 // they are measured in the other direction is caught by ZERO of the 67 biped
 // interpolators, at any sample count. Every one of them uses a single
 // poseType throughout, which makes its distance metric symmetric and hides a
@@ -715,7 +712,7 @@ TestCases(const Json &fixture, Worst *worst, int *refusedSeen,
         if (failures && reported) {
             std::printf("     ^ %s\n", record.Text("why").c_str());
         }
-        // The fixture carries a `clamped` column only where the conventional tool's
+        // The fixture carries a `clamped` column only where
         // allowNegativeWeights is off, so CheckSamples reads the flag off the
         // column's presence rather than being told twice.
         CheckSamples(record, solver, label, worst, refusedSeen, negativeSeen);
@@ -752,8 +749,8 @@ TestInterpolators(const Json &fixture, Worst *worst, int *refusedSeen,
         desc.enableTranslation = record.Bool("enable_translation", false);
         poses += desc.poses.size();
 
-        // The fitter, not a stated width: the conventional tool does not export the width it
-        // solves with, so this is the number the whole conversion hangs off
+        // The fitter, not a stated width: the data does not carry the width
+        // it was tuned with, so this is the number the whole conversion hangs off
         // (see RigExecRbfFitWidth).
         RigExecRbfFitReport report;
         RigExecRbfSolver solver = RigExecRbfFitWidth(desc, &report);
@@ -826,9 +823,7 @@ main(int argc, char **argv)
 
     std::ifstream file(path.c_str(), std::ios::binary);
     if (!file) {
-        std::printf("FAIL: cannot open the parity fixture at %s\n"
-                    "      Regenerate it with "
-                    "`python tools/biped/gen_psd_parity.py`.\n",
+        std::printf("FAIL: cannot open the parity fixture at %s\n",
                     path.c_str());
         return 1;
     }

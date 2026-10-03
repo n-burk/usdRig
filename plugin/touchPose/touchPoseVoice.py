@@ -3,8 +3,7 @@
 THE ADAPTER, and only the adapter. Everything about speech -- how a rig
 name becomes words, what the recogniser is allowed to hear, what an
 ambiguous phrase means, the helper process and its protocol -- lives in
-`touchpose/voice`, a subpackage of the shared TouchPose repo beside this
-checkout. That subpackage imports no `pxr`, no Qt and no DCC, and its
+a subpackage of the shared TouchPose repo. That subpackage imports no `pxr`, no Qt and no DCC, and its
 tests run under plain CPython with nothing installed; a test there walks
 its AST to keep it that way. This file is the other half of that
 bargain: the USD, the Qt and the usdview.

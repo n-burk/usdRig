@@ -112,16 +112,19 @@ _SCHEMA_RANK = {name: i for i, name in enumerate((
 # Channels that carry no scalar to edit. avars:defaultSpace is a matrix
 # the evaluator falls back through (schema.usda: "Zero pose supplied to
 # avar evaluation") -- authoring it from a slider would be wrong, and it
-# is not a channel an animator poses. Listed in the footnote instead.
-_HIDDEN = ("avars:defaultSpace",)
+# is not a channel an animator poses. avars:rotationSign is the same
+# distinction one type down: a triple of +1/-1 that says this control is
+# a mirrored limb, which belongs to the rig and not to a pose. Both are
+# listed in the footnote instead.
+_HIDDEN = ("avars:defaultSpace", "avars:rotationSign")
 
 # Rig channels that configure a control rather than pose it. Zeroing a
 # rig must not touch these: clearing avars:rotationOrder would silently
 # re-order a control's rotations, which is not what "zero" means to
 # anyone. Kept here beside _HIDDEN because it is the same distinction,
 # drawn for a different consumer -- the panel still SHOWS these.
-CONFIG_CHANNELS = ("avars:rotationOrder", "avars:unitScaleFactor",
-                   "avars:defaultSpace")
+CONFIG_CHANNELS = ("avars:rotationOrder", "avars:rotationSign",
+                   "avars:unitScaleFactor", "avars:defaultSpace")
 
 
 def PoseChannels(prim, stage=None):

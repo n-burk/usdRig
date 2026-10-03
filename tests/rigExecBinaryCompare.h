@@ -186,6 +186,10 @@ _BinaryCompareConstants(const rigExec::RigExecBakedProgramImpl &program,
         CHECK((program.noScaleAvars[i] != 0) ==
               (constants.noScaleAvars[i] != 0));
     }
+    CHECK(program.rotationSign.size() == constants.rotationSign.size());
+    for (size_t i = 0; i < constants.rotationSign.size(); ++i) {
+        CHECK(program.rotationSign[i] == constants.rotationSign[i]);
+    }
     _BinaryCheckEqual(program.avarConstants, constants.avarConstants);
 }
 

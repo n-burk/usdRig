@@ -48,13 +48,8 @@ A citation alone does not establish rights to source code or assets.
   [Walt Yoder](https://github.com/wyoder)). It is retained in the
   repository at the owner's request. A redistribution license for that
   material is not documented here yet.
-- `libs/rigExecMath/rbf.h` describes a native port of a Python reference solver.
-  `tests/fixtures/psd_parity.json` records source hashes but does not identify
-  the reference implementation's author or license. Its provenance must be
-  established before claiming this material is wholly original or MIT-only.
 
 The biped entry now identifies its source author; its redistribution
-terms are still undocumented. The Rbf entry below remains fully
-unresolved. Before a public distribution, the owner must document
+terms are still undocumented. Before a public distribution, the owner must document
 ownership or permission for the affected material. No claim of an
 entirely MIT-licensed distribution is made here.

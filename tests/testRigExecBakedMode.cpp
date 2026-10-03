@@ -891,7 +891,7 @@ EditKeyedFootRoll(const UsdStageRefPtr &stage, const SdfPath &rigPath)
     size_t keyed = 0;
     for (const UsdPrim &prim : UsdPrimRange(stage->GetPrimAtPath(rigPath))) {
         // `avars:footRoll` since the foot dials moved onto the per-limb
-        // param node (tools/biped/params.py add_foot_params): the dial
+        // param node: the dial
         // was `bank_?.foot:roll`, and params.py now MIGRATES it -- the
         // connections are re-pointed and the original deleted, so the
         // old name resolves to nothing and this test silently found no
@@ -916,7 +916,7 @@ EditFootRollValue(const UsdStageRefPtr &stage, const SdfPath &rigPath)
     size_t edited = 0;
     for (const UsdPrim &prim : UsdPrimRange(stage->GetPrimAtPath(rigPath))) {
         // `avars:footRoll` since the foot dials moved onto the per-limb
-        // param node (tools/biped/params.py add_foot_params): the dial
+        // param node: the dial
         // was `bank_?.foot:roll`, and params.py now MIGRATES it -- the
         // connections are re-pointed and the original deleted, so the
         // old name resolves to nothing and this test silently found no
@@ -2698,6 +2698,100 @@ MakeAnInterveningXformRig(bool animated, bool identityToday = false)
     return stage;
 }
 
+// avars:rotationSign, the per-axis sign a mirrored limb declares: it
+// multiplies rx/ry/rz (and rspin, which is an X rotation) before they are
+// composed, so it is the identity at rest and a mirrored control answers the
+// same typed value by turning the other way.
+static UsdStageRefPtr
+MakeARotationSignRig(const GfVec3d &sign, const GfVec3d &rotate)
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim arm = stage->DefinePrim(SdfPath("/Asset/Rig/Arm"),
+                                          TfToken("RigExecControl"));
+    arm.GetAttribute(TfToken("avars:rotationSign")).Set(sign);
+    static const char *const kChannels[3] = {"avars:rx", "avars:ry",
+                                             "avars:rz"};
+    for (int axis = 0; axis < 3; ++axis) {
+        arm.GetAttribute(TfToken(kChannels[axis])).Set(rotate[axis]);
+    }
+    // A child two units out, so a sign that reaches the compose moves it and
+    // a sign that does not leaves it where it was.
+    const UsdPrim tip = stage->DefinePrim(SdfPath("/Asset/Rig/Arm/Tip"),
+                                          TfToken("RigExecJoint"));
+    tip.GetAttribute(TfToken("rest:space"))
+        .Set(GfMatrix4d(1.0).SetTranslate(GfVec3d(0, 2, 0)));
+    // Something the tip moves, so the comparison has a geometry domain to
+    // compare and not only a pose: the sign reaches a mesh through the
+    // same frame it reaches a joint matrix through.
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Points"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0)});
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/M.points")});
+    mover.CreateRelationship(TfToken("rigExec:transform"))
+        .SetTargets({tip.GetPath()});
+    return stage;
+}
+
+static GfVec3d
+RotationSignTip(const UsdStageRefPtr &stage)
+{
+    RigExecRigEvaluator rig(stage, SdfPath("/Asset/Rig"));
+    MakeItTheReference(&rig);
+    CHECK(rig.Compile());
+    const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(1.0));
+    CHECK(pose.valid);
+    const auto tip = pose.jointFramesFinal.find(SdfPath("/Asset/Rig/Arm/Tip"));
+    CHECK(tip != pose.jointFramesFinal.end());
+    return tip == pose.jointFramesFinal.end() ? GfVec3d(0)
+                                              : tip->second.points[0];
+}
+
+static void
+TestRotationSignNegatesTheAvar()
+{
+    const GfVec3d plain(1, 1, 1);
+    const GfVec3d mirrored(-1, -1, 1);
+    const GfVec3d pose(30, 20, 40);
+    const GfVec3d negated(-pose[0], -pose[1], pose[2]);
+
+    // The whole claim: a signed control at +pose is the unsigned control at
+    // the negated pose, and nothing else about it changes.
+    const GfVec3d signedTip = RotationSignTip(
+        MakeARotationSignRig(mirrored, pose));
+    const GfVec3d byHand = RotationSignTip(
+        MakeARotationSignRig(plain, negated));
+    CHECK((signedTip - byHand).GetLength() < 1e-12);
+    // And it is a real difference, not two ways of writing the same pose.
+    const GfVec3d unsignedTip = RotationSignTip(
+        MakeARotationSignRig(plain, pose));
+    CHECK((signedTip - unsignedTip).GetLength() > 1e-3);
+
+    // Identity at rest: declaring the sign cannot move a control nobody
+    // posed, which is what lets a shipped rig declare it without re-fitting
+    // the skin or anything constrained to the control.
+    const GfVec3d rest(0, 0, 0);
+    CHECK((RotationSignTip(MakeARotationSignRig(mirrored, rest)) -
+           RotationSignTip(MakeARotationSignRig(plain, rest)))
+              .GetLength() < 1e-12);
+
+    // A malformed value is the unmirrored axis rather than a collapsed one:
+    // the channel carries a sign, so the magnitude is discarded and zero
+    // selects +1 (RigExecNormalizeRotationSign).
+    CHECK((RotationSignTip(MakeARotationSignRig(GfVec3d(0, 7, -0.25), pose)) -
+           RotationSignTip(MakeARotationSignRig(GfVec3d(1, 1, -1), pose)))
+              .GetLength() < 1e-12);
+}
+
 // Compiles \p stage in baked mode, reports whether it bakes and why not, and
 // compares every published domain against a dynamic evaluator over the
 // sweep. Returns the baked generation count.
@@ -2743,6 +2837,20 @@ BakedAgreesWithDynamic(const char *what, const UsdStageRefPtr &stage,
                         expected, actual);
     }
     return baked.GetBakedGenerationCount();
+}
+
+// The program composes the avars a second time, so the sign has to be in
+// both or a mirrored limb drifts the moment the rig bakes.
+static void
+TestRotationSignBakesExactly()
+{
+    const GfVec3d mirrored(-1, -1, 1);
+    const GfVec3d pose(30, 20, 40);
+    CHECK(BakedAgreesWithDynamic(
+              "a mirrored control's rotation sign",
+              MakeARotationSignRig(mirrored, pose),
+              MakeARotationSignRig(mirrored, pose),
+              /* expectBakeable = */ true) > 0);
 }
 
 // Asserts that \p reasons names \p expected, so a refusal that changed its
@@ -3035,6 +3143,9 @@ main(int argc, char **argv)
     // A read phase naming a point in the pose walk, which no shipped rig
     // authors and no other suite builds.
     TestAReadPhaseOnTheTransformIsExact();
+    // The mirrored-limb rotation sign, in the compose and in the program.
+    TestRotationSignNegatesTheAvar();
+    TestRotationSignBakesExactly();
     // The second deliberate negative: a volume weight a constraint moves,
     // which the DYNAMIC path gives two placements at once.
     TestAConstrainedVolumeWeightFallsBack();

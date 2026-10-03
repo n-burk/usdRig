@@ -129,6 +129,11 @@ public:
     /// Magnitudes below 1e-4 are raised to that floor with sign preserved.
     void SetAvarScale(double sx, double sy, double sz);
     void SetAvarSpin(double degrees);
+    /// Author avars:rotationSign: per axis +1, or -1 to declare that this
+    /// control is its twin's mirror, so the same rotation value turns the
+    /// two limbs into each other. Identity at rest. Anything but +1/-1
+    /// throws.
+    void SetRotationSign(double sx, double sy, double sz);
     /// RigExecControlAPI rigExec:channelRole (pose | switch | tweak).
     void SetChannelRole(const TfToken &role);
 };
@@ -158,6 +163,8 @@ public:
     /// Same signed 1e-4 local-scale floor as RigExecControlHandle.
     void SetAvarScale(double sx, double sy, double sz);
     void SetAvarSpin(double degrees);
+    /// As RigExecControlHandle::SetRotationSign.
+    void SetRotationSign(double sx, double sy, double sz);
 };
 
 /// One aggregate solver's handle. Solvers publish computePointFrameArray and
@@ -186,7 +193,7 @@ public:
     /// world | parentRelative (rigExec:controlSpace): whether each control's
     /// posed frame already carries the motion of the control before it.
     /// Use parentRelative for controls nested one under the next (AddControl
-    /// with a parent) so they travel with their parent, the conventional tool FK style,
+    /// with a parent) so they travel with their parent, FK style,
     /// without the solver applying that motion twice. The joints pose the
     /// same either way. Any other token is rejected.
     void SetControlSpace(const TfToken &space);
@@ -293,7 +300,7 @@ public:
     void SetPreserveVolume(double amount);
     /// Mid control follow point: 0 follows the root, 1 the end.
     void SetMidFollowWeight(double weight);
-    /// Additional roll / twist in degrees (the conventional tool ikHandle roll / twist).
+    /// Additional roll / twist in degrees about the chain.
     void SetRoll(double degrees);
     void SetTwist(double degrees);
     /// Length floor as a fraction of the rest root->end chord, 0 = off
@@ -603,10 +610,10 @@ public:
     void SetTranslation(const GfVec3f &translation);
     /// The pose's own falloff widths: radians and centimetres. Zero means
     /// "measure one from the poses" -- see RigExecRbfFitWidth for why these
-    /// are fitted rather than read out of the conventional tool.
+    /// are fitted rather than read from the data.
     void SetRadii(float rotationRadius, float translationRadius = 0.f);
-    /// poseFalloff, as provenance: the share painted on top of the
-    /// fitted width, 0.3 being the conventional default. The radii already carry it.
+    /// The pose falloff: the share painted on top of the
+    /// fitted width, 0.3 being the default. The radii already carry it.
     void SetFalloff(float falloff);
     /// The exact control PROPERTIES that put the rig into this pose and their
     /// values, in OUR units and from OUR zero (degrees, centimetres). The two
@@ -619,8 +626,7 @@ public:
     SdfPath GetWeightOutput() const;
 };
 
-/// A RigExecPoseInterpolator: the conventional poseInterpolator, one driver in and one
-/// weight per pose out.
+/// A RigExecPoseInterpolator: one driver in and one weight per pose out.
 class RigExecPoseInterpolatorHandle : public RigExecHandleBase {
 public:
     using RigExecHandleBase::RigExecHandleBase;
@@ -636,7 +642,7 @@ public:
     void SetAllowNegativeWeights(bool allow);
     void SetNormalize(bool normalize);
     void SetRegularization(float regularization);
-    /// X | Y | Z, in the driver's own frame. driverTwistAxis.
+    /// X | Y | Z, the twist axis in the driver's own frame.
     void SetTwistAxis(const TfToken &axis);
     void SetEnabled(bool enabled);
     /// Add a pose as a child of this interpolator. Poses are prims rather

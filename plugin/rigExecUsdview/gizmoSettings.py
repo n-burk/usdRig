@@ -27,9 +27,9 @@ TOOL_SELECT = "select"
 
 TOOLS = (TOOL_SELECT, TOOL_TRANSLATE, TOOL_ROTATE, TOOL_SCALE)
 
-# the conventional Axis Orientation menu. World / Object / Parent for Move and
-# Scale; Object / World / Gimbal for Rotate (the conventional Rotate Tool has no
-# Parent entry -- its "Gimbal" is the parent-space Euler decomposition).
+# the Axis Orientation menu. World / Object / Parent for Move and
+# Scale; Object / World / Gimbal for Rotate (Rotate has no Parent entry --
+# its "Gimbal" is the parent-space Euler decomposition).
 ORIENT_WORLD = "world"
 ORIENT_OBJECT = "object"
 ORIENT_PARENT = "parent"
@@ -43,7 +43,7 @@ ORIENT_GIMBAL = "gimbal"
 # Named here rather than in gizmoUI so the pairing is testable headlessly.
 ORIENT_TOGGLE = (ORIENT_WORLD, ORIENT_OBJECT)
 
-# conventional snap modes for the viewport gizmo (snapping design
+# snap modes for the viewport gizmo (snapping design
 # section 1). The tokens alone let gizmoSnap re-export one spelling;
 # the labels, per-tool choices, sticky field and grid size below are
 # the Task 2 half, added together so no _FIELDS entry lacks its
@@ -61,10 +61,9 @@ _ORIENT_LABELS = {
     ORIENT_GIMBAL: "Gimbal",
 }
 
-# What the TOOLBAR calls them. the conventional tool says World/Object; every other application
-# an animator is likely to have used says Global/Local, and the toolbar
-# has room for one word. The panel keeps the conventional spelling because the
-# rest of that panel is the authored data's.
+# What the TOOLBAR calls them: Global/Local, which is what most animators
+# expect, and the toolbar has room for one word. The panel keeps
+# World/Object because the rest of that panel is the authored data's.
 _TOGGLE_LABELS = {
     ORIENT_WORLD: "Global",
     ORIENT_OBJECT: "Local",
@@ -127,7 +126,7 @@ GRID_SIZE_MIN = 1e-4
 GRID_SIZE_MAX = 1e5
 
 # The fields every ToolSettings carries. Every tool carries all of them
-# even where the conventional tool shows only some (Free Rotate is a Rotate-only row),
+# even where a tool shows only some (Free Rotate is a Rotate-only row),
 # so the drag code can read settings.freeRotate without first asking
 # which tool it belongs to.
 _FIELDS = ("orientation", "stepSnap", "stepSize", "freeRotate",
@@ -142,7 +141,7 @@ def OrientationLabel(orientation):
 
 def OrientationChoices(tool):
     """
-    The Axis Orientation entries the conventional tool offers for `tool`, in the conventional own
+    The Axis Orientation entries offered for `tool`, in their menu
     order (the default first). Empty for a tool with no manipulator, so
     the panel can simply omit the row.
     """
@@ -286,7 +285,7 @@ class ToolSettings(object):
 
 def ToolDefaults(tool, owner=None):
     """
-    A fresh ToolSettings carrying the conventional defaults for `tool` (design
+    A fresh ToolSettings carrying the defaults for `tool` (design
     spec 8.2 Move, 8.3 Rotate, 8.4 Scale).
     """
     values = {
@@ -354,7 +353,7 @@ class GizmoSettings(object):
         return settings
 
     def Reset(self, tool):
-        """Restore the conventional defaults for one tool, in place."""
+        """Restore the defaults for one tool, in place."""
         self.For(tool).CopyFrom(ToolDefaults(tool))
 
     def ScaleManipulator(self, factor):

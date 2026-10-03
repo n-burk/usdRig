@@ -1,4 +1,4 @@
-// The pose-interpolator phase: the conventional poseInterpolator, evaluated.
+// The pose-interpolator phase, evaluated.
 // A RigExecPoseInterpolator reads the FINAL local rotation of a driver and
 // publishes one float per authored RigExecPose. It is not a mover -- a
 // mover's inputs are resolved by the property chains, which run before exec

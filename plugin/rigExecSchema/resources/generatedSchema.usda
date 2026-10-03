@@ -107,6 +107,12 @@ class RigExecControl "RigExecControl" (
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
     )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
+    )
     double avars:rspin = 0
     double avars:rx = 0
     double avars:ry = 0
@@ -308,6 +314,12 @@ class "RigExecXformable" (
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
     )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
+    )
     double avars:rspin = 0
     double avars:rx = 0
     double avars:ry = 0
@@ -417,6 +429,12 @@ class RigExecJoint "RigExecJoint" (
     )
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
     )
     double avars:rspin = 0
     double avars:rx = 0
@@ -1983,6 +2001,12 @@ class "RigExecVolumeWeight" (
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
     )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
+    )
     double avars:rspin = 0
     double avars:rx = 0
     double avars:ry = 0
@@ -2182,6 +2206,12 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
     )
     double avars:rspin = 0
     double avars:rx = 0
@@ -2418,6 +2448,12 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
     )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
+    )
     double avars:rspin = 0
     double avars:rx = 0
     double avars:ry = 0
@@ -2641,6 +2677,12 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     )
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
     )
     double avars:rspin = 0
     double avars:rx = 0
@@ -3589,6 +3631,12 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     )
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    double3 avars:rotationSign = (1, 1, 1) (
+        customData = {
+            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed."""
+        }
     )
     double avars:rspin = 0
     double avars:rx = 0

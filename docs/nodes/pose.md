@@ -90,14 +90,34 @@ orientation is the joint orient the authored data removes from
 poseRotation, so a driver sitting at its rest measures as identity and
 the neutral pose reads 1.000 with the rig standing still.
 
+#### `rigExec:driverAttributes`
+
+*Relationship.*
+
+A NUMERIC driver: one to three float or double PROPERTIES --
+avars, usually -- read in order as the driver's position, in place of
+a transform's translation.
+
+This is what lets a corrective be driven by a dial rather than by
+something the rig moves: a breath, a squash amount, a shot-specific
+knob. Each pose carries the values it stands at in
+rigExec:translation and their width in rigExec:translationRadius, so
+the solve, the fit and the baked program are the ones the translation
+channel already had -- the only difference is where the position
+comes from.
+
+Authoring this makes rigExec:driver optional and measures no
+rotation: there is no frame to take one from. Up to three because
+that is what one position is; a corrective wanting more channels is
+two interpolators whose weights multiply.
+
 #### `rigExec:kernel`
 
 *Type:* `uniform token`. *Default:* `"gaussian"`.
 
 Valid values: `gaussian`, `linear`.
 
-How a pose's weight falls away with distance. The conventional tool's
-interpolation attribute: 0 is linear, 1 is gaussian. On the shipped biped 16 interpolators
+How a pose's weight falls away with distance. On the shipped biped 16 interpolators
 are gaussian and 53 linear.
 
 Gaussian never quite reaches zero, so a little of every pose survives
@@ -146,7 +166,7 @@ unity. By their sum and not by the sum of magnitudes, because a
 negative weight is a real instruction. Where the sum is smaller than
 1e-6 there is nothing to divide by and the weights are left alone,
 which is what falling away to nothing outside the poses should look
-like (rbf.py:964-987).
+like.
 
 #### `rigExec:regularization`
 
@@ -196,7 +216,7 @@ driver usually carries both at once and they mean different things: a
 neck that has twisted has not bent, and its bend shapes should stay at
 zero. Measuring the whole rotation instead leaks about 0.05 of every
 swing pose into a pure twist on the shipped biped
-(rbf.py:1030-1038).
+.
 
 #### `rigExec:rotation`
 
@@ -218,7 +238,7 @@ millimetres.
 
 Measured against this port's own drivers it lands at 0.00 degrees on
 the elbow, the knee and the toe and 1.64 on the shoulder;
-tools/biped/verify_psd.py prints the angle per pose, which is the
+The verification gate prints the angle per pose, which is the
 fidelity number.
 
 #### `rigExec:translation`
@@ -230,7 +250,7 @@ driver's own frame. Read only when the interpolator has
 rigExec:enableTranslation on; an interpolator with no authored
 translations has nothing to say about translation, and saying every
 pose is equally close would peg its weights at 1/n
-(rbf.py:431-436).
+.
 
 #### `rigExec:rotationRadius`
 
@@ -239,11 +259,9 @@ pose is equally close would peg its weights at 1/n
 How far in RADIANS the driver may stray before this pose's
 kernel has fallen away -- one falloff width, this pose's own.
 
-FITTED, NOT EXPORTED. the conventional tool does not write out the width it solves
-with: it writes rigExec:falloff, which its own documentation calls a
-share relative to the closest other pose, and a poseRotationFalloff it
-ignores for every non-independent pose -- which is all of them on this
-rig. So the shape of the rule is preserved and the size is not
+FITTED, NOT EXPORTED. The width a set of poses was tuned with is not
+in the data; rigExec:falloff, a share relative to the closest other
+pose, is. So the shape of the rule is preserved and the size is not
 recoverable, and one scale for the whole rig does not work because the
 pose layouts are not alike: the thigh has poses 25 to 150 degrees
 apart, the shoulder eight with pairs 45 apart, the index three in a
@@ -271,7 +289,7 @@ brow's poses sit millimetres apart and a rotation width would swallow
 every one of them. Fitted by the same swept scale, because the metric
 already divides each channel by its own width -- the shape of the pose
 space is fixed by the RATIO of the two and only its overall size is
-free (rbf.py:223-352).
+free.
 
 #### `rigExec:falloff`
 
@@ -316,7 +334,7 @@ configuration the poses were captured in rather than the bind pose.
 Measured: driving this rig with those absolute values reaches the
 authored quaternion to 45.4 degrees on the shoulder and 10.0 on the
 wrist; driving it with (pose - neutral) reaches 1.64 and 0.00. So the
-subtraction happens once, in tools/biped/build_psd.py, and what is
+subtraction happens once, at build time, and what is
 stored is what an editor can set directly.
 
 #### `inputs:enabled`

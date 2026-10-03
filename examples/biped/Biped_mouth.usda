@@ -2969,6 +2969,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3013,6 +3014,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (1, -1, -1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3035,6 +3037,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (1, -1, -1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3057,6 +3060,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (1, -1, -1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3079,6 +3083,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (1, -1, -1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3101,6 +3106,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (1, -1, -1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3123,6 +3129,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (1, -1, -1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3145,6 +3152,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (1, -1, -1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3206,6 +3214,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -3217,6 +3226,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (1, 0, 0)
                                                                         double3 guide:offset = (0.35075000078986207, 0.05494999991816485, -1.3684999989490807)
                                                                         uniform token guide:planeNormal = "Z"
@@ -3320,12 +3330,14 @@ over "Biped"
 
                                                                 def RigExecJoint "mouth_corner_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.5232141754227951, -5.959556050306464e-9, 0.8522012250237759, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.8522012242637557, 1.5247634218577794e-9, 0.5232141741848971, 0), (3.1219999853459317, -7.5038201046971835, -6.291128564518697, 1) )
 
                                                                     def RigExecJoint "mouth_corner_r_pin"
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:radius = 0
                                                                         uniform token purpose = "default"
                                                                         matrix4d rest:space = ( (1, 6.8893057489571435e-18, -5.551115123125783e-17, 0), (1.2565834933281375e-17, 1.0000000000000002, 7.714870547042123e-18, 0), (0, -1.418253611804142e-19, 1.0000000000000002, 0), (-2.6645352591003757e-15, 0, -8.881784197001252e-16, 1) )
@@ -3364,6 +3376,7 @@ over "Biped"
                                                                                 }
                                                                                 doc = "Pins the corner to the jaw (-10) or the head (10)."
                                                                             )
+                                                                            double3 avars:rotationSign = (-1, -1, 1)
                                                                             color3f guide:displayColor = (1, 1, 0)
                                                                             double3 guide:offset = (0.6445000016693794, -1.7053025658242404e-13, -2.1125999945265077)
                                                                             uniform token guide:planeNormal = "Z"
@@ -3502,6 +3515,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lipMain_corner_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (-0.7071067817001162, 6.1507630931831456e-9, -0.7071067817001191, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.7071067806729787, -9.656697632180326e-11, -0.707106780672982, 0), (3.122000223764511, -7.5038201046971835, -6.291128564518697, 1) )
@@ -3520,6 +3534,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (1, -1, -1)
                                                                             custom float face:tzFromTy = 0 (
                                                                                 doc = "lip main's forward push from the corner's height"
                                                                             )
@@ -3533,6 +3548,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3588,6 +3604,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lipMain_up_0_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (-0.7532764869930053, 6.143227587224135e-9, -0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.6577039867170309, 3.19322127244837e-10, -0.7532764860376334, 0), (2.734400039344966, -7.38602224899256, -6.85872857713007, 1) )
@@ -3606,6 +3623,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (1, -1, -1)
                                                                             custom float face:tzFromTy = 0 (
                                                                                 doc = "lip main's forward push from the corner's height"
                                                                             )
@@ -3619,6 +3637,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3674,6 +3693,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lipMain_up_1_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (-0.8196832661811799, 6.073183533953838e-9, -0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.572817024138208, 9.785977581681881e-10, -0.8196832653491144, 0), (2.0536999748587763, -7.334417018117932, -7.619828393214039, 1) )
@@ -3692,6 +3712,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (1, -1, -1)
                                                                             custom float face:tzFromTy = 0 (
                                                                                 doc = "lip main's forward push from the corner's height"
                                                                             )
@@ -3705,6 +3726,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3760,6 +3782,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lipMain_up_2_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (-0.9556358403712063, 5.482510349754627e-9, -0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.2945507436724918, 2.7898552066752895e-9, -0.9556358399433486, 0), (1.0654000085508124, -7.334417011102602, -8.238728693004106, 1) )
@@ -3778,6 +3801,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (1, -1, -1)
                                                                             custom float face:tzFromTy = 0 (
                                                                                 doc = "lip main's forward push from the corner's height"
                                                                             )
@@ -3791,6 +3815,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3846,6 +3871,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lipMain_low_0_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (-0.7532764869930053, 6.143227587224135e-9, -0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.6577039867170309, 3.19322127244837e-10, -0.7532764860376334, 0), (2.734400040550896, -7.6590172441097195, -6.8587285759613685, 1) )
@@ -3864,6 +3890,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (1, -1, -1)
                                                                             custom float face:tzFromTy = 0 (
                                                                                 doc = "lip main's forward push from the corner's height"
                                                                             )
@@ -3877,6 +3904,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -3932,6 +3960,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lipMain_low_1_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (-0.8196832661811799, 6.073183533953838e-9, -0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.572817024138208, 9.785977581681881e-10, -0.8196832653491144, 0), (2.0538001124399896, -7.7369133560089836, -7.619828391490865, 1) )
@@ -3950,6 +3979,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (1, -1, -1)
                                                                             custom float face:tzFromTy = 0 (
                                                                                 doc = "lip main's forward push from the corner's height"
                                                                             )
@@ -3963,6 +3993,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -4018,6 +4049,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lipMain_low_2_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (-0.9556358403712063, 5.482510349754627e-9, -0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.2945507436724918, 2.7898552066752895e-9, -0.9556358399433486, 0), (1.065400010572599, -7.792119647820897, -8.238828826847886, 1) )
@@ -4036,6 +4068,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (1, -1, -1)
                                                                             custom float face:tzFromTy = 0 (
                                                                                 doc = "lip main's forward push from the corner's height"
                                                                             )
@@ -4049,6 +4082,7 @@ over "Biped"
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
                                                                             )
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, 1)
                                                                                 double guide:scaleX = 0
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
@@ -4127,6 +4161,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lip_corner_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.6615671197676841, -6.13272636438801e-9, 0.7498859563183967, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.7498859553574067, 4.804988542338692e-10, 0.661567118678409, 0), (3.122000223764511, -7.5038201046971835, -6.291128564518697, 1) )
@@ -4135,6 +4170,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (0, 0, 0)
                                                                         double3 guide:offset = (-3.5915714846623814e-13, -3.410605131648481e-13, -0.8250999976213915)
                                                                         uniform token guide:planeNormal = "Z"
@@ -4182,6 +4218,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lip_up_0_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.7532764869930053, -6.143227587224135e-9, 0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039867170309, -3.19322127244837e-10, 0.7532764860376334, 0), (2.734400039344966, -7.38602224899256, -6.85872857713007, 1) )
@@ -4190,6 +4227,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4200,6 +4238,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (-1, -1, 1)
                                                                             color3f guide:displayColor = (0, 0, 1)
                                                                             double3 guide:offset = (-0.16640000047938175, 0.2227999999999497, -0.8267999976197196)
                                                                             uniform token guide:planeNormal = "Z"
@@ -4237,6 +4276,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lip_up_1_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.8196832661811799, -6.073183533953838e-9, 0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.572817024138208, -9.785977581681881e-10, 0.8196832653491144, 0), (2.0536999748587763, -7.334417018117932, -7.619828393214039, 1) )
@@ -4245,6 +4285,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (0, 0, 1)
                                                                         double3 guide:offset = (-0.34100000093070426, 0.2629999999998631, -0.9151999975030032)
                                                                         uniform token guide:planeNormal = "Z"
@@ -4281,6 +4322,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lip_up_2_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.9556358403712063, -5.482510349754627e-9, 0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.2945507436724918, -2.7898552066752895e-9, 0.9556358399433486, 0), (1.0654000085508124, -7.334417011102602, -8.238728693004106, 1) )
@@ -4289,6 +4331,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (0, 0, 1)
                                                                         double3 guide:offset = (-0.23020000037695865, 0.2994999999999379, -1.1076999981882407)
                                                                         uniform token guide:planeNormal = "Z"
@@ -4336,6 +4379,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lip_low_0_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.7532764869930053, -6.143227587224135e-9, 0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039867170309, -3.19322127244837e-10, 0.7532764860376334, 0), (2.734400040550896, -7.6590172441097195, -6.8587285759613685, 1) )
@@ -4344,6 +4388,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4354,6 +4399,7 @@ over "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (-1, -1, 1)
                                                                             color3f guide:displayColor = (0.392, 0.863, 1)
                                                                             double3 guide:offset = (-0.1273000003668706, -0.3558000000002437, -0.7115999979513274)
                                                                             uniform token guide:planeNormal = "Z"
@@ -4391,6 +4437,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lip_low_1_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.8196832661811799, -6.073183533953838e-9, 0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.572817024138208, -9.785977581681881e-10, 0.8196832653491144, 0), (2.0538001124399896, -7.7369133560089836, -7.619828391490865, 1) )
@@ -4399,6 +4446,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (0.392, 0.863, 1)
                                                                         double3 guide:offset = (-0.14300000039055838, -0.47990000000012856, -0.7613999979225783)
                                                                         uniform token guide:planeNormal = "Z"
@@ -4435,6 +4483,7 @@ over "Biped"
 
                                                                 def RigExecJoint "lip_low_2_r_follow"
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
                                                                     matrix4d rest:space = ( (0.9556358403712063, -5.482510349754627e-9, 0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.2945507436724918, -2.7898552066752895e-9, 0.9556358399433486, 0), (1.065400010572599, -7.792119647820897, -8.238828826847886, 1) )
@@ -4443,6 +4492,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (0.392, 0.863, 1)
                                                                         double3 guide:offset = (-0.05150000008475031, -0.522099999999881, -1.0732999982444742)
                                                                         uniform token guide:planeNormal = "Z"
@@ -4520,6 +4570,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4531,6 +4582,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4564,6 +4616,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4586,6 +4639,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4608,6 +4662,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4630,6 +4685,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4652,6 +4708,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4674,6 +4731,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4696,6 +4754,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -4707,6 +4766,7 @@ over "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (1, 0, 0)
                                                                         double3 guide:offset = (0.2797000000316014, -0.7258000008515636, -1.4460499981372201)
                                                                         uniform token guide:planeNormal = "Z"

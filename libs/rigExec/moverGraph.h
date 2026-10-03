@@ -814,7 +814,7 @@ std::shared_ptr<const RigExecSkinTopology> RigExecResolveSkinTopology(
 /// read and copied off the stage once per sample per frame whether its
 /// channel sits at 0 or at 1 -- measured at 0.37-0.38 ms per sample per frame
 /// on a 26,276-point body, so 169 correctives cost ~65 ms/frame with the rig
-/// standing at REST (tools/biped/spikes/blend_cost.py). Resolving the shape
+/// standing at REST. Resolving the shape
 /// once per epoch and sharing it by pointer is what removes that, and the
 /// sparse layout is what makes the resolved shape small: the real correctives
 /// move 1,279 points on average, 4.87% of the mesh.

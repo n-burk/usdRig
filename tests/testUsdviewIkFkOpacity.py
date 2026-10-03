@@ -19,7 +19,7 @@
 #
 # Opened on biped_rig_v3.usda, whose arm switches are parked at 0 (FK)
 # and leg switches at 1 (IK). The wiring itself is authored into the
-# SESSION layer by tools/biped/params.py, the same code the builder and
+# SESSION layer by the same code the builder and
 # the retrofit CLI run; the file is never written.
 #
 # Set RIGEXEC_IKFK_OPACITY_SHOT=/path.png to save a window grab.

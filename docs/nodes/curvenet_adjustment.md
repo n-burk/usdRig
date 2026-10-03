@@ -104,6 +104,26 @@ drawn in the local XZ plane -- while cube is the 3D box; this is
 the conventional rigging distinction between the two box-ish
 tokens.
 
+#### `guide:planeNormal`
+
+*Type:* `uniform token`. *Default:* `"Y"`.
+
+Valid values: `X`, `Y`, `Z`.
+
+Which LOCAL axis the planar guides' normal points along,
+for circle and box. Ignored by the volumetric shapes.
+
+The planar guides were drawn in the XZ plane and nowhere else,
+while a rig's control curves lie in whichever plane the rigger
+drew them in. Measured on the biped's own control curves: 37 lie
+in the local YZ plane, 26 in XY and only 7 in XZ, so 181 of 213
+planar controls were drawn edge-on as slivers -- correct sizes,
+wrong plane. The only ones that looked right were the uniform
+TRS masters and the leg bendys, which genuinely are thin in Y.
+
+Y is the default and reproduces the historical drawing exactly,
+so a control that does not author this is unchanged.
+
 #### `guide:drawMode`
 
 *Type:* `uniform token`. *Default:* `"wire"`.
@@ -346,6 +366,34 @@ selects another zero pose.
 *Type:* `double`. *Default:* `1`.
 
 Multiplier converting translation avars into local distance units before the selected default and parent transforms. Rotations and scales are unaffected.
+
+#### `avars:rotationSign`
+
+*Type:* `double3`. *Default:* `(1, 1, 1)`.
+
+Per-axis sign applied to rx, ry and rz -- and to rspin,
+which is an X rotation -- before they are composed. Each component
+carries a sign and nothing else: a magnitude is discarded, and
+anything that is not negative, including zero, selects +1. Zero
+would otherwise erase an axis, so it resolves to the unmirrored
+answer rather than a collapsed one.
+
+This is how a MIRRORED limb is declared: the same rotation value
+moves both sides symmetrically. A mirror expressed as a negative
+scale cannot survive into a rest frame here -- it would make the frame
+left-handed and every joint, driver and bind below it would have
+to be rebuilt to match -- so the mirror is declared on the avars
+instead, where it belongs: it says which of this control's axes
+already point the mirrored way and which answer backwards.
+
+Identity at rest, and that is the point. A sign changes nothing
+when the avars are zero, so declaring it cannot move the rest
+pose, the skin, or anything constrained to this control. Only
+what the animator types changes meaning.
+
+Applied to the avar, not to the frame, so the control's own posed
+frame mirrors too and a manipulator turns with the limb rather
+than against it.
 
 #### `parent:space`
 

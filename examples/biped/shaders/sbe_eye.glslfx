@@ -187,7 +187,7 @@ float ecInput_pupilBleedSaturation(float baked)
 // (the projector's frame travels it) and one dirty flag per frame beats
 // eight. Slot i is row i/4, column i%4, in the order the projector's
 // rigExec:shaderDialSources lists them -- which
-// tools/biped/eye_shape_avars.py writes in exactly this order:
+// the builder writes in exactly this order:
 //
 //   0 pupilX   1 pupilY   2 irisX        3 irisY
 //   4 pupilTX  5 pupilTY  6 pupilRadius  7 irisRadius
@@ -981,7 +981,7 @@ float ecPlacedSpecDir(vec3 P, vec3 sdir, float size,
     // Normalized shape radius: 1 exactly on the boundary. Circle first, so
     // the ellipse case is the same arithmetic it always was. Deliberately
     // not called s-n-o-r-m: that spelling is an HLSL type modifier, and the
-    // Maya VP2 and Unreal translations stop compiling on it.
+    // other host translations stop compiling on it.
     float shapeR = cl;
     if (ns >= 3.0f) {
       // Regular n-gon inscribed in the unit circle: its radius runs from
@@ -1518,8 +1518,7 @@ void eye_displace(
 
 // ============================================================================
 // iris_core.glsl - procedural iris generator, GLSL port of the byte-exact
-// single-source iris (maya/python/squarebit_eye/iris_procedural.py
-// _iris_rgba_py == web eye-textures.js generateIrisRGBA == Blender embed).
+// single-source iris shared by the eye's other host ports.
 //
 // A faithful transcription of the per-pixel loop so hosts that can't bind a
 // baked texture (hdStorm - it segfaults on textures in sourceAsset glslfx
@@ -1744,7 +1743,7 @@ vec4 surfaceShader(vec4 Peye, vec3 Neye, vec4 color, vec4 patchCoord)
     vec3 sssFill = vec3(0.9600f, 0.9000f, 0.8600f) * (scleraFrac * wrapLift);
     // SPEC 4.9 sclera emissive. A glslfx surfaceShader returns ONE colour and
     // has no emission pin, so this rides the composite ADDITIVELY - the same
-    // compromise the Maya VP2 fragment makes, and the same one this file makes
+    // compromise the other host fragments make, and the same one this file makes
     // for the placed spec. scleraEmissive is eye_project's already-masked,
     // already-scaled output (sclera falloff * STATIC limbal ring * front gate),
     // so the ring stays a ring instead of being filled back in.

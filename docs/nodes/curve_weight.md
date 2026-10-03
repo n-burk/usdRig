@@ -377,6 +377,34 @@ selects another zero pose.
 
 Multiplier converting translation avars into local distance units before the selected default and parent transforms. Rotations and scales are unaffected.
 
+#### `avars:rotationSign`
+
+*Type:* `double3`. *Default:* `(1, 1, 1)`.
+
+Per-axis sign applied to rx, ry and rz -- and to rspin,
+which is an X rotation -- before they are composed. Each component
+carries a sign and nothing else: a magnitude is discarded, and
+anything that is not negative, including zero, selects +1. Zero
+would otherwise erase an axis, so it resolves to the unmirrored
+answer rather than a collapsed one.
+
+This is how a MIRRORED limb is declared: the same rotation value
+moves both sides symmetrically. A mirror expressed as a negative
+scale cannot survive into a rest frame here -- it would make the frame
+left-handed and every joint, driver and bind below it would have
+to be rebuilt to match -- so the mirror is declared on the avars
+instead, where it belongs: it says which of this control's axes
+already point the mirrored way and which answer backwards.
+
+Identity at rest, and that is the point. A sign changes nothing
+when the avars are zero, so declaring it cannot move the rest
+pose, the skin, or anything constrained to this control. Only
+what the animator types changes meaning.
+
+Applied to the avar, not to the frame, so the control's own posed
+frame mirrors too and a manipulator turns with the limb rather
+than against it.
+
 #### `parent:space`
 
 *Type:* `matrix4d`. *Default:* `( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )`.

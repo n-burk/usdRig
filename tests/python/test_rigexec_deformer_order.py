@@ -1,4 +1,4 @@
-"""The deformation stack runs in the order the Maya rig runs it.
+"""The deformation stack runs in the rig's authored order.
 
 Deformer order is not cosmetic on this rig: the head wires are the first
 four deformers on the face and everything downstream is shaped by what
@@ -138,7 +138,7 @@ _SCOPE_RUN = [
 # The head is what breaks when this slips, so state its invariants
 # outright as well as pinning the sequence. Read as evaluation order the
 # source appears to put the head wires FIRST (ranks 1-4); read correctly,
-# as Maya history, they are ranks 119-121 and shape the face LAST, on top
+# as history order, they are ranks 119-121 and shape the face LAST, on top
 # of the lip, cheek and eye correctives.
 _HEAD_LAST = ["head_wire", "head_low_wire_body_geo",
               "head_top_cluster", "head_low_cluster"]
@@ -233,7 +233,7 @@ def main():
 
     # 4. the limb wires run AFTER the skin.
     #    Read as evaluation order the source seems to put them before it,
-    #    but the file is Maya HISTORY order -- it ends with the blendShape
+    #    but the file is HISTORY order -- it ends with the blendShape
     #    and tweak4, and a tweak is always first in a deformation chain.
     #    Backwards it reads tweak, blendShape, the blink and lash wires,
     #    sync_geo_skinCluster at 20, then the limb wires at 29-33. The rig
@@ -257,7 +257,7 @@ def main():
                 "%s runs post-skin so %s must be '%s', got %r"
                 % (wire, attr, want, a.Get() if a and a.IsValid() else None))
     print("    the arm and leg wires run after the skin, in the posed frame")
-    print("OK: the deformation stack runs in the Maya order")
+    print("OK: the deformation stack runs in the authored order")
 
 
 if __name__ == "__main__":

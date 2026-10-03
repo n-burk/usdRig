@@ -52,8 +52,8 @@ ALPHA_ATTR = "touchpose:alpha"
 # The authored STATE colours, carried in the same group record as the
 # palette (`leadColor`, `selectedColor`). Written out because the pick
 # loop needs a lead colour and a selected colour and the file already
-# says what they are -- inventing two would mean the port and the conventional tool
-# tool disagreed about what "selected" looks like.
+# says what they are -- inventing two would mean the port and the file
+# disagreed about what "selected" looks like.
 LEAD_COLOR_ATTR = "touchpose:leadColor"
 SELECTED_COLOR_ATTR = "touchpose:selectedColor"
 FACES_ATTR = "touchpose:faces"

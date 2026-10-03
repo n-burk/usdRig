@@ -1807,6 +1807,7 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
             t.Matrix(B.posedAuthoredM[i]);
             t.Int(B.posedAuthored[i]);
             t.Str(B.rotOrder[i].GetString());
+            t.Int(i < B.rotationSign.size() ? B.rotationSign[i] : 0);
         }
         t.count = B.restM.size();
     }
@@ -2154,6 +2155,18 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             const UsdPrim prim = B.stage->GetPrimAtPath(path);
             B.noScaleAvars.push_back(
                 prim && _IsVolumeWeightTypeName(prim.GetTypeName()) ? 1 : 0);
+            // avars:rotationSign is rig structure, not animation: it is read
+            // once here beside the type, and the compose applies it to
+            // whatever the avar inputs carry that frame.
+            GfVec3d sign(1, 1, 1);
+            if (prim) {
+                if (const UsdAttribute attr =
+                        prim.GetAttribute(TfToken("avars:rotationSign"))) {
+                    attr.Get(&sign);
+                }
+            }
+            B.rotationSign.push_back(
+                RigExecRotationSignMask(sign[0], sign[1], sign[2]));
         }
     }
     const int N = int(B.paths.size());

@@ -1934,7 +1934,7 @@ over "Biped"
                                         }
                                     }
                                 }
-                                doc = "Foot rock in degrees: positive tips the foot onto its outer edge, negative onto the inner (the conventional tool leg_?.footRock, whose +-90 reaches 80.9 deg through the bank remap)."
+                                doc = "Foot rock in degrees: positive tips the foot onto its outer edge, negative onto the inner (+-90 reaches 80.9 deg through the bank remap)."
                             )
                             custom double avars:footRockTotal = 0
                             custom float avars:footRoll = 0 (
@@ -1950,7 +1950,7 @@ over "Biped"
                                         }
                                     }
                                 }
-                                doc = "Foot roll in degrees: negative rocks onto the heel, positive rolls over the ball and, past avars:toePlantAngle, onto the toe tip (the conventional tool leg_?.footRoll)."
+                                doc = "Foot roll in degrees: negative rocks onto the heel, positive rolls over the ball and, past avars:toePlantAngle, onto the toe tip."
                             )
                             custom double avars:footRollTotal = 0
                             custom float avars:ikfk = 1 (
@@ -1980,7 +1980,7 @@ over "Biped"
                                         }
                                     }
                                 }
-                                doc = "Roll angle at which the ball stops and the toe takes over (the conventional tool leg_?.toePlantAngle)."
+                                doc = "Roll angle at which the ball stops and the toe takes over."
                             )
                             color3f guide:displayColor = (1, 0.85, 0.1)
                             double3 guide:offset = (-2.85035, 0, -15.38615)

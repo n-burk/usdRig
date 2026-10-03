@@ -4,7 +4,7 @@ Headless test for voice-to-select on the REAL biped.
 
 The pure parts of the feature -- tokenizing, the grammar, the ambiguity
 policy, the push-to-talk state machine -- are tested in the shared
-TouchPose repo (`scripts/touchpose/voice/tests`, plain pytest, no
+TouchPose repo (plain pytest, no
 host). What can
 only be tested HERE is the join: that the vocabulary built off
 `examples/biped/Biped_stack.usda` actually names that rig's controls, and
@@ -178,7 +178,7 @@ def main():
     #
     # "Face" is NOT in this list any more, and its absence is the point:
     # the body carried two sets over the same mesh (TouchPose and
-    # TouchPoseFace) and tools/biped/touchpose_one_layer.py merged them,
+    # TouchPoseFace) and the import merged them,
     # measured as 0 overlapping region names and 0 faces claimed by both.
     # The assertion was left behind by that merge and failed on the
     # biped with ['Body', 'Eye L', 'Eye R'].

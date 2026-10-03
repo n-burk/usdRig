@@ -142,6 +142,33 @@ overlay needs the whole ramp in a single read.
 
 Opacity the overlay draws the regions at.
 
+#### `rigExec:touch:layerName`
+
+*Type:* `uniform token`. *Default:* `""`.
+
+This scope's name as a LAYER, for the editor's switch.
+Empty falls back to the prim's own name.
+
+One scope is one layer: a mesh may carry several, each with its
+own regions, its own palette and its own paint, and exactly one
+of them is live at a time. That is what lets a body set and a
+face set annotate the same mesh without fighting over faces --
+the face -> region table is one to one WITHIN a layer, and
+carries no obligation across them.
+
+Note what this is NOT: it is not a USD layer. A touch layer is a
+prim, composed like any other, and a stage's sublayers can each
+contribute one.
+
+#### `rigExec:touch:layerOrder`
+
+*Type:* `uniform int`. *Default:* `0`.
+
+Where this layer sits in the editor's list, and which
+one opens live: the lowest order wins. Ties break on the layer
+name, so the order is total and an unordered file still opens
+the same way twice.
+
 ## Example
 
 A three-segment strip skinned by an FK chain, its twelve faces divided

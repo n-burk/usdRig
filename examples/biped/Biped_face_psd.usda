@@ -13,7 +13,7 @@ over "Biped"
             reorder nameChildren = ["param_follow", "bendy_geo", "skin_body_geo", "bodyWires_geo", "squetch_geo", "mouth_geo", "cheeks_geo", "brows_geo", "eyes_r_geo", "eyes_l_geo", "lashes_geo", "bendy_pose", "face_shapes_geo", "shapes_body_geo", "headwire_follow_pose", "jaw_drivers", "face_psd_drivers", "squetch_drivers", "breathing_drivers", "cheeks_drivers", "brows_drivers", "mouth_drivers", "eyes_l_drivers", "eyes_r_drivers", "pose_drivers", "twist_aims", "eyes_r_pose", "eyes_l_pose", "mouth_pose", "face_eyes", "eye_converge_drivers", "face_brow_joints", "face_inner_joints", "nose_bridge_compress_scale_w", "face_brow_pivots", "face_pivots", "nose_compress_w", "nose_bridge_compress_w", "nose_bridge_follow_w", "face_mid_compress_w", "teeth_tongue_drivers", "teeth_upper_drivers", "face_outer_joints", "eye_socket_follow_drivers", "bodyWires_pose", "neck_to_bind", "girdles", "spine_to_bind", "hips_follow", "leg_fk_ball_drivers", "ball_l_bind_scAim", "ankle_l_bind_scAim", "ballRoll_l_down_rc", "ballRoll_l_down_w", "ballRoll_l_up_rc", "ballRoll_l_up_w", "toe_l_roll_rc", "toe_l_roll_w", "heel_l_roll_rc", "heel_l_roll_w", "bankOut_l_pivot_rc", "bankOut_l_pivot_w", "bankIn_l_pivot_rc", "bankIn_l_pivot_w", "ball_r_bind_scAim", "ankle_r_bind_scAim", "ballRoll_r_down_rc", "ballRoll_r_down_w", "ballRoll_r_up_rc", "ballRoll_r_up_w", "toe_r_roll_rc", "toe_r_roll_w", "heel_r_roll_rc", "heel_r_roll_w", "bankOut_r_pivot_rc", "bankOut_r_pivot_w", "bankIn_r_pivot_rc", "bankIn_r_pivot_w", "hand_l_follow", "hand_r_follow", "spine_mid_follow", "foot_roll_total"]
             def Scope "face_psd_drivers"
             {
-                reorder nameChildren = ["brow_inner_l_TX_driver_avars_tx_1_add", "brow_inner_l_TY_driver_avars_tx_1_add", "brow_inner_combo_l_driver_avars_tx_1_add", "brow_inner_combo_l_driver_avars_ty_1_add", "brow_corrugator_l_driver_avars_tx_1_add", "brow_corrugator_l_driver_avars_tx_2_add", "brow_inner_r_TX_driver_avars_tx_1_add", "brow_inner_r_TY_driver_avars_tx_1_add", "brow_inner_combo_r_driver_avars_tx_1_add", "brow_inner_combo_r_driver_avars_ty_1_add", "brow_corrugator_r_driver_avars_tx_1_add", "brow_corrugator_r_driver_avars_tx_2_add", "mouth_corner_l_driver_avars_tx_0_blend", "mouth_corner_l_driver_avars_ty_0_blend", "mouth_corner_r_driver_avars_tx_0_blend", "mouth_corner_r_driver_avars_ty_0_blend", "jaw_driver_avars_tx_0_blend", "jaw_driver_avars_tx_1_multiply", "jaw__mouth_corner_l_driver_avars_tx_0_blend", "jaw__mouth_corner_l_driver_avars_ty_0_blend", "jaw__mouth_corner_l_driver_avars_tz_0_blend", "jaw__mouth_corner_l_driver_avars_tz_1_multiply", "jaw__mouth_corner_r_driver_avars_tx_0_blend", "jaw__mouth_corner_r_driver_avars_ty_0_blend", "jaw__mouth_corner_r_driver_avars_tz_0_blend", "jaw__mouth_corner_r_driver_avars_tz_1_multiply", "lip_volume_l_driver_avars_tx_0_blend", "lip_volume_r_driver_avars_tx_0_blend", "brow_inner_l_TX_driver_avars_tx_0_blend", "brow_inner_r_TX_driver_avars_tx_0_blend", "brow_inner_l_TY_driver_avars_tx_0_blend", "brow_inner_r_TY_driver_avars_tx_0_blend", "brow_inner_combo_l_driver_avars_tx_0_blend", "brow_inner_combo_l_driver_avars_ty_0_blend", "brow_inner_combo_r_driver_avars_tx_0_blend", "brow_inner_combo_r_driver_avars_ty_0_blend", "brow_main_l_TY_driver_avars_tx_0_blend", "brow_main_r_TY_driver_avars_tx_0_blend", "brow_corrugator_l_driver_avars_tx_0_blend", "brow_corrugator_r_driver_avars_tx_0_blend", "lip_upper_driver_avars_rx_0_blend", "lip_lower_driver_avars_rx_0_blend"]
+                reorder nameChildren = ["brow_inner_l_TX_driver_avars_tx_1_add", "brow_inner_l_TY_driver_avars_tx_1_add", "brow_inner_combo_l_driver_avars_tx_1_add", "brow_inner_combo_l_driver_avars_ty_1_add", "brow_corrugator_l_driver_avars_tx_2_add", "brow_corrugator_l_driver_avars_tx_1_add", "brow_inner_r_TX_driver_avars_tx_1_add", "brow_inner_r_TY_driver_avars_tx_1_add", "brow_inner_combo_r_driver_avars_tx_1_add", "brow_inner_combo_r_driver_avars_ty_1_add", "brow_corrugator_r_driver_avars_tx_2_add", "brow_corrugator_r_driver_avars_tx_1_add", "mouth_corner_l_driver_avars_tx_0_blend", "mouth_corner_l_driver_avars_ty_0_blend", "mouth_corner_r_driver_avars_tx_0_blend", "mouth_corner_r_driver_avars_ty_0_blend", "jaw_driver_avars_tx_1_multiply", "jaw_driver_avars_tx_0_blend", "jaw__mouth_corner_l_driver_avars_tx_0_blend", "jaw__mouth_corner_l_driver_avars_ty_0_blend", "jaw__mouth_corner_l_driver_avars_tz_1_multiply", "jaw__mouth_corner_l_driver_avars_tz_0_blend", "jaw__mouth_corner_r_driver_avars_tx_0_blend", "jaw__mouth_corner_r_driver_avars_ty_0_blend", "jaw__mouth_corner_r_driver_avars_tz_1_multiply", "jaw__mouth_corner_r_driver_avars_tz_0_blend", "lip_volume_l_driver_avars_tx_0_blend", "lip_volume_r_driver_avars_tx_0_blend", "brow_inner_l_TX_driver_avars_tx_0_blend", "brow_inner_r_TX_driver_avars_tx_0_blend", "brow_inner_l_TY_driver_avars_tx_0_blend", "brow_inner_r_TY_driver_avars_tx_0_blend", "brow_inner_combo_l_driver_avars_tx_0_blend", "brow_inner_combo_l_driver_avars_ty_0_blend", "brow_inner_combo_r_driver_avars_tx_0_blend", "brow_inner_combo_r_driver_avars_ty_0_blend", "brow_main_l_TY_driver_avars_tx_0_blend", "brow_main_r_TY_driver_avars_tx_0_blend", "brow_corrugator_l_driver_avars_tx_0_blend", "brow_corrugator_r_driver_avars_tx_0_blend", "lip_upper_driver_avars_rx_0_blend", "lip_lower_driver_avars_rx_0_blend"]
                 def RigExecFloatMathMover "mouth_corner_l_driver_avars_tx_0_blend" (
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
@@ -2942,6 +2942,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -2975,6 +2976,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -2997,6 +2999,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -3019,6 +3022,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -3041,6 +3045,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -3063,6 +3068,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -3085,6 +3091,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -3107,6 +3114,7 @@ over "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0

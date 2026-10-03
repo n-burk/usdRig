@@ -43,9 +43,8 @@ LEAD_COLOR_ATTR = "touchpose:leadColor"
 SELECTED_COLOR_ATTR = "touchpose:selectedColor"
 
 # What the three states look like when the file does not say. The hues
-# are the studio's: `leadColor` in `touch_sets.touch` is a green and
-# `selectedColor` a neutral, which is also the conventional kLeadSelected /
-# kSelected vocabulary, so the port agrees with the tool it came from.
+# are the studio's: `leadColor` in the touch file is a green and
+# `selectedColor` a neutral.
 DEFAULT_LEAD_COLOR = (0.054, 0.420, 0.187)
 DEFAULT_SELECTED_COLOR = (0.277, 0.277, 0.277)
 

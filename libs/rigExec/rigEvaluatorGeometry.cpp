@@ -1181,12 +1181,10 @@ RigExecRigEvaluator::_ApplySurfaceProjectors(RigExecRigPose *pose,
         //              stretch carries the iris with it.
         //   reproject  the ray is cast AGAIN at the posed surface, so the
         //              frame is wherever the look meets the deformed
-        //              eyeball now. This is what the Maya rig does:
-        //              eye_?_pupil_bindplane is skinned to eye_?_bind for
-        //              the look and then SHRINKWRAPPED onto
-        //              eye_?_projection_sphere, and a shrink wrap
-        //              re-projects every frame rather than following a
-        //              material point.
+        //              eyeball now: the look aims the projector and the
+        //              result is shrink-wrapped onto the projection
+        //              sphere, which re-projects every frame rather than
+        //              following a material point.
         TfToken projection("material");
         if (const UsdPrim projector = _stage->GetPrimAtPath(record.path)) {
             if (const UsdAttribute a = projector.GetAttribute(

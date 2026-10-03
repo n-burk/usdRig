@@ -2375,7 +2375,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             // _EvaluateDynamic instead, so every dense sample's full points
             // array was pulled twice per frame: once through exec to fill a
             // value that was discarded, once again for real.
-            // MEASURED (tools/biped/spikes/blend_cost.py, 64 dense samples on
+            // MEASURED (64 dense samples on
             // a 26,276-point body, every channel weight 0): the taps cost
             // 7.72 ms/frame of AuthoritativeSnapshot, about 30% of the whole
             // per-target blend cost, for nothing. At N=0 AuthoritativeSnapshot

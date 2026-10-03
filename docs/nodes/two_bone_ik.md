@@ -137,6 +137,46 @@ Ordered output joints [root, mid, end] posed by this solve
 (view-free extraction). Position is the element index; the compiler
 binds each joint to one aggregate element.
 
+#### `rigExec:space`
+
+*Relationship.*
+
+The prim whose movement away from its rest defines the
+space this chain is measured in -- normally a TRS master.
+
+A RELATIONSHIP, not a connection to `posed:space`: a control's
+posed space is computed, not authored, so an attribute connection
+to it resolves to the unauthored identity and the solver silently
+keeps its old lengths. Naming the prim instead pulls the same
+computed frame the root, effector and pole already come through.
+
+The space used is rest-inverse-times-posed, so a master sitting
+at its rest contributes identity and a rig that names nothing is
+unchanged.
+
+#### `rigExec:spaceMatrix`
+
+*Type:* `matrix4d`. *Default:* `( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )`.
+
+The space the chain's REST measurements are carried into
+before they are compared with the posed goal.
+
+Bone lengths are measured from the bound joints' rests, and the
+root, goal and pole arrive as posed frames. The two agree only
+while whatever sits above the rig is unscaled: put the rig under a
+scaled master and the goal moves twice as far away while the
+chain keeps its authored length, so the solve clamps and the limb
+straightens instead of scaling.
+
+Connect this to the posed space of whatever the rig hangs from --
+a TRS master, a shot transform -- and the rests are carried into
+the same space the frames are already in. Identity, the fallback,
+is exactly the old behaviour, so a rig that connects nothing is
+unchanged. The matrix is an INPUT rather than a name the solver
+looks up: which prim defines the space is the asset's business,
+not this schema's, and a rig with several nested masters connects
+the one it means.
+
 #### `guide:radius`
 
 *Type:* `double`. *Default:* `1.0`.

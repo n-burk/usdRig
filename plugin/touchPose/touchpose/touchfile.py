@@ -1,4 +1,4 @@
-"""Read a `.touch` file. No `pxr`, no Qt, no ctypes, no the conventional tool.
+"""Read a `.touch` file. No `pxr`, no Qt, no ctypes, no host application.
 
 This is the format layer of the TouchPose port and the bottom of its
 stack: it turns the studio's `.touch` document into plain records, and
@@ -7,11 +7,11 @@ host-free is what lets the importer, the spikes and (later) the picker
 model all share one reader, and lets all three be tested with nothing
 loaded.
 
-WHAT A `.touch` FILE IS, from reading the shipped one
-(`biped/rig/default/data/build/touch_sets.touch`, 247 sets, 567 KB):
+WHAT A `.touch` FILE IS, from reading the shipped one (247 sets,
+567 KB):
 
 It is JSON -- `{user, type: "TouchSetsData", time, data}` -- where `data`
-maps a conventional `objectSet` name to its record. One entry is special:
+maps a set name to its record. One entry is special:
 
   * `data["TouchSets"]` is the GROUP. Its `members` is the ordered list
     of set names; it carries no faces. It also carries the PALETTE:
@@ -22,20 +22,20 @@ maps a conventional `objectSet` name to its record. One entry is special:
   * every other entry is a SET:
       - `members`: face components, each `"<mesh>.f[i]"` or
         `"<mesh>.f[a:b]"`, INCLUSIVE at both ends, plus exactly one
-        trailing `"<setname>_data"` which is a node of the conventional tool, not geometry,
+        trailing `"<setname>_data"` which is a data node, not geometry,
         and is dropped here.
       - `touch_hilight`: int 0..5, an INDEX INTO THE GROUP PALETTE. It is
         not a colour and not a boolean. Shipped distribution: 148 sets at
         0, 76 at 3, 13 at 2, 10 at 1.
-      - `touchColor`: the set's own linear RGB, which is what the conventional tool
+      - `touchColor`: the set's own linear RGB, which is what the original
         product actually drew; `touch_hilight` selects the colour used
         for a DIFFERENT state (the six-colour palette is the layer/state
         ramp). Both are carried through; which one the overlay uses is a
         presentation decision, not a format one.
-      - `command` / `touch_layers`: the conventional tool right-click menus, verbatim
-        `conventional.cmds` source. Deliberately NOT parsed. They are the part of
+      - `command` / `touch_layers`: right-click menus, verbatim host-script
+        source. Deliberately NOT parsed. They are the part of
         the product that does not port, and reading them here would drag
-        a conventional-tool dependency into the bottom layer for nothing.
+        a host dependency into the bottom layer for nothing.
 
 THE CONTROL BINDING IS THE NAME. There is no `control` field: a set
 called `thumb_003_r_touch` binds the control `thumb_003_r`, in BUILD
@@ -46,15 +46,15 @@ naming. The `_touch` suffix is the whole convention, and three sets
 THREE THINGS THE SHIPPED FILE DOES NOT EXERCISE, and which are handled
 here anyway because the TouchPose the editor port's `domain/schema.py`
 (branch `feature/the editor-port`, read not copied) documents them as having
-been verified against the conventional tool's writer:
+been verified against the original writer:
 
   * The colour key was renamed. `touch_sets_data.py` defines the colour
     attribute twice -- `touch_color` and then `touchColor` -- and the
-    second wins, so v1.0-era files on disk carry `touch_color` and the conventional tool
+    second wins, so v1.0-era files on disk carry `touch_color` and the original writer
     itself silently randomises their colours on load. Both keys are read.
   * The envelope may carry a `version`. The shipped file has none, which
     puts it before the version ladder started; a future export will have
-    one, and a `faces` block that states membership without the conventional tool's
+    one, and a `faces` block that states membership without the
     component grammar. Preferred when present.
   * `members` can also contain NESTED SET names, making the sets a tree.
     The shipped file is flat (every set's `parent` is `TouchSets`, and
@@ -69,7 +69,7 @@ import re
 SUFFIX = "_touch"
 GROUP = "TouchSets"
 
-# `body_geo.f[21416:21537]` or `body_geo.f[21590]`. the conventional tool ranges are
+# `body_geo.f[21416:21537]` or `body_geo.f[21590]`. Ranges are
 # inclusive, which is the one thing in this format that is easy to get
 # wrong by one face at every range end -- 3783 ranges on body_geo alone.
 _COMPONENT = re.compile(r"^(?P<mesh>[^.]+)\.f\[(?P<lo>\d+)(?::(?P<hi>\d+))?\]$")
@@ -116,7 +116,7 @@ class TouchSet(object):
         self.faces = {}
         self.unparsed = []
 
-        # v4.0 states membership without the conventional tool component grammar. Additive,
+        # v4.0 states membership without the component grammar. Additive,
         # so it is preferred when present and the components are still
         # parsed when it is not.
         for mesh, indices in (record.get("faces") or {}).items():
@@ -125,7 +125,7 @@ class TouchSet(object):
         for member in record.get("members", ()):
             match = _COMPONENT.match(member)
             if match is None:
-                # The `<set>_data` node, and anything else the conventional tool slipped in.
+                # The `<set>_data` node, and anything else the writer slipped in.
                 self.unparsed.append(member)
                 continue
             lo = int(match.group("lo"))
@@ -164,7 +164,7 @@ class TouchDocument(object):
         self.version = payload.get("version")
 
         # The group's `members` gives the studio's ORDER, which is also
-        # the draw order the conventional product used for overlapping regions.
+        # the draw order the original product used for overlapping regions.
         # Falling back to dict order keeps a hand-edited file readable.
         order = [m for m in group.get("members", ()) if m in data]
         order += [k for k in data if k != GROUP and k not in order]

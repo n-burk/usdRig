@@ -146,6 +146,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((avarRz, "avars:rz"))
     ((avarRspin, "avars:rspin"))
     ((avarRotationOrder, "avars:rotationOrder"))
+    ((avarRotationSign, "avars:rotationSign"))
     (posedConnected)
     (parentPosedFrame)
     (parentRestFrame)
@@ -362,6 +363,15 @@ _ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
     const double units = _ScalarInput(ctx, _tokens->avarUnitScaleFactor, 1);
     const TfToken *order =
         ctx.GetInputValuePtr<TfToken>(_tokens->avarRotationOrder);
+    // avars:rotationSign mirrors a limb's rotation channels (see the schema).
+    // It multiplies the avar, never the frame, so it is the identity at rest.
+    const GfVec3d *signAvar =
+        ctx.GetInputValuePtr<GfVec3d>(_tokens->avarRotationSign);
+    const GfVec3d sign =
+        signAvar ? GfVec3d(rigExec::RigExecNormalizeRotationSign((*signAvar)[0]),
+                           rigExec::RigExecNormalizeRotationSign((*signAvar)[1]),
+                           rigExec::RigExecNormalizeRotationSign((*signAvar)[2]))
+                 : GfVec3d(1, 1, 1);
     const GfMatrix4d avars = _ComposeAvars(
         _ScalarInput(ctx, _tokens->avarTx, 0) * units,
         _ScalarInput(ctx, _tokens->avarTy, 0) * units,
@@ -369,10 +379,10 @@ _ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
         readScaleAvars ? _ScalarInput(ctx, _tokens->avarSx, 1) : 1.0,
         readScaleAvars ? _ScalarInput(ctx, _tokens->avarSy, 1) : 1.0,
         readScaleAvars ? _ScalarInput(ctx, _tokens->avarSz, 1) : 1.0,
-        _ScalarInput(ctx, _tokens->avarRx, 0),
-        _ScalarInput(ctx, _tokens->avarRy, 0),
-        _ScalarInput(ctx, _tokens->avarRz, 0),
-        _ScalarInput(ctx, _tokens->avarRspin, 0),
+        _ScalarInput(ctx, _tokens->avarRx, 0) * sign[0],
+        _ScalarInput(ctx, _tokens->avarRy, 0) * sign[1],
+        _ScalarInput(ctx, _tokens->avarRz, 0) * sign[2],
+        _ScalarInput(ctx, _tokens->avarRspin, 0) * sign[0],
         order ? *order : TfToken("XYZ"));
     return _FrameFromMatrix(
         avars * (defaultSpace ? *defaultSpace : GfMatrix4d(1.0)) *
@@ -531,6 +541,7 @@ _ComputeJointMatrix(const VdfContext &ctx)
                 AttributeValue<double>(_tokens->avarRy),                     \
                 AttributeValue<double>(_tokens->avarRz),                     \
                 AttributeValue<double>(_tokens->avarRspin),                  \
+                AttributeValue<GfVec3d>(_tokens->avarRotationSign),           \
                 AttributeValue<TfToken>(_tokens->avarRotationOrder));        \
                                                                              \
         self.PrimComputation(_tokens->computeMatrix)                         \
