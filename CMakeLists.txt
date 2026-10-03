@@ -1134,7 +1134,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_wire_invariant.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
-    # The deformation stack must keep running in the Maya order: the head
+    # The deformation stack must keep running in its authored order: the head
     # wires are the first four deformers on the face and everything after
     # them is shaped by what they leave behind.
     add_test(NAME testRigExecDeformerOrderPython
@@ -1261,6 +1261,10 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_math.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testPoseReaderViz
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_pose_reader_viz.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testLayerOpinionsModel
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_layer_opinions_model.py"
@@ -1275,6 +1279,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testPathSpelling
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_path_spelling.py")
+    add_test(NAME testMoverChainOrder
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_mover_chain_order.py")
     add_test(NAME testGizmoPreview
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_preview.py")
@@ -1334,8 +1341,10 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecSkippedOperations
                          testRigExecFloatCurveOp
                          testRigExecUndo testGizmoMath testGizmoScreen
+                         testPoseReaderViz
                          testLayerOpinionsModel testCompositionArcsModel
                          testPathSpelling
+                         testMoverChainOrder
                          testAvarEditorModel
                          testGizmoPreview
                          testGizmoSettings testGizmoDrag testGizmoSnap

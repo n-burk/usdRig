@@ -33,11 +33,44 @@ except ImportError:
     from PySide2 import QtCore, QtGui, QtWidgets
 
 import shapeEditorModel as model
+import poseReaderModel as readerViz
 
 # One panel per usdview session lives in rigExecUsdview's registry: the
 # Shape Editor reads rigExecImaging through rigExecUsdview already, so its
 # directory is on the module search path wherever this panel can work.
 import sessionRegistry
+
+
+# The second stages the private evaluator compiles against, keyed by
+# their root and session layers.
+_TWIN = {}
+
+
+def _CompilableStage(stage):
+    """A stage `rigexec.Rig` will accept, over the same layers.
+
+    usdview hands out a stage it holds in a `UsdStageCache`, and the
+    binding for `rigexec.Rig` refuses it ("needs a `__owner` capsule")
+    because that wrapper does not own the stage. A second stage opened
+    over the same root and session layers composes identically, and every
+    edit -- a mute here, a drag committed in the viewport -- lands in
+    those shared layers and reaches both. Without it the private
+    evaluator never built inside usdview, which went unseen because the
+    weights normally come straight off the viewport; the frames the
+    viewport overlay needs do not.
+
+    The same answer the Execution Stack panel uses, kept local because the
+    editors load independently of each other.
+    """
+    root = stage.GetRootLayer()
+    session = stage.GetSessionLayer()
+    key = (root.identifier, session.identifier if session else None)
+    twin = _TWIN.get(key)
+    if (twin is None or twin.GetRootLayer() != root or
+            twin.GetSessionLayer() != session):
+        twin = Usd.Stage.Open(root, session)
+        _TWIN[key] = twin
+    return twin
 
 
 # How often the generation counter is read. Not how often the rig is
@@ -159,6 +192,22 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         self._packed = None       # the path list handed to the bridge
         self._packedEntries = []
         self._buffer = None
+        # The viewport visualization. Off until the group is ticked; the
+        # overlay is created on first use so a closed panel costs nothing.
+        self._vizSettings = readerViz.Settings()
+        self._vizView = None
+        self._vizSelected = set()
+        self._vizViewport = set()  # interpolators the viewport selects
+        # Rows picked in the tree, by prim path. Kept here rather than read
+        # off the tree because the tree is REBUILT on every refresh in
+        # firing-only mode and on every search keystroke, and a rebuild
+        # would otherwise drop the pick the overlay is following.
+        self._treePicked = set()
+        # The viewport's last selection, as prim paths: what a change
+        # REMOVED is how a deselect is told apart from a new pick.
+        self._viewportPaths = set()
+        self._vizRest = {}        # rest frames: constant while posing
+        self._vizNotice = None
 
         self.setWindowTitle("Shape Editor")
         self.resize(560, 720)
@@ -207,6 +256,8 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         self._tree.itemSelectionChanged.connect(self._OnSelected)
         layout.addWidget(self._tree, 1)
 
+        self._BuildVizControls(layout)
+
         self._status = QtWidgets.QLabel("")
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
@@ -229,8 +280,11 @@ class ShapeEditorPanel(QtWidgets.QDialog):
 
     def hideEvent(self, event):
         # Nobody pays for a panel they closed. This is the whole of the
-        # cost control described at the top of the file.
-        self._timer.stop()
+        # cost control described at the top of the file -- unless the
+        # viewport visualization is on, which is still being looked at
+        # with the panel tucked away, so it keeps its refresh.
+        if not self._vizSettings.enabled:
+            self._timer.stop()
         return super(ShapeEditorPanel, self).hideEvent(event)
 
     def _Stage(self):
@@ -266,7 +320,8 @@ class ShapeEditorPanel(QtWidgets.QDialog):
             import rigexec
             for prim in stage.Traverse():
                 if str(prim.GetTypeName()) == "RigExecRoot":
-                    rig = rigexec.Rig(stage, str(prim.GetPath()))
+                    rig = rigexec.Rig(_CompilableStage(stage),
+                                      str(prim.GetPath()))
                     rig.compile()
                     # This evaluator exists to read published floats, and
                     # nothing looks at its guides -- so stop computing
@@ -316,11 +371,18 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         self._interpolators = model.Discover(stage) if stage else []
         self._packed = None       # the path list is only valid for these
         self._rig = None          # the stage may have changed under us
+        self._vizRest = {}        # and so may every rest frame
         self._Populate()
         self.Refresh()
 
     def Refresh(self):
-        """Pull the published weights and repaint the numbers."""
+        """Pull the published weights, repaint the numbers and the view."""
+        try:
+            self._RefreshWeights()
+        finally:
+            self._RefreshViz()
+
+    def _RefreshWeights(self):
         if self._ReadFromViewport():
             return
         rig = self._Rig()
@@ -393,6 +455,7 @@ class ShapeEditorPanel(QtWidgets.QDialog):
         self._tree.blockSignals(True)
         self._tree.clear()
         self._items = {}
+        rows = []
         firingOnly = self._firingOnly.isChecked()
         query = self._search.text() if hasattr(self, "_search") else ""
         for interp in self._interpolators:
@@ -416,6 +479,7 @@ class ShapeEditorPanel(QtWidgets.QDialog):
             top.setCheckState(3, QtCore.Qt.Checked if interp.enabled
                               else QtCore.Qt.Unchecked)
             top.setData(0, QtCore.Qt.UserRole + 1, str(interp.path))
+            rows.append(top)
             # A search that narrowed the poses opens the parent: a filter
             # whose hits are behind a closed triangle has not helped.
             top.setExpanded(firingOnly or bool(query.split()))
@@ -430,6 +494,12 @@ class ShapeEditorPanel(QtWidgets.QDialog):
                 if entry.is_neutral:
                     item.setForeground(0, _NEUTRAL)
                 self._items[str(entry.path)] = item
+                rows.append(item)
+        # Put the pick back, signals still blocked so a rebuild is not
+        # mistaken for the artist changing it.
+        for row in rows:
+            if row.data(0, QtCore.Qt.UserRole + 1) in self._treePicked:
+                row.setSelected(True)
         self._tree.blockSignals(False)
         self._UpdateNumbers()
 
@@ -496,6 +566,10 @@ class ShapeEditorPanel(QtWidgets.QDialog):
     def _OnSelected(self):
         """Select the driver joint when an interpolator row is picked."""
         items = self._tree.selectedItems()
+        self._treePicked = set(
+            item.data(0, QtCore.Qt.UserRole + 1) for item in items
+            if item.data(0, QtCore.Qt.UserRole + 1))
+        self._UpdateVizSelection()
         if not items:
             return
         path = items[0].data(0, QtCore.Qt.UserRole + 1)
@@ -519,3 +593,352 @@ class ShapeEditorPanel(QtWidgets.QDialog):
             self._api.dataModel.selection.setPrim(prim)
         except Exception:
             pass
+
+    # -- viewport visualization ----------------------------------------------
+
+    _PART_LABELS = (
+        (readerViz.PART_CONES, "Cones",
+         "Each swing pose's support as a cone at the driver, out to the "
+         "pose's own rotation radius -- where its raw falloff reaches zero "
+         "(linear) or e^-1 (gaussian)."),
+        (readerViz.PART_CORES, "Cores",
+         "The inner cone or sphere where a pose's raw falloff is still one "
+         "half."),
+        (readerViz.PART_TWIST, "Twist",
+         "Twist poses as a fan about the driver's twist axis, centred on "
+         "the pose's twist angle."),
+        (readerViz.PART_SPHERES, "Spheres",
+         "Each translation pose's support as a sphere around where the "
+         "pose puts the driver."),
+        (readerViz.PART_DRIVER, "Driver",
+         "Where the driver is now: its twist axis as an arrow, or its "
+         "position as a dot."),
+        (readerViz.PART_LABELS, "Labels",
+         "Each pose's name and its PUBLISHED weight -- the normalised "
+         "number the corrective receives, which differs from the raw "
+         "falloff exactly where poses overlap."),
+        (readerViz.PART_OVERLAP, "Overlap",
+         "A line between every pair of poses whose supports intersect: "
+         "yellow where the supports meet, orange where the cores do, red "
+         "where the two sit closer than a quarter of a radius -- the "
+         "layout that lets normalised weights run far outside 0..1."),
+    )
+
+    def _BuildVizControls(self, layout):
+        """The 'Show in viewport' group: off by default, every part on."""
+        group = QtWidgets.QGroupBox("Show in viewport")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setToolTip(
+            "Draw the interpolators' falloffs over the viewport: cones for "
+            "swing poses, fans for twist poses, spheres for translation "
+            "poses, and the driver where it is now. Off by default.")
+        group.toggled.connect(self._OnVizToggled)
+        self._vizGroup = group
+        box = QtWidgets.QVBoxLayout(group)
+
+        parts = QtWidgets.QGridLayout()
+        self._vizParts = {}
+        for i, (part, label, tip) in enumerate(self._PART_LABELS):
+            check = QtWidgets.QCheckBox(label)
+            check.setChecked(True)
+            check.setToolTip(tip)
+            check.toggled.connect(self._OnVizChanged)
+            parts.addWidget(check, i // 4, i % 4)
+            self._vizParts[part] = check
+        box.addLayout(parts)
+
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Show"))
+        self._vizScope = QtWidgets.QComboBox()
+        for scope, label in ((readerViz.SCOPE_SELECTED, "selected"),
+                             (readerViz.SCOPE_FIRING, "firing"),
+                             (readerViz.SCOPE_ALL, "all")):
+            self._vizScope.addItem(label, scope)
+        self._vizScope.setToolTip(
+            "Which interpolators to draw. SELECTED follows the viewport "
+            "selection -- a driver joint, an interpolator or one of its "
+            "poses, or a row picked above. FIRING draws every interpolator "
+            "with a non-neutral pose carrying weight. ALL draws everything.")
+        self._vizScope.currentIndexChanged.connect(self._OnVizChanged)
+        row.addWidget(self._vizScope)
+        row.addSpacing(12)
+        row.addWidget(QtWidgets.QLabel("Size"))
+        self._vizSize = QtWidgets.QDoubleSpinBox()
+        self._vizSize.setRange(1.0, 200.0)
+        self._vizSize.setDecimals(1)
+        self._vizSize.setSingleStep(1.0)
+        self._vizSize.setValue(readerViz.READER_LENGTH)
+        self._vizSize.setToolTip(
+            "How long the cones and fans are drawn, in scene units -- the "
+            "same for every interpolator. Display only: the falloff ANGLES "
+            "are the rig's, and the spheres are the rig's own radii.")
+        self._vizSize.valueChanged.connect(self._OnVizSizeChanged)
+        row.addWidget(self._vizSize)
+        row.addWidget(QtWidgets.QLabel("Opacity"))
+        self._vizOpacity = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._vizOpacity.setRange(5, 100)
+        self._vizOpacity.setValue(int(self._vizSettings.opacity * 100))
+        self._vizOpacity.setToolTip(
+            "Base opacity of the fills. A pose carrying weight is drawn "
+            "brighter than this; one at rest, fainter.")
+        self._vizOpacity.valueChanged.connect(self._OnVizChanged)
+        row.addWidget(self._vizOpacity, 1)
+        box.addLayout(row)
+
+        self._vizInfo = QtWidgets.QLabel("")
+        self._vizInfo.setWordWrap(True)
+        box.addWidget(self._vizInfo)
+        layout.addWidget(group)
+
+        # The viewport selection drives the SELECTED scope.
+        try:
+            self._api.dataModel.selection.signalPrimSelectionChanged.connect(
+                self._OnViewportSelection)
+        except Exception:
+            pass
+
+    def _ReadVizSettings(self):
+        settings = self._vizSettings
+        settings.enabled = bool(self._vizGroup.isChecked())
+        for part, check in self._vizParts.items():
+            settings.parts[part] = check.isChecked()
+        settings.scope = self._vizScope.currentData() or \
+            readerViz.SCOPE_SELECTED
+        settings.size = self._vizSize.value() / readerViz.READER_LENGTH
+        settings.opacity = self._vizOpacity.value() / 100.0
+        return settings
+
+    def _VizView(self):
+        """The overlay controller, made on first use."""
+        if self._vizView is None:
+            try:
+                import poseReaderOverlay
+                self._vizView = poseReaderOverlay.PoseReaderView(
+                    self._api, self)
+            except Exception as error:
+                Tf.Warn("shapeEditor: no viewport overlay: %s" % error)
+                return None
+        return self._vizView
+
+    def _OnVizToggled(self, on):
+        if on:
+            self._WatchRest(True)
+            self._OnViewportSelection()
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._WatchRest(False)
+            if not self.isVisible():
+                self._timer.stop()
+        self._OnVizChanged()
+
+    def _OnVizSizeChanged(self, *args):
+        # The size feeds the readers' lengths, so they are rebuilt, not
+        # only reprojected.
+        self._OnVizChanged()
+
+    def _OnVizChanged(self, *args):
+        settings = self._ReadVizSettings()
+        view = self._VizView() if settings.enabled else self._vizView
+        if view is not None:
+            view.SetSettings(settings)
+        self._RefreshViz()
+
+    def _OnViewportSelection(self, *args):
+        """Map the viewport selection to interpolator paths.
+
+        From the model the panel already holds rather than a stage
+        traversal: an interpolator selects itself, a pose its
+        interpolator, a driver every interpolator it drives.
+        """
+        try:
+            selected = set(Sdf.Path(str(p.GetPath()))
+                           for p in self._api.selectedPrims)
+        except Exception:
+            selected = set()
+        added = selected - self._viewportPaths
+        removed = self._viewportPaths - selected
+        self._viewportPaths = selected
+        if removed and not added:
+            # A pure DESELECT -- Ctrl+right-click, Ctrl+click, a click on
+            # empty space -- unpicks what it removed here too. Anything
+            # that adds (selecting the arm to pose it) leaves the panel's
+            # pick alone: that is the case the pick exists for.
+            self._Unpick(self._InterpolatorsIn(removed))
+        self._vizViewport = self._InterpolatorsIn(selected)
+        self._UpdateVizSelection()
+
+    def _Unpick(self, interpolators):
+        """Drop every tree row that names one of `interpolators`."""
+        if not interpolators:
+            return
+        keep = set(p for p in self._treePicked
+                   if not (self._InterpolatorsIn({Sdf.Path(p)}) &
+                           interpolators))
+        if keep == self._treePicked:
+            return
+        self._treePicked = keep
+        self._tree.blockSignals(True)
+        try:
+            for item in self._tree.selectedItems():
+                if item.data(0, QtCore.Qt.UserRole + 1) not in keep:
+                    item.setSelected(False)
+        finally:
+            self._tree.blockSignals(False)
+
+    def _InterpolatorsIn(self, paths):
+        """The interpolators a set of prim paths names, from the model."""
+        found = set()
+        for interp in self._interpolators:
+            if interp.path in paths or interp.driver in paths:
+                found.add(interp.path)
+                continue
+            if any(p.path in paths for p in interp.poses):
+                found.add(interp.path)
+        return found
+
+    def _UpdateVizSelection(self):
+        """SELECTED draws what the tree picks AND what the viewport does.
+
+        The union, so a row picked here stays drawn while the artist
+        clicks a control in the viewport to pose it -- which replaces the
+        viewport selection, and without the tree's half would blank the
+        very overlay they are posing against.
+        """
+        picked = set(Sdf.Path(p) for p in self._treePicked)
+        self._vizSelected = self._InterpolatorsIn(picked) | \
+            self._vizViewport
+        if self._vizSettings.enabled:
+            self._RefreshViz()
+
+    def _WatchRest(self, on):
+        """Clear the rest-frame cache when a rest channel changes.
+
+        Rest frames are cached because they do not move while a pose is
+        dragged; anything that CAN move one -- a rest:* channel, an
+        intervening transform, a resync -- throws the cache away.
+        """
+        if on and self._vizNotice is None:
+            self._vizNotice = Tf.Notice.RegisterGlobally(
+                Usd.Notice.ObjectsChanged, self._OnObjectsChanged)
+        elif not on and self._vizNotice is not None:
+            self._vizNotice.Revoke()
+            self._vizNotice = None
+
+    def _OnObjectsChanged(self, notice, sender):
+        if sender is not self._Stage() or not self._vizRest:
+            return
+        if notice.GetResyncedPaths():
+            self._vizRest = {}
+            return
+        for path in notice.GetChangedInfoOnlyPaths():
+            name = path.name if path.IsPropertyPath() else ""
+            if name.startswith("rest:") or name.startswith("xformOp") or \
+                    name == "xformOpOrder":
+                self._vizRest = {}
+                return
+
+    def _VizPose(self):
+        """A pose with live frames, the viewport's drag values included.
+
+        The viewport's own snapshot carries weights but not joint frames,
+        so the private evaluator supplies the frames. A gizmo drag holds
+        its values in a preview channel until release; they are handed to
+        this evaluator as interactive overrides, so the cones follow the
+        drag instead of jumping on release.
+        """
+        rig = self._Rig()
+        stage = self._Stage()
+        if rig is None or stage is None:
+            return None
+        overrides = []
+        try:
+            import gizmoMath
+            for path, value in gizmoMath.PreviewValues(stage).items():
+                path = Sdf.Path(str(path))
+                if not path.IsPropertyPath():
+                    continue
+                if isinstance(value, bool) or \
+                        not isinstance(value, (int, float)):
+                    continue
+                overrides.append((str(path.GetPrimPath()), path.name,
+                                  float(value)))
+        except Exception:
+            overrides = []
+        try:
+            if overrides:
+                rig.set_interactive_overrides(overrides)
+            else:
+                rig.clear_interactive_overrides()
+        except Exception:
+            pass
+        try:
+            frame = self._api.frame.GetValue() if self._api.frame else 0.0
+        except Exception:
+            frame = 0.0
+        try:
+            return rig.evaluate(float(frame))
+        except Exception as error:
+            self._vizInfo.setText("evaluate failed: %s" % error)
+            return None
+
+    def _RefreshViz(self):
+        settings = self._vizSettings
+        view = self._vizView
+        if not settings.enabled:
+            if view is not None:
+                view.SetReaders([])
+            return
+        stage = self._Stage()
+        if stage is None or view is None:
+            return
+        if settings.scope == readerViz.SCOPE_ALL:
+            chosen = list(self._interpolators)
+        elif settings.scope == readerViz.SCOPE_FIRING:
+            chosen = [i for i in self._interpolators if i.firing]
+        else:
+            chosen = [i for i in self._interpolators
+                      if i.path in self._vizSelected]
+        if not chosen:
+            view.SetReaders([])
+            self._vizInfo.setText(
+                "Select a driver joint, an interpolator or a pose to see "
+                "it." if settings.scope == readerViz.SCOPE_SELECTED else
+                "Nothing to draw: no interpolator is firing."
+                if settings.scope == readerViz.SCOPE_FIRING else
+                "No interpolators on this stage.")
+            return
+        pose = self._VizPose()
+        if pose is None:
+            view.SetReaders([])
+            return
+        try:
+            import gizmoMath
+            restSpace = gizmoMath.RestSpace
+        except Exception as error:
+            self._vizInfo.setText("no rest frames: %s" % error)
+            return
+        try:
+            frame = self._api.frame.GetValue() if self._api.frame else 0.0
+        except Exception:
+            frame = 0.0
+        readers = readerViz.Build(stage, chosen, pose, Usd.TimeCode(frame),
+                                  restSpace, settings.size, self._vizRest)
+        drawn = readerViz.Visible(readers, settings,
+                                  [r.path for r in readers])
+        view.SetReaders(drawn)
+        counts = readerViz.OverlapSummary(drawn)
+        skipped = [r for r in readers if not r.drawable]
+        text = "%d drawn" % len(drawn)
+        if any(counts.values()):
+            text += "; overlapping pairs: %d coincident, %d cores, " \
+                    "%d supports" % (counts[readerViz.OVERLAP_COINCIDENT],
+                                     counts[readerViz.OVERLAP_CORES],
+                                     counts[readerViz.OVERLAP_SUPPORTS])
+        if skipped:
+            text += "; not drawn: " + ", ".join(
+                "%s (%s)" % (r.name, r.note) for r in skipped[:3])
+            if len(skipped) > 3:
+                text += ", +%d more" % (len(skipped) - 3)
+        self._vizInfo.setText(text)
