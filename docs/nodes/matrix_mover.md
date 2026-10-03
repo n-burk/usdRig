@@ -59,8 +59,8 @@ The provider publishes `computeMatrix`, the rest-to-posed map of its
 own frame (computations.cpp:401-415), and the mover blends it over the
 incoming points as `p' = q + w (T q - q)` (schema.usda:1677-1679), where
 `w` is the bound weight field or, with none bound,
-`inputs:defaultWeight`. `rigExec:transformReadPhase` chooses which
-revision of the provider is read: the default `base` binds the provider
+`inputs:defaultWeight`. `rigExecReadPhase` metadata on
+`rigExec:transform` chooses which revision of the provider is read: the default `base` binds the provider
 itself, `final` binds the head of its frame chain
 (moverGraph.cpp:1366-1379). The result is passed down the point chain,
 and the compiler synthesizes the recompute revisions that keep authored
@@ -208,7 +208,8 @@ Optional neutral-solve provider sharing transform's authored
 rest frame. Normalizes the transform as inverse(M(reference)) *
 M(transform), so the fitted neutral solve produces identity even
 when a solver has rest residuals or controls have default offsets.
-Read at transformReadPhase; the reference must have animation
+Read at rigExec:transform's read phase; the reference must have
+animation
 channels neutralized while sharing the live fitting parameters.
 
 #### `rigExec:referenceTransformSpace`
@@ -218,12 +219,6 @@ channels neutralized while sharing the live fitting parameters.
 Neutral counterpart of transformSpace. Required when both
 referenceTransform and transformSpace are supplied. Normalize both
 transforms independently before removing the space's motion.
-
-#### `rigExec:transformReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
 
 #### `rigExec:weightBlend`
 

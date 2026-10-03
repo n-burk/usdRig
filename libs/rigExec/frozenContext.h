@@ -560,13 +560,15 @@ struct RigExecChainSampleRevision {
     RigExecChainSampleInput tangents;
 };
 
-/// One sampled property chain: its target and its revisions.
+/// One sampled property chain: its target, its revisions, and the mover
+/// inputs that read it at a declared phase (RigExecPhasedConnection).
 struct RigExecChainSampleChain {
     SdfPath targetPath;
     UsdAttribute target;
     UsdAttributeQuery targetQuery;
     SdfValueTypeName valueType;
     std::vector<RigExecChainSampleRevision> revisions;
+    std::vector<RigExecPhasedConnection> phased;
 };
 
 /// The epoch-pinned chain bindings one sampling call evaluates through.

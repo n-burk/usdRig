@@ -111,6 +111,10 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     std::string digest;
     // Every path this call writes is spelled through here (see _PathText).
     _PathText pathText;
+    // Made once here, never per read: constructing a token from text takes
+    // the token registry's lock, and readOf below runs on the prefetch's
+    // parallel lanes.
+    const TfToken phaseField(RigExecReadPhaseMetadataName);
 
     const bool profileDigest = _profiler.IsEnabled();
     uint64_t digestRegionStart =
@@ -255,8 +259,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += '|';
     };
     auto appendAttributeBinding =
-        [this, &digest, &noteRead, &pathText, &appendRelTargets](const UsdPrim &prim,
-                                              const char *name) {
+        [this, &digest, &noteRead, &pathText, &appendRelTargets,
+         &phaseField](const UsdPrim &prim, const char *name) {
         const UsdAttribute attr = prim.GetAttribute(TfToken(name));
         digest += name;
         digest += "@sources=";
@@ -295,6 +299,15 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             visiting.erase(a.GetPath());
         };
         append(attr);
+        // The read phase a connected input declares selects which revision
+        // of a property chain its connection reads, which Compile resolves.
+        // An unconnected input has nothing to choose, so it is not read.
+        if (attr && attr.HasAuthoredConnections()) {
+            std::string phase;
+            attr.GetMetadata(phaseField, &phase);
+            digest += "@phase=";
+            digest += phase;
+        }
         digest += '|';
     };
     auto appendFrameBindingIdentityNamed =
@@ -387,22 +400,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // to carry the same value at the current time. Static fields include
         // these markers too so adding an illegal source re-enters Compile and
         // is rejected instead of replaying the old request.
-        for (const char *field : {
-                 "rigExec:values", "rigExec:indices",
-                 "rigExec:defaultWeight", "rigExec:representation",
-                 "rigExec:rangePolicy", "rigExec:operation",
-                 "inputs:driver", "inputs:scale", "inputs:bias",
-                 "inputs:falloffMin", "inputs:falloffMax",
-                 "inputs:invert", "inputs:strength", "inputs:scaleX",
-                 "inputs:scaleXPos",
-                 "inputs:scaleYPos",
-                 "inputs:scaleZPos",
-                 "inputs:scaleXNeg",
-                 "inputs:scaleYNeg",
-                 "inputs:scaleZNeg",
-                 "inputs:scaleY", "inputs:scaleZ", "inputs:extentU",
-                 "inputs:extentV", "inputs:weights", "rigExec:autoSmooth",
-                 "rigExec:basis", "rigExec:samplesPerSpline", "rigExec:unreachedValue"}) {
+        for (const char *field : kDigestWeightObjectFields) {
             appendAttributeBinding(w, field);
         }
 
@@ -688,6 +686,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         bool exists = false;
         TfToken typeName;
         SdfPathVector sources;
+        /// A connected attribute's declared read phase, which selects the
+        /// revision of a property chain its connection reads.
+        std::string phase;
     };
     const bool memoizeReads = !(segments & _DigestUnmemoizedReads);
     std::unordered_map<SdfPath, _DigestAttribute, SdfPath::Hash>
@@ -695,13 +696,16 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // The three facts of one attribute, and the text an attribute is written
     // out as. One definition of each, shared by the walk and by the prefetch
     // below, so the two cannot spell an attribute differently.
-    const auto readOf = [](const UsdAttribute &attribute) {
+    const auto readOf = [&phaseField](const UsdAttribute &attribute) {
         _DigestAttribute read;
         read.exists = static_cast<bool>(attribute);
         if (read.exists) {
             read.typeName = attribute.GetTypeName().GetAsToken();
         }
         read.sources = _AuthoredConnections(attribute);
+        if (!read.sources.empty()) {
+            attribute.GetMetadata(phaseField, &read.phase);
+        }
         return read;
     };
     const auto entryOf = [](_PathText &text, const SdfPath &path,
@@ -714,6 +718,10 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         for (const SdfPath &source : attribute.sources) {
             entry += text(source);
             entry += ',';
+        }
+        if (!attribute.phase.empty()) {
+            entry += "@phase=";
+            entry += attribute.phase;
         }
         entry += '|';
         return entry;
@@ -1588,10 +1596,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             // Compiled into the revision: it selects the cluster's
             // point-frame correction in the fold.
             appendToken(prim, "rigExec:pointFrame");
-            for (const char *input : {
-                     "inputs:defaultWeight", "inputs:enabled",
-                     "inputs:value", "inputs:min", "inputs:max",
-                     "inputs:keys"}) {
+            for (const char *input : kDigestMoverInputs) {
                 appendAttributeBinding(prim, input);
             }
             // Pose-constraint wiring. Source order is semantic because every
@@ -1668,6 +1673,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 const UsdPrim input = _stage->GetPrimAtPath(inputPath);
                 if (!input) {
                     continue;
+                }
+                for (const char *field : kDigestBlendInputFields) {
+                    appendAttributeBinding(input, field);
                 }
                 for (const SdfPath &samplePath :
                      appendRelTargets(input, "rigExec:samples", true)) {

@@ -262,6 +262,12 @@ RigExecPointsOf(const SdfPath &path)
 RigExecReadPhase RigExecPhaseForInput(
     const UsdPrim &moverPrim, const char *rel);
 
+/// A property-chain value as a phased input of \p consumerType holds it
+/// (RigExecPhasedConnection). Compile admits only the chain's own
+/// type, or float and double either way round, which this converts.
+VtValue RigExecPhasedConsumerValue(
+    const VtValue &chainValue, const SdfValueTypeName &consumerType);
+
 /// The oracle's phased read, as a free function: resolves the phase for
 /// the input \p relName names and reads the recorded snapshot for it, or
 /// the authored stage value when the phase is Base or no snapshot was

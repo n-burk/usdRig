@@ -51,6 +51,19 @@ struct RigExecMoverRecord {
     bool enabledFallback = true;
 };
 
+/// An operator input whose connection reads a property chain at a declared
+/// phase rather than its final value: rigExecReadPhase on the input.
+/// `applied` is how many of the chain's revisions the value includes -- 0
+/// for `base`, the revision count through a named prim for a checkpoint.
+/// The value is published on the consumer itself, so every reader of the
+/// input gets it through the routes a chain result takes.
+struct RigExecPhasedConnection {
+    SdfPath consumer;
+    SdfValueTypeName consumerType;
+    SdfPath target;
+    size_t applied = 0;
+};
+
 /// One weight object's resolved field, as a mover actually consumed it.
 ///
 /// Dense and already range-policed, so a consumer can index it by element
@@ -500,6 +513,14 @@ public:
     /// usdview row executes first; spec §4.2).
     const std::vector<RigExecMoverRecord> &GetMoverOrder() const {
         return _movers;
+    }
+
+    /// The read phases the last compile resolved on operator inputs'
+    /// connections: the movers' inputs in mover order, then the solvers'.
+    /// A connection with no declaration, or one declaring `final`, reads
+    /// the chain's final value and has none.
+    const std::vector<RigExecPhasedConnection> &GetPhasedConnections() const {
+        return _phasedConnections;
     }
 
     /// Operations the last compile set aside -- operation prim -> the error
@@ -1807,13 +1828,20 @@ private:
         TfToken schemaType;
     };
 
-    /// Bind property revisions and order their attribute/weight dependencies.
+    /// Bind property revisions and order their attribute/weight dependencies,
+    /// and resolve the read phases declared on connected inputs of the
+    /// movers and of \p solvers.
     bool _CompilePropertyChains(
         const std::vector<RigExecMoverRecord> &movers,
         std::map<SdfPath, std::vector<_PropertyRevision>> &chains,
-        std::vector<SdfPath> &order, _CompileFailure *failure) const;
+        std::vector<SdfPath> &order,
+        std::vector<RigExecPhasedConnection> &phased,
+        const std::vector<UsdPrim> &solvers,
+        _CompileFailure *failure) const;
     /// Exact scalar property target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;
+    /// Phased connections; see GetPhasedConnections.
+    std::vector<RigExecPhasedConnection> _phasedConnections;
 
     /// Every attribute a property chain READS through a connection, so that
     /// an avar-only notice naming one of them still drops the chain

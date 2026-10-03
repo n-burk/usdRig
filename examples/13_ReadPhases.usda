@@ -32,7 +32,8 @@
     It is registered in the schema plugin's SdfMetadata block.
 
     It is the only way to declare a read phase: no schema attribute stands
-    in for it.
+    in for it. 16_ConnectionReadPhases declares one on an attribute
+    connection, to read a property at a point in its math-mover chain.
 
     WHAT THIS FILE DEMONSTRATES
 

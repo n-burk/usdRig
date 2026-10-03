@@ -68,6 +68,7 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "13_ReadPhases.usda|1001,1012,1024,1036,1048|/ReadPhaseAsset/Rig/Controls/LiftCtl|avars:ty|/ReadPhaseAsset/Rig/Weights/CageW|rigExec:defaultWeight|YES|-"
     "15_TransformMatrixMover.usda|1001,1012,1024,1036,1048|/TransformMoverAsset/Rig/Controls/DriverSpace/Driver|avars:ry|/TransformMoverAsset/Rig/Movers/PropFollow|inputs:defaultWeight|YES|-"
     "14_VolumeConstrainedSweep.usda|1001,1012,1024,1036,1048|/SweepAsset/Rig/Controls/Band|avars:ty|/SweepAsset/Rig/Controls/Band/Volume|inputs:falloffMax|YES|-"
+    "16_ConnectionReadPhases.usda|1001,1012,1024,1036,1048|/PhaseConnectAsset/Rig/Controls/LiftCtl|avars:ty|/PhaseConnectAsset/Rig/Movers/Dial/Gain|inputs:value|YES|-"
     # -- the constraint stages: every one aims at a plain UsdGeomXformable --
     "aimtest.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"
     "aimtest_points.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"

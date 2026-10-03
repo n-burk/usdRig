@@ -123,6 +123,12 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
   joint's frame is carried by the driver's motion in its space. One
   mover blends radially (`rigExec:weightBlend = "radial"`), one linearly,
   at half weight.
+- **16_ConnectionReadPhases.usda** — read phases on attribute
+  connections. One dial is doubled and then clamped by two math movers,
+  and three readers connect to it: at `base`, at a checkpoint after the
+  doubling, and undeclared (`final`). Float math movers show the three
+  values as channels; three cards whose matrix-mover envelope is the
+  connection rise by them.
 - **rigexec_flat.usda** — the smallest rig that exists, and a flattened
   capture of the shape an interactive session produces: one aim
   constraint, no joints at all, and both ends plain `UsdGeomXformable`s.

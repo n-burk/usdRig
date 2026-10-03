@@ -59,8 +59,8 @@ partially weighted point is likewise held toward rest.
 
 The mover is one revision in its target's point chain, so it runs in
 the mover-application walk after solving: it reads
-every influence's `computeMatrix` (the rest-to-posed map) at
-`rigExec:transformReadPhase`, gathers `rigExec:elementSize` index/weight
+every influence's `computeMatrix` (the rest-to-posed map) at the
+`rigExecReadPhase` declared on `rigExec:influences`, gathers `rigExec:elementSize` index/weight
 slots per point in point order, and accumulates them — `classicLinear`
 sums `w_k T_k p` and leaves the weight shortfall `1 - sum w_k` on the
 rest point, while `dualQuaternion` splits each influence once per
@@ -160,14 +160,6 @@ Influences per point.
 *Type:* `uniform token`. *Default:* `"classicLinear"`.
 
 Valid values: `classicLinear`, `dualQuaternion`.
-
-#### `rigExec:transformReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
-
-Which revision of every influence's matrix is read.
 
 ## Example
 

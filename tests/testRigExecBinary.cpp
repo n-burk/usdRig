@@ -207,6 +207,7 @@ _BinaryExpectedVariance(const std::string &fixture)
         "09_PropertyMathMovers.usda", "10_AimXformTurret.usda",
         "11_VolumeWeights.usda",
         "13_ReadPhases.usda", "14_VolumeConstrainedSweep.usda",
+        "16_ConnectionReadPhases.usda",
         "aimtest.usda", "aimtest_points.usda",
         "rotateConstraint.usda", "rigexec_flat.usda",
         "par_rot_aim.usd", "par_rot_aim_redorder.usd",

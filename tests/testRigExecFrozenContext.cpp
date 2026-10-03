@@ -2580,6 +2580,18 @@ TestReadPhasesWarmBitIdentical(const std::string &examplesDir)
         SdfPath("/ReadPhaseAsset/Geom/Slab.points"));
 }
 
+// Read phases on connections (examples/16_ConnectionReadPhases.usda) warm
+// bit-identically: the frame-cache sampler publishes each phased reader's
+// value from its own pass over the dial's chain, as the live path does.
+void
+TestConnectionReadPhasesWarmBitIdentical(const std::string &examplesDir)
+{
+    CheckExampleWarmsBitIdentical(
+        examplesDir + "/16_ConnectionReadPhases.usda", {1001.0},
+        {1012.0, 1024.0, 1036.0, 1048.0},
+        SdfPath("/PhaseConnectAsset/Geom/GainCard.points"));
+}
+
 // A constraint stage warms bit-identically: freeze after the history,
 // sample each probe frame through both routes, and diff the warmed pose
 // against live. The program-shape assertions are the vacuity guard -- the
@@ -3409,6 +3421,7 @@ main(int argc, char **argv)
         TestRibbonSpineWarmsBitIdentical(argv[1]);
         TestArmRigWarmsBitIdentical(argv[1]);
         TestReadPhasesWarmBitIdentical(argv[1]);
+        TestConnectionReadPhasesWarmBitIdentical(argv[1]);
         TestAimXformTurretWarmsBitIdentical(argv[1]);
         TestAimtestWarmsBitIdentical(argv[1]);
         TestAimtestPointsWarmsBitIdentical(argv[1]);

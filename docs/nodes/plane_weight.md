@@ -60,9 +60,10 @@ shared remap of the signed axis coordinate `d` —
 `1 - u`, and scaled by `inputs:strength` — so the field is fully ON at
 `falloffMin` and fully OFF at `falloffMax`. With `bounded`, a point outside
 the in-plane rectangle gets exactly zero instead, with no edge ramp. Which
-points are measured is `rigExec:samplePhase`: `reference` (the default)
-measures the authored base points, `current` the points as they stand at
-that mover's position in the stack.
+points are measured is the `rigExecReadPhase` metadata on
+`rigExec:weightTarget`: `base` (the default) measures the authored base
+points, `preceding` the points as they stand at that mover's position in
+the stack.
 
 ## Wiring
 
@@ -70,7 +71,7 @@ that mover's position in the stack.
 |---|---|---|
 | `rigExec:weightTarget` | Exact points property this field covers; must match the target of the mover that binds it. | yes |
 | (placement) | No wiring: the volume's own posed frame, from its avars (optionally connected to a control's, as in the example) or from an xformable namespace parent it rides. | - |
-| `rigExec:sampleSource` | Optional static points to measure against instead of the weighted domain; ignored when `rigExec:samplePhase` is `current`. | no |
+| `rigExec:sampleSource` | Optional static points to measure against instead of the weighted domain; ignored when `rigExec:weightTarget` reads `preceding`. | no |
 | (bound by) | A mover's `rigExec:weightObject` applies this field. | - |
 
 ## Parameters
@@ -91,7 +92,22 @@ disagreeing.
 
 *Relationship.*
 
-Canonical prim or exact property carrying the weighted domain.
+Canonical prim or exact property carrying the weighted
+domain.
+
+Its rigExecReadPhase metadata chooses which points the distance
+function measures. `base`, the default, samples the STATIC
+authored points (or rigExec:sampleSource), so the field is
+computed once per epoch and a point keeps the weight its bind pose
+earned -- the behaviour of a painted map, and what a matrix mover
+wants so that its own output cannot feed back into its own weights.
+
+`preceding` samples the points AS THEY STAND at the consuming
+operation's position in the mover stack, so the volume grabs
+whatever is inside it right now. That is the dynamic behaviour, and
+it is order dependent by construction: the same volume placed at
+two points in the stack legitimately yields two different fields.
+Any other phase is a compile error.
 
 #### `rigExec:representation`
 
@@ -189,26 +205,6 @@ Held extrapolation outside [0, 1] is the Ts default and is
 exactly right here, so a curve authored over a shorter span still
 yields a total field.
 
-#### `rigExec:samplePhase`
-
-*Type:* `uniform token`. *Default:* `"reference"`.
-
-Valid values: `reference`, `current`.
-
-Which points the distance function measures against.
-
-`reference` samples the STATIC authored base points, so the field
-is computed once per epoch and a point keeps the weight its bind
-pose earned -- the behaviour of a painted map, and what a matrix
-mover wants so that its own output cannot feed back into its own
-weights.
-
-`current` samples the points AS THEY STAND at this operation's
-position in the mover stack, so the volume grabs whatever is
-inside it right now. That is the dynamic behaviour, and it is
-order dependent by construction: the same volume placed at two
-points in the stack legitimately yields two different fields.
-
 #### `rigExec:sampleSource`
 
 *Relationship.*
@@ -217,7 +213,8 @@ Optional explicit static points source to measure
 against, overriding rigExec:weightTarget for SAMPLING only. The
 weighted domain stays the weightTarget, so this is how a volume
 weights one mesh by another mesh's shape -- typically an
-unposed reference copy. Ignored when samplePhase is `current`.
+unposed reference copy. Ignored when rigExec:weightTarget reads
+`preceding`.
 
 #### `guide:drawMode`
 

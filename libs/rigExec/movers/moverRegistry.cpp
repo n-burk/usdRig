@@ -203,6 +203,21 @@ RigExecPhaseForInput(const UsdPrim &moverPrim, const char *rel)
     return phase;
 }
 
+VtValue
+RigExecPhasedConsumerValue(const VtValue &chainValue,
+                           const SdfValueTypeName &consumerType)
+{
+    if (consumerType == SdfValueTypeNames->Double &&
+        chainValue.IsHolding<float>()) {
+        return VtValue(double(chainValue.UncheckedGet<float>()));
+    }
+    if (consumerType == SdfValueTypeNames->Float &&
+        chainValue.IsHolding<double>()) {
+        return VtValue(float(chainValue.UncheckedGet<double>()));
+    }
+    return chainValue;
+}
+
 void
 RigExecReadPhasedPoints(
     const UsdStageRefPtr &stage,

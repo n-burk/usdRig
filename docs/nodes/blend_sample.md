@@ -83,12 +83,6 @@ Mutually exclusive with rigExec:targetPoints: authoring both is a
 compile error rather than a precedence rule, because a silent winner
 between two shapes that disagree is the worst of the three outcomes.
 
-#### `rigExec:pointsReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
-
 ## Example
 
 One channel with two samples: at activation 0.5 the card shifts

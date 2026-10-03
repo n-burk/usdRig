@@ -13,6 +13,27 @@ namespace evaluatorDetail {
 SdfPathVector
 _AuthoredConnections(const UsdAttribute &attribute);
 
+// The attributes the structure digest hashes as bindings -- connection walk
+// and declared read phase -- on every mover, on every weight object a mover
+// binds, and on every blend input a mover names. With every connected
+// attribute of an aggregate solver, these are where a read phase on a
+// connection is honoured (RigExecPhasedConnection), and the digest hashing
+// them is what makes a phase edit re-epoch the rig.
+inline constexpr const char *kDigestMoverInputs[] = {
+    "inputs:defaultWeight", "inputs:enabled", "inputs:value", "inputs:min",
+    "inputs:max", "inputs:keys", "inputs:tangents"};
+inline constexpr const char *kDigestWeightObjectFields[] = {
+    "rigExec:values", "rigExec:indices", "rigExec:defaultWeight",
+    "rigExec:representation", "rigExec:rangePolicy", "rigExec:operation",
+    "inputs:driver", "inputs:scale", "inputs:bias", "inputs:falloffMin",
+    "inputs:falloffMax", "inputs:invert", "inputs:strength", "inputs:scaleX",
+    "inputs:scaleXPos", "inputs:scaleYPos", "inputs:scaleZPos",
+    "inputs:scaleXNeg", "inputs:scaleYNeg", "inputs:scaleZNeg",
+    "inputs:scaleY", "inputs:scaleZ", "inputs:extentU", "inputs:extentV",
+    "inputs:weights", "rigExec:autoSmooth", "rigExec:basis",
+    "rigExec:samplesPerSpline", "rigExec:unreachedValue"};
+inline constexpr const char *kDigestBlendInputFields[] = {"inputs:weight"};
+
 // Prefer the generation's resolved value, including property and interactive overrides.
 template <class T>
 T

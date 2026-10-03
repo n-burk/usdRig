@@ -2305,8 +2305,10 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // solver's kernel.
     std::map<SdfPath, std::vector<_PropertyRevision>> newPropertyChains;
     std::vector<SdfPath> newPropertyChainOrder;
+    std::vector<RigExecPhasedConnection> newPhasedConnections;
     if (!_CompilePropertyChains(newMovers, newPropertyChains,
-                                newPropertyChainOrder, failure)) {
+                                newPropertyChainOrder, newPhasedConnections,
+                                orderedSolvers, failure)) {
         return fail(failure->message, failure->operations);
     }
 
@@ -4551,6 +4553,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     }
     _propertyChains = std::move(newPropertyChains);
     _propertyChainOrder = std::move(newPropertyChainOrder);
+    _phasedConnections = std::move(newPhasedConnections);
     // Every attribute a chain READS through a connection.
     //
     // The avar-only notice path below skips dropping the chain bindings, on

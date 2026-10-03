@@ -135,6 +135,42 @@ that revises a joint the same solver writes — the stack already orders those
 two writers — and compiling such a rig fails with a message naming the
 solver, the joint and the constraint.
 
+### Connected inputs
+
+An attribute connection reads a property. When math movers revise that
+property, an undeclared connection reads it after all of them: the final
+value. The same metadata on the connected input chooses another point in
+that property's chain:
+
+```usda
+float inputs:defaultWeight (
+    rigExecReadPhase = "base"
+)
+float inputs:defaultWeight.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
+```
+
+- **`final`** — after every math mover on the property. What an undeclared
+  connection reads.
+- **`base`** — the property's authored value, before any math mover.
+- **a checkpoint** — an absolute prim path: the value as the last math mover
+  at or beneath that prim left it.
+
+`preceding` names a position in the reader's own chain, and a connection
+reads another property's, so compiling it fails. The phase applies to the
+first revised property along the connection's single-source hops, and needs
+that property's type, or float and double either way round.
+
+A connection phase is read on `inputs:enabled` and `inputs:defaultWeight` of
+every mover; `inputs:value`, `inputs:min`, `inputs:max`, `inputs:keys` and
+`inputs:tangents` of the math movers; the inputs of a weight object a mover
+binds; `inputs:weight` of a blend input a mover names; and every connected
+attribute of a solver. An unconnected input reads its own value, so a phase
+there has nothing to choose and is ignored. A drag on the revised property
+itself replaces its final value only: `base` and checkpoint readers keep
+reading the chain computed from the authored value.
+[Example 16](../../examples/16_ConnectionReadPhases.usda) reads one dial
+three ways, with math movers and with mover envelopes.
+
 ## A frame, walked through
 
 ![Two-bone IK](../gifs/two_bone_ik.gif)

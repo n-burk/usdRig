@@ -2629,6 +2629,13 @@ and it drives nothing, the blendshape does all the work.""",
             "`remap` only normalizes: `(v − min) / (max − min)`, with a "
             "zero-width range returning 0 rather than dividing. Chain a `clamp` "
             "after it whenever the incoming channel can overshoot.",
+            # rigEvaluatorProperties.cpp, _CompilePropertyChains: the phased
+            # connections, published on the reader by _EvaluatePropertyChains.
+            "A connection to a property these movers revise reads it after "
+            "all of them. `rigExecReadPhase` on the connected input reads it "
+            "at `base` or as a named prim's movers left it instead; see "
+            "[Connected inputs](../concepts/how-operators-fire.md#connected-inputs) "
+            "and example 16.",
         ],
         "see_also": [
             ("blend_input", "Blend Input"),

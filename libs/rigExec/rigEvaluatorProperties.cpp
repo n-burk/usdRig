@@ -266,6 +266,14 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                              bound.target.GetNumTimeSamples() > 0)) {
             bound.varying = true;
         }
+        for (const RigExecPhasedConnection &connection : _phasedConnections) {
+            if (connection.target == targetPath) {
+                bound.phased.push_back(
+                    RigExecPropertyChainBindings::Chain::Phased{
+                        connection.consumer, connection.consumerType,
+                        connection.applied});
+            }
+        }
         return bound;
     };
     // Which chains' targets each chain watches. Recomputed whole whenever a
@@ -343,6 +351,20 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
     bindings.lastTime = time;
     bindings.lastOverrides = std::move(nowOverrides);
 
+    // One value onto one property, through the three routes a chain result
+    // takes: the published results, the generation's resolved inputs, and
+    // the exec overrides.
+    const auto publish = [&](const SdfPath &path, const VtValue &value) {
+        if (results) {
+            (*results)[path] = value;
+        }
+        _resolvedInputs.SetProperty(path, value);
+        if (overrides) {
+            overrides->push_back(RigExecValueOverride{
+                path.GetPrimPath(), TfToken(), path.GetNameToken(), value});
+        }
+    };
+
     for (RigExecPropertyChainBindings::Chain &chain :
              _propertyChainBindings->chains) {
         const SdfPath &target = chain.targetPath;
@@ -370,14 +392,11 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 diag(line);
             }
             if (chain.published) {
-                if (results) {
-                    (*results)[target] = chain.lastValue;
-                }
-                _resolvedInputs.SetProperty(target, chain.lastValue);
-                if (overrides) {
-                    overrides->push_back(RigExecValueOverride{
-                        target.GetPrimPath(), TfToken(),
-                        target.GetNameToken(), chain.lastValue});
+                publish(target, chain.lastValue);
+            }
+            for (size_t k = 0; k < chain.lastPhased.size(); ++k) {
+                if (!chain.lastPhased[k].IsEmpty()) {
+                    publish(chain.phased[k].consumer, chain.lastPhased[k]);
                 }
             }
             continue;
@@ -385,6 +404,9 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         const size_t diagnosticsBefore =
             diagnostics ? diagnostics->size() : 0;
         _resolvedInputs.ClearProperty(target);
+        for (const auto &phased : chain.phased) {
+            _resolvedInputs.ClearProperty(phased.consumer);
+        }
         struct _Remember {
             RigExecPropertyChainBindings::Chain &chain;
             RigExecResolvedInputs &resolved;
@@ -393,9 +415,22 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
             ~_Remember() {
                 const VtValue *now = resolved.Find(chain.targetPath);
                 const bool published = now != nullptr;
+                // A phased consumer can move while the final value does not
+                // (a clamp at the end of the chain), and a chain downstream
+                // of it has to hear about that too.
+                bool phasedMoved = false;
+                chain.lastPhased.resize(chain.phased.size());
+                for (size_t k = 0; k < chain.phased.size(); ++k) {
+                    const VtValue *value =
+                        resolved.Find(chain.phased[k].consumer);
+                    const VtValue current = value ? *value : VtValue();
+                    phasedMoved = phasedMoved ||
+                                  current != chain.lastPhased[k];
+                    chain.lastPhased[k] = current;
+                }
                 chain.changedThisRun =
                     !chain.cached || published != chain.published ||
-                    (published && *now != chain.lastValue);
+                    (published && *now != chain.lastValue) || phasedMoved;
                 chain.published = published;
                 chain.lastValue = published ? *now : VtValue();
                 chain.lastDiagnostics.clear();
@@ -428,8 +463,18 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                      ": authored base is not finite; chain skipped");
                 return false;
             }
+            // The value after each revision, base first, so a phased
+            // consumer can read the chain where it asked to. A revision that
+            // passes through still takes its place.
+            std::vector<ValueT> history;
+            if (!chain.phased.empty()) {
+                history.reserve(revisions.size() + 1);
+            }
             for (const RigExecPropertyChainBindings::Revision &revision :
                      revisions) {
+                if (!chain.phased.empty()) {
+                    history.push_back(value);
+                }
                 const UsdPrim &moverPrim = revision.moverPrim;
                 if (!moverPrim) {
                     continue;
@@ -484,17 +529,19 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 }
                 value = next;
             }
-            if (results) {
-                (*results)[target] = VtValue(value);
-            }
             // Publish immediately, not after every chain has run. Dependency
             // ordering guarantees that any later chain which consumes this
             // property reads the revised value.
-            _resolvedInputs.SetProperty(target, VtValue(value));
-            if (overrides) {
-                overrides->push_back(RigExecValueOverride{
-                    target.GetPrimPath(), TfToken(), target.GetNameToken(),
-                    VtValue(value)});
+            publish(target, VtValue(value));
+            if (!chain.phased.empty()) {
+                history.push_back(value);
+                for (const auto &phased : chain.phased) {
+                    publish(phased.consumer,
+                            RigExecPhasedConsumerValue(
+                                VtValue(history[std::min(
+                                    phased.applied, history.size() - 1)]),
+                                phased.consumerType));
+                }
             }
             return true;
         };
@@ -594,7 +641,9 @@ bool
 RigExecRigEvaluator::_CompilePropertyChains(
     const std::vector<RigExecMoverRecord> &newMovers,
     std::map<SdfPath, std::vector<_PropertyRevision>> &newPropertyChains,
-    std::vector<SdfPath> &newPropertyChainOrder, _CompileFailure *failure) const
+    std::vector<SdfPath> &newPropertyChainOrder,
+    std::vector<RigExecPhasedConnection> &newPhasedConnections,
+    const std::vector<UsdPrim> &solvers, _CompileFailure *failure) const
 {
     const auto fail = [failure](const std::string &message,
                                 SdfPathVector operations = {}) {
@@ -724,6 +773,210 @@ RigExecRigEvaluator::_CompilePropertyChains(
         };
         for (const auto &[target, _] : dependsOn) {
             if (colour[target] == 0 && !visit(target)) {
+                return false;
+            }
+        }
+    }
+
+    // Read phases declared on connections. A connected input reads the first
+    // property-chain target on its connection walk; with no declaration it
+    // reads that chain's final value, and rigExecReadPhase on the input
+    // chooses another point in the chain: `base` (the target's authored
+    // value) or a prim path (the value as that prim's last revision of the
+    // target left it). Honoured on the inputs the structure digest hashes
+    // with their phase: the mover, weight-object and blend-input fields of
+    // rigEvaluatorInternal.h, and every connected attribute of an aggregate
+    // solver.
+    // Every name as a token once per compile, not once per prim: making a
+    // token from text takes the token registry's lock.
+    const auto tokensOf = [](const auto &names) {
+        std::vector<TfToken> tokens;
+        for (const char *name : names) {
+            tokens.emplace_back(name);
+        }
+        return tokens;
+    };
+    const TfToken phaseField(RigExecReadPhaseMetadataName);
+    const std::vector<TfToken> moverInputs = tokensOf(kDigestMoverInputs);
+    const std::vector<TfToken> weightFields =
+        tokensOf(kDigestWeightObjectFields);
+    const std::vector<TfToken> blendFields = tokensOf(kDigestBlendInputFields);
+    const TfToken weightObjectRel("rigExec:weightObject");
+    const TfToken blendInputsRel("rigExec:blendInputs");
+    const TfToken weightInputRels[] = {TfToken("rigExec:inputWeights"),
+                                       TfToken("rigExec:baseWeight")};
+    const auto targetsOf = [](const UsdPrim &prim, const TfToken &name) {
+        SdfPathVector targets;
+        if (const UsdRelationship rel = prim.GetRelationship(name)) {
+            rel.GetTargets(&targets);
+        }
+        return targets;
+    };
+    std::set<SdfPath> considered;
+    const auto consider = [&](const UsdAttribute &input,
+                              const SdfPath &owner) {
+        if (!input || !input.HasAuthoredMetadata(phaseField) ||
+            !considered.insert(input.GetPath()).second) {
+            return true;
+        }
+        const std::string who = input.GetPath().GetString() +
+                                ": rigExecReadPhase";
+        // An unconnected input reads its own value: the phase has nothing
+        // to choose, and the digest does not read it there either.
+        const SdfPathVector sources = _AuthoredConnections(input);
+        if (sources.empty()) {
+            return true;
+        }
+        RigExecReadPhase phase;
+        std::string phaseError;
+        if (!RigExecResolveReadPhase(input, &phase, &phaseError)) {
+            return fail(phaseError, {owner});
+        }
+        if (phase.kind == RigExecReadPhaseKind::Preceding) {
+            return fail(who + " 'preceding' names no position for a "
+                              "connection; use base, final or a prim "
+                              "path",
+                        {owner});
+        }
+        if (newPropertyChains.count(input.GetPath())) {
+            return fail(who + " on an input math movers also revise is "
+                              "ambiguous",
+                        {owner});
+        }
+        // The first chain target along the single-source walk, the same
+        // walk RigExecResolvedInputs::GetAttribute takes.
+        SdfPath target;
+        std::set<SdfPath> visited{input.GetPath()};
+        SdfPathVector hop = sources;
+        while (hop.size() == 1 && visited.insert(hop[0]).second) {
+            if (newPropertyChains.count(hop[0])) {
+                target = hop[0];
+                break;
+            }
+            const UsdAttribute next = _stage->GetAttributeAtPath(hop[0]);
+            if (!next) {
+                break;
+            }
+            hop = _AuthoredConnections(next);
+        }
+        if (target.IsEmpty()) {
+            // No math mover writes what the connection reads: base and
+            // final are the same value there, and a checkpoint names a
+            // revision that does not exist.
+            if (phase.kind == RigExecReadPhaseKind::AtPrim) {
+                return fail(who + " names " + phase.prim.GetString() +
+                                ", but the connection reaches no "
+                                "property a math mover writes",
+                            {owner});
+            }
+            return true;
+        }
+        if (phase.kind == RigExecReadPhaseKind::Final) {
+            return true;  // what an undeclared connection already reads
+        }
+        const UsdAttribute targetAttr =
+            _stage->GetAttributeAtPath(target);
+        const SdfValueTypeName consumerType = input.GetTypeName();
+        const SdfValueTypeName targetType =
+            targetAttr ? targetAttr.GetTypeName() : SdfValueTypeName();
+        const bool scalarPair =
+            (consumerType == SdfValueTypeNames->Float ||
+             consumerType == SdfValueTypeNames->Double) &&
+            (targetType == SdfValueTypeNames->Float ||
+             targetType == SdfValueTypeNames->Double);
+        if (!scalarPair && consumerType != targetType) {
+            return fail(who + " reads " + target.GetString() + " (" +
+                            targetType.GetAsToken().GetString() +
+                            ") into a " +
+                            consumerType.GetAsToken().GetString() +
+                            " input; a phased read needs the same type, "
+                            "or float and double",
+                        {owner});
+        }
+        RigExecPhasedConnection connection;
+        connection.consumer = input.GetPath();
+        connection.consumerType = consumerType;
+        connection.target = target;
+        if (phase.kind == RigExecReadPhaseKind::AtPrim) {
+            // The last revision of the target at or beneath the prim.
+            const std::vector<_PropertyRevision> &revisions =
+                newPropertyChains.at(target);
+            size_t applied = 0;
+            for (size_t i = 0; i < revisions.size(); ++i) {
+                if (revisions[i].moverPath.HasPrefix(phase.prim)) {
+                    applied = i + 1;
+                }
+            }
+            if (applied == 0) {
+                return fail(who + " names " + phase.prim.GetString() +
+                                ", which revises nothing on " +
+                                target.GetString(),
+                            {owner});
+            }
+            connection.applied = applied;
+        }
+        newPhasedConnections.push_back(std::move(connection));
+        return true;
+    };
+    const auto considerFields = [&](const UsdPrim &prim,
+                                    const std::vector<TfToken> &fields,
+                                    const SdfPath &owner) {
+        for (const TfToken &name : fields) {
+            if (!consider(prim.GetAttribute(name), owner)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    // Weight objects compose through their input and base weights.
+    std::set<SdfPath> weightsSeen;
+    std::function<bool(const SdfPath &, const SdfPath &)> considerWeight =
+        [&](const SdfPath &weightPath, const SdfPath &owner) {
+        if (!weightsSeen.insert(weightPath).second) {
+            return true;
+        }
+        const UsdPrim weight = _stage->GetPrimAtPath(weightPath);
+        if (!weight) {
+            return true;
+        }
+        if (!considerFields(weight, weightFields, owner)) {
+            return false;
+        }
+        for (const TfToken &rel : weightInputRels) {
+            for (const SdfPath &next : targetsOf(weight, rel)) {
+                if (!considerWeight(next, owner)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    for (const RigExecMoverRecord &mover : newMovers) {
+        const UsdPrim prim = _stage->GetPrimAtPath(mover.moverPath);
+        if (!prim) {
+            continue;
+        }
+        if (!considerFields(prim, moverInputs, mover.moverPath)) {
+            return false;
+        }
+        for (const SdfPath &weight : targetsOf(prim, weightObjectRel)) {
+            if (!considerWeight(weight, mover.moverPath)) {
+                return false;
+            }
+        }
+        for (const SdfPath &input : targetsOf(prim, blendInputsRel)) {
+            if (const UsdPrim blendInput = _stage->GetPrimAtPath(input)) {
+                if (!considerFields(blendInput, blendFields,
+                                    mover.moverPath)) {
+                    return false;
+                }
+            }
+        }
+    }
+    for (const UsdPrim &solver : solvers) {
+        for (const UsdAttribute &input : solver.GetAuthoredAttributes()) {
+            if (input.HasAuthoredConnections() &&
+                !consider(input, solver.GetPath())) {
                 return false;
             }
         }

@@ -48,8 +48,8 @@ contributing source and read in `rigExec:rotationOrder`. That candidate is
 then written per axis through the three `inputs:affect*` mask triples and
 blended over the target's incoming frame by the common mover envelope, so
 the single `rigExec:moves` target is revised in place and anything that reads
-that provider afterwards -- a skinning mover with
-`rigExec:transformReadPhase = "final"`, for instance -- sees the parented
+that provider afterwards -- a skinning mover whose input carries
+`rigExecReadPhase = "final"`, for instance -- sees the parented
 result. A zero envelope is an exact pass-through: the target keeps whatever
 posed it before the constraint ran.
 

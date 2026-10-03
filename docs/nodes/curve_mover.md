@@ -121,15 +121,10 @@ emitGuidePoints writes its sample positions; wire moves each point by
 the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the
 parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)
 per point from rigExec:bindCoordinates, C the curve's posed control
-points at rigExec:driverCurveReadPhase and C0 its authored ones. With
+points at rigExec:driverCurve's read phase and C0 its authored
+ones. With
 a sparse weight object the bind table may be sparse too: one (u, d)
 per weighted point, in the weight object's index order.
-
-#### `rigExec:driverCurveReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
 
 #### `rigExec:driverTransforms`
 
@@ -141,7 +136,9 @@ control point, or one for all. A periodic curve's repeated points
 take their unique point's provider. The posed point is
 C0 + w (M C0 - C0), M the provider measured against its entry in
 rigExec:driverTransformSpaces and w its inputs:driverWeights entry.
-No chain runs on the curve, so no phased read is needed.
+No chain runs on the curve, so its points need no phased read;
+rigExecReadPhase metadata on this relationship chooses base or
+final for the providers.
 
 #### `rigExec:driverTransformSpaces`
 
@@ -234,15 +231,7 @@ control polygons are transformed by that space's rest->pose map
 (its computeMatrix) before the wire is evaluated, so the
 displacement is carried with the points; the scale-only correction
 of rigExec:pointFrame is then not applied beside it. Read at the
-drivers' rigExec:transformReadPhase.
-
-#### `rigExec:transformReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `final`.
-
-wire: which revision of the driver transforms is read.
+phase declared on rigExec:driverTransforms.
 
 #### `inputs:driverWeights`
 

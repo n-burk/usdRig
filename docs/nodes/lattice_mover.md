@@ -36,8 +36,8 @@ tensor-product basis evaluation (spec sections 4.1, 7.5).
 Each moved point is located in the bind cage's lattice coordinates,
 then re-evaluated in the posed cage under the `bernstein` or `bspline`
 basis. `rigExec:divisions` sets the cage resolution per axis with
-x-fastest point ordering; the cage is read at `rigExec:cageReadPhase`
-(usually `base`, the authored animation).
+x-fastest point ordering; the cage is read at the `rigExecReadPhase`
+declared on `rigExec:cage` (`base`, the authored animation, when none is).
 
 ## Wiring
 
@@ -102,12 +102,6 @@ Valid values: `bspline`, `bernstein`.
 #### `rigExec:divisions`
 
 *Type:* `int3`. *Default:* `(2, 2, 2)`.
-
-#### `rigExec:cageReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
 
 ## Example
 
