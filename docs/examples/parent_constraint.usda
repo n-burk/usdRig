@@ -125,8 +125,9 @@ def Xform "PropParentAsset"
                 )
                 {
                     rel rigExec:moves = </PropParentAsset/Geom/HandPlate.points>
-                    rel rigExec:transform = </PropParentAsset/Rig/Controls/Hand>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </PropParentAsset/Rig/Controls/Hand> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </PropParentAsset/Rig/Weights/PlateW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -136,8 +137,9 @@ def Xform "PropParentAsset"
                 )
                 {
                     rel rigExec:moves = </PropParentAsset/Geom/PropCard.points>
-                    rel rigExec:transform = </PropParentAsset/Rig/Joints/Prop>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </PropParentAsset/Rig/Joints/Prop> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </PropParentAsset/Rig/Weights/CardW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

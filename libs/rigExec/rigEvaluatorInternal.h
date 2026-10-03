@@ -57,7 +57,15 @@ inline const TfToken _enabledAttr("inputs:enabled");
 inline const TfToken _computeFalloffLut("computeFalloffLut");
 inline const TfToken _falloffProfileAttr("rigExec:falloffProfile");
 inline const TfToken _falloffCurveAttr("rigExec:falloffCurve");
-inline const TfToken _samplePhaseAttr("rigExec:samplePhase");
+inline const TfToken _weightTargetRel("rigExec:weightTarget");
+
+/// Whether a volume weight measures its distance against the points as
+/// they stand at the consuming operator's position (`preceding` declared
+/// on rigExec:weightTarget) rather than against its static source (`base`,
+/// the default). Any other phase, or an unparseable one, is false with
+/// \p error filled.
+bool _VolumeWeightSamplesInFlight(const UsdPrim &weight, bool *inFlight,
+                                  std::string *error);
 
 std::vector<UsdPrim>
 _GetPoseStackOrder(const UsdPrim &root);

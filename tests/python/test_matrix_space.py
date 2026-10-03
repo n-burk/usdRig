@@ -99,7 +99,8 @@ def _CheckNeutralReference():
             refs.append(ref)
         mover.GetRelationship('rigExec:referenceTransform').SetTargets([refs[1].GetPath()])
         mover.GetRelationship('rigExec:referenceTransformSpace').SetTargets([refs[0].GetPath()])
-        mover.GetAttribute('rigExec:transformReadPhase').Set(phase)
+        mover.GetRelationship('rigExec:transform').SetMetadata(
+            'rigExecReadPhase', str(phase))
         rig = _rigexec.Rig(stage, '/Asset/Rig')
         rig.evaluation_mode = 'parity'
         rig.compile()

@@ -415,7 +415,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // because it selects which field function runs, exactly as
         // rigExec:planeAxis selects which coordinate it measures.
         appendToken(w, "rigExec:falloffProfile");
-        appendToken(w, "rigExec:samplePhase");
+        appendPhase(w, "rigExec:weightTarget");
         appendToken(w, "rigExec:planeAxis");
         appendToken(w, "rigExec:planeBounds");
         appendToken(w, "rigExec:combineMode");
@@ -1581,7 +1581,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             appendRelTargets(prim, "rigExec:driverBaseTransformSpaces", false);
             // Influence order is semantic: jointIndices index into it.
             appendRelTargets(prim, "rigExec:influences", false);
-            appendToken(prim, "rigExec:transformReadPhase");
             appendToken(prim, "rigExec:skinningMethod");
             appendToken(prim, "rigExec:operation");
             appendToken(prim, "rigExec:mode");
@@ -1639,8 +1638,10 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             appendRelTargets(prim, "rigExec:cage", false);
             appendRelTargets(prim, "rigExec:surface", false);
             appendRelTargets(prim, "rigExec:bindCoordinates", false);
-            for (const char *phased : {"rigExec:transform", "rigExec:cage",
-                                       "rigExec:surface",
+            for (const char *phased : {"rigExec:transform",
+                                       "rigExec:influences",
+                                       "rigExec:driverTransforms",
+                                       "rigExec:cage", "rigExec:surface",
                                        "rigExec:bindCoordinates",
                                        "rigExec:driverCurve"}) {
                 appendPhase(prim, phased);
@@ -1677,7 +1678,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                     }
                     appendRelTargets(sample, "rigExec:targetPoints", true);
                     appendPhase(sample, "rigExec:targetPoints");
-                    appendToken(sample, "rigExec:pointsReadPhase");
                     // WHICH blend shape a sparse sample names is structure,
                     // so it belongs in the epoch digest. What the shape
                     // CONTAINS deliberately does not: offsets and

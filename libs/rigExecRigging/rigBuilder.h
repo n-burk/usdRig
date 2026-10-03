@@ -259,8 +259,6 @@ public:
     void SetTwistFrames(const std::vector<SdfPath> &paths);
     void SetSampleCount(int count);
     void SetParameterization(const TfToken &mode);  // arcLength | parametric
-    void SetDriverCurveReadPhase(const TfToken &phase);
-    void SetSurfaceReadPhase(const TfToken &phase);
     void SetJointElements(const std::vector<int> &elements);
 };
 
@@ -483,8 +481,10 @@ public:
     /// with UsdAttribute::GetSpline(), so the curve IS its time samples --
     /// each (x, y) knot lands at time x. Knots are clamped to [0,1].
     void SetFalloffCurve(const std::vector<std::pair<double, double>> &knots);
-    /// reference (static base points) | current (in-flight stack points).
-    void SetSamplePhase(const TfToken &phase);
+    /// base (the static source points, the default) | preceding (the
+    /// in-flight points at the consuming operator's position), as
+    /// rigExecReadPhase metadata on rigExec:weightTarget.
+    void SetReadPhase(const TfToken &phase);
     /// Optional explicit static sampling source.
     void SetSampleSource(const SdfPath &path);
 };
@@ -568,7 +568,8 @@ public:
     /// its channel weight, which is ~65 ms/frame for 169 correctives on a
     /// 26,276-point body standing at rest.
     void SetBlendShape(const SdfPath &path);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:targetPoints.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -644,7 +645,7 @@ public:
 
     /// The GfMatrix4d provider (computeMatrix) -- joint, control, or xform.
     void SetTransformProvider(const SdfPath &path);
-    /// base | preceding | final.
+    /// base | final, as rigExecReadPhase metadata on rigExec:transform.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -670,7 +671,8 @@ public:
     /// skinning: rotation blended on the shortest arc, joint scale and
     /// shear blended linearly in the pre-rotation frame).
     void SetSkinningMethod(const TfToken &method);
-    /// base | preceding | final, for every influence.
+    /// base | final for every influence, as rigExecReadPhase metadata on
+    /// rigExec:influences.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -685,7 +687,8 @@ public:
     /// bspline | bernstein.
     void SetBasis(const TfToken &basis);
     void SetDivisions(int x, int y, int z);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:cage.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -712,7 +715,8 @@ public:
     void SetBindCoordinates(const SdfPath &path);
     /// ribbon | emitGuidePoints.
     void SetMode(const TfToken &mode);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:driverCurve.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -726,7 +730,8 @@ public:
     void SetSurface(const SdfPath &path);
     /// attach | project.
     void SetMode(const TfToken &mode);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:surface.
     void SetReadPhase(const TfToken &phase);
 };
 

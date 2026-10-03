@@ -240,8 +240,9 @@ def Xform "TailAsset"
                 )
                 {
                     rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
-                    rel rigExec:transform = </TailAsset/Rig/Joints/Seg1>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </TailAsset/Rig/Joints/Seg1> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg1W>
                     uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 
@@ -250,8 +251,9 @@ def Xform "TailAsset"
                     )
                     {
                         rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
-                        rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2>
-                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2> (
+                            rigExecReadPhase = "final"
+                        )
                         rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg2W>
                         uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 
@@ -260,8 +262,9 @@ def Xform "TailAsset"
                         )
                         {
                             rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
-                            rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2/Seg3>
-                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2/Seg3> (
+                                rigExecReadPhase = "final"
+                            )
                             rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg3W>
                             uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 
@@ -270,8 +273,9 @@ def Xform "TailAsset"
                             )
                             {
                                 rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
-                                rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2/Seg3/Seg4>
-                                uniform token rigExec:transformReadPhase = "final"
+                                rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2/Seg3/Seg4> (
+                                    rigExecReadPhase = "final"
+                                )
                                 rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg4W>
                                 uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
                             }

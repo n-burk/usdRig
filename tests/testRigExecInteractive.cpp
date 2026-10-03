@@ -257,14 +257,18 @@ static void TestBlendSampleReadPhases()
         if (retained) CHECK(pose.moverGraphRevisionsCreated == 0);
     };
     check(GfVec3f(10, 0, 0), false);
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("final"));
+    const UsdRelationship targetPoints =
+        sample.GetRelationship(TfToken("rigExec:targetPoints"));
+    targetPoints.SetMetadata(
+        TfToken(RigExecReadPhaseMetadataName), std::string("final"));
     check(GfVec3f(12, 3, 0), true);
     x.GetAttribute(TfToken("avars:tx")).Set(4.0);
     check(GfVec3f(14, 3, 0), true);
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("preceding"));
+    targetPoints.SetMetadata(
+        TfToken(RigExecReadPhaseMetadataName), std::string("preceding"));
     check(GfVec3f(14, 0, 0), true);
-    sample.GetRelationship(TfToken("rigExec:targetPoints"))
-        .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("final"));
+    targetPoints.SetMetadata(
+        TfToken(RigExecReadPhaseMetadataName), std::string("final"));
     check(GfVec3f(14, 3, 0), true);
     sample.GetRelationship(TfToken("rigExec:targetPoints")).SetTargets({target});
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);

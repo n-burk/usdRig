@@ -2122,7 +2122,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
 
     case RigExecBakedStepKind::RevisionStatic: {
-        // rigExec:samplePhase = "current": the field is measured against the
+        // A volume weight reading `preceding` on rigExec:weightTarget: the
+        // field is measured against the
         // points AS THEY STAND HERE, not the authored base, so the volume
         // grabs whatever is inside it right now.
         // This one copies the ORACLE and not exec (see bakedWeights.cpp):

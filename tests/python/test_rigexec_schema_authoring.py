@@ -428,17 +428,21 @@ class SchemaFacadeTests(_ContractTestCase):
     def test_canonical_read_phase_metadata_on_attribute_and_relationship(self):
         mover = rigexec.schema.MatrixMover.define(self.stage, "/Mover")
         mover.set_read_phase("rigExec:transform", "preceding")
-        mover.set_read_phase(
-            "rigExec:transformReadPhase", "/Rig/Movers/Previous")
+        mover.set_read_phase("rigExec:weightBlend", "/Rig/Movers/Previous")
 
         prim = self.stage.GetPrimAtPath("/Mover")
         transform = prim.GetRelationship("rigExec:transform")
-        legacy_attribute = prim.GetAttribute("rigExec:transformReadPhase")
+        attribute = prim.GetAttribute("rigExec:weightBlend")
         self.assertEqual(
             transform.GetMetadata("rigExecReadPhase"), "preceding")
         self.assertEqual(
-            legacy_attribute.GetMetadata("rigExecReadPhase"),
+            attribute.GetMetadata("rigExecReadPhase"),
             "/Rig/Movers/Previous")
+
+        # The read phase is metadata only: no role-named attribute exists.
+        with self.assertRaises(ValueError):
+            mover.set_read_phase("rigExec:transformReadPhase", "final")
+        self.assertFalse(prim.HasProperty("rigExec:transformReadPhase"))
 
         with self.assertRaises(ValueError):
             mover.set_read_phase("rigExec:notDeclared", "base")
@@ -1033,8 +1037,10 @@ class BuilderDependencyTests(_ContractTestCase):
             "preceding")
         mover.set_read_phase("final")
         self.assertEqual(
-            str(prim.GetAttribute("rigExec:driverCurveReadPhase").Get()),
+            prim.GetRelationship("rigExec:driverCurve").GetMetadata(
+                "rigExecReadPhase"),
             "final")
+        self.assertFalse(prim.HasProperty("rigExec:driverCurveReadPhase"))
         mover.set_read_phase("rigExec:driverCurve", "base")
         self.assertEqual(
             prim.GetRelationship("rigExec:driverCurve").GetMetadata(

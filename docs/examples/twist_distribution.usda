@@ -129,8 +129,9 @@ def Xform "TwistAsset"
                 )
                 {
                     rel rigExec:moves = </TwistAsset/Geom/Fin.points>
-                    rel rigExec:transform = </TwistAsset/Rig/Joints/TwistMid>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </TwistAsset/Rig/Joints/TwistMid> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </TwistAsset/Rig/Weights/FinW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

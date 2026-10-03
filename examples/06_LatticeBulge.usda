@@ -62,7 +62,6 @@ def Xform "LatticeAsset"
                         {
                             uniform token rigExec:basis = "bernstein"
                             rel rigExec:cage = </LatticeAsset/Geom/Cage>
-                            uniform token rigExec:cageReadPhase = "base"
                             int3 rigExec:divisions = (2, 2, 3)
                             rel rigExec:moves = </LatticeAsset/Geom/Slab.points>
                             uniform asset ui:nodegraph:node:icon = @../icons/lattice_mover.png@

@@ -184,8 +184,9 @@ def Xform "JointAsset"
                 )
                 {
                     rel rigExec:moves = </JointAsset/Geom/Upper.points>
-                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </JointAsset/Rig/Weights/UpperW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -195,8 +196,9 @@ def Xform "JointAsset"
                 )
                 {
                     rel rigExec:moves = </JointAsset/Geom/Fore.points>
-                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder/Elbow>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder/Elbow> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </JointAsset/Rig/Weights/ForeW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -206,8 +208,9 @@ def Xform "JointAsset"
                 )
                 {
                     rel rigExec:moves = </JointAsset/Geom/Hand.points>
-                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder/Elbow/Wrist>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder/Elbow/Wrist> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </JointAsset/Rig/Weights/HandW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

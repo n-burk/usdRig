@@ -735,7 +735,7 @@ the bind-time curve.""",
             ("`rigExec:driverCurve`", "Native BasisCurves supplying the spine path; "
              "without it the solver publishes no frames rather than erroring.", "yes"),
             # bakedPose.cpp:475-481: "rigExec:parameterization, frameTransport,
-            # startFrame, endFrame, twistFrames and driverCurveReadPhase are
+            # startFrame, endFrame and twistFrames are
             # deliberately NOT read: the computation does not read them
             # either". The exec computation's inputs are sampleCount and the two
             # point packets and nothing else (moverKernels.cpp:1203-1208). The
@@ -1127,8 +1127,8 @@ contributing source and read in `rigExec:rotationOrder`. That candidate is
 then written per axis through the three `inputs:affect*` mask triples and
 blended over the target's incoming frame by the common mover envelope, so
 the single `rigExec:moves` target is revised in place and anything that reads
-that provider afterwards -- a skinning mover with
-`rigExec:transformReadPhase = "final"`, for instance -- sees the parented
+that provider afterwards -- a skinning mover whose input carries
+`rigExecReadPhase = "final"`, for instance -- sees the parented
 result. A zero envelope is an exact pass-through: the target keeps whatever
 posed it before the constraint ran.""",
         "wiring": [
@@ -1296,8 +1296,8 @@ same way, as a step of the pose stack.""",
 own frame (computations.cpp:401-415), and the mover blends it over the
 incoming points as `p' = q + w (T q - q)` (schema.usda:1677-1679), where
 `w` is the bound weight field or, with none bound,
-`inputs:defaultWeight`. `rigExec:transformReadPhase` chooses which
-revision of the provider is read: the default `base` binds the provider
+`inputs:defaultWeight`. `rigExecReadPhase` metadata on
+`rigExec:transform` chooses which revision of the provider is read: the default `base` binds the provider
 itself, `final` binds the head of its frame chain
 (moverGraph.cpp:1366-1379). The result is passed down the point chain,
 and the compiler synthesizes the recompute revisions that keep authored
@@ -1374,8 +1374,8 @@ for linear blend skinning, `dualQuaternion` for the volume-preserving
 one.""",
         "how_it_works": """The mover is one revision in its target's point chain, so it runs in
 the mover-application walk after solving: it reads
-every influence's `computeMatrix` (the rest-to-posed map) at
-`rigExec:transformReadPhase`, gathers `rigExec:elementSize` index/weight
+every influence's `computeMatrix` (the rest-to-posed map) at the
+`rigExecReadPhase` declared on `rigExec:influences`, gathers `rigExec:elementSize` index/weight
 slots per point in point order, and accumulates them — `classicLinear`
 sums `w_k T_k p` and leaves the weight shortfall `1 - sum w_k` on the
 rest point, while `dualQuaternion` splits each influence once per
@@ -1569,8 +1569,8 @@ shaping — bulges, bends, squash and stretch.""",
         "how_it_works": """Each moved point is located in the bind cage's lattice coordinates,
 then re-evaluated in the posed cage under the `bernstein` or `bspline`
 basis. `rigExec:divisions` sets the cage resolution per axis with
-x-fastest point ordering; the cage is read at `rigExec:cageReadPhase`
-(usually `base`, the authored animation).""",
+x-fastest point ordering; the cage is read at the `rigExecReadPhase`
+declared on `rigExec:cage` (`base`, the authored animation, when none is).""",
         "wiring": [
             ("`rigExec:cage`", "Native Points/mesh prim supplying cage points.", "yes"),
             ("`rigExec:moves`", "Exact points property to deform.", "yes"),
@@ -1607,7 +1607,8 @@ contact pass, not a slide-along-the-surface follow.""",
         "how_it_works": """The mover is one revision in its target's point chain, so it runs in
 the mover-application walk after solving and after every earlier revision
 on that chain. It reads the driver prim's `points` at
-`rigExec:surfaceReadPhase` plus its `faceVertexCounts` /
+the `rigExecReadPhase` declared on `rigExec:surface` plus its
+`faceVertexCounts` /
 `faceVertexIndices`, fans every face into a triangle fan, and takes the
 closest point over all of them per moved point; the envelope then blends
 that candidate over the incoming revision, and the compiler re-synthesizes
@@ -1627,13 +1628,11 @@ facets and pop.""",
             # reclassified as a grouping scope; 3560-3577: authored but empty
             # targets report a notice and go inert for the generation.
             ("`rigExec:moves`", "Exact points property to drape.", "yes"),
-            # moverGraph.cpp:1450-1460: only a non-base phase binds the driver
-            # to a moved chain output. moverGraph.cpp:1101-1135: read-phase
-            # metadata on the rigExec:surface relationship wins, and this uniform
-            # token is the role-named fallback. rigEvaluator.cpp:4174-4202
-            # rejects an unparseable token at compile.
-            ("`rigExec:surfaceReadPhase`", "`base` for the driver's authored "
-             "points, `final` when the driver is itself rigged.", "no"),
+            # Only a non-base phase binds the driver to a moved chain
+            # output; an unparseable phase is a compile error.
+            ("`rigExec:surface` `rigExecReadPhase`", "Metadata: `base` for "
+             "the driver's authored points, `final` when the driver is "
+             "itself rigged.", "no"),
         ],
         "param_groups": [
             ("Common mover envelope", "RigExecMoverAPI"),
@@ -2242,11 +2241,11 @@ which changes *what is measured* without changing what is weighted.
 `inputs:invert`, remapped through the falloff lookup table, multiplied by
 `inputs:strength`, and bounded by `rigExec:rangePolicy` (`clamp` by
 default, so scrubbing strength saturates instead of invalidating the
-rig). `rigExec:samplePhase` chooses the points measured: `reference`
-(the default) uses the STATIC authored base points, so a point keeps
-the weight its bind pose earned and a mover's own output cannot feed
-back into its own weights; `current` re-measures the points as they
-stand at that position in the mover stack. The band, invert and strength
+rig). The `rigExecReadPhase` metadata on `rigExec:weightTarget` chooses
+the points measured: `base` (the default) uses the STATIC authored base
+points, so a point keeps the weight its bind pose earned and a mover's
+own output cannot feed back into its own weights; `preceding` re-measures
+the points as they stand at that position in the mover stack. The band, invert and strength
 are live per-frame inputs; `rigExec:falloffProfile` and `rigExec:falloffCurve` are
 structural and are baked to one lookup table per binding epoch.""",
         "wiring": [
@@ -2334,9 +2333,10 @@ shared remap of the signed axis coordinate `d` —
 `1 - u`, and scaled by `inputs:strength` — so the field is fully ON at
 `falloffMin` and fully OFF at `falloffMax`. With `bounded`, a point outside
 the in-plane rectangle gets exactly zero instead, with no edge ramp. Which
-points are measured is `rigExec:samplePhase`: `reference` (the default)
-measures the authored base points, `current` the points as they stand at
-that mover's position in the stack.""",
+points are measured is the `rigExecReadPhase` metadata on
+`rigExec:weightTarget`: `base` (the default) measures the authored base
+points, `preceding` the points as they stand at that mover's position in
+the stack.""",
         "wiring": [
             # rigEvaluator.cpp:874 ("rigExec:weightTarget must have exactly one
             # target") and :882 (must equal the bound mover's target).
@@ -2354,8 +2354,8 @@ that mover's position in the stack.""",
             # rigEvaluator.cpp:7563 - sampleSource is tried first and falls back
             # to weightTarget, so authoring it is optional.
             ("`rigExec:sampleSource`", "Optional static points to measure against "
-             "instead of the weighted domain; ignored when `rigExec:samplePhase` "
-             "is `current`.", "no"),
+             "instead of the weighted domain; ignored when `rigExec:weightTarget` "
+             "reads `preceding`.", "no"),
             # rigEvaluator.cpp:4041 - the mover's weightObject binding is what
             # runs _ValidateWeightObjectDomain, so an unbound volume weight is
             # never validated or compiled at all.
@@ -2470,10 +2470,11 @@ geometry it weights.""",
             "turning the tube elliptical — but any axis that is non-positive or "
             "non-finite invalidates the whole packet rather than collapsing the "
             "volume.",
-            "Leave `rigExec:samplePhase` at `reference` and the tube measures the "
-            "static bind points, so a point keeps the weight its rest position "
-            "earned; `current` measures the points as they stand at this mover's "
-            "place in the stack, which makes the field order dependent by design.",
+            "Leave `rigExec:weightTarget` at its default `base` read phase and "
+            "the tube measures the static bind points, so a point keeps the "
+            "weight its rest position earned; `rigExecReadPhase = \"preceding\"` "
+            "measures the points as they stand at this mover's place in the "
+            "stack, which makes the field order dependent by design.",
         ],
         "see_also": [
             ("sphere_weight", "Sphere Weight"),

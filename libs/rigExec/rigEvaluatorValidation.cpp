@@ -784,6 +784,35 @@ RigExecRigEvaluator::_DiscoverMovers(
                     }
                 }
             }
+            // The read-phase attributes were replaced by rigExecReadPhase
+            // metadata on the input relationship. An old opinion would now
+            // compose as an inert custom attribute, so it is refused.
+            {
+                static const std::pair<const char *, const char *>
+                    kRemovedPhases[] = {
+                        {"rigExec:transformReadPhase",
+                         "rigExec:transform, rigExec:influences or "
+                         "rigExec:driverTransforms"},
+                        {"rigExec:cageReadPhase", "rigExec:cage"},
+                        {"rigExec:surfaceReadPhase", "rigExec:surface"},
+                        {"rigExec:driverCurveReadPhase",
+                         "rigExec:driverCurve"},
+                        {"rigExec:pointsReadPhase", "rigExec:targetPoints"},
+                    };
+                for (const auto &[oldName, input] : kRemovedPhases) {
+                    const UsdAttribute old =
+                        prim.GetAttribute(TfToken(oldName));
+                    if (old && old.HasAuthoredValue()) {
+                        return fail(record.schemaType.GetString() + " " +
+                                        prim.GetPath().GetString() +
+                                        " authors " + oldName +
+                                        ", which was replaced by "
+                                        "rigExecReadPhase metadata on " +
+                                        input,
+                                    {prim.GetPath()});
+                    }
+                }
+            }
             // Read phases, validated from the AUTHORED stage.
             // Binding resolution parses these too, but it has to be total --
             // it returns a binding, not a verdict -- so an unparseable phase
@@ -792,29 +821,17 @@ RigExecRigEvaluator::_DiscoverMovers(
             // authored value. The parse verdict belongs here, in Phase A,
             // where it can reject the compile before any epoch state moves.
             {
-                static const std::pair<const char *, const char *> kPhased[] = {
-                    {"rigExec:transform", "rigExec:transformReadPhase"},
-                    {"rigExec:cage", "rigExec:cageReadPhase"},
-                    {"rigExec:surface", "rigExec:surfaceReadPhase"},
-                    {"rigExec:bindCoordinates", nullptr},
-                    {"rigExec:driverCurve", "rigExec:driverCurveReadPhase"},
-                };
-                for (const auto &[relName, legacyAttr] : kPhased) {
+                static const char *const kPhased[] = {
+                    "rigExec:transform", "rigExec:influences",
+                    "rigExec:driverTransforms", "rigExec:cage",
+                    "rigExec:surface", "rigExec:bindCoordinates",
+                    "rigExec:driverCurve"};
+                for (const char *relName : kPhased) {
                     RigExecReadPhase phase;
                     std::string phaseError;
-                    bool ok = true;
-                    if (const UsdRelationship rel =
-                            prim.GetRelationship(TfToken(relName))) {
-                        ok = RigExecResolveReadPhase(rel, legacyAttr, &phase,
-                                                     &phaseError);
-                    } else if (legacyAttr) {
-                        if (const UsdAttribute a =
-                                prim.GetAttribute(TfToken(legacyAttr))) {
-                            ok = RigExecResolveReadPhase(a, legacyAttr, &phase,
-                                                         &phaseError);
-                        }
-                    }
-                    if (!ok) {
+                    if (!RigExecResolveReadPhase(
+                            prim.GetRelationship(TfToken(relName)), &phase,
+                            &phaseError)) {
                         return fail(record.schemaType.GetString() + " " +
                                     prim.GetPath().GetString() + ": " +
                                     phaseError, {prim.GetPath()});
@@ -827,7 +844,7 @@ RigExecRigEvaluator::_DiscoverMovers(
                 for (const UsdRelationship &rel : prim.GetRelationships()) {
                     RigExecReadPhase phase;
                     std::string phaseError;
-                    if (!RigExecResolveReadPhase(rel, nullptr, &phase,
+                    if (!RigExecResolveReadPhase(rel, &phase,
                                                  &phaseError)) {
                         return fail(record.schemaType.GetString() + " " +
                                     prim.GetPath().GetString() + ": " +
@@ -844,9 +861,7 @@ RigExecRigEvaluator::_DiscoverMovers(
             // resolving them at evaluation time. The same rule
             // the aggregate cardinality attributes already follow.
             std::vector<const char *> structuralTokens = {
-                "rigExec:mode", "rigExec:operation",
-                "rigExec:transformReadPhase", "rigExec:cageReadPhase",
-                "rigExec:surfaceReadPhase"};
+                "rigExec:mode", "rigExec:operation"};
             // Which operators carry a rotation order is a table column, not
             // a list of type names repeated at each site that asks.
             const _ConstraintHandler *orderHandler =

@@ -74,8 +74,11 @@ answer, only how fast it arrives.
 
 ## Read phases: which version a mover sees
 
-A mover names the moment it reads its provider with
-`rigExec:transformReadPhase`:
+A mover names the moment it reads its provider with `rigExecReadPhase`
+metadata on the relationship that names the input — `rigExec:transform`,
+`rigExec:influences`, `rigExec:cage`, `rigExec:surface`, `rigExec:driverCurve`
+and so on. Metadata is the only way to declare a phase; there is no schema
+attribute for it. With none authored the input reads `base`.
 
 - `base` — the joint **after its last solver**. Note that this is not "before
   every constraint": a constraint that fell *below* the last solver is already
@@ -95,17 +98,16 @@ def RigExecMatrixMover "HandSkin" (
 )
 {
     rel rigExec:moves = </Asset/Geom/Hand.points>
-    rel rigExec:transform = </Asset/Rig/Joints/Shoulder/Elbow/Wrist>
-    uniform token rigExec:transformReadPhase = "final"
+    rel rigExec:transform = </Asset/Rig/Joints/Shoulder/Elbow/Wrist> (
+        rigExecReadPhase = "final"
+    )
 }
 ```
 
-Change that one token to `base` and the hand card follows the FK solve but
-ignores the aim constraint stacked above it. Nothing else in the file moves.
-
-The same choice is available on any input relationship as property metadata,
-`rigExecReadPhase` (see [example 13](../../examples/13_ReadPhases.usda)); the
-metadata wins over a role-named attribute when both are authored.
+Change that one value to `base` (or delete it) and the hand card follows the
+FK solve but ignores the aim constraint stacked above it. Nothing else in the
+file moves. [Example 13](../../examples/13_ReadPhases.usda) shows the
+checkpoint form on a lattice cage.
 
 ### Solver inputs
 
@@ -167,9 +169,9 @@ full reach of the 3 + 3 unit chain, so the arm holds a slight bend. By frame
 - **"My constraint does nothing."** It is probably below the solver that
   overwrites the joint. Move its scope above the `Solvers` scope — i.e. earlier
   in composed order — or accept that it is now feeding the solve.
-- **"My skinning ignores the constraint."** The mover is reading `base`. Set
-  `rigExec:transformReadPhase = "final"`, which is what every shipped example
-  does.
+- **"My skinning ignores the constraint."** The mover is reading `base`. Put
+  `rigExecReadPhase = "final"` on its `rigExec:transform` (or
+  `rigExec:influences`), which is what every shipped example does.
 - **"Two movers on one mesh fight."** They do not fight; they stack, bottom
   sibling first, descendants before their parent. Reorder or renest to choose.
   Stacking matrix movers is how you layer rigid follows, not how you blend

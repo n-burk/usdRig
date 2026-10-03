@@ -820,12 +820,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             if (!prim) {
                 continue;
             }
-            TfToken phase("base");
-            if (UsdAttribute a = prim.GetAttribute(
-                    TfToken("rigExec:transformReadPhase"))) {
-                a.Get(&phase);
-            }
-            if (phase != "final") {
+            if (RigExecPhaseForInput(prim, transformRel).kind !=
+                RigExecReadPhaseKind::Final) {
                 continue;
             }
             SdfPathVector transforms;
@@ -1649,11 +1645,23 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             lutOverride.value = VtValue(lut);
             newFalloffLutOverrides.push_back(std::move(lutOverride));
 
-            TfToken phase("reference");
-            if (UsdAttribute a = w.GetAttribute(_samplePhaseAttr)) {
-                a.Get(&phase);
-            }
-            if (phase == "current") {
+            // Which points the field measures is the read phase declared
+            // on rigExec:weightTarget; the old attribute is refused rather
+            // than composing as an inert custom attribute.
+            bool inFlight = false;
+            std::string phaseError;
+            const UsdAttribute old =
+                w.GetAttribute(TfToken("rigExec:samplePhase"));
+            if (old && old.HasAuthoredValue()) {
+                volumeWeightError =
+                    weightPath.GetString() +
+                    " authors rigExec:samplePhase, which was replaced by "
+                    "rigExecReadPhase metadata on rigExec:weightTarget "
+                    "(reference is base, current is preceding)";
+            } else if (!_VolumeWeightSamplesInFlight(w, &inFlight,
+                                                     &phaseError)) {
+                volumeWeightError = phaseError;
+            } else if (inFlight) {
                 newCurrentPhaseWeights.insert(weightPath);
                 isCurrent = true;
             }
@@ -2336,12 +2344,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             revision.op = *op;
             revision.binding =
                 RigExecResolveRevisionBinding(moverPrim, target, {});
-            TfToken phase("base");
-            if (const UsdAttribute a = moverPrim.GetAttribute(
-                    TfToken("rigExec:transformReadPhase"))) {
-                a.Get(&phase);
-            }
-            revision.transformFinalPhase = phase == "final";
+            // The phase each mover's own handler resolved from the input
+            // that names its providers: rigExec:transform, rigExec:influences
+            // or rigExec:driverTransforms.
+            revision.transformFinalPhase =
+                revision.binding.transformPhase.kind ==
+                RigExecReadPhaseKind::Final;
             {
                 TfToken pointFrame;
                 if (const UsdAttribute a = moverPrim.GetAttribute(
@@ -2780,13 +2788,25 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         solverInputPhases;
     for (const auto &[solver, dependencies] : newSolverDependencies) {
         const UsdPrim prim = _stage->GetPrimAtPath(solver);
+        // The ribbon's read-phase attributes were replaced by metadata and
+        // would now compose as inert custom attributes.
+        for (const char *removed :
+             {"rigExec:driverCurveReadPhase", "rigExec:surfaceReadPhase"}) {
+            const UsdAttribute old = prim.GetAttribute(TfToken(removed));
+            if (old && old.HasAuthoredValue()) {
+                return fail(solver.GetString() + " authors " + removed +
+                                ", which was replaced by rigExecReadPhase "
+                                "metadata on the input relationship",
+                            {solver});
+            }
+        }
         for (const UsdRelationship &rel : prim.GetRelationships()) {
             if (rel.GetName() == "rigExec:joints") {
                 continue;
             }
             RigExecReadPhase phase;
             std::string phaseError;
-            if (!RigExecResolveReadPhase(rel, nullptr, &phase, &phaseError)) {
+            if (!RigExecResolveReadPhase(rel, &phase, &phaseError)) {
                 return fail(solver.GetString() + " " +
                                 rel.GetName().GetString() + ": " + phaseError,
                             {solver});
@@ -2802,6 +2822,18 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         solverInputPhases[solver][target.GetPrimPath()]
                             .push_back(phase);
                     }
+                } else if (phased) {
+                    // A solver reads a phase only through a provider's
+                    // frame chain; anything else would read base silently.
+                    return fail(solver.GetString() + " " +
+                                    rel.GetName().GetString() +
+                                    " declares rigExecReadPhase '" +
+                                    phase.GetAsString() + "' on " +
+                                    target.GetString() +
+                                    ", which is not a frame provider; a "
+                                    "solver reads a phase only from a "
+                                    "control or joint",
+                                {solver});
                 }
             }
         }

@@ -21,6 +21,35 @@
 
 namespace rigExec {
 
+namespace evaluatorDetail {
+
+bool
+_VolumeWeightSamplesInFlight(const UsdPrim &weight, bool *inFlight,
+                             std::string *error)
+{
+    *inFlight = false;
+    RigExecReadPhase phase;
+    std::string why;
+    if (!RigExecResolveReadPhase(weight.GetRelationship(_weightTargetRel),
+                                 &phase, &why)) {
+        *error = why;
+        return false;
+    }
+    if (phase.kind == RigExecReadPhaseKind::Preceding) {
+        *inFlight = true;
+    } else if (!phase.IsBase()) {
+        *error = weight.GetPath().GetString() + ": rigExecReadPhase '" +
+                 phase.GetAsString() +
+                 "' on rigExec:weightTarget is not supported; a volume "
+                 "weight measures its source at base or the points in flight "
+                 "at preceding";
+        return false;
+    }
+    return true;
+}
+
+}  // namespace evaluatorDetail
+
 using namespace evaluatorDetail;
 
 namespace {
@@ -247,19 +276,21 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
 
     // Which points the distance function measures.
     std::vector<GfVec3f> samplePoints;
-    TfToken samplePhase("reference");
-    if (UsdAttribute a = prim.GetAttribute(_samplePhaseAttr)) {
-        a.Get(&samplePhase, time);
+    bool inFlight = false;
+    std::string phaseError;
+    if (!_VolumeWeightSamplesInFlight(prim, &inFlight, &phaseError)) {
+        *error = who() + ": " + phaseError;
+        return false;
     }
-    if (samplePhase == "current") {
+    if (inFlight) {
         if (!currentPoints) {
             *error = who() +
-                     ": rigExec:samplePhase is `current` but no in-flight "
-                     "points were supplied";
+                     ": rigExec:weightTarget reads `preceding` but no "
+                     "in-flight points were supplied";
             return false;
         }
         samplePoints = *currentPoints;
-    } else if (samplePhase == "reference") {
+    } else {
         // An explicit sampleSource wins over the weighted domain, which
         // is how one mesh is weighted by another mesh's shape.
         if (!_ReadTargetPoints(prim, "rigExec:sampleSource", time,
@@ -269,10 +300,6 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
             *error = who() + ": could not read the points to sample";
             return false;
         }
-    } else {
-        *error = who() + ": unknown rigExec:samplePhase " +
-                 samplePhase.GetString();
-        return false;
     }
     if (samplePoints.size() != count) {
         *error = who() + ": sampled point count does not match the target";

@@ -71,8 +71,7 @@ _BindLatticeMover(const rigExec::RigExecMoverBindContext &ctx)
     if (!cages.empty()) {
         binding.cagePoints = rigExec::RigExecPointsOf(cages[0]);
         const rigExec::RigExecReadPhase phase =
-            rigExec::RigExecPhaseForInput(
-                moverPrim, "rigExec:cage", "rigExec:cageReadPhase");
+            rigExec::RigExecPhaseForInput(moverPrim, "rigExec:cage");
         if (!phase.IsBase()) {
             binding.phases[binding.cagePoints] = phase;
         }
@@ -117,8 +116,8 @@ _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
         a.Get(&restCage, UsdTimeCode::Default());
     }
     rigExec::RigExecReadPhasedPoints(
-        stage, ctx.snapshots, time, prim, "rigExec:cage",
-        "rigExec:cageReadPhase", cagePoints, moverPath, &posedCage);
+        stage, ctx.snapshots, time, prim, "rigExec:cage", cagePoints,
+        moverPath, &posedCage);
     if (UsdAttribute a = stage->GetAttributeAtPath(target)) {
         a.Get(&base, time);
     }

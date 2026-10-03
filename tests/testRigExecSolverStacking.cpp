@@ -341,16 +341,6 @@ RigText(const RigSpec &spec)
             "                    rigExecReadPhase = \"" + spec.probePhase +
             "\"\n"
             "                )\n";
-        // "base" and "final" have a LEGACY attribute spelling as well, and
-        // the graph's matrix-mover branch reads that one rather than the
-        // relationship metadata -- so a fixture that means "final" has to
-        // author it, exactly as every shipped rig does. AtPrim has no
-        // attribute spelling and is carried by the metadata alone.
-        if (spec.probePhase == "base" || spec.probePhase == "final") {
-            text += "                uniform token "
-                    "rigExec:transformReadPhase = \"" + spec.probePhase +
-                    "\"\n";
-        }
         text +=
             "            }\n";
     }
@@ -464,15 +454,13 @@ SameJoint(const RigExecRigPose &a, const RigExecRigPose &b,
 /// failure with the messages that caused it.
 ///
 /// \p parity drives the scalar CPU oracle. It is OFF for the checkpoint
-/// fixtures and only for them: the oracle's RigExecMatrixMover branch resolves
-/// rigExec:transform's phase from the legacy `rigExec:transformReadPhase`
-/// attribute and understands only "base" and "final" -- it has no AtPrim
-/// branch and never looks at the `rigExecReadPhase` metadata, so ANY AtPrim
-/// transform phase, solver-named or constraint-named, reads the base matrix
-/// there and disagrees with the graph. That gap predates solver stacking (no
-/// shipped rig authors an AtPrim transform phase, which is why it has never
-/// fired) and is not this change's to close; the baked parity harness below
-/// still judges every stacking fixture that carries no such phase.
+/// fixtures and only for them: the oracle's RigExecMatrixMover branch reads
+/// rigExec:transform's rigExecReadPhase as "base" or "final" only -- it has
+/// no AtPrim branch, so ANY AtPrim transform phase, solver-named or
+/// constraint-named, reads the base matrix there and disagrees with the
+/// graph. No shipped rig authors an AtPrim transform phase; the baked parity
+/// harness below still judges every stacking fixture that carries no such
+/// phase.
 RigExecRigPose
 Evaluate(const char *what, const UsdStageRefPtr &stage, double time,
          std::vector<std::string> *errors, bool parity = true,

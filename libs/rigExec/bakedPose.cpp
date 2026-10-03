@@ -532,7 +532,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // recompile when the count changes the frame cardinality.
             s.ribbonSampleCount = bind(prim, "rigExec:sampleCount", 5);
             // rigExec:parameterization, frameTransport, startFrame,
-            // endFrame, twistFrames and driverCurveReadPhase are
+            // endFrame and twistFrames are
             // deliberately NOT read: the computation does not read them
             // either -- they shape batching and the epoch digest -- and
             // folding one would rebuild the program for an edit that cannot

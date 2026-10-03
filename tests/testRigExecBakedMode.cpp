@@ -2071,12 +2071,12 @@ MakeAConstrainedVolumeRig()
                            SdfValueTypeNames->Float).Set(8.0f);
     sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
                            SdfValueTypeNames->Token).Set(TfToken("linear"));
-    // `current`, so the field is resolved by the oracle on both paths: a
-    // `reference` field on a constrained volume is the arm the dynamic
-    // path's own parity mode refuses, and this test is about the SLOT
-    // collision rather than about that.
-    sphere.CreateAttribute(TfToken("rigExec:samplePhase"),
-                           SdfValueTypeNames->Token).Set(TfToken("current"));
+    // `preceding`, so the field is resolved by the oracle on both paths: a
+    // `base` field on a constrained volume is the arm the dynamic path's own
+    // parity mode refuses, and this test is about the SLOT collision rather
+    // than about that.
+    sphere.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetMetadata(TfToken("rigExecReadPhase"), std::string("preceding"));
 
     // The constraint that moves the volume. This is the whole fixture.
     const UsdPrim move = stage->DefinePrim(
@@ -2232,15 +2232,21 @@ MakeAPoseWalkReadPhaseRig(const char *phase)
     const UsdRelationship transform =
         mover.CreateRelationship(TfToken("rigExec:transform"));
     transform.SetTargets({jointPath});
-    // The phase itself, as METADATA on the relationship rather than through
-    // the role-named attribute: rigExec:transformReadPhase is the v0.1
-    // spelling and admits only base and final, so a pose-walk point can only
-    // be said the general way. "A" is spelled as the constraint's own path
-    // because an AtPrim phase is an ABSOLUTE prim path and nothing else.
+    // The phase itself, as rigExecReadPhase metadata on the relationship.
+    // "A" is spelled as the constraint's own path because an AtPrim phase is
+    // an ABSOLUTE prim path and nothing else.
     const std::string authored = std::string(phase) == "atPrim"
                                      ? constraintA.GetPath().GetString()
                                      : std::string(phase);
     transform.SetMetadata(TfToken(RigExecReadPhaseMetadataName), authored);
+    // Bottom siblings run first. Constrain sits below Geometry, so both
+    // constraints run before the mover -- a `final` read of the joint is
+    // only satisfiable when no writer of it comes later in the stack -- and
+    // A sits below B, so A writes first and B last.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+        .SetChildrenReorder({TfToken("Geometry"), TfToken("Constrain")});
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Constrain"))
+        .SetChildrenReorder({TfToken("B"), TfToken("A")});
 
     // A SKIN mover with the same phase on rigExec:influences is deliberately
     // NOT here. Compile validates an AtPrim phase against

@@ -194,19 +194,11 @@ RigExecRelationshipTargets(const UsdPrim &prim, const char *rel)
 }
 
 RigExecReadPhase
-RigExecPhaseForInput(
-    const UsdPrim &moverPrim, const char *rel, const char *legacyAttr)
+RigExecPhaseForInput(const UsdPrim &moverPrim, const char *rel)
 {
     RigExecReadPhase phase;
     if (const UsdRelationship r = moverPrim.GetRelationship(TfToken(rel))) {
-        RigExecResolveReadPhase(r, legacyAttr, &phase, nullptr);
-    } else if (legacyAttr) {
-        // No relationship to hang metadata on, but the legacy attribute
-        // may still be authored.
-        if (const UsdAttribute a =
-                moverPrim.GetAttribute(TfToken(legacyAttr))) {
-            RigExecResolveReadPhase(a, legacyAttr, &phase, nullptr);
-        }
+        RigExecResolveReadPhase(r, &phase, nullptr);
     }
     return phase;
 }
@@ -218,15 +210,11 @@ RigExecReadPhasedPoints(
     UsdTimeCode time,
     const UsdPrim &prim,
     const char *relName,
-    const char *legacyAttr,
     const SdfPath &pointsPath,
     const SdfPath &readerMover,
     VtVec3fArray *out)
 {
-    RigExecReadPhase phase;
-    if (const UsdRelationship r = prim.GetRelationship(TfToken(relName))) {
-        RigExecResolveReadPhase(r, legacyAttr, &phase, nullptr);
-    }
+    const RigExecReadPhase phase = RigExecPhaseForInput(prim, relName);
     if (!phase.IsBase()) {
         if (const VtValue *v = snapshots.Lookup(
                 pointsPath, phase, readerMover)) {

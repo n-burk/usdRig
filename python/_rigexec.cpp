@@ -1526,8 +1526,6 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("paths"))
         .def("set_sample_count", &rigExec::RigExecRibbonHandle::SetSampleCount, py::arg("count"))
         .def("set_parameterization", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetParameterization(TfToken(v)); }, py::arg("mode"))
-        .def("set_driver_curve_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetDriverCurveReadPhase(TfToken(v)); }, py::arg("phase"))
-        .def("set_surface_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetSurfaceReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_joint_elements", [](rigExec::RigExecRibbonHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
 
     py::class_<rigExec::RigExecSplineIkHandle, rigExec::RigExecSolverHandle>(m, "SplineIk",
@@ -1720,7 +1718,7 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_falloff_curve", [](rigExec::RigExecVolumeWeightHandle &h, std::vector<std::pair<double, double>> knots) {
             h.SetFalloffCurve(knots);
         }, py::arg("knots"), "A list of (x, y) pairs over x in [0, 1].")
-        .def("set_sample_phase", [](rigExec::RigExecVolumeWeightHandle &h, std::string v) { h.SetSamplePhase(TfToken(v)); }, py::arg("phase"))
+        .def("set_read_phase", [](rigExec::RigExecVolumeWeightHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_sample_source", [](rigExec::RigExecVolumeWeightHandle &h, py::object p) {
             h.SetSampleSource(_PythonToDependencyPath(p, h.GetStage()));
         }, py::arg("path"));

@@ -436,7 +436,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
                     snapshot.Get<RigExecWeightPacket>(revision.weightTap);
                 values.weights = &weights;
 
-                // rigExec:samplePhase = "current": the field is measured
+                // A volume weight reading `preceding` on
+                // rigExec:weightTarget: the field is measured
                 // against the points AS THEY STAND HERE, not the
                 // authored base, so the volume grabs whatever is inside
                 // it right now.

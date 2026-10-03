@@ -986,9 +986,6 @@ class RigExecRibbon "RigExecRibbon" (
         }
     )
     rel rigExec:driverCurve
-    uniform token rigExec:driverCurveReadPhase = "base" (
-        allowedTokens = ["base", "final"]
-    )
     rel rigExec:endFrame
     uniform token rigExec:frameTransport = "rotationMinimizing" (
         allowedTokens = ["rotationMinimizing"]
@@ -1010,9 +1007,6 @@ class RigExecRibbon "RigExecRibbon" (
     )
     uniform int rigExec:sampleCount = 5
     rel rigExec:startFrame
-    uniform token rigExec:surfaceReadPhase = "base" (
-        allowedTokens = ["base", "final"]
-    )
     rel rigExec:twistFrames
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
@@ -2227,21 +2221,6 @@ class "RigExecVolumeWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure\r
@@ -2250,7 +2229,11 @@ class "RigExecVolumeWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+        domain.\r
+\r
+        Its rigExecReadPhase metadata chooses which points the distance\r
+        function measures."""
         }
     )
     token visibility = "inherited" (
@@ -2478,21 +2461,6 @@ class RigExecSphereWeight "RigExecSphereWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure\r
@@ -2501,7 +2469,11 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+        domain.\r
+\r
+        Its rigExecReadPhase metadata chooses which points the distance\r
+        function measures."""
         }
     )
     token visibility = "inherited" (
@@ -2728,21 +2700,6 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure\r
@@ -2751,7 +2708,11 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+        domain.\r
+\r
+        Its rigExecReadPhase metadata chooses which points the distance\r
+        function measures."""
         }
     )
     token visibility = "inherited" (
@@ -2958,21 +2919,6 @@ class RigExecCurveWeight "RigExecCurveWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure\r
@@ -2981,7 +2927,11 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+        domain.\r
+\r
+        Its rigExecReadPhase metadata chooses which points the distance\r
+        function measures."""
         }
     )
     token visibility = "inherited" (
@@ -3097,9 +3047,6 @@ class RigExecMatrixMover "RigExecMatrixMover" (
             string userDocBrief = "Exactly one GfMatrix4d provider (computeMatrix)."
         }
     )
-    uniform token rigExec:transformReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-    )
     rel rigExec:transformSpace (
         customData = {
             string userDocBrief = """Optional second provider the transform is measured against:\r
@@ -3160,12 +3107,6 @@ class RigExecSkinMover "RigExecSkinMover" (
     uniform token rigExec:skinningMethod = "classicLinear" (
         allowedTokens = ["classicLinear", "dualQuaternion"]
     )
-    uniform token rigExec:transformReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-        customData = {
-            string userDocBrief = "Which revision of every influence's matrix is read."
-        }
-    )
 }
 
 class RigExecBlendShapeMover "RigExecBlendShapeMover" (
@@ -3213,9 +3154,6 @@ class RigExecBlendSample "RigExecBlendSample" (
         expresses as a full moved-points array, stored as only the points that\r
         move."""
         }
-    )
-    uniform token rigExec:pointsReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
     )
     rel rigExec:targetPoints (
         customData = {
@@ -3456,9 +3394,6 @@ class RigExecCurveMover "RigExecCurveMover" (
         }
     )
     rel rigExec:driverCurve
-    uniform token rigExec:driverCurveReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-    )
     uniform token rigExec:driverDeltaFrame = "local" (
         allowedTokens = ["local", "posed"]
         customData = {
@@ -3488,7 +3423,8 @@ class RigExecCurveMover "RigExecCurveMover" (
         the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the\r
         parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)\r
         per point from rigExec:bindCoordinates, C the curve's posed control\r
-        points at rigExec:driverCurveReadPhase and C0 its authored ones."""
+        points at rigExec:driverCurve's read phase and C0 its authored\r
+        ones."""
         }
     )
     uniform token rigExec:pointFrame = "rest" (
@@ -3505,12 +3441,6 @@ class RigExecCurveMover "RigExecCurveMover" (
         customData = {
             string userDocBrief = """wire: the prim whose movement away from its rest carries\r
         the whole rig -- normally a TRS master."""
-        }
-    )
-    uniform token rigExec:transformReadPhase = "base" (
-        allowedTokens = ["base", "final"]
-        customData = {
-            string userDocBrief = "wire: which revision of the driver transforms is read."
         }
     )
 }
@@ -3562,9 +3492,6 @@ class RigExecLatticeMover "RigExecLatticeMover" (
             string userDocBrief = "Native mesh/points prim supplying cage control points."
         }
     )
-    uniform token rigExec:cageReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-    )
     int3 rigExec:divisions = (2, 2, 2)
 }
 
@@ -3583,9 +3510,6 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
         customData = {
             string userDocBrief = "Native mesh prim supplying the driver surface."
         }
-    )
-    uniform token rigExec:surfaceReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
     )
 }
 

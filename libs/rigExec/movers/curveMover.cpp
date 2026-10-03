@@ -97,9 +97,7 @@ _BindCurveMover(const rigExec::RigExecMoverBindContext &ctx)
         binding.driverCurveKnots =
             curvePrim.AppendProperty(TfToken("knots"));
         const rigExec::RigExecReadPhase phase =
-            rigExec::RigExecPhaseForInput(
-                moverPrim, "rigExec:driverCurve",
-                "rigExec:driverCurveReadPhase");
+            rigExec::RigExecPhaseForInput(moverPrim, "rigExec:driverCurve");
         if (!phase.IsBase()) {
             binding.phases[binding.driverCurvePoints] = phase;
         }
@@ -113,8 +111,7 @@ _BindCurveMover(const rigExec::RigExecMoverBindContext &ctx)
             moverPrim, "rigExec:driverTransforms");
     if (!driverTransforms.empty()) {
         binding.transformPhase = rigExec::RigExecPhaseForInput(
-            moverPrim, "rigExec:driverTransforms",
-            "rigExec:transformReadPhase");
+            moverPrim, "rigExec:driverTransforms");
         const auto provider = [&](SdfPath path) {
             if (binding.transformPhase.kind ==
                 rigExec::RigExecReadPhaseKind::Final) {
@@ -163,7 +160,7 @@ _BindCurveMover(const rigExec::RigExecMoverBindContext &ctx)
     if (!binding.bindCoords.IsEmpty()) {
         const rigExec::RigExecReadPhase phase =
             rigExec::RigExecPhaseForInput(
-                moverPrim, "rigExec:bindCoordinates", nullptr);
+                moverPrim, "rigExec:bindCoordinates");
         if (!phase.IsBase()) {
             binding.phases[binding.bindCoords] = phase;
         }
@@ -218,7 +215,6 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         if (driverTransforms.empty()) {
             rigExec::RigExecReadPhasedPoints(
                 stage, ctx.snapshots, time, prim, "rigExec:driverCurve",
-                "rigExec:driverCurveReadPhase",
                 curvePrim.AppendProperty(TfToken("points")), moverPath,
                 &posedCvs);
         }
@@ -244,14 +240,12 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         if (!driverTransforms.empty()) {
             // Independently of the assembler: the providers' own
             // matrices, measured and weighted per control point.
-            TfToken phase("base");
-            if (const UsdAttribute a = prim.GetAttribute(
-                    TfToken("rigExec:transformReadPhase"))) {
-                a.Get(&phase);
-            }
-            const auto &matrices = phase == "final"
-                                       ? ctx.finalProviderMatrices
-                                       : ctx.baseProviderMatrices;
+            const bool final =
+                rigExec::RigExecPhaseForInput(
+                    prim, "rigExec:driverTransforms").kind ==
+                rigExec::RigExecReadPhaseKind::Final;
+            const auto &matrices = final ? ctx.finalProviderMatrices
+                                         : ctx.baseProviderMatrices;
             VtFloatArray weights, baseWeights;
             if (const UsdAttribute a = prim.GetAttribute(
                     TfToken("inputs:driverWeights"))) {

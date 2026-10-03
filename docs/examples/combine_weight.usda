@@ -170,8 +170,9 @@ def Xform "CombineAsset"
                 )
                 {
                     rel rigExec:moves = </CombineAsset/Geom/Panel.points>
-                    rel rigExec:transform = </CombineAsset/Rig/Joints/Jnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </CombineAsset/Rig/Joints/Jnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </CombineAsset/Rig/Weights/Union>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

@@ -147,8 +147,9 @@ def Xform "EyesAsset"
                 )
                 {
                     rel rigExec:moves = </EyesAsset/Geom/EyeCardL.points>
-                    rel rigExec:transform = </EyesAsset/Rig/Joints/EyeL>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </EyesAsset/Rig/Joints/EyeL> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </EyesAsset/Rig/Weights/EyeLW>
                     uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
                 }
@@ -158,8 +159,9 @@ def Xform "EyesAsset"
                 )
                 {
                     rel rigExec:moves = </EyesAsset/Geom/EyeCardR.points>
-                    rel rigExec:transform = </EyesAsset/Rig/Joints/EyeR>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </EyesAsset/Rig/Joints/EyeR> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </EyesAsset/Rig/Weights/EyeRW>
                     uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
                 }

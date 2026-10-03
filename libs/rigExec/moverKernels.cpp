@@ -150,7 +150,6 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((planeAxisAttr, "rigExec:planeAxis"))
     ((planeBoundsAttr, "rigExec:planeBounds"))
     ((combineModeAttr, "rigExec:combineMode"))
-    ((samplePhaseAttr, "rigExec:samplePhase"))
 );
 
 namespace {

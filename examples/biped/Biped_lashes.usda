@@ -77,8 +77,9 @@ over "Biped"
                 )
                 {
                     custom rel rigExec:moves = </Biped/Geom/lash_upper_l_proxy.points>
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/lashes/blinkLower_l_cluster_on_lash_upper_l_proxy>
@@ -89,8 +90,9 @@ over "Biped"
                 )
                 {
                     custom rel rigExec:moves = </Biped/Geom/lash_upper_l_proxy.points>
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/lashes/blinkUpper_l_cluster_on_lash_upper_l_proxy>
@@ -101,8 +103,9 @@ over "Biped"
                 )
                 {
                     custom rel rigExec:moves = </Biped/Geom/lash_upper_l_proxy.points>
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketStretch_l_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketStretch_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/lashes/socketStretch_l_cluster_on_lash_upper_l_proxy>
@@ -113,8 +116,9 @@ over "Biped"
                 )
                 {
                     custom rel rigExec:moves = </Biped/Geom/lash_upper_r_proxy.points>
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/lashes/blinkLower_r_cluster_on_lash_upper_r_proxy>
@@ -125,8 +129,9 @@ over "Biped"
                 )
                 {
                     custom rel rigExec:moves = </Biped/Geom/lash_upper_r_proxy.points>
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/lashes/blinkUpper_r_cluster_on_lash_upper_r_proxy>
@@ -137,8 +142,9 @@ over "Biped"
                 )
                 {
                     custom rel rigExec:moves = </Biped/Geom/lash_upper_r_proxy.points>
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketStretch_r_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketStretch_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/lashes/socketStretch_r_cluster_on_lash_upper_r_proxy>

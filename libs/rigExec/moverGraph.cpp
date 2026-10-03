@@ -1230,7 +1230,6 @@ RigExecParseReadPhase(
 bool
 RigExecResolveReadPhase(
     const UsdObject &property,
-    const char *legacyAttribute,
     RigExecReadPhase *phase,
     std::string *error)
 {
@@ -1241,44 +1240,19 @@ RigExecResolveReadPhase(
     if (!property.IsValid()) {
         return true;
     }
-
-    // Metadata on the property itself wins: it is the most specific place the
-    // phase can be said, and the only one that works for an input with no
-    // schema attribute of its own.
     std::string authored;
-    if (property.GetMetadata(TfToken(RigExecReadPhaseMetadataName),
-                             &authored) &&
-        !authored.empty()) {
-        std::string why;
-        if (!RigExecParseReadPhase(authored, phase, &why)) {
-            if (error) {
-                *error = property.GetPath().GetString() + ": " +
-                         RigExecReadPhaseMetadataName + " " + why;
-            }
-            return false;
-        }
+    if (!property.GetMetadata(TfToken(RigExecReadPhaseMetadataName),
+                              &authored) ||
+        authored.empty()) {
         return true;
     }
-
-    // Then the role-named schema attribute, so every asset authored before the
-    // metadata existed keeps meaning exactly what it meant.
-    if (legacyAttribute) {
-        const UsdPrim owner = property.GetPrim();
-        if (const UsdAttribute a =
-                owner.GetAttribute(TfToken(legacyAttribute))) {
-            TfToken value;
-            if (a.Get(&value) && !value.IsEmpty()) {
-                std::string why;
-                if (!RigExecParseReadPhase(value.GetString(), phase, &why)) {
-                    if (error) {
-                        *error = owner.GetPath().GetString() + ": " +
-                                 legacyAttribute + " " + why;
-                    }
-                    return false;
-                }
-                return true;
-            }
+    std::string why;
+    if (!RigExecParseReadPhase(authored, phase, &why)) {
+        if (error) {
+            *error = property.GetPath().GetString() + ": " +
+                     RigExecReadPhaseMetadataName + " " + why;
         }
+        return false;
     }
     return true;
 }

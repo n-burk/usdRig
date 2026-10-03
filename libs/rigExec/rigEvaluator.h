@@ -706,9 +706,9 @@ private:
     ///
     /// \p currentPoints, when non-null, are the IN-FLIGHT points at the
     /// consuming operation's position in the mover stack. A volumetric
-    /// weight whose rigExec:samplePhase is `current` measures against
+    /// weight whose rigExec:weightTarget reads `preceding` measures against
     /// those; everything else ignores them and reads the authored base.
-    /// Passing null where `current` was authored is an error rather than
+    /// Passing null where `preceding` was authored is an error rather than
     /// a silent fall back to the base, because the two fields differ and
     /// quietly publishing the wrong one is exactly the failure the
     /// parity harness exists to catch.
@@ -2066,7 +2066,7 @@ private:
     /// the next epoch.
     std::vector<RigExecValueOverride> _falloffLutOverrides;
 
-    /// Volume weight objects whose rigExec:samplePhase is `current`,
+    /// Volume weight objects whose rigExec:weightTarget reads `preceding`,
     /// which have to measure the IN-FLIGHT points at their own position
     /// in the mover stack rather than the authored base.
     std::set<SdfPath> _currentPhaseWeights;

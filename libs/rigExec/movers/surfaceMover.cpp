@@ -60,8 +60,7 @@ _BindSurfaceMover(const rigExec::RigExecMoverBindContext &ctx)
         binding.surfacePoints =
             surfacePrim.AppendProperty(TfToken("points"));
         const rigExec::RigExecReadPhase phase =
-            rigExec::RigExecPhaseForInput(
-                moverPrim, "rigExec:surface", "rigExec:surfaceReadPhase");
+            rigExec::RigExecPhaseForInput(moverPrim, "rigExec:surface");
         if (!phase.IsBase()) {
             binding.phases[binding.surfacePoints] = phase;
         }
@@ -95,7 +94,6 @@ _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
     VtIntArray counts, indices;
     rigExec::RigExecReadPhasedPoints(
         stage, ctx.snapshots, time, prim, "rigExec:surface",
-        "rigExec:surfaceReadPhase",
         surfacePrim.AppendProperty(TfToken("points")), moverPath,
         &surfacePoints);
     if (const UsdPrim s = stage->GetPrimAtPath(surfacePrim)) {

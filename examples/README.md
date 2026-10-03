@@ -192,9 +192,8 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
   a grouping `Scope` means "after everything beneath it", because post-order
   visits a parent last. The field is `rigExecReadPhase`, not
   `rigExec:readPhase`: USD metadata names take no namespace, and metadata
-  follows the target assignment rather than preceding it. The older
-  role-named attributes (`rigExec:cageReadPhase`, …) still work; metadata
-  wins when both are authored. Editing a phase is structural. Chains are
+  follows the target assignment rather than preceding it. It is the only
+  way to declare a phase; there is no role-named attribute. Editing a phase is structural. Chains are
   evaluated in dependency order and a cyclic phase read fails the compile.
   Bind-time (rest) reads always take the authored value — a phase has no
   meaning for the neutral pose a deformation is measured against.

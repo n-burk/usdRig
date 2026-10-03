@@ -955,11 +955,13 @@ TestBlendDeltasUseBase()
 
     // A static sample has identical base/final/preceding values. Phase edits
     // remain valid and preserve that result without rebuilding point nodes.
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("final"));
+    sample.GetRelationship(TfToken("rigExec:targetPoints"))
+        .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("final"));
     const auto finalSample = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(finalSample.valid);
     CHECK(finalSample.moverGraphRevisionsCreated == 0);
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("base"));
+    sample.GetRelationship(TfToken("rigExec:targetPoints"))
+        .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("base"));
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
     sample.GetRelationship(TfToken("rigExec:targetPoints"))
         .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("preceding"));

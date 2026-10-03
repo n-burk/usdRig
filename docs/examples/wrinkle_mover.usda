@@ -777,8 +777,9 @@ def RigExecRoot "Rig"
             )
             {
                 rel rigExec:moves = </Rig/Cloth.points>
-                rel rigExec:transform = </Rig/Controls/Compression>
-                uniform token rigExec:transformReadPhase = "final"
+                rel rigExec:transform = </Rig/Controls/Compression> (
+                    rigExecReadPhase = "final"
+                )
                 float inputs:defaultWeight = 1
             }
         }

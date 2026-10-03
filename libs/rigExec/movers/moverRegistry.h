@@ -257,11 +257,10 @@ RigExecPointsOf(const SdfPath &path)
     return path.IsPrimPath() ? path.AppendProperty(TfToken("points")) : path;
 }
 
-/// The read phase declared for the input \p rel names: metadata on the
-/// relationship first, then the legacy attribute, then Base. See
-/// RigExecResolveReadPhase.
+/// The read phase declared for the input \p rel names: the relationship's
+/// rigExecReadPhase metadata, or Base. See RigExecResolveReadPhase.
 RigExecReadPhase RigExecPhaseForInput(
-    const UsdPrim &moverPrim, const char *rel, const char *legacyAttr);
+    const UsdPrim &moverPrim, const char *rel);
 
 /// The oracle's phased read, as a free function: resolves the phase for
 /// the input \p relName names and reads the recorded snapshot for it, or
@@ -275,7 +274,6 @@ void RigExecReadPhasedPoints(
     UsdTimeCode time,
     const UsdPrim &prim,
     const char *relName,
-    const char *legacyAttr,
     const SdfPath &pointsPath,
     const SdfPath &readerMover,
     VtVec3fArray *out);

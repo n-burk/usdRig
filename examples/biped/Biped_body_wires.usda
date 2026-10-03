@@ -130,7 +130,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow/M_HeadwireTop>,
                         </Biped/Rig/Main/Shot/Aux/Controls/headwire_mid_follow/M_HeadwireMid>,
                         </Biped/Rig/Main/Shot/Aux/Controls/headwire_low_follow/M_HeadwireLow>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/headwire_top_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/headwire_mid_follow>,
@@ -140,7 +142,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/bodyWires/head_wire>
                 }
             }
@@ -161,7 +162,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/spine_bend_2_follow/M_SpineBend2>,
                         </Biped/Rig/Main/Shot/Aux/Controls/spine_bend_3_follow/M_SpineBend3>,
                         </Biped/Rig/Main/Shot/Aux/Controls/spine_curve_anchor_4_follow>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/spine_curve_anchor_0_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/spine_bend_1_follow>,
@@ -173,7 +176,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "posed"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/bodyWires/spine_curve_wire>
                 }
             }

@@ -164,8 +164,9 @@ def Xform "TouchAsset"
                 )
                 {
                     rel rigExec:moves = </TouchAsset/Geom/Skin.points>
-                    rel rigExec:transform = </TouchAsset/Rig/Joints/Seg1>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </TouchAsset/Rig/Joints/Seg1> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </TouchAsset/Rig/Weights/Seg1W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -175,8 +176,9 @@ def Xform "TouchAsset"
                 )
                 {
                     rel rigExec:moves = </TouchAsset/Geom/Skin.points>
-                    rel rigExec:transform = </TouchAsset/Rig/Joints/Seg1/Seg2>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </TouchAsset/Rig/Joints/Seg1/Seg2> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </TouchAsset/Rig/Weights/Seg2W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -186,8 +188,9 @@ def Xform "TouchAsset"
                 )
                 {
                     rel rigExec:moves = </TouchAsset/Geom/Skin.points>
-                    rel rigExec:transform = </TouchAsset/Rig/Joints/Seg1/Seg2/Seg3>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </TouchAsset/Rig/Joints/Seg1/Seg2/Seg3> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </TouchAsset/Rig/Weights/Seg3W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

@@ -93,16 +93,11 @@ RigExecIsDerivedMatrixOp(RigExecRevisionOp op)
 
 /// When in the walk a side input takes its value from.
 ///
-/// A mover reads things other movers write. Which REVISION of those things it
-/// gets is a separate authored choice from which path it reads, and the two
-/// were never expressible together: a read phase had to be a schema attribute
-/// named for one specific role (rigExec:cageReadPhase, rigExec:surfaceRead-
-/// Phase, ...), so every new input needed a new attribute and an input with no
-/// attribute of its own had no way to say anything at all.
-///
-/// Declaring it as metadata ON the relationship or attribute that names the
-/// input puts the phase where the binding is, so any input can carry one and
-/// nothing has to be added to a schema to introduce another.
+/// A mover or solver reads things other operators write. Which REVISION of
+/// those things it gets is a separate authored choice from which path it
+/// reads, declared as rigExecReadPhase metadata ON the relationship that
+/// names the input: the phase sits where the binding is, so any input can
+/// carry one and no schema attribute is needed to introduce another.
 enum class RigExecReadPhaseKind {
     Base,       ///< the authored value: what the stage resolves at this time
     Preceding,  ///< the value immediately before the reading mover
@@ -146,15 +141,14 @@ inline constexpr const char *RigExecReadPhaseMetadataName = "rigExecReadPhase";
 bool RigExecParseReadPhase(
     const std::string &authored, RigExecReadPhase *phase, std::string *error);
 
-/// The read phase declared for \p property, if any.
+/// The read phase declared for \p property: its rigExecReadPhase metadata,
+/// or Base when none is authored.
 ///
-/// Metadata first, then \p legacyAttribute on the property's own prim (the
-/// rigExec:<role>ReadPhase attributes, still honored so existing assets keep
-/// working), then Base. Returns false and fills \p error on an unparseable
-/// authored value; an absent declaration is Base and true.
+/// Metadata is the only way to declare one; no schema attribute stands in
+/// for it. Returns false and fills \p error on an unparseable authored
+/// value; an absent declaration is Base and true.
 bool RigExecResolveReadPhase(
     const UsdObject &property,
-    const char *legacyAttribute,
     RigExecReadPhase *phase,
     std::string *error);
 

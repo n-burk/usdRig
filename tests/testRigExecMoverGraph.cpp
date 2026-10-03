@@ -292,8 +292,9 @@ TestSkinBindingAndAssembly()
 
     // "final" rebinding applies to every influence, as it does for the
     // matrix mover's one.
-    mover.CreateAttribute(TfToken("rigExec:transformReadPhase"),
-                          SdfValueTypeNames->Token).Set(TfToken("final"));
+    mover.GetRelationship(TfToken("rigExec:influences"))
+        .SetMetadata(TfToken(rigExec::RigExecReadPhaseMetadataName),
+                     std::string("final"));
     const RigExecRevisionBinding finalBinding = RigExecResolveRevisionBinding(
         mover, target,
         {{SdfPath("/Asset/Rig/Joints/A"), SdfPath("/Asset/Rig/Heads/A")}});
@@ -616,9 +617,9 @@ TestRevisionBindingResolution()
         CHECK(b.weightObject == SdfPath("/Asset/Rig/Weights/W"));
 
         // "final" swaps in the provider's frame-chain head instead.
-        mover.CreateAttribute(TfToken("rigExec:transformReadPhase"),
-                              SdfValueTypeNames->Token)
-            .Set(TfToken("final"));
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetMetadata(TfToken(rigExec::RigExecReadPhaseMetadataName),
+                         std::string("final"));
         const std::map<SdfPath, SdfPath> heads = {
             {SdfPath("/Asset/Rig/Joints/J"), SdfPath("/Asset/Gen/Head")}};
         const RigExecRevisionBinding f =

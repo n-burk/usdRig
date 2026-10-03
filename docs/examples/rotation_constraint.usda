@@ -104,8 +104,9 @@ def Xform "RotationAsset"
                 )
                 {
                     rel rigExec:moves = </RotationAsset/Geom/PanelCard.points>
-                    rel rigExec:transform = </RotationAsset/Rig/Joints/Panel>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </RotationAsset/Rig/Joints/Panel> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </RotationAsset/Rig/Weights/PanelW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

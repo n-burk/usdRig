@@ -139,8 +139,9 @@ def Xform "PropMathAsset"
                 prepend apiSchemas = ["RigExecMoverAPI"]
             )
             {
-                rel rigExec:transform = </PropMathAsset/Rig/Joints/Root>
-                uniform token rigExec:transformReadPhase = "final"
+                rel rigExec:transform = </PropMathAsset/Rig/Joints/Root> (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:weightObject = </PropMathAsset/Rig/Weights/CardW>
                 rel rigExec:moves = </PropMathAsset/Geom/Card.points>
             }

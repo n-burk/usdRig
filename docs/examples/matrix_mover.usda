@@ -61,8 +61,9 @@ def Xform "MatrixAsset"
             {
                 float inputs:defaultWeight = 1
                 rel rigExec:moves = </MatrixAsset/Geom/Card.points>
-                rel rigExec:transform = </MatrixAsset/Rig/Controls/Carrier>
-                uniform token rigExec:transformReadPhase = "final"
+                rel rigExec:transform = </MatrixAsset/Rig/Controls/Carrier> (
+                    rigExecReadPhase = "final"
+                )
                 uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
             }
         }

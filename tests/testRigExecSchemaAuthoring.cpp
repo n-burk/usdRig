@@ -316,12 +316,14 @@ TestReadPhaseMetadataAndRetypeGuard(const UsdStageRefPtr &stage)
 {
     RigExecSchemaPrim mover = RigExecSchemaPrim::Get(
         stage, SdfPath("/Rig/Mover"), TfToken("RigExecMatrixMover"));
-    mover.SetAttribute(
-        TfToken("rigExec:transformReadPhase"), VtValue(TfToken("base")));
+    // The read phase is metadata only: the role-named attribute is gone.
+    CHECK(Throws([&] {
+        mover.SetAttribute(
+            TfToken("rigExec:transformReadPhase"), VtValue(TfToken("final")));
+    }));
     mover.SetReadPhase(TfToken("rigExec:transform"), "final");
-    mover.SetReadPhase(
-        TfToken("rigExec:transformReadPhase"),
-        "/Rig/Movers/Previous");
+    // Any declared property can carry the field, attributes included.
+    mover.SetReadPhase(TfToken("rigExec:weightBlend"), "/Rig/Movers/Previous");
 
     std::string phase;
     CHECK(mover.GetPrim()
@@ -329,7 +331,7 @@ TestReadPhaseMetadataAndRetypeGuard(const UsdStageRefPtr &stage)
               .GetMetadata(TfToken("rigExecReadPhase"), &phase));
     CHECK(phase == "final");
     CHECK(mover.GetPrim()
-              .GetAttribute(TfToken("rigExec:transformReadPhase"))
+              .GetAttribute(TfToken("rigExec:weightBlend"))
               .GetMetadata(TfToken("rigExecReadPhase"), &phase));
     CHECK(phase == "/Rig/Movers/Previous");
 

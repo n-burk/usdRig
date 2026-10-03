@@ -116,11 +116,6 @@ bool RigExecSceneDb::ValidateCapabilities(std::string *error) const
     for (const auto &[path, attr] : attributes) {
         if (!baseMetadata(attr.metadata))
             return fail("does not lower input read phases: " + path.GetString());
-        if (path.GetNameToken() == "rigExec:pointsReadPhase") {
-            for (const auto &[identity, value] : attr.resolved)
-                if (!basePhase(value))
-                    return fail("does not lower blend target read phases: " + path.GetString());
-        }
     }
     for (const auto &[path, rel] : relationships) {
         // rigExec:joints is NOT rejected. It carries two meanings and only

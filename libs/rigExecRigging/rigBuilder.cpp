@@ -648,22 +648,6 @@ RigExecRibbonHandle::SetParameterization(const TfToken &mode)
 }
 
 void
-RigExecRibbonHandle::SetDriverCurveReadPhase(const TfToken &phase)
-{
-    _AuthorAttr(
-        GetPrim(), "rigExec:driverCurveReadPhase", SdfValueTypeNames->Token,
-        VtValue(phase));
-}
-
-void
-RigExecRibbonHandle::SetSurfaceReadPhase(const TfToken &phase)
-{
-    _AuthorAttr(
-        GetPrim(), "rigExec:surfaceReadPhase", SdfValueTypeNames->Token,
-        VtValue(phase));
-}
-
-void
 RigExecRibbonHandle::SetJointElements(const std::vector<int> &elements)
 {
     // Explicit VtIntArray payload (see TwistDistribution above).
@@ -1327,10 +1311,13 @@ RigExecVolumeWeightHandle::SetFalloffCurve(
 }
 
 void
-RigExecVolumeWeightHandle::SetSamplePhase(const TfToken &phase)
+RigExecVolumeWeightHandle::SetReadPhase(const TfToken &phase)
 {
-    _AuthorAttr(
-        GetPrim(), "rigExec:samplePhase", SdfValueTypeNames->Token, VtValue(phase));
+    if (phase.IsEmpty()) {
+        throw std::invalid_argument("volume weight read phase must not be empty");
+    }
+    _Schema(GetPrim()).SetReadPhase(
+        TfToken("rigExec:weightTarget"), phase.GetString());
 }
 
 void
@@ -1735,9 +1722,7 @@ RigExecMatrixMoverHandle::SetReadPhase(const TfToken &phase)
     if (phase.IsEmpty()) {
         throw std::invalid_argument("matrix mover read phase must not be empty");
     }
-    _AuthorAttr(
-        GetPrim(), "rigExec:transformReadPhase", SdfValueTypeNames->Token,
-        VtValue(phase));
+    RigExecMoverHandle::SetReadPhase(TfToken("rigExec:transform"), phase.GetString());
 }
 
 void
@@ -1808,9 +1793,7 @@ RigExecSkinMoverHandle::SetReadPhase(const TfToken &phase)
     if (phase.IsEmpty()) {
         throw std::invalid_argument("skin mover read phase must not be empty");
     }
-    _AuthorAttr(
-        GetPrim(), "rigExec:transformReadPhase", SdfValueTypeNames->Token,
-        VtValue(phase));
+    RigExecMoverHandle::SetReadPhase(TfToken("rigExec:influences"), phase.GetString());
 }
 
 void
@@ -1843,9 +1826,7 @@ RigExecLatticeMoverHandle::SetReadPhase(const TfToken &phase)
     if (phase.IsEmpty()) {
         throw std::invalid_argument("lattice mover read phase must not be empty");
     }
-    _AuthorAttr(
-        GetPrim(), "rigExec:cageReadPhase", SdfValueTypeNames->Token,
-        VtValue(phase));
+    RigExecMoverHandle::SetReadPhase(TfToken("rigExec:cage"), phase.GetString());
 }
 
 RigExecBlendInputHandle
@@ -1915,9 +1896,7 @@ RigExecCurveMoverHandle::SetReadPhase(const TfToken &phase)
     if (phase.IsEmpty()) {
         throw std::invalid_argument("curve mover read phase must not be empty");
     }
-    _AuthorAttr(
-        GetPrim(), "rigExec:driverCurveReadPhase", SdfValueTypeNames->Token,
-        VtValue(phase));
+    RigExecMoverHandle::SetReadPhase(TfToken("rigExec:driverCurve"), phase.GetString());
 }
 
 void
@@ -1942,9 +1921,7 @@ RigExecSurfaceMoverHandle::SetReadPhase(const TfToken &phase)
     if (phase.IsEmpty()) {
         throw std::invalid_argument("surface mover read phase must not be empty");
     }
-    _AuthorAttr(
-        GetPrim(), "rigExec:surfaceReadPhase", SdfValueTypeNames->Token,
-        VtValue(phase));
+    RigExecMoverHandle::SetReadPhase(TfToken("rigExec:surface"), phase.GetString());
 }
 
 void

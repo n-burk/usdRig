@@ -112,8 +112,9 @@ def Xform "PositionAsset"
                 )
                 {
                     rel rigExec:moves = </PositionAsset/Geom/Plate.points>
-                    rel rigExec:transform = </PositionAsset/Rig/Joints/Slide>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </PositionAsset/Rig/Joints/Slide> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </PositionAsset/Rig/Weights/PlateW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
