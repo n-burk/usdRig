@@ -1310,6 +1310,78 @@ _FrozenDerived(_FrozenWorker *worker, RigExecBakedStep *step,
     if (!chain.haveResult || !derived.haveBase) {
         return true;
     }
+    if (derived.matrixTarget) {
+        // RigExecReadProjectorTarget's reads, replayed from their samples,
+        // then the same RigExecRunProjectorTarget the live paths run.
+        const auto sampleOf = [&](const SdfPath &path)
+            -> const RigExecSampledInput * {
+            const auto found = index.find(path);
+            if (found == index.end() || !inputs.values[found->second].hasValue) {
+                return nullptr;
+            }
+            return &inputs.values[found->second];
+        };
+        const SdfPath &moverPath = revision.moverPath;
+        RigExecProjectorReads reads;
+        if (revision.op == RigExecRevisionOp::ShaderDials) {
+            for (const SdfPath &dial : revision.binding.shaderDials) {
+                const RigExecSampledInput *sample = sampleOf(dial);
+                reads.dials.push_back(
+                    sample && sample->value.IsHolding<double>()
+                        ? sample->value.UncheckedGet<double>()
+                        : 0.0);
+            }
+        } else {
+            const auto vec = [&](const char *name, GfVec3d *out) {
+                if (const RigExecSampledInput *sample = sampleOf(
+                        moverPath.AppendProperty(TfToken(name)))) {
+                    if (sample->value.IsHolding<GfVec3d>()) {
+                        *out = sample->value.UncheckedGet<GfVec3d>();
+                    }
+                }
+            };
+            vec("rigExec:rayOrigin", &reads.rayOrigin);
+            vec("rigExec:rayDirection", &reads.rayDirection);
+            vec("rigExec:rayUp", &reads.rayUp);
+            if (const RigExecSampledInput *sample = sampleOf(
+                    moverPath.AppendProperty(
+                        TfToken("rigExec:shaderOffset")))) {
+                if (sample->value.IsHolding<GfMatrix4d>()) {
+                    reads.shaderOffset =
+                        sample->value.UncheckedGet<GfMatrix4d>();
+                }
+            }
+            if (const RigExecSampledInput *sample = sampleOf(
+                    moverPath.AppendProperty(
+                        TfToken("rigExec:projectionMode")))) {
+                TfToken mode;
+                if (_SampleHolds(sample->value, &mode)) {
+                    reads.reproject = mode == "reproject";
+                }
+            }
+            const auto ints = [&](const SdfPath &path, std::vector<int> *out) {
+                if (const RigExecSampledInput *sample = sampleOf(path)) {
+                    if (sample->value.IsHolding<VtIntArray>()) {
+                        const VtIntArray &held =
+                            sample->value.UncheckedGet<VtIntArray>();
+                        out->assign(held.begin(), held.end());
+                    }
+                }
+            };
+            ints(revision.binding.topologyCounts, &reads.faceVertexCounts);
+            ints(revision.binding.topologyIndices, &reads.faceVertexIndices);
+        }
+        step->counters.revisionsBuilt = 1;
+        derived.haveMatrix = RigExecRunProjectorTarget(
+            revision.op, revision.binding,
+            RigExecBakedProjectorFrames(B, revision), reads,
+            std::vector<GfVec3f>(chain.lastBase.begin(), chain.lastBase.end()),
+            std::vector<GfVec3f>(chain.result.begin(), chain.result.end()),
+            &derived.matrix, &step->diagnostics);
+        derived.haveResult = true;
+        step->counters.chainsBuilt = 1;
+        return true;
+    }
     RigExecMoverParameters parameters;
     if (!_AssembleDerivedPacket(revision, chain.result.cdata(),
                                 chain.result.size(), index, inputs,

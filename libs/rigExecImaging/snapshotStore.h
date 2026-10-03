@@ -110,7 +110,8 @@ struct RigExecPublishedPrim {
     GfMatrix4d xformBase{1.0};
 
     /// Constant matrix primvars the rig computed for this prim's shader.
-    /// See RigExecRigPose::shaderMatrices for why a primvar.
+    /// Matrix-valued `primvars:<name>` the rig moved on this prim, by
+    /// name: a shader's only per-evaluation channel into Storm.
     std::map<TfToken, GfMatrix4d> shaderMatrices;
 
     bool hasPoints = false;

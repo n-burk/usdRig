@@ -272,6 +272,27 @@ orientation is the joint orient the authored data removes from
 poseRotation, so a driver sitting at its rest measures as identity and
 the neutral pose reads 1.000 with the rig standing still.
 
+#### `rigExec:driverAttributes`
+
+*Relationship.*
+
+A NUMERIC driver: one to three float or double PROPERTIES --
+avars, usually -- read in order as the driver's position, in place of
+a transform's translation.
+
+This is what lets a corrective be driven by a dial rather than by
+something the rig moves: a breath, a squash amount, a shot-specific
+knob. Each pose carries the values it stands at in
+rigExec:translation and their width in rigExec:translationRadius, so
+the solve, the fit and the baked program are the ones the translation
+channel already had -- the only difference is where the position
+comes from.
+
+Authoring this makes rigExec:driver optional and measures no
+rotation: there is no frame to take one from. Up to three because
+that is what one position is; a corrective wanting more channels is
+two interpolators whose weights multiply.
+
 #### `rigExec:kernel`
 
 *Type:* `uniform token`. *Default:* `"gaussian"`.

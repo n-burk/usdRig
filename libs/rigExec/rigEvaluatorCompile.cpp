@@ -21,6 +21,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
+#include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdGeom/gprim.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/mesh.h"
@@ -2525,6 +2526,146 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             newGraphDerivedChains[pointsTarget].push_back(derived);
         }
     }
+    // Surface projectors (RigExecSurfaceProjector): derived MATRIX targets
+    // on the chain they ride, measured from that chain's final points the
+    // way normals and extent are. The shader matrix and the packed dials
+    // are each one target, published as a primvar of the surface and
+    // never authored back.
+    for (const _SurfaceProjectorRecord &projector : newSurfaceProjectors) {
+        const UsdPrim prim = _stage->GetPrimAtPath(projector.path);
+        const SdfPath meshPath = projector.target.GetPrimPath();
+        const UsdPrim mesh = _stage->GetPrimAtPath(meshPath);
+        if (!prim || !mesh || !UsdGeomMesh(mesh)) {
+            return fail(projector.path.GetString() +
+                        ": a surface projector must move one mesh's "
+                        "points", {projector.path});
+        }
+        if (!newGraphChains.count(projector.target)) {
+            TF_WARN("%s projects onto %s, which no mover deforms; it "
+                    "publishes nothing", projector.path.GetText(),
+                    meshPath.GetText());
+            continue;
+        }
+        // The mesh's own transform places the ray when the source names no
+        // sibling space. It is a stage transform the rig does not own, so
+        // it is captured here and must not vary over time.
+        for (UsdPrim p = mesh; p && !p.IsPseudoRoot(); p = p.GetParent()) {
+            if (const UsdGeomXformable xformable{p}) {
+                if (xformable.TransformMightBeTimeVarying()) {
+                    return fail(projector.path.GetString() +
+                                " projects onto " + meshPath.GetString() +
+                                ", whose transform is animated; a surface "
+                                "projector needs a static surface "
+                                "transform", {projector.path});
+                }
+            }
+        }
+        UsdGeomXformCache meshXforms(UsdTimeCode::Default());
+        const GfMatrix4d meshWorldInverse =
+            meshXforms.GetLocalToWorldTransform(mesh).GetInverse();
+        // Source, its sibling space and the rig's space, each at most one
+        // frame provider: bound as the transform, transformSpace and carry
+        // providers, which every evaluator already reads per phase.
+        const auto oneProvider = [&](const char *name, SdfPath *out) {
+            const SdfPathVector targets = getTargets(prim, name);
+            if (targets.size() > 1) {
+                return fail(projector.path.GetString() + " has more than "
+                            "one " + std::string(name), {projector.path});
+            }
+            if (!targets.empty()) {
+                if (!_IsFrameProvider(_stage->GetPrimAtPath(targets[0].GetPrimPath()))) {
+                    return fail(projector.path.GetString() + " " +
+                                std::string(name) + " target " +
+                                targets[0].GetString() +
+                                " is not a RigExec frame provider",
+                                {projector.path});
+                }
+                *out = targets[0].GetPrimPath();
+            }
+            return true;
+        };
+        _GraphRevision base;
+        base.moverPath = projector.path;
+        base.binding.moverPath = projector.path;
+        base.binding.base = projector.target;
+        base.binding.topologyCounts =
+            meshPath.AppendProperty(TfToken("faceVertexCounts"));
+        base.binding.topologyIndices =
+            meshPath.AppendProperty(TfToken("faceVertexIndices"));
+        base.binding.meshWorldInverse = meshWorldInverse;
+        if (!oneProvider("rigExec:sources", &base.binding.transform) ||
+            !oneProvider("rigExec:sourceSpace",
+                         &base.binding.transformSpace) ||
+            !oneProvider("rigExec:space", &base.binding.carrySpace)) {
+            return false;
+        }
+        const auto primvarTarget = [&](const char *attr,
+                                       const TfToken &fallback) {
+            TfToken name = fallback;
+            if (const UsdAttribute a = prim.GetAttribute(TfToken(attr))) {
+                a.Get(&name);
+            }
+            return name.IsEmpty()
+                       ? SdfPath()
+                       : meshPath.AppendProperty(
+                             TfToken("primvars:" + name.GetString()));
+        };
+        const SdfPath shaderTarget =
+            primvarTarget("rigExec:shaderPrimvar", TfToken("eyeProjector"));
+        if (!shaderTarget.IsEmpty()) {
+            _GraphRevision derived = base;
+            derived.target = shaderTarget;
+            derived.binding.target = shaderTarget;
+            derived.op = RigExecRevisionOp::SurfaceProjector;
+            const SdfPath providers[3] = {derived.binding.transform,
+                                          derived.binding.transformSpace,
+                                          derived.binding.carrySpace};
+            RigExecTapId *matrixTaps[3] = {&derived.transformTap,
+                                           &derived.transformSpaceTap,
+                                           &derived.carrySpaceTap};
+            for (int k = 0; k < 3; ++k) {
+                if (providers[k].IsEmpty()) continue;
+                *matrixTaps[k] = newTaps->Add(RigExecValueAddress::Prim(
+                    providers[k], TfToken("computeMatrix")));
+                derived.projectorRestTaps[k] = newTaps->Add(
+                    RigExecValueAddress::Prim(providers[k],
+                                              TfToken("computeRestFrame")));
+            }
+            newGraphDerivedChains[projector.target].push_back(derived);
+        }
+        const SdfPath dialTarget =
+            primvarTarget("rigExec:shaderDialPrimvar", TfToken());
+        if (!dialTarget.IsEmpty()) {
+            _GraphRevision derived = base;
+            derived.target = dialTarget;
+            derived.binding.target = dialTarget;
+            // Packs dial values only: no frames and no surface, so no mesh
+            // topology for the frame cache to sample with every frame.
+            derived.binding.transform = SdfPath();
+            derived.binding.transformSpace = SdfPath();
+            derived.binding.carrySpace = SdfPath();
+            derived.binding.topologyCounts = SdfPath();
+            derived.binding.topologyIndices = SdfPath();
+            derived.op = RigExecRevisionOp::ShaderDials;
+            for (const SdfPath &dial :
+                 getTargets(prim, "rigExec:shaderDialSources")) {
+                if (!dial.IsPropertyPath()) {
+                    return fail(projector.path.GetString() +
+                                " rigExec:shaderDialSources names " +
+                                dial.GetString() + ", not a property",
+                                {projector.path});
+                }
+                if (derived.binding.shaderDials.size() == 16) {
+                    TF_WARN("%s names more than sixteen shader dials; the "
+                            "rest do not fit the primvar",
+                            projector.path.GetText());
+                    break;
+                }
+                derived.binding.shaderDials.push_back(dial);
+            }
+            newGraphDerivedChains[projector.target].push_back(derived);
+        }
+    }
 
     compileBlocks.Next("SolverSchedule.PoseDag");
     // Compile one pose DAG. Constraints retain authored preceding order;
@@ -4239,7 +4380,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     _jointPaths = std::move(newJointPaths);
     _controlPaths = std::move(newControlPaths);
     _poseInterpolators = std::move(newPoseInterpolators);
-    _surfaceProjectors = std::move(newSurfaceProjectors);
 
     _poseWeightProperties.clear();
     for (const _PoseInterpolator &interpolator : _poseInterpolators) {

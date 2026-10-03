@@ -576,6 +576,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
             chains[c].derived[d].haveResult = chain.derived[d].haveResult;
             chains[c].derived[d].haveBase = chain.derived[d].haveBase;
             chains[c].derived[d].baseDirty = chain.derived[d].baseDirty;
+            chains[c].derived[d].matrix = chain.derived[d].matrix;
+            chains[c].derived[d].haveMatrix = chain.derived[d].haveMatrix;
         }
     }
     steps.resize(program.steps.size());
@@ -645,6 +647,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
             chain.derived[d].haveResult = chains[c].derived[d].haveResult;
             chain.derived[d].haveBase = chains[c].derived[d].haveBase;
             chain.derived[d].baseDirty = chains[c].derived[d].baseDirty;
+            chain.derived[d].matrix = chains[c].derived[d].matrix;
+            chain.derived[d].haveMatrix = chains[c].derived[d].haveMatrix;
         }
     }
     for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
@@ -776,6 +780,17 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                              " haveResult",
                          chains[c].derived[d].haveResult,
                          chain.derived[d].haveResult);
+            CompareValue(differences, &count,
+                         where + " derived " +
+                             chain.derived[d].target.GetString() +
+                             " haveMatrix",
+                         chains[c].derived[d].haveMatrix,
+                         chain.derived[d].haveMatrix);
+            if (!Same(chains[c].derived[d].matrix, chain.derived[d].matrix)) {
+                Differ(differences, &count,
+                       where + " derived " +
+                           chain.derived[d].target.GetString() + " matrix");
+            }
             CompareRevision(differences, &count,
                             where + " derived " +
                                 chain.derived[d].target.GetString(),

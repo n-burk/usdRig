@@ -231,6 +231,19 @@ Per-source translation offsets parallel to rigExec:sources.
 
 Per-source Euler rotation offsets parallel to rigExec:sources.
 
+#### `rigExec:blendShear`
+
+*Type:* `uniform bool`. *Default:* `false`.
+
+With all three inputs:affectScale axes on, blend the sources' SHEAR
+as well as their scale. Shear lives in the same linear block as
+scale, so a constraint that replaces scale from a clean source can
+still leave behind a shear the input inherited -- a chain stretched
+by a spline IK with volume preservation carries one down to every
+child. Off (the default) keeps the input's shear, which is the FBX
+behaviour. Ignored when any scale axis is masked off: shear mixes two
+axes at a time, so a partial mask has no meaningful share of it.
+
 ## Example
 
 A Prop joint is parented to the Hand control with a

@@ -14,6 +14,7 @@
 #include "pxr/base/gf/vec3i.h"
 
 #include <vector>
+#include "rigExecMath/surfaceProjectorKernel.h"
 
 namespace rigExec {
 
@@ -56,17 +57,6 @@ void RigExecApplyLaplacianSmooth(
     const std::vector<int> &faceVertexIndices,
     double strength);
 
-/// Where a ray meets a mesh, kept as the MATERIAL point it landed on: the
-/// corners of the fan triangle that won and the barycentric weights inside
-/// it. A hit is topology, not position, so the same hit evaluates on any
-/// point set that shares the mesh's topology -- the rest points, or the
-/// posed points -- and that is what lets a frame follow the surface's
-/// material instead of the line of the ray.
-struct RigExecSurfaceHit {
-    int a = -1, b = -1, c = -1;  ///< corners of the winning triangle
-    double u = 0.0, v = 0.0;     ///< weights of b and c; a carries 1 - u - v
-    double distance = 0.0;       ///< along the normalized ray, from origin
-};
 
 /// Cast a ray at a mesh: Moller-Trumbore against each face fan-triangulated
 /// about its first corner, two-sided, nearest hit strictly in front of the

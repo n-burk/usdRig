@@ -103,6 +103,36 @@ def RigExecMatrixMover "HandSkin" (
 Change that one token to `base` and the hand card follows the FK solve but
 ignores the aim constraint stacked above it. Nothing else in the file moves.
 
+The same choice is available on any input relationship as property metadata,
+`rigExecReadPhase` (see [example 13](../../examples/13_ReadPhases.usda)); the
+metadata wins over a role-named attribute when both are authored.
+
+### Solver inputs
+
+A solver reads its inputs — an IK effector or pole, a root control, a space —
+where the stack puts them. A constraint **above** the solver on that input (or
+on one of its frame ancestors) has not fired yet when the solver runs, so by
+default the solver sees the frame before the constraint and the constraint
+then revises the result. To have the solver wait for that constraint instead,
+put the read phase on the solver's input relationship:
+
+```usda
+def RigExecTwoBoneIk "ArmIK"
+{
+    rel rigExec:effectorControl = </Asset/Rig/Controls/HandIK> (
+        rigExecReadPhase = "final"
+    )
+}
+```
+
+`final` reads the input after every constraint on it; a prim-path checkpoint
+reads it as of that step, so only constraints at or before the checkpoint are
+waited on. `base`, `preceding` and an unannotated relationship all mean the
+hierarchy rule. A declared phase cannot make a solver wait on a constraint
+that revises a joint the same solver writes — the stack already orders those
+two writers — and compiling such a rig fails with a message naming the
+solver, the joint and the constraint.
+
 ## A frame, walked through
 
 ![Two-bone IK](../gifs/two_bone_ik.gif)

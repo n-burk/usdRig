@@ -66,6 +66,7 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "10_AimXformTurret.usda|1001,1012,1024,1036,1048|/TurretAsset/Rig/Controls/TrackTarget|avars:tx|/TurretAsset/Rig/Movers/AimBarrel|inputs:defaultWeight|YES|-"
     "11_VolumeWeights.usda|1001,1012,1024,1036,1048|/VolumeAsset/Rig/Controls/Root|avars:rz|/VolumeAsset/Rig/Joints/Shoulder/ShoulderVolume|inputs:falloffMax|YES|-"
     "13_ReadPhases.usda|1001,1012,1024,1036,1048|/ReadPhaseAsset/Rig/Controls/LiftCtl|avars:ty|/ReadPhaseAsset/Rig/Weights/CageW|rigExec:defaultWeight|YES|-"
+    "15_TransformMatrixMover.usda|1001,1012,1024,1036,1048|/TransformMoverAsset/Rig/Controls/DriverSpace/Driver|avars:ry|/TransformMoverAsset/Rig/Movers/PropFollow|inputs:defaultWeight|YES|-"
     "14_VolumeConstrainedSweep.usda|1001,1012,1024,1036,1048|/SweepAsset/Rig/Controls/Band|avars:ty|/SweepAsset/Rig/Controls/Band/Volume|inputs:falloffMax|YES|-"
     # -- the constraint stages: every one aims at a plain UsdGeomXformable --
     "aimtest.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"

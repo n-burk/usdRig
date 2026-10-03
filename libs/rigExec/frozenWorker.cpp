@@ -506,6 +506,13 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         chain.lastBase = basePoints;
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
+            if (derived.matrixTarget) {
+                // As the baked prologue: no base, evaluated every run.
+                derived.haveBase = true;
+                derived.baseDirty = true;
+                derived.revision.created = false;
+                continue;
+            }
             // Derived bases key by target like chain bases; validity rides
             // the derivedIndex-parallel side-table.
             const RigExecSampledInput *sample = findSample(derived.target);
@@ -738,8 +745,13 @@ _FrozenPublishGeometry(RigExecBakedProgramImpl &B, RigExecRigPose *pose)
             const RigExecBakedProgramImpl::GeomChain::Derived &derived =
                 chain.derived[size_t(derivedIndex)];
             if (chain.haveBase && derived.haveBase) {
-                pose->movedProperties[derived.target] =
-                    VtValue(derived.result);
+                if (!derived.matrixTarget) {
+                    pose->movedProperties[derived.target] =
+                        VtValue(derived.result);
+                } else if (derived.haveMatrix) {
+                    pose->movedProperties[derived.target] =
+                        VtValue(derived.matrix);
+                }
             }
         }
     }

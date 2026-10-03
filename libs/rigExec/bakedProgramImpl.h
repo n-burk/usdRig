@@ -383,6 +383,8 @@ RigExecBakedOpName(RigExecRevisionOp op)
     case RigExecRevisionOp::External: return "external";
     case RigExecRevisionOp::RecomputeNormals: return "recomputeNormals";
     case RigExecRevisionOp::RecomputeExtent: return "recomputeExtent";
+    case RigExecRevisionOp::SurfaceProjector: return "surfaceProjector";
+    case RigExecRevisionOp::ShaderDials: return "shaderDials";
     }
     return "unknown";
 }
@@ -2380,6 +2382,12 @@ struct RigExecBakedProgramImpl {
             /// As the chain's, read by the prologue.
             bool haveBase = false;
             bool baseDirty = false;
+            /// A surface projector target (RigExecIsDerivedMatrixOp): no
+            /// authored base, and a MATRIX published in place of a vec3f
+            /// array -- when this run measured one.
+            bool matrixTarget = false;
+            GfMatrix4d matrix{1.0};
+            bool haveMatrix = false;
         };
         std::vector<Derived> derived;
     };
@@ -3346,6 +3354,8 @@ struct RigExecBakedRunShadow {
         RevisionState revision;
         VtVec3fArray result, spare, lastBase;
         bool haveResult = false, haveBase = false, baseDirty = false;
+        GfMatrix4d matrix{1.0};
+        bool haveMatrix = false;
     };
     struct ChainState {
         std::vector<RevisionState> revisions;
@@ -3420,6 +3430,21 @@ struct RigExecBakedRunStatistics {
 
 /// Whether RIGEXEC_BAKED_VERIFY_CONES asks a run to prove its cone.
 bool RigExecBakedVerifyConesRequested();
+
+/// A projector target's provider world frames, out of the program's rest
+/// frames and its base and final matrix tables.
+RigExecSurfaceProjectorFrames RigExecBakedProjectorFrames(
+    const RigExecBakedProgramImpl &B,
+    const RigExecBakedProgramImpl::GeomRevision &revision);
+
+/// One projector target of \p chain, run against its authored base and
+/// final points: what the baked Derived step does for a matrix target.
+bool RigExecBakedRunProjectorTarget(
+    const RigExecBakedProgramImpl &B,
+    const RigExecBakedProgramImpl::GeomChain &chain,
+    const RigExecBakedProgramImpl::GeomRevision &revision,
+    const RigExecResolvedInputs &resolved, UsdTimeCode time,
+    GfMatrix4d *matrix, std::vector<std::string> *diagnostics);
 
 }  // namespace rigExec
 

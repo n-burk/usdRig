@@ -145,6 +145,11 @@ struct RrDerivedPublish {
     bool haveBase = false;
     uint32_t target = 0;
     std::vector<RrVec3f> result;
+    /// A surface projector target publishes a matrix primvar instead,
+    /// when this run measured one.
+    bool matrixTarget = false;
+    bool haveMatrix = false;
+    RrMat4d matrix;
 };
 
 // Family-private scratch, defined in the family's own .cpp.
@@ -199,6 +204,8 @@ struct RrStore {
     std::map<uint32_t, RrPointFrame> jointFramesBase, jointFramesFinal;
     std::map<uint32_t, RrPointFrame> controlFrames;
     std::map<uint32_t, std::vector<RrVec3f>> movedProperties;
+    /// Matrix primvars a surface projector published, by property.
+    std::map<uint32_t, RrMat4d> movedMatrices;
     std::map<uint32_t, RrWeightFieldPublish> weightFields;
     std::vector<char> jointMatrixPublished;
     std::vector<RrInputValue> inputHolders;

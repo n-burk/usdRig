@@ -345,7 +345,8 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
             if (derived.revision.op != RigExecRevisionOp::RecomputeNormals &&
-                derived.revision.op != RigExecRevisionOp::RecomputeExtent) {
+                derived.revision.op != RigExecRevisionOp::RecomputeExtent &&
+                !RigExecIsDerivedMatrixOp(derived.revision.op)) {
                 return fail("derived target " +
                             derived.target.GetString() +
                             " runs an op the frozen executor does not "

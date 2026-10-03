@@ -664,6 +664,53 @@ _VerifyMoved(const std::map<SdfPath, VtValue> &baked,
     }
 }
 
+// Matrix primvars (a surface projector's frame and dials), bit for bit:
+// a moved property holding a matrix against the binary's matrix primvars.
+void
+_VerifyMatrixPrimvars(
+    const std::map<SdfPath, VtValue> &baked,
+    const std::vector<rigExec::RigExecRuntimeMatrixPrimvar> &rt,
+    std::vector<std::string> *diffs)
+{
+    std::map<std::string, const rigExec::RrMat4d *> byPath;
+    for (const auto &primvar : rt) {
+        byPath[primvar.path] = &primvar.matrix;
+    }
+    // Only `primvars:` matrices: a property-domain matrix mover's result is
+    // a rig input, outside the runtime's output contract like other scalars.
+    static const std::string prefix("primvars:");
+    size_t bakedMatrices = 0;
+    for (const auto &[path, value] : baked) {
+        if (!value.IsHolding<GfMatrix4d>() ||
+            path.GetName().compare(0, prefix.size(), prefix) != 0) {
+            continue;
+        }
+        ++bakedMatrices;
+        const auto found = byPath.find(path.GetString());
+        if (found == byPath.end()) {
+            _VerifyPush(diffs, "matrix primvar " + path.GetString() +
+                                   " missing from the binary");
+            continue;
+        }
+        const GfMatrix4d &m = value.UncheckedGet<GfMatrix4d>();
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                if (m[i][j] != (*found->second)[i][j]) {
+                    _VerifyPush(diffs, "matrix primvar " + path.GetString() +
+                                           " differs");
+                    i = 4;
+                    break;
+                }
+            }
+        }
+    }
+    if (bakedMatrices != byPath.size()) {
+        _VerifyPush(diffs, "matrix primvar count baked " +
+                               std::to_string(bakedMatrices) + " binary " +
+                               std::to_string(byPath.size()));
+    }
+}
+
 void
 _VerifyWeightFrames(
     const std::map<SdfPath, GfMatrix4d> &baked,
@@ -865,6 +912,8 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
                       &diffs);
         _VerifyMoved(pose.movedProperties, reader->GetPoints(), &diffs,
                      &skippedScalars);
+        _VerifyMatrixPrimvars(pose.movedProperties,
+                              reader->GetMatrixPrimvars(), &diffs);
         _VerifyWeightFrames(pose.weightFrames, reader->GetWeightFrames(),
                              &diffs);
         _VerifyWeightFields(pose.weightFields, reader->GetWeightFields(),

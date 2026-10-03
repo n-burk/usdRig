@@ -2480,13 +2480,23 @@ RigExecImagingBridge::_PublishPoseSnapshot(
     auto snapshot = std::make_shared<RigExecImagingSnapshot>();
     snapshot->generation = ++_generation;
     _StampGeneration(time, snapshot.get());
-    // Rig-computed matrices a shader on the prim reads, as constant
-    // primvars. Indexed before the geometry loop so a prim carrying only
-    // a shader matrix still gets published.
-    for (const auto &[primPath, matrices] : pose.shaderMatrices) {
-        if (!matrices.empty()) {
-            snapshot->prims[primPath].shaderMatrices = matrices;
+    // Matrix primvars a rig computes for a shader on the prim (a surface
+    // projector's frame and dials), published as constant primvars. The
+    // rig writes them as moved `primvars:<name>` properties and nothing
+    // authors them; indexed before the geometry loop so a prim carrying
+    // only a matrix primvar still gets published.
+    static const std::string primvarsPrefix("primvars:");
+    for (const auto &[propertyPath, value] : pose.movedProperties) {
+        if (!value.IsHolding<GfMatrix4d>()) {
+            continue;
         }
+        const std::string &name = propertyPath.GetName();
+        if (name.compare(0, primvarsPrefix.size(), primvarsPrefix) != 0) {
+            continue;
+        }
+        snapshot->prims[propertyPath.GetPrimPath()]
+            .shaderMatrices[TfToken(name.substr(primvarsPrefix.size()))] =
+            value.UncheckedGet<GfMatrix4d>();
     }
     for (const auto &[propertyPath, value] : pose.movedProperties) {
         const SdfPath primPath = propertyPath.GetPrimPath();

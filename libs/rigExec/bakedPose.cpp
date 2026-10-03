@@ -1484,9 +1484,8 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                         RigExecBakedSlotDomain::PosedM, source));
                 }
             }
-            // And the index itself, so that keying a space dirties this
-            // step and only this one.
-            RigExecBakedNoteInput(sw.activeInput, &step);
+            // The index itself is declared by
+            // RigExecBakedDeclareInputDependencies.
         }
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseBase, group.begin, group.end));
@@ -2030,11 +2029,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseWeight, interpolator.weightBegin,
             interpolator.weightEnd));
-        RigExecBakedNoteInput(interpolator.enabled, &step);
-        for (const RigExecBakedInput<double> &value :
-                 interpolator.valueInputs) {
-            RigExecBakedNoteInput(value, &step);
-        }
     }
 
     // The store's other pose-half record: every provider's rest -> final
@@ -2097,6 +2091,7 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.minLengthRatio, step);
     NoteInput(solver.twistTurns, step);
     NoteInput(solver.ribbonSampleCount, step);
+    NoteInput(solver.ikSpace, step);
     // The spline parameters the bake could not fold, which the solve re-reads
     // as a group rather than one input at a time.
     step->varyingInputs = step->varyingInputs || solver.splineParamsVary;
@@ -2168,6 +2163,34 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
             RigExecBakedNoteWeightInputs(
                 B.weightObjects[size_t(step.object)], &step);
             break;
+        case RigExecBakedStepKind::ComposeSubtree: {
+            // A switched slot's active index, so that keying a space dirties
+            // the compose group that reads it and only that one.
+            const RigExecBakedComposeGroup &group =
+                B.composeGroups[size_t(step.object)];
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                const int switchIndex =
+                    B.spaceSwitchBySlot.empty()
+                        ? -1 : B.spaceSwitchBySlot[size_t(slot)];
+                if (switchIndex >= 0) {
+                    NoteInput(B.spaceSwitches[size_t(switchIndex)].activeInput,
+                              &step);
+                }
+            }
+            break;
+        }
+        case RigExecBakedStepKind::PoseInterpolator: {
+            // Read by the prologue into enabledValue and values, which the
+            // step consumes; the step owns the dependency.
+            const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
+                B.poseInterpolators[size_t(step.object)];
+            NoteInput(interpolator.enabled, &step);
+            for (const RigExecBakedInput<double> &value :
+                     interpolator.valueInputs) {
+                NoteInput(value, &step);
+            }
+            break;
+        }
         default:
             break;
         }

@@ -838,6 +838,48 @@ TestFbxScaleConstraintKernel()
                    4.0) < 1e-9);
 }
 
+/// rigExec:blendShear is opt-in. Off, a constraint that governs every
+/// scale axis keeps the shear its input inherited -- the FBX behaviour and
+/// what every rig authored before the flag existed. On, the shear blends
+/// toward the sources' like the scale does, and a partial scale mask
+/// leaves it alone either way.
+static void
+TestConstraintShearBlendIsOptIn()
+{
+    const GfVec3d inputShear(0.12, -0.05, 0.08);
+    const RigExecPointFrame input = ConstraintFrame(
+        GfVec3d(1, 2, 3), GfVec3d(10, 0, 5), GfVec3d(2, 2, 2), inputShear);
+    RigExecConstraintSource clean;
+    clean.frame = ConstraintFrame(GfVec3d(0), GfVec3d(0), GfVec3d(3, 3, 3));
+    clean.normalizedWeight = 1.0;
+
+    RigExecScaleConstraintParams scale;
+    scale.affect = {true, true, true};
+    RigExecTransformParams kept, blended, partial;
+    CHECK(ConstraintParams(
+        RigExecApplyScaleConstraint(input, {clean}, scale), &kept));
+    CHECK(Near(kept.shear, inputShear, 1e-8));
+    scale.blendShear = true;
+    CHECK(ConstraintParams(
+        RigExecApplyScaleConstraint(input, {clean}, scale), &blended));
+    CHECK(Near(blended.shear, GfVec3d(0), 1e-8));
+    CHECK(Near(blended.scale, kept.scale, 1e-8));
+    scale.affect = {true, false, true};
+    CHECK(ConstraintParams(
+        RigExecApplyScaleConstraint(input, {clean}, scale), &partial));
+    CHECK(Near(partial.shear, inputShear, 1e-8));
+
+    RigExecParentConstraintParams parent;
+    parent.scaleAxes = {true, true, true};
+    CHECK(ConstraintParams(
+        RigExecApplyParentConstraint(input, {clean}, parent), &kept));
+    CHECK(Near(kept.shear, inputShear, 1e-8));
+    parent.blendShear = true;
+    CHECK(ConstraintParams(
+        RigExecApplyParentConstraint(input, {clean}, parent), &blended));
+    CHECK(Near(blended.shear, GfVec3d(0), 1e-8));
+}
+
 static void
 TestFbxParentConstraintKernel()
 {
@@ -1709,6 +1751,7 @@ main()
     TestFbxRotationConstraintKernel();
     TestFbxScaleConstraintKernel();
     TestFbxParentConstraintKernel();
+    TestConstraintShearBlendIsOptIn();
     TestFbxAimConstraintKernel();
     TestFbxConstraintFailures();
     TestConstraintEnvelopeExactEndpoints();

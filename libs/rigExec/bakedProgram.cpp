@@ -635,7 +635,8 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                              bool derived) {
         const bool supported =
             derived ? (r.op == RigExecRevisionOp::RecomputeExtent ||
-                       r.op == RigExecRevisionOp::RecomputeNormals)
+                       r.op == RigExecRevisionOp::RecomputeNormals ||
+                       RigExecIsDerivedMatrixOp(r.op))
                     : (r.op == RigExecRevisionOp::Skin ||
                        r.op == RigExecRevisionOp::Matrix ||
                        // Every operation whose whole packet the per-frame
@@ -886,6 +887,8 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
             derived.lastBase = std::move(match->second->lastBase);
             derived.result = std::move(match->second->result);
             derived.haveResult = match->second->haveResult;
+            derived.matrix = match->second->matrix;
+            derived.haveMatrix = match->second->haveMatrix;
         }
     }
 }

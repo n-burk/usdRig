@@ -1,0 +1,117 @@
+#usda 1.0
+(
+    """
+    RigExec example 15 - a matrix mover in the transform domain.
+
+    A RigExecMatrixMover usually moves points: rigExec:moves names a
+    PointBased <prim>.points property and each point is carried by
+    T = M(transform) * inverse(M(transformSpace)), scaled by its weight.
+
+    Naming a bare prim instead -- a RigExecJoint, a RigExecControl or an
+    Xformable -- moves that prim's FRAME the same way. The four landmark
+    points of the frame are carried with the point kernel's own rule, so a
+    frame placed where a point is lands exactly where that point lands.
+    The mover is a step of the pose stack like a constraint, ordered by the
+    composed namespace, and a joint below the moved one rides along.
+
+    PropFollow takes half of the driver's motion measured in DriverSpace and
+    blends it RADIALLY (rigExec:weightBlend = "radial"): a fraction of the
+    rotation, so the prop keeps its distance from the driver's pivot instead
+    of cutting the chord. LinearFollow takes the same half linearly, which
+    is the default and what a point does.
+
+    Evaluates identically on the dynamic path, the baked program, the frame
+    cache and a .rigexec binary.
+    """
+    defaultPrim = "TransformMoverAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "TransformMoverAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "TransformMoverAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "DriverSpace" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1036: 3; post linear,
+                    1048: 3; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+
+                def RigExecControl "Driver" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    double avars:ry = 0
+                    double avars:ry.spline = {
+                        1001: 0; pre (0, 0); post linear,
+                        1024: 90; post linear,
+                        1048: 0; post linear,
+                    }
+                    double avars:ty = 0
+                    double avars:ty.spline = {
+                        1001: 0; pre (0, 0); post linear,
+                        1012: 2; post linear,
+                        1048: 0; post linear,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                }
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Prop"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
+
+                def RigExecJoint "PropTip"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                }
+            }
+
+            def RigExecJoint "LinearProp"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 4, 1) )
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecMatrixMover "PropFollow" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 0.5
+                rel rigExec:moves = </TransformMoverAsset/Rig/Joints/Prop>
+                rel rigExec:transform = </TransformMoverAsset/Rig/Controls/DriverSpace/Driver>
+                rel rigExec:transformSpace = </TransformMoverAsset/Rig/Controls/DriverSpace>
+                uniform token rigExec:weightBlend = "radial"
+            }
+
+            def RigExecMatrixMover "LinearFollow" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 0.5
+                rel rigExec:moves = </TransformMoverAsset/Rig/Joints/LinearProp>
+                rel rigExec:transform = </TransformMoverAsset/Rig/Controls/DriverSpace/Driver>
+                rel rigExec:transformSpace = </TransformMoverAsset/Rig/Controls/DriverSpace>
+            }
+        }
+    }
+}

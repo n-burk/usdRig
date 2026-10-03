@@ -425,10 +425,9 @@ RigExecRigEvaluator::_DiscoverMovers(
                 continue;
             }
             if (prim.GetTypeName() == "RigExecSurfaceProjector") {
-                // Discovered here for the execution order, resolved in one
-                // post-geometry pass. It does not become a mover record: a
-                // projector needs the POSED surface, which does not exist
-                // until the geometry chains have run.
+                // Not a mover record: compile makes it derived targets on
+                // the chain it rides, which run on that chain's final
+                // points as the normals and extent maintenance do.
                 SdfPathVector projected;
                 moves.GetTargets(&projected);
                 for (const SdfPath &t : projected) {
@@ -441,44 +440,6 @@ RigExecRigEvaluator::_DiscoverMovers(
                     _SurfaceProjectorRecord record;
                     record.path = prim.GetPath();
                     record.target = t;
-                    record.rayOrigin = GfVec3d(0, 0, 0);
-                    record.rayDirection = GfVec3d(0, 0, 1);
-                    record.rayUp = GfVec3d(0, 1, 0);
-                    prim.GetAttribute(TfToken("rigExec:rayOrigin"))
-                        .Get(&record.rayOrigin);
-                    prim.GetAttribute(TfToken("rigExec:rayDirection"))
-                        .Get(&record.rayDirection);
-                    prim.GetAttribute(TfToken("rigExec:rayUp"))
-                        .Get(&record.rayUp);
-                    SdfPathVector anchors;
-                    if (const UsdRelationship r = prim.GetRelationship(
-                            TfToken("rigExec:sources"))) {
-                        r.GetTargets(&anchors);
-                    }
-                    if (!anchors.empty()) {
-                        record.source = anchors[0].GetPrimPath();
-                    }
-                    SdfPathVector spaces;
-                    if (const UsdRelationship r = prim.GetRelationship(
-                            TfToken("rigExec:sourceSpace"))) {
-                        r.GetTargets(&spaces);
-                    }
-                    if (!spaces.empty()) {
-                        record.sourceSpace = spaces[0].GetPrimPath();
-                    }
-                    SdfPathVector rigSpaces;
-                    if (const UsdRelationship r = prim.GetRelationship(
-                            TfToken("rigExec:space"))) {
-                        r.GetTargets(&rigSpaces);
-                    }
-                    if (!rigSpaces.empty()) {
-                        record.space = rigSpaces[0].GetPrimPath();
-                    }
-                    prim.GetAttribute(TfToken("rigExec:shaderOffset"))
-                        .Get(&record.shaderOffset);
-                    record.shaderPrimvar = TfToken("eyeProjector");
-                    prim.GetAttribute(TfToken("rigExec:shaderPrimvar"))
-                        .Get(&record.shaderPrimvar);
                     newSurfaceProjectors.push_back(std::move(record));
                 }
                 continue;

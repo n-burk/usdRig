@@ -453,8 +453,8 @@ _ReadRevision(RigExecWireReader *reader, RigExecWireRevision *revision)
     if (!reader->ReadU32(&revision->moverPath) ||
         !reader->ReadU32(&revision->target) ||
         !reader->ReadU32(&revision->moverPrim) ||
-        !reader->ReadU8(&revision->op) || revision->op > 15 ||
-        revision->op == 10 || revision->op == 11 ||
+        !reader->ReadU8(&revision->op) || revision->op > 18 ||
+        revision->op == 10 || revision->op == 11 || revision->op == 16 ||
         !_ReadBinding(reader, &revision->binding) ||
         !reader->ReadU32(&count)) {
         return false;
@@ -744,6 +744,14 @@ RigExecWireEncodeDomainGeometry(const RigExecWireDomainGeometry &geometry,
             RigExecWirePutI32(out, derived.revision.carrySpaceSlot);
         }
     }
+    // The projector block: per derived entry, its dials and the mesh's
+    // world inverse. Same walk, same reason as the carry block.
+    for (const RigExecWireChain &chain : geometry.chains) {
+        for (const RigExecWireDerived &derived : chain.derived) {
+            _PutU32s(out, derived.revision.shaderDials);
+            RigExecWirePutMatrix4d(out, derived.revision.meshWorldInverse);
+        }
+    }
     return true;
 }
 
@@ -831,6 +839,18 @@ RigExecWireDecodeDomainGeometry(RigExecWireReader *reader,
             }
             for (RigExecWireDerived &derived : chain.derived) {
                 if (!reader->ReadI32(&derived.revision.carrySpaceSlot)) {
+                    return _Fail(error);
+                }
+            }
+        }
+    }
+    // The optional projector block; absent means no projector targets.
+    if (!reader->Exhausted()) {
+        for (RigExecWireChain &chain : geometry->chains) {
+            for (RigExecWireDerived &derived : chain.derived) {
+                if (!_ReadU32s(reader, &derived.revision.shaderDials) ||
+                    !RigExecWireReadMatrix4d(
+                        reader, &derived.revision.meshWorldInverse)) {
                     return _Fail(error);
                 }
             }

@@ -44,6 +44,13 @@ struct RigExecRuntimePoints {
     std::vector<RrVec3f> points;
 };
 
+// A matrix-primvar output: the `<prim>.primvars:<name>` property a surface
+// projector publishes plus its value, row-major.
+struct RigExecRuntimeMatrixPrimvar {
+    std::string path;
+    RrMat4d matrix;
+};
+
 // A weight-frame output: the volume weight's path plus its placement.
 struct RigExecRuntimeWeightFrame {
     std::string path;
@@ -136,6 +143,12 @@ public:
         return _points;
     }
 
+    // Matrix primvars a surface projector published, in path order.
+    const std::vector<RigExecRuntimeMatrixPrimvar> &GetMatrixPrimvars() const
+    {
+        return _matrixPrimvars;
+    }
+
     // Volume weight placements, in path order.
     const std::vector<RigExecRuntimeWeightFrame> &GetWeightFrames() const
     {
@@ -210,6 +223,7 @@ private:
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;
+    std::vector<RigExecRuntimeMatrixPrimvar> _matrixPrimvars;
     std::vector<RigExecRuntimeWeightFrame> _weightFrames;
     std::vector<RigExecRuntimeWeightField> _weightFields;
     std::vector<RigExecRuntimeProviderXform> _providerXforms;

@@ -1975,6 +1975,125 @@ SchemaResourceDir(const std::string &examplesDir)
 #endif
 }
 
+/// A solver input's read phase is the one way past the hierarchy.
+///
+/// The FK chain sits BELOW a position constraint that moves the chain's
+/// root CONTROL (not a joint), so by the namespace the constraint revises
+/// what the chain already read: the hip stays where the unmoved control
+/// put it. `rigExecReadPhase = "final"` on rigExec:controls asks for the
+/// control as the constraint left it, the chain waits on the constraint,
+/// and the hip follows.
+std::string
+ControlFollowText(const char *controlsPhase)
+{
+    const std::string phase =
+        controlsPhase ? std::string(" (\n                    "
+                                    "rigExecReadPhase = \"") +
+                            controlsPhase + "\"\n                )"
+                      : std::string();
+    std::string text = Head(
+        FkControls("Fk", 0) +
+        "            def RigExecControl \"Lift\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 20, 6) + "\n"
+        "            }\n");
+    // Movers defined before Solvers, so Solvers is the bottom sibling and
+    // every solver executes before every constraint.
+    text +=
+        "\n"
+        "        def Scope \"Movers\"\n"
+        "        {\n"
+        "            def RigExecPositionConstraint \"HipFollow\" (\n"
+        "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+        "            )\n"
+        "            {\n"
+        "                float inputs:defaultWeight = 1\n"
+        "                rel rigExec:sources = </Asset/Rig/Controls/Lift>\n"
+        "                rel rigExec:moves = </Asset/Rig/Controls/FkHip>\n"
+        "            }\n"
+        "        }\n"
+        "\n"
+        "        def Scope \"Solvers\"\n"
+        "        {\n"
+        "            def RigExecFkChain \"LegFK\"\n"
+        "            {\n"
+        "                rel rigExec:controls = [ "
+        "</Asset/Rig/Controls/FkHip>, "
+        "</Asset/Rig/Controls/FkHip/Knee>, "
+        "</Asset/Rig/Controls/FkHip/Knee/Ankle> ]" + phase + "\n"
+        "                rel rigExec:joints = [ "
+        "</Asset/Rig/Joints/Hip>, </Asset/Rig/Joints/Hip/Knee>, "
+        "</Asset/Rig/Joints/Hip/Knee/Ankle> ]\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n";
+    return text;
+}
+
+/// The baked half for a hand-written fixture: CheckParity's comparison,
+/// over stages opened from \p text, with the program required.
+void
+CheckTextParity(const char *what, const std::string &text,
+                const std::vector<double> &frames)
+{
+    const UsdStageRefPtr referenceStage = OpenText(text);
+    const UsdStageRefPtr bakedStage = OpenText(text);
+    CHECK(referenceStage && bakedStage);
+    if (!referenceStage || !bakedStage) return;
+    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baked(bakedStage, kRigPath);
+    std::vector<std::string> errors;
+    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        return;
+    }
+    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    std::vector<std::string> reasons;
+    CHECK(baked.IsBakeable(&reasons));
+    for (const double frame : frames) {
+        const std::string where =
+            std::string(what) + " frame " + std::to_string(frame);
+        const RigExecRigPose a = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose b = baked.Evaluate(UsdTimeCode(frame));
+        CHECK(a.valid && b.valid);
+        CHECK(b.bakedParityMismatches == 0);
+        rigExecTest::ComparePose(&failures, where, a, b);
+    }
+    CHECK(baked.GetBakedGenerationCount() == frames.size());
+}
+
+void
+TestSolverInputReadPhaseFollowsAConstraintAbove()
+{
+    const UsdStageRefPtr plain = OpenText(ControlFollowText(nullptr));
+    const UsdStageRefPtr declared = OpenText(ControlFollowText("final"));
+    CHECK(plain && declared);
+    if (!plain || !declared) return;
+    const RigExecRigPose before = Evaluate("no read phase", plain, 1.0,
+                                           nullptr);
+    const RigExecRigPose after = Evaluate("final read phase", declared,
+                                          1.0, nullptr);
+    if (!before.valid || !after.valid) return;
+    const auto hipBefore = before.jointFramesFinal.find(kHip);
+    const auto hipAfter = after.jointFramesFinal.find(kHip);
+    CHECK(hipBefore != before.jointFramesFinal.end());
+    CHECK(hipAfter != after.jointFramesFinal.end());
+    if (hipBefore == before.jointFramesFinal.end() ||
+        hipAfter == after.jointFramesFinal.end()) {
+        return;
+    }
+    // The hierarchy: the chain read the control before it was moved.
+    CHECK(Near(hipBefore->second.Origin(), GfVec3d(0, 8, 0), 1e-6));
+    // The declared phase: the chain read the moved control.
+    CHECK(Near(hipAfter->second.Origin(), GfVec3d(0, 20, 6), 1e-6));
+    // And the baked program schedules both the same way.
+    CheckTextParity("no read phase", ControlFollowText(nullptr), {1, 3, 5});
+    CheckTextParity("final read phase", ControlFollowText("final"),
+                    {1, 3, 5});
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2008,6 +2127,7 @@ main(int argc, char **argv)
     TestProducersCarryNoStackPosition();
     TestAggregateContradictionIsRejected();
     TestUnrelatedLimbsShareALevel();
+    TestSolverInputReadPhaseFollowsAConstraintAbove();
 
     // The baked half. Every fixture below stacks and carries no solver-named
     // read phase, so every one of them bakes: the SSA ladder gives each

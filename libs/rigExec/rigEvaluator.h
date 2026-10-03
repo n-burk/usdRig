@@ -107,19 +107,6 @@ struct RigExecRigPose {
     /// Keyed identically, so a lookup that finds one finds the other.
     std::map<SdfPath, GfMatrix4d> providerBaseXforms;
 
-    /// Prim path -> constant matrices the rig computed for a SHADER on that prim,
-    /// by primvar name.
-    ///
-    /// The eye's projector is why this exists. Its shader needs a frame
-    /// that is NOT the prim's own placement: the eyeball is moved by a
-    /// skin and a cluster, so its transform is its placement, while the
-    /// projector is anchored to the eye's bind joint and rides the
-    /// deforming surface. Storm cannot hand a material a matrix that
-    /// changes per evaluation, but it does expose a primvar to a glslfx
-    /// as HdGet_<name>(), so a constant matrix primvar is the one
-    /// channel a rig-computed frame has into the geometry stage.
-    std::map<SdfPath, std::map<TfToken, GfMatrix4d>> shaderMatrices;
-
     /// Aggregate solver path -> posed frame elements straight from the
     /// solver's computePointFrameArray (guide drawing and inspection).
     std::map<SdfPath, std::vector<RigExecPointFrame>> solverFrames;
@@ -771,31 +758,12 @@ private:
     bool _CompileEpochAttempt(std::vector<std::string> *errors,
                               _CompileFailure *failure);
 
-    /// RigExecSurfaceProjector prims, with the points property each one
-    /// rides. Kept OUT of _movers on purpose: a projector is resolved in
-    /// one post-geometry pass that both counter-moves the points and
-    /// publishes the transform, because the two are the same answer and
-    /// splitting them across the mover graph and the pose walk would let
-    /// them disagree. See _ApplySurfaceProjectors.
+    /// RigExecSurfaceProjector prims and the points property each rides.
+    /// Compile turns each into derived matrix targets on that chain
+    /// (RigExecRevisionOp::SurfaceProjector / ShaderDials).
     struct _SurfaceProjectorRecord {
         SdfPath path;
         SdfPath target;   ///< the points property it rides
-        GfVec3d rayOrigin;
-        GfVec3d rayDirection;
-        GfVec3d rayUp;
-        SdfPath source;          ///< frame the projector is anchored to
-        SdfPath sourceSpace;     ///< the source's sibling space, if any
-        /// rigExec:space -- the provider whose own rest->pose map
-        /// carries the whole rig, normally a TRS master. The REST
-        /// cast needs it taken back off: the rest ray is built from
-        /// the source's base frame, which composes through the
-        /// masters' posed avars, while the base POINTS it is cast at
-        /// are the mesh as authored and carry nothing. Move a master
-        /// forty units and the ray starts forty units off the rest
-        /// eyeball and misses, and the projector publishes nothing.
-        SdfPath space;
-        GfMatrix4d shaderOffset{1.0};
-        TfToken shaderPrimvar;
     };
 
     /// Discover and validate movers without changing the active epoch.
@@ -1474,6 +1442,9 @@ private:
         /// counterpart is carrySpaceSlot against the same base/final
         /// matrix table, so the two paths read the same value.
         RigExecTapId carrySpaceTap = -1;
+        /// Surface projector only: computeRestFrame of transform,
+        /// transformSpace and carrySpace, for their world frames.
+        RigExecTapId projectorRestTaps[3] = {-1, -1, -1};
         /// computeMatrix per binding.influences entry, in that order (skin).
         std::vector<RigExecTapId> influenceTaps;
         RigExecTapId weightTap = -1;
@@ -2083,19 +2054,6 @@ private:
     std::map<SdfPath, _DerivedResult> _derivedCache;
     std::vector<RigExecMoverRecord> _movers;
 
-    std::vector<_SurfaceProjectorRecord> _surfaceProjectors;
-
-    /// Resolve every surface projector against the posed geometry: the
-    /// ray cast at the base points names a material point, and the delta
-    /// is how the surface frame at that point moved on the posed points. Fills
-    /// providerXforms and rewrites the posed points so composed world
-    /// geometry is unchanged.
-    void _ApplySurfaceProjectors(RigExecRigPose *pose, UsdTimeCode time) const;
-
-    /// Resolve projectors on the pose Evaluate is about to publish,
-    /// whichever path produced it.
-    RigExecRigPose _WithSurfaceProjectors(RigExecRigPose pose,
-                                          UsdTimeCode time);
 
     /// Baked falloff remaps for every volumetric weight object reachable
     /// in this epoch, ready to hand to RigExecTapSet::Evaluate as value

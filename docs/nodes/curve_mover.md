@@ -150,6 +150,92 @@ No chain runs on the curve, so no phased read is needed.
 wire: the space each driver transform is measured against,
 parallel to rigExec:driverTransforms, or one for all, or none.
 
+#### `rigExec:driverDeltaFrame`
+
+*Type:* `uniform token`. *Default:* `"local"`.
+
+Valid values: `local`, `posed`.
+
+wire: WHICH FRAME the driver's offset from its space is
+applied in. Only meaningful with rigExec:driverTransformSpaces.
+
+local is what the measurement M = T * S^-1 gives, and in USD's
+row-vector convention that product is exactly the driver's LOCAL
+matrix: world = local * parent, so T * S^-1 cancels the space
+entirely. The curve's control points are world positions, so
+applying it to them uses a local offset as though it were a world
+one -- the offset points wherever it pointed at the bind pose, no
+matter where the space has since been carried.
+
+posed conjugates that offset into the space's current frame,
+S^-1 * T, which is S^-1 * local * S. The offset then rides the
+space: same measurement gives 69.93 degrees against the arm's
+70.00, with the length preserved exactly.
+
+Both are IDENTITY when the driver sits at its space, at rest and
+posed alike, so neither makes the curve move merely because the
+space moved -- that is the skin's job and would be a double
+transform. They differ only once an animator touches the control.
+
+local remains the default because the shipped face rig was built
+and measured against it; posed is what a wire riding a deforming
+limb wants. Set per mover, so the two can coexist while rigs
+migrate.
+
+#### `rigExec:pointFrame`
+
+*Type:* `uniform token`. *Default:* `"rest"`.
+
+Valid values: `rest`, `posed`.
+
+wire: WHICH FRAME the points this wire moves are
+already in when it runs.
+
+A wire adds a displacement read off its driver curve to the
+points it moves. The curve, the bind distances measured against
+it and the mesh rest points are all authored at the ASSET'S
+scale; a skin is what carries those points out of it. So the
+same displacement means two different things depending on where
+in the chain the wire sits, and only the asset knows which.
+
+rest is a wire that runs BEFORE the skin on its target. Its
+displacement stays in the asset's units, because the skin will
+apply the rig's scale to it afterwards and applying it here too
+applies it twice.
+
+posed is a wire that runs AFTER it, adding to points a skin has
+already carried into the rig's posed frame. Its displacement is
+carried there too: the scale the driver measurement took out
+goes back on, and nothing else does, so the wire moves the posed
+mesh as far as the posed rig moved.
+
+The two corrections are in OPPOSITE directions, which is why one
+blanket rule cannot serve both families and why the wire has to
+say. Which one a given wire is, is not a rigging choice -- it is
+where the compiler put it relative to its skin -- so a build tool
+should author it from the compiled mover order rather than from a
+list kept by hand.
+
+Both are IDENTICAL while nothing above the rig is scaled,
+because the scale in question measures one. A wire that names
+neither posed frame keeps the plain measurement bit for bit.
+
+#### `rigExec:space`
+
+*Relationship.*
+
+wire: the prim whose movement away from its rest carries
+the whole rig -- normally a TRS master. Only meaningful with
+rigExec:driverTransforms and rigExec:pointFrame = "posed".
+
+A posed wire adds a displacement computed in the uncarried frame
+to points a skin has already carried. With a space named, both
+control polygons are transformed by that space's rest->pose map
+(its computeMatrix) before the wire is evaluated, so the
+displacement is carried with the points; the scale-only correction
+of rigExec:pointFrame is then not applied beside it. Read at the
+drivers' rigExec:transformReadPhase.
+
 #### `rigExec:transformReadPhase`
 
 *Type:* `uniform token`. *Default:* `"base"`.

@@ -10,6 +10,8 @@
 #include "rigExecRuntime/store.h"
 #include "rigExecMath/deltaMushKernel.h"
 #include "rigExecMath/wrinkleKernel.h"
+#include "rigExecMath/surfaceProjectorKernel.h"
+#include "poseInternal.h"
 
 #include <algorithm>
 #include <array>
@@ -63,6 +65,8 @@ enum RrGeoOp {
     RrGeoOpRecomputeExtent = 13,
     RrGeoOpDeltaMush = 14,
     RrGeoOpWrinkle = 15,
+    RrGeoOpSurfaceProjector = 17,
+    RrGeoOpShaderDials = 18,
 };
 
 const char *
@@ -83,6 +87,8 @@ RrGeoOpName(int op)
     case RrGeoOpEmitGuidePoints: return "EmitGuidePoints";
     case RrGeoOpRecomputeNormals: return "RecomputeNormals";
     case RrGeoOpRecomputeExtent: return "RecomputeExtent";
+    case RrGeoOpSurfaceProjector: return "SurfaceProjector";
+    case RrGeoOpShaderDials: return "ShaderDials";
     default: return nullptr;
     }
 }
@@ -106,6 +112,8 @@ RrGeoKindToken(int op)
     case RrGeoOpEmitGuidePoints: return "emitGuidePoints";
     case RrGeoOpRecomputeNormals: return "recomputeNormals";
     case RrGeoOpRecomputeExtent: return "recomputeExtent";
+    case RrGeoOpSurfaceProjector: return "surfaceProjector";
+    case RrGeoOpShaderDials: return "shaderDials";
     default: return nullptr;
     }
 }
@@ -4781,6 +4789,129 @@ RrPrologueGeometry(RrProgram *program, double time,
 
 namespace {
 
+// A surface projector target, as RigExecRunProjectorTarget runs it on the
+// USD side: the providers' world frames out of the rest frames and the
+// base and final matrix tables, the recorded settings and dials, and the
+// shared kernel on the chain's authored and final points.
+bool
+RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
+                        size_t chainIndex, const RigExecWireRevision &wire,
+                        size_t object, RrStepOutput *output)
+{
+    RrStore &store = program->store;
+    if (object >= store.derivedPublish.size()) {
+        return false;
+    }
+    RrDerivedPublish &publish = store.derivedPublish[object];
+    publish.matrixTarget = true;
+    publish.haveMatrix = false;
+    publish.haveBase = true;
+    output->counters.revisionsBuilt = 1;
+    output->counters.chainsBuilt = 1;
+    if (wire.op == RrGeoOpShaderDials) {
+        std::vector<double> dials;
+        dials.reserve(wire.shaderDials.size());
+        for (const uint32_t dial : wire.shaderDials) {
+            dials.push_back(
+                RrGeoReadDouble(program, scratch, dial, false, 0.0));
+        }
+        publish.matrix = RigExecPackShaderDialsT<RrMat4d>(dials);
+        publish.haveMatrix = true;
+        return true;
+    }
+    const auto vec = [&](const char *attr, const RrVec3d &fallback) {
+        const RigExecWirePathValue *read = RrGeoPathRead(
+            scratch, RrGeoMoverAttrId(program, scratch, wire, attr), false);
+        if (read && read->tag == RigExecWirePathValue::Tag::Vec3d) {
+            return RrVec3d(read->vec[0], read->vec[1], read->vec[2]);
+        }
+        return fallback;
+    };
+    RigExecSurfaceProjectorInputs<RrMat4d, RrVec3d> in;
+    in.rayOrigin = vec("rigExec:rayOrigin", RrVec3d(0.0, 0.0, 0.0));
+    in.rayDirection = vec("rigExec:rayDirection", RrVec3d(0.0, 0.0, 1.0));
+    in.rayUp = vec("rigExec:rayUp", RrVec3d(0.0, 1.0, 0.0));
+    in.shaderOffset.SetIdentity();
+    if (const RigExecWirePathValue *read = RrGeoPathRead(
+            scratch,
+            RrGeoMoverAttrId(program, scratch, wire, "rigExec:shaderOffset"),
+            false)) {
+        if (read->tag == RigExecWirePathValue::Tag::Matrix4d) {
+            for (int i = 0; i < 4; ++i) {
+                for (int j = 0; j < 4; ++j) {
+                    in.shaderOffset[i][j] = read->matrix[size_t(i * 4 + j)];
+                }
+            }
+        }
+    }
+    in.reproject =
+        RrGeoReadToken(program, scratch,
+                       RrGeoMoverAttrId(program, scratch, wire,
+                                        "rigExec:projectionMode"),
+                       false, "material") == "reproject";
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            in.worldToMesh[i][j] = wire.meshWorldInverse[size_t(i * 4 + j)];
+        }
+    }
+    // Providers: transform, transformSpace and carry slots, each a world
+    // frame as rest * computeMatrix at base and at final.
+    const RrPoseScratch *pose = runtimePoseDetail::_RrScratch(program);
+    const int32_t slots[3] = {wire.transformSlot, wire.transformSpaceSlot,
+                              wire.carrySpaceSlot};
+    // Named means slotted: the bake refuses a named provider it cannot
+    // give a slot, so the two are the same set here.
+    const bool named[3] = {slots[0] >= 0, slots[1] >= 0, slots[2] >= 0};
+    bool resolved[3] = {false, false, false};
+    RrMat4d base[3], fin[3];
+    for (int k = 0; k < 3; ++k) {
+        base[k].SetIdentity();
+        fin[k].SetIdentity();
+        const int32_t slot = slots[k];
+        if (!named[k] || !pose ||
+            size_t(slot) >= pose->restFrames.size() ||
+            size_t(slot) >= store.baseMatrix.size() ||
+            size_t(slot) >= store.finalMatrix.size() ||
+            !pose->restFrames[size_t(slot)].IsValid()) {
+            continue;
+        }
+        RrMat4d rest;
+        rest.SetIdentity();
+        RrPointsToMatrix(RrIdentityLandmarks(),
+                         pose->restFrames[size_t(slot)].points, &rest);
+        base[k] = rest * store.baseMatrix[size_t(slot)];
+        fin[k] = rest * store.finalMatrix[size_t(slot)];
+        resolved[k] = true;
+    }
+    in.hasSource = named[0] && resolved[0];
+    in.sourceBase = base[0];
+    in.sourceFinal = fin[0];
+    in.sourceSpaceNamed = named[1];
+    in.hasSourceSpace = named[1] && resolved[1];
+    in.sourceSpaceBase = base[1];
+    in.sourceSpaceFinal = fin[1];
+    in.spaceNamed = named[2];
+    in.hasSpace = named[2] && resolved[2];
+    in.spaceFinal = fin[2];
+    std::vector<int> counts, indices;
+    RrGeoReadIntArray(scratch, wire.binding.topologyCounts, false, &counts);
+    RrGeoReadIntArray(scratch, wire.binding.topologyIndices, false, &indices);
+    const std::vector<RrVec3f> &basePoints =
+        chainIndex < store.chainBases.size()
+            ? store.chainBases[chainIndex]
+            : std::vector<RrVec3f>();
+    const std::vector<RrVec3f> &finalPoints = scratch->chains[chainIndex].result;
+    publish.haveMatrix = RigExecSolveSurfaceProjectorT(
+        in, basePoints, finalPoints, counts, indices,
+        [](const std::vector<RrVec3f> &points, const std::vector<int> &c,
+           const std::vector<int> &i) {
+            return RrGeoComputeVertexNormals(points, c, i);
+        },
+        program->TextOrEmpty(wire.moverPath), &publish.matrix,
+        &output->diagnostics);
+    return true;
+}
+
 bool
 RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
                     size_t step, const RigExecWireFrameInputs *record,
@@ -4828,6 +4959,12 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
                      std::to_string(wire.op);
         }
         return false;
+    }
+    if (wire.op == RrGeoOpSurfaceProjector ||
+        wire.op == RrGeoOpShaderDials) {
+        derived.haveResult = true;
+        return RrGeoRunProjectorTarget(program, scratch, chainIndex, wire,
+                                       size_t(object), &output);
     }
     RrGeometryScratch::Revision &rev = derived.revision;
     // The fold's answer is dropped for a derived revision, exactly as

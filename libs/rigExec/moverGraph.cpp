@@ -1,6 +1,7 @@
 // RigExec compiled mover graph (spec §7.2). See moverGraph.h.
 #include "moverGraph.h"
 #include "parallel.h"
+#include "frameExtraction.h"
 #include "movers/moverRegistry.h"
 
 #include "rigExecMath/geometryKernels.h"
@@ -74,6 +75,8 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((external, "external"))
     ((recomputeNormals, "recomputeNormals"))
     ((recomputeExtent, "recomputeExtent"))
+    ((surfaceProjector, "surfaceProjector"))
+    ((shaderDials, "shaderDials"))
 );
 
 // The attribute and value names the PER-FRAME assemblers read. Hoisted out of
@@ -206,6 +209,10 @@ _RevisionKindToken(RigExecRevisionOp op)
         return _kindTokens->recomputeNormals;
     case RigExecRevisionOp::RecomputeExtent:
         return _kindTokens->recomputeExtent;
+    case RigExecRevisionOp::SurfaceProjector:
+        return _kindTokens->surfaceProjector;
+    case RigExecRevisionOp::ShaderDials:
+        return _kindTokens->shaderDials;
     }
     // No runtime dispatch beyond the frozen operation set: an unhandled op is
     // a build error, not a silently mismatched packet.
@@ -1059,6 +1066,11 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
     case RigExecRevisionOp::RecomputeNormals:
     case RigExecRevisionOp::RecomputeExtent:
         return RigExecApplyDerivedKernel(op, p, pts);
+    case RigExecRevisionOp::SurfaceProjector:
+    case RigExecRevisionOp::ShaderDials:
+        // Matrix targets: evaluated by RigExecEvaluateProjectorTarget,
+        // never through a point kernel.
+        return false;
     }
     // No runtime dispatch beyond the frozen operation set: an unhandled op is
     // a build error, not a silently skipped revision.
@@ -1126,7 +1138,8 @@ RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
 {
     return moverPath == o.moverPath && target == o.target &&
            transform == o.transform &&
-           transformSpace == o.transformSpace && influences == o.influences &&
+           transformSpace == o.transformSpace &&
+           carrySpace == o.carrySpace && influences == o.influences &&
            weightObject == o.weightObject &&
            base == o.base && topologyCounts == o.topologyCounts &&
            topologyIndices == o.topologyIndices &&
@@ -1139,6 +1152,8 @@ RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
            driverSpaceCount == o.driverSpaceCount &&
            driverBaseTransformCount == o.driverBaseTransformCount &&
            widths == o.widths &&
+           shaderDials == o.shaderDials &&
+           meshWorldInverse == o.meshWorldInverse &&
            blendInputs == o.blendInputs && blendSamples == o.blendSamples &&
            phases == o.phases && transformPhase == o.transformPhase;
 }
@@ -2153,6 +2168,12 @@ RigExecAssembleParameters(
     case RigExecRevisionOp::RecomputeExtent:
         params.kind = _kindTokens->recomputeExtent;
         break;
+    case RigExecRevisionOp::SurfaceProjector:
+        params.kind = _kindTokens->surfaceProjector;
+        break;
+    case RigExecRevisionOp::ShaderDials:
+        params.kind = _kindTokens->shaderDials;
+        break;
     case RigExecRevisionOp::Matrix:
     case RigExecRevisionOp::Skin:
         break;  // handled above
@@ -2791,6 +2812,133 @@ size_t
 RigExecMoverGraph::GetScheduleBuildCount() const
 {
     return _runtime->scheduleBuildCount;
+}
+
+GfMatrix4d
+RigExecWorldFromRest(const std::array<GfVec3d, 4> &restPoints,
+                     const GfMatrix4d &restToPose)
+{
+    GfMatrix4d rest(1.0);
+    RigExecPointsToMatrix(RigExecIdentityLandmarks(), restPoints, &rest);
+    return rest * restToPose;
+}
+
+void
+RigExecReadProjectorTarget(
+    const UsdPrim &projectorPrim, RigExecRevisionOp op,
+    const RigExecRevisionBinding &binding,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    RigExecProjectorReads *reads)
+{
+    if (!projectorPrim) {
+        return;
+    }
+    if (op == RigExecRevisionOp::ShaderDials) {
+        // The dials, each read through the generation's resolved inputs so
+        // a property chain revising one is what the shader sees.
+        const UsdStageRefPtr stage = projectorPrim.GetStage();
+        reads->dials.clear();
+        for (const SdfPath &dial : binding.shaderDials) {
+            const UsdAttribute a = stage->GetAttributeAtPath(dial);
+            double value = 0.0;
+            if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
+                float asFloat = 0.0f;
+                if (!(resolved && resolved->GetAttribute(a, time, &asFloat))) {
+                    a.Get(&asFloat, time);
+                }
+                value = double(asFloat);
+            } else if (a) {
+                if (!(resolved && resolved->GetAttribute(a, time, &value))) {
+                    a.Get(&value, time);
+                }
+            }
+            RigExecRecordStageRead(resolved, _RecorderOf(resolved), dial, a,
+                                   time, VtValue(value), /*forceFrame=*/true);
+            reads->dials.push_back(value);
+        }
+        return;
+    }
+    static const TfToken rayOrigin("rigExec:rayOrigin");
+    static const TfToken rayDirection("rigExec:rayDirection");
+    static const TfToken rayUp("rigExec:rayUp");
+    static const TfToken shaderOffset("rigExec:shaderOffset");
+    static const TfToken projectionMode("rigExec:projectionMode");
+    reads->rayOrigin = _RecordedInput<GfVec3d>(
+        projectorPrim, rayOrigin, GfVec3d(0.0, 0.0, 0.0), time, resolved);
+    reads->rayDirection = _RecordedInput<GfVec3d>(
+        projectorPrim, rayDirection, GfVec3d(0.0, 0.0, 1.0), time, resolved);
+    reads->rayUp = _RecordedInput<GfVec3d>(
+        projectorPrim, rayUp, GfVec3d(0.0, 1.0, 0.0), time, resolved);
+    reads->shaderOffset = _RecordedInput<GfMatrix4d>(
+        projectorPrim, shaderOffset, GfMatrix4d(1.0), time, resolved);
+    reads->reproject = _RecordedToken(projectorPrim, projectionMode,
+                                      TfToken("material"), time,
+                                      resolved) == "reproject";
+    reads->faceVertexCounts = _Array<int>(
+        projectorPrim, binding.topologyCounts, time, resolved,
+        _RecorderOf(resolved));
+    reads->faceVertexIndices = _Array<int>(
+        projectorPrim, binding.topologyIndices, time, resolved,
+        _RecorderOf(resolved));
+}
+
+bool
+RigExecRunProjectorTarget(
+    RigExecRevisionOp op, const RigExecRevisionBinding &binding,
+    const RigExecSurfaceProjectorFrames &frames,
+    const RigExecProjectorReads &reads,
+    const std::vector<GfVec3f> &basePoints,
+    const std::vector<GfVec3f> &finalPoints, GfMatrix4d *matrix,
+    std::vector<std::string> *diagnostics)
+{
+    if (op == RigExecRevisionOp::ShaderDials) {
+        *matrix = RigExecPackShaderDialsT<GfMatrix4d>(reads.dials);
+        return true;
+    }
+    if (op != RigExecRevisionOp::SurfaceProjector) {
+        return false;
+    }
+    RigExecSurfaceProjectorInputs<GfMatrix4d, GfVec3d> in;
+    in.rayOrigin = reads.rayOrigin;
+    in.rayDirection = reads.rayDirection;
+    in.rayUp = reads.rayUp;
+    in.shaderOffset = reads.shaderOffset;
+    in.reproject = reads.reproject;
+    in.hasSource = frames.named[0] && frames.resolved[0];
+    in.sourceBase = frames.base[0];
+    in.sourceFinal = frames.final[0];
+    in.sourceSpaceNamed = frames.named[1];
+    in.hasSourceSpace = frames.named[1] && frames.resolved[1];
+    in.sourceSpaceBase = frames.base[1];
+    in.sourceSpaceFinal = frames.final[1];
+    in.spaceNamed = frames.named[2];
+    in.hasSpace = frames.named[2] && frames.resolved[2];
+    in.spaceFinal = frames.final[2];
+    in.worldToMesh = binding.meshWorldInverse;
+    return RigExecSolveSurfaceProjectorT(
+        in, basePoints, finalPoints, reads.faceVertexCounts,
+        reads.faceVertexIndices, &RigExecComputeVertexNormals,
+        binding.moverPath.GetString(), matrix, diagnostics);
+}
+
+bool
+RigExecEvaluateProjectorTarget(
+    const UsdPrim &projectorPrim, RigExecRevisionOp op,
+    const RigExecRevisionBinding &binding,
+    const RigExecSurfaceProjectorFrames &frames,
+    const std::vector<GfVec3f> &basePoints,
+    const std::vector<GfVec3f> &finalPoints,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    GfMatrix4d *matrix, std::vector<std::string> *diagnostics)
+{
+    if (!projectorPrim) {
+        return false;
+    }
+    RigExecProjectorReads reads;
+    RigExecReadProjectorTarget(projectorPrim, op, binding, resolved, time,
+                               &reads);
+    return RigExecRunProjectorTarget(op, binding, frames, reads, basePoints,
+                                     finalPoints, matrix, diagnostics);
 }
 
 }  // namespace rigExec

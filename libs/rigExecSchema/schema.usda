@@ -197,13 +197,9 @@ class RigExecControl "RigExecControl" (
         doc = """Which LOCAL axis the planar guides' normal points along,
         for circle and box. Ignored by the volumetric shapes.
 
-        The planar guides were drawn in the XZ plane and nowhere else,
-        while a rig's control curves lie in whichever plane the rigger
-        drew them in. Measured on the biped's own control curves: 37 lie
-        in the local YZ plane, 26 in XY and only 7 in XZ, so 181 of 213
-        planar controls were drawn edge-on as slivers -- correct sizes,
-        wrong plane. The only ones that looked right were the uniform
-        TRS masters and the leg bendys, which genuinely are thin in Y.
+        A rig's control curves lie in whichever plane the rigger drew
+        them in. A planar guide drawn in a different plane from its
+        curve shows edge-on, as a sliver of the right size.
 
         Y is the default and reproduces the historical drawing exactly,
         so a control that does not author this is unchanged."""
@@ -1377,8 +1373,8 @@ class RigExecSpaceSwitch "RigExecSpaceSwitch" (
     the same source, so at rest the two cancel and EVERY space gives the
     same answer: adding or changing a space switch cannot move a rig at
     rest, and cannot move it at all while the selected source is unposed.
-    Switching mid-pose DOES move the control, exactly as a Maya space switch
-    does; compensating for that is a tool's job, not the engine's.
+    Switching mid-pose DOES move the control; matching the pose across
+    a switch is a tool's job, not the engine's.
 
     A source that is not an xformable provider -- the RigExecRoot itself is
     the idiomatic one -- contributes identity, which is how "world" is
@@ -1406,10 +1402,7 @@ class RigExecSpaceSwitch "RigExecSpaceSwitch" (
         source's motion. With rigExec:rotationFilters left at `all` that
         is harmless: the mask is the identity and the carry passes
         through. Ask for `twist` or `swing` and the filter throws the
-        master's rotation away along with the part it was told to drop --
-        on the biped, rotating a master left 44 of 430 providers behind,
-        all of them the leg chain, because L_LegPV sits in its foot's
-        space behind a twist filter.
+        master's rotation away along with the part it was told to drop.
 
         Naming the space runs the filter on the master-free motion and
         re-applies the carry afterwards, so only the source's own
@@ -1991,9 +1984,7 @@ class RigExecMatrixMover "RigExecMatrixMover" (
         for a pre-skin cluster, whose own skin is still to come and will
         apply the scale itself. A post-skin cluster gets a mesh twice as
         big and an offset that has not grown, so it pulls the doubled mesh
-        by the original distance: on the biped, the six squetch clusters
-        left M_HeadwireTop tx=2.0 short by 25.09 units with every wire
-        disabled, and 0.000031 with those clusters off.
+        by the original distance.
 
         posed conjugates the offset by the rig's CARRY, C^-1 M C, where C
         is rigExec:space's own rest->pose map. That is the whole
@@ -2026,9 +2017,7 @@ class RigExecMatrixMover "RigExecMatrixMover" (
         construction (both terms carry them on the right and they cancel),
         so applying it to carried points shears them by T*R - T, growing
         with the master's motion and zero only when the offset has no
-        rotation. Measured on the biped with the face posed and Main moved
-        (40, 0, 25): head_top_aim_cluster, which is aim-driven and so has
-        a real rotation, put 5.70 units of shear into body_geo on its own.
+        rotation.
 
         The carry used is the named prim's own rest->pose map -- what
         computeMatrix publishes -- so a master sitting at its rest
@@ -2547,10 +2536,7 @@ class RigExecCurveMover "RigExecCurveMover" (
         entirely. The curve's control points are world positions, so
         applying it to them uses a local offset as though it were a world
         one -- the offset points wherever it pointed at the bind pose, no
-        matter where the space has since been carried. Measured on the
-        biped's arm bendies: swing the shoulder 70 degrees, push a bend
-        control, and the bulge comes out in the same world direction to
-        0.00 degrees.
+        matter where the space has since been carried.
 
         posed conjugates that offset into the space's current frame,
         S^-1 * T, which is S^-1 * local * S. The offset then rides the
@@ -2582,10 +2568,7 @@ class RigExecCurveMover "RigExecCurveMover" (
         rest is a wire that runs BEFORE the skin on its target. Its
         displacement stays in the asset's units, because the skin will
         apply the rig's scale to it afterwards and applying it here too
-        applies it twice -- measured on the biped's blink wires under a
-        master scaled to 2, that is the difference between a mesh that
-        scales and one that comes apart by 1.54 units with the torso
-        merely turned 15 degrees.
+        applies it twice.
 
         posed is a wire that runs AFTER it, adding to points a skin has
         already carried into the rig's posed frame. Its displacement is
@@ -2736,110 +2719,84 @@ class RigExecSurfaceProjector "RigExecSurfaceProjector" (
     customData = {
         string className = "SurfaceProjector"
     }
-    doc = """Carries a projector on a deforming surface: casts a ray at
-    the surface's rest points to pick a material point on it, follows
-    that point onto the surface's OWN posed points, and moves the target
-    so that the frame there -- its position and its interpolated surface
-    normal -- drives the prim's transform while the geometry stays
-    exactly where the deformation put it (spec sections 4.1, 7.5).
+    doc = """Publishes a frame that rides a deforming surface to the
+    renderer, as a constant matrix primvar on that surface. It writes no
+    stage value and moves no point: the surface named by rigExec:moves
+    keeps exactly the geometry its other movers produce, and the frame
+    reaches only imaging and other consumers of the evaluated pose.
 
-    THE HIT IS A MATERIAL POINT, not a place on a line. The ray is cast
-    once, at the rest surface; what it names is a triangle and a place
-    inside it, and the posed surface says where that went. Re-casting at
-    the posed surface would find wherever the deformed surface crosses
-    the same fixed ray, which is a different material point whenever the
-    surface slides across it -- and then the iris under the projector
-    could move while the projector read the surface as standing still.
+    A ray in the surface's object space picks a MATERIAL point on the
+    surface's base points -- a triangle and a place inside it. The frame
+    there (its position, the interpolated vertex normal, and rigExec:rayUp
+    for roll) is evaluated again on the surface's final points, after
+    every mover on the surface's chain has run, and the motion between
+    the two frames is the projector's own. rigExec:projectionMode chooses
+    whether the posed frame follows that material point or re-casts the
+    ray at the posed surface.
 
-    This is the shrinkwrapped-follicle arrangement without the follicle.
-    A projector pinned to an eyeball has to ride the surface and turn
-    with it, and the rig does that with a point stuck to a bindplane
-    that is itself shrinkwrapped to the eye. The ray asks the same
-    question of the surface directly: nothing binds to a vertex, so
-    nothing needs rebinding when the mesh changes, and the hit slides
-    continuously instead of stepping between bound points.
+    When rigExec:sources names a frame provider, the ray moves with it,
+    and in material mode the source's rotation is applied as the look (a
+    re-cast already carries it). The published matrix, in row-vector
+    convention, is
 
-    THE OFFSET IS THE POINT. The projector does not sit at the hit -- it
-    keeps its own placement, and the hit supplies only its MOTION,
-    exactly as a parent constraint with an offset would. The delta
-    between the hit frame on the base points and the hit frame on the
-    posed points is applied to the prim's transform, and the inverse of
-    that delta is applied to the points, so composed world geometry is
-    unchanged and the transform alone has moved. A consumer reading the
-    prim's transform as a projector therefore sees the surface's motion
-    without the surface appearing to move.
+        rigExec:shaderOffset * look * delta
 
-    The transform is published for the renderer to inherit, the same way
-    a constraint-driven transform on a plain Xformable is."""
+    where delta is the hit frame's rest-to-posed motion, scaled about the
+    rest hit by the source's and rigExec:space's uniform scale.
+    rigExec:shaderDialSources optionally packs up to sixteen scalar
+    controls into a second matrix primvar for the same shader.
+
+    Both primvars are derived targets of the surface's point chain: they
+    are recomputed when the chain's final points or a source frame
+    change, and the dynamic path, the baked program, the frame cache and
+    the .rigexec runtime compute them with one kernel."""
 )
 {
     rel rigExec:space (
         doc = """The prim whose movement away from its rest carries
         the whole rig -- normally a TRS master.
 
-        The REST cast needs it taken back off. The rest ray is
-        built from the source's BASE frame, and a base frame still
-        composes through the masters' posed avars, while the base
-        POINTS it is cast at are the mesh exactly as authored and
-        carry nothing. At the origin the two agree. Move a master
-        forty units and the ray starts forty units from the rest
-        surface: on the biped the cast simply missed, both eyes,
-        and the projector published no shader matrix at all.
-
-        The carry used is rest-inverse-times-posed, so a master
-        sitting at its rest contributes identity and a rig naming
-        no space is unchanged. Distinct from rigExec:sourceSpace,
-        which is the source's SIBLING space and shapes the ray's
-        own motion rather than undoing the rig's carry."""
+        The rest ray is built from the source's BASE frame, which still
+        composes through the masters' posed avars, while the base points
+        it is cast at carry nothing. Naming the space takes its
+        rest-to-posed matrix back off the rest ray, so the cast meets the
+        surface wherever the master has moved the rig, and puts the
+        master's uniform scale back on the published matrix. A master at
+        its rest contributes identity, and a rig naming no space is
+        unchanged. Distinct from rigExec:sourceSpace, which shapes the
+        ray's own motion rather than undoing the rig's carry."""
     )
     rel rigExec:sourceSpace (
         doc = """The SIBLING SPACE rigExec:sources is measured against --
         for an eye, the socket bone its bind joint hangs from.
 
-        Without it the source's WORLD frame is mapped into the mesh's
-        object space through UsdGeomXformCache, which reads the STAGE. A
-        rig moves points, not xforms, so the eye mesh's stage transform is
-        the identity and the ray origin comes out as the bind's world
-        position -- measured on the biped, 164 units from a unit eyeball
-        authored at the origin. It hits only because the direction happens
-        to point back at the ball, and past about 20 degrees of head turn
-        it stops hitting: the projector published no matrix for either eye
-        at head ry 30, in both projection modes.
+        With it, the source's motion relative to this space is applied to
+        the authored rigExec:rayOrigin, rigExec:rayDirection and
+        rigExec:rayUp. Motion common to both frames -- the head, the face
+        -- cancels, so moving them carries the projector and only the
+        source's own motion aims the ray. The same space is used for the
+        look term, so turning the head does not read as the eye looking.
 
-        With it, the source is measured against the space and the ray is
-        that motion applied to the authored rigExec:rayOrigin and
-        rigExec:rayDirection. The head and the face are common to both
-        frames and cancel exactly, so moving them carries the projector
-        instead of breaking it, and what is left is the eye's own look.
-        The same space is used for the look term, or turning the head
-        would swing the iris as though the eye had looked."""
+        Without it, the source's posed frame IS the ray: its translation,
+        Z axis and Y axis, mapped into the surface's object space through
+        the surface's authored transform, which is read once at compile
+        and so must not vary with time."""
     )
     uniform token rigExec:projectionMode = "material" (
         allowedTokens = ["material", "reproject"]
         doc = """WHICH SURFACE the posed frame is read from.
 
-        material is the historical form and the default. The ray is cast
-        ONCE, at the rest surface, and names a triangle and a place
-        inside it; the posed frame is where that same material point
-        ended up. The projector then rides the skin, so a deformer that
-        slides the surface along the ray carries the projector with it --
-        on the biped's eyes the socket stretch drags the iris and pupil
-        across the eyeball, which is what this mode is for and what makes
-        it wrong here.
+        material (the default) casts the ray ONCE, at the base surface,
+        and the posed frame is where that same material point ended up.
+        The projector then rides the skin: a deformer that slides the
+        surface along the ray carries the projector with it.
 
-        reproject casts the ray AGAIN at the posed surface, so the frame
-        is wherever the look meets the deformed eyeball now. A surface
-        sliding along the ray then changes nothing: the hit stays on the
-        line the eye is looking down. The rest frame is still the first
-        cast's, because that is the projector's own placement and the
-        shader offset is quoted against it.
-
-        reproject is what the Maya rig does, and it is worth naming the
-        node: eye_?_pupil_bindplane is skinned to eye_?_bind for the look
-        and then SHRINKWRAPPED onto eye_?_projection_sphere, which itself
-        carries socketStretch_?_cluster. A shrink wrap re-projects onto
-        the deformed target every frame; it does not follow a material
-        point. There is no lattice anywhere in that setup."""
+        reproject casts the ray AGAIN at the final surface, so the frame
+        is wherever the ray meets the deformed surface now, and a surface
+        sliding along the ray changes nothing. The rest frame is still
+        the first cast's, because that is the projector's own placement
+        and rigExec:shaderOffset is quoted against it. A re-cast that
+        misses falls back to the material point, with a diagnostic."""
     )
     double3 rigExec:rayOrigin = (0, 0, 0) (
         doc = """Ray origin in the target's own object space. The default

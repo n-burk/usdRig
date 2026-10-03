@@ -1120,16 +1120,17 @@ PYBIND11_MODULE(_rigexec, m) {
             }, py::arg("path"),
            "The final rest-to-pose affine map of one joint (16 numbers, row-major).")
 
-        // Shader matrices. A surface projector publishes its frame here
-        // rather than moving points, so without this accessor the only
-        // way to check one was to look at the render -- which is how the
-        // eye projector's material-point drift went unmeasured.
+        // Shader matrices: the matrix-valued `primvars:<name>` a surface
+        // projector publishes on its mesh, as moved properties.
         .def("shader_matrix_keys", [](const rigExec::RigExecRigPose &p) {
                 std::vector<std::pair<std::string, std::string>> out;
-                for (const auto &mesh : p.shaderMatrices) {
-                    for (const auto &named : mesh.second) {
-                        out.emplace_back(_PathStr(mesh.first),
-                                         named.first.GetString());
+                static const std::string prefix("primvars:");
+                for (const auto &[path, value] : p.movedProperties) {
+                    const std::string &name = path.GetName();
+                    if (value.IsHolding<GfMatrix4d>() &&
+                        name.compare(0, prefix.size(), prefix) == 0) {
+                        out.emplace_back(_PathStr(path.GetPrimPath()),
+                                         name.substr(prefix.size()));
                     }
                 }
                 return out;
@@ -1138,15 +1139,14 @@ PYBIND11_MODULE(_rigexec, m) {
            "evaluation.")
         .def("shader_matrix", [](const rigExec::RigExecRigPose &p,
                                  std::string mesh, std::string primvar) {
-                auto it = p.shaderMatrices.find(SdfPath(mesh));
-                if (it == p.shaderMatrices.end()) {
-                    throw py::key_error("no shader matrices for " + mesh);
-                }
-                auto named = it->second.find(TfToken(primvar));
-                if (named == it->second.end()) {
+                const auto it = p.movedProperties.find(
+                    SdfPath(mesh).AppendProperty(
+                        TfToken("primvars:" + primvar)));
+                if (it == p.movedProperties.end() ||
+                    !it->second.IsHolding<GfMatrix4d>()) {
                     throw py::key_error("no " + primvar + " on " + mesh);
                 }
-                return _Mat4ToVec(named->second);
+                return _Mat4ToVec(it->second.UncheckedGet<GfMatrix4d>());
             }, py::arg("mesh"), py::arg("primvar"),
            "One published shader matrix (16 numbers, row-major).")
 

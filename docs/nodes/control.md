@@ -255,6 +255,22 @@ drawn in the local XZ plane -- while cube is the 3D box; this is
 the conventional rigging distinction between the two box-ish
 tokens.
 
+#### `guide:planeNormal`
+
+*Type:* `uniform token`. *Default:* `"Y"`.
+
+Valid values: `X`, `Y`, `Z`.
+
+Which LOCAL axis the planar guides' normal points along,
+for circle and box. Ignored by the volumetric shapes.
+
+A rig's control curves lie in whichever plane the rigger drew
+them in. A planar guide drawn in a different plane from its
+curve shows edge-on, as a sliver of the right size.
+
+Y is the default and reproduces the historical drawing exactly,
+so a control that does not author this is unchanged.
+
 #### `guide:drawMode`
 
 *Type:* `uniform token`. *Default:* `"wire"`.

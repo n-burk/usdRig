@@ -241,6 +241,25 @@ display on for a small asset buried it in solver geometry.
 
 *Type:* `float`. *Default:* `0.5`.
 
+#### `rigExec:space`
+
+*Relationship.*
+
+The prim whose movement away from its rest defines the
+space this chain is measured in -- normally a TRS master.
+
+The spline places joint i at `arcLength / restArcLength` along the
+posed curve. The curve is posed and the rest is not, so scaling
+whatever the rig hangs from doubles the ratio and the solve reads
+a pure scale as a 2x STRETCH: the chain still spans the curve, but
+every stretch-driven effect -- volume preservation, twist
+distribution -- fires as though the spine had been pulled.
+
+Naming the space carries the rest description into it, so the
+ratio stays 1 and only real stretching stretches. A relationship
+rather than a connection for the same reason as RigExecTwoBoneIk:
+a control's posed space is computed, never authored.
+
 ## Example
 
 A six-joint chain rests straight along a 6-unit tube with controls at

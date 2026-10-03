@@ -2080,6 +2080,148 @@ TestBipedWarmsBitIdentical(const std::string &examplesDir,
     CheckPosesBitIdentical(what4.c_str(), live4, warmed4);
 }
 
+// Per-frame operator inputs that move nothing else: a space switch's index,
+// a numeric pose driver's dial, a TwoBoneIk rigExec:spaceMatrix, and the
+// controls behind a radial cluster and a posed wire. Each is keyed to differ
+// between frames 3 and 4 in the session layer. Live runs with the parity
+// check, so a baked step that does not declare one of them (and is skipped
+// on the time change) disagrees with the dynamic path; a warm that replays a
+// stale constant -- an input the sampler never visits -- disagrees with live.
+void
+TestKeyedOperatorInputsWarmBitIdentical(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/biped/Biped_stack.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const auto keyNumber = [](const UsdAttribute &a, double v3, double v4) {
+        if (!a) return false;
+        if (a.GetTypeName() == SdfValueTypeNames->Double) {
+            a.Set(v3, UsdTimeCode(3.0));
+            a.Set(v4, UsdTimeCode(4.0));
+            return true;
+        }
+        if (a.GetTypeName() == SdfValueTypeNames->Float) {
+            a.Set(float(v3), UsdTimeCode(3.0));
+            a.Set(float(v4), UsdTimeCode(4.0));
+            return true;
+        }
+        return false;
+    };
+    const auto keyAvar = [&](const SdfPath &path, const char *avar,
+                             double v3, double v4) {
+        const UsdPrim prim = stage->GetPrimAtPath(path);
+        if (!prim || prim.GetTypeName() != "RigExecControl") return false;
+        UsdAttribute a = prim.GetAttribute(TfToken(avar));
+        if (!a) {
+            a = prim.CreateAttribute(TfToken(avar),
+                                     SdfValueTypeNames->Double);
+        }
+        return keyNumber(a, v3, v4);
+    };
+    SdfPath rig;
+    bool switchKeyed = false, dialKeyed = false, ikKeyed = false;
+    bool radialKeyed = false, wireKeyed = false;
+    for (const UsdPrim &prim : stage->TraverseAll()) {
+        const TfToken type = prim.GetTypeName();
+        SdfPathVector targets;
+        if (type == "RigExecRoot" && rig.IsEmpty()) {
+            rig = prim.GetPath();
+        } else if (type == "RigExecSpaceSwitch" && !switchKeyed) {
+            prim.GetRelationship(TfToken("rigExec:activeSpaceAttribute"))
+                .GetTargets(&targets);
+            switchKeyed = keyNumber(
+                targets.empty()
+                    ? prim.GetAttribute(TfToken("inputs:activeSpace"))
+                    : stage->GetAttributeAtPath(targets[0]),
+                0.0, 1.0);
+        } else if (type == "RigExecPoseInterpolator" && !dialKeyed) {
+            prim.GetRelationship(TfToken("rigExec:driverAttributes"))
+                .GetTargets(&targets);
+            dialKeyed = !targets.empty() &&
+                        keyNumber(stage->GetAttributeAtPath(targets[0]), 0.0,
+                                  2.0);
+        } else if (type == "RigExecTwoBoneIk" && !ikKeyed) {
+            GfMatrix4d scaled(1.0);
+            scaled.SetScale(1.1);
+            UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:spaceMatrix"));
+            if (a) {
+                a.Set(GfMatrix4d(1.0), UsdTimeCode(3.0));
+                a.Set(scaled, UsdTimeCode(4.0));
+                ikKeyed = true;
+            }
+        } else if (type == "RigExecMatrixMover" && !radialKeyed) {
+            TfToken blend;
+            if (UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:weightBlend"))) {
+                a.Get(&blend);
+            }
+            prim.GetRelationship(TfToken("rigExec:transform"))
+                .GetTargets(&targets);
+            radialKeyed = blend == "radial" && !targets.empty() &&
+                          keyAvar(targets[0], "avars:rx", 0.0, 20.0);
+        } else if (type == "RigExecCurveMover" && !wireKeyed) {
+            TfToken delta;
+            if (UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:driverDeltaFrame"))) {
+                a.Get(&delta);
+            }
+            prim.GetRelationship(TfToken("rigExec:driverTransforms"))
+                .GetTargets(&targets);
+            wireKeyed = delta == "posed" && !targets.empty() &&
+                        keyAvar(targets[0], "avars:ty", 0.0, 1.0);
+        }
+    }
+    CHECK(!rig.IsEmpty());
+    CHECK(switchKeyed);
+    CHECK(dialKeyed);
+    CHECK(ikKeyed);
+    CHECK(radialKeyed);
+    CHECK(wireKeyed);
+    if (rig.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("keyed operator inputs: freeze refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {3.0, 4.0}) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, rig, frozen, inputs, &scheduler, nullptr);
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid);
+        if (live.bakedParityMismatches != 0) {
+            for (const std::string &diagnostic : live.diagnostics) {
+                std::printf("keyed operator inputs live frame %g: %s\n",
+                            frame, diagnostic.c_str());
+            }
+        }
+        CHECK(live.bakedParityMismatches == 0);
+        const std::string what =
+            "keyed operator inputs warmed frame " + std::to_string(frame);
+        CheckPosesBitIdentical(what.c_str(), live, warmed);
+    }
+}
+
 // The stack (examples/biped/Biped_stack_anim.usda) warms bit-identically:
 // the layered full-body rig with its pose-interpolator steps, which no
 // flat rig builds, warmed from the same two-frame history.
@@ -3259,6 +3401,7 @@ main(int argc, char **argv)
         TestBipedWarmsBitIdentical(argv[1]);
         TestBipedWarmsBitIdenticalAtSweepDistance(argv[1]);
         TestStackAnimWarmsBitIdentical(argv[1]);
+        TestKeyedOperatorInputsWarmBitIdentical(argv[1]);
         TestStackAnimWarmsBitIdenticalAtSweepDistance(argv[1]);
         TestBlendFaceWarmsBitIdentical(argv[1]);
         TestLatticeStackWarmsBitIdentical(argv[1]);

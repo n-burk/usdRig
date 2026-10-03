@@ -1145,6 +1145,10 @@ _ToRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     out.transformSlot = int32_t(revision.transformSlot);
     out.transformSpaceSlot = int32_t(revision.transformSpaceSlot);
     out.carrySpaceSlot = int32_t(revision.carrySpaceSlot);
+    for (const SdfPath &dial : revision.binding.shaderDials) {
+        out.shaderDials.push_back(_PathRef(dial, writer));
+    }
+    out.meshWorldInverse = _ToMatrix(revision.binding.meshWorldInverse);
     out.constraintDelta = int32_t(revision.constraintDelta);
     out.driverFramesSolver = int32_t(revision.driverFramesSolver);
     out.finalPhase = revision.finalPhase;

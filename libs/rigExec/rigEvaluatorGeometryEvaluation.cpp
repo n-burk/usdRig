@@ -677,6 +677,59 @@ RigExecRigEvaluator::_EvaluateGeometry(
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "Derived " + target.GetString(), "geometry");
         for (const _GraphRevision &derived : derivedIt->second) {
+            if (RigExecIsDerivedMatrixOp(derived.op)) {
+                // A surface projector's matrix primvar: its providers' world
+                // frames (rest times computeMatrix, base and final), the
+                // chain's authored and final points, and the shared kernel.
+                RigExecSurfaceProjectorFrames frames;
+                const SdfPath providers[3] = {derived.binding.transform,
+                                              derived.binding.transformSpace,
+                                              derived.binding.carrySpace};
+                const RigExecTapId matrixTaps[3] = {derived.transformTap,
+                                                    derived.transformSpaceTap,
+                                                    derived.carrySpaceTap};
+                for (int k = 0; k < 3; ++k) {
+                    if (providers[k].IsEmpty()) continue;
+                    frames.named[k] = true;
+                    if (matrixTaps[k] < 0 || derived.projectorRestTaps[k] < 0) {
+                        continue;
+                    }
+                    const GfMatrix4d baseMatrix =
+                        snapshot.Get<GfMatrix4d>(matrixTaps[k]);
+                    GfMatrix4d finalMatrix = baseMatrix;
+                    const auto revised = finalMatrices.find(providers[k]);
+                    if (revised != finalMatrices.end()) {
+                        finalMatrix = revised->second;
+                    }
+                    const RigExecPointFrame rest =
+                        snapshot.Get<RigExecPointFrame>(
+                            derived.projectorRestTaps[k]);
+                    if (!rest.IsValid()) continue;
+                    frames.base[k] = RigExecWorldFromRest(rest.points, baseMatrix);
+                    frames.final[k] =
+                        RigExecWorldFromRest(rest.points, finalMatrix);
+                    frames.resolved[k] = true;
+                }
+                GfMatrix4d matrix(1.0);
+                std::vector<std::string> diagnostics;
+                if (RigExecEvaluateProjectorTarget(
+                        _stage->GetPrimAtPath(derived.moverPath), derived.op,
+                        derived.binding, frames,
+                        std::vector<GfVec3f>(basePoints.begin(),
+                                             basePoints.end()),
+                        std::vector<GfVec3f>(graphPoints.begin(),
+                                             graphPoints.end()),
+                        &_resolvedInputs, time, &matrix, &diagnostics)) {
+                    work.movedProperties.emplace_back(derived.target,
+                                                      VtValue(matrix));
+                }
+                work.diagnostics.insert(work.diagnostics.end(),
+                                        diagnostics.begin(),
+                                        diagnostics.end());
+                ++work.revisionsBuilt;
+                ++work.chainsBuilt;
+                continue;
+            }
             VtVec3fArray derivedBase;
             const UsdAttribute derivedAttr =
                 _stage->GetAttributeAtPath(derived.target);

@@ -1275,6 +1275,8 @@ _BinaryCompareRevision(
     _BinaryCheckEqual(live.influenceSlots, wire.influenceSlots);
     CHECK(live.transformSlot == wire.transformSlot);
     CHECK(live.transformSpaceSlot == wire.transformSpaceSlot);
+    CHECK(live.carrySpaceSlot == wire.carrySpaceSlot);
+    CHECK(live.binding.shaderDials.size() == wire.shaderDials.size());
     CHECK(live.constraintDelta == wire.constraintDelta);
     CHECK(live.driverFramesSolver == wire.driverFramesSolver);
     CHECK(live.finalPhase == wire.finalPhase);

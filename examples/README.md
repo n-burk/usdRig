@@ -118,6 +118,11 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
   `/…/Movers/Cage/CageLift` gives the lifted-but-not-twisted cage, and
   `final` gives both — three different results from one rig with no other
   edit. Cyclic phase reads are rejected at compile.
+- **15_TransformMatrixMover.usda** — a matrix mover in the transform
+  domain: `rigExec:moves` names a joint rather than `.points`, and the
+  joint's frame is carried by the driver's motion in its space. One
+  mover blends radially (`rigExec:weightBlend = "radial"`), one linearly,
+  at half weight.
 - **rigexec_flat.usda** — the smallest rig that exists, and a flattened
   capture of the shape an interactive session produces: one aim
   constraint, no joints at all, and both ends plain `UsdGeomXformable`s.

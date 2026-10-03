@@ -428,6 +428,10 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
 // transforms bind the table path). All under synthetic mover keys; the
 // worker replays them, it cannot read the mover prim or the stage.
 void
+_SampleMoverToken(const UsdPrim &moverPrim, const SdfPath &moverPath,
+                  const char *name, UsdTimeCode time, RigExecFrameInputs *out);
+
+void
 _SampleWireInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
                   const RigExecResolvedInputs *refreshed,
                   const UsdStageRefPtr &stage, UsdTimeCode time,
@@ -507,6 +511,9 @@ _SampleWireInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
     };
     floats("inputs:driverWeights", "driverWeights");
     floats("inputs:driverBaseWeights", "driverBaseWeights");
+    _SampleMoverToken(moverPrim, moverPath, "rigExec:pointFrame", time, out);
+    _SampleMoverToken(moverPrim, moverPath, "rigExec:driverDeltaFrame", time,
+                      out);
     if (binding.driverTransformCount == 0 &&
         !binding.driverCurvePoints.IsEmpty()) {
         VtVec3fArray posed;
@@ -521,6 +528,29 @@ _SampleWireInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
         out->Add(_FrozenWireInputKey(moverPath, "driverCurvePoints"),
                  VtValue(has ? posed : VtVec3fArray()), has);
     }
+}
+
+// A structural token the live assembler reads raw and records
+// (_RecordedToken in moverGraph.cpp), sampled under its own property path:
+// unsampled, the replay would take the fallback where live took the
+// authored value. Only an authored token is sampled. An unauthored one
+// reads its schema fallback live, which is the replay's fallback too, and
+// every matrix or wire mover would otherwise add a sample to every cached
+// frame.
+void
+_SampleMoverToken(const UsdPrim &moverPrim, const SdfPath &moverPath,
+                  const char *name, UsdTimeCode time, RigExecFrameInputs *out)
+{
+    if (!moverPrim) {
+        return;
+    }
+    const UsdAttribute a = moverPrim.GetAttribute(TfToken(name));
+    if (!a || !a.HasAuthoredValue()) {
+        return;
+    }
+    TfToken value;
+    const bool has = a.Get(&value, time);
+    out->Add(moverPath.AppendProperty(TfToken(name)), VtValue(value), has);
 }
 
 void
@@ -676,6 +706,53 @@ _SampleMoverScalar(const SdfPath &key, const UsdAttribute &attribute,
         attribute.Get(&value, time);
     }
     out->Add(key, VtValue(value), /*hasValue=*/true);
+}
+
+// RigExecReadProjectorTarget's reads, sampled where it reads them: the
+// settings off the projector, the dials through the refreshed inputs.
+void
+_SampleProjectorInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
+                       const RigExecResolvedInputs *refreshed,
+                       const UsdStageRefPtr &stage, UsdTimeCode time,
+                       RigExecFrameInputs *out)
+{
+    const UsdPrim &prim = revision.moverPrim;
+    if (!prim || !stage) {
+        return;
+    }
+    if (revision.op == RigExecRevisionOp::ShaderDials) {
+        for (const SdfPath &dial : revision.binding.shaderDials) {
+            const UsdAttribute a = stage->GetAttributeAtPath(dial);
+            double value = 0.0;
+            if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
+                float asFloat = 0.0f;
+                if (!(refreshed && refreshed->GetAttribute(a, time, &asFloat))) {
+                    a.Get(&asFloat, time);
+                }
+                value = double(asFloat);
+            } else if (a) {
+                if (!(refreshed && refreshed->GetAttribute(a, time, &value))) {
+                    a.Get(&value, time);
+                }
+            }
+            out->Add(dial, VtValue(value), /*hasValue=*/true);
+        }
+        return;
+    }
+    const SdfPath &path = revision.moverPath;
+    _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:rayOrigin")),
+                       prim.GetAttribute(TfToken("rigExec:rayOrigin")),
+                       GfVec3d(0.0, 0.0, 0.0), time, refreshed, out);
+    _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:rayDirection")),
+                       prim.GetAttribute(TfToken("rigExec:rayDirection")),
+                       GfVec3d(0.0, 0.0, 1.0), time, refreshed, out);
+    _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:rayUp")),
+                       prim.GetAttribute(TfToken("rigExec:rayUp")),
+                       GfVec3d(0.0, 1.0, 0.0), time, refreshed, out);
+    _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:shaderOffset")),
+                       prim.GetAttribute(TfToken("rigExec:shaderOffset")),
+                       GfMatrix4d(1.0), time, refreshed, out);
+    _SampleMoverToken(prim, path, "rigExec:projectionMode", time, out);
 }
 
 // Samples one derived-topology array: the resolved memory first (an
@@ -1442,6 +1519,10 @@ RigExecSampleFrameInputsWithChainBindings(
         if (revision.op == RigExecRevisionOp::Wire) {
             _SampleWireInputs(revision, &refreshed, B.stage, time, &sampled);
         }
+        if (revision.op == RigExecRevisionOp::Matrix) {
+            _SampleMoverToken(moverPrim, revision.moverPath,
+                              "rigExec:weightBlend", time, &sampled);
+        }
         _SampleIterativeMoverInputs(revision, &refreshed, B.stage, time,
                                     &sampled);
         if (revision.op == RigExecRevisionOp::BlendShape && moverPrim) {
@@ -1524,6 +1605,10 @@ RigExecSampleFrameInputsWithChainBindings(
         if (revision.op == RigExecRevisionOp::RecomputeExtent) {
             _SampleTopologyArray<float>(revision.binding.widths, time,
                                         &refreshed, B.stage, &sampled);
+        }
+        if (RigExecIsDerivedMatrixOp(revision.op)) {
+            _SampleProjectorInputs(revision, &refreshed, B.stage, time,
+                                   &sampled);
         }
     }
     // Skin packets, assembled here by the real assembler: the worker cannot
@@ -1921,6 +2006,10 @@ RigExecSampleFrameInputsWithBurstCache(
         if (revision.op == RigExecRevisionOp::Wire) {
             _SampleWireInputs(revision, &refreshed, B.stage, time, &sampled);
         }
+        if (revision.op == RigExecRevisionOp::Matrix) {
+            _SampleMoverToken(moverPrim, revision.moverPath,
+                              "rigExec:weightBlend", time, &sampled);
+        }
         _SampleIterativeMoverInputs(revision, &refreshed, B.stage, time,
                                     &sampled);
         if (revision.op == RigExecRevisionOp::BlendShape && moverPrim) {
@@ -1998,6 +2087,10 @@ RigExecSampleFrameInputsWithBurstCache(
             _SampleTopologyArrayCached<float>(revision.binding.widths, time,
                                               &refreshed, B.stage, &sampled,
                                               cache);
+        }
+        if (RigExecIsDerivedMatrixOp(revision.op)) {
+            _SampleProjectorInputs(revision, &refreshed, B.stage, time,
+                                   &sampled);
         }
     }
     sampled.revisionPackets.resize(B.revisionIndex.size());

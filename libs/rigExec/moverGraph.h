@@ -74,7 +74,22 @@ enum class RigExecRevisionOp {
     Wrinkle,
     /// A registered plugin supplies parameter assembly and point deformation.
     External,
+    /// RigExecSurfaceProjector: a derived matrix primvar measured from the
+    /// chain's final points (rigExec:shaderPrimvar).
+    SurfaceProjector,
+    /// RigExecSurfaceProjector: its shader dials packed into a derived
+    /// matrix primvar (rigExec:shaderDialPrimvar).
+    ShaderDials,
 };
+
+/// Whether \p op publishes a derived MATRIX primvar rather than revising
+/// points or a vec3f array.
+inline bool
+RigExecIsDerivedMatrixOp(RigExecRevisionOp op)
+{
+    return op == RigExecRevisionOp::SurfaceProjector ||
+           op == RigExecRevisionOp::ShaderDials;
+}
 
 /// When in the walk a side input takes its value from.
 ///
@@ -658,6 +673,11 @@ struct RigExecRevisionBinding {
     int driverBaseTransformCount = 0;
     SdfPath driverFrames;     ///< aggregate frame provider
     SdfPath widths;           ///< authored widths (extent maintenance)
+    /// Surface projector: rigExec:shaderDialSources, in order, at most
+    /// sixteen, and the inverse of the projected mesh's local-to-world,
+    /// which compile requires to be static.
+    std::vector<SdfPath> shaderDials;
+    GfMatrix4d meshWorldInverse{1.0};
     std::vector<SdfPath> blendInputs;  ///< sorted blend channels
     std::map<SdfPath, std::vector<RigExecBlendSampleBinding>> blendSamples;
 
@@ -1471,6 +1491,68 @@ struct RigExecProviderValues {
     /// what a rig with no property chains wants and what a test may pass.
     const RigExecResolvedInputs *resolved = nullptr;
 };
+
+/// The provider frames a surface projector reads, as WORLD frames: each
+/// provider's rest frame times its base or final computeMatrix. Index 0 is
+/// binding.transform (the source), 1 binding.transformSpace (the source's
+/// sibling space), 2 binding.carrySpace (the rig's space). `named` says the
+/// binding names the provider; `resolved` says its frames were read.
+struct RigExecSurfaceProjectorFrames {
+    bool named[3] = {false, false, false};
+    bool resolved[3] = {false, false, false};
+    GfMatrix4d base[3] = {GfMatrix4d(1.0), GfMatrix4d(1.0), GfMatrix4d(1.0)};
+    GfMatrix4d final[3] = {GfMatrix4d(1.0), GfMatrix4d(1.0), GfMatrix4d(1.0)};
+};
+
+/// A provider's world frame from its rest landmarks and a rest->pose map:
+/// row-vector world = rest * M. Identity rest landmarks give M itself.
+GfMatrix4d RigExecWorldFromRest(const std::array<GfVec3d, 4> &restPoints,
+                                const GfMatrix4d &restToPose);
+
+/// What a surface projector target reads besides frames and points: its
+/// settings, its dials and its surface's topology. Gathered from the stage
+/// by RigExecReadProjectorTarget and from samples by the frozen replay, so
+/// both hand RigExecRunProjectorTarget the same values.
+struct RigExecProjectorReads {
+    GfVec3d rayOrigin{0.0, 0.0, 0.0};
+    GfVec3d rayDirection{0.0, 0.0, 1.0};
+    GfVec3d rayUp{0.0, 1.0, 0.0};
+    GfMatrix4d shaderOffset{1.0};
+    bool reproject = false;
+    std::vector<double> dials;
+    std::vector<int> faceVertexCounts;
+    std::vector<int> faceVertexIndices;
+};
+
+/// Reads (and records, for the bake) what \p op needs off the stage,
+/// through the generation's resolved inputs where the live assemblers do.
+void RigExecReadProjectorTarget(
+    const UsdPrim &projectorPrim, RigExecRevisionOp op,
+    const RigExecRevisionBinding &binding,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    RigExecProjectorReads *reads);
+
+/// Runs a surface projector target (SurfaceProjector or ShaderDials) on its
+/// gathered reads: the shared kernel on \p finalPoints against the authored
+/// \p basePoints. False, with diagnostics, when no matrix is published.
+bool RigExecRunProjectorTarget(
+    RigExecRevisionOp op, const RigExecRevisionBinding &binding,
+    const RigExecSurfaceProjectorFrames &frames,
+    const RigExecProjectorReads &reads,
+    const std::vector<GfVec3f> &basePoints,
+    const std::vector<GfVec3f> &finalPoints, GfMatrix4d *matrix,
+    std::vector<std::string> *diagnostics);
+
+/// RigExecReadProjectorTarget then RigExecRunProjectorTarget: what the
+/// dynamic walk and the baked program both call.
+bool RigExecEvaluateProjectorTarget(
+    const UsdPrim &projectorPrim, RigExecRevisionOp op,
+    const RigExecRevisionBinding &binding,
+    const RigExecSurfaceProjectorFrames &frames,
+    const std::vector<GfVec3f> &basePoints,
+    const std::vector<GfVec3f> &finalPoints,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    GfMatrix4d *matrix, std::vector<std::string> *diagnostics);
 
 /// Sums blend channels into dense per-point deltas against \p base
 /// (spec §7.3): deltas derive against the authored base, never the preceding

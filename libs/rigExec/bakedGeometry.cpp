@@ -332,9 +332,13 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         for (const RigExecBakedRevisionSpec &derived : spec.derived) {
             RigExecBakedProgramImpl::GeomChain::Derived d;
             d.target = derived.target;
+            d.matrixTarget = RigExecIsDerivedMatrixOp(derived.op);
             B.prims.insert(derived.target.GetPrimPath());
             B.named.insert(derived.target);
-            if (const UsdAttribute a =
+            if (d.matrixTarget) {
+                // A projector's primvar is published, never authored, so
+                // there is no base to read; its inputs are the chain's.
+            } else if (const UsdAttribute a =
                     B.stage->GetAttributeAtPath(derived.target)) {
                 d.baseQuery = UsdAttributeQuery(a);
             } else {
@@ -1103,6 +1107,18 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     int(B.steps.size()) - 1));
             }
             DeclareMatrixReads(derived.revision, &step);
+            if (derived.matrixTarget) {
+                // A projector reads its providers at BOTH phases.
+                for (const int slot : {derived.revision.transformSlot,
+                                       derived.revision.transformSpaceSlot,
+                                       derived.revision.carrySpaceSlot}) {
+                    if (slot < 0) continue;
+                    step.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::BaseMatrix, slot));
+                    step.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::FinalMatrix, slot));
+                }
+            }
             step.writes.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::DerivedOut, id));
         }
@@ -1830,6 +1846,14 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
         }
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
                  chain.derived) {
+            if (derived.matrixTarget) {
+                // No base and no graph node: the dynamic walk evaluates a
+                // projector target directly every generation.
+                derived.haveBase = true;
+                derived.baseDirty = true;
+                derived.revision.created = false;
+                continue;
+            }
             VtVec3fArray derivedBase;
             derived.haveBase = derived.baseQuery.IsValid() &&
                                derived.baseQuery.Get(&derivedBase, time);
@@ -1929,6 +1953,15 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             return;
         }
         RigExecBakedProgramImpl::GeomRevision &revision = derived.revision;
+        if (derived.matrixTarget) {
+            step->counters.revisionsBuilt = 1;
+            derived.haveMatrix = RigExecBakedRunProjectorTarget(
+                B, chain, revision, R, time, &derived.matrix,
+                &step->diagnostics);
+            derived.haveResult = true;
+            step->counters.chainsBuilt = 1;
+            return;
+        }
         FoldInfluences(B, &revision);
         RigExecMoverParameters parameters = AssembleRevision(
             B, &revision, chain.result.cdata(), chain.result.size(), time,
@@ -2651,11 +2684,60 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
             const RigExecBakedProgramImpl::GeomChain::Derived &derived =
                 chain.derived[size_t(derivedIndex)];
             if (chain.haveBase && derived.haveBase) {
-                pose->movedProperties[derived.target] =
-                    VtValue(derived.result);
+                if (!derived.matrixTarget) {
+                    pose->movedProperties[derived.target] =
+                        VtValue(derived.result);
+                } else if (derived.haveMatrix) {
+                    pose->movedProperties[derived.target] =
+                        VtValue(derived.matrix);
+                }
             }
         }
     }
+}
+
+RigExecSurfaceProjectorFrames
+RigExecBakedProjectorFrames(const RigExecBakedProgramImpl &B,
+                            const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    // World frames: each provider's rest times its base and final
+    // computeMatrix, the tables every geometry revision reads.
+    RigExecSurfaceProjectorFrames frames;
+    const SdfPath providers[3] = {revision.binding.transform,
+                                  revision.binding.transformSpace,
+                                  revision.binding.carrySpace};
+    const int slots[3] = {revision.transformSlot,
+                          revision.transformSpaceSlot,
+                          revision.carrySpaceSlot};
+    for (int k = 0; k < 3; ++k) {
+        if (providers[k].IsEmpty()) continue;
+        frames.named[k] = true;
+        const int slot = slots[k];
+        if (slot < 0 || !B.restFrames[size_t(slot)].IsValid()) continue;
+        const auto &rest = B.restFrames[size_t(slot)].points;
+        frames.base[k] =
+            RigExecWorldFromRest(rest, B.baseMatrix[size_t(slot)]);
+        frames.final[k] =
+            RigExecWorldFromRest(rest, B.finalMatrix[size_t(slot)]);
+        frames.resolved[k] = true;
+    }
+    return frames;
+}
+
+bool
+RigExecBakedRunProjectorTarget(
+    const RigExecBakedProgramImpl &B,
+    const RigExecBakedProgramImpl::GeomChain &chain,
+    const RigExecBakedProgramImpl::GeomRevision &revision,
+    const RigExecResolvedInputs &resolved, UsdTimeCode time,
+    GfMatrix4d *matrix, std::vector<std::string> *diagnostics)
+{
+    return RigExecEvaluateProjectorTarget(
+        revision.moverPrim, revision.op, revision.binding,
+        RigExecBakedProjectorFrames(B, revision),
+        std::vector<GfVec3f>(chain.lastBase.begin(), chain.lastBase.end()),
+        std::vector<GfVec3f>(chain.result.begin(), chain.result.end()),
+        &resolved, time, matrix, diagnostics);
 }
 
 }  // namespace rigExec

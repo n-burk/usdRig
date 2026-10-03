@@ -3591,14 +3591,8 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
 
 class RigExecSurfaceProjector "RigExecSurfaceProjector" (
     customData = {
-        string userDocBrief = """Carries a projector on a deforming surface: casts a ray at\r
-    the surface's rest points to pick a material point on it, follows\r
-    that point onto the surface's OWN posed points, and moves the target\r
-    so that the frame there -- its position and its interpolated surface\r
-    normal -- drives the prim's transform while the geometry stays\r
-    exactly where the deformation put it (spec sections 4.1, 7.5).\r
-\r
-    THE HIT IS A MATERIAL POINT, not a place on a line."""
+        string userDocBrief = """Publishes a frame that rides a deforming surface to the\r
+    renderer, as a constant matrix primvar on that surface."""
     }
 )
 {
@@ -3607,7 +3601,14 @@ class RigExecSurfaceProjector "RigExecSurfaceProjector" (
         customData = {
             string userDocBrief = """WHICH SURFACE the posed frame is read from.\r
 \r
-        material is the historical form and the default."""
+        material (the default) casts the ray ONCE, at the base surface,\r
+        and the posed frame is where that same material point ended up.\r
+        The projector then rides the skin: a deformer that slides the\r
+        surface along the ray carries the projector with it.\r
+\r
+        reproject casts the ray AGAIN at the final surface, so the frame\r
+        is wherever the ray meets the deformed surface now, and a surface\r
+        sliding along t..."""
         }
     )
     double3 rigExec:rayDirection = (0, 0, 1) (
@@ -3661,8 +3662,9 @@ class RigExecSurfaceProjector "RigExecSurfaceProjector" (
             string userDocBrief = """The SIBLING SPACE rigExec:sources is measured against --\r
         for an eye, the socket bone its bind joint hangs from.\r
 \r
-        Without it the source's WORLD frame is mapped into the mesh's\r
-        object space through UsdGeomXformCache, which reads the STAGE."""
+        With it, the source's motion relative to this space is applied to\r
+        the authored rigExec:rayOrigin, rigExec:rayDirection and\r
+        rigExec:rayUp."""
         }
     )
     rel rigExec:space (
@@ -3670,7 +3672,9 @@ class RigExecSurfaceProjector "RigExecSurfaceProjector" (
             string userDocBrief = """The prim whose movement away from its rest carries\r
         the whole rig -- normally a TRS master.\r
 \r
-        The REST cast needs it taken back off."""
+        The rest ray is built from the source's BASE frame, which still\r
+        composes through the masters' posed avars, while the base points\r
+        it is cast at carry nothing."""
         }
     )
 }

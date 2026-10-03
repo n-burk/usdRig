@@ -12,7 +12,7 @@ rendered for it (such a page still links a stage if it sets "example_key").
 
 CATEGORIES = [
     ("Rig", ["rig_root"]),
-    ("Transform providers", ["control", "joint"]),
+    ("Transform providers", ["control", "joint", "space_switch"]),
     ("Solvers", ["fk_chain", "two_bone_ik", "spline_ik",
                  "blend_point_frames", "twist_distribution", "ribbon"]),
     ("Constraints", ["aim_constraint", "position_constraint",
@@ -27,6 +27,7 @@ CATEGORIES = [
                  "plane_weight", "curve_weight", "combine_weight"]),
     ("Property math", ["float_math_mover", "vec3f_math_mover",
                        "matrix_math_mover"]),
+    ("Shading", ["surface_projector"]),
     ("Interface", ["picker", "picker_panel", "picker_button",
                    "touch_regions", "touch_region"]),
 ]
@@ -281,6 +282,83 @@ for the whole loop and the only motion in frame comes from the one driver.""",
             ("fk_chain", "FK Chain"),
             ("aim_constraint", "Aim Constraint"),
             ("matrix_mover", "Matrix Mover"),
+        ],
+    },
+    "space_switch": {
+        "title": "Space Switch",
+        "schema": "RigExecSpaceSwitch",
+        "summary": "Gives a control a labelled list of parent spaces, selected or blended by an index.",
+        "description": """A space switch replaces one control's PARENT SPACE with
+one of an ordered list of sources — world, the chest, the head — chosen by
+a live index. It does not write the control's pose: the control keeps
+composing from its own avars, so it still drags, still carries its
+namespace children, and its avars read as offsets in whichever space is
+selected. A whole-number index selects a space exactly; a fractional one
+blends the two it lies between, so a switch can be eased instead of
+stepped.""",
+        "how_it_works": """The switch is read at compile time and changes how its target
+composes. In row-vector convention the target's world matrix is
+`avars * default:space * inverse(source default:space) * source posed:space`:
+the ordinary transform ladder with the namespace parent's pair of spaces
+swapped for the selected source's pair. Both halves come from the same
+source, so at rest they cancel and every space gives the same answer —
+adding a switch never moves a rig at rest. A source that is not a frame
+provider (the `RigExecRoot` itself is the idiomatic one) contributes
+identity, which is how "world" is spelled. The inherited per-axis masks
+act on the delta the space contributes, expressed in the target's own
+default frame, and `rigExec:rotationFilters` can pass only the twist of a
+source's rotation about `rigExec:twistAxis`, or only the swing, by an
+exact swing-twist decomposition. The index is an ordinary per-frame input:
+the dynamic path, the baked program, the frame cache and a `.rigexec`
+binary all re-read it every frame, and keying it re-runs only the compose
+of the switched control's subtree.""",
+        "wiring": [
+            ("`rigExec:target`", "The one control (or other transform provider) "
+             "whose parent space is switched. Zero or several is a compile error.", "yes"),
+            ("`rigExec:sources`", "The spaces, in index order. The rig root (or any "
+             "prim that is not a frame provider) means world.", "yes"),
+            ("`rigExec:activeSpaceAttribute`", "A float or double property supplying "
+             "the index, normally an avar on the control itself; when authored it "
+             "wins over `inputs:activeSpace`.", "no"),
+            ("`rigExec:space`", "The master whose rest-to-posed motion carries the "
+             "whole rig, so a rotation filter does not discard it.", "no"),
+        ],
+        "param_groups": [
+            ("Constraint base", "RigExecConstraint"),
+            ("Ordered sources", "RigExecSourceConstraint"),
+        ],
+        "example": """A cart slides along a track and a hand control floats above
+it. The hand is the cart's sibling, not its child, so in namespace it lives
+in world space; the `HandSpaces` switch lists world (the rig root) and the
+cart, and reads its index from the hand's own `avars:space`. For the first
+eleven frames the index is 0 and the cart drives away beneath a hand that
+stays put. Over the next twelve the index eases from 0 to 1 and the hand
+glides across onto the cart — halfway at the midpoint, because a fractional
+index blends the two spaces. From then on the hand rides the cart out and
+home again, and with the cart back at rest both spaces agree, so the loop
+closes where it began.""",
+        "tips": [
+            "Switching mid-pose moves the control: the same avars now mean an "
+            "offset in a different space. Matching the pose across a switch is "
+            "a tool's job (key the avars at the switch frame), not the "
+            "evaluator's.",
+            "Put the index on the control the animator already selects, through "
+            "`rigExec:activeSpaceAttribute` — an `avars:space` channel keys, "
+            "shows in the avar editor and undoes like any other avar.",
+            "`inputs:sourceWeights` has no meaning here — the index is the "
+            "selector — and authoring it is a compile error rather than a "
+            "silent no-op.",
+            "A pole vector that should follow a hand's twist but not its swing "
+            "takes `rigExec:rotationFilters = [\"all\", \"twist\"]` with "
+            "`rigExec:twistAxis` along the forearm.",
+            "Two switches that each need the other composed first are a cycle "
+            "and refuse to compile; a switch that reads a space below it in "
+            "namespace is fine.",
+        ],
+        "see_also": [
+            ("control", "Control"),
+            ("parent_constraint", "Parent Constraint"),
+            ("two_bone_ik", "Two-Bone IK"),
         ],
     },
     "fk_chain": {
@@ -1211,7 +1289,9 @@ by a weight object. One mover at constant weight is a rigid attachment;
 several stacked on one target are applied in sequence, each from the
 preceding revision, which is exact wherever a point has a single
 influence and is not linear blend skinning where weights overlap — that
-is the Skin Mover's job.""",
+is the Skin Mover's job. Naming a bare prim — a joint, a control or an
+Xformable — instead of a `points` property moves that prim's FRAME the
+same way, as a step of the pose stack.""",
         "how_it_works": """The provider publishes `computeMatrix`, the rest-to-posed map of its
 own frame (computations.cpp:401-415), and the mover blends it over the
 incoming points as `p' = q + w (T q - q)` (schema.usda:1677-1679), where
@@ -1236,7 +1316,8 @@ and the compiler synthesizes the recompute revisions that keep authored
             # entirely is not an error: the prim is then not a mover at all --
             # skipped as a grouping scope, :3543-3557 -- and an authored but empty
             # one is reported inert, :3561-3578.)
-            ("`rigExec:moves`", "Exact points property to deform.", "yes"),
+            ("`rigExec:moves`", "Exact points property to deform, or a bare joint, "
+             "control or Xformable whose frame to move.", "yes"),
         ],
         "param_groups": [
             ("Common mover envelope", "RigExecMoverAPI"),
@@ -1265,6 +1346,11 @@ stays at 1, so the follow is full strength over every point of the card.""",
             "4.2). Stacking is how you layer rigid follows, not how you blend "
             "influences on one point — use the Skin Mover for that "
             "(schema.usda:1700-1705).",
+            "`rigExec:weightBlend = \"radial\"` blends a fraction of the "
+            "rotation instead of the chord, so a partly weighted point keeps "
+            "its distance from the driver's pivot; the default `linear` is the "
+            "classic cluster. A frame mover blends its landmark points the same "
+            "way (examples/15_TransformMatrixMover.usda).",
         ],
         "see_also": [
             ("skin_mover", "Skin Mover"),
@@ -2695,6 +2781,79 @@ the rest pose the pair departs from.""",
             ("matrix_mover", "Matrix Mover"),
             ("control", "Control"),
             ("float_math_mover", "Float Math Mover"),
+        ],
+    },
+    "surface_projector": {
+        "title": "Surface Projector",
+        "schema": "RigExecSurfaceProjector",
+        "no_gif": True,
+        "summary": "Publishes a frame riding a deforming surface to its shader, as a matrix primvar.",
+        "description": """A surface projector hands a shader a frame that rides a
+deforming surface — the canonical case is an iris and pupil projected onto
+an eyeball that the lids, the socket and the look all deform. It casts a
+ray at the surface's rest points to pick a point on it, follows that point
+onto the surface's final points, and publishes the motion as a constant
+`matrix4d` primvar on the surface for the material to read. It writes
+nothing to the stage and moves no point; the geometry is exactly what the
+surface's other movers make it, and the frame reaches only the renderer.""",
+        "how_it_works": """The projector is compiled into a derived target of the surface's
+point chain, beside the normals and extent the compiler already keeps
+current, so it runs after every mover on that surface and again whenever
+the chain's final points or one of its source frames change. The ray —
+`rigExec:rayOrigin` and `rigExec:rayDirection` in the surface's object
+space — is moved by the `rigExec:sources` frame, measured against
+`rigExec:sourceSpace` so that motion common to the eye and its socket
+cancels. A Möller–Trumbore cast against the base points names a triangle
+and a place inside it; the frame there (position, interpolated vertex
+normal, `rigExec:rayUp` for roll) is evaluated on the base and the final
+points, and `rigExec:projectionMode` chooses whether the posed frame
+follows that material point or re-casts at the posed surface. The
+published matrix is `rigExec:shaderOffset * look * delta`. Up to sixteen
+scalar `rigExec:shaderDialSources` are packed into a second matrix primvar
+for the same material. The dynamic path, the baked program, the frame
+cache and the `.rigexec` runtime all run one header-only kernel.""",
+        "wiring": [
+            ("`rigExec:moves`", "The surface's `points` property; the primvars are "
+             "published on that prim.", "yes"),
+            ("`rigExec:sources`", "The frame provider that aims the ray — normally "
+             "the eye's bind joint.", "no"),
+            ("`rigExec:sourceSpace`", "The sibling space the source is measured in — "
+             "normally the socket the bind joint hangs from.", "no"),
+            ("`rigExec:space`", "The master whose motion carries the whole rig, "
+             "taken back off the rest ray.", "no"),
+            ("`rigExec:shaderDialSources`", "Scalar properties (usually control avars) "
+             "packed into `rigExec:shaderDialPrimvar`.", "no"),
+        ],
+        "param_groups": [],
+        "example": """The biped's eyes are the worked example
+([Biped_eyes.usda](../../examples/biped/Biped_eyes.usda)). Each eye mesh
+has one projector whose source is the eye's bind joint and whose source
+space is its socket, so turning the head carries the iris and only the
+eye's own look aims it. The material, a glslfx shader in
+`examples/biped/shaders`, reads `eyeProjector` to place the iris and
+pupil and `eyeDials` for the pupil and iris sizes and offsets, which are
+avars on each eye control. Nothing on the eye mesh moves; open the stage
+in `usdview` and turn an eye control to watch the iris slide over the
+ball while the ball itself stays still.""",
+        "tips": [
+            "A glslfx material sees a primvar only if its own `attributes` "
+            "block names it: Storm filters every other primvar out before the "
+            "shader runs.",
+            "The projector does not show in a GIF of the plain viewport: its "
+            "whole output is a primvar, so it is visible only through a "
+            "material that reads it.",
+            "Name `rigExec:sourceSpace`. Without it the ray is the source's "
+            "world frame mapped through the surface's authored transform. That "
+            "transform must be static either way: a projector onto a surface "
+            "whose transform is animated fails to compile.",
+            "Use `reproject` when a deformer slides the surface along the look "
+            "(a socket stretch dragging the eyeball) and the iris should stay "
+            "on the line of sight; `material` keeps it on the same skin.",
+        ],
+        "see_also": [
+            ("surface_mover", "Surface Mover"),
+            ("aim_constraint", "Aim Constraint"),
+            ("control", "Control"),
         ],
     },
     "picker": {

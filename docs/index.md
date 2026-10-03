@@ -31,6 +31,7 @@ Storm viewport with the rig guides on.
 |---|---|---|
 | ![Control](../icons/control.png) | [Control](nodes/control.md) | The animator's handle: animation is authored on its avars. |
 | ![Joint](../icons/joint.png) | [Joint](nodes/joint.md) | A posed output of the rig: solvers write it, movers read it. |
+| ![Space Switch](../icons/concept.png) | [Space Switch](nodes/space_switch.md) | Gives a control a labelled list of parent spaces, selected or blended by an index. |
 
 ## Solvers
 
@@ -101,6 +102,12 @@ Storm viewport with the rig guides on.
 | ![Float Math Mover](../icons/float_math_mover.png) | [Float Math Mover](nodes/float_math_mover.md) | Arithmetic on one scalar channel: add, clamp, remap, blend. |
 | ![Vec3f Math Mover](../icons/vec3f_math_mover.png) | [Vec3f Math Mover](nodes/vec3f_math_mover.md) | Component-wise arithmetic on one vector-valued property. |
 | ![Matrix Math Mover](../icons/matrix_math_mover.png) | [Matrix Math Mover](nodes/matrix_math_mover.md) | Multiplies or blends one matrix channel. |
+
+## Shading
+
+| | Node | Does |
+|---|---|---|
+| ![Surface Projector](../icons/concept.png) | [Surface Projector](nodes/surface_projector.md) | Publishes a frame riding a deforming surface to its shader, as a matrix primvar. |
 
 ## Interface
 

@@ -201,6 +201,19 @@ have exactly one entry per source.
 
 ### Node parameters
 
+#### `rigExec:blendShear`
+
+*Type:* `uniform bool`. *Default:* `false`.
+
+With all three scale axes governed, blend the sources' SHEAR
+as well as their scale. Shear lives in the same linear block as
+scale, so a constraint that replaces scale from a clean source can
+still leave behind a shear the input inherited -- a chain stretched
+by a spline IK with volume preservation carries one down to every
+child. Off (the default) keeps the input's shear, which is the FBX
+behaviour. Ignored when any scale axis is masked off: shear mixes two
+axes at a time, so a partial mask has no meaningful share of it.
+
 ## Example
 
 A 6x4 quad card is skinned rigidly to one joint sitting at its

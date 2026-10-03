@@ -199,6 +199,7 @@ RrPublishGeometry(RrProgram *program,
     const RigExecWireDomainGeometry &geo = *program->geometry;
 
     store.movedProperties.clear();
+    store.movedMatrices.clear();
     store.weightFields.clear();
 
     for (const RigExecWireStep &step : steps) {
@@ -246,7 +247,11 @@ RrPublishGeometry(RrProgram *program,
             const RrDerivedPublish &derived =
                 store.derivedPublish[size_t(step.object)];
             if (store.chainPublish[chain].haveBase && derived.haveBase) {
-                store.movedProperties[derived.target] = derived.result;
+                if (!derived.matrixTarget) {
+                    store.movedProperties[derived.target] = derived.result;
+                } else if (derived.haveMatrix) {
+                    store.movedMatrices[derived.target] = derived.matrix;
+                }
             }
         } else {
             switch (step.kind) {

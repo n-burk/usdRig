@@ -295,6 +295,14 @@ RigExecRuntimeReader::Execute(std::string *error)
         moved.points = entry.second;
         points.push_back(std::move(moved));
     }
+    std::vector<RigExecRuntimeMatrixPrimvar> matrixPrimvars;
+    matrixPrimvars.reserve(store.movedMatrices.size());
+    for (const auto &entry : store.movedMatrices) {
+        RigExecRuntimeMatrixPrimvar primvar;
+        primvar.path = program.TextOrEmpty(entry.first);
+        primvar.matrix = entry.second;
+        matrixPrimvars.push_back(std::move(primvar));
+    }
     std::vector<RigExecRuntimeWeightFrame> weightFrames;
     weightFrames.reserve(store.weightFrames.size());
     for (const auto &entry : store.weightFrames) {
@@ -332,6 +340,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     _SortByPath(&providerXforms);
     _jointMatrices = std::move(jointMatrices);
     _points = std::move(points);
+    _matrixPrimvars = std::move(matrixPrimvars);
     _weightFrames = std::move(weightFrames);
     _weightFields = std::move(weightFieldsOut);
     _providerXforms = std::move(providerXforms);
