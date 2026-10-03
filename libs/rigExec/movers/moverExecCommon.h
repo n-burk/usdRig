@@ -44,7 +44,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
     ((inputsDefaultWeight, "inputs:defaultWeight"))                     \
     ((weightObjectRel, "rigExec:weightObject"))                         \
     ((deltaSpace, "rigExec:deltaSpace"))                                \
-    ((modeAttr, "rigExec:mode"))                                         \
+    ((weightBlendAttr, "rigExec:weightBlend"))                          \
+    ((modeAttr, "rigExec:mode"))                                      \
     ((divisionsAttr, "rigExec:divisions"))                              \
     ((restCagePointsAttr, "rigExec:restCagePoints"))                     \
     ((resolvedTransform, "rigExec:resolvedTransform"))                   \

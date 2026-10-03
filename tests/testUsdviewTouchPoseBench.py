@@ -44,7 +44,7 @@ import time
 from pxr import Sdf, UsdGeom
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
-HIPS = "/Biped/Rig/Controls/hips_ctl"
+HIPS = "/Biped/Rig/Main/Shot/Aux/Controls/M_Body"
 REPEATS = int(os.environ.get("TOUCHPOSE_BENCH_REPEATS", "30"))
 
 _PLUGIN = os.environ.get("TOUCHPOSE_PLUGIN_DIR")

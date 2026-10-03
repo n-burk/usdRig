@@ -329,6 +329,98 @@ def TestEditScope(stage):
            "an aborted scope restored the channel")
 
 
+class _FakeApi(object):
+    """Just enough usdviewApi for FocusPrim: a selection and a focus."""
+
+    def __init__(self, selectedPrims, prim=None):
+        self.selectedPrims = selectedPrims
+        self.prim = prim
+
+
+def TestFocusIsTheLastSelected(stage):
+    root = stage.GetPrimAtPath("/Rig/Controls/Root")
+    static = stage.GetPrimAtPath("/Rig/Controls/Static")
+
+    # The tail of the selection wins, even when usdview's focus is still
+    # on the first prim -- which is what happens on a shift-add, and the
+    # case the panel exists to follow.
+    prim, others = model.FocusPrim(_FakeApi([root, static], prim=root))
+    _Check(prim.GetPath() == static.GetPath(),
+           "the LAST selected is shown, got %s" % prim.GetPath())
+    _Check(others == 1, "the others are counted, got %d" % others)
+
+    prim, others = model.FocusPrim(_FakeApi([static, root], prim=root))
+    _Check(prim.GetPath() == root.GetPath(),
+           "reversing the selection order moves the panel")
+
+    # Focus is still the fallback when nothing usable is selected.
+    prim, others = model.FocusPrim(_FakeApi([], prim=root))
+    _Check(prim is not None and prim.GetPath() == root.GetPath()
+           and others == 0,
+           "an empty selection falls back to the focus prim")
+    prim, others = model.FocusPrim(_FakeApi([], prim=None))
+    _Check(prim is None and others == 0, "nothing selected reads as nothing")
+
+
+def TestPeerChannels(stage):
+    root = stage.GetPrimAtPath("/Rig/Controls/Root")
+    static = stage.GetPrimAtPath("/Rig/Controls/Static")
+    channels = {c.name: c for c in model.DiscoverChannels(root, stage)[0]}
+
+    # A channel BOTH prims carry reaches the other one.
+    peers = model.PeerChannels(channels["avars:ikfk"], [root, static])
+    _Check([str(c.attr.GetPrim().GetPath()) for c in peers]
+           == ["/Rig/Controls/Static"],
+           "the shared avar finds its peer, got %s" % peers)
+
+    # A channel only the shown prim carries reaches nobody: selecting a
+    # second control must not author an avar it never had.
+    peers = model.PeerChannels(channels["avars:mirror"], [root, static])
+    _Check(peers == [], "an unshared avar has no peers, got %s" % peers)
+    _Check(not static.HasAttribute("avars:mirror"),
+           "and nothing was created on the other prim")
+
+    # The channel's own prim is never its own peer.
+    peers = model.PeerChannels(channels["avars:ikfk"], [root])
+    _Check(peers == [], "a prim is not its own peer")
+
+
+def TestPendingValue(stage):
+    """A drag in flight is what the editor shows; the stage is untouched."""
+    import gizmoMath
+    prim = stage.GetPrimAtPath("/Rig/Controls/Static")
+    by = {c.name: c for c in model.DiscoverChannels(prim, stage)[0]}
+    ikfk = by["avars:ikfk"]
+    frame = Usd.TimeCode.Default()
+    _Check(ikfk.PendingValue() is None, "nothing in flight to begin with")
+    _Check(ikfk.Value(frame) == 0.0, "so Value is the stage's")
+
+    # The gizmo's own collector: Set() records and previews, nothing lands.
+    writer = gizmoMath.Writer(stage, frame, gizmoMath.WRITE_DEFAULT)
+    writer.Set(ikfk.attr, 0.75)
+    _Check(ikfk.PendingValue() == 0.75, "the collected value is pending")
+    _Check(ikfk.Value(frame) == 0.75, "and Value prefers it")
+    _Check(ikfk.attr.Get(frame) == 0.0, "while the stage still says 0")
+    _Check(by["avars:tx"].PendingValue() is None,
+           "a channel the drag did not touch has nothing pending")
+
+    writer.Clear()
+    _Check(ikfk.PendingValue() is None and ikfk.Value(frame) == 0.0,
+           "an abort drops it and Value falls back to the stage")
+
+
+def TestMatches():
+    _Check(model.Matches("avars:rx", ""), "an empty query keeps everything")
+    _Check(model.Matches("avars:rx", "   "), "whitespace keeps everything")
+    _Check(model.Matches("avars:rx", "rx"), "a substring matches")
+    _Check(model.Matches("avars:rx", "RX"), "matching is case-insensitive")
+    _Check(not model.Matches("avars:rx", "ry"), "a miss is a miss")
+    _Check(model.Matches("avars:rx", "r x"),
+           "every word has to match, in any order")
+    _Check(not model.Matches("avars:rx", "rx z"),
+           "one word missing drops it")
+
+
 def main():
     _RegisterSchema()
     stage = _Stage()
@@ -339,6 +431,10 @@ def main():
     TestWriteAndReset(stage)
     TestPromotion(stage)
     TestEditScope(stage)
+    TestFocusIsTheLastSelected(stage)
+    TestPeerChannels(stage)
+    TestPendingValue(stage)
+    TestMatches()
     print("test_avar_editor_model OK")
 
 

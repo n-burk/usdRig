@@ -268,6 +268,12 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // The bone lengths exec measures every evaluation, measured once.
             s.upperLengthBase = (s.ikRests[1][0] - s.ikRests[0][0]).GetLength();
             s.lowerLengthBase = (s.ikRests[2][0] - s.ikRests[1][0]).GetLength();
+            s.ikSpace = bind(prim, "rigExec:spaceMatrix", GfMatrix4d(1.0));
+            const auto sp = targets(prim, "rigExec:space");
+            s.spaceSlot = sp.empty() ? -1 : providerSlot(sp[0]);
+            if (s.spaceSlot >= 0) {
+                s.spaceRest = B.restPts[foldRest(s.spaceSlot)];
+            }
             s.bend = bind(prim, "rigExec:preferredBendRadians", 0.0);
             s.upperOffset = bind(prim, "rigExec:upperLengthOffset", 0.0);
             s.lowerOffset = bind(prim, "rigExec:lowerLengthOffset", 0.0);
@@ -276,10 +282,11 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.ikParams.preferredBendRadians = s.bend.constant;
             s.ikParams.stretch = s.stretch.constant;
             s.ikParams.softness = s.softness.constant;
-            s.ikParams.upperLength =
-                s.upperLengthBase + s.upperOffset.constant;
-            s.ikParams.lowerLength =
-                s.lowerLengthBase + s.lowerOffset.constant;
+            RigExecTwoBoneIkLengths(s.ikRests, s.ikSpace.constant,
+                                  s.upperOffset.constant,
+                                  s.lowerOffset.constant,
+                                  &s.ikParams.upperLength,
+                                  &s.ikParams.lowerLength);
         } else if (s.type == "RigExecBlendPointFrames") {
             auto solverSlot = [&](const SdfPathVector &v) {
                 if (v.empty()) return -1;
@@ -376,6 +383,20 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.splineRestMode = restTok == "chain"
                                    ? RigExecSplineIkRestLength::Chain
                                    : RigExecSplineIkRestLength::Curve;
+            const auto splineSpaceTargets = targets(prim, "rigExec:space");
+            s.spaceSlot = splineSpaceTargets.empty()
+                              ? -1
+                              : providerSlot(splineSpaceTargets[0]);
+            if (s.spaceSlot >= 0) {
+                s.spaceRest = B.restPts[foldRest(s.spaceSlot)];
+            }
+            s.splineRestFrames = restJoints;
+            s.splineRootRest = s.root >= 0 ? B.restFrames[foldRest(s.root)]
+                                           : RigExecPointFrame();
+            s.splineMidRest = s.mid >= 0 ? B.restFrames[foldRest(s.mid)]
+                                         : RigExecPointFrame();
+            s.splineEndRest = s.end >= 0 ? B.restFrames[foldRest(s.end)]
+                                         : RigExecPointFrame();
             s.splineRest = RigExecSplineIkMakeRest(
                 restJoints,
                 s.root >= 0 ? B.restFrames[foldRest(s.root)]
@@ -849,6 +870,15 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                        fc.worldUpObject);
             }
         }
+        // rigExec:space, on the operators the compile reads it for. The
+        // compile only keeps a provider here, so a named space that has no
+        // slot is a bake-time contradiction, not a per-frame one.
+        if (!fc.space.IsEmpty()) {
+            c.spaceSlot = slotOf(fc.space);
+            if (c.spaceSlot < 0) {
+                refuse("constraint space is not a pose provider", fc.space);
+            }
+        }
         B.constraints.push_back(std::move(c));
         return int(B.constraints.size()) - 1;
     };
@@ -1063,6 +1093,7 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
         solver.midRead = readFin(solver.mid);
         solver.endRead = readFin(solver.end);
         solver.poleRead = readFin(solver.pole);
+        solver.spaceRead = readFin(solver.spaceSlot);
         // The live joint rests, bound exactly like the control reads are: to
         // the version standing where this batch begins, which is where the
         // dynamic path reads finalFrames for the same override. That is what
@@ -1267,6 +1298,25 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         const int concurrency = std::max(1, int(WorkGetConcurrencyLimit()));
         const int budget =
             std::max(1, N / std::max(1, 4 * concurrency));
+        // A SWITCHED slot breaks the one assumption the single pass rests on.
+        // Slots are in SdfPath order, which guarantees that a slot's PARENT
+        // is below it and nothing more -- and a space source is not a parent:
+        // an arm's IK handle at /Rig/Controls/arm_l_ik sorts BEFORE the chest
+        // it may be parented into at /Rig/Controls/hips_ctl/.../spine_end_ctl.
+        // So the switched slot and its whole subtree (contiguous, for the
+        // same path-order reason) are cut into groups of their own, and the
+        // source frames are declared as reads of that group. The ordinary
+        // read/write dependency sweep then runs it after the groups that
+        // compose its spaces, which is exactly the machinery a cross-group
+        // parent already uses.
+        std::set<int> forced;
+        for (const RigExecBakedProgramImpl::SpaceSwitch &sw :
+                 B.spaceSwitches) {
+            if (sw.slot < 0) continue;
+            forced.insert(sw.slot);
+            const int after = sw.slot + subtreeSize[size_t(sw.slot)];
+            if (after < N) forced.insert(after);
+        }
         std::vector<int> starts;
         for (int i = 0; i < N;) {
             // The shallowest node whose whole subtree fits is a cut; one
@@ -1276,6 +1326,9 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             starts.push_back(i);
             i += subtreeSize[size_t(i)] <= budget ? subtreeSize[size_t(i)] : 1;
         }
+        starts.insert(starts.end(), forced.begin(), forced.end());
+        std::sort(starts.begin(), starts.end());
+        starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
         // Then merge ADJACENT groups while the result is still inside the
         // budget. Without this an internal node too big to be its own
         // subtree becomes a one-slot step, and a biped -- whose controls
@@ -1289,6 +1342,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             group.begin = starts[k];
             group.end = k + 1 < starts.size() ? starts[k + 1] : N;
             while (k + 1 < starts.size() &&
+                   !forced.count(starts[k + 1]) &&
                    (k + 2 < starts.size() ? starts[k + 2] : N) -
                            group.begin <= budget) {
                 ++k;
@@ -1308,7 +1362,86 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             B.composeGroups.push_back(std::move(group));
         }
     }
-    for (size_t g = 0; g < B.composeGroups.size(); ++g) {
+    // Groups are emitted in DEPENDENCY order, not in slot order.
+    //
+    // The schedule's dependency sweep runs forward through the step list and
+    // raises an edge only against a step it has already passed (see
+    // bakedSchedule.cpp: "an edge only ever leaves a step the sweep has
+    // already passed"). A read of a slot some LATER step writes therefore
+    // raises no edge at all and quietly takes the previous run's value. Slot
+    // order settles parents, which is all an unswitched rig reads, but a
+    // space source is not a parent: /Rig/Controls/arm_l_ik sorts before the
+    // chest it may be parented into, so the group that composes the chest
+    // has to be emitted first.
+    std::vector<size_t> emission(B.composeGroups.size());
+    {
+        for (size_t g = 0; g < emission.size(); ++g) emission[g] = g;
+        std::vector<int> groupOfSlot(size_t(N), -1);
+        for (size_t g = 0; g < B.composeGroups.size(); ++g) {
+            for (int slot = B.composeGroups[g].begin;
+                 slot < B.composeGroups[g].end; ++slot) {
+                groupOfSlot[size_t(slot)] = int(g);
+            }
+        }
+        std::vector<std::vector<int>> after(B.composeGroups.size());
+        bool reordered = false;
+        for (size_t g = 0; g < B.composeGroups.size(); ++g) {
+            const RigExecBakedComposeGroup &group = B.composeGroups[g];
+            for (const int parent : group.parentSlots) {
+                if (groupOfSlot[size_t(parent)] >= 0) {
+                    after[g].push_back(groupOfSlot[size_t(parent)]);
+                }
+            }
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                const int switchIndex =
+                    B.spaceSwitchBySlot.empty()
+                        ? -1 : B.spaceSwitchBySlot[size_t(slot)];
+                if (switchIndex < 0) continue;
+                const RigExecBakedProgramImpl::SpaceSwitch &sw =
+                    B.spaceSwitches[size_t(switchIndex)];
+                // The space is read exactly like a source, so it orders the
+                // groups exactly like one: leave it out and a switch could
+                // read its master's frame from the group before that group
+                // had composed it.
+                std::vector<int> reads = sw.sourceSlots;
+                reads.push_back(sw.spaceSlot);
+                for (const int source : reads) {
+                    if (source < 0) continue;
+                    const int owner = groupOfSlot[size_t(source)];
+                    if (owner < 0 || size_t(owner) == g) continue;
+                    after[g].push_back(owner);
+                    if (size_t(owner) > g) reordered = true;
+                }
+            }
+        }
+        // Slot order already satisfies every edge on a rig whose switches
+        // all read backwards, which is most of them; the sort runs only when
+        // one of them does not.
+        if (reordered) {
+            std::vector<int> state(B.composeGroups.size(), 0);
+            std::vector<size_t> order;
+            bool cyclic = false;
+            std::function<void(size_t)> visit = [&](size_t g) {
+                if (state[g] == 2 || cyclic) return;
+                if (state[g] == 1) { cyclic = true; return; }
+                state[g] = 1;
+                for (const int pred : after[g]) visit(size_t(pred));
+                state[g] = 2;
+                order.push_back(g);
+            };
+            for (size_t g = 0; g < B.composeGroups.size(); ++g) visit(g);
+            if (cyclic) {
+                // Two spaces that each need the other composed first. The
+                // compile refuses a switch cycle between CONTROLS; this is
+                // the same thing reached through namespace, and the honest
+                // answer is the dynamic path.
+                B.composeCycle = true;
+            } else {
+                emission = order;
+            }
+        }
+    }
+    for (const size_t g : emission) {
         const RigExecBakedComposeGroup &group = B.composeGroups[g];
         RigExecBakedStep &step = AddStep(
             &B, RigExecBakedStepKind::ComposeSubtree, int(g));
@@ -1317,6 +1450,39 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         for (const int parent : group.parentSlots) {
             step.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::PosedM, parent));
+        }
+        // A switched slot reads its spaces instead of its namespace parent,
+        // so those frames are reads of this step too -- that is what orders
+        // a pole vector's group after its IK handle's. A source inside the
+        // group is already ordered by the loop itself, and one at -1 is
+        // world, which is a constant and no read at all.
+        for (int slot = group.begin; slot < group.end; ++slot) {
+            const int switchIndex =
+                B.spaceSwitchBySlot.empty()
+                    ? -1 : B.spaceSwitchBySlot[size_t(slot)];
+            if (switchIndex < 0) continue;
+            const RigExecBakedProgramImpl::SpaceSwitch &sw =
+                B.spaceSwitches[size_t(switchIndex)];
+            std::vector<int> reads = sw.sourceSlots;
+            reads.push_back(sw.spaceSlot);
+            for (const int source : reads) {
+                // OUTSIDE the group in EITHER direction. A source above the
+                // group is as real a read as one below it -- emission is in
+                // dependency order, not slot order, so "below" says nothing
+                // about what has run -- and an undeclared read is invisible
+                // to the dirty sweep: the first generation runs every step
+                // and gets it right, and no later edit of that source ever
+                // re-runs this step again. That is a switched control going
+                // deaf to its space the moment anything is authored on it.
+                if (source >= 0 &&
+                    (source < group.begin || source >= group.end)) {
+                    step.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PosedM, source));
+                }
+            }
+            // And the index itself, so that keying a space dirties this
+            // step and only this one.
+            RigExecBakedNoteInput(sw.activeInput, &step);
         }
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseBase, group.begin, group.end));
@@ -1521,6 +1687,13 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 commitStep.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::PoseFin,
                     constraint.worldUpObject));
+            }
+            // rigExec:space: the carry is read off the compose's own
+            // table, exactly as a switched slot reads its space, so moving
+            // a master dirties this step.
+            if (constraint.spaceSlot >= 0) {
+                commitStep.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PosedM, constraint.spaceSlot));
             }
             // Both frames of every provider a native source might ride: the
             // step compares them to decide which ancestor moved, so both are
@@ -1789,6 +1962,9 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         if (revision.transformSpaceSlot >= 0) {
             table[size_t(revision.transformSpaceSlot)] = 1;
         }
+        if (revision.carrySpaceSlot >= 0) {
+            table[size_t(revision.carrySpaceSlot)] = 1;
+        }
         for (const int slot : revision.influenceSlots) {
             if (slot >= 0) {
                 table[size_t(slot)] = 1;
@@ -1837,8 +2013,12 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         // One line, and terminal: a driver without a usable frame, or a
         // solve of the wrong size, zeroes the weights and says so.
         step.maxDiagnostics = 1;
-        step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,
-                                             interpolator.driverSlot));
+        // A numeric driver reads dials and no frame at all, so it names no
+        // slot to read: pushing one would read slot -1.
+        if (interpolator.driverSlot >= 0) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::PoseFin, interpolator.driverSlot));
+        }
         if (interpolator.parentSlot >= 0) {
             step.reads.push_back(RigExecBakedOne(
                 RigExecBakedSlotDomain::PoseFin, interpolator.parentSlot));
@@ -1847,6 +2027,10 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             RigExecBakedSlotDomain::PoseWeight, interpolator.weightBegin,
             interpolator.weightEnd));
         RigExecBakedNoteInput(interpolator.enabled, &step);
+        for (const RigExecBakedInput<double> &value :
+                 interpolator.valueInputs) {
+            RigExecBakedNoteInput(value, &step);
+        }
     }
 
     // The store's other pose-half record: every provider's rest -> final
@@ -2149,6 +2333,11 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
              B.poseInterpolators) {
         interpolator.enabledValue =
             RigExecBakedRead(interpolator.enabled, R, time, &B.overridden);
+        // A numeric driver's dials, read here so its step reads no USD.
+        for (size_t i = 0; i < interpolator.valueInputs.size(); ++i) {
+            interpolator.values[i] = RigExecBakedRead(
+                interpolator.valueInputs[i], R, time, &B.overridden);
+        }
     }
 }
 
@@ -2497,8 +2686,11 @@ RefreshSolverRests(RigExecBakedProgramImpl &B,
         // The constant arm of the params below reads these two, so they are
         // written back into it here; the live arm recomputes them from the
         // same bases and agrees by construction.
-        s.ikParams.upperLength = s.upperLengthBase + s.upperOffset.constant;
-        s.ikParams.lowerLength = s.lowerLengthBase + s.lowerOffset.constant;
+        RigExecTwoBoneIkLengths(s.ikRests, s.ikSpace.constant,
+                                s.upperOffset.constant,
+                                s.lowerOffset.constant,
+                                &s.ikParams.upperLength,
+                                &s.ikParams.lowerLength);
     } else if (s.type == "RigExecSplineIk") {
         std::vector<RigExecPointFrame> restJoints(s.splineCount);
         for (size_t k = 0; k < s.restRefs.size(); ++k) {
@@ -2509,11 +2701,15 @@ RefreshSolverRests(RigExecBakedProgramImpl &B,
                 s.splineJointRests[size_t(element)] = restPtsOf(k, slot);
             }
         }
+        s.splineRestFrames = restJoints;
+        s.splineRootRest =
+            s.root >= 0 ? B.restFrames[size_t(s.root)] : RigExecPointFrame();
+        s.splineMidRest =
+            s.mid >= 0 ? B.restFrames[size_t(s.mid)] : RigExecPointFrame();
+        s.splineEndRest =
+            s.end >= 0 ? B.restFrames[size_t(s.end)] : RigExecPointFrame();
         s.splineRest = RigExecSplineIkMakeRest(
-            restJoints,
-            s.root >= 0 ? B.restFrames[size_t(s.root)] : RigExecPointFrame(),
-            s.mid >= 0 ? B.restFrames[size_t(s.mid)] : RigExecPointFrame(),
-            s.end >= 0 ? B.restFrames[size_t(s.end)] : RigExecPointFrame(),
+            restJoints, s.splineRootRest, s.splineMidRest, s.splineEndRest,
             s.splineRestWeights, s.splineRestMode);
     } else if (s.type == "RigExecTwistDistribution") {
         if (s.root >= 0 && s.end >= 0) {
@@ -2579,6 +2775,125 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
                     noScale ? 1.0 : a[5],
                     a[6], a[7], a[8], a[9], B.rotOrder[size_t(i)]);
+                const int switchIndex =
+                    B.spaceSwitchBySlot.empty()
+                        ? -1 : B.spaceSwitchBySlot[size_t(i)];
+                if (switchIndex >= 0) {
+                    // A switched slot composes against the SELECTED source's
+                    // pair of spaces instead of its namespace parent's. Both
+                    // halves come from one source, so at rest they cancel
+                    // and no space moves the rig standing still.
+                    const RigExecBakedProgramImpl::SpaceSwitch &sw =
+                        B.spaceSwitches[size_t(switchIndex)];
+                    // `local` is avars * default:space, and it is reached the
+                    // long way round -- compose the UNSWITCHED world, then
+                    // divide the namespace parent back out -- rather than as
+                    // `avars * selfD`, which is the same quantity in exact
+                    // arithmetic and NOT the same in doubles. The dynamic
+                    // path can only reach it this way (it reads frames, not
+                    // the ladder), the two answers are compared bit for bit
+                    // by the parity mode, and 4e-15 of disagreement here
+                    // propagates to every descendant of a switched control.
+                    const GfMatrix4d parentPosed =
+                        B.parent[size_t(i)] >= 0
+                            ? B.posedM[size_t(B.parent[size_t(i)])]
+                            : GfMatrix4d(1.0);
+                    const GfMatrix4d parentDefault =
+                        B.parent[size_t(i)] >= 0
+                            ? B.defaultRoundTrip[size_t(B.parent[size_t(i)])]
+                            : GfMatrix4d(1.0);
+                    const GfMatrix4d local =
+                        RigExecBakedRoundTrip(avars * B.selfD[size_t(i)] *
+                                              B.parentDinv[size_t(i)] *
+                                              parentPosed) *
+                        parentPosed.GetInverse() * parentDefault;
+                    const GfMatrix4d localInverse = local.GetInverse();
+                    const int count = int(sw.sourceSlots.size());
+                    // Read here rather than in a prologue: the index is one
+                    // double, the step already holds the reader, and a
+                    // prologue copy would be a second place for an override
+                    // to fail to reach.
+                    double active = rd(sw.activeInput);
+                    if (!std::isfinite(active)) active = 0.0;
+                    active = GfClamp(active, 0.0, double(count - 1));
+                    const int lower = int(std::floor(active));
+                    const int upper = std::min(lower + 1, count - 1);
+                    const double blend = active - double(lower);
+                    // rigExec:space. `local` above composes over the
+                    // target's DEFAULT ancestors, so a master's motion
+                    // reaches a switched control only inside the source's
+                    // motion -- and a twist or swing filter drops that
+                    // carry along with the part it was asked to drop.
+                    // Strip the master map off before the filter and put it
+                    // back after, so the filter only sees the source's own
+                    // master-free motion. Identity when no space is named.
+                    // The branches below must be UNTOUCHED when no space is
+                    // named, not multiplied by an identity: `local *
+                    // identity * localInverse` is identity in exact
+                    // arithmetic and a few ulps off it in doubles, and that
+                    // difference reaches verify_binary as a failure.
+                    const bool hasCarry = sw.spaceSlot >= 0;
+                    GfMatrix4d carry(1.0), carryInverse(1.0);
+                    if (hasCarry) {
+                        carry = B.defaultRoundTrip[size_t(sw.spaceSlot)]
+                                    .GetInverse() *
+                                B.posedM[size_t(sw.spaceSlot)];
+                        carryInverse = carry.GetInverse();
+                    }
+                    const auto deltaOf = [&](int index) {
+                        const int slot = sw.sourceSlots[size_t(index)];
+                        if (slot < 0) {
+                            // World: the source never moves, so the only
+                            // motion left is the space's own carry -- and
+                            // with no space named there is none, which is
+                            // the pin-to-zero-pose this branch has always
+                            // meant.
+                            return hasCarry ? local * carry * localInverse
+                                            : GfMatrix4d(1.0);
+                        }
+                        // defaultRoundTrip, not selfD: the ladder's own
+                        // parent link is the ROUND TRIPPED default (see
+                        // parentDinv in RigExecBakedComposeLadder), which is
+                        // what exec's computeDefaultFrame hands back, and a
+                        // space source has to be read the same way its
+                        // namespace parent would be or the two paths
+                        // disagree in the last few digits on every
+                        // descendant.
+                        // Filtered while the motion is still measured
+                        // against the SOURCE's rest, because the twist axis
+                        // is the source's. See the dynamic path, which does
+                        // the same thing in the same order.
+                        const GfMatrix4d sourceDefault =
+                            B.defaultRoundTrip[size_t(slot)];
+                        const RigExecRotationFilter filter =
+                            sw.filters.empty()
+                                ? RigExecRotationFilter::All
+                                : sw.filters[size_t(index)];
+                        const GfVec3d axis =
+                            sourceDefault.TransformDir(sw.twistAxis);
+                        const GfMatrix4d moved =
+                            sourceDefault.GetInverse() *
+                            B.posedM[size_t(slot)];
+                        const GfMatrix4d motion =
+                            hasCarry
+                                ? RigExecFilterSpaceRotation(
+                                      moved * carryInverse, axis, filter) *
+                                      carry
+                                : RigExecFilterSpaceRotation(moved, axis,
+                                                             filter);
+                        return local * motion * localInverse;
+                    };
+                    GfMatrix4d delta = deltaOf(lower);
+                    if (upper != lower && blend > 0.0) {
+                        delta = RigExecBlendTransforms(delta, deltaOf(upper),
+                                                       blend);
+                    }
+                    delta = RigExecMaskTransform(delta, sw.affectTranslation,
+                                                 sw.affectRotation,
+                                                 sw.affectScale);
+                    B.base[size_t(i)] =
+                        RigExecFrameFromMatrix(delta * local);
+                } else {
                 const GfMatrix4d parentPosed =
                     B.parent[size_t(i)] >= 0
                         ? B.posedM[size_t(B.parent[size_t(i)])]
@@ -2586,6 +2901,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 B.base[size_t(i)] = RigExecFrameFromMatrix(
                     avars * B.selfD[size_t(i)] * B.parentDinv[size_t(i)] *
                     parentPosed);
+                }
             }
             B.fin[size_t(i)] = B.base[size_t(i)];
             // _SpaceFromFrame: an unusable frame selects the NaN sentinel, so
@@ -2687,13 +3003,32 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
         } else if (s.type == "RigExecTwoBoneIk") {
             RigExecTwoBoneIkParams params = s.ikParams;
+            GfMatrix4d ikSpace = rd(s.ikSpace);
+            bool spaceMoved = false;
+            // spaceSlot, not spaceRead: readFin(-1) is 0u, a perfectly
+            // valid slot, so testing the READ made every solver that
+            // names no space apply whatever frame slot 0 happens to
+            // hold.
+            if (s.spaceSlot >= 0) {
+                GfMatrix4d delta(1.0);
+                if (RigExecPointsToMatrix(s.spaceRest,
+                                          B.fin[size_t(s.spaceRead)],
+                                          &delta)) {
+                    ikSpace = delta * ikSpace;
+                    spaceMoved = true;
+                }
+            }
             if (live(s.bend) || live(s.stretch) || live(s.softness) ||
-                live(s.upperOffset) || live(s.lowerOffset)) {
+                live(s.upperOffset) || live(s.lowerOffset) ||
+                live(s.ikSpace) || spaceMoved) {
                 params.preferredBendRadians = rd(s.bend);
                 params.stretch = rd(s.stretch);
                 params.softness = rd(s.softness);
-                params.upperLength = s.upperLengthBase + rd(s.upperOffset);
-                params.lowerLength = s.lowerLengthBase + rd(s.lowerOffset);
+                params.space = ikSpace;
+                RigExecTwoBoneIkLengths(s.ikRests, ikSpace,
+                                        rd(s.upperOffset), rd(s.lowerOffset),
+                                        &params.upperLength,
+                                        &params.lowerLength);
             }
             const auto frames = RigExecSolveTwoBoneIk(
                 B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
@@ -2765,12 +3100,40 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 params.twist = GfDegreesToRadians(rd(s.twist));
                 params.minLengthRatio = rd(s.minLengthRatio);
             }
+            // REBUILD THE REST IN THE SPACE WHEN THE SPACE HAS MOVED.
+            // The bind-time rest is measured at identity, and the
+            // placement ratio is arcLength / restArcLength -- so a scaled
+            // root reads as stretch until the rest is carried into the
+            // same space. Only when a space is named and has actually
+            // moved, so an unscaled rig pays nothing.
+            const RigExecSplineIkRest *restForSolve = &s.splineRest;
+            RigExecSplineIkRest spacedRest;
+            if (s.spaceSlot >= 0) {
+                GfMatrix4d delta(1.0);
+                if (RigExecPointsToMatrix(s.spaceRest,
+                                          B.fin[size_t(s.spaceRead)],
+                                          &delta) &&
+                    delta != GfMatrix4d(1.0)) {
+                    std::vector<RigExecPointFrame> spaced;
+                    spaced.reserve(s.splineRestFrames.size());
+                    for (const RigExecPointFrame &f : s.splineRestFrames) {
+                        spaced.push_back(RigExecTransformFrame(f, delta));
+                    }
+                    spacedRest = RigExecSplineIkMakeRest(
+                        spaced,
+                        RigExecTransformFrame(s.splineRootRest, delta),
+                        RigExecTransformFrame(s.splineMidRest, delta),
+                        RigExecTransformFrame(s.splineEndRest, delta),
+                        s.splineRestWeights, s.splineRestMode);
+                    restForSolve = &spacedRest;
+                }
+            }
             RigExecSplineIkControls controls;
             controls.root = B.fin[size_t(s.rootRead)];
             controls.mid = B.fin[size_t(s.midRead)];
             controls.end = B.fin[size_t(s.endRead)];
             RigExecSplineIkResult solved;
-            RigExecSolveSplineIk(s.splineRest, controls, params, &solved);
+            RigExecSolveSplineIk(*restForSolve, controls, params, &solved);
             if (solved.joints.size() == s.splineCount) {
                 aggregate.frames.reserve(s.splineCount);
                 for (const auto &joint : solved.joints) {
@@ -3184,6 +3547,16 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         affect.x = rd(c.affectX);
         affect.y = rd(c.affectY);
         affect.z = rd(c.affectZ);
+        // rigExec:space: the space switch's carry, from the same two
+        // tables (see the compose above). -1 is "no space named", and the
+        // params keep their null carry so the kernel's untouched branch
+        // runs -- the dynamic path does the same.
+        GfMatrix4d carry(1.0);
+        const bool hasCarry = c.spaceSlot >= 0;
+        if (hasCarry) {
+            carry = B.defaultRoundTrip[size_t(c.spaceSlot)].GetInverse() *
+                    B.posedM[size_t(c.spaceSlot)];
+        }
         if (c.type == "RigExecPositionConstraint") {
             RigExecPositionConstraintParams params;
             params.offset = rd(c.offset);
@@ -3196,6 +3569,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.affect = affect;
             params.rotationOrder = c.order;
             params.weight = solveWeight;
+            params.carry = hasCarry ? &carry : nullptr;
             candidate = RigExecApplyRotationConstraint(input, sources, params);
         } else if (c.type == "RigExecScaleConstraint") {
             RigExecScaleConstraintParams params;
@@ -3216,6 +3590,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.scaleAxes.z = rd(c.sZ);
             params.rotationOrder = c.order;
             params.weight = solveWeight;
+            params.carry = hasCarry ? &carry : nullptr;
             candidate = RigExecApplyParentConstraint(input, sources, params);
         } else {
             // Aim: the same weighted source set reduced to the target point
@@ -3300,9 +3675,12 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                 " has a degenerate world-up object");
                             candidateReady = false;
                         } else if (candidateReady) {
+                            // Rotation only -- see the dynamic path: a
+                            // scaled up object turned the foot 90 degrees.
                             params.worldUpDirection =
-                                up.ExtractRotation().TransformDir(
-                                    authoredWorldUp);
+                                up.GetOrthonormalized(false)
+                                    .ExtractRotation()
+                                    .TransformDir(authoredWorldUp);
                         }
                     }
                 }
@@ -3451,13 +3829,15 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // parent subtracts the twist back out so the local rotation is the
         // swing alone. The rest is the program's own asset-space rest frame,
         // the same one the matrices are measured against.
-        const size_t d = size_t(interpolator.driverSlot);
+        const bool numeric = !interpolator.valueInputs.empty();
+        const size_t d = size_t(numeric ? 0 : interpolator.driverSlot);
         GfQuatd driverFinal(1.0), driverRest(1.0);
         GfQuatd parentFinal(1.0), parentRest(1.0);
-        bool usable =
-            RigExecFrameRotation(B.fin[size_t(B.finLast[d])], &driverFinal) &&
-            RigExecFrameRotation(B.restFrames[d], &driverRest);
-        if (usable && interpolator.parentSlot >= 0) {
+        bool usable = numeric ||
+            (RigExecFrameRotation(B.fin[size_t(B.finLast[d])],
+                                  &driverFinal) &&
+             RigExecFrameRotation(B.restFrames[d], &driverRest));
+        if (!numeric && usable && interpolator.parentSlot >= 0) {
             const size_t p = size_t(interpolator.parentSlot);
             usable = RigExecFrameRotation(B.fin[size_t(B.finLast[p])],
                                           &parentFinal) &&
@@ -3477,8 +3857,37 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // Through the euler, as the dynamic phase goes: the gate's expected
         // weights take that route, and the same route is the same
         // floating-point values and not merely the same rotation.
+        // The translation channel, measured the dynamic phase's way
+        // (RigExecFrameTranslation), in metres for the solver.
+        GfVec3d translation(0.0);
+        const GfVec3d *translationPtr = nullptr;
+        if (numeric) {
+            for (size_t i = 0; i < interpolator.values.size(); ++i) {
+                translation[int(i)] = interpolator.values[i];
+            }
+            translation /= 100.0;
+            translationPtr = &translation;
+        } else if (interpolator.enableTranslation) {
+            const RigExecPointFrame *pf = nullptr, *pr = nullptr;
+            if (interpolator.parentSlot >= 0) {
+                const size_t p = size_t(interpolator.parentSlot);
+                pf = &B.fin[size_t(B.finLast[p])];
+                pr = &B.restFrames[p];
+            }
+            if (!RigExecFrameTranslation(B.fin[size_t(B.finLast[d])],
+                                         B.restFrames[d], pf, pr,
+                                         &translation)) {
+                step->diagnostics.push_back(
+                    "pose interpolator " + interpolator.path.GetString() +
+                    " could not measure its driver's translation; its "
+                    "weights are zero this generation");
+                return;
+            }
+            translation /= 100.0;
+            translationPtr = &translation;
+        }
         interpolator.solver.Evaluate(RigExecRbfEulerFromQuaternion(delta),
-                                     nullptr, &interpolator.scratch,
+                                     translationPtr, &interpolator.scratch,
                                      interpolator.allowNegativeWeights);
         if (interpolator.scratch.size() != interpolator.poseSlots.size()) {
             step->diagnostics.push_back(

@@ -192,6 +192,7 @@ Same(const RigExecMoverParameters &a, const RigExecMoverParameters &b)
     // mode stops looking at. Shared layouts are compared by identity,
     // exactly as operator== compares them.
     return a.kind == b.kind && a.enabled == b.enabled && a.valid == b.valid &&
+           a.radialWeight == b.radialWeight &&
            Same(a.transform, b.transform) && Same(a.weights, b.weights) &&
            Same(a.blendDeltas, b.blendDeltas) &&
            a.blendSurfaceFrame == b.blendSurfaceFrame &&

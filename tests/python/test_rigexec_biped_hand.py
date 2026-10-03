@@ -7,7 +7,7 @@ FkChains solved absolute. The chains now carry
 rigExec:startFramePolicy = "parent" (the compile derives the wrist from
 the joint hierarchy) and execute after the arm blends (Solvers order).
 
-Per evaluated file (Biped.usda, Biped_layered.usda), per mode (reference,
+Per evaluated file (Biped.usda, Biped_body.usda), per mode (dynamic,
 baked):
 
   1. wrist FK ry=30 carries every left finger joint rigidly: each lands
@@ -35,26 +35,22 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(os.path.dirname(_HERE))
 _FILES = [
     os.path.join(_REPO, "examples", "biped", "Biped.usda"),
-    os.path.join(_REPO, "examples", "biped", "Biped_layered.usda"),
+    os.path.join(_REPO, "examples", "biped", "Biped_body.usda"),
 ]
 _RIG = "/Biped/Rig"
-_WRIST_CTL = (_RIG + "/Controls/hips_ctl/torso_ctl/spine_end_pivot/"
-              "spine_end_ctl/clavicle_l_ctl/arm_l_root/"
-              "arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/"
-              "arm_l_fk_wrist_l_bind")
-_SHOULDER_CTL = (_RIG + "/Controls/hips_ctl/torso_ctl/spine_end_pivot/"
-                "spine_end_ctl/clavicle_l_ctl/arm_l_root/"
-                "arm_l_fk_shoulder_l_bind")
-_ELBOW = (_RIG + "/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/"
-         "spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/"
-         "clavicle_l_bind/shoulder_l_bind/elbow_l_bind")
-_WRIST = (_RIG + "/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/"
-          "spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/"
-          "clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind")
-_INDEX_FK = (_RIG + "/Controls/index_001_l_bind_fk_follow/"
-             "index_001_l_bind_fk")
-_ARM_PARAMS = _RIG + "/Controls/arm_l_params"
-_ARM_IK = _RIG + "/Controls/arm_l_ik"
+_CTL = _RIG + "/Main/Shot/Aux/Controls"
+_JNT = _RIG + "/Main/Shot/Aux/Joints"
+_ARM = (_CTL + "/M_Body/M_Torso/M_Chest/M_ChestTop/"
+        "L_Shldr/L_UpArmSwing/L_UpArm")
+_WRIST_CTL = _ARM + "/L_LoArm/L_Hand"
+_SHOULDER_CTL = _ARM
+_SPINE = (_JNT + "/hips_def/spine_0_def/spine_1_def/spine_2_def/"
+          "spine_3_def/spine_4_def/spine_5_def/chest_def")
+_ELBOW = _SPINE + "/clavicle_l_def/shoulder_l_def/elbow_l_def"
+_WRIST = _ELBOW + "/wrist_l_def"
+_INDEX_FK = _CTL + "/index_001_l_bind_fk_follow/L_IndexMeta"
+_ARM_PARAMS = _CTL + "/L_Arm"
+_ARM_IK = _CTL + "/L_ArmIK"
 
 _FINGERS = ("index_", "middle_", "ring_", "pinky", "thumb")
 _EPS = 1e-6
@@ -195,7 +191,7 @@ def main():
     import rigexec
     rigexec.load_schema_plugin(sys.argv[1] if len(sys.argv) > 1 else None)
     for path in _FILES:
-        for mode in ("reference", "baked"):
+        for mode in ("dynamic", "baked"):
             _check_file(path, mode)
     print("OK: biped hand follows the wrist")
 

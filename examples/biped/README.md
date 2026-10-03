@@ -1,47 +1,78 @@
 # Biped -- the ported character
 
-Character and rig by [Squarebit Studios](https://www.squarebitstudios.com/)
-([Matt Schiller](https://github.com/matthewschiller),
-[Walt Yoder](https://github.com/wyoder)), converted to RigExec.
-For source and licensing status, see [third-party notices](../../THIRD_PARTY_NOTICES.md#provenance-requiring-owner-review).
+Onboarding: [docs/human](../../docs/human/). Spec:
+[docs/specs/biped-rig.md](../../docs/specs/biped-rig.md).
 
-**Open `Biped_layered.usda`.** That is the whole character: skeleton, rig,
-skinned mesh and materials, composed from three side layers. It is
-self-contained -- clone the repo and open it, nothing else to build or
-fetch.
+**Open `Biped_stack.usda`.** That is the whole character: skeleton, rig,
+face, skinned mesh, correctives, picker and touch regions, composed as a
+tree of layers. It is self-contained -- clone the repo and open it, nothing
+else to build or fetch.
 
 **Nothing else is needed to open it.** The mesh points, the skin weights,
 the materials and every rest transform are authored directly into these
 files; the only asset paths in the whole stack are the relative sublayers
 below.
 
-    bin\launch_usdview.bat examples\biped\Biped_layered.usda
+    bin\launch_usdview.bat examples\biped\Biped_stack.usda
+
+The stack has two branches, the face over the body. Each branch carries
+every kind of data for its part, so the picker panel, touch regions and
+shapes of the face live with the face, and the body's with the body:
+
+    Biped_stack.usda
+        Biped_face_rig.usda                 the face branch
+            Biped_face_picker.usda          the Face panel of the picker
+            Biped_face_touch_regions.usda   TouchPose regions on face controls
+            Biped_face_psd.usda             face pose interpolators and their drivers
+            Biped_face_shapes.usdc          the face's corrective blend shapes
+            Biped_cheeks.usda               cheeks, nose and ear clusters
+            Biped_brows.usda                the corrugators
+            Biped_mouth.usda                the mouth, over the face and eyes
+            Biped_eyes.usda                 the eyes, over the face
+            Biped_jaw.usda                  the jaw's automatic compression
+            Biped_face.usda                 the face's skeleton controls
+        Biped_body.usda                     the body branch
+            Biped_body_picker.usda          the Body panel of the picker
+            Biped_body_touch_regions.usda   TouchPose regions on body controls
+            Biped_body_breathing.usda       the chest and belly breathing dials
+            Biped_body_psd.usda             pose interpolators, one weight per corrective
+            Biped_body_shapes.usdc          the blend shapes those weights drive
+            Biped_body_bendy.usda           the bendy limbs: bend controls and their wires
+            Biped_body_center.usda          spine, neck, hips, chest, the rig root
+            Biped_body_left.usda            everything on the left side
+            Biped_body_right.usda           the right side, as references onto the left
+            Biped_body_model.usda           the mesh and the materials
 
 | file | what |
 |---|---|
-| `Biped_layered.usda` | **the one to open** -- a root sublayering the three below |
-| `Biped_layered_center.usda` | spine, neck, hips, chest, the mesh and the materials |
-| `Biped_layered_left.usda` | everything on the left side |
-| `Biped_layered_right.usda` | the right side, as references onto the left layer plus the ~336 attributes that genuinely differ |
-| `Biped_face_rig.usda` | the face rig as one branch of the tree, sublayered by `Biped_stack.usda`, `Biped_all.usda` and `Biped_everything.usda` and NOT by `Biped_layered.usda`. It sublayers the parts below, strongest first |
-| `Biped_cheeks.usda` | the cluster controls around the cheeks, nose and ears |
-| `Biped_brows.usda` | the brows' cluster controls: the corrugators |
-| `Biped_mouth.usda` | the mouth, over the face and the eyes |
-| `Biped_eyes.usda` | the eyes, over the face |
-| `Biped_face.usda` | the face's skeleton controls, over the rig |
-| `Biped.usda` | the same rig flat, in one file, if you want to read it |
-| `Biped_anim.usda` | a 200-frame animated overlay on `Biped.usda`, for timing and for testing the animated evaluate path |
+| `Biped_stack.usda` | **the one to open** -- the face and body branches |
+| `Biped_body.usda` | the body on its own, with its picker, touch regions and correctives |
+| `Biped_face_rig.usda` | the face branch; it needs the body under it |
+| `Biped.usda` | the body rig flat, in one file, if you want to read it |
+| `Biped_anim.usda` | an 8-frame animated overlay on `Biped.usda`, for timing and for testing the animated evaluate path |
+| `Biped_stack_anim.usda` | the same keys over `Biped_stack.usda` |
+
+The face correctives fire from the face controls the way the source rig's
+do: the mouth corners, jaw, inner and main brows, corrugators and lips each
+drive a pose interpolator through a hidden driver that copies the control's
+channels, measured as a TRANSLATION (or, for the lips, a twist). Moving
+`mouth_corner_l_ctl` 3 cm out is exactly the authored wide pose.
+
+Any layer can be muted for a lighter character. Each branch's psd and shapes
+layers travel together: the interpolators publish weights nothing reads without
+the shapes, and the shapes wait for weights nobody writes without the
+interpolators. The face parts expect the ones below them, so drop those
+from the top.
 
 `Biped_anim.usda` sublayers `Biped.usda` and keys six controls over frames
-1-200. A static stage never re-reads a time sample, so it cannot show what an
+1-8. A static stage never re-reads a time sample, so it cannot show what an
 animated frame costs or whether the evaluator handles a time change
 correctly; that is what this overlay is for:
 
-    build\rigExecPose examples\biped\Biped_anim.usda --frames 1,50,100,150,200 --joints
+    build\rigExecPose examples\biped\Biped_anim.usda --frames 1,2,3,4,5,6,7,8 --joints
 
-The layered and flat forms evaluate identically -- 576 prims, 110 movers in
-the same order, and all 252 joint frames matching to 0.000e+00 cm at rest
-and under a test pose.
+The body branch's rig and the flat form evaluate identically -- all 252
+joint frames match to 0.000e+00 cm at rest and under a test pose.
 
 ## What is in it
 
@@ -53,16 +84,15 @@ two-bone IK/FK limbs with a per-limb switch, reverse foot, FK finger
 controls that follow the arm in IK as well as FK, twist helpers, and
 `hips_ctl` as the master body control.
 
-The face arrives as its own sublayer: the jaw group, the jaw compression
+The face arrives as its own branch: the jaw group, the jaw compression
 that couples the mid-face and the nose to it, the nose's blend between
 upper and lower face, and the eye look-ats. The eyes arrive as one more
-sublayer over it: the lids and the blink, the socket stretch and lift, the
+layer over it: the lids and the blink, the socket stretch and lift, the
 lids following the eyes, and the lid and socket curves with a tweak control
 on every point of each. The mouth is one more: mouthMain, the lip
 clusters, the mouth corners driving lip main, and the lip curve with a
-tweak control on every point. Open `Biped_stack.usda`, `Biped_all.usda` or
-`Biped_everything.usda` to get all three; `Biped_layered.usda` is the body rig
-alone.
+tweak control on every point. Then the brows' corrugators and the cheek,
+nose and ear clusters. `Biped_body.usda` is the body alone.
 
 ## Driving it
 
@@ -73,10 +103,20 @@ starting with:
 - `torso_ctl` -- chest, neck, head and arms, not the legs
 - `spine_root_ctl` / `spine_end_ctl` -- hip swivel and chest; both twist the
   spine, from their own end
+- `arm_?_ik` / `leg_?_ik` -- the IK hand and foot. Their axes are world
+  axes, so the gizmo moves and turns them in world space; the wrist and
+  ankle keep their own bone orientation underneath
 - `arm_?_params` / `leg_?_params` -- the small yellow cubes near each wrist
   and ankle. Their `ikfk` channel is the IK/FK switch: **0 = FK, 1 = IK**,
   and the inactive control set fades as you cross. Arms ship in FK, legs in
   IK.
+- `arm_bend_0..4_?_ctl` / `leg_bend_0..4_?_ctl` -- the bendy limbs, five
+  along each arm and leg from the upper joint to the end joint. Move one
+  to bend the limb's skin; the two halfway controls ride between their
+  neighbours. They bend the skin by their own motion only, so posing the
+  limb is unchanged until you touch one
+- `spine_end_ctl`'s `breathing:chest` and `breathing:belly` dials breathe
+  the chest and the belly (their shapes sit at +-10 and +-100)
 - `bank_?` at each ball of the foot -- its `foot:roll` / `foot:bank` dials
   are the foot roll
 - the small squares along each finger -- `index_002_l_bind_fk` and its 41
@@ -88,9 +128,11 @@ starting with:
   `nose_ctl` in between. The brows sit on `head_tip_ctl`, and each
   `brow_main_?_ctl` carries its inner brow and its peak. Three
   dials carry the automatic parts: `face:jawCompression` on `jaw_ctl`
-  (0 to 1, the jaw pressing up into the middle of the face),
+  (0 to 1, the jaw pressing up into the middle of the face; closing the
+  jaw past rest or pushing it up drives it by itself, and the dial adds on
+  top),
   `face:noseFollow` on `face_lower_ctl` (how much of the lower face the
-  nose carries, 1 by default) and `face:lookAt` on `lookAt_ctl`
+  nose carries, 1 by default) and `avars:space` on `lookAt_ctl`
 - `lookAt_ctl`, the wide plate in front of the eyes. It is top-level,
   beside `hips_ctl`, so a gaze holds while the head turns. `lookRot_ctl`
   sits between the eyes and turns both together; `eye_l_ctl` and
@@ -120,8 +162,8 @@ avars directly, if you would rather drag than type.
 ## Why it is fast
 
 `Biped.usda` authors `uniform bool rigExec:baked = true` on its
-`RigExecRoot` (and so does `Biped_layered_center.usda`, which is where the
-layered variants define theirs), so opening it -- here, or through
+`RigExecRoot` (and so does `Biped_body_center.usda`, which is where the
+body branch defines its own), so opening it -- here, or through
 `rigExecPose` with no `--mode` -- evaluates it through the BAKED PROGRAM: the
 compiled epoch as a graph of steps over dense slots, with no exec round trip
 per frame. It is a request and not an assertion. Every value published is the
@@ -180,7 +222,7 @@ C++ against the posed mesh (a BVH refit per pose). Measured on this
 character: a hover costs about **0.3 ms** where it cost 4-8 ms, a region
 crossing reaches the screen in about **15 ms** where it took 60-90 ms, and
 TouchPose adds almost nothing to a selection change where it added
-~200 ms (`bin\test\run_testusdview_touchpose_bench.bat`).
+~200 ms (`bin\run_testusdview_touchpose_bench.bat`).
 
 While the box is ticked the **mesh is not selectable**: a click on the skin
 belongs to TouchPose, and on unpainted skin it selects nothing rather than
@@ -198,8 +240,9 @@ marquee stands down -- deliberately, because a modifier that painted in one
 mode and subtracted in another is how an animator deletes half a selection
 by reflex. The regions stay non-overlapping as you paint -- a face joining
 one leaves the other in the same step -- and nothing is written until
-**Save regions**, which rewrites `Biped_touch_regions.usda` and never the
-rig.
+**Save regions**, which rewrites each region into the touch layer it came
+from (`Biped_body_touch_regions.usda` or `Biped_face_touch_regions.usda`)
+and never the rig.
 
 That last part is not just tidiness. An authored edit on any prim inside
 the rig's read roots makes OpenExec uncompile and recompile the network,
@@ -212,50 +255,26 @@ move across a stroke.
 
 | file | what |
 |---|---|
-| `Biped_all.usda` | **the one to open** -- the touch regions over the layered rig, so TouchPose and the Control Picker both work on it |
-| `Biped_touch.usda` | the same regions over the face rig and the flat `Biped.usda` |
-| `Biped_touch_regions.usda` | **TouchPose alone** -- 98 regions on a `/Biped/TouchPose` scope and nothing else. Read it, validate it, or stack it under another composition. Opening it on its own shows nothing, because it is `over`s with no geometry under them. |
+| `Biped_stack.usda` | **the one to open** -- both touch layers over the whole character, so TouchPose and the Control Picker both work on it |
+| `Biped_body_touch_regions.usda` | the body's regions: limbs, fingers, spine, head and neck |
+| `Biped_face_touch_regions.usda` | the face's regions: jaw, brows, nose, eyes, lids, sockets, lips, cheeks and ears |
+
+Both put their regions on the same `/Biped/Rig/TouchPose` scope, so the
+tool reads them as one set. Opening either on its own shows nothing,
+because they are `over`s with no geometry under them.
 
 The regions come from the studio's `touch_sets.touch`, which ships 247
-painted sets. 98 are written here: a set naming a control this port does
-not have yet is **skipped rather than authored**, so nothing downstream
-pays to test, highlight and then refuse a region it can never act on. The
-skipped count stays in the import report, so the naming gap is still
-visible -- it is overwhelmingly the cheeks, brows and teeth now that the
-eyelid, socket, lip and mouth sets bind to their controls. What
-is written covers 16,739 of `body_geo`'s 26,274 faces (64%).
+painted sets. 211 are written here, 104 on the body and 107 on the face: a
+set naming a control this port does not have yet is **skipped rather than
+authored**, so nothing downstream pays to test, highlight and then refuse a
+region it can never act on. The skipped count stays in the import report,
+so the naming gap is still visible.
 
 They are **not** `GeomSubset`s under the mesh, which is the obvious place
 for them: hdSt collects every face subset whatever family it declares, so
-98 of them collided with `body_geo`'s five `materialBind` subsets and cost
+the first 98 of them collided with `body_geo`'s five `materialBind` subsets and cost
 16,739 warnings every time the stage opened. On their own scope, with the
 faces in a plain `int[]`, the renderer never sees them.
-
-## The whole stack
-
-`Biped_stack.usda` is the character with everything on it, one layer per
-thing it is made of. Open it and the Layer Stack view reads top to bottom
-in resolution order:
-
-| layer | what it contributes |
-| --- | --- |
-| `Biped_picker.usda` | the control picker: `RigExecPicker` prims |
-| `Biped_touch_regions.usda` | TouchPose regions: `RigExecTouchRegions` |
-| `Biped_psd.usda` | pose interpolators, one weight per corrective |
-| `Biped_shapes.usdc` | the blend shapes those weights drive |
-| `Biped_layered.usda` | the rig, itself four layers |
-
-and that last one brings in four more: `Biped_layered_left.usda`,
-`Biped_layered_right.usda` and `Biped_layered_center.usda` stacked on
-`Biped_layered_model.usda`. The model is publishable on its own, and the
-rig is three files two riggers can work in at once.
-
-Any layer can be left out for a lighter character. The correctives are
-the one pair that has to travel together: the interpolators publish
-weights nothing reads without the shapes, and the shapes wait for weights
-nobody writes without the interpolators. Either alone is inert rather
-than broken, which is what lets a shot drop both without editing
-anything.
 
 ## Everything the rig owns lives under the rig
 
@@ -267,9 +286,9 @@ one rig, so they sit inside its `RigExecRoot` rather than beside it:
         Movers          solvers, constraints, the blend shape mover
         Controls        what an animator grabs
         Solvers
-        Shapes          161 UsdSkelBlendShape targets
+        Shapes          UsdSkelBlendShape targets: 114 body, 47 face
         PoseInterpolators
-        TouchPose       RigExecTouchRegions, 98 painted regions
+        TouchPose       RigExecTouchRegions, body and face regions
         Uman            RigExecPicker, the control picker
 
     /Biped/Geom         the mesh

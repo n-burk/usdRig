@@ -216,7 +216,7 @@ _BinaryExpectedVariance(const std::string &fixture)
     static const char *statics[] = {
         "ArmRig.usda", "spider_leg.usd", "spider_leg_ik.usd",
         "simple_rig.usd", "spider_legs_assembly_ref.usda",
-        "Biped.usda", "Biped_layered.usda",
+        "Biped.usda", "Biped_body.usda", "Biped_stack.usda",
     };
     for (const char *known : animated) {
         if (name == known) {

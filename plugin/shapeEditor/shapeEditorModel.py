@@ -191,3 +191,23 @@ def Summarise(interpolators):
     text = ("%d interpolators, %d poses, %d driving a corrective; "
             "%d firing" % (len(interpolators), poses, driven, firing))
     return text + (", %d disabled" % off if off else "")
+
+
+def Matches(text, query):
+    """True when *text* survives a search box holding *query*.
+
+    Every space-separated word has to appear in *text*, case-insensitively
+    and in any order, so "l brow" finds the left brow shapes whichever way
+    round the rig spells them. An empty or whitespace query keeps
+    everything, which is what makes clearing the box the way back.
+
+    Pure, and local to this plugin on purpose: the editors load
+    independently of each other, so a shared helper would mean one plugin
+    importing another's module and failing to open when it is absent. The
+    rule is eight lines; the coupling would cost more than the repetition.
+    """
+    words = (query or "").split()
+    if not words:
+        return True
+    hay = (text or "").lower()
+    return all(word.lower() in hay for word in words)

@@ -740,7 +740,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     compileBlocks.Next("DiscoverValidate.MoverDiscovery");
     std::vector<RigExecMoverRecord> newMovers;
     size_t inertMovers = 0;
-    if (!_DiscoverMovers(newMovers, inertMovers, errors, failure)) {
+    std::vector<_SurfaceProjectorRecord> newSurfaceProjectors;
+    if (!_DiscoverMovers(newMovers, newSurfaceProjectors, inertMovers,
+                         errors, failure)) {
         return fail(failure->message, failure->operations);
     }
 
@@ -831,13 +833,20 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 rel.GetTargets(&transforms);
             }
             if (transformHandler->spaceRelationship) {
-                SdfPathVector spaces;
-                if (UsdRelationship rel = prim.GetRelationship(
-                        TfToken(transformHandler->spaceRelationship))) {
-                    rel.GetTargets(&spaces);
+                // Both spaces: the measuring one the handler names, and
+                // rigExec:space, the rig's carry. They are read at the SAME
+                // phase as the transform, so a final read of either carries
+                // the same ordering obligation.
+                for (const char *name : {transformHandler->spaceRelationship,
+                                         "rigExec:space"}) {
+                    SdfPathVector spaces;
+                    if (UsdRelationship rel =
+                            prim.GetRelationship(TfToken(name))) {
+                        rel.GetTargets(&spaces);
+                    }
+                    transforms.insert(transforms.end(), spaces.begin(),
+                                      spaces.end());
                 }
-                transforms.insert(transforms.end(), spaces.begin(),
-                                  spaces.end());
             }
             for (const SdfPath &provider : transforms) {
                 const auto it = lastFrameWriterOrdinal.find(provider);
@@ -1762,7 +1771,16 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         }
     }
     for (const RigExecMoverRecord &mover : newMovers) {
-        if (!_IsFrameConstraintType(mover.schemaType)) {
+        // A matrix mover in the TRANSFORM domain is frame work. It deforms a
+        // frame, and a frame is what the pose walk orders, what later movers
+        // observe, and what gets published -- none of which the point graph
+        // does. Its geometry-domain twin is unaffected and stays there.
+        const bool transformDomainMatrix =
+            mover.schemaType == "RigExecMatrixMover" &&
+            mover.targets.size() == 1 && mover.targets[0].IsPrimPath() &&
+            !rigExec::RigExecIsTransformDomainAmbiguous(_stage, mover.targets[0]);
+        if (!_IsFrameConstraintType(mover.schemaType) &&
+            !transformDomainMatrix) {
             continue;
         }
         const UsdPrim moverPrim = _stage->GetPrimAtPath(mover.moverPath);
@@ -1781,7 +1799,40 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             constraint.weightObject = commonWeights[0];
         }
 
-        if (_IsSourceFrameConstraintType(mover.schemaType)) {
+        if (transformDomainMatrix) {
+            // T = M(transform) * inverse(M(transformSpace)), the same pair
+            // the geometry domain reads, carried here as ordered sources so
+            // the existing binding and phase machinery resolves them.
+            constraint.targets = mover.targets;
+            const SdfPathVector xf = getTargets(moverPrim, "rigExec:transform");
+            if (xf.size() != 1) {
+                return fail(mover.moverPath.GetString() +
+                            ": a transform-domain MatrixMover needs exactly "
+                            "one rigExec:transform", {mover.moverPath});
+            }
+            const SdfPathVector space =
+                getTargets(moverPrim, "rigExec:transformSpace");
+            for (const SdfPath &one : {xf[0]}) {
+                _FrameSourceBinding binding;
+                if (!bindFrameSource(mover.moverPath, one,
+                                     mover.moverPath.GetString() +
+                                         " rigExec:transform", &binding)) {
+                    return false;
+                }
+                constraint.sources.push_back(binding);
+            }
+            for (const SdfPath &one : space) {
+                _FrameSourceBinding binding;
+                if (!bindFrameSource(mover.moverPath, one,
+                                     mover.moverPath.GetString() +
+                                         " rigExec:transformSpace",
+                                     &binding)) {
+                    return false;
+                }
+                constraint.sources.push_back(binding);
+                break;
+            }
+        } else if (_IsSourceFrameConstraintType(mover.schemaType)) {
             constraint.targets = mover.targets;
 
             // Domain selection, by the authored spelling alone. A bare prim
@@ -1818,6 +1869,35 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                     return false;
                 }
                 constraint.sources.push_back(binding);
+            }
+
+            // The two operators that read Euler components of their
+            // sources -- a mask on one, a weighted mean over several --
+            // and so the two whose answer turns with an outer rotation.
+            if (mover.schemaType == "RigExecRotationConstraint" ||
+                mover.schemaType == "RigExecParentConstraint") {
+                const SdfPathVector space =
+                    getTargets(moverPrim, "rigExec:space");
+                if (space.size() > 1) {
+                    return fail(mover.schemaType.GetString() + " " +
+                                mover.moverPath.GetString() +
+                                " has more than one rigExec:space",
+                                {mover.moverPath});
+                }
+                // A space that is not a frame provider is dropped rather
+                // than reported, exactly as the space switch drops it: "no
+                // space" and "a space that cannot supply a frame" mean the
+                // same thing here, and both leave the mask running as it
+                // did before the masters.
+                if (!space.empty()) {
+                    const UsdPrim spacePrim = _stage->GetPrimAtPath(space[0]);
+                    const TfToken spaceType =
+                        spacePrim ? spacePrim.GetTypeName() : TfToken();
+                    if (spaceType == "RigExecControl" ||
+                        spaceType == "RigExecJoint") {
+                        constraint.spacePath = space[0];
+                    }
+                }
             }
 
             if (mover.schemaType == "RigExecAimConstraint") {
@@ -2234,6 +2314,14 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 a.Get(&phase);
             }
             revision.transformFinalPhase = phase == "final";
+            {
+                TfToken pointFrame;
+                if (const UsdAttribute a = moverPrim.GetAttribute(
+                        TfToken("rigExec:pointFrame"))) {
+                    a.Get(&pointFrame);
+                }
+                revision.transformPosedPoints = pointFrame == "posed";
+            }
             if (!revision.binding.transform.IsEmpty()) {
                 revision.transformTap = newTaps->Add(
                     RigExecValueAddress::Prim(revision.binding.transform,
@@ -2242,6 +2330,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             if (!revision.binding.transformSpace.IsEmpty()) {
                 revision.transformSpaceTap = newTaps->Add(
                     RigExecValueAddress::Prim(revision.binding.transformSpace,
+                                              TfToken("computeMatrix")));
+            }
+            if (!revision.binding.carrySpace.IsEmpty()) {
+                revision.carrySpaceTap = newTaps->Add(
+                    RigExecValueAddress::Prim(revision.binding.carrySpace,
                                               TfToken("computeMatrix")));
             }
             for (const SdfPath &influence : revision.binding.influences) {
@@ -2569,6 +2662,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 seed(source.sourcePath);
             }
             seed(constraint.worldUpObject.sourcePath);
+            seed(constraint.spacePath);
             seed(constraint.effector.sourcePath);
             seed(constraint.weightObject);
             for (const auto &pole : constraint.poleObjects) {
@@ -2703,6 +2797,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         for (const SdfPath &target : constraint.targets) dependOnFrame(target);
         for (const auto &source : constraint.sources) dependOnFrame(source.sourcePath);
         dependOnFrame(constraint.worldUpObject.sourcePath);
+        dependOnFrame(constraint.spacePath);
         dependOnFrame(constraint.effector.sourcePath);
         dependOnFrame(constraint.weightObject);
         for (const auto &pole : constraint.poleObjects) dependOnFrame(pole.sourcePath);
@@ -2769,8 +2864,23 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         // on it -- the constraint waits on the solver
                         // instead. (Producers have no position and keep the
                         // unconditional edge.)
+                        //
+                        // ONLY WHERE THE TWO WRITE THE SAME JOINT. The pose
+                        // stack orders the steps that write a JOINT; a
+                        // constraint that moves something else this solver
+                        // READS -- an FK control parked on a wrist, so the
+                        // hand travels with the arm -- is an ordinary
+                        // producer, and deferring it leaves the solver
+                        // reading a control still standing at its rest. The
+                        // whole Solvers scope sits after Movers in the
+                        // namespace, so without this test EVERY constraint
+                        // reads as "above" every solver: measured on the
+                        // biped, the finger chains stopped following the
+                        // wrist entirely.
+                        const bool sharedJoint =
+                            newJointBinding.count(p) > 0;
                         const bool positional =
-                            poseStackOrdinal.count(solver) > 0;
+                            sharedJoint && poseStackOrdinal.count(solver) > 0;
                         const int here = stackOrdinalOf(solver);
                         for (const SdfPath &constraint : it->second) {
                             if (positional &&
@@ -2992,9 +3102,264 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         for (const SdfPath &target : constraint.targets) seedProvider(target);
         for (const auto &source : constraint.sources) seedProvider(source.sourcePath);
         seedProvider(constraint.worldUpObject.sourcePath);
+        seedProvider(constraint.spacePath);
         seedProvider(constraint.effector.sourcePath);
         for (const auto &pole : constraint.poleObjects) seedProvider(pole.sourcePath);
     }
+    // rigExec:space on a rotation constraint: the same pair of taps a space
+    // switch reads for its carry, on the same seed request, so the
+    // constraint and the switch derive one carry from one answer.
+    for (_FrameConstraint &constraint : newFrameConstraints) {
+        if (constraint.spacePath.IsEmpty()) continue;
+        constraint.spacePosedTap = newFirstFramePoseTaps->Add(
+            RigExecValueAddress::Prim(constraint.spacePath,
+                                      _computePointFrame));
+        constraint.spaceDefaultTap = newFirstFramePoseTaps->Add(
+            RigExecValueAddress::Prim(constraint.spacePath,
+                                      TfToken("computeDefaultFrame")));
+    }
+    compileBlocks.Next("PrepareRequests.SpaceSwitches");
+    // RigExecSpaceSwitch: a labelled parent-space list for one xformable.
+    //
+    // Collected here rather than in the mover loop because a switch is not a
+    // mover -- it writes no pose and takes no place in the pose stack. It
+    // reads two frames per source (posed and default) and hands the target a
+    // frame composed against them, so all it needs from Compile is taps, and
+    // the taps have to ride the seed request that is being built right here.
+    std::vector<_SpaceSwitch> newSpaceSwitches;
+    if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
+        std::map<SdfPath, size_t> switchByTarget;
+        std::vector<_SpaceSwitch> collected;
+        for (const UsdPrim &prim : UsdPrimRange(rig)) {
+            if (prim.GetTypeName() != "RigExecSpaceSwitch") continue;
+            const SdfPath path = prim.GetPath();
+            const SdfPathVector targets = getTargets(prim, "rigExec:target");
+            if (targets.size() != 1) {
+                return fail(path.GetString() +
+                            " must have exactly one rigExec:target, got " +
+                            std::to_string(targets.size()));
+            }
+            const UsdPrim targetPrim = _stage->GetPrimAtPath(targets[0]);
+            if (!targetPrim || !isFrameProvider(targets[0])) {
+                return fail(path.GetString() + " targets " +
+                            targets[0].GetString() +
+                            ", which is not a RigExec transform provider");
+            }
+            // inputs:sourceWeights is inherited from RigExecSourceConstraint
+            // and plays no part here. Authoring it is refused rather than
+            // ignored: a weight array that looks like it selects the space
+            // and does not is the kind of thing a rigger debugs for an hour.
+            VtFloatArray sourceWeights;
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("inputs:sourceWeights"));
+                a && a.Get(&sourceWeights) && !sourceWeights.empty()) {
+                return fail(path.GetString() +
+                            " authors inputs:sourceWeights, which a space "
+                            "switch does not read; inputs:activeSpace is the "
+                            "selector");
+            }
+            _SpaceSwitch record;
+            record.switchPath = path;
+            record.target = targets[0];
+            const SdfPathVector sources = getTargets(prim, "rigExec:sources");
+            if (sources.empty()) {
+                return fail(path.GetString() +
+                            " has no rigExec:sources; a space switch needs at "
+                            "least one space");
+            }
+            VtTokenArray labels;
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:spaceLabels"))) {
+                a.Get(&labels);
+            }
+            VtTokenArray filters;
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:rotationFilters"))) {
+                a.Get(&filters);
+            }
+            if (!filters.empty() && filters.size() != sources.size()) {
+                return fail(path.GetString() + " has " +
+                            std::to_string(filters.size()) +
+                            " rigExec:rotationFilters for " +
+                            std::to_string(sources.size()) + " sources");
+            }
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:twistAxis"))) {
+                a.Get(&record.twistAxis);
+            }
+            {
+                const SdfPathVector space = getTargets(prim, "rigExec:space");
+                if (space.size() > 1) {
+                    return fail(path.GetString() +
+                                " has more than one rigExec:space");
+                }
+                // A space that is not a frame provider is dropped rather
+                // than reported: "no space" and "a space that cannot supply
+                // a frame" mean the same thing here, and both leave the
+                // filter running exactly as it did before the masters.
+                if (!space.empty() && isFrameProvider(space[0])) {
+                    record.spacePath = space[0];
+                    seedProvider(space[0]);
+                }
+            }
+            if (!labels.empty() && labels.size() != sources.size()) {
+                return fail(path.GetString() + " has " +
+                            std::to_string(labels.size()) +
+                            " rigExec:spaceLabels for " +
+                            std::to_string(sources.size()) + " sources");
+            }
+            for (size_t i = 0; i < sources.size(); ++i) {
+                _SpaceSwitch::Source source;
+                // A source that is not an xformable provider contributes
+                // identity. The RigExecRoot is the idiomatic one, and that is
+                // how "world" is spelled without inventing a prim for it.
+                if (isFrameProvider(sources[i])) {
+                    source.path = sources[i];
+                    seedProvider(sources[i]);
+                }
+                if (!filters.empty()) {
+                    const TfToken &filter = filters[i];
+                    if (filter == "twist") {
+                        source.filter = RigExecRotationFilter::Twist;
+                    } else if (filter == "swing") {
+                        source.filter = RigExecRotationFilter::Swing;
+                    } else if (!filter.IsEmpty() && filter != "all") {
+                        return fail(path.GetString() +
+                                    " has an unknown rigExec:rotationFilters "
+                                    "entry " + filter.GetString() +
+                                    "; expected all, twist or swing");
+                    }
+                }
+                record.sources.push_back(source);
+                record.labels.push_back(
+                    labels.empty() ? sources[i].GetName()
+                                   : labels[i].GetString());
+            }
+            const SdfPathVector active =
+                getTargets(prim, "rigExec:activeSpaceAttribute");
+            if (active.size() > 1) {
+                return fail(path.GetString() +
+                            " has more than one rigExec:activeSpaceAttribute");
+            }
+            if (!active.empty()) {
+                if (!active[0].IsPropertyPath()) {
+                    return fail(path.GetString() +
+                                " rigExec:activeSpaceAttribute must target a "
+                                "property, got " + active[0].GetString());
+                }
+                record.activeAttribute = active[0];
+            }
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("inputs:activeSpace"))) {
+                a.Get(&record.activeFallback);
+            }
+            const auto readMask = [&prim](const char *name, bool *out,
+                                          bool fallback) {
+                bool value = fallback;
+                if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+                    a.Get(&value);
+                }
+                *out = value;
+            };
+            readMask("inputs:affectTranslationX", &record.affectTranslation[0], true);
+            readMask("inputs:affectTranslationY", &record.affectTranslation[1], true);
+            readMask("inputs:affectTranslationZ", &record.affectTranslation[2], true);
+            readMask("inputs:affectRotationX", &record.affectRotation[0], true);
+            readMask("inputs:affectRotationY", &record.affectRotation[1], true);
+            readMask("inputs:affectRotationZ", &record.affectRotation[2], true);
+            readMask("inputs:affectScaleX", &record.affectScale[0], true);
+            readMask("inputs:affectScaleY", &record.affectScale[1], true);
+            readMask("inputs:affectScaleZ", &record.affectScale[2], true);
+            seedProvider(targets[0]);
+            if (switchByTarget.count(targets[0])) {
+                return fail(targets[0].GetString() +
+                            " is the target of more than one space switch");
+            }
+            switchByTarget[targets[0]] = collected.size();
+            collected.push_back(std::move(record));
+        }
+        // Bands. A switch reads a space that some OTHER switch may move --
+        // directly (a pole vector in its IK handle's space) or through
+        // namespace (a head whose parent hangs under a switched neck) -- and
+        // such a switch resolves one round later, from a seed re-evaluated
+        // with that switch's answer standing. The dependency is therefore
+        // "the nearest switched ancestor-or-self of each source", and the
+        // graph is tiny: one node per switched control.
+        const auto switchedAncestor = [&switchByTarget](SdfPath path) {
+            for (; !path.IsEmpty() && path != SdfPath::AbsoluteRootPath();
+                 path = path.GetParentPath()) {
+                const auto it = switchByTarget.find(path);
+                if (it != switchByTarget.end()) return int(it->second);
+            }
+            return -1;
+        };
+        std::vector<int> state(collected.size(), 0);
+        std::vector<int> band(collected.size(), 0);
+        std::function<bool(size_t)> visit = [&](size_t i) {
+            if (state[i] == 2) return true;
+            if (state[i] == 1) {
+                return fail(collected[i].switchPath.GetString() +
+                            " is part of a space-switch cycle: its space "
+                            "depends on a control whose space depends on it");
+            }
+            state[i] = 1;
+            int here = 0;
+            for (const auto &source : collected[i].sources) {
+                if (source.path.IsEmpty()) continue;
+                const int producer = switchedAncestor(source.path);
+                if (producer < 0 || size_t(producer) == i) continue;
+                if (!visit(size_t(producer))) return false;
+                here = std::max(here, band[size_t(producer)] + 1);
+            }
+            band[i] = here;
+            state[i] = 2;
+            return true;
+        };
+        for (size_t i = 0; i < collected.size(); ++i) {
+            if (!visit(i)) {
+                return false;
+            }
+        }
+        std::vector<size_t> order(collected.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(),
+                         [&band](size_t a, size_t b) {
+                             return band[a] < band[b];
+                         });
+        for (const size_t i : order) {
+            _SpaceSwitch record = collected[i];
+            record.band = band[i];
+            for (auto &source : record.sources) {
+                if (source.path.IsEmpty()) continue;
+                source.posedTap = newFirstFramePoseTaps->Add(
+                    RigExecValueAddress::Prim(source.path, _computePointFrame));
+                source.defaultTap = newFirstFramePoseTaps->Add(
+                    RigExecValueAddress::Prim(
+                        source.path, TfToken("computeDefaultFrame")));
+            }
+            if (!record.spacePath.IsEmpty()) {
+                record.spacePosedTap = newFirstFramePoseTaps->Add(
+                    RigExecValueAddress::Prim(record.spacePath,
+                                              _computePointFrame));
+                record.spaceDefaultTap = newFirstFramePoseTaps->Add(
+                    RigExecValueAddress::Prim(
+                        record.spacePath, TfToken("computeDefaultFrame")));
+            }
+            record.targetPosedTap = newFirstFramePoseTaps->Add(
+                RigExecValueAddress::Prim(record.target, _computePointFrame));
+            if (const UsdPrim parent = _NamespaceFrameProvider(
+                    _stage->GetPrimAtPath(record.target))) {
+                record.parentPosedTap = newFirstFramePoseTaps->Add(
+                    RigExecValueAddress::Prim(parent.GetPath(),
+                                              _computePointFrame));
+                record.parentDefaultTap = newFirstFramePoseTaps->Add(
+                    RigExecValueAddress::Prim(parent.GetPath(),
+                                              TfToken("computeDefaultFrame")));
+            }
+            newSpaceSwitches.push_back(std::move(record));
+        }
+    }
+
     compileBlocks.Next("PrepareRequests.ProviderClosure");
     // Warming the closure over the seeded set is what grows newPoseInputInfo,
     // which the pass after this one iterates -- so the two are timed apart:
@@ -3753,6 +4118,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     _jointPaths = std::move(newJointPaths);
     _controlPaths = std::move(newControlPaths);
     _poseInterpolators = std::move(newPoseInterpolators);
+    _surfaceProjectors = std::move(newSurfaceProjectors);
+
     _poseWeightProperties.clear();
     for (const _PoseInterpolator &interpolator : _poseInterpolators) {
         _poseWeightProperties.insert(_poseWeightProperties.end(),
@@ -3764,6 +4131,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     }
     _controlFrameTaps = std::move(newControlFrameTaps);
     _frameConstraints = std::move(newFrameConstraints);
+    _spaceSwitches = std::move(newSpaceSwitches);
     _frameChains = std::move(newFrameChains);
     _providerBaseFrameTaps = std::move(newProviderBaseFrameTaps);
     _xformDerivedProviders = std::move(newXformDerivedProviders);
@@ -3890,6 +4258,32 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     }
     _propertyChains = std::move(newPropertyChains);
     _propertyChainOrder = std::move(newPropertyChainOrder);
+    // Every attribute a chain READS through a connection.
+    //
+    // The avar-only notice path below skips dropping the chain bindings, on
+    // the reasoning that a float-typed chain input cannot reach a double
+    // avar. It can: a connection from a mover's float inputs:value to a
+    // control's double avars:ty resolves and is what every "distance from
+    // its rest, from the control's own translate" chain in this rig is built
+    // out of -- cheeks.py's mouth corner, squetch.py's head wire. Without
+    // this set such a chain answered once and then held that answer for the
+    // life of the stage, so the cheeks stopped following the mouth corner
+    // the moment an avar was AUTHORED rather than dragged.
+    _propertyChainInputs.clear();
+    for (const auto &[target, revisions] : _propertyChains) {
+        for (const _PropertyRevision &revision : revisions) {
+            const UsdPrim mover = _stage->GetPrimAtPath(revision.moverPath);
+            if (!mover) continue;
+            for (const char *name : {"inputs:value", "inputs:min",
+                                     "inputs:max"}) {
+                const UsdAttribute a = mover.GetAttribute(TfToken(name));
+                if (!a) continue;
+                for (const SdfPath &source : _AuthoredConnections(a)) {
+                    _propertyChainInputs.insert(source);
+                }
+            }
+        }
+    }
     // The bindings describe the chains entry for entry, so a recompile that
     // replaced them has replaced what the bindings are about.
     _propertyChainBindings.reset();

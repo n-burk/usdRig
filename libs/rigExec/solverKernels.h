@@ -109,6 +109,68 @@ RigExecPointFrameArray RigExecSolveTwistDistribution(
 /// the same authored poses, so two spellings of it would be two rigs.
 bool RigExecFrameRotation(const RigExecPointFrame &frame, GfQuatd *out);
 
+/// A pose interpolator driver's TRANSLATION relative to its own rest, in its
+/// own rest frame, in the frames' units (centimetres on the shipped biped).
+///
+///   local     = world * parent^-1          (row-vector)
+///   restLocal = restWorld * restParent^-1
+///   out       = origin of local, expressed in restLocal
+///
+/// So a control whose avars translate it along its own rest axes measures
+/// exactly those avars, whatever its rest orientation, and a driver whose
+/// parent moves measures nothing. `parentFinal`/`parentRest` are null when
+/// the driver has no frame-publishing parent. False when a frame is invalid,
+/// degenerate or singular.
+///
+/// ONE definition, for the same reason as RigExecFrameRotation: the dynamic
+/// phase and the baked step compare against the same authored poses.
+bool RigExecFrameTranslation(const RigExecPointFrame &driverFinal,
+                             const RigExecPointFrame &driverRest,
+                             const RigExecPointFrame *parentFinal,
+                             const RigExecPointFrame *parentRest,
+                             GfVec3d *out);
+
+/// Linear blend of two transforms, decomposed: translation and scale lerp,
+/// rotation slerps. `weight` 0 returns \p a unchanged and 1 returns \p b
+/// unchanged, both exactly -- which is what lets a space switch sit on whole
+/// numbers and be bit-identical to selecting that space outright.
+///
+/// Used by RigExecSpaceSwitch for a fractional active index, and written
+/// once so the dynamic phase and the baked step ease a switch the same way.
+GfMatrix4d RigExecBlendTransforms(const GfMatrix4d &a, const GfMatrix4d &b,
+                                  double weight);
+
+/// Zero the masked channels of a transform, per axis, in the transform's own
+/// decomposition: translation components go to zero, rotation components to
+/// no rotation about that axis (XYZ order), scale components to one.
+///
+/// An all-true mask returns \p m untouched rather than round-tripping it
+/// through a decomposition, so the ordinary space switch -- every axis on --
+/// is exact and costs nothing.
+GfMatrix4d RigExecMaskTransform(const GfMatrix4d &m,
+                                const bool translation[3],
+                                const bool rotation[3],
+                                const bool scale[3]);
+
+/// How RigExecFilterSpaceRotation splits a rotation.
+enum class RigExecRotationFilter { All, Twist, Swing };
+
+/// Keep only the twist of \p m's rotation about \p axis, or only the swing,
+/// leaving its translation and scale exactly as they were.
+///
+/// The split is the exact swing-twist decomposition -- project the rotation
+/// quaternion onto the axis, normalize, and take the remainder as the swing
+/// -- not an Euler mask, so it stays well behaved at large angles where
+/// masking one Euler channel does not. A degenerate projection (a half turn
+/// square to the axis, where the twist is undefined) yields no twist, which
+/// is the only continuous answer available there.
+///
+/// `All` returns \p m untouched rather than round-tripping it through a
+/// decomposition, so an unfiltered space is exact and costs nothing.
+GfMatrix4d RigExecFilterSpaceRotation(const GfMatrix4d &m,
+                                      const GfVec3d &axis,
+                                      RigExecRotationFilter filter);
+
 }  // namespace rigExec
 
 #endif  // RIGEXEC_SOLVER_KERNELS_H

@@ -74,6 +74,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         out.op = r.op;
         out.binding = r.binding;
         out.finalPhase = r.transformFinalPhase;
+        out.posedPoints = r.transformPosedPoints;
         out.skinTopologyFixed = r.skinTopologyFixed;
         out.snapshotAfter = r.snapshotAfter;
         // The geometry-domain constraint whose measured delta IS this
@@ -256,6 +257,16 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
             if (out.transformSpaceSlot < 0) {
                 refuse("mover transform space is not a pose provider",
                        r.binding.transformSpace);
+            }
+        }
+        // rigExec:space: the rig's carry. Refused on a miss for the same
+        // reason the measuring space is -- a carry that quietly resolved to
+        // nothing looks exactly like the bug it was named to fix.
+        if (!r.binding.carrySpace.IsEmpty()) {
+            out.carrySpaceSlot = slotOf(r.binding.carrySpace);
+            if (out.carrySpaceSlot < 0) {
+                refuse("mover carry space is not a pose provider",
+                       r.binding.carrySpace);
             }
         }
         // The solver whose aggregate supplies values.driverFrames, resolved
@@ -657,6 +668,10 @@ DeclareMatrixReads(const RigExecBakedProgramImpl::GeomRevision &revision,
     if (revision.transformSpaceSlot >= 0) {
         step->reads.push_back(
             RigExecBakedOne(domain, revision.transformSpaceSlot));
+    }
+    if (revision.carrySpaceSlot >= 0) {
+        step->reads.push_back(
+            RigExecBakedOne(domain, revision.carrySpaceSlot));
     }
     for (const int slot : revision.influenceSlots) {
         if (slot >= 0) {
@@ -1158,6 +1173,21 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
                 ? B.finalMatrix[size_t(revision->transformSlot)]
                 : B.baseMatrix[size_t(revision->transformSlot)];
     }
+    // rigExec:space, out of the same table at the same phase, so this reads
+    // exactly what the dynamic path's carry tap reads. Held on the revision
+    // for the assemble, which may not read the tables itself: the fold is
+    // the step that declared them.
+    revision->haveCarry = revision->carrySpaceSlot >= 0;
+    if (revision->haveCarry) {
+        const GfMatrix4d &carry =
+            revision->finalPhase
+                ? B.finalMatrix[size_t(revision->carrySpaceSlot)]
+                : B.baseMatrix[size_t(revision->carrySpaceSlot)];
+        if (revision->carry != carry) {
+            revision->carry = carry;
+            changed = true;
+        }
+    }
     // A geometry-domain constraint's delta, if one was measured for this
     // mover: the pose walk solved the constraint and stashed the map from the
     // target's authored transform to the solved one, and THIS is the Matrix
@@ -1223,11 +1253,19 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
             revision->finalPhase
                 ? B.finalMatrix[size_t(revision->transformSpaceSlot)]
                 : B.baseMatrix[size_t(revision->transformSpaceSlot)];
+        // The reference refines the SPACE first, then the carry
+        // consumes it: the two are sequential, not alternatives.
         if (hasReference && revision->influenceSlots.size() > 1) {
             space = RigExecMeasureFromReference(space, referenceMatrix(1));
         }
-        revision->transform =
-            RigExecMeasureInSpace(revision->transform, space);
+        // rigExec:space, as read above. A POINTER, because a revision
+        // naming no carry must take the untouched branch and not one
+        // multiplied by an identity: see RigExecClusterInPointFrame.
+        const GfMatrix4d *carry =
+            revision->haveCarry ? &revision->carry : nullptr;
+        revision->transform = RigExecClusterInPointFrame(
+            RigExecMeasureInSpace(revision->transform, space), space,
+            revision->posedPoints, carry);
     }
     for (size_t k = 0; k < revision->influenceSlots.size(); ++k) {
         const size_t slot = size_t(revision->influenceSlots[k]);
@@ -1486,6 +1524,11 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     // packet is assembled without a matrix rather than with a stale one.
     if (revision->haveTransform && revision->op != RigExecRevisionOp::Skin) {
         values.transform = &revision->transform;
+    }
+    // The carry the fold read beside the transform, for the wire assembler.
+    // A skin's fold runs after its assemble, but a skin never names one.
+    if (revision->haveCarry) {
+        values.carry = &revision->carry;
     }
     // A skin revision's packet carries the IDENTITY table and never the
     // folded one: it is assembled before the matrices are folded, which is

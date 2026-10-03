@@ -56,6 +56,88 @@ void RigExecApplyLaplacianSmooth(
     const std::vector<int> &faceVertexIndices,
     double strength);
 
+/// Where a ray meets a mesh, kept as the MATERIAL point it landed on: the
+/// corners of the fan triangle that won and the barycentric weights inside
+/// it. A hit is topology, not position, so the same hit evaluates on any
+/// point set that shares the mesh's topology -- the rest points, or the
+/// posed points -- and that is what lets a frame follow the surface's
+/// material instead of the line of the ray.
+struct RigExecSurfaceHit {
+    int a = -1, b = -1, c = -1;  ///< corners of the winning triangle
+    double u = 0.0, v = 0.0;     ///< weights of b and c; a carries 1 - u - v
+    double distance = 0.0;       ///< along the normalized ray, from origin
+};
+
+/// Cast a ray at a mesh: Moller-Trumbore against each face fan-triangulated
+/// about its first corner, two-sided, nearest hit strictly in front of the
+/// origin. Returns false, leaving hit untouched, when nothing is met, the
+/// direction is degenerate, or the topology is invalid.
+bool RigExecRaycastSurface(
+    const std::vector<GfVec3f> &points,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const GfVec3d &origin,
+    const GfVec3d &direction,
+    RigExecSurfaceHit *hit);
+
+/// The surface frame at a hit, evaluated on the given points: the hit's
+/// barycentric position as the translation and the surface normal there as
+/// +Z. The normal is the barycentric blend of RigExecComputeVertexNormals,
+/// so it varies smoothly across a face rather than stepping from triangle
+/// to triangle.
+///
+/// This is what puts a projector on a deforming eyeball. The ray is cast
+/// ONCE, at the rest points, and picks a material point on the cornea; the
+/// posed points then say where that point went and which way the surface
+/// faces there. Re-casting at the posed surface would measure something
+/// else -- where the surface happens to cross a fixed line -- and a
+/// surface sliding across the ray would read as standing still while its
+/// material moved. A rigid motion of the mesh comes back exactly: the frame
+/// on the moved points is the rest frame carried by that motion.
+///
+/// upHint fixes the roll, which the normal alone cannot: it is orthogonalized
+/// against the normal, and a hint parallel to it (or degenerate) falls back
+/// to the least-aligned principal axis, so a frame always comes back rather
+/// than failing at a pole. Returns false only when the hit or the topology
+/// is invalid, leaving frame untouched.
+bool RigExecSurfaceFrameAtHit(
+    const std::vector<GfVec3f> &points,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const RigExecSurfaceHit &hit,
+    const GfVec3d &upHint,
+    GfMatrix4d *frame);
+
+/// RigExecRaycastSurface followed by RigExecSurfaceFrameAtHit on the same
+/// points: the frame where the ray meets THIS surface. Returns false only
+/// when nothing is hit or the topology is invalid, leaving frame untouched.
+bool RigExecRaycastSurfaceFrame(
+    const std::vector<GfVec3f> &points,
+    const std::vector<int> &faceVertexCounts,
+    const std::vector<int> &faceVertexIndices,
+    const GfVec3d &origin,
+    const GfVec3d &direction,
+    const GfVec3d &upHint,
+    GfMatrix4d *frame);
+
+/// A fraction of a transform, taken as a fraction of its ROTATION.
+///
+/// The point-domain matrix mover blends linearly -- p' = q + w(Tq - q) --
+/// which is exact at both ends and a straight line in between. Under a
+/// rotation that straight line is the CHORD, and a chord always falls
+/// inside its arc, toward the axis. For a cluster that rotates a lid
+/// about an eyeball that is the difference between the lid sweeping over
+/// the eye and the lid cutting into it: the sag at weight one half is
+/// r(1 - cos(theta/2)), which on a 2.48 radius eye at a 56 degree blink
+/// is 0.29 -- a tenth of the eyeball.
+///
+/// This takes the same axis and a fraction of the ANGLE, so every point
+/// keeps its distance from the axis however it is weighted. Translation
+/// and scale scale linearly, which is what they mean. Endpoints agree
+/// with the linear form exactly, so weight 0 and weight 1 are unchanged.
+GfMatrix4d RigExecPartialTransform(const GfMatrix4d &transform,
+                                   double weight);
+
 /// Angle-weighted vertex normals from standard polygon topology
 /// (RigExecPostMover "recomputeNormals", spec §7.6).
 ///

@@ -19,15 +19,18 @@
 # the panel is a thin driver over module-level authoring functions so the
 # authoring rules can be tested headlessly.
 #
+import os
+import sys
+
 from pxr import Gf, Sdf, Tf, Ts, Usd, UsdGeom
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
+    import rigExecUndo
     import sessionRegistry
 except ImportError:                    # loader that did not add our dir
-    import os as _os
-    import sys as _sys
-    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import rigExecUndo
     import sessionRegistry
 
 
@@ -71,6 +74,69 @@ SPLINE_PROFILE_NAMES = (
 
 # Attribute authoring helpers (no Qt)
 
+# --------------------------------------------------------------------
+# Undo
+#
+# Every write in this file goes through SetAtTime or SetVisibleAtTime, so
+# recording happens THERE rather than at two dozen call sites. The panel
+# hands the shared stack to SetUndoStack when it opens.
+#
+# Recording() nests: an outer scope over a prim already covers whatever
+# its attributes do inside, so an inner call folds into it instead of
+# pushing a second entry. That is what makes "create a sphere weight" --
+# which authors a prim, a relationship and half a dozen placement avars
+# -- arrive as one Ctrl+Z, and it is also what lets a slider hold one
+# scope open across a whole drag.
+# --------------------------------------------------------------------
+
+_UNDO = None
+_OPEN = 0
+
+
+def SetUndoStack(stack):
+    """The stack Recording() pushes onto. None disables recording."""
+    global _UNDO
+    _UNDO = stack
+
+
+class _Scope(object):
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __enter__(self):
+        global _OPEN
+        _OPEN += 1
+        if self._inner is not None:
+            self._inner.__enter__()
+        return self
+
+    def __exit__(self, excType, exc, tb):
+        global _OPEN
+        _OPEN -= 1
+        if self._inner is not None:
+            self._inner.__exit__(excType, exc, tb)
+        return False
+
+
+def Recording(stage, paths, label):
+    """One undo entry covering `paths`, unless one is already open."""
+    if _UNDO is None or stage is None or not paths or _OPEN:
+        return _Scope(None)
+    return _Scope(rigExecUndo.SpecScope(stage, paths, _UNDO, label))
+
+
+def _AttributeScope(attr, label):
+    """Recording() for one attribute, keyed on its OWNING PRIM.
+
+    The prim, not the property: authoring a placement avar can create the
+    attribute spec, and undoing has to remove the spec rather than leave
+    an empty one behind. A prim snapshot does that and costs no more here.
+    """
+    path = attr.GetPath()
+    return Recording(attr.GetStage(), [path.GetPrimPath()],
+                     "%s %s" % (label, path.name))
+
+
 def SetAtTime(attr, value, time):
     """
     Sets a value on an attribute at a specified time.
@@ -89,6 +155,11 @@ def SetAtTime(attr, value, time):
     rangePolicy, drawMode), and a uniform attribute cannot legally carry
     a time sample, so those always go to the default.
     """
+    with _AttributeScope(attr, "Set"):
+        _SetAtTime(attr, value, time)
+
+
+def _SetAtTime(attr, value, time):
     if attr.GetVariability() == Sdf.VariabilityUniform:
         attr.Set(value)
         return
@@ -139,6 +210,11 @@ def SetVisibleAtTime(attr, value, time=None):
     if attr is None or not attr:
         return False
 
+    with _AttributeScope(attr, "Set"):
+        return _SetVisibleAtTime(attr, value, time)
+
+
+def _SetVisibleAtTime(attr, value, time):
     if time is None or time.IsDefault():
         attr.Set(value)
         return True
@@ -413,6 +489,27 @@ def FindWeightsScopeAncestor(prim):
     return None
 
 
+def ChooseWeightParentPath(stage, selectedPrims):
+    """Where ChooseWeightParentPrim WILL put a new weight, creating nothing.
+
+    The undo scope has to name a path before the thing at it exists, and
+    ChooseWeightParentPrim defines the Weights scope as a side effect of
+    answering -- so the answer is separated from the act here, and the
+    two share this function to keep them from drifting.
+    """
+    for prim in selectedPrims or ():
+        if prim and prim.GetTypeName() == "RigExecJoint":
+            return prim.GetPath(), True
+    for prim in selectedPrims or ():
+        scope = FindWeightsScopeAncestor(prim)
+        if scope:
+            return scope.GetPath(), True
+    rig = FindRigPrim(stage)
+    path = (rig.GetPath().AppendChild("Weights") if rig
+            else Sdf.Path("/Weights"))
+    return path, bool(stage.GetPrimAtPath(path))
+
+
 def ChooseWeightParentPrim(stage, selectedPrims):
     """
     Decides where a newly created volume weight should live and returns
@@ -437,11 +534,9 @@ def ChooseWeightParentPrim(stage, selectedPrims):
         if scope:
             return scope
 
-    rig = FindRigPrim(stage)
-    if rig:
-        return stage.DefinePrim(rig.GetPath().AppendChild("Weights"), "Scope")
-
-    return stage.DefinePrim(Sdf.Path("/Weights"), "Scope")
+    path, existed = ChooseWeightParentPath(stage, selectedPrims)
+    return (stage.GetPrimAtPath(path) if existed
+            else stage.DefinePrim(path, "Scope"))
 
 
 def MakeUniquePrimName(parentPrim, baseName):
@@ -1243,6 +1338,14 @@ class AttributeValueSliderWidget(QtWidgets.QWidget):
         self._slider.setValue(self._ValueToSlider(
             usdAttribute.Get(usdviewApi.dataModel.currentFrame)))
         self._slider.valueChanged.connect(self._onSliderChanged)
+        # One undo entry per DRAG, not per sample: a slider pulled across
+        # its range emits valueChanged a hundred times, and a hundred
+        # entries means a hundred Ctrl+Zs to get back. Keyboard and wheel
+        # changes emit no press/release, so they fall through to
+        # SetAtTime's own per-write scope and are one entry each anyway.
+        self._gesture = None
+        self._slider.sliderPressed.connect(self._onSliderPressed)
+        self._slider.sliderReleased.connect(self._onSliderReleased)
         layout.addWidget(self._slider)
 
         self._noticeKey = Tf.Notice.Register(
@@ -1251,6 +1354,10 @@ class AttributeValueSliderWidget(QtWidgets.QWidget):
             self._usdAttribute.GetStage())
 
     def Detach(self):
+        # A panel rebuilt mid-drag would otherwise leave the scope open
+        # and _OPEN stuck above zero, which silently stops every later
+        # edit on the stage from recording.
+        self._onSliderReleased()
         if self._noticeKey is not None:
             self._noticeKey.Revoke()
             self._noticeKey = None
@@ -1268,6 +1375,18 @@ class AttributeValueSliderWidget(QtWidgets.QWidget):
     def _SliderToValue(self, position):
         span = self._maximum - self._minimum
         return self._minimum + span * (float(position) / self.__resolution)
+
+    def _onSliderPressed(self):
+        scope = Recording(self._usdAttribute.GetStage(),
+                          [self._usdAttribute.GetPath().GetPrimPath()],
+                          "Set %s" % self._usdAttribute.GetName())
+        scope.__enter__()
+        self._gesture = scope
+
+    def _onSliderReleased(self):
+        scope, self._gesture = self._gesture, None
+        if scope is not None:
+            scope.__exit__(None, None, None)
 
     def _onSliderChanged(self, position):
         value = self._SliderToValue(position)
@@ -2135,10 +2254,24 @@ class VolumeWeightPanel(QtWidgets.QWidget):
             Tf.Warn("No stage: cannot create %s" % typeName)
             return
 
+        # What is about to be authored, named before it exists: the new
+        # weight, and the Weights scope when creating it is what brings
+        # that scope into being. An absent snapshot is what makes undo
+        # remove them again.
+        selected = list(self._usdviewApi.selectedPrims)
+        parentPath, parentExisted = ChooseWeightParentPath(stage, selected)
+        parentPrim = stage.GetPrimAtPath(parentPath)
+        name = (MakeUniquePrimName(parentPrim,
+                                   DefaultPrimNameForType(typeName))
+                if parentPrim else DefaultPrimNameForType(typeName))
+        paths = [parentPath.AppendChild(name)]
+        if not parentExisted:
+            paths.append(parentPath)
+
         try:
-            prim = CreateVolumeWeightPrim(
-                stage, typeName, list(self._usdviewApi.selectedPrims),
-                self._usdviewApi.frame)
+            with Recording(stage, paths, "Create %s" % name):
+                prim = CreateVolumeWeightPrim(
+                    stage, typeName, selected, self._usdviewApi.frame)
         except Exception as err:
             Tf.Warn("Failed to create %s: %s" % (typeName, err))
             return
@@ -2165,7 +2298,9 @@ class VolumeWeightPanel(QtWidgets.QWidget):
                     "volume weight.")
             return
 
-        SnapWeightToPrim(prim, source, self._usdviewApi.frame)
+        with Recording(prim.GetStage(), [prim.GetPath()],
+                       "Snap %s" % prim.GetName()):
+            SnapWeightToPrim(prim, source, self._usdviewApi.frame)
         self._RebuildForSelection()
 
     def _onPreset(self, profile):
@@ -2177,18 +2312,25 @@ class VolumeWeightPanel(QtWidgets.QWidget):
         if not attr:
             return
 
-        try:
-            EnsureDefaultSpline(attr, profile, force=True)
-        except Exception as err:
-            Tf.Warn("Failed to author %s spline on <%s>: %s"
-                    % (profile, attr.GetPath(), err))
-            return
+        # The spline and the profile token are one decision, so they are
+        # one undo entry: leaving the curve behind with the profile
+        # reverted, or the other way round, is the trap the comment
+        # below is about.
+        with Recording(prim.GetStage(), [prim.GetPath()],
+                       "%s falloff" % profile):
+            try:
+                EnsureDefaultSpline(attr, profile, force=True)
+            except Exception as err:
+                Tf.Warn("Failed to author %s spline on <%s>: %s"
+                        % (profile, attr.GetPath(), err))
+                return
 
-        # Baking a shape the field would ignore is a trap, so the preset
-        # buttons also flip the profile token to the one that reads it.
-        profileAttr = prim.GetAttribute("rigExec:falloffProfile")
-        if profileAttr:
-            profileAttr.Set("curve")
+            # Baking a shape the field would ignore is a trap, so the
+            # preset buttons also flip the profile token to the one that
+            # reads it.
+            profileAttr = prim.GetAttribute("rigExec:falloffProfile")
+            if profileAttr:
+                profileAttr.Set("curve")
 
         self._RebuildForSelection()
 
@@ -2206,7 +2348,9 @@ class VolumeWeightPanel(QtWidgets.QWidget):
             Tf.Warn("Select one or more weight objects to add.")
             return
 
-        AddInputWeightPaths(prim, paths)
+        with Recording(prim.GetStage(), [prim.GetPath()],
+                       "Add input weights"):
+            AddInputWeightPaths(prim, paths)
         self._RebuildForSelection()
 
     def _onRemoveInputWeights(self):
@@ -2219,7 +2363,9 @@ class VolumeWeightPanel(QtWidgets.QWidget):
         if not paths:
             return
 
-        RemoveInputWeightPaths(prim, paths)
+        with Recording(prim.GetStage(), [prim.GetPath()],
+                       "Remove input weights"):
+            RemoveInputWeightPaths(prim, paths)
         self._RebuildForSelection()
 
     # -- viewport overlay ---------------------------------------------
@@ -2292,10 +2438,12 @@ class VolumeWeightPanel(QtWidgets.QWidget):
 
 
 def OpenVolumeWeightPanel(usdviewApi, setWeightOverlay=None,
-                          hasWeightOverlay=None):
+                          hasWeightOverlay=None, undoStack=None):
     """
     Command-plugin entry point: shows the single panel instance.
     """
+    if undoStack is not None:
+        SetUndoStack(undoStack)
     panel = VolumeWeightPanel.GetInstance(
         usdviewApi, setWeightOverlay, hasWeightOverlay)
     panel.show()

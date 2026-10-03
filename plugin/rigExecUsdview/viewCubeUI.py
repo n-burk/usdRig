@@ -454,10 +454,8 @@ class ViewCubeController(QtCore.QObject):
         self._view = view
         if view is None:
             return
-        widget = ViewCubeWidget(self, view)
+        widget = self._MakeWidget(view)
         self._widget = widget
-        widget.resize(int(viewCubeMath.WIDGET_SIZE),
-                      int(viewCubeMath.WIDGET_SIZE))
         # Resize/Show re-place the widget (and re-raise it on a
         # zero-length timer so it ends above the gizmo overlay, which
         # raises itself synchronously in its own Resize handler).
@@ -474,6 +472,13 @@ class ViewCubeController(QtCore.QObject):
         self._Place()
         widget.show()
         self._RefreshBasis()
+
+    def _MakeWidget(self, view):
+        """The overlay widget; the view axis controller overrides it."""
+        widget = ViewCubeWidget(self, view)
+        widget.resize(int(viewCubeMath.WIDGET_SIZE),
+                      int(viewCubeMath.WIDGET_SIZE))
+        return widget
 
     # -- state ----------------------------------------------------------
 

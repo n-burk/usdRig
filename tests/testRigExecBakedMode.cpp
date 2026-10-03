@@ -486,8 +486,9 @@ TestASolverInputEditIsRoutedAfterADeferredCompile(
     const std::string &examplesDir)
 {
     const SdfPath knee(
-        "/Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind");
-    const SdfPath ankle = knee.AppendChild(TfToken("ankle_l_bind"));
+        "/Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_l_def/"
+        "thigh_l_def/knee_l_def");
+    const SdfPath ankle = knee.AppendChild(TfToken("ankle_l_def"));
     const TfToken restTx("rest:tx");
     UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
     CHECK(stage);
@@ -1872,7 +1873,7 @@ MoveARestChannel(const UsdStageRefPtr &stage)
 {
     EditInSession(stage);
     const UsdPrim hips =
-        stage->GetPrimAtPath(SdfPath("/Biped/Rig/Joints/hips_bind"));
+        stage->GetPrimAtPath(SdfPath("/Biped/Rig/Main/Shot/Aux/Joints/hips_def"));
     CHECK(hips);
     if (!hips) return;
     UsdAttribute rest = hips.GetAttribute(TfToken("rest:tx"));
@@ -2836,7 +2837,7 @@ main(int argc, char **argv)
     }
 
     for (const char *stageName : {"biped/Biped.usda",
-                                  "biped/Biped_layered.usda",
+                                  "biped/Biped_body.usda",
                                   "biped/Biped_anim.usda",
                                   // A matrix-mover rig with keyed avars: the
                                   // biped's chains are all skin, so without

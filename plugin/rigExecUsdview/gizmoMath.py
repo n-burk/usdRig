@@ -458,12 +458,39 @@ def _FindParentXformable(prim, rigRoot, _ctx=None):
 # for invalidation. Named once so the two cannot drift apart.
 SOLVER_JOINTS_REL = "rigExec:joints"
 MOVER_MOVES_REL = "rigExec:moves"
-RIG_WRITTEN_RELS = (SOLVER_JOINTS_REL, MOVER_MOVES_REL)
+# A space switch names its target with its own relationship, not
+# rigExec:moves, so reading the two above cannot see it.
+SPACE_TARGET_REL = "rigExec:target"
+RIG_WRITTEN_RELS = (SOLVER_JOINTS_REL, MOVER_MOVES_REL, SPACE_TARGET_REL)
 
 # Mover types that OVERWRITE their target's frame rather than composing
 # onto it. Only these belong in SolverPosedPaths; see its docstring for
 # the measurement that separates them from the rest.
 OVERWRITING_MOVER_TYPES = ("RigExecParentConstraint",)
+
+# Types that re-parent their target through SPACE_TARGET_REL.
+SPACE_SWITCH_TYPES = ("RigExecSpaceSwitch",)
+
+
+class _PosedPaths(set):
+    """The posed set, plus which of its members a SPACE SWITCH claimed.
+
+    One set answers two different questions and they part company on a
+    switched control. "Whose frame must come from the published pose?"
+    includes a switch target -- that is what stops a switched IK hand's
+    manipulator sitting 25 cm from the hand. "Whose avars are inert, so
+    refuse to manipulate it?" does NOT: a switch re-parents its target,
+    it does not drive it, and the animator still poses it in the
+    selected space.
+
+    A subclass rather than a second return value or a map, because every
+    caller tests membership against this and a plain `set` is still
+    exactly what they get.
+    """
+
+    def __init__(self, *args):
+        super(_PosedPaths, self).__init__(*args)
+        self.spaceSwitched = set()
 
 
 def SolverPosedPaths(rigRoot):
@@ -498,8 +525,34 @@ def SolverPosedPaths(rigRoot):
     controls are parent-constraint targets and 0 of 26 live ones are.
     A mover type that turns out to overwrite as well belongs in
     OVERWRITING_MOVER_TYPES, with the measurement that says so.
+
+    AND SPACE SWITCHES, which neither relationship above can reach: a
+    RigExecSpaceSwitch names what it re-parents with rigExec:target. A
+    switched control is posed from its ACTIVE source, and the
+    composition here walks the NAMESPACE parent, so the two part company
+    the moment the active space is not the namespace one.
+
+    Measured on Biped_stack.usda with the character posed (M_Body
+    tx=25 ty=-8, M_Head ry=35 rx=15, M_Chest rz=20), comparing the
+    composed frame against pose.control_frame() for all thirteen
+    targets:
+
+        space 0 ..... 0.0000 cm, every one of them
+        space 1 ..... 25.06 to 34.20 cm
+
+    Zero at index 0 because that is the composition's own parent, which
+    is exactly why this went unseen until an animator switched a space:
+    "we also need controls manips to move where they are when dealing
+    with spaces. They seem to be getting left behind."
+
+    These targets are NOT avar-inert -- an animator still translates a
+    switched IK hand, and must -- but that is not what the set means to
+    _PreferPublishedFrame, which keeps posed == avars * P by deriving
+    P = avars^-1 * published. Inertness is what made the foot roll
+    pointless to claim (0.000 cm wrong either way); being mis-placed is
+    what makes these worth claiming.
     """
-    paths = set()
+    paths = _PosedPaths()
     for prim in Usd.PrimRange(rigRoot):
         rel = prim.GetRelationship(SOLVER_JOINTS_REL)
         if rel:
@@ -507,6 +560,11 @@ def SolverPosedPaths(rigRoot):
         rel = prim.GetRelationship(MOVER_MOVES_REL)
         if rel and prim.GetTypeName() in OVERWRITING_MOVER_TYPES:
             paths.update(rel.GetTargets())
+        rel = prim.GetRelationship(SPACE_TARGET_REL)
+        if rel and prim.GetTypeName() in SPACE_SWITCH_TYPES:
+            switched = set(rel.GetTargets())
+            paths.update(switched)
+            paths.spaceSwitched.update(switched)
     return paths
 
 
@@ -1258,7 +1316,7 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
         # biped rather than the 10 roots the constraints actually write:
         # the 32 nested FK controls the animator grabs (index_002..,
         # thumb_001..) do honour their own avars -- measured, avars:tx=5
-        # on index_002_l_bind_fk moves it and its joints 5.0000 cm, while
+        # on L_IndexBase moves it and its joints 5.0000 cm, while
         # the same on the constrained root moves nothing at all -- and
         # refusing them would have traded a misplaced gizmo for no gizmo.
         if (parentFrames.reason and not explicitParent
@@ -1268,12 +1326,19 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
         frames.parentRest = parentFrames.rest
         frames.parentPosed = parentFrames.posed
 
-    if prim.GetPath() in solverPosed:
-        # One message for both authorities: SolverPosedPaths returns one
-        # set (its callers compare it to a set, so it cannot become a
-        # path -> relationship map without churning them), and the
-        # artist-facing fact is the same either way -- something in the
-        # rig writes this frame, so the avars here are not what moves it.
+    if (prim.GetPath() in solverPosed
+            and prim.GetPath() not in getattr(solverPosed, "spaceSwitched",
+                                              ())):
+        # A SPACE SWITCH target is in the posed set and is NOT refused: the
+        # switch re-parents the control, it does not pose it, and its avars
+        # still apply in the selected space. Refusing them took the
+        # manipulator off all thirteen switched controls on the biped --
+        # both IK hands, both pole vectors, both legs, the look, the neck,
+        # the skull and both upper arms.
+        #
+        # One message for the two authorities that DO pose outright, whose
+        # artist-facing fact is the same either way: something in the rig
+        # writes this frame, so the avars here are not what moves it.
         frames.reason = ("%s is posed by a solver or an overwriting mover "
                          "(rigExec:joints / rigExec:moves); its avars "
                          "are ignored" % prim.GetName())
@@ -2677,7 +2742,7 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None,
     the refusal check below and the target's own first Refresh() cost
     ONE walk rather than two; MakeGroupTarget passes one in so the whole
     selection costs one. Measured on examples/biped/Biped.usda, building
-    targets for {fk shoulder, fk elbow, fk wrist, spine_root_ctl} is
+    targets for {fk shoulder, fk elbow, fk wrist, M_BodyGimbal} is
     262.5 ms of walking with a cache each and 120.1 ms sharing one --
     and a selection change runs this.
     """
@@ -2769,7 +2834,7 @@ def PoseProviderChain(prim, time):
     That distinction is the whole design. This rig nests its FK controls
     in a namespace chain -- rigExec:controlSpace = "parentRelative"
     (tools/biped/build_biped_rigexec.py:211, build_fingers.py:225) --
-    where another rig would use constraints, so arm_l_fk_shoulder_l_bind
+    where another rig would use constraints, so L_UpArm
     > elbow > wrist is one line of descent and so is every finger, leg
     and spine chain. An earlier version SKIPPED a member whose ancestor
     was also selected, on the grounds that the ancestor's rigid motion
@@ -3035,7 +3100,7 @@ class GroupTarget(Target):
         six -- and ComputeRigFrames recomposes the whole chain for each
         prim asked about unless it is handed the cache it uses
         internally. Measured on Biped.usda, one refresh of
-        {fk shoulder, fk elbow, fk wrist, spine_root_ctl}: 262.5 ms with
+        {fk shoulder, fk elbow, fk wrist, M_BodyGimbal}: 262.5 ms with
         a walk each, 120.1 ms sharing one cache -- and this runs on
         every mouse sample of a drag, so it is 2.2x of the whole
         interactive budget, not of a setup step.

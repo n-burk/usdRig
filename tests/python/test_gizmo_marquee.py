@@ -20,7 +20,7 @@ import sys
 # SetupPluginTest is the shared form of test_rigexec_python's
 # _setup_environment -- same sys.path, DLL-directory and plugin-path
 # work, plus plugin/rigExecUsdview -- so this test runs from ctest, from
-# bin/test/run_python_tests, and from a bare shell alike.
+# bin/run_python_tests, and from a bare shell alike.
 import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()
@@ -37,21 +37,21 @@ BIPED = os.path.join(
         os.path.abspath(__file__)))),
     "examples", "biped", "Biped.usda")
 
-CONTROLS = "/Biped/Rig/Controls"
-NECK = CONTROLS + "/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl" \
-                  "/neck_root_ctl"
+CONTROLS = "/Biped/Rig/Main/Shot/Aux/Controls"
+NECK = CONTROLS + "/M_Body/M_Torso/M_Chest/M_ChestTop" \
+                  "/M_Neck"
 
 # The neck chain, top to bottom, measured at (400.0, 20.4), (400.0, 44.3),
 # (400.0, 66.8) and (400.0, 88.5) physical pixels with the camera below.
 NECK_CHAIN = sorted([
     NECK,
     NECK + "/neck_cv1",
-    NECK + "/neck_end_pivot",
-    NECK + "/neck_end_pivot/neck_end_ctl",
+    NECK + "/M_Head",
+    NECK + "/M_Head/M_HeadGimbal",
 ])
 
 # The band that catches exactly those four and nothing else: the next
-# control down the body, clavicle_l_ctl, is at y = 107.4.
+# control down the body, L_Shldr, is at y = 107.4.
 NECK_BAND = (380.0, 5.0, 420.0, 100.0)
 
 # Four of the 15 controls the rig poses outright through a
@@ -61,14 +61,17 @@ OVERWRITTEN = (
     CONTROLS + "/spine_mid_follow",
     CONTROLS + "/index_001_l_bind_fk_follow",
     CONTROLS + "/thumbCup_r_bind_fk_follow",
-    CONTROLS + "/arm_l_params",
+    CONTROLS + "/L_Arm",
 )
 
-# Measured on this asset: 126 RigExecControl prims, 15 of them overwritten
-# by the rig, 111 box-selectable.
-CONTROL_COUNT = 126
+# Measured on this asset: 129 RigExecControl prims, 15 of them overwritten
+# by the rig, 114 box-selectable. The count went 126 -> 129 when the rig
+# gained its three TRS masters (Main/Shot/Aux); they are
+# controls like any other, and they are selectable, so the selectable
+# count moves with them.
+CONTROL_COUNT = 129
 OVERWRITTEN_COUNT = 15
-SELECTABLE_COUNT = 111
+SELECTABLE_COUNT = 114
 
 
 def _Check(condition, message):
@@ -203,7 +206,7 @@ def TestModesOnTheBand(stage):
     positions = gizmoMarquee.ScreenPositions(
         stage, camera, VIEWPORT, Usd.TimeCode.Default())
     caught = gizmoMarquee.PathsInBand(positions, *NECK_BAND)
-    hips = CONTROLS + "/hips_ctl"
+    hips = CONTROLS + "/M_Body"
 
     plain = gizmoMarquee.Resolve([hips], caught,
                                  gizmoMarquee.MODE_REPLACE)

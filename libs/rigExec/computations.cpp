@@ -94,6 +94,10 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((twistTurns, "inputs:twistTurns"))
     ((joints, "rigExec:joints"))
     ((jointElements, "rigExec:jointElements"))
+    ((space, "rigExec:space"))
+    ((spaceFrame, "spaceFrame"))
+    ((spaceRest, "spaceRest"))
+    ((spaceMatrix, "rigExec:spaceMatrix"))
     ((upperLengthOffset, "rigExec:upperLengthOffset"))
     ((lowerLengthOffset, "rigExec:lowerLengthOffset"))
     ((inputsWeight, "inputs:weight"))
@@ -859,10 +863,38 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
                  int(seen[0]) + int(seen[1]) + int(seen[2]));
         return result;
     }
-    params.upperLength =
-        (rests[1][0] - rests[0][0]).GetLength() + upperOffset;
-    params.lowerLength =
-        (rests[2][0] - rests[1][0]).GetLength() + lowerOffset;
+    // MEASURE THE CHAIN IN THE SPACE THE GOAL IS IN. The rests are
+    // authored unscaled; the root, goal and pole arrive posed. Under a
+    // scaled master the goal is twice as far away while the chain keeps
+    // its authored length, so the solve clamps and the limb straightens.
+    // Carrying the rest points through rigExec:spaceMatrix puts both
+    // sides in one space; identity leaves the measurement exactly as it
+    // was. The authored offsets are lengths too, so they ride the same
+    // factor -- a chain that scales but whose offset does not would
+    // change proportion as the rig resizes, which is the thing scaling
+    // is supposed not to do.
+    const GfMatrix4d *spacePtr =
+        ctx.GetInputValuePtr<GfMatrix4d>(_tokens->spaceMatrix);
+    GfMatrix4d space = spacePtr ? *spacePtr : GfMatrix4d(1.0);
+    // rigExec:space names a prim -- a TRS master -- and what matters is
+    // how far it has moved from its own rest, so the space is
+    // rest-inverse-times-posed. A master sitting at rest contributes
+    // identity, which is why a rig that names nothing is unchanged.
+    const RigExecPointFrame *spacePosed =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->spaceFrame);
+    const RigExecPointFrame *spaceRestFrame =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->spaceRest);
+    if (spacePosed && spaceRestFrame) {
+        GfMatrix4d delta(1.0);
+        if (rigExec::RigExecPointsToMatrix(spaceRestFrame->points,
+                                           *spacePosed, &delta)) {
+            space = delta * space;
+        }
+    }
+    params.space = space;
+    rigExec::RigExecTwoBoneIkLengths(rests, space, upperOffset, lowerOffset,
+                                     &params.upperLength,
+                                     &params.lowerLength);
 
     const auto frames = rigExec::RigExecSolveTwoBoneIk(
         *root, *effector, *pole, rests, params);
@@ -897,7 +929,14 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwoBoneIk)
             Relationship(_tokens->joints)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->jointRests),
+            Relationship(_tokens->space)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computePointFrame)
+                .InputName(_tokens->spaceFrame),
+            Relationship(_tokens->space)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->spaceRest),
             AttributeValue<int>(_tokens->jointElements),
+            AttributeValue<GfMatrix4d>(_tokens->spaceMatrix),
             AttributeValue<double>(_tokens->upperLengthOffset),
             AttributeValue<double>(_tokens->lowerLengthOffset),
             AttributeValue<double>(_tokens->preferredBendRadians),
@@ -1180,11 +1219,50 @@ _ComputeSplineIk(const VdfContext &ctx)
         return result;
     }
 
+    // MEASURE THE REST IN THE POSED CHAIN'S SPACE. The placement ratio is
+    // arcLength / restArcLength; the curve is posed and the rest is not,
+    // so a scaled rig root doubles the ratio and the solve reads a pure
+    // scale as a 2x stretch -- volume preservation and twist both fire as
+    // though the spine had been pulled. Carrying the rest through
+    // rigExec:space keeps the ratio at 1 so only real stretching
+    // stretches. Identity leaves the rest exactly as it was.
+    GfMatrix4d splineSpace(1.0);
+    const RigExecPointFrame *splinePosedSpace =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->spaceFrame);
+    const RigExecPointFrame *splineRestSpace =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->spaceRest);
+    if (splinePosedSpace && splineRestSpace) {
+        GfMatrix4d delta(1.0);
+        if (rigExec::RigExecPointsToMatrix(splineRestSpace->points,
+                                           *splinePosedSpace, &delta)) {
+            splineSpace = delta;
+        }
+    }
+    const bool spacedSpline = splineSpace != GfMatrix4d(1.0);
+    std::vector<RigExecPointFrame> spacedJoints;
+    if (spacedSpline) {
+        spacedJoints.reserve(restJoints.size());
+        for (const RigExecPointFrame &f : restJoints) {
+            spacedJoints.push_back(
+                rigExec::RigExecTransformFrame(f, splineSpace));
+        }
+    }
+    const RigExecPointFrame spacedRoot =
+        spacedSpline ? rigExec::RigExecTransformFrame(*rootRest, splineSpace)
+                     : *rootRest;
+    const RigExecPointFrame spacedMid =
+        spacedSpline ? rigExec::RigExecTransformFrame(*midRest, splineSpace)
+                     : *midRest;
+    const RigExecPointFrame spacedEnd =
+        spacedSpline ? rigExec::RigExecTransformFrame(*endRest, splineSpace)
+                     : *endRest;
+
     // The rest description is rebuilt every evaluation, exactly as
     // TwoBoneIk re-measures its bones: a rest edit on a bound joint or a
     // control re-shapes the rest curve with no recompile.
     const rigExec::RigExecSplineIkRest rest = rigExec::RigExecSplineIkMakeRest(
-        restJoints, *rootRest, *midRest, *endRest, weights, restLength);
+        spacedSpline ? spacedJoints : restJoints, spacedRoot, spacedMid,
+        spacedEnd, weights, restLength);
 
     rigExec::RigExecSplineIkParams params;
     params.preserveVolume =
@@ -1281,5 +1359,11 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSplineIk)
             AttributeValue<double>(_tokens->inputsRoll),
             AttributeValue<double>(_tokens->inputsTwist),
             AttributeValue<double>(_tokens->inputsMinLengthRatio),
+            Relationship(_tokens->space)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computePointFrame)
+                .InputName(_tokens->spaceFrame),
+            Relationship(_tokens->space)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->spaceRest),
             AttributeValue<TfToken>(_tokens->rootTangent));
 }

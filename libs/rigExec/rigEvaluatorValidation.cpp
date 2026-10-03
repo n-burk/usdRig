@@ -374,7 +374,9 @@ _ValidateWeightObjectDomain(
 
 bool
 RigExecRigEvaluator::_DiscoverMovers(
-    std::vector<RigExecMoverRecord> &newMovers, size_t &inertMovers,
+    std::vector<RigExecMoverRecord> &newMovers,
+    std::vector<_SurfaceProjectorRecord> &newSurfaceProjectors,
+    size_t &inertMovers,
     std::vector<std::string> *errors, _CompileFailure *failure) const
 {
     const auto fail = [failure](const std::string &message,
@@ -420,6 +422,65 @@ RigExecRigEvaluator::_DiscoverMovers(
                 // Not a mover: a solver, a control, a joint, a weight, or a
                 // grouping scope. Solvers pose joints through the rig-wide
                 // solver discovery above; the rest are read, not applied.
+                continue;
+            }
+            if (prim.GetTypeName() == "RigExecSurfaceProjector") {
+                // Discovered here for the execution order, resolved in one
+                // post-geometry pass. It does not become a mover record: a
+                // projector needs the POSED surface, which does not exist
+                // until the geometry chains have run.
+                SdfPathVector projected;
+                moves.GetTargets(&projected);
+                for (const SdfPath &t : projected) {
+                    if (!t.IsPropertyPath() || t.GetNameToken() != "points") {
+                        return fail(
+                            "RigExecSurfaceProjector " +
+                            prim.GetPath().GetString() + " target " +
+                            t.GetString() + " is not a points property");
+                    }
+                    _SurfaceProjectorRecord record;
+                    record.path = prim.GetPath();
+                    record.target = t;
+                    record.rayOrigin = GfVec3d(0, 0, 0);
+                    record.rayDirection = GfVec3d(0, 0, 1);
+                    record.rayUp = GfVec3d(0, 1, 0);
+                    prim.GetAttribute(TfToken("rigExec:rayOrigin"))
+                        .Get(&record.rayOrigin);
+                    prim.GetAttribute(TfToken("rigExec:rayDirection"))
+                        .Get(&record.rayDirection);
+                    prim.GetAttribute(TfToken("rigExec:rayUp"))
+                        .Get(&record.rayUp);
+                    SdfPathVector anchors;
+                    if (const UsdRelationship r = prim.GetRelationship(
+                            TfToken("rigExec:sources"))) {
+                        r.GetTargets(&anchors);
+                    }
+                    if (!anchors.empty()) {
+                        record.source = anchors[0].GetPrimPath();
+                    }
+                    SdfPathVector spaces;
+                    if (const UsdRelationship r = prim.GetRelationship(
+                            TfToken("rigExec:sourceSpace"))) {
+                        r.GetTargets(&spaces);
+                    }
+                    if (!spaces.empty()) {
+                        record.sourceSpace = spaces[0].GetPrimPath();
+                    }
+                    SdfPathVector rigSpaces;
+                    if (const UsdRelationship r = prim.GetRelationship(
+                            TfToken("rigExec:space"))) {
+                        r.GetTargets(&rigSpaces);
+                    }
+                    if (!rigSpaces.empty()) {
+                        record.space = rigSpaces[0].GetPrimPath();
+                    }
+                    prim.GetAttribute(TfToken("rigExec:shaderOffset"))
+                        .Get(&record.shaderOffset);
+                    record.shaderPrimvar = TfToken("eyeProjector");
+                    prim.GetAttribute(TfToken("rigExec:shaderPrimvar"))
+                        .Get(&record.shaderPrimvar);
+                    newSurfaceProjectors.push_back(std::move(record));
+                }
                 continue;
             }
             SdfPathVector targets;

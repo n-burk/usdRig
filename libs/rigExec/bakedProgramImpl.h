@@ -17,6 +17,7 @@
 #include "frameExtraction.h"
 #include "moverGraph.h"
 #include "profiler.h"
+#include "solverKernels.h"
 #include "tapSet.h"
 #include "types.h"
 #include "weightPackets.h"
@@ -1383,6 +1384,14 @@ struct RigExecBakedProgramImpl {
         /// one. Compiled by the evaluator, restated here as a slot.
         int parentSlot = -1;
         bool allowNegativeWeights = true;
+        /// Whether the solve measures the driver's translation as well.
+        bool enableTranslation = false;
+        /// A NUMERIC driver (rigExec:driverAttributes): the dials read in
+        /// place of a transform's translation, one per axis, bound like any
+        /// other per-frame input so a dragged or animated one is honoured.
+        /// Empty on a transform-driven interpolator.
+        std::vector<RigExecBakedInput<double>> valueInputs;
+        std::vector<double> values;
         /// `inputs:enabled`, a per-frame input the prologue reads into
         /// `enabledValue` so the body touches no USD.
         RigExecBakedInput<bool> enabled;
@@ -1559,6 +1568,22 @@ struct RigExecBakedProgramImpl {
         RigExecBakedInput<double> bend, upperOffset, lowerOffset;
         RigExecBakedInput<float> stretch, softness;
         double upperLengthBase = 0, lowerLengthBase = 0;
+        /// rigExec:spaceMatrix: an explicit factor, composed after the
+        /// space prim below.
+        RigExecBakedInput<GfMatrix4d> ikSpace;
+        /// rigExec:space: the prim whose movement from its own rest is the
+        /// space the chain is measured in. Read as a frame, exactly like
+        /// the root/effector/pole, so an animated master is handled and
+        /// the baked path cannot disagree with the dynamic one.
+        int spaceSlot = -1, spaceRead = -1;
+        /// The rest frames a spline needs to rebuild its rest description
+        /// when the space has moved. Kept because the bind-time
+        /// splineRest is measured at identity.
+        std::vector<RigExecPointFrame> splineRestFrames;
+        RigExecPointFrame splineRootRest, splineMidRest, splineEndRest;
+        std::array<GfVec3d, 4> spaceRest = {GfVec3d(0), GfVec3d(1, 0, 0),
+                                            GfVec3d(0, 1, 0),
+                                            GfVec3d(0, 0, 1)};
         // BlendPointFrames
         int inA = -1, inB = -1;
         RigExecBakedInput<float> blendWeight;
@@ -1702,6 +1727,12 @@ struct RigExecBakedProgramImpl {
         int worldUpNative = -1;
         SdfPath worldUpPath;
         bool worldUpObjectNamed = false;
+        /// rigExec:space on a rotation constraint: the provider whose own
+        /// rest->pose map carries the whole rig, or -1 when none is named.
+        /// The carry is the space switch's, from the same two tables
+        /// (posedM and defaultRoundTrip); see the dynamic path, which
+        /// derives it from the same pair of taps.
+        int spaceSlot = -1;
         /// True when any target wants a record, which is the one branch a
         /// rig with no read phase pays per constraint.
         bool snapshotAfter = false;
@@ -1753,6 +1784,54 @@ struct RigExecBakedProgramImpl {
     // work in -- and every edge points forward in it.
     std::vector<RigExecBakedStep> steps;
     /// The compose pass, partitioned into contiguous subtrees at Build.
+    /// One compiled RigExecSpaceSwitch, in the program's own terms.
+    ///
+    /// The compose for an ordinary slot is
+    ///
+    ///     base = avars * selfD * parentDinv * posedM[parent]
+    ///
+    /// and a switched slot's is the same shape with the namespace parent's
+    /// pair of spaces replaced by the SELECTED source's pair:
+    ///
+    ///     base = avars * selfD * inverse(selfD[source]) * posedM[source]
+    ///
+    /// so the two halves cancel at rest and no space can move the rig
+    /// standing still. A source slot of -1 is world: it contributes
+    /// identity, which pins the control at its zero pose.
+    ///
+    /// The source slots must be LOWER than the target's, which is what makes
+    /// one pass over the slots enough; the bake refuses otherwise rather
+    /// than reading a frame the compose has not written yet.
+    struct SpaceSwitch {
+        int slot = -1;
+        std::vector<int> sourceSlots;
+        /// Parallel to sourceSlots: which part of that source's rotation
+        /// reaches the target (a pole vector in its hand's space takes the
+        /// twist and not the swing).
+        std::vector<RigExecRotationFilter> filters;
+        GfVec3d twistAxis = GfVec3d(1, 0, 0);
+        /// rigExec:space -- the provider whose own rest->pose map carries
+        /// the whole rig. -1 when none is named, and then the filter runs
+        /// exactly as it did before the masters existed. See the dynamic
+        /// path, which derives the same carry from a pair of taps.
+        int spaceSlot = -1;
+        RigExecBakedInput<double> activeInput;
+        bool affectTranslation[3] = {true, true, true};
+        bool affectRotation[3] = {true, true, true};
+        bool affectScale[3] = {true, true, true};
+    };
+    std::vector<SpaceSwitch> spaceSwitches;
+    /// Per provider slot: its switch's index, or -1. Read once per slot by
+    /// the compose, so the ordinary rig pays one array lookup and nothing
+    /// else for a feature it does not use.
+    std::vector<int> spaceSwitchBySlot;
+
+    /// Set when the compose groups could not be put in dependency order:
+    /// two space switches each need the other composed first. Read by Build,
+    /// which turns it into an ordinary bake refusal -- the step builder has
+    /// no build context of its own to refuse through.
+    bool composeCycle = false;
+
     std::vector<RigExecBakedComposeGroup> composeGroups;
     /// One per walk entry, in walk order; `walkSteps[w]` and `commits[w]`
     /// describe the same commit.
@@ -2025,6 +2104,12 @@ struct RigExecBakedProgramImpl {
         int transformSlot = -1;
         /// The rigExec:transformSpace provider's slot, or -1.
         int transformSpaceSlot = -1;
+        /// The rigExec:space provider's slot, or -1: the prim whose own
+        /// rest->pose map carries the whole rig, normally a TRS master.
+        /// Read out of the SAME base/final matrix table the two above come
+        /// from, because that table is what computeMatrix publishes and
+        /// the dynamic path's carry tap reads computeMatrix.
+        int carrySpaceSlot = -1;
         /// The geometry-domain constraint whose delta IS this revision's
         /// transform, as an index into the dense delta tables, or -1. Joined
         /// on the mover path at Build, because that is the key the dynamic
@@ -2038,6 +2123,11 @@ struct RigExecBakedProgramImpl {
         /// refuses "driver frames on mover".
         int driverFramesSolver = -1;
         bool finalPhase = false;
+        /// rigExec:pointFrame == "posed": a skin already carried
+        /// this cluster's points into the rig's posed frame, so the
+        /// measured offset is conjugated by the rig's carry -- or, with no
+        /// rigExec:space named, by the measuring space's own scale.
+        bool posedPoints = false;
         /// Compile's judgement that none of this skin mover's layout arrays
         /// can change within the epoch, so the packet may carry the layout
         /// by handle out of the evaluator's cache instead of re-reading and
@@ -2099,6 +2189,14 @@ struct RigExecBakedProgramImpl {
         /// fold beside the table, because "there is a matrix" is part of what
         /// the table says.
         bool haveTransform = false;
+        /// rigExec:space's matrix this run, out of the same base/final
+        /// table as `transform`, and whether the revision named one at all.
+        /// Written by the fold, because the fold is the step that declares
+        /// the matrix reads; the assemble only reads what the fold wrote.
+        /// A cluster conjugates its offset by it, a posed transform-driven
+        /// wire carries its control polygons by it.
+        GfMatrix4d carry{1.0};
+        bool haveCarry = false;
         /// This revision's overlay of the run's snapshot store, built only
         /// when the revision declares a read phase. Per revision, never one
         /// buffer shared by the walk.
@@ -2703,6 +2801,8 @@ struct RigExecBakedConstraintSpec {
     /// Empty when the aim constraint named no world-up object.
     SdfPath worldUpObject;
     SdfPath worldUpXform;
+    /// rigExec:space on a rotation constraint; empty when none is named.
+    SdfPath space;
     /// rigExec:weightObject, empty when the constraint binds none.
     SdfPath weightObject;
 };
@@ -2714,6 +2814,10 @@ struct RigExecBakedRevisionSpec {
     RigExecRevisionOp op = RigExecRevisionOp::Skin;
     RigExecRevisionBinding binding;
     bool transformFinalPhase = false;
+    /// rigExec:pointFrame == "posed": the points this cluster moves
+    /// were already carried into the rig's posed frame by a skin. See
+    /// RigExecClusterInPointFrame.
+    bool transformPosedPoints = false;
     bool skinTopologyFixed = false;
     /// Whether a read phase asked for the target's points as of this
     /// revision (the evaluator's _chainPlan.snapshots membership).

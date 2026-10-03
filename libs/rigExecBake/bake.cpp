@@ -112,7 +112,14 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     }
     RigExecBinaryWriter writer;
     std::string captureError;
-    RigExecBakeCapture capture(evaluator, &writer, &captureError);
+    RigExecBakeCapture capture(evaluator, &writer, &captureError,
+                               opts.overridableInputs);
+    if (opts.overridableInputs) {
+        // One byte, written only when the rule was widened, so a default
+        // bake is byte-for-byte what it always was.
+        writer.AddSection(RigExecBinarySection::InputPolicy,
+                          std::vector<uint8_t>{1});
+    }
     if (!capture.Valid()) {
         return Fail(captureError);
     }
@@ -207,7 +214,7 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     writer.AddSection(RigExecBinarySection::DomainPose, payload);
     payload.clear();
     // Sparse: only solvers hanging from a start provider. Absent in
-    // binaries baked before minor 1, which is not an error: those load
+    // binaries baked by major 1 minor 0, which is not an error: those load
     // with every chain absolute, exactly as before.
     std::vector<RigExecWireSolverStart> starts;
     for (size_t i = 0; i < wirePose.solvers.size(); ++i) {
@@ -226,6 +233,35 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
         return Fail("cannot encode the solver starts");
     }
     writer.AddSection(RigExecBinarySection::SolverStart, payload);
+    payload.clear();
+    // Sparse: only interpolators that read dials or measure translation.
+    // Absent in binaries baked before minor 1, which load with every
+    // interpolator solving a transform's rotation alone -- which is what
+    // those files were baked from.
+    std::vector<RigExecWirePoseNumeric> numerics;
+    for (size_t i = 0; i < wirePose.poseInterpolators.size(); ++i) {
+        const RigExecWirePoseInterpolator &interp =
+            wirePose.poseInterpolators[i];
+        if (interp.valueInputs.empty() && !interp.enableTranslation) {
+            continue;
+        }
+        RigExecWirePoseNumeric entry;
+        entry.interpolator = uint32_t(i);
+        entry.enableTranslation = interp.enableTranslation;
+        entry.values = interp.valueInputs;
+        numerics.push_back(std::move(entry));
+    }
+    if (!RigExecWireEncodePoseNumerics(numerics, &payload)) {
+        return Fail("cannot encode the pose numerics");
+    }
+    writer.AddSection(RigExecBinarySection::PoseNumeric, payload);
+    payload.clear();
+    // Sparse in the same way: a rig with no space switch writes an empty
+    // section, and a binary baked before minor 1 carries none at all.
+    if (!RigExecWireEncodeSpaceSwitches(wirePose.spaceSwitches, &payload)) {
+        return Fail("cannot encode the space switches");
+    }
+    writer.AddSection(RigExecBinarySection::SpaceSwitch, payload);
     payload.clear();
     const RigExecWireDomainGeometry wireGeometry =
         RigExecBakeConvertDomainGeometry(program, &writer);

@@ -1,6 +1,6 @@
 #!/bin/bash
 # bin/test/run_testusdview_avars.sh -- headless end-to-end test of the Avar
-# Editor panel (tests/testUsdviewAvarEditor.py) on biped_full2.usda.
+# Editor panel (tests/testUsdviewAvarEditor.py) on examples/biped/Biped_anim_ikfk.usda.
 #
 # Asserts the RigExec menu item is registered, that the panel follows
 # usdview's prim selection, and that driving a row's spin box or slider
@@ -19,7 +19,7 @@ rigexec_require_python
 rigexec_require_usd "$TESTUSDVIEW"
 rigexec_build
 
-STAGE="$RIG/biped_full2.usda"
+STAGE="$RIG/examples/biped/Biped_anim_ikfk.usda"
 rigexec_require_stage "$STAGE"
 
 # A bare (non-flag) argument is the renderer display name, matching the

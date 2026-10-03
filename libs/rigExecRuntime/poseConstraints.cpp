@@ -46,6 +46,11 @@ struct _RrRotationConstraintParams {
     RrVec3d offsetDegrees{0.0};
     _RrConstraintAxisMask affect;
     _RrEulerOrder rotationOrder = _RrEulerOrder::XYZ;
+    /// rigExec:space -- the carrying provider's rest->pose map, or nullptr
+    /// when none is named. Twin of RigExecRotationConstraintParams::carry:
+    /// the mask runs with the carry stripped and the answer is carried
+    /// back. Guarded on "named", never on "identity".
+    const RrMat4d *carry = nullptr;
 };
 
 struct _RrScaleConstraintParams {
@@ -60,6 +65,8 @@ struct _RrParentConstraintParams {
     _RrConstraintAxisMask rotationAxes;
     _RrConstraintAxisMask scaleAxes;
     _RrEulerOrder rotationOrder = _RrEulerOrder::XYZ;
+    /// rigExec:space, or nullptr: see RigExecParentConstraintParams.
+    const RrMat4d *carry = nullptr;
 };
 
 struct _RrAimConstraintParams {
@@ -158,6 +165,38 @@ bool
 _RrAffects(const _RrConstraintAxisMask &mask, int axis)
 {
     return axis == 0 ? mask.x : axis == 1 ? mask.y : mask.z;
+}
+
+/// Every landmark carried by the space, nothing else: the twin of
+/// RigExecTransformFrame.
+RrPointFrame
+_RrTransformFrame(const RrPointFrame &frame, const RrMat4d &space)
+{
+    RrPointFrame out = frame;
+    for (RrVec3d &p : out.points) {
+        p = space.Transform(p);
+    }
+    return out;
+}
+
+// Shear belongs to the same linear block as scale; a constraint governing
+// all three scale axes governs it too. The twin of _BlendGovernedShear in
+// libs/rigExecMath/solvers.cpp -- see the reasoning there. Without it an
+// inherited shear survives a constraint that has just replaced translation,
+// rotation and scale, which is how the biped's spine squash reached
+// skull_def and face_upper_def at 0.157 and scaled the head.
+void
+_RrBlendGovernedShear(const _RrConstraintAxisMask &scaleMask,
+                      const RrVec3d &targetShear, double weight,
+                      _RrTransformParams *params)
+{
+    if (!scaleMask.x || !scaleMask.y || !scaleMask.z) {
+        return;
+    }
+    for (int i = 0; i < 3; ++i) {
+        params->shear[i] =
+            _RrBlendEnvelope(params->shear[i], targetShear[i], weight);
+    }
 }
 
 bool
@@ -399,8 +438,19 @@ _RrApplyRotationConstraint(
         return _RrConstraintFailure(input);
     }
 
+    // rigExec:space: measured with the carry stripped, carried back at
+    // the end, and every failure hands back the ORIGINAL input. Same
+    // arithmetic in the same order as RigExecApplyRotationConstraint.
+    RrMat4d carryInverse = _RrIdentity();
+    RrPointFrame measured;
+    const RrPointFrame *in = &input;
+    if (params.carry) {
+        carryInverse = params.carry->GetInverse();
+        measured = _RrTransformFrame(input, carryInverse);
+        in = &measured;
+    }
     _RrTransformParams inputParams;
-    if (!_RrDecomposeConstraintFrame(input, &inputParams)) {
+    if (!_RrDecomposeConstraintFrame(*in, &inputParams)) {
         return _RrConstraintFailure(input);
     }
     const RrVec3d inputEuler =
@@ -420,7 +470,10 @@ _RrApplyRotationConstraint(
             continue;
         }
         _RrTransformParams sourceParams;
-        if (!_RrDecomposeConstraintFrame(source.frame, &sourceParams)) {
+        const RrPointFrame sourceMeasured =
+            params.carry ? _RrTransformFrame(source.frame, carryInverse)
+                         : source.frame;
+        if (!_RrDecomposeConstraintFrame(sourceMeasured, &sourceParams)) {
             return _RrConstraintFailure(input);
         }
         const RrVec3d sourceEuler = _RrEulerDegreesFromQuat(
@@ -453,7 +506,12 @@ _RrApplyRotationConstraint(
         inputEuler, targetEuler, params.affect, globalWeight);
     inputParams.rotation =
         _RrQuatFromEulerDegrees(outputEuler, params.rotationOrder);
-    return _RrFrameFromConstraintParams(input, inputParams);
+    const RrPointFrame solved =
+        _RrFrameFromConstraintParams(input, inputParams);
+    if (!params.carry || (solved.flags & RrPointFrameDegenerate)) {
+        return solved;
+    }
+    return _RrTransformFrame(solved, *params.carry);
 }
 
 RrPointFrame
@@ -477,7 +535,7 @@ _RrApplyScaleConstraint(
     if (!_RrDecomposeConstraintFrame(input, &inputParams)) {
         return _RrConstraintFailure(input);
     }
-    RrVec3d targetScale(0.0);
+    RrVec3d targetScale(0.0), targetShear(0.0);
     double totalWeight = 0.0;
     for (const _RrConstraintSource &source : sources) {
         if (!_RrValidateSourceWeight(source)) {
@@ -491,6 +549,7 @@ _RrApplyScaleConstraint(
             return _RrConstraintFailure(input);
         }
         targetScale += sourceParams.scale * source.normalizedWeight;
+        targetShear += sourceParams.shear * source.normalizedWeight;
         totalWeight += source.normalizedWeight;
     }
     if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
@@ -498,7 +557,9 @@ _RrApplyScaleConstraint(
                                   : _RrConstraintFailure(input);
     }
     targetScale = targetScale / totalWeight + params.offset;
-    if (!_RrConstraintVecFinite(targetScale)) {
+    targetShear /= totalWeight;
+    if (!_RrConstraintVecFinite(targetScale) ||
+        !_RrConstraintVecFinite(targetShear)) {
         return _RrConstraintFailure(input);
     }
     for (int axis = 0; axis < 3; ++axis) {
@@ -507,6 +568,8 @@ _RrApplyScaleConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
+    _RrBlendGovernedShear(params.affect, targetShear, globalWeight,
+                          &inputParams);
     return _RrFrameFromConstraintParams(input, inputParams);
 }
 
@@ -527,8 +590,17 @@ _RrApplyParentConstraint(
         return _RrConstraintFailure(input);
     }
 
+    // rigExec:space, as in _RrApplyRotationConstraint.
+    RrMat4d carryInverse = _RrIdentity();
+    RrPointFrame measured;
+    const RrPointFrame *in = &input;
+    if (params.carry) {
+        carryInverse = params.carry->GetInverse();
+        measured = _RrTransformFrame(input, carryInverse);
+        in = &measured;
+    }
     _RrTransformParams inputParams;
-    if (!_RrDecomposeConstraintFrame(input, &inputParams)) {
+    if (!_RrDecomposeConstraintFrame(*in, &inputParams)) {
         return _RrConstraintFailure(input);
     }
     const RrVec3d inputEuler =
@@ -537,7 +609,7 @@ _RrApplyParentConstraint(
     if (!_RrConstraintVecFinite(inputEuler)) {
         return _RrConstraintFailure(input);
     }
-    RrVec3d targetTranslation(0.0), targetScale(0.0);
+    RrVec3d targetTranslation(0.0), targetScale(0.0), targetShear(0.0);
     RrVec3d sourceAnchor(0.0), weightedRotationDelta(0.0);
     bool hasSourceAnchor = false;
     double totalWeight = 0.0;
@@ -552,11 +624,14 @@ _RrApplyParentConstraint(
             !_RrConstraintVecFinite(source.rotationOffsetDegrees)) {
             return _RrConstraintFailure(input);
         }
-        if (!_RrConstraintFrameUsable(source.frame)) {
+        const RrPointFrame sourceMeasured =
+            params.carry ? _RrTransformFrame(source.frame, carryInverse)
+                         : source.frame;
+        if (!_RrConstraintFrameUsable(sourceMeasured)) {
             return _RrConstraintFailure(input);
         }
         RrMat4d sourceMatrix = _RrIdentity();
-        if (!RrPointsToMatrix(RrIdentityLandmarks(), source.frame.points,
+        if (!RrPointsToMatrix(RrIdentityLandmarks(), sourceMeasured.points,
                               &sourceMatrix)) {
             return _RrConstraintFailure(input);
         }
@@ -576,6 +651,7 @@ _RrApplyParentConstraint(
         targetTranslation +=
             targetParams.translation * source.normalizedWeight;
         targetScale += targetParams.scale * source.normalizedWeight;
+        targetShear += targetParams.shear * source.normalizedWeight;
 
         const RrVec3d sourceEuler = _RrEulerDegreesFromQuat(
             targetParams.rotation, params.rotationOrder);
@@ -599,10 +675,12 @@ _RrApplyParentConstraint(
     }
     targetTranslation /= totalWeight;
     targetScale /= totalWeight;
+    targetShear /= totalWeight;
     const RrVec3d targetEuler =
         sourceAnchor + weightedRotationDelta / totalWeight;
     if (!_RrConstraintVecFinite(targetTranslation) ||
         !_RrConstraintVecFinite(targetScale) ||
+        !_RrConstraintVecFinite(targetShear) ||
         !_RrConstraintVecFinite(weightedRotationDelta) ||
         !_RrConstraintVecFinite(targetEuler)) {
         return _RrConstraintFailure(input);
@@ -619,11 +697,18 @@ _RrApplyParentConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
+    _RrBlendGovernedShear(params.scaleAxes, targetShear, globalWeight,
+                          &inputParams);
     const RrVec3d outputEuler = _RrApplyEulerDelta(
         inputEuler, targetEuler, params.rotationAxes, globalWeight);
     inputParams.rotation =
         _RrQuatFromEulerDegrees(outputEuler, params.rotationOrder);
-    return _RrFrameFromConstraintParams(input, inputParams);
+    const RrPointFrame solved =
+        _RrFrameFromConstraintParams(input, inputParams);
+    if (!params.carry || (solved.flags & RrPointFrameDegenerate)) {
+        return solved;
+    }
+    return _RrTransformFrame(solved, *params.carry);
 }
 
 RrPointFrame
@@ -2064,6 +2149,24 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
     affect.z = program->ReadConstraint(ci, RrConstraintAffectZ).boolean;
     const std::string ctype = program->TextOrEmpty(c.type);
     const _RrEulerOrder order = _RrEulerOrder(c.order);
+    // rigExec:space: the space switch's carry, from the same two tables
+    // the compose reads it from. -1 is "no space named", and the params
+    // keep their null carry so the kernel's untouched branch runs.
+    RrMat4d carry = _RrIdentity();
+    const bool hasCarry = c.spaceSlot >= 0;
+    if (hasCarry) {
+        if (size_t(c.spaceSlot) >= store.posedM.size() ||
+            size_t(c.spaceSlot) >= scratch->defaultRoundTrip.size()) {
+            if (error) {
+                *error = _RrStepHead(program, step) +
+                         " names no space slot";
+            }
+            return false;
+        }
+        carry = scratch->defaultRoundTrip[size_t(c.spaceSlot)]
+                    .GetInverse() *
+                store.posedM[size_t(c.spaceSlot)];
+    }
     if (ctype == "RigExecPositionConstraint") {
         _RrPositionConstraintParams params;
         params.offset =
@@ -2078,6 +2181,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         params.affect = affect;
         params.rotationOrder = order;
         params.weight = solveWeight;
+        params.carry = hasCarry ? &carry : nullptr;
         candidate = _RrApplyRotationConstraint(input, sources, params);
     } else if (ctype == "RigExecScaleConstraint") {
         _RrScaleConstraintParams params;
@@ -2108,6 +2212,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
             program->ReadConstraint(ci, RrConstraintSZ).boolean;
         params.rotationOrder = order;
         params.weight = solveWeight;
+        params.carry = hasCarry ? &carry : nullptr;
         candidate = _RrApplyParentConstraint(input, sources, params);
     } else {
         RrVec3d target(0.0);
@@ -2201,8 +2306,16 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
                             cpath + " has a degenerate world-up object");
                         candidateReady = false;
                     } else if (candidateReady) {
-                        worldUpStorage = up.ExtractRotation().TransformDir(
-                            authoredWorldUp);
+                        // Rotation only, never scale -- the same rule the
+                        // USD-side paths follow. Under a scaled rig root
+                        // the up object's frame carries that scale and
+                        // ExtractRotation on a scaled matrix does not
+                        // return the rotation. This copy is why the gate
+                        // exists: fix the two USD paths and leave this
+                        // one and the binary disagrees with the bake.
+                        worldUpStorage = up.GetOrthonormalized(false)
+                                             .ExtractRotation()
+                                             .TransformDir(authoredWorldUp);
                         haveWorldUp = true;
                     }
                 }

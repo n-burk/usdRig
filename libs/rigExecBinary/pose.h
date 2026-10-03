@@ -80,6 +80,7 @@ struct RigExecWireRbf {
 
 struct RigExecWirePoseInterpolator {
     uint32_t path = 0;
+    /// -1 on a NUMERIC driver, which reads dials and no frame at all.
     int32_t driverSlot = -1;
     int32_t parentSlot = -1;
     bool allowNegativeWeights = true;
@@ -89,6 +90,14 @@ struct RigExecWirePoseInterpolator {
     std::vector<int32_t> poseSlots;
     std::vector<int32_t> disabledSlots;
     RigExecWireRbf solver;
+    /// Whether the solve measures the driver's translation as well.
+    /// Memory only: the interpolator record layout is frozen, so this and
+    /// the numeric dials travel in the optional PoseNumeric section and
+    /// the loader overlays them after decoding the pose domain.
+    bool enableTranslation = false;
+    /// A numeric driver's dials, one per axis, at most three. Empty on a
+    /// transform-driven interpolator. Memory only, as above.
+    std::vector<RigExecWireInput> valueInputs;
 };
 
 struct RigExecWireTwoBoneIkParams {
@@ -246,6 +255,12 @@ struct RigExecWireConstraint {
     int32_t worldUpNative = -1;
     uint32_t worldUpPath = 0;
     bool worldUpObjectNamed = false;
+    /// rigExec:space on a rotation constraint, or -1 for none. Encoded as
+    /// a trailing block at the END of the pose section, after every table,
+    /// so a binary baked before it decodes with -1 on every constraint --
+    /// the behaviour those files were baked from. See
+    /// RigExecWireDecodeDomainPose.
+    int32_t spaceSlot = -1;
     bool snapshotAfter = false;
     // SingleChainIK
     bool singleChainIk = false;
@@ -346,6 +361,32 @@ struct RigExecWireComposeGroup {
     std::vector<int32_t> parentSlots;
 };
 
+/// One RigExecSpaceSwitch: the switched provider slot, the slots of its
+/// labelled sources (-1 is world), and the channels the resulting delta is
+/// allowed to reach. `active` is the fractional selector, read per frame.
+///
+/// Memory only on RigExecWireDomainPose: these travel in the optional
+/// SpaceSwitch section, so a binary baked before minor 1 loads with every
+/// provider composed against its authored parent, exactly as before.
+struct RigExecWireSpaceSwitch {
+    int32_t slot = -1;
+    std::vector<int32_t> sourceSlots;
+    /// Parallel to sourceSlots, in RigExecRotationFilter order: which part
+    /// of that source's rotation reaches the target. Empty means All.
+    std::vector<uint8_t> filters;
+    RigExecWireVec3d twistAxis{};
+    /// rigExec:space -- the provider whose own rest->pose map carries the
+    /// whole rig, or -1 for none. Encoded as a trailing block AFTER every
+    /// switch's fixed fields, so a binary baked before it decodes with -1
+    /// on every switch, which is the behaviour those files were baked
+    /// from. See RigExecWireDecodeSpaceSwitches.
+    int32_t spaceSlot = -1;
+    RigExecWireInput active;
+    bool affectTranslation[3] = {true, true, true};
+    bool affectRotation[3] = {true, true, true};
+    bool affectScale[3] = {true, true, true};
+};
+
 /// The DomainPose section: every table the pose-half steps index, plus the
 /// publication inputs the epilogue reads.
 struct RigExecWireDomainPose {
@@ -371,6 +412,9 @@ struct RigExecWireDomainPose {
     bool hasPropertyChains = false;
     bool phasedReads = false;
     bool publishWeightFields = true;
+    /// Memory only: the SpaceSwitch section carries these (see bake.cpp).
+    /// Sparse -- one entry per switched provider, in slot order.
+    std::vector<RigExecWireSpaceSwitch> spaceSwitches;
 };
 
 void RigExecWirePutInput(std::vector<uint8_t> *out,
@@ -398,6 +442,28 @@ bool RigExecWireEncodeSolverStarts(
 bool RigExecWireDecodeSolverStarts(RigExecWireReader *reader,
                                    std::vector<RigExecWireSolverStart> *starts,
                                    std::string *error);
+
+/// One pose interpolator's numeric dials and translation channel: sparse,
+/// only interpolators that read one or the other.
+struct RigExecWirePoseNumeric {
+    uint32_t interpolator = 0;
+    bool enableTranslation = false;
+    std::vector<RigExecWireInput> values;
+};
+
+bool RigExecWireEncodePoseNumerics(
+    const std::vector<RigExecWirePoseNumeric> &numerics,
+    std::vector<uint8_t> *out);
+bool RigExecWireDecodePoseNumerics(
+    RigExecWireReader *reader,
+    std::vector<RigExecWirePoseNumeric> *numerics, std::string *error);
+
+bool RigExecWireEncodeSpaceSwitches(
+    const std::vector<RigExecWireSpaceSwitch> &switches,
+    std::vector<uint8_t> *out);
+bool RigExecWireDecodeSpaceSwitches(
+    RigExecWireReader *reader,
+    std::vector<RigExecWireSpaceSwitch> *switches, std::string *error);
 
 }  // namespace rigExec
 

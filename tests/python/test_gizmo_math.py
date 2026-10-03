@@ -2052,8 +2052,8 @@ def TestSolverCacheRetarget():
         _Check(cache.For(rigRoot) == {child.GetPath()},
                "the first SetTargets reached the memo: %s"
                % cache.For(rigRoot))
-
-
+        # The one that used to be missed: the relationship already has
+        # targets, so USD reports an info-only change.
         rel.SetTargets([parent.GetPath()])
         _Check(not listener.resynced and listener.changed,
                "retargeting is info-only, not a resync: resynced=%s "
@@ -2149,7 +2149,7 @@ def _Group(stage, prims, time, channels=None):
 def TestGroupPivotAndFrame():
     """
     The pivot is the centroid of the members' evaluated origins,
-    oriented like the LEAD (last-selected) control -- the conventional-tool/the editor
+    oriented like the LEAD (last-selected) control -- the conventional-tool/Blender
     convention.
     """
     stage, root, mid, tip, side, _ = _GroupStage()
@@ -2495,7 +2495,7 @@ def _Centroid3(points):
 def TestGroupPivotModes():
     """
     WHERE a group turns: the CENTRE by default, and the two other
-    answers a application offers.
+    answers a DCC offers.
 
     The default is the point of the option. "Rotate these together"
     means about their middle -- the centroid has to come out of the
@@ -2609,7 +2609,7 @@ def TestGroupRotateTurnsEveryoneWhateverThePivot():
     selected control turns about itself, so a control that hangs off
     another selected control gets its own turn AND its ancestor's: Mid
     and Side turn 30 degrees, and Tip -- a child of Mid -- turns 60.
-    That is behaviour for this mode, and it is the reason an
+    That is Blender's behaviour for this mode, and it is the reason an
     animator reaches for it: selecting a finger chain and dragging the
     ring CURLS the finger instead of swinging it rigidly.
     """
@@ -2834,27 +2834,27 @@ def TestGroupOnBiped():
     if not os.path.isfile(path):
         return
     time = Usd.TimeCode.Default()
-    control = "/Biped/Rig/Controls"
-    arm = (control + "/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl"
-           + "/clavicle_l_ctl/arm_l_root")
-    shoulder = arm + "/arm_l_fk_shoulder_l_bind"
-    elbow = shoulder + "/arm_l_fk_elbow_l_bind"
-    wrist = elbow + "/arm_l_fk_wrist_l_bind"
-    spine = control + "/hips_ctl/spine_root_pivot/spine_root_ctl"
-
-
-
-
-
-
-
-
-
-
-
+    control = "/Biped/Rig/Main/Shot/Aux/Controls"
+    arm = (control + "/M_Body/M_Torso/M_Chest/M_ChestTop"
+           + "/L_Shldr/L_UpArmSwing")
+    shoulder = arm + "/L_UpArm"
+    elbow = shoulder + "/L_LoArm"
+    wrist = elbow + "/L_Hand"
+    spine = control + "/M_Body/M_HipSwivel/M_BodyGimbal"
+    # The finger ROOT is now posable, and the prim the rig overwrites is
+    # the FOLLOW HELPER above it. `build_fingers.py` used to parent-
+    # constrain the root control itself to the wrist so the hand rode the
+    # arm -- but a constraint overwrites the frame it writes, so the
+    # control's own avars were discarded and ten finger roots moved 0 of
+    # 26,276 skinned points on any avar. The constraint now targets a
+    # helper and the control hangs off it by namespace, so it carries the
+    # hand AND stays posable (measured: 612 points, 8.18 cm on rz=30).
+    #
+    # This case wants a prim the rig really does overwrite, so it uses the
+    # helper. `L_Arm` would do as well.
     fingerHelper = control + "/index_001_l_bind_fk_follow"
-    finger = fingerHelper + "/index_001_l_bind_fk"
-    witnesses = [control + "/hips_ctl", control + "/arm_l_ik"]
+    finger = fingerHelper + "/L_IndexMeta"
+    witnesses = [control + "/M_Body", control + "/L_ArmIK"]
 
     def Open():
         # A fresh session layer over the CACHED file layer: Usd.Stage.Open
@@ -2945,7 +2945,7 @@ def TestGroupOnBiped():
     group, _reason = gizmoMath.MakeGroupTarget(
         stage, selected, gizmoMath.CHANNELS_POSE, writer)
     _Check([m.prim.GetName() for m in group.members]
-           == ["arm_l_fk_shoulder_l_bind", "spine_root_ctl"],
+           == ["L_UpArm", "M_BodyGimbal"],
            "the parent-constrained follow helper is not a member: %s"
            % [m.prim.GetName() for m in group.members])
     group.BeginDrag()
@@ -2960,6 +2960,167 @@ def TestGroupOnBiped():
         selected[1].GetPath().AppendProperty(n))
         for n in gizmoMath.AVAR_T + gizmoMath.AVAR_R),
         "and nothing was authored onto it")
+
+def TestSpaceSwitchTargetsAreClaimed():
+    """A switched control's manipulator goes where the rig put it.
+
+    ComputeRigFrames composes a control's pose from rest, its avars and
+    its NAMESPACE parent. A RigExecSpaceSwitch poses its target from the
+    ACTIVE source instead, so the two part company the moment the active
+    space is not the namespace one -- and the manipulator is drawn from
+    the composition.
+
+    Reported by an animator: "we also need controls manips to move where
+    they are when dealing with spaces. They seem to be getting left
+    behind." Measured on Biped_stack.usda with the character posed
+    (M_Body tx=25 ty=-8, M_Head ry=35 rx=15, M_Chest rz=20), over all
+    thirteen space-switch targets:
+
+        space 0 ..... 0.0000 cm, every one
+        space 1 ..... 25.06 to 34.20 cm
+
+    Zero at index 0 because that IS the composition's parent, which is
+    why it went unseen until a space was switched.
+
+    The route out already existed: _PreferPublishedFrame swaps the
+    evaluated frame in for anything in SolverPosedPaths. A space switch
+    names its target with rigExec:target, which neither rigExec:joints
+    nor rigExec:moves can reach, so the set had never heard of them.
+
+    The published reader is the host's, and this runs headless, so a
+    stand-in reads pose.control_frame() -- the same quantity the host
+    snapshots. Without it _PreferPublishedFrame returns early and this
+    file cannot see the fix at all.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "examples", "biped",
+                        "Biped_stack.usda")
+    if not os.path.isfile(path):
+        return
+    try:
+        import rigexec
+    except ImportError:
+        return
+
+    stage = Usd.Stage.Open(Sdf.Layer.FindOrOpen(path),
+                           Sdf.Layer.CreateAnonymous())
+    stage.SetEditTarget(stage.GetSessionLayer())
+    rigRoot = stage.GetPrimAtPath("/Biped/Rig")
+
+    targets = {}
+    for prim in stage.Traverse():
+        if str(prim.GetTypeName()) != "RigExecSpaceSwitch":
+            continue
+        rel = prim.GetRelationship("rigExec:target")
+        index = prim.GetRelationship("rigExec:activeSpaceAttribute")
+        if not rel or not index or not index.GetTargets():
+            continue
+        for target in rel.GetTargets():
+            targets[target] = str(index.GetTargets()[0])
+    _Check(len(targets) >= 13,
+           "the biped has its space switches: %d" % len(targets))
+
+    posed = gizmoMath.SolverPosedPaths(rigRoot)
+    missing = [str(t) for t in targets if t not in posed]
+    _Check(not missing,
+           "SolverPosedPaths claims every space-switch target; missing %s"
+           % missing[:4])
+
+    rig = rigexec.Rig(stage, "/Biped/Rig")
+    rig.evaluation_mode = "baked"
+    writer = gizmoMath.Writer(stage, 0, gizmoMath.WRITE_DEFAULT)
+
+    def Set(spec, value):
+        prim = stage.GetPrimAtPath(spec.split(".")[0])
+        attr = prim.GetAttribute(spec.split(".", 1)[1])
+        if attr and attr.IsValid():
+            attr.Set(value)
+
+    # At rest every space coincides; nothing distinguishes "world" from
+    # "head" with the head at the origin.
+    control = "/Biped/Rig/Main/Shot/Aux/Controls"
+    head = (control
+            + "/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head")
+    for spec, value in ((control + "/M_Body.avars:tx", 25.0),
+                        (control + "/M_Body.avars:ty", -8.0),
+                        (head + ".avars:ry", 35.0),
+                        (head + ".avars:rx", 15.0),
+                        (control + "/M_Body/M_Torso/M_Chest.avars:rz",
+                         20.0)):
+        Set(spec, value)
+
+    live = {}
+
+    def Reader(_stage, path, _time):
+        return live.get(str(path))
+
+    # The keyless reader, which is the one SetPublishedControlFrameReader
+    # installs without a session (see sessionRegistry): this test runs
+    # outside usdview and has no session to file one under.
+    previous = gizmoMath._keylessControlFrameReader
+    gizmoMath.SetPublishedControlFrameReader(Reader)
+    try:
+        for index in (0.0, 1.0):
+            for spec in set(targets.values()):
+                Set(spec, index)
+            pose = rig.evaluate(0)
+            _Check(pose.valid, "the rig evaluates at space %g" % index)
+            live.clear()
+            for each in pose.control_paths():
+                frame = pose.control_frame(each)
+                if frame.valid:
+                    live[str(each)] = Gf.Matrix4d(
+                        *[float(v) for v in frame.to_matrix4()])
+            # JOINTS too, as the host's reader serves them. A switched
+            # control can hang off a rig-written joint -- M_Skull sits
+            # under skull_follow, a RigExecJoint -- and a parent whose
+            # frame is not published propagates its refusal to the child.
+            # Serving only controls made that read as the child having no
+            # manipulator when in usdview it has one.
+            for each in pose.joint_paths():
+                frame = pose.joint_frame(each, True)
+                if frame.valid:
+                    live.setdefault(str(each), Gf.Matrix4d(
+                        *[float(v) for v in frame.to_matrix4()]))
+            worst, where = 0.0, None
+            for target in targets:
+                want = live.get(str(target))
+                if want is None:
+                    continue
+                frames = gizmoMath.ComputeRigFrames(
+                    stage, stage.GetPrimAtPath(target), 0, posed)
+                gap = (Gf.Vec3d(want.ExtractTranslation())
+                       - Gf.Vec3d(frames.posed.ExtractTranslation())
+                       ).GetLength()
+                if gap > worst:
+                    worst, where = gap, target.name
+            # 25-34 cm before, so a millimetre is four orders clear of
+            # the failure and well above the compose/evaluate residual.
+            _Check(worst < 0.1,
+                   "at space %g the worst manipulator is %.4f cm out "
+                   "(%s)" % (index, worst, where))
+            # And every one of them still HAS a manipulator. Being in the
+            # posed set answers "whose frame comes from the published
+            # pose", and the refusal asks a different question -- "whose
+            # avars are inert" -- which a switch target is not: the switch
+            # re-parents it, the animator still poses it. Conflating the
+            # two took the manipulator off all thirteen, the IK hands and
+            # pole vectors included, and left the reason reading "posed by
+            # a solver or an overwriting mover".
+            refused = []
+            for target in targets:
+                prim = stage.GetPrimAtPath(target)
+                made, reason = gizmoMath.MakeTarget(
+                    stage, prim, gizmoMath.CHANNELS_POSE, writer)
+                if made is None:
+                    refused.append("%s (%s)" % (target.name, reason))
+            _Check(not refused,
+                   "at space %g, %d switched control(s) have no "
+                   "manipulator: %s"
+                   % (index, len(refused), "; ".join(refused[:4])))
+    finally:
+        gizmoMath.SetPublishedControlFrameReader(previous)
+
 
 def main():
     _RegisterSchema()
@@ -3021,6 +3182,8 @@ def main():
          TestGroupLocalAxesAreTheLeads),
         ("group is one undo entry", TestGroupIsOneUndoEntry),
         ("group on the biped", TestGroupOnBiped),
+        ("space-switch manipulators",
+         TestSpaceSwitchTargetsAreClaimed),
     ]
     for name, fn in groups:
         fn()

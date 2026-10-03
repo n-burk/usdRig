@@ -514,6 +514,8 @@ private:
         bool controlLive = false;
         TfToken shape;
         TfToken drawMode;
+        /// guide:planeNormal -- X, Y or Z; Y is the historical drawing.
+        TfToken planeNormal;
         GfVec3d scale;
         double wireWidth = 0.05;
         GfVec3d offset = GfVec3d(0.0);

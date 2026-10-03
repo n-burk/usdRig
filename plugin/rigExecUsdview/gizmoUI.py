@@ -2631,6 +2631,11 @@ class GizmoController(QtCore.QObject):
             self._UpdateHover(None)
             return False
         if kind == QtCore.QEvent.MouseButtonPress:
+            # A click in the viewport ends a text edit -- see
+            # _DropTypingFocus. Before _OnPress and regardless of what
+            # it returns: a plain selection click is the commonest way
+            # into this and it claims nothing.
+            self._DropTypingFocus()
             return self._OnPress(event)
         if kind == QtCore.QEvent.MouseMove:
             return self._OnMove(event)
@@ -3048,6 +3053,61 @@ class GizmoController(QtCore.QObject):
         return (isinstance(focus, QtWidgets.QComboBox)
                 and focus.isEditable())
 
+    def _DropTypingFocus(self):
+        """End a text edit so the viewport can have the keyboard back.
+
+        USDVIEW WILL NOT DO THIS. appEventFilter.JealousFocus lists
+        QLineEdit, QComboBox, QTextEdit, QPlainTextEdit, QAbstractSlider
+        and QAbstractSpinBox, and SetFocusFromMousePos runs for Escape
+        alone -- "Don't touch if there's a greedy focus widget". So once
+        the caret is in the path field under the menu bar it stays
+        there through every mouse move and every viewport click, and
+        Q / W / E / R are typed into the field instead of changing the
+        tool. Reported from a real session, and the report was exact:
+        "this usually is happening after I select something in the
+        viewport".
+
+        Every DCC ends a field edit when the viewport is clicked. This
+        does the same, and clears rather than re-homing the focus:
+        usdview's stage view reports NoFocus, so there is nothing to
+        give it to, and a null focus widget is precisely what makes
+        _TypingFocus false for the keys that follow.
+        """
+        focus = QtWidgets.QApplication.focusWidget()
+        if focus is None or not self._TypingFocus():
+            return False
+        focus.clearFocus()
+        return True
+
+    def _ToolKeyOverTheView(self, receiver, kind, event):
+        """Q / W / E / R with the cursor over the viewport, and it wins.
+
+        The viewport owns the tool keys whenever the cursor is over it,
+        even with a text field focused: usdview hands the path field
+        under the menu bar a focus it will not give up (see
+        _DropTypingFocus), so gating on the focus widget alone left the
+        tools dead after a viewport selection. The field loses the
+        caret on the way through, which is the same thing the click
+        would have done.
+
+        Only these four, and only unmodified: the drag, size and pivot
+        keys stay behind the typing gate, so a stray keystroke while a
+        field is focused can at worst change the active tool -- visible,
+        and undone by pressing the one the artist wanted.
+        """
+        if kind == QtCore.QEvent.KeyRelease:
+            return False
+        if event.key() not in self._TOOL_KEYS:
+            return False
+        if event.modifiers() & (QtCore.Qt.ControlModifier
+                                | QtCore.Qt.AltModifier
+                                | QtCore.Qt.MetaModifier):
+            return False
+        if not (self._CursorOverView() or receiver is self._view):
+            return False
+        self._DropTypingFocus()
+        return True
+
     def _CursorOverView(self):
         view = self._view
         if view is None:
@@ -3092,7 +3152,8 @@ class GizmoController(QtCore.QObject):
             if self._TypingFocus():
                 return False
             return self._Claim(event, handled)
-        if self._TypingFocus():
+        if (self._TypingFocus()
+                and not self._ToolKeyOverTheView(receiver, kind, event)):
             return False
         if kind == QtCore.QEvent.KeyRelease:
             # Auto-repeat only: the block above took the real one,

@@ -6,7 +6,13 @@
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/solvers.h"
 
+#include "pxr/base/gf/math.h"
+#include "pxr/base/gf/quatd.h"
+#include "pxr/base/gf/rotation.h"
+#include "pxr/base/gf/transform.h"
+
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -152,6 +158,205 @@ RigExecFrameRotation(const RigExecPointFrame &frame, GfQuatd *out)
     *out = matrix.GetOrthonormalized(/* issueWarning = */ false)
                .ExtractRotationQuat();
     return true;
+}
+
+namespace {
+
+bool
+_FrameMatrix(const RigExecPointFrame &frame, GfMatrix4d *out)
+{
+    return frame.IsValid() && !frame.IsDegenerate() &&
+           RigExecPointsToMatrix(RigExecIdentityLandmarks(), frame.points,
+                                 out);
+}
+
+}  // namespace
+
+bool
+RigExecFrameTranslation(const RigExecPointFrame &driverFinal,
+                        const RigExecPointFrame &driverRest,
+                        const RigExecPointFrame *parentFinal,
+                        const RigExecPointFrame *parentRest,
+                        GfVec3d *out)
+{
+    GfMatrix4d world(1.0), restWorld(1.0);
+    if (!_FrameMatrix(driverFinal, &world) ||
+        !_FrameMatrix(driverRest, &restWorld)) {
+        return false;
+    }
+    GfMatrix4d local = world, restLocal = restWorld;
+    double det = 0.0;
+    if (parentFinal && parentRest) {
+        GfMatrix4d parent(1.0), restParent(1.0);
+        if (!_FrameMatrix(*parentFinal, &parent) ||
+            !_FrameMatrix(*parentRest, &restParent)) {
+            return false;
+        }
+        const GfMatrix4d parentInverse = parent.GetInverse(&det);
+        if (det == 0.0) {
+            return false;
+        }
+        const GfMatrix4d restParentInverse = restParent.GetInverse(&det);
+        if (det == 0.0) {
+            return false;
+        }
+        local = world * parentInverse;
+        restLocal = restWorld * restParentInverse;
+    }
+    const GfMatrix4d restLocalInverse = restLocal.GetInverse(&det);
+    if (det == 0.0) {
+        return false;
+    }
+    *out = restLocalInverse.Transform(local.ExtractTranslation());
+    return true;
+}
+
+namespace {
+
+// Translation, rotation (as a quaternion) and scale of a transform, taken
+// with GfTransform so that the decomposition and the recomposition below are
+// each other's inverse by construction.
+struct _Decomposed {
+    GfVec3d translation = GfVec3d(0);
+    GfQuatd rotation = GfQuatd::GetIdentity();
+    GfVec3d scale = GfVec3d(1);
+};
+
+_Decomposed
+_Decompose(const GfMatrix4d &m)
+{
+    const GfTransform transform(m);
+    _Decomposed out;
+    out.translation = transform.GetTranslation();
+    out.rotation = transform.GetRotation().GetQuat();
+    out.scale = transform.GetScale();
+    return out;
+}
+
+GfMatrix4d
+_Recompose(const _Decomposed &d)
+{
+    GfTransform transform;
+    transform.SetScale(d.scale);
+    transform.SetRotation(GfRotation(d.rotation));
+    transform.SetTranslation(d.translation);
+    return transform.GetMatrix();
+}
+
+}  // namespace
+
+GfMatrix4d
+RigExecBlendTransforms(const GfMatrix4d &a, const GfMatrix4d &b, double weight)
+{
+    // The endpoints return their operand untouched rather than a
+    // decomposition of it: a space switch sitting on a whole number has to be
+    // bit-identical to selecting that space, and a round trip through
+    // GfTransform is not the identity on a sheared or near-degenerate matrix.
+    if (!(weight > 0.0)) {
+        return a;
+    }
+    if (weight >= 1.0) {
+        return b;
+    }
+    const _Decomposed da = _Decompose(a), db = _Decompose(b);
+    _Decomposed out;
+    out.translation = GfLerp(weight, da.translation, db.translation);
+    out.scale = GfLerp(weight, da.scale, db.scale);
+    // Shortest arc: the two spaces are usually close, and a switch easing the
+    // long way round is never what an animator asked for.
+    GfQuatd target = db.rotation;
+    if (GfDot(da.rotation, target) < 0.0) {
+        target = GfQuatd(-target.GetReal(), -target.GetImaginary());
+    }
+    out.rotation = GfSlerp(weight, da.rotation, target).GetNormalized();
+    return _Recompose(out);
+}
+
+GfMatrix4d
+RigExecFilterSpaceRotation(const GfMatrix4d &m, const GfVec3d &axis,
+                           RigExecRotationFilter filter)
+{
+    if (filter == RigExecRotationFilter::All) {
+        return m;
+    }
+    const double length = axis.GetLength();
+    if (length < 1e-12) {
+        return m;
+    }
+    const GfVec3d a = axis / length;
+    _Decomposed d = _Decompose(m);
+    const GfQuatd q = d.rotation.GetNormalized();
+    // Swing-twist: the twist is the part of the rotation whose axis IS the
+    // limb axis, which is the quaternion's imaginary component along it,
+    // renormalized; the swing is whatever is left over.
+    const double along = GfDot(q.GetImaginary(), a);
+    GfQuatd twist(q.GetReal(), along * a);
+    const double norm = std::sqrt(twist.GetReal() * twist.GetReal() +
+                                  twist.GetImaginary().GetLengthSq());
+    if (norm < 1e-12) {
+        // A half turn square to the axis: the twist is genuinely undefined
+        // there, and no twist is the only answer that does not jump.
+        twist = GfQuatd::GetIdentity();
+    } else {
+        twist = GfQuatd(twist.GetReal() / norm, twist.GetImaginary() / norm);
+    }
+    d.rotation = filter == RigExecRotationFilter::Twist
+                     ? twist
+                     : (q * twist.GetInverse()).GetNormalized();
+    return _Recompose(d);
+}
+
+GfMatrix4d
+RigExecMaskTransform(const GfMatrix4d &m, const bool translation[3],
+                     const bool rotation[3], const bool scale[3])
+{
+    const bool all = translation[0] && translation[1] && translation[2] &&
+                     rotation[0] && rotation[1] && rotation[2] &&
+                     scale[0] && scale[1] && scale[2];
+    if (all) {
+        return m;
+    }
+    _Decomposed d = _Decompose(m);
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!translation[axis]) d.translation[axis] = 0.0;
+        if (!scale[axis]) d.scale[axis] = 1.0;
+    }
+    if (!rotation[0] || !rotation[1] || !rotation[2]) {
+        // Per-axis rotation masking is an EULER statement -- "keep the X
+        // rotation, drop the Y" -- so the rotation is taken apart in the SAME
+        // order the avar compose puts one together (_ComposeAvars /
+        // RigExecBakedComposeAvars with an XYZ order): row-vector
+        // R = Rx * Ry * Rz. Decomposing with GfRotation::Decompose instead
+        // would be one convention removed from that, and a mask that agrees
+        // with the compose only for small angles is worse than none.
+        const GfMatrix4d r(GfRotation(d.rotation), GfVec3d(0));
+        double x = 0.0, y = 0.0, z = 0.0;
+        const double sinY = GfClamp(r[0][2], -1.0, 1.0);
+        y = std::asin(sinY);
+        if (std::abs(sinY) < 1.0 - 1e-9) {
+            x = std::atan2(r[1][2], r[2][2]);
+            z = std::atan2(r[0][1], r[0][0]);
+        } else {
+            // Gimbal lock: X and Z are the same rotation, so all of it is
+            // given to X and Z is zero, which is what any Euler extraction
+            // has to choose.
+            x = std::atan2(-r[2][1], r[1][1]);
+            z = 0.0;
+        }
+        static const GfVec3d axes[3] = {
+            GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+        const double angles[3] = {GfRadiansToDegrees(x),
+                                  GfRadiansToDegrees(y),
+                                  GfRadiansToDegrees(z)};
+        GfMatrix4d composed(1.0);
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!rotation[axis] || angles[axis] == 0.0) continue;
+            composed = composed *
+                GfMatrix4d(GfRotation(axes[axis], angles[axis]), GfVec3d(0));
+        }
+        d.rotation = composed.ExtractRotationQuat();
+    }
+    return _Recompose(d);
 }
 
 }  // namespace rigExec

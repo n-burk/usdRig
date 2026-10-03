@@ -109,6 +109,10 @@ struct RigExecPublishedPrim {
     GfMatrix4d xform{1.0};
     GfMatrix4d xformBase{1.0};
 
+    /// Constant matrix primvars the rig computed for this prim's shader.
+    /// See RigExecRigPose::shaderMatrices for why a primvar.
+    std::map<TfToken, GfMatrix4d> shaderMatrices;
+
     bool hasPoints = false;
     VtVec3fArray points;
 
@@ -181,6 +185,9 @@ struct RigExecPublishedPrim {
     TfToken controlGuideShape;
     /// wire|geometry.
     TfToken controlGuideDrawMode;
+    /// X|Y|Z: which LOCAL axis the planar guides' normal points along.
+    /// Y reproduces the historical XZ-plane drawing exactly.
+    TfToken controlGuidePlaneNormal;
     /// Effective per-axis draw scale: positive evaluated frame-axis
     /// magnitudes times guide:scaleX/Y/Z. The guide multipliers are authored
     /// as three separate doubles (deliberately not a vec3, per direction);
@@ -340,6 +347,14 @@ enum RigExecPublishedChange : uint8_t {
     /// the displayColor primvar appears or disappears -- and reports
     /// structural instead, exactly as points ownership does.
     RigExecChangeWeightOverlay = 1 << 6,
+
+    /// A rig-computed shader matrix changed value. Its own flag because
+    /// it is the one primvar whose value can move while the geometry it
+    /// rides is perfectly still: the eye's projector turns with a
+    /// look-at while the eyeball does not deform at all, and a prim that
+    /// reports no change is never dirtied, so the shader would keep
+    /// reading the first frame's matrix forever.
+    RigExecChangeShaderMatrix = 1 << 7,
 };
 
 struct RigExecPublishedDirty {
@@ -452,6 +467,7 @@ private:
             // is also what makes RigExecImaging_SetWeightOverlay redraw
             // immediately: universal dirtiness re-pulls the container and
             // the new primvar is simply there.
+            before->shaderMatrices.size() != after.shaderMatrices.size() ||
             before->hasWeightOverlay != after.hasWeightOverlay ||
             before->hasVolumeGuides != after.hasVolumeGuides ||
             before->volumeGuides.size() != after.volumeGuides.size()) {
@@ -484,10 +500,15 @@ private:
         // different prim now, not that one of its values moved.
         if (after.hasControlGuide &&
             (before->controlGuideShape != after.controlGuideShape ||
-             before->controlGuideDrawMode != after.controlGuideDrawMode)) {
+             before->controlGuideDrawMode != after.controlGuideDrawMode ||
+             before->controlGuidePlaneNormal !=
+                 after.controlGuidePlaneNormal)) {
             return RigExecChangeStructural;
         }
         uint8_t changes = RigExecChangeNone;
+        if (before->shaderMatrices != after.shaderMatrices) {
+            changes |= RigExecChangeShaderMatrix;
+        }
         if (after.hasControlFrame && before->controlFrame != after.controlFrame) {
             changes |= RigExecChangeGuides;
         }

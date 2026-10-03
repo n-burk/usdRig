@@ -1,0 +1,311 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = "Space switches for the IK handles, the pole vectors, the FK shoulders, the neck and the head: one RigExecSpaceSwitch per control and the avars:space dial it reads, with the space lists taken from the source rig's picker. Adds prims and overrides nothing, so dropping this sublayer leaves the character exactly as it was."
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        def "Spaces"
+        {
+            def RigExecSpaceSwitch "arm_l_ik_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["world", "chest", "head", "hips"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK>
+            }
+
+            def RigExecSpaceSwitch "arm_l_pv_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmPV.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "all", "twist"]
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "chest", "hand"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmPV>
+                double3 rigExec:twistAxis = (0.6964629191117421, -0.7098055540683189, 0.10542996593055506)
+            }
+
+            def RigExecSpaceSwitch "leg_l_ik_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["world", "hips"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK>
+            }
+
+            def RigExecSpaceSwitch "leg_l_pv_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_LegPV.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "all", "twist"]
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/L_Hip>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "pelvis", "foot"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/L_LegPV>
+                double3 rigExec:twistAxis = (1.4512820906544433e-16, -0.9980091550935452, -0.0630692187161716)
+            }
+
+            def RigExecSpaceSwitch "arm_l_fk_shoulder_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing>,
+                    </Biped/Rig/Main/Shot/Aux>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "world"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm>
+            }
+
+            def RigExecSpaceSwitch "arm_r_ik_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["world", "chest", "head", "hips"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK>
+            }
+
+            def RigExecSpaceSwitch "arm_r_pv_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmPV.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "all", "twist"]
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "chest", "hand"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmPV>
+                double3 rigExec:twistAxis = (-0.696462919111743, -0.7098055540683179, 0.10542996593055526)
+            }
+
+            def RigExecSpaceSwitch "leg_r_ik_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["world", "hips"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK>
+            }
+
+            def RigExecSpaceSwitch "leg_r_pv_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_LegPV.avars:space>
+                uniform token[] rigExec:rotationFilters = ["all", "all", "twist"]
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/R_Hip>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "pelvis", "foot"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/R_LegPV>
+                double3 rigExec:twistAxis = (2.2805861424569806e-16, -0.9980091550935455, -0.06306921871616765)
+            }
+
+            def RigExecSpaceSwitch "arm_r_fk_shoulder_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing>,
+                    </Biped/Rig/Main/Shot/Aux>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "world"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm>
+            }
+
+            def RigExecSpaceSwitch "neck_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "world"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck>
+            }
+
+            def RigExecSpaceSwitch "head_spaces"
+            {
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow>,
+                    </Biped/Rig/Main/Shot/Aux>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["local", "world"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>
+            }
+
+            def RigExecSpaceSwitch "look_spaces"
+            {
+                double inputs:activeSpace = 1
+                rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Look.avars:space>
+                rel rigExec:sources = [
+                    </Biped/Rig/Main/Shot/Aux>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace>,
+                ]
+                rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
+                uniform token[] rigExec:spaceLabels = ["world", "local"]
+                rel rigExec:target = </Biped/Rig/Main/Shot/Aux/Controls/M_Look>
+            }
+        }
+
+        def RigExecControl "Main"
+        {
+            def RigExecControl "Shot"
+            {
+                def RigExecControl "Aux"
+                {
+                    over "Controls"
+                    {
+                        over "L_LegIK"
+                        {
+                            custom double avars:space = 0
+                        }
+
+                        over "R_LegIK"
+                        {
+                            custom double avars:space = 0
+                        }
+
+                        over "R_ArmIK"
+                        {
+                            custom double avars:space = 0
+                        }
+
+                        over "R_LegPV"
+                        {
+                            custom double avars:space = 2
+                        }
+
+                        over "L_LegPV"
+                        {
+                            custom double avars:space = 2
+                        }
+
+                        over "L_ArmIK"
+                        {
+                            custom double avars:space = 0
+                        }
+
+                        over "R_ArmPV"
+                        {
+                            custom double avars:space = 0
+                        }
+
+                        over "L_ArmPV"
+                        {
+                            custom double avars:space = 0
+                        }
+
+                        over "M_Body"
+                        {
+                            over "M_Torso"
+                            {
+                                over "M_Chest"
+                                {
+                                    over "M_ChestTop"
+                                    {
+                                        custom token guide:shape = "circle"
+
+                                        over "L_Shldr"
+                                        {
+                                            custom token guide:shape = "circle"
+
+                                            over "L_UpArmSwing"
+                                            {
+                                                over "L_UpArm"
+                                                {
+                                                    custom double avars:space = 0
+                                                    custom token guide:shape = "circle"
+                                                }
+                                            }
+                                        }
+
+                                        over "R_Shldr"
+                                        {
+                                            custom token guide:shape = "circle"
+
+                                            over "R_UpArmSwing"
+                                            {
+                                                over "R_UpArm"
+                                                {
+                                                    custom double avars:space = 0
+                                                    custom token guide:shape = "circle"
+                                                }
+                                            }
+                                        }
+
+                                        over "M_Neck"
+                                        {
+                                            custom double avars:space = 0
+
+                                            over "M_Head"
+                                            {
+                                                over "M_HeadGimbal"
+                                                {
+                                                    over "skull_follow"
+                                                    {
+                                                        over "M_Skull"
+                                                        {
+                                                            custom double avars:space = 0
+
+                                                            over "M_UpFace"
+                                                            {
+                                                                over "lookRot_aim"
+                                                                {
+                                                                    over "M_LookRot"
+                                                                    {
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

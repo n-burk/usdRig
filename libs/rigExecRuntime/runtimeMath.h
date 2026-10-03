@@ -336,6 +336,14 @@ struct RrVec3d {
     static RrVec3d YAxis() { return RrVec3d(0.0, 1.0, 0.0); }
     static RrVec3d ZAxis() { return RrVec3d(0.0, 0.0, 1.0); }
 
+    RrVec3d &Set(double x, double y, double z)
+    {
+        _data[0] = x;
+        _data[1] = y;
+        _data[2] = z;
+        return *this;
+    }
+
     const double *data() const { return _data; }
     double *data() { return _data; }
     double operator[](size_t i) const { return _data[i]; }
@@ -1262,6 +1270,141 @@ struct RrMat4d {
                 _mtx[row1][col3] * _mtx[row2][col2] * _mtx[row3][col1]);
     }
 
+    /// GfMatrix4d::_Jacobi3, arithmetic untouched: the symmetric 3x3
+    /// eigen-decomposition Factor rests on.
+    void _Jacobi3(RrVec3d *eigenvalues, RrVec3d eigenvectors[3]) const
+    {
+        eigenvalues->Set(_mtx[0][0], _mtx[1][1], _mtx[2][2]);
+        eigenvectors[0] = RrVec3d::XAxis();
+        eigenvectors[1] = RrVec3d::YAxis();
+        eigenvectors[2] = RrVec3d::ZAxis();
+
+        RrMat4d a = (*this);
+        RrVec3d b = *eigenvalues;
+        RrVec3d z = RrVec3d(0.0);
+
+        for (int i = 0; i < 50; i++) {
+            double sm = 0.0;
+            for (int p = 0; p < 2; p++)
+                for (int q = p + 1; q < 3; q++)
+                    sm += std::abs(a._mtx[p][q]);
+
+            if (sm == 0.0) return;
+
+            const double thresh = (i < 3 ? (.2 * sm / (3 * 3)) : 0.0);
+
+            for (int p = 0; p < 3; p++) {
+                for (int q = p + 1; q < 3; q++) {
+                    double g = 100.0 * std::abs(a._mtx[p][q]);
+
+                    if (i > 3 &&
+                        (std::abs((*eigenvalues)[p]) + g ==
+                         std::abs((*eigenvalues)[p])) &&
+                        (std::abs((*eigenvalues)[q]) + g ==
+                         std::abs((*eigenvalues)[q]))) {
+                        a._mtx[p][q] = 0.0;
+                    } else if (std::abs(a._mtx[p][q]) > thresh) {
+                        double h = (*eigenvalues)[q] - (*eigenvalues)[p];
+                        double t;
+
+                        if (std::abs(h) + g == std::abs(h)) {
+                            t = a._mtx[p][q] / h;
+                        } else {
+                            const double theta = 0.5 * h / a._mtx[p][q];
+                            t = 1.0 / (std::abs(theta) +
+                                       std::sqrt(1.0 + theta * theta));
+                            if (theta < 0.0) t = -t;
+                        }
+
+                        const double c = 1.0 / std::sqrt(1.0 + t * t);
+                        const double s = t * c;
+                        const double tau = s / (1.0 + c);
+                        h = t * a._mtx[p][q];
+                        z[p] -= h;
+                        z[q] += h;
+                        (*eigenvalues)[p] -= h;
+                        (*eigenvalues)[q] += h;
+                        a._mtx[p][q] = 0.0;
+
+                        for (int j = 0; j < p; j++) {
+                            g = a._mtx[j][p];
+                            h = a._mtx[j][q];
+                            a._mtx[j][p] = g - s * (h + g * tau);
+                            a._mtx[j][q] = h + s * (g - h * tau);
+                        }
+                        for (int j = p + 1; j < q; j++) {
+                            g = a._mtx[p][j];
+                            h = a._mtx[j][q];
+                            a._mtx[p][j] = g - s * (h + g * tau);
+                            a._mtx[j][q] = h + s * (g - h * tau);
+                        }
+                        for (int j = q + 1; j < 3; j++) {
+                            g = a._mtx[p][j];
+                            h = a._mtx[q][j];
+                            a._mtx[p][j] = g - s * (h + g * tau);
+                            a._mtx[q][j] = h + s * (g - h * tau);
+                        }
+                        for (int j = 0; j < 3; j++) {
+                            g = eigenvectors[j][p];
+                            h = eigenvectors[j][q];
+                            eigenvectors[j][p] = g - s * (h + g * tau);
+                            eigenvectors[j][q] = h + s * (g - h * tau);
+                        }
+                    }
+                }
+            }
+            for (int p = 0; p < 3; p++) {
+                (*eigenvalues)[p] = b[p] += z[p];
+                z[p] = 0;
+            }
+        }
+    }
+
+    /// GfMatrix4d::Factor, arithmetic untouched. False when the matrix is
+    /// singular, which still produces a usable factorization -- a zero
+    /// scale is a legitimate transform to take apart.
+    bool Factor(RrMat4d *r, RrVec3d *s, RrMat4d *u, RrVec3d *t, RrMat4d *p,
+                double eps = 1e-10) const
+    {
+        p->SetDiagonal(1);
+
+        RrMat4d a;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) a._mtx[i][j] = _mtx[i][j];
+            a._mtx[3][i] = a._mtx[i][3] = 0.0;
+            (*t)[i] = _mtx[3][i];
+        }
+        a._mtx[3][3] = 1.0;
+
+        const double det = a.GetDeterminant3();
+        const double detSign = (det < 0.0 ? -1.0 : 1.0);
+        const bool isSingular = det * detSign < eps;
+
+        const RrMat4d b = a * a.GetTranspose();
+        RrVec3d eigenvalues;
+        RrVec3d eigenvectors[3];
+        b._Jacobi3(&eigenvalues, eigenvectors);
+        r->Set(eigenvectors[0][0], eigenvectors[0][1], eigenvectors[0][2],
+               0.0, eigenvectors[1][0], eigenvectors[1][1],
+               eigenvectors[1][2], 0.0, eigenvectors[2][0],
+               eigenvectors[2][1], eigenvectors[2][2], 0.0, 0.0, 0.0, 0.0,
+               1.0);
+
+        RrMat4d sInv;
+        sInv.SetIdentity();
+        for (int i = 0; i < 3; i++) {
+            if (eigenvalues[i] < eps) {
+                (*s)[i] = detSign * eps;
+            } else {
+                (*s)[i] = detSign * std::sqrt(eigenvalues[i]);
+            }
+            sInv._mtx[i][i] = 1.0 / (*s)[i];
+        }
+
+        *u = *r * sInv * r->GetTranspose() * a;
+        return !isSingular;
+    }
+
     RrMat4d GetInverse(double *detPtr = nullptr, double eps = 0) const
     {
         double x00, x01, x02, x03;
@@ -1420,6 +1563,21 @@ struct RrMat4d {
         _mtx[3][1] = t[1];
         _mtx[3][2] = t[2];
         _mtx[3][3] = 1.0;
+        return *this;
+    }
+
+    RrMat4d &SetTranslate(const RrVec3d &t)
+    {
+        SetIdentity();
+        return SetTranslateOnly(t);
+    }
+
+    RrMat4d &SetScale(const RrVec3d &s)
+    {
+        SetIdentity();
+        _mtx[0][0] = s[0];
+        _mtx[1][1] = s[1];
+        _mtx[2][2] = s[2];
         return *this;
     }
 

@@ -3,6 +3,7 @@
 
 #include "registry.h"
 
+#include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/range3d.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
@@ -1015,8 +1016,34 @@ _BuildControlGuidePrim(
     // parent -- is what places them.
     GfMatrix4d scale(1.0);
     scale.SetScale(published.controlGuideScale);
+
+    // THE PLANAR GUIDES ARE BUILT IN THE XZ PLANE AND NOWHERE ELSE, and a
+    // rig's control curves lie in whichever plane the rigger drew them in.
+    // Measured on the biped: 37 of its planar control curves lie in the
+    // local YZ plane, 26 in XY and 7 in XZ, so most were drawn edge-on as
+    // slivers -- right sizes, wrong plane. guide:planeNormal turns the
+    // unit shape so its normal points along the axis the control names.
+    //
+    // BEFORE the scale, and that ordering is the point: the authored
+    // guide:scaleX/Y/Z were measured along the control's OWN axes, so the
+    // shape has to be turned into those axes first and sized second.
+    // Rotating after the scale would size the turned shape by whichever
+    // axis it had landed on.
+    //
+    // Proper rotations rather than component swaps, so the shape keeps its
+    // handedness; the rings are symmetric enough that it does not show,
+    // but a reflection is a thing to leave out of a transform chain.
+    GfMatrix4d plane(1.0);
+    if (published.controlGuideShape == TfToken("circle") ||
+        published.controlGuideShape == TfToken("box")) {
+        if (published.controlGuidePlaneNormal == TfToken("X")) {
+            plane.SetRotate(GfRotation(GfVec3d(0, 0, 1), -90.0));
+        } else if (published.controlGuidePlaneNormal == TfToken("Z")) {
+            plane.SetRotate(GfRotation(GfVec3d(1, 0, 0), 90.0));
+        }
+    }
     const GfMatrix4d xform =
-        scale * published.controlGuideFrame * assetRootWorld;
+        plane * scale * published.controlGuideFrame * assetRootWorld;
 
     TfTokenVector names;
     std::vector<HdDataSourceBaseHandle> values;
@@ -1437,6 +1464,19 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
         primvarValues.push_back(HdBlockDataSource::New());
         primvarNames.push_back(HdTokens->accelerations);
         primvarValues.push_back(HdBlockDataSource::New());
+    }
+    // Rig-computed matrices for this prim's shader, as CONSTANT primvars.
+    // A glslfx sourceAsset only ever SEES one of these if its own
+    // "attributes" configuration block names it: Storm filters primvars
+    // down to the builtins plus that list before the shader is reached.
+    for (const auto &[name, matrix] : published.shaderMatrices) {
+        primvarNames.push_back(name);
+        primvarValues.push_back(
+            HdPrimvarSchema::Builder()
+                .SetPrimvarValue(
+                    HdRetainedTypedSampledDataSource<GfMatrix4d>::New(matrix))
+                .SetInterpolation(_Token(HdPrimvarSchemaTokens->constant))
+                .Build());
     }
     if (published.hasNormals) {
         primvarNames.push_back(HdTokens->normals);
@@ -2571,6 +2611,17 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                 HdPrimvarsSchemaTokens->primvars, HdTokens->velocities));
             leaves.insert(HdDataSourceLocator(
                 HdPrimvarsSchemaTokens->primvars, HdTokens->accelerations));
+        }
+        if (entry.changes & RigExecChangeShaderMatrix) {
+            // The primvars CONTAINER, not one named leaf: the flag says a
+            // shader matrix moved but not which, and this loop has only
+            // the path and the flags. A container dirty re-pulls this
+            // prim's primvar values, which is the right weight -- it is
+            // a value dirty, so Hydra keeps the descriptors it announced
+            // on the first sync, where a structural one would resync the
+            // prim every time an eye moved.
+            leaves.insert(HdDataSourceLocator(
+                HdPrimvarsSchemaTokens->primvars));
         }
         if (entry.changes & RigExecChangeNormals) {
             leaves.insert(HdDataSourceLocator(

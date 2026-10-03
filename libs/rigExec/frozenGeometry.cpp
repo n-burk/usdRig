@@ -428,6 +428,24 @@ _FrozenAssembleMatrix(
     RigExecMoverParameters *params)
 {
     params->kind = RigExecRevisionKindToken(RigExecRevisionOp::Matrix);
+    // rigExec:weightBlend, off the recorded read rather than the stage, as
+    // every other structural token here is. The frozen replay must choose
+    // the same arc as live: a radial cluster blended linearly here and
+    // radially on the live path reports as a parity mismatch on every
+    // weighted point of every painted falloff on the rig.
+    {
+        static const TfToken radial("radial");
+        const SdfPath key = revision.moverPath.AppendProperty(
+            TfToken("rigExec:weightBlend"));
+        const auto found = index.find(key);
+        if (found != index.end()) {
+            const RigExecSampledInput &sample = inputs.values[found->second];
+            TfToken blend;
+            if (sample.hasValue && _SampleHolds(sample.value, &blend)) {
+                params->radialWeight = blend == radial;
+            }
+        }
+    }
     params->enabled =
         _FrozenSampledEnabled(index, inputs, revision.moverPath);
     if (!params->enabled) {

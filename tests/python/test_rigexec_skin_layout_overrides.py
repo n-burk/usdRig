@@ -64,8 +64,8 @@ _POINTS = "/Biped/Geom/body_geo.points"
 # One probe per region of the rig the closure work found to be structurally
 # different: a leaf that reaches 2% of the joints, a mid-limb, a deep spine
 # control, and the root that reaches everything.
-_PROBES = ("index_004_l_bind_fk", "arm_l_fk_wrist_l_bind", "spine_end_ctl",
-           "hips_ctl")
+_PROBES = ("L_IndexTip", "L_Hand", "M_ChestTop",
+           "M_Body")
 _VALUES = (5.0, 17.5, -32.25)
 
 
@@ -179,7 +179,7 @@ def TestOnlyALayoutReachingOverrideInvalidates():
     """
     _, rig, controls, skins = _Open()
     assert skins, "the biped is expected to carry a skin mover"
-    tip = controls["index_004_l_bind_fk"]
+    tip = controls["L_IndexTip"]
 
     rig.evaluate(1.0)
     held = rig.skin_topology_cache_size

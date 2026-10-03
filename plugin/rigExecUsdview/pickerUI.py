@@ -21,8 +21,10 @@ from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 if __name__ != "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import avarEditorModel
 import pickerModel
 import pickerScene
+import rigExecUndo
 
 try:
     import sessionRegistry
@@ -47,28 +49,60 @@ def _path_for(button):
     elif shape == "polygon" and button.polygon:
         _polygon(path, button.polygon, button.roundness)
     elif shape == "bezier" and button.bezier:
+        # THE KNOT IS (anchor, OUT, IN), not (anchor, in, out).
+        #
+        # Read the other way round the segment leaving a knot took that
+        # knot's INCOMING handle and the next knot's OUTGOING one, which
+        # is a curve tied to the wrong ends: every face button came out
+        # self-intersecting -- the cheeks as folded ribbons with a pinch
+        # at the seam, which is what "no curved shapes, weird triangles"
+        # looks like from the outside. Rendered side by side the swap is
+        # not a matter of taste: the same six buttons go from twisted to
+        # clean arcs.
         points = button.bezier
         path.moveTo(*points[0][0])
         for i in range(len(points)):
             a = points[i]
             b = points[(i + 1) % len(points)]
-            c1 = a[2] if len(a) > 2 else a[0]
-            c2 = b[1] if len(b) > 1 else b[0]
+            c1 = a[1] if len(a) > 1 else a[0]
+            c2 = b[2] if len(b) > 2 else b[0]
             path.cubicTo(c1[0], c1[1], c2[0], c2[1], b[0][0], b[0][1])
         path.closeSubpath()
     elif shape == "trapezoid":
+        # A SLOPE INSETS AN EDGE; IT NEVER FLARES PAST THE BOX.
+        #
+        # The slopes arrive in +/- pairs -- L_InLid is +3/+3 and L_UpLid2
+        # is -3/-3 -- and the old form applied both to the TOP edge, so a
+        # negative one ran the top from -3 to w+3 and the shape spilled
+        # outside its own bounds on both sides. Around an eye that is
+        # dozens of lid and socket segments each three pixels too wide,
+        # colliding with their neighbours: the chaotic wedges.
+        #
+        # Positive insets the top, negative insets the bottom. The pair
+        # then mirrors vertically, which is what an upper-lid and a
+        # lower-lid segment need in order to tile.
         ls, rs = button.left_slope, button.right_slope
         if button.direction in ("top", "bottom"):
-            path.moveTo(ls, 0)
-            path.lineTo(w - rs, 0)
-            path.lineTo(w, h)
-            path.lineTo(0, h)
+            top_l = ls if ls > 0 else 0.0
+            bot_l = -ls if ls < 0 else 0.0
+            top_r = rs if rs > 0 else 0.0
+            bot_r = -rs if rs < 0 else 0.0
+            pts = [(top_l, 0.0), (w - top_r, 0.0),
+                   (w - bot_r, h), (bot_l, h)]
         else:
-            path.moveTo(0, ls)
-            path.lineTo(w, 0)
-            path.lineTo(w, h)
-            path.lineTo(0, h - rs)
-        path.closeSubpath()
+            left_t = ls if ls > 0 else 0.0
+            left_b = -ls if ls < 0 else 0.0
+            right_t = rs if rs > 0 else 0.0
+            right_b = -rs if rs < 0 else 0.0
+            pts = [(0.0, left_t), (w, right_t),
+                   (w, h - right_b), (0.0, h - left_b)]
+        # ROUNDNESS IS NOT DECORATION ON A RING. The eye tiles carry
+        # roundness 2 in the source and this branch dropped it, so every
+        # tile kept square corners -- and square corners on a circle are
+        # exactly where neighbouring tiles bite into each other. The
+        # polygon helper already rounds a corner list; the trapezoid is
+        # a corner list.
+        _polygon(path, pts, max(button.roundness, 0.0))
     elif shape == "hexagon":
         q = w * 0.25
         path.moveTo(q, 0)
@@ -236,37 +270,71 @@ class PickerView(QtWidgets.QWidget):
                     QtCore.QPointF(left + side * 0.44, top + side * 0.76),
                     QtCore.QPointF(left + side * 0.82, top + side * 0.24)])
 
-        if button.text:
+        # A SWITCH WITH NO STATIC LABEL STILL HAS A VALUE. The value used
+        # to be drawn inside `if button.text:`, so the six switches the
+        # studio left unlabelled -- head, neck, both FK arms, both arm
+        # IKs -- painted as empty boxes: they carry no `ui:text`, and the
+        # live space never got a chance to draw. The gate is now "is
+        # there anything to say", and the label and the value are placed
+        # separately so either can stand alone.
+        if button.text or button.value:
             font = QtGui.QFont(self._font or "Sans")
             font.setPixelSize(max(int(round(button.font_size)), 5))
             font.setBold(button.bold)
             box = QtCore.QRectF(2, 0, button.w - 4, button.h)
+            # Fit the PAIR, not just the label. Shrinking to fit "Foot"
+            # and then drawing "world" beside it is how "worldFoot" and
+            # "fooPV" happened.
+            both = " ".join(x for x in (button.text, button.value) if x)
             for _ in range(6):
-                if (QtGui.QFontMetricsF(font).horizontalAdvance(button.text)
-                        <= box.width() or font.pixelSize() <= 5):
+                if (QtGui.QFontMetricsF(font).horizontalAdvance(both)
+                        <= box.width() - (14.0 if button.value else 0.0)
+                        or font.pixelSize() <= 5):
                     break
                 font.setPixelSize(font.pixelSize() - 1)
             painter.setFont(font)
-            painter.setPen(QtGui.QColor(*button.text_color))
             align = {"left": QtCore.Qt.AlignLeft,
                      "right": QtCore.Qt.AlignRight}.get(
                          button.h_align, QtCore.Qt.AlignHCenter)
             if button.checkbox:
                 box.setLeft(box.left() + min(button.h - 4.0, 11.0) + 5.0)
                 align = QtCore.Qt.AlignLeft
-            painter.drawText(box, align | QtCore.Qt.AlignVCenter, button.text)
+
+            # THE TWO HALVES DO NOT OVERLAP. Both used to be drawn into
+            # the same rect with opposite alignments, which reads fine
+            # only while they happen not to meet in the middle -- and on
+            # this rig they met on every leg.
+            label_box, value_box, value_align, caret_x = box, None, None, 0.0
             if button.value:
-                painter.setPen(QtGui.QColor(*button.value_color))
+                metrics = QtGui.QFontMetricsF(font)
+                want = min(metrics.horizontalAdvance(button.value) + 14.0,
+                           box.width())
+                if not button.text:
+                    want = box.width()          # nothing to share with
+                    label_box = None
                 if align == QtCore.Qt.AlignRight:
                     value_box = QtCore.QRectF(box.left() + 12, box.top(),
-                                              box.width() - 12, box.height())
+                                              want - 12, box.height())
                     value_align = QtCore.Qt.AlignLeft
                     caret_x = box.left() + 5
+                    if label_box is not None:
+                        label_box = QtCore.QRectF(box)
+                        label_box.setLeft(box.left() + want)
                 else:
-                    value_box = QtCore.QRectF(box.left(), box.top(),
-                                              box.width() - 12, box.height())
+                    value_box = QtCore.QRectF(box.right() - want, box.top(),
+                                              want - 12, box.height())
                     value_align = QtCore.Qt.AlignRight
                     caret_x = box.right() - 7
+                    if label_box is not None:
+                        label_box = QtCore.QRectF(box)
+                        label_box.setRight(box.right() - want)
+
+            if button.text and label_box is not None:
+                painter.setPen(QtGui.QColor(*button.text_color))
+                painter.drawText(label_box, align | QtCore.Qt.AlignVCenter,
+                                 button.text)
+            if button.value:
+                painter.setPen(QtGui.QColor(*button.value_color))
                 painter.drawText(value_box,
                                  value_align | QtCore.Qt.AlignVCenter,
                                  button.value)
@@ -308,10 +376,42 @@ class PickerView(QtWidgets.QWidget):
             return "toggle"
         return "replace"
 
+    @staticmethod
+    def WantsMirror(modifiers):
+        """Whether this gesture should bring the opposite side along.
+
+        Alt, and Alt alone was free: Ctrl removes, Shift toggles, and
+        nothing else was reading it. It composes with both rather than
+        replacing them, so Alt+Shift adds a pair to a selection and
+        Alt+Ctrl takes a pair out of one.
+        """
+        return bool(modifiers & QtCore.Qt.AltModifier)
+
     def _PanelPos(self, event):
         scale = self._scale()
         pos = event.position() if hasattr(event, "position") else event.pos()
         return pos.x() / scale + self._ox, pos.y() / scale + self._oy
+
+    def _WithMirrors(self, buttons):
+        """The buttons, plus their opposite numbers when Alt is held.
+
+        The pairing is the studio picker's own <mirror> field, so this
+        reaches the controls whose names carry no side at all -- which
+        deriving L_/R_ from a name never would. A button with no mirror
+        simply comes through alone, and nothing is added twice.
+        """
+        if not getattr(self, "_wantMirror", False):
+            return buttons
+        byName = {}
+        for b in self._picker.visible(self._panel.id, edit=self._edit):
+            byName[b.id] = b
+        out, seen = [], set()
+        for b in buttons:
+            for candidate in (b, byName.get((b.mirror or "").rsplit("/", 1)[-1])):
+                if candidate is not None and id(candidate) not in seen:
+                    seen.add(id(candidate))
+                    out.append(candidate)
+        return out
 
     def mousePressEvent(self, event):
         if event.button() != QtCore.Qt.LeftButton:
@@ -320,6 +420,7 @@ class PickerView(QtWidgets.QWidget):
         self._press = self._PanelPos(event)
         self._band = None
         self._mode = self.ModeFor(event.modifiers())
+        self._wantMirror = self.WantsMirror(event.modifiers())
 
     def mouseReleaseEvent(self, event):
         if event.button() != QtCore.Qt.LeftButton or self._press is None:
@@ -332,7 +433,7 @@ class PickerView(QtWidgets.QWidget):
                                        band[2], band[3], self._modes,
                                        self._edit)
             if hits:
-                self.picked.emit(hits, self._mode)
+                self.picked.emit(self._WithMirrors(hits), self._mode)
             return
         # A click: an unavailable button is inert, and with nothing live
         # under the cursor an empty marquee still means "clear", which is
@@ -340,7 +441,7 @@ class PickerView(QtWidgets.QWidget):
         live = [b for b in self._picker.hits(self._panel.id, start[0],
                                              start[1], self._modes,
                                              self._edit) if b.live or self._edit]
-        self.picked.emit(live[:1], self._mode)
+        self.picked.emit(self._WithMirrors(live[:1]), self._mode)
 
     def mouseMoveEvent(self, event):
         if self._press is not None:
@@ -422,17 +523,24 @@ class PickerPanel(QtWidgets.QDialog):
     _sessions = sessionRegistry.SessionRegistry("picker panels")
 
     @classmethod
-    def GetInstance(cls, usdviewApi):
+    def GetInstance(cls, usdviewApi, undoStack=None):
         panel = cls._sessions.Get(usdviewApi)
         if panel is None:
-            panel = cls._sessions.Set(usdviewApi, cls(usdviewApi))
+            panel = cls._sessions.Set(
+                usdviewApi, cls(usdviewApi, undoStack=undoStack))
         else:
             panel._api = usdviewApi
+            if undoStack is not None:
+                panel._undo = undoStack
         return panel
 
-    def __init__(self, usdviewApi, parent=None):
+    def __init__(self, usdviewApi, parent=None, undoStack=None):
         super(PickerPanel, self).__init__(parent or usdviewApi.qMainWindow)
         self._api = usdviewApi
+        # The shared stack, so Ctrl+Z reaches a picker edit the same as
+        # it reaches a gizmo drag. None in a test that built the panel
+        # alone, and every edit below still works -- just unrecorded.
+        self._undo = undoStack
         # Every picker on the stage, one outer tab each, and the one
         # whose tab is showing. `_picker` stays the ACTIVE picker so the
         # single-character code below reads the same as it always did.
@@ -483,7 +591,17 @@ class PickerPanel(QtWidgets.QDialog):
                 ("Ctrl+Shift+A", self._SelectNone, "clear the selection"),
                 ("Ctrl+I", self._InvertSelection, "invert the selection"),
                 ("F", self._FrameSelection, "frame the selection"),
-        ):
+        ) + tuple(
+                # PANEL HOTKEYS. 1 and 2 swap between the two panels, and
+                # the digit matches the panel number an animator counts
+                # from -- pressing 1 for the first panel rather than 0 is
+                # what everyone tries first. Extended through 9 so a rig
+                # with more panels needs no new binding. Digits are free
+                # here -- the picker's own gestures are modifier-based
+                # and Q/W/E/R are forwarded to the viewport.
+                (str(d + 1), (lambda i: lambda: self._ShowPanel(i))(d),
+                 "show panel %d" % (d + 1))
+                for d in range(9)):
             # QAction lives in QtGui on Qt6 and QtWidgets on Qt5,
             # and usdview is built against either.
             factory = getattr(QtGui, "QAction", None) or QtWidgets.QAction
@@ -532,7 +650,7 @@ class PickerPanel(QtWidgets.QDialog):
         # IK/FK half it draws was refreshed on a switch click and nowhere
         # else, so a dial moved from anywhere ELSE -- the Avar Editor, a
         # gizmo on `avars:ikfk`, an undo, a scrub onto a keyed frame --
-        # left the dead half drawn. Measured in usdview on Biped_all:
+        # left the dead half drawn. Measured in usdview on Biped_stack:
         # after setting arm_l `avars:ikfk` back to 0 (FK) from outside,
         # the panel still drew L_ArmIK and L_ArmPV and still hid L_UpArm,
         # L_LoArm and L_Hand, and only reopening it corrected them.
@@ -740,20 +858,19 @@ class PickerPanel(QtWidgets.QDialog):
                 fn()
                 return
 
-    # Every avar a control or joint can carry a pose in. Clearing these
-    # IS the zero pose: `avars:t*`/`r*`/`rspin` fall back to 0 and
-    # `avars:s*` to 1, which is the schema's own definition of rest.
-    _POSE_AVARS = ("avars:tx", "avars:ty", "avars:tz",
-                   "avars:rx", "avars:ry", "avars:rz", "avars:rspin",
-                   "avars:sx", "avars:sy", "avars:sz")
 
     def _ZeroControls(self):
         """Zero the selected controls, or the whole rig if none are.
 
-        CLEAR, not Set(0). Clearing the opinion returns the attribute to
-        its schema fallback -- 0 for translate and rotate, 1 for scale --
-        which is the same zero pose, leaves no authored junk behind, and
-        shrinks the layer instead of growing it.
+        CLEAR, not Set(0), and that is what makes this right for the
+        channels that are not zero at zero. Clearing an opinion returns
+        the attribute to what the RIG says, which for `avars:t*`/`r*` is
+        the schema's 0 and for `avars:s*` its 1, but for a custom channel
+        is whatever default the rig authored -- `spaces:active` of 2 on a
+        knee's pole vector, `avars:space` of 1 on the eye target. Setting
+        zero would be wrong for all three; clearing is right for all
+        three, leaves no authored junk behind, and shrinks the layer
+        instead of growing it.
 
         ONE `Sdf.ChangeBlock` around the whole thing, and that is the
         difference between fast and unusable: the rig re-evaluates once
@@ -777,17 +894,30 @@ class PickerPanel(QtWidgets.QDialog):
             prims = [p for p in stage.Traverse()
                      if str(p.GetTypeName()) == "RigExecControl"]
 
+        # The exact attributes about to be cleared, gathered BEFORE the
+        # change block so the undo scope can snapshot them. Only the ones
+        # with an authored value: an attribute nobody has posed has
+        # nothing to clear and nothing to restore.
+        #
+        # Every POSE channel, not just the nine transform avars. A rig
+        # zeroed with a limb still in IK, a foot still rolled, a knee's
+        # pole vector switched out of its default space or an eye still
+        # locked to the look target is not zeroed, and each of those
+        # lives in a namespace of its own. avarEditorModel.PoseChannels
+        # draws the line, and draws it once for both panels.
+        doomed = []
+        for prim in prims:
+            for attr in avarEditorModel.PoseChannels(prim, stage):
+                if attr.HasAuthoredValue():
+                    doomed.append(attr.GetPath())
+
         cleared = 0
-        scope = self._UndoScope("Zero controls")
+        scope = self._UndoScope("Zero controls", doomed)
         try:
             with Sdf.ChangeBlock():
-                for prim in prims:
-                    for name in self._POSE_AVARS:
-                        attr = prim.GetAttribute(name)
-                        if (attr and attr.IsValid()
-                                and attr.HasAuthoredValue()):
-                            attr.Clear()
-                            cleared += 1
+                for path in doomed:
+                    stage.GetAttributeAtPath(path).Clear()
+                    cleared += 1
         finally:
             if scope is not None:
                 scope.__exit__(None, None, None)
@@ -801,13 +931,21 @@ class PickerPanel(QtWidgets.QDialog):
                " -- nothing was selected, so the whole rig" if whole
                else ""))
 
-    def _UndoScope(self, label):
-        """The shared undo scope, when the container provides one."""
-        maker = getattr(self, "EditScope", None)
-        if maker is None:
+    def _UndoScope(self, label, paths):
+        """One undo entry covering `paths`, when there is a stack.
+
+        `paths` is not optional and was the whole bug: this used to open
+        a scope over an EMPTY list, which snapshots nothing, records no
+        entry and leaves the stack untouched while the stage changes --
+        so Zero Controls, which zeroes the WHOLE RIG when nothing is
+        selected, could not be undone at all. A scope has to be told
+        what it is covering.
+        """
+        if self._undo is None or not paths:
             return None
         try:
-            scope = maker([], label)
+            scope = rigExecUndo.SpecScope(
+                self._stage(), paths, self._undo, label)
             scope.__enter__()
             return scope
         except Exception:
@@ -848,6 +986,9 @@ class PickerPanel(QtWidgets.QDialog):
                 self._ZeroControls()
                 return
             if buttons[0].attr_target:
+                # No position passed: _OnPicked has no event, and the
+                # cursor is still where the click landed, which is where
+                # a menu belongs anyway.
                 self._Switch(buttons[0])
                 return
 
@@ -993,10 +1134,44 @@ class PickerPanel(QtWidgets.QDialog):
                 view.update()
         return modes
 
-    def _Switch(self, button):
-        """Cycle an attribute button and write it."""
+    def _ShowPanel(self, index):
+        """Show the index'th panel of the picker that is showing.
+
+        The panels are an inner QTabWidget inside the per-picker outer
+        one, so this moves the inner selection and leaves which PICKER is
+        up alone -- pressing 1 should not jump you to another character's
+        Body panel.
+        """
+        inner = self._tabs.currentWidget()
+        if not isinstance(inner, QtWidgets.QTabWidget):
+            return
+        if 0 <= index < inner.count():
+            inner.setCurrentIndex(index)
+            self._status.setText("panel: %s" % inner.tabText(index))
+
+    def _Switch(self, button, at=None):
+        """Act on an attribute button: toggle two values, offer a menu of
+        more.
+
+        A space switch names three to five places -- world, chest, head,
+        hips -- and cycling through them meant an animator hunting for
+        `hips` clicked until it came round, reading the label each time.
+        So anything with more than two choices opens a MENU at the
+        cursor and jumps straight to the one picked. IK/FK has exactly
+        two and stays a toggle, which is the whole interaction for it.
+
+        `at` is where to pop the menu; without it the menu appears at the
+        button, which is what a keyboard or scripted call should get.
+        """
         stage = self._stage()
         target = button.attr_target
+        labels = (target or {}).get("enum") or []
+        if target and len(labels) > 2:
+            chosen = self._ChooseValue(button, labels, at)
+            if chosen is None:
+                return
+            self._WriteSwitch(button, chosen)
+            return
         prim = stage.GetPrimAtPath(Sdf.Path(target["path"]))
         if not prim or not prim.IsValid():
             return
@@ -1007,7 +1182,52 @@ class PickerPanel(QtWidgets.QDialog):
         value, label = button.next_value(attr.Get())
         if value is None:
             return
-        attr.Set(float(value))
+        self._ApplySwitch(button, target, attr, value, label)
+
+    def _ChooseValue(self, button, labels, at):
+        """A menu of the named spaces, returning the label picked."""
+        menu = QtWidgets.QMenu()
+        current = button.value
+        for name in labels:
+            action = menu.addAction(str(name))
+            action.setCheckable(True)
+            action.setChecked(name == current)
+        where = at if at is not None else QtGui.QCursor.pos()
+        picked = menu.exec(where)
+        return picked.text() if picked is not None else None
+
+    def _WriteSwitch(self, button, label):
+        """Write the value whose label the animator picked."""
+        stage = self._stage()
+        target = button.attr_target
+        prim = stage.GetPrimAtPath(Sdf.Path(target["path"]))
+        if not prim or not prim.IsValid():
+            return
+        attr = prim.GetAttribute(target["attr"])
+        if not attr or not attr.IsValid():
+            attr = prim.CreateAttribute(target["attr"],
+                                        Sdf.ValueTypeNames.Float)
+        labels = target.get("enum") or []
+        if label not in labels:
+            return
+        index = labels.index(label)
+        value = index
+        if target.get("invert"):
+            value = len(labels) - 1 - index
+        self._ApplySwitch(button, target, attr, value, label)
+
+    def _ApplySwitch(self, button, target, attr, value, label):
+        """Write one switch value and let every view catch up."""
+        # An IK/FK switch is a pose change like any other -- it decides
+        # which half of a limb drives the joints -- so it belongs on the
+        # same stack as the drag that follows it.
+        scope = self._UndoScope("Switch %s" % target["attr"],
+                                [attr.GetPath()])
+        try:
+            attr.Set(float(value))
+        finally:
+            if scope is not None:
+                scope.__exit__(None, None, None)
         button.value = label
         # The limb just changed mode, so the other half of its controls
         # should appear and this half disappear.
@@ -1029,6 +1249,51 @@ class PickerPanel(QtWidgets.QDialog):
         for view in self._views:
             view.set_selected(paths)
 
+    # -- keys -----------------------------------------------------------
+
+    def _FrameSelection(self):
+        """Frame the selection in the viewport. True if it was asked for.
+
+        Through usdview's OWN menu action rather than appController.
+        _frameSelection(): the action is a named child of the main window
+        and therefore public, it is the same entry point the Camera menu
+        and the viewport's F both end at, and it carries its own enabled
+        state -- so a picker press with nothing selected does nothing
+        rather than framing an empty bound.
+        """
+        main = getattr(self._api, "qMainWindow", None)
+        if main is None:
+            return False
+        actionType = getattr(QtGui, "QAction", None) or QtWidgets.QAction
+        action = main.findChild(actionType, "actionFrame_Selected")
+        if action is None or not action.isEnabled():
+            return False
+        action.trigger()
+        return True
+
+    def keyPressEvent(self, event):
+        """F frames the selection, as it does over the viewport.
+
+        It does NOT reach here on its own. usdview routes F through one
+        application-wide AppEventFilter, and that filter hands the key to
+        appController.processNavKeyEvent only for widgets in the main
+        window; the picker is a QDialog -- its own top-level window -- so
+        the key arrived and nothing framed. Selecting in the picker and
+        pressing F is the same gesture as selecting in the viewport and
+        pressing F, so it does the same thing.
+
+        Bare F only. Any modifier is somebody else's shortcut, and a key
+        we did not act on goes back to Qt rather than being swallowed --
+        a QLineEdit inside the panel still receives its own F, because
+        the focused widget sees the key before the dialog does.
+        """
+        if (event.key() == QtCore.Qt.Key_F
+                and event.modifiers() == QtCore.Qt.NoModifier
+                and self._FrameSelection()):
+            event.accept()
+            return
+        super(PickerPanel, self).keyPressEvent(event)
+
 
 class _NullContext(object):
     def __enter__(self):
@@ -1039,7 +1304,7 @@ class _NullContext(object):
 
 
 def OpenPickerPanel(usdviewApi, undoStack=None):
-    panel = PickerPanel.GetInstance(usdviewApi)
+    panel = PickerPanel.GetInstance(usdviewApi, undoStack=undoStack)
     panel.Reload()
     panel.show()
     panel.raise_()

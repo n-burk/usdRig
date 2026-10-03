@@ -560,6 +560,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             digest += pathText(interpolatorPath);
             digest += '|';
             appendRelTargets(interpolator, "rigExec:driver", false);
+            appendRelTargets(interpolator, "rigExec:driverAttributes", false);
             for (const char *name : {"rigExec:kernel", "rigExec:twistAxis",
                                      "rigExec:regularization",
                                      "rigExec:normalize",
@@ -584,6 +585,44 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         }
         digest += '|';
 
+    // Space switches. Everything the compile resolves once is epoch
+    // identity: which prim is switched, the ordered source list, the labels
+    // parallel to it, where the active index is read from, and the masks --
+    // all of which decide the shape of the taps and the dependency order
+    // between switches. inputs:activeSpace is deliberately NOT hashed: it is
+    // the animated channel, read per frame like any avar, and an edit to it
+    // must not rebuild the epoch.
+    for (const UsdPrim &prim :
+         UsdPrimRange(_stage->GetPrimAtPath(_rigPath))) {
+        if (prim.GetTypeName() != "RigExecSpaceSwitch") continue;
+        digest += prim.GetPath().GetString();
+        digest += '|';
+        appendRelTargets(prim, "rigExec:target", false);
+        appendRelTargets(prim, "rigExec:sources", false);
+        appendRelTargets(prim, "rigExec:activeSpaceAttribute", false);
+        // The space decides a tap pair and the dependency order between
+        // switches, so it is epoch identity like the sources it joins.
+        appendRelTargets(prim, "rigExec:space", false);
+        for (const char *name : {"rigExec:spaceLabels",
+                                 "rigExec:rotationFilters",
+                                 "rigExec:twistAxis",
+                                 "inputs:affectTranslationX",
+                                 "inputs:affectTranslationY",
+                                 "inputs:affectTranslationZ",
+                                 "inputs:affectRotationX",
+                                 "inputs:affectRotationY",
+                                 "inputs:affectRotationZ",
+                                 "inputs:affectScaleX",
+                                 "inputs:affectScaleY",
+                                 "inputs:affectScaleZ",
+                                 "inputs:sourceWeights"}) {
+            appendScalar(prim, name);
+        }
+        digest += '|';
+    }
+    digest += '|';
+
+    stampDigestRegion("Digest.OutputSets");
         stampDigestRegion("Digest.OutputSets");
     }
     // Solver->joint wiring is epoch identity (view-free extraction,
@@ -1528,6 +1567,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             // Declared dependency wiring and read phases.
             appendRelTargets(prim, "rigExec:transform", true);
             appendRelTargets(prim, "rigExec:transformSpace", true);
+            // The carry decides a tap and a slot, so it is epoch
+            // identity exactly as the measuring space is.
+            appendRelTargets(prim, "rigExec:space", true);
             appendRelTargets(prim, "rigExec:referenceTransform", true);
             appendRelTargets(prim, "rigExec:referenceTransformSpace", true);
             appendRelTargets(prim, "rigExec:driverTransforms", false);

@@ -1997,13 +1997,18 @@ TestPurityAuditNamesEveryUnit()
 
 }  // namespace
 
-// The biped: twelve float chain-driven inputs over the foot movers, and
+// The biped: sixteen float chain-driven inputs over the foot movers, and
 // the rig the hook unlocks. Warmed frames match live with zero parity
 // mismatches -- the same bar as the fixture, on a production rig.
+//
+// The counts are the DELIVERED rig's. They are asserted rather than
+// printed because a chain that stops binding is a chain the warming job
+// silently stops sampling, and the parity check below would then compare
+// two runs that agree about the wrong thing.
 void
 TestBipedWarmsBitIdentical(const std::string &examplesDir,
                            const std::string &stageFile = "Biped_anim.usda",
-                           size_t expectChains = 12)
+                           size_t expectChains = 16)
 {
     const std::string stagePath = examplesDir + "/biped/" + stageFile;
     UsdStageRefPtr stage = UsdStage::Open(stagePath);
@@ -2082,7 +2087,7 @@ void
 TestStackAnimWarmsBitIdentical(const std::string &examplesDir)
 {
     TestBipedWarmsBitIdentical(examplesDir, "Biped_stack_anim.usda",
-                               /*expectChains=*/250);
+                               /*expectChains=*/313);
 }
 
 // The blend face (examples/04_BlendShapeFace.usda) warms bit-identically:

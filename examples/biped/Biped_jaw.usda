@@ -1,0 +1,152 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = "Automatic jaw compression: how far the jaw pushes the teeth up into the face, added onto face:jawCompression, so closing the jaw past rest compresses the mid-face, nose and mouth. Adds prims and overrides nothing, so dropping this sublayer leaves the character exactly as it was."
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        over "Movers"
+        {
+            reorder nameChildren = ["param_follow", "bendy_geo", "skin_body_geo", "bodyWires_geo", "squetch_geo", "mouth_geo", "cheeks_geo", "brows_geo", "eyes_r_geo", "eyes_l_geo", "lashes_geo", "bendy_pose", "face_shapes_geo", "shapes_body_geo", "headwire_follow_pose", "jaw_drivers", "face_psd_drivers", "squetch_drivers", "breathing_drivers", "cheeks_drivers", "brows_drivers", "mouth_drivers", "eyes_l_drivers", "eyes_r_drivers", "pose_drivers", "twist_aims", "eyes_r_pose", "eyes_l_pose", "mouth_pose", "face_eyes", "eye_converge_drivers", "face_brow_joints", "face_inner_joints", "nose_bridge_compress_scale_w", "face_brow_pivots", "face_pivots", "nose_compress_w", "nose_bridge_compress_w", "nose_bridge_follow_w", "face_mid_compress_w", "teeth_tongue_drivers", "teeth_upper_drivers", "face_outer_joints", "eye_socket_follow_drivers", "bodyWires_pose", "neck_to_bind", "girdles", "spine_to_bind", "hips_follow", "leg_fk_ball_drivers", "ball_l_bind_scAim", "ankle_l_bind_scAim", "ballRoll_l_down_rc", "ballRoll_l_down_w", "ballRoll_l_up_rc", "ballRoll_l_up_w", "toe_l_roll_rc", "toe_l_roll_w", "heel_l_roll_rc", "heel_l_roll_w", "bankOut_l_pivot_rc", "bankOut_l_pivot_w", "bankIn_l_pivot_rc", "bankIn_l_pivot_w", "ball_r_bind_scAim", "ankle_r_bind_scAim", "ballRoll_r_down_rc", "ballRoll_r_down_w", "ballRoll_r_up_rc", "ballRoll_r_up_w", "toe_r_roll_rc", "toe_r_roll_w", "heel_r_roll_rc", "heel_r_roll_w", "bankOut_r_pivot_rc", "bankOut_r_pivot_w", "bankIn_r_pivot_rc", "bankIn_r_pivot_w", "hand_l_follow", "hand_r_follow", "spine_mid_follow", "foot_roll_total"]
+            def Scope "jaw_drivers"
+            {
+                reorder nameChildren = ["jaw_ctl_face_jawCompression_0_add", "jaw_compression_auto_avars_compression_4_multiply", "jaw_compression_auto_avars_compression_3_clamp", "jaw_compression_auto_avars_compression_2_add", "jaw_compression_auto_avars_compression_1_curve", "jaw_compression_auto_avars_compression_0_blend"]
+                def RigExecFloatMathMover "jaw_compression_auto_avars_compression_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rx>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/jaw_compression_auto.avars:compression>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "jaw_compression_auto_avars_compression_1_curve" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float2[] inputs:keys = [(-45, -6.65074), (-40, -6.103934), (-35, -5.496969), (-30, -4.8344655), (-25, -4.1214647), (-20, -3.3633938), (-15, -2.5660217), (-10, -1.735417), (-5, -0.87790096), (0, 0), (5, 0.89160466), (10, 1.7901273), (15, 2.6887295), (20, 3.5805728), (25, 4.4588695), (30, 5.3169346), (35, 6.1482387), (40, 6.9464545), (45, 7.7055073), (50, 8.4196205), (55, 9.083359), (60, 9.69167), (65, 10.239926), (70, 10.723954), (75, 11.14007), (80, 11.485106), (85, 11.756438), (90, 11.952)]
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/jaw_compression_auto.avars:compression>
+                    uniform token rigExec:operation = "curve"
+                }
+
+                def RigExecFloatMathMover "jaw_compression_auto_avars_compression_2_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ty>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/jaw_compression_auto.avars:compression>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "jaw_compression_auto_avars_compression_3_clamp" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:max = 1000000
+                    float inputs:min = 0
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/jaw_compression_auto.avars:compression>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "jaw_compression_auto_avars_compression_4_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 0.5
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/jaw_compression_auto.avars:compression>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "M_Jaw_face_jawCompression_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/jaw_compression_auto.avars:compression>
+                    rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.face:jawCompression>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            over "mouth_geo"
+            {
+            }
+        }
+
+        over "Weights"
+        {
+            over "mouth"
+            {
+            }
+        }
+
+        def RigExecControl "Main"
+        {
+            def RigExecControl "Shot"
+            {
+                def RigExecControl "Aux"
+                {
+                    over "Controls"
+                    {
+                        over "M_Body"
+                        {
+                            over "M_Torso"
+                            {
+                                over "M_Chest"
+                                {
+                                    over "M_ChestTop"
+                                    {
+                                        custom token guide:shape = "circle"
+
+                                        over "M_Neck"
+                                        {
+                                            custom double avars:space = 0
+
+                                            over "M_Head"
+                                            {
+                                                over "M_HeadGimbal"
+                                                {
+                                                    over "skull_follow"
+                                                    {
+                                                        over "M_Skull"
+                                                        {
+                                                            custom double avars:space = 0
+
+                                                            over "M_LoFace"
+                                                            {
+                                                                def RigExecControl "jaw_compression_auto" (
+                                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                                )
+                                                                {
+                                                                    custom double avars:compression = 0 (
+                                                                        doc = "How far the jaw pushes the teeth up into the face, as a share of full compression. Computed from the jaw; do not animate."
+                                                                    )
+                                                                    double guide:scaleX = 0
+                                                                    double guide:scaleY = 0
+                                                                    double guide:scaleZ = 0
+                                                                    uniform token purpose = "default"
+                                                                    matrix4d rest:space = ( (1, 4.1048567562091053e-25, 0, 0), (2.3525252952210547e-25, 1, 0, 0), (1.0339757656912846e-25, 0, 1, 0), (-1.0587911840678754e-22, 0, 0, 1) )
+                                                                }
+
+                                                                over "M_Jaw"
+                                                                {
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

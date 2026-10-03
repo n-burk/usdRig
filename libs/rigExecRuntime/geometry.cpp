@@ -414,6 +414,11 @@ struct RrGeoMoverParameters {
     bool enabled = true;
     bool valid = false;
     RrMat4d transform;
+    // rigExec:weightBlend == "radial": a partial weight takes a fraction
+    // of the rotation about the transform's own pivot instead of a
+    // fraction of the resulting position. Replayed from the recorded
+    // read, because there is no stage here to ask.
+    bool radialWeight = false;
     RrGeoWeightPacket weights;
     std::vector<RrVec3f> blendDeltas;
     bool blendSurfaceFrame = false;
@@ -453,6 +458,7 @@ struct RrGeoMoverParameters {
     bool operator==(const RrGeoMoverParameters &o) const
     {
         return kind == o.kind && enabled == o.enabled && valid == o.valid &&
+               radialWeight == o.radialWeight &&
                transform == o.transform && weights == o.weights &&
                blendDeltas == o.blendDeltas &&
                blendSurfaceFrame == o.blendSurfaceFrame &&
@@ -529,6 +535,75 @@ RrGeoApplyWeightedMatrix(const RrVec3d &point, const RrMat4d &transform,
         return moved;
     }
     return point + (moved - point) * weight;
+}
+
+// A fraction of the transform's ROTATION about the pivot it turns about,
+// not a fraction of the resulting position. The USD twin is
+// RigExecPartialTransform in rigExecMath/geometryKernels.cpp; the two must
+// agree bit for bit, so this is a transcription of it and not a second
+// derivation. See that function for why the pivot has to be recovered from
+// the screw axis rather than taken from the translation.
+RrMat4d
+RrGeoPartialTransform(const RrMat4d &transform, double weight)
+{
+    const double w = RrClamp(weight, 0.0, 1.0);
+    if (w <= 0.0) {
+        return RrMat4d(1.0);
+    }
+    if (w >= 1.0) {
+        return transform;
+    }
+
+    // Row lengths are the scale; dividing them out leaves the rotation.
+    RrMat4d basis = transform;
+    basis.SetTranslateOnly(RrVec3d(0.0, 0.0, 0.0));
+    RrVec3d scale(1.0, 1.0, 1.0);
+    for (int axis = 0; axis < 3; ++axis) {
+        const RrVec3d row(basis[axis][0], basis[axis][1], basis[axis][2]);
+        const double length = row.GetLength();
+        if (length > 1e-12) {
+            scale[axis] = length;
+            const RrVec3d unit = row / length;
+            basis[axis][0] = unit[0];
+            basis[axis][1] = unit[1];
+            basis[axis][2] = unit[2];
+        }
+    }
+
+    const RrRotation rotation = basis.ExtractRotation();
+    const RrVec3d axis = rotation.GetAxis().GetNormalized();
+    const double angle = rotation.GetAngle();
+    const RrVec3d translation = transform.ExtractTranslation();
+
+    RrMat4d scaled(1.0);
+    scaled.SetScale(RrVec3d(1.0 + (scale[0] - 1.0) * w,
+                            1.0 + (scale[1] - 1.0) * w,
+                            1.0 + (scale[2] - 1.0) * w));
+
+    RrMat4d out(1.0);
+    out.SetRotate(RrRotation(axis, angle * w));
+    out = scaled * out;
+
+    // Below about a tenth of a degree there is no meaningful axis to turn
+    // about and the chord and the arc agree to within float noise.
+    const double radians = RrDegreesToRadians(angle);
+    if (std::abs(std::sin(0.5 * radians)) < 1e-4) {
+        out.SetTranslateOnly(translation * w);
+        return out;
+    }
+
+    // Split the translation into the part along the axis and the part
+    // across it, which is (I - R) applied to the pivot and so names it.
+    const double along = RrDot(translation, axis);
+    const RrVec3d across = translation - axis * along;
+    const double half = 0.5 / std::tan(0.5 * radians);
+    const RrVec3d pivot = across * 0.5 + RrCross(axis, across) * half;
+
+    // p' = R_w (p - pivot) + pivot + w * along * axis.
+    const RrMat4d partial = out;
+    out.SetTranslateOnly(pivot - partial.TransformDir(pivot) +
+                         axis * (along * w));
+    return out;
 }
 
 bool
@@ -749,6 +824,23 @@ RrGeoApplyMatrixKernelRange(const RrGeoMoverParameters &p,
                            RrVec3f *pts)
 {
     static const bool useSimd = RrGeoGetenvBool("RIGEXEC_ENABLE_SIMD", true);
+    if (p.radialWeight) {
+        // Factored per WEIGHT rather than per point: a painted falloff is
+        // mostly a handful of distinct values. Mirrors
+        // RigExecApplyMatrixKernelRange exactly.
+        double cachedWeight = -1.0;
+        RrMat4d partial(1.0);
+        for (size_t i = begin; i < end; ++i) {
+            const double w = envelope[i];
+            if (w != cachedWeight) {
+                partial = RrGeoPartialTransform(p.transform, w);
+                cachedWeight = w;
+            }
+            pts[i] = RrGeoToVec3f(partial.TransformAffine(
+                RrGeoToVec3d(pts[i])));
+        }
+        return;
+    }
     if (useSimd) {
         RrGeoApplyWeightedMatrixSimd(
             pts + begin, pts + begin, envelope + begin, end - begin,
@@ -784,6 +876,24 @@ RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts)
             return true;  // at rest every weighted point maps to itself
         }
         RrVec3f *data = pts->data();
+        if (p.radialWeight) {
+            // The sparse walk takes the same arc the dense kernel does; a
+            // painted cluster falloff is almost always sparse, so this is
+            // the branch every radial cluster on a real rig reaches.
+            double cachedWeight = -1.0;
+            RrMat4d partial(1.0);
+            for (size_t k = 0; k < w.indices.size(); ++k) {
+                const double value = w.values[k];
+                if (value != cachedWeight) {
+                    partial = RrGeoPartialTransform(p.transform, value);
+                    cachedWeight = value;
+                }
+                RrVec3f &point = data[size_t(w.indices[k])];
+                point = RrGeoToVec3f(
+                    partial.TransformAffine(RrGeoToVec3d(point)));
+            }
+            return true;
+        }
         for (size_t k = 0; k < w.indices.size(); ++k) {
             RrVec3f &point = data[size_t(w.indices[k])];
             point = RrGeoToVec3f(RrGeoApplyWeightedMatrix(
@@ -2349,6 +2459,102 @@ RrGeoMeasureInSpace(const RrMat4d &transform, const RrMat4d &space)
     return m;
 }
 
+// inverse(space) * transform: the same offset, conjugated into the space's
+// CURRENT frame. The USD-side twin is RigExecMeasureInPosedSpace in
+// moverGraph.h; what rigExec:driverDeltaFrame = "posed" asks a wire for.
+// Same arithmetic in the same order, so the two agree bit for bit.
+RrMat4d
+RrGeoMeasureInPosedSpace(const RrMat4d &transform, const RrMat4d &space)
+{
+    RrMat4d m = space.GetInverse() * transform;
+    m[0][3] = 0.0;
+    m[1][3] = 0.0;
+    m[2][3] = 0.0;
+    m[3][3] = 1.0;
+    return m;
+}
+
+// The scale a posed frame carries: the length of each column of its linear
+// part. The USD-side twin is RigExecFrameScale in moverGraph.h and the two
+// must agree to the last bit, so the arithmetic here is the same arithmetic
+// in the same order. A frame nothing has scaled returns (1, 1, 1) and every
+// caller skips its correction outright, which is what keeps an unscaled rig
+// bit for bit what it was.
+RrVec3d
+RrGeoFrameScale(const RrMat4d &frame)
+{
+    RrVec3d scale(1.0, 1.0, 1.0);
+    for (size_t c = 0; c < 3; ++c) {
+        const double length =
+            RrVec3d(frame[0][c], frame[1][c], frame[2][c]).GetLength();
+        if (length > 0.0) {
+            scale[c] = length;
+        }
+    }
+    return scale;
+}
+
+// The offset a cluster applies, in the frame its POINTS are already in.
+// The USD-side twin is RigExecClusterInPointFrame in moverGraph.h; the two
+// are compared bit for bit, so this is the same arithmetic in the same
+// order, including which of the two branches is taken.
+//
+// \p carry is rigExec:space's rest->pose map -- the rig's own carry,
+// normally a TRS master's -- and conjugating by it is what makes a
+// post-skin cluster ride a moved master instead of shearing the mesh by
+// T*R - T. A null \p carry falls back to conjugating by the space's own
+// SCALE, which is all the correction there was before a carry could be
+// named; the two never compose, because a named carry already holds the
+// master's scale. A rig naming no space under an unscaled master measures
+// (1, 1, 1) and \p m comes back untouched.
+RrMat4d
+RrGeoClusterInPointFrame(const RrMat4d &m, const RrMat4d &space,
+                         bool posedPoints, const RrMat4d *carry)
+{
+    if (!posedPoints) {
+        return m;
+    }
+    RrMat4d out;
+    if (carry) {
+        out = carry->GetInverse() * m * *carry;
+    } else {
+        const RrVec3d k = RrGeoFrameScale(space);
+        if (k == RrVec3d(1.0, 1.0, 1.0)) {
+            return m;
+        }
+        RrMat4d scale(1.0), unscale(1.0);
+        scale.SetScale(k);
+        unscale.SetScale(RrVec3d(1.0 / k[0], 1.0 / k[1], 1.0 / k[2]));
+        out = unscale * m * scale;
+    }
+    out[0][3] = 0.0;
+    out[1][3] = 0.0;
+    out[2][3] = 0.0;
+    out[3][3] = 1.0;
+    return out;
+}
+
+// Carries a transform-driven wire's two control polygons into the frame
+// its POINTS are already in. The USD-side twin is RigExecCarryWireCurves in
+// moverGraph.h: the applier adds posed(u) - rest(u), a difference computed
+// in the asset's uncarried frame and added to points a skin has already
+// carried by the master, so both polygons are transformed by the carry and
+// the difference becomes d * M_linear. NURBS evaluation commutes with an
+// affine map, so the bind table stays valid. Called only when a carry was
+// NAMED, and then in place of the scale-only correction, which the carry
+// already holds.
+void
+RrGeoCarryWireCurves(std::vector<RrVec3f> *rest, std::vector<RrVec3f> *posed,
+                     const RrMat4d &carry)
+{
+    for (RrVec3f &p : *rest) {
+        p = RrGeoToVec3f(carry.TransformAffine(RrGeoToVec3d(p)));
+    }
+    for (RrVec3f &p : *posed) {
+        p = RrGeoToVec3f(carry.TransformAffine(RrGeoToVec3d(p)));
+    }
+}
+
 bool
 RrGeoApplyRevisionKernel(
     int op, const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
@@ -2561,6 +2767,10 @@ struct RrGeometryScratch {
         bool influencesChanged = false;
         RrMat4d transform;
         bool haveTransform = false;
+        // rigExec:space's matrix this run and whether one was named, out
+        // of the fold, for the cluster conjugation and the wire assembly.
+        RrMat4d carry = RrMat4d(1.0);
+        bool haveCarry = false;
         std::vector<float> rows;
         std::vector<RrGeoScaledDualQuat> palette;
         std::vector<Chunk> chunks;
@@ -3379,6 +3589,15 @@ RrGeoAssembleMatrix(const RrGeoAssembleInputs &in,
         params->valid = true;
         return;
     }
+    // rigExec:weightBlend, exactly as RigExecAssembleMatrixParameters
+    // reads it: "radial" turns a fraction of the rotation about the
+    // transform's own pivot, "linear" -- the fallback -- blends the
+    // position. A recorded read, so the runtime sees what the bake saw.
+    params->radialWeight =
+        RrGeoReadToken(in.program, in.scratch,
+                       RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
+                                        "rigExec:weightBlend"),
+                       false, "linear") == "radial";
     if (!in.rev->haveTransform) {
         return;
     }
@@ -3589,15 +3808,70 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
         const auto pick = [](size_t count, size_t j) {
             return count <= 1 ? size_t(0) : j % count;
         };
+        // Which frame the points this wire moves are already in, exactly as
+        // RigExecAssembleParameters reads it: "posed" is a wire that runs
+        // after the skin on its target, "rest" -- the fallback -- one that
+        // runs before it. See rigExec:pointFrame in the schema.
+        const bool posedPoints =
+            RrGeoReadToken(in.program, in.scratch,
+                           RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
+                                            "rigExec:pointFrame"),
+                           false, "rest") == "posed";
+        // Which frame the driver's offset from its space is applied in,
+        // exactly as RigExecAssembleParameters reads it: "local" (the
+        // fallback) is T * S^-1, "posed" conjugates that into the space's
+        // current frame. Both tokens are recorded reads, so the runtime
+        // sees what the bake saw.
+        const bool posedDelta =
+            RrGeoReadToken(in.program, in.scratch,
+                           RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
+                                            "rigExec:driverDeltaFrame"),
+                           false, "local") == "posed";
+        // MEASURE THE OFFSET IN THE ASSET'S OWN UNITS, and carry only the
+        // finished displacement out of them. The curve, its bind distances
+        // and the mesh rest points are authored at the asset's scale, while
+        // the driver's offset from its space arrives in whatever scale that
+        // space is in: under a master scaled to two the offset is twice as
+        // long while the curve it moves has not grown. A space nothing has
+        // scaled measures one, so both corrections vanish and an unscaled
+        // rig is untouched.
+        const auto measured = [&](size_t first, size_t count,
+                                  size_t spaceFirst, size_t spaceCount,
+                                  size_t j, RrVec3d *spaceScale) {
+            RrMat4d m = table[first + pick(count, j)];
+            if (spaceCount > 0) {
+                RrMat4d space = table[spaceFirst + pick(spaceCount, j)];
+                const RrVec3d k = RrGeoFrameScale(space);
+                if (spaceScale) {
+                    *spaceScale = k;
+                }
+                if (k != RrVec3d(1.0, 1.0, 1.0)) {
+                    RrMat4d unscale(1.0);
+                    unscale.SetScale(
+                        RrVec3d(1.0 / k[0], 1.0 / k[1], 1.0 / k[2]));
+                    m = m * unscale;
+                    space = space * unscale;
+                }
+                m = posedDelta ? RrGeoMeasureInPosedSpace(m, space)
+                               : RrGeoMeasureInSpace(m, space);
+            }
+            return m;
+        };
+        // With rigExec:space named the displacement is carried out by the
+        // rig's whole rest->pose map instead of by the space's scale alone:
+        // both polygons are transformed by the carry after the loop, and
+        // the scale-only correction is NOT applied beside it, exactly as
+        // RigExecAssembleParameters decides it. See RrGeoCarryWireCurves.
+        const bool carried = posedPoints && in.rev->haveCarry;
         params->auxPoints.resize(params->restPoints.size());
         for (size_t j = 0; j < params->restPoints.size(); ++j) {
             RrVec3f &rest = params->restPoints[j];
+            // The base motion cancels out of the displacement -- both
+            // curves carry it -- so it stays in the asset's units with the
+            // rest curve it moves.
             if (bt > 0) {
-                RrMat4d b = table[t + s + pick(bt, j)];
-                if (bs > 0) {
-                    b = RrGeoMeasureInSpace(
-                        b, table[t + s + bt + pick(bs, j)]);
-                }
+                const RrMat4d b =
+                    measured(t + s, bt, t + s + bt, bs, j, nullptr);
                 const float wb = baseWeights.empty()
                     ? 1.0f
                     : baseWeights[pick(baseWeights.size(), j)];
@@ -3605,18 +3879,28 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
                     b.TransformAffine(RrGeoToVec3d(rest)));
                 rest = rest + (moved - rest) * wb;
             }
-            RrMat4d m = table[pick(t, j)];
-            if (s > 0) {
-                m = RrGeoMeasureInSpace(m, table[t + pick(s, j)]);
-            }
+            RrVec3d scale(1.0, 1.0, 1.0);
+            const RrMat4d m = measured(0, t, t, s, j, &scale);
             const float w = weights.empty()
                 ? 1.0f
                 : weights[pick(weights.size(), j)];
             const RrVec3f moved = RrGeoToVec3f(
                 m.TransformAffine(RrGeoToVec3d(rest)));
-            params->auxPoints[j] = rest + (moved - rest) * w;
+            RrVec3f displacement = (moved - rest) * w;
+            if (posedPoints && !carried) {
+                displacement = RrVec3f(displacement[0] * float(scale[0]),
+                                       displacement[1] * float(scale[1]),
+                                       displacement[2] * float(scale[2]));
+            }
+            params->auxPoints[j] = rest + displacement;
+        }
+        if (carried) {
+            RrGeoCarryWireCurves(&params->restPoints, &params->auxPoints,
+                                 in.rev->carry);
         }
     } else {
+        // A curve-driven wire's posed polygon comes from its own chain, so
+        // there is no uncarried delta to carry: a named space is left alone.
         RrGeoReadBindingVec3fArray(in, in.wire->binding.driverCurvePoints,
                                    false, &params->auxPoints);
     }
@@ -3887,6 +4171,24 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
         }
         rev->transform = *matrix;
     }
+    // rigExec:space, out of the same phase-resolved matrix table the
+    // transform came from, so this is what the baked fold reads. Held on
+    // the revision for the assembly, exactly as the baked GeomRevision
+    // holds it.
+    rev->haveCarry = wire.carrySpaceSlot >= 0;
+    if (rev->haveCarry) {
+        const RrMat4d *carry = nullptr;
+        if (!matrixAt(wire.carrySpaceSlot, &carry)) {
+            if (error) {
+                *error = "carry space slot names no provider matrix";
+            }
+            return false;
+        }
+        if (rev->carry != *carry) {
+            rev->carry = *carry;
+            changed = true;
+        }
+    }
     // A geometry-domain constraint's solved delta lands here, after the
     // provider read and before the phase substitution: the pose family
     // publishes per-frame deltaValues/deltaPresent on the store (the baked
@@ -3935,12 +4237,25 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
             }
             return false;
         }
+        const bool clusterPosedPoints =
+            RrGeoReadToken(program, scratch,
+                           RrGeoMoverAttrId(program, scratch, wire,
+                                            "rigExec:pointFrame"),
+                           false, "rest") == "posed";
+        // The reference refines the SPACE first, then the carry consumes
+        // it -- the twin of the same two steps in bakedGeometry.cpp.
         RrMat4d measuredSpace = *space;
         if (hasReference && wire.influenceSlots.size() > 1 &&
             !normalize(1, &measuredSpace)) {
             return false;
         }
-        rev->transform = RrGeoMeasureInSpace(rev->transform, measuredSpace);
+        // rigExec:space, as read above. A POINTER, because a revision
+        // naming no carry must take the untouched branch and not one
+        // multiplied by an identity.
+        const RrMat4d *carry = rev->haveCarry ? &rev->carry : nullptr;
+        rev->transform = RrGeoClusterInPointFrame(
+            RrGeoMeasureInSpace(rev->transform, measuredSpace), measuredSpace,
+            clusterPosedPoints, carry);
     }
     if (rev->influences.size() != wire.influenceSlots.size()) {
         if (error) {

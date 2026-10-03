@@ -911,7 +911,8 @@ RigExecImagingBridge::_IsControlSpaceJoint(const SdfPath &path) const
         // pivot can nest under another pivot (a follow above a compression).
         static const TfToken kControl("RigExecControl");
         static const TfToken kJoint("RigExecJoint");
-        if (const UsdPrim prim = _stage->GetPrimAtPath(path)) {
+        const UsdPrim prim = _stage->GetPrimAtPath(path);
+        if (prim) {
             for (UsdPrim up = prim.GetParent(); up; up = up.GetParent()) {
                 const TfToken &type = up.GetTypeName();
                 if (type == kControl) {
@@ -920,6 +921,38 @@ RigExecImagingBridge::_IsControlSpaceJoint(const SdfPath &path) const
                 }
                 if (type != kJoint) {
                     break;
+                }
+            }
+        }
+        // ... or any control BELOW it, through a chain of joints.
+        //
+        // Looking up alone misses the case this publication exists for. A
+        // limb bend or spine bend follow hangs off the Controls SCOPE, not
+        // off a control -- there is nothing above it to find -- and carries
+        // the bend control as its child. That control composes against this
+        // joint's frame, a constraint writes that frame, and without it
+        // published the manipulator reads the joint's REST frame, decides
+        // the control has no trustworthy parent, and refuses the gizmo: the
+        // bend controls could be selected and dragged from the avar editor
+        // but had no viewport manipulator at all.
+        //
+        // Having a control beneath it is the property that actually matters
+        // -- "a control composes against this joint" -- where being beneath
+        // a control is only one way to end up that way.
+        if (!nested && prim) {
+            std::vector<UsdPrim> pending(1, prim);
+            while (!pending.empty() && !nested) {
+                const UsdPrim here = pending.back();
+                pending.pop_back();
+                for (const UsdPrim &child : here.GetChildren()) {
+                    const TfToken &type = child.GetTypeName();
+                    if (type == kControl) {
+                        nested = true;
+                        break;
+                    }
+                    if (type == kJoint) {
+                        pending.push_back(child);
+                    }
                 }
             }
         }
@@ -1201,6 +1234,7 @@ RigExecImagingBridge::_FillControlGuides(
             // drawing control guides rather than draw the documented default.
             inputs.shape = TfToken("circle");
             inputs.drawMode = TfToken("wire");
+            inputs.planeNormal = TfToken("Y");
             inputs.scale = GfVec3d(1.0, 1.0, 1.0);
             inputs.wireWidth = 0.05;
             inputs.offset = GfVec3d(0.0);
@@ -1214,6 +1248,11 @@ RigExecImagingBridge::_FillControlGuides(
                 if (UsdAttribute a =
                         prim.GetAttribute(TfToken("guide:drawMode"))) {
                     a.Get(&inputs.drawMode, pose.time);
+                    live = live || _GuideAttrIsLive(a);
+                }
+                if (UsdAttribute a =
+                        prim.GetAttribute(TfToken("guide:planeNormal"))) {
+                    a.Get(&inputs.planeNormal, pose.time);
                     live = live || _GuideAttrIsLive(a);
                 }
                 static const TfToken scaleAttrs[3] = {
@@ -1294,6 +1333,7 @@ RigExecImagingBridge::_FillControlGuides(
         published.controlGuideFrame = guideFrame;
         published.controlGuideShape = shape;
         published.controlGuideDrawMode = drawMode;
+        published.controlGuidePlaneNormal = inputs.planeNormal;
         published.controlGuideScale = effectiveScale;
         published.controlGuideWireWidth = wireWidth;
         _ReadGuideStyleCached(inputs, pose, &published);
@@ -2440,6 +2480,14 @@ RigExecImagingBridge::_PublishPoseSnapshot(
     auto snapshot = std::make_shared<RigExecImagingSnapshot>();
     snapshot->generation = ++_generation;
     _StampGeneration(time, snapshot.get());
+    // Rig-computed matrices a shader on the prim reads, as constant
+    // primvars. Indexed before the geometry loop so a prim carrying only
+    // a shader matrix still gets published.
+    for (const auto &[primPath, matrices] : pose.shaderMatrices) {
+        if (!matrices.empty()) {
+            snapshot->prims[primPath].shaderMatrices = matrices;
+        }
+    }
     for (const auto &[propertyPath, value] : pose.movedProperties) {
         const SdfPath primPath = propertyPath.GetPrimPath();
         const TfToken property = propertyPath.GetNameToken();

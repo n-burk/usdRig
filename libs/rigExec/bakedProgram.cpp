@@ -289,6 +289,11 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     // program's own table.
     for (const RigExecRigEvaluator::_PoseInterpolator &record :
              E._poseInterpolators) {
+        // A NUMERIC driver reads dials rather than a frame: it names no
+        // driver prim, so there is no slot for one to be.
+        if (!record.driverAttributes.empty()) {
+            continue;
+        }
         if (!E._firstFramePoseFrames.count(record.driver)) {
             say("pose interpolator driver is not a pose provider",
                 record.driver);
@@ -310,6 +315,28 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     std::set<SdfPath> chainTargets;
     for (const auto &[target, revisions] : E._propertyChains) {
         chainTargets.insert(target);
+    }
+    // A space switch replaces a provider's parent with one the ladder does
+    // not know about. The compose handles that in one line (see
+    // RigExecBakedProgramImpl::SpaceSwitch), but only while the source it
+    // reads has ALREADY been composed this pass -- slots run in namespace
+    // DFS pre-order, so that means a strictly lower slot. A rig that wants
+    // otherwise needs the compose partitioned differently, which is a
+    // scheduler change rather than a compose one, so it is refused here and
+    // takes the dynamic path: correct and slower, never fast and wrong.
+    for (const RigExecRigEvaluator::_SpaceSwitch &sw : E._spaceSwitches) {
+        if (!E._firstFramePoseFrames.count(sw.target)) {
+            say("space switch on a provider with no slot", sw.target);
+            continue;
+        }
+        for (const auto &source : sw.sources) {
+            if (source.path.IsEmpty()) {
+                continue;   // world: identity, no slot needed
+            }
+            if (!E._firstFramePoseFrames.count(source.path)) {
+                say("space switch source has no slot", source.path);
+            }
+        }
     }
     for (const auto &[path, tap] : E._firstFramePoseFrames) {
         const UsdPrim prim = E._stage->GetPrimAtPath(path);
@@ -2570,6 +2597,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             entry.constraint.worldUpObject = fc.worldUpObject.sourcePath;
             entry.constraint.weightObject = fc.weightObject;
             entry.constraint.worldUpXform = fc.worldUpObject.xformPath;
+            entry.constraint.space = fc.spacePath;
         }
         walk.push_back(std::move(entry));
     }
@@ -2710,8 +2738,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
              E._poseInterpolators) {
         RigExecBakedProgramImpl::PoseInterpolator out;
         out.path = record.prim;
-        out.driverSlot = ctx.SlotOf(record.driver);
-        if (out.driverSlot < 0) {
+        // A numeric driver reads dials, not a frame: it names no driver prim
+        // and needs no slot.
+        const bool numeric = !record.driverAttributes.empty();
+        out.driverSlot = numeric ? -1 : ctx.SlotOf(record.driver);
+        if (!numeric && out.driverSlot < 0) {
             ctx.Refuse("pose interpolator driver has no provider slot",
                        record.driver);
             continue;
@@ -2725,6 +2756,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             }
         }
         out.allowNegativeWeights = record.allowNegativeWeights;
+        out.enableTranslation = record.enableTranslation;
         const UsdPrim prim = B.stage->GetPrimAtPath(record.prim);
         // The interpolator's structure -- its driver, its poses, their
         // rotations and radii -- is epoch identity and recompiles; what a
@@ -2734,6 +2766,20 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         B.prims.insert(record.prim);
         B.resolvedRoutedPrims.insert(record.prim);
         out.enabled = ctx.Bind<bool>(prim, "inputs:enabled", true);
+        for (const SdfPath &value : record.driverAttributes) {
+            const UsdPrim owner =
+                B.stage->GetPrimAtPath(value.GetPrimPath());
+            // NAMED, for invalidation, but NOT routed: a routed prim tells
+            // SetOverrides that every read of it already goes through the
+            // resolved inputs, and a drag on the dial would then be placed
+            // nowhere -- the bound input below is what reads it, and it is
+            // reached through its own override index.
+            B.prims.insert(value.GetPrimPath());
+            const std::string valueName = value.GetName();
+            out.valueInputs.push_back(
+                ctx.Bind<double>(owner, valueName.c_str(), 0.0));
+        }
+        out.values.assign(out.valueInputs.size(), 0.0);
         const auto addWeight = [&B](const SdfPath &weight) {
             const int slot = int(B.poseWeightPaths.size());
             B.poseWeightPaths.push_back(weight);
@@ -2753,6 +2799,62 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     }
     B.poseWeights.assign(B.poseWeightPaths.size(), 0.0f);
 
+    // ---- space switches ------------------------------------------------------
+    //
+    // Everything structural was settled at compile: which prim is switched,
+    // the ordered sources, the masks, and the dependency order between
+    // switches. All that is left is to turn paths into slots and to bind the
+    // one value that moves -- the active index -- so that keying a space
+    // dirties the compose step that reads it and nothing else.
+    B.spaceSwitchBySlot.assign(B.paths.size(), -1);
+    for (const RigExecRigEvaluator::_SpaceSwitch &sw : E._spaceSwitches) {
+        RigExecBakedProgramImpl::SpaceSwitch out;
+        out.slot = slotOf(sw.target);
+        if (out.slot < 0) continue;
+        for (const auto &source : sw.sources) {
+            // A source may sit anywhere in the slot order, above or below.
+            // Slots are in SdfPath order, which orders a slot after its
+            // PARENT and says nothing about a space source in another
+            // branch -- so the compose partition cuts the switched subtree
+            // into groups of its own and the source frames are declared as
+            // reads of that group (see the partition in bakedPose.cpp). The
+            // schedule orders the rest.
+            out.sourceSlots.push_back(
+                source.path.IsEmpty() ? -1 : slotOf(source.path));
+            out.filters.push_back(source.filter);
+        }
+        out.twistAxis = sw.twistAxis;
+        // The space is read the same way a source is, and like a source it
+        // may sit anywhere in the slot order.
+        out.spaceSlot =
+            sw.spacePath.IsEmpty() ? -1 : slotOf(sw.spacePath);
+        for (int axis = 0; axis < 3; ++axis) {
+            out.affectTranslation[axis] = sw.affectTranslation[axis];
+            out.affectRotation[axis] = sw.affectRotation[axis];
+            out.affectScale[axis] = sw.affectScale[axis];
+        }
+        // The index comes either from a property on the control -- where the
+        // animator keys it -- or from the switch's own inputs:activeSpace.
+        // Both are ordinary per-frame inputs, so both bind the same way and
+        // an override lands on whichever one the rig actually reads.
+        if (!sw.activeAttribute.IsEmpty()) {
+            const UsdPrim owner =
+                B.stage->GetPrimAtPath(sw.activeAttribute.GetPrimPath());
+            if (owner) {
+                out.activeInput = ctx.Bind<double>(
+                    owner, sw.activeAttribute.GetName().c_str(),
+                    sw.activeFallback);
+            }
+        } else if (const UsdPrim switchPrim =
+                       B.stage->GetPrimAtPath(sw.switchPath)) {
+            out.activeInput = ctx.Bind<double>(switchPrim,
+                                               "inputs:activeSpace",
+                                               sw.activeFallback);
+        }
+        B.spaceSwitchBySlot[size_t(out.slot)] = int(B.spaceSwitches.size());
+        B.spaceSwitches.push_back(std::move(out));
+    }
+
     std::vector<RigExecBakedChainSpec> chainSpecs;
     const auto revisionSpec =
         [&snapshotAfter](const RigExecRigEvaluator::_GraphRevision &r) {
@@ -2762,6 +2864,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             spec.op = r.op;
             spec.binding = r.binding;
             spec.transformFinalPhase = r.transformFinalPhase;
+            spec.transformPosedPoints = r.transformPosedPoints;
             spec.skinTopologyFixed = r.skinTopologyFixed;
             spec.snapshotAfter = snapshotAfter(r.target, r.moverPath);
             return spec;
@@ -2870,6 +2973,10 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     RigExecProfilePhases graphPhases(&E._profiler, "compile");
     graphPhases.Next("Bake.the_step_graph.pose_steps");
     RigExecBakedBuildPoseSteps(&B);
+    if (B.composeCycle) {
+        refuse("space switches form a compose cycle: two of them each need "
+               "the other's space composed first", E._rigPath);
+    }
     // Between the two halves, which is where a weight object belongs in
     // program order: its placement comes from the pose walk and its packet is
     // what a revision assembles against.

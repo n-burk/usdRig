@@ -293,10 +293,41 @@ _BuildWrapper(const TfToken &base)
     // The primvars go in as node METADATA: Storm keeps a mesh's primvar only
     // if some material asks for it by name (primvar filtering), and this is
     // how a glslfx node asks.
+    //
+    // AND THE BASE'S OWN REQUESTS COME WITH THEM. This used to be an
+    // assignment, so the wrapper asked for the two tint primvars and
+    // nothing else -- including nothing the shader it wraps had asked
+    // for. Storm then filtered the base's primvars off the rprim, the
+    // `#if defined(HD_HAS_...)` guards around them went false, and the
+    // shader quietly fell back to its unbound branch.
+    //
+    // MEASURED on the biped's eyes. sbe_eye.glslfx opens with
+    //
+    //     "attributes": {
+    //         "eyeProjector": { "default": [1.0, 0.0, 0.0, 0.0] },
+    //         "eyeDials":     { "default": [0.0, 0.0, 0.0, 0.0] }
+    //     }
+    //
+    // which is how a glslfx node asks for a primvar, and reads them
+    // through HD_HAS_eyeProjector / HD_HAS_eyeDials to place the iris
+    // and the pupil. The rig publishes both every evaluation -- four
+    // shader matrices, two per eye, confirmed through
+    // RigExecRigPose::shaderMatrices -- so the data was always there.
+    // The moment TouchPose went live on a set that owns an eye mesh,
+    // the wrapper dropped the request and the iris went with it.
+    //
+    // The tint's two primvars are ADDED to whatever the base asks for,
+    // never substituted for them.
     SdrTokenMap sdrMetadata;
-    sdrMetadata[SdrNodeMetadata->Primvars] =
-        _tokens->rigExecTouchRegion.GetString() + "|" +
-        _tokens->rigExecTouchTable.GetString();
+    std::string primvars = _tokens->rigExecTouchRegion.GetString() + "|" +
+                           _tokens->rigExecTouchTable.GetString();
+    for (const TfToken &primvar : node->GetPrimvars()) {
+        if (primvar.IsEmpty()) {
+            continue;
+        }
+        primvars += "|" + primvar.GetString();
+    }
+    sdrMetadata[SdrNodeMetadata->Primvars] = primvars;
     const SdrShaderNodeConstPtr wrapped = registry.GetShaderNodeFromSourceCode(
         source, _tokens->glslfx, sdrMetadata);
     if (!wrapped) {

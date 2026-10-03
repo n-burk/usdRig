@@ -35,6 +35,17 @@ _BuildMatrixMoverParameters(const VdfContext &ctx)
         return params;
     }
 
+    // radial takes a fraction of the transform's ROTATION instead of a
+    // fraction of the resulting position, so a partially weighted point
+    // keeps its distance from the axis rather than cutting the chord.
+    // Read here AND in RigExecAssembleMatrixParameters: the biped runs its
+    // baked program, which never touches this builder, so a flag set only
+    // here is silently ignored on exactly the rig it was turned on for.
+    static const TfToken radial("radial");
+    const TfToken *blend =
+        ctx.GetInputValuePtr<TfToken>(RigExecMoverExecTokens->weightBlendAttr);
+    params.radialWeight = blend && *blend == radial;
+
     const GfMatrix4d *transform =
         ctx.GetInputValuePtr<GfMatrix4d>(RigExecMoverExecTokens->transform);
     if (!transform ||
@@ -114,14 +125,39 @@ _ValidateMatrixMover(
     const UsdPrim &prim = ctx.prim;
     const std::vector<SdfPath> &targets = ctx.targets;
     const std::string who = "MatrixMover " + prim.GetPath().GetString();
-    if (targets.size() != 1 ||
-        !targets[0].IsPropertyPath() ||
+    if (targets.size() != 1) {
+        *error = who + ": moves must resolve to exactly one target";
+        return false;
+    }
+    // Transform domain: a bare prim path names the frame to deform, and the
+    // mover carries M' = T_w M -- the twin of the point form, and of
+    // UsdSkel pairing ComputeSkinnedTransform with ComputeSkinnedPoints.
+    // Validated here and wired as frame work, because a frame is what the
+    // pose walk orders and publishes.
+    //
+    // NOT for a PointBased prim. There the bare path is ambiguous -- the
+    // same prim owns both write sets -- and in practice it is a typo for
+    // <prim>.points, which the hint below says so. Deforming a mesh's own
+    // transform is what a constraint is for.
+    if (targets[0].IsPrimPath() &&
+        !rigExec::RigExecIsTransformDomainAmbiguous(stage, targets[0])) {
+        const UsdPrim owner = stage->GetPrimAtPath(targets[0]);
+        const TfToken type = owner ? owner.GetTypeName() : TfToken();
+        if (!owner || !(type == "RigExecControl" || type == "RigExecJoint" ||
+                        UsdGeomXformable(owner))) {
+            *error = who + ": a bare prim move target names the transform "
+                           "domain, so it must be an Xformable, a "
+                           "RigExecControl or a RigExecJoint";
+            return false;
+        }
+        return true;
+    }
+    if (!targets[0].IsPropertyPath() ||
         targets[0].GetNameToken() != "points") {
         *error = who + ": moves must resolve to exactly one native "
-                       "PointBased points property" +
-                 (targets.size() == 1
-                      ? rigExec::RigExecPointsTargetHint(stage, targets[0])
-                      : std::string());
+                       "PointBased points property, or one prim for the "
+                       "transform domain" +
+                 rigExec::RigExecPointsTargetHint(stage, targets[0]);
         return false;
     }
     const UsdPrim owner =
@@ -180,6 +216,26 @@ _ValidateMatrixMover(
         if (!spacePrim || !frameProviderTypes.count(spacePrim.GetTypeName())) {
             *error = who + ": rigExec:transformSpace target is not a "
                            "catalogued matrix provider";
+            return false;
+        }
+    }
+    // rigExec:space, the rig's carry, held to the same two rules: at most
+    // one, and a catalogued provider. Refused rather than dropped, because
+    // a carry that silently resolved to nothing is exactly the bug it was
+    // added to fix, reappearing as a typo nobody is told about.
+    SdfPathVector carries;
+    if (UsdRelationship rel = prim.GetRelationship(TfToken("rigExec:space"))) {
+        rel.GetTargets(&carries);
+    }
+    if (carries.size() > 1) {
+        *error = who + ": rigExec:space takes at most one target";
+        return false;
+    }
+    if (!carries.empty()) {
+        const UsdPrim carryPrim = stage->GetPrimAtPath(carries[0]);
+        if (!carryPrim || !frameProviderTypes.count(carryPrim.GetTypeName())) {
+            *error = who + ": rigExec:space target is not a catalogued "
+                           "matrix provider";
             return false;
         }
     }
@@ -321,6 +377,8 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecMatrixMover)
         .Callback<RigExecMoverParameters>(&_BuildMatrixMoverParameters)
         .Inputs(
             RIGEXEC_MOVER_COMMON_INPUTS,
+            AttributeValue<TfToken>(
+                RigExecMoverExecTokens->weightBlendAttr),
             Relationship(RigExecMoverExecTokens->resolvedTransform)
                 .TargetedObjects<GfMatrix4d>(
                     RigExecMoverExecTokens->computeMatrix)

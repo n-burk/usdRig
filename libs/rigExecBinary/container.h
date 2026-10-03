@@ -21,10 +21,23 @@ namespace rigExec {
 /// Magic bytes "REXB" as a little-endian u32.
 inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 
-/// Major 3 uses the current geometry and frame record layouts.
-/// Re-export earlier files; incompatible records must not be misread.
-/// Encoded (minor << 16) | major.
-inline constexpr uint32_t RigExecBinaryVersion = 0x00000003u;
+/// The container version this code writes: major 3, minor 1.
+/// Encoded (minor << 16) | major; the reader requires the major and
+/// tolerates the minor.
+///
+/// MAJOR 3 uses the current geometry and frame record layouts: the curvenet
+/// binding, revision, weight and adjuster fields are gone, revision ops 10
+/// and 11 are reserved, and Wrinkle is op 15. Re-export earlier files;
+/// incompatible records must not be misread.
+///
+/// MINOR 1 on that major adds the optional PoseNumeric, SpaceSwitch and
+/// InputPolicy sections and the trailing per-constraint and per-revision
+/// space-slot blocks. Files without them load with every interpolator
+/// driven by a transform's rotation alone, every provider in its authored
+/// parent, the narrow input directory and no carry space, which is what
+/// those files were baked from. A minor-0 reader rejects a minor-1 file
+/// that carries constraints or geometry revisions.
+inline constexpr uint32_t RigExecBinaryVersion = 0x00010003u;
 inline constexpr uint32_t RigExecBinaryMajor(uint32_t version)
 {
     return version & 0xffffu;
@@ -46,6 +59,15 @@ enum class RigExecBinarySection : uint32_t {
     Diagnostics = 11,  ///< embedded diagnostics; the loader skips it
     SolverStart = 12,  ///< FkChain start providers (minor 1)
     Presentation = 13, ///< Optional embedded render geometry/materials and public controls
+    PoseNumeric = 14,  ///< numeric drivers and translation channels
+    SpaceSwitch = 15,  ///< labelled parent spaces
+    /// How the input directory was built. Absent means the default rule --
+    /// only inputs that vary were given uids -- which is what every binary
+    /// written before this section did, so its absence is the old answer
+    /// and no version moves. Present and set, the directory also holds
+    /// every input an override can reach, and the loader has to route by
+    /// the same widened rule or the uids drift apart. See capture.h.
+    InputPolicy = 16,
 };
 
 /// Builds a .rigexec file in memory.

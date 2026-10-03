@@ -1,0 +1,16 @@
+#usda 1.0
+
+over "Biped"
+{
+    over "Geom"
+    {
+        over "body_geo"
+        {
+        }
+    }
+
+    over "Rig"
+    {
+    }
+}
+

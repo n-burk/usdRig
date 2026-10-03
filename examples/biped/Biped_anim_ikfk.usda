@@ -1,0 +1,60 @@
+#usda 1.0
+(
+    # Biped_anim.usda plus ONE keyed IK/FK blend weight, on the left arm.
+    #
+    # Its own file rather than a block in Biped_anim.usda, because a
+    # time-varying blend weight is the one input the dynamic walk and the
+    # baked program are known to disagree about: a flat weight at any
+    # fraction agrees to the last bit, a keyed one moves the left arm's
+    # forty-two joints by up to 150 units from frame 40 on (the ramp's
+    # first non-zero frame). Biped_anim.usda is the shared animated
+    # fixture -- the baked-parity test walks it frame by frame -- so the
+    # known disagreement is kept out of it and named here instead.
+    #
+    # The Avar Editor's animated-channel policy has to keep an authored
+    # curve intact rather than flatten it to the value under the playhead,
+    # and only a channel the FILE animates exercises that. Its twin on
+    # R_Arm is deliberately left unkeyed, so the panel shows both policies
+    # at once.
+    endTimeCode = 200
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    subLayers = [
+        @./Biped_anim.usda@
+    ]
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        over "Main"
+        {
+            over "Shot"
+            {
+                over "Aux"
+                {
+                    over "Controls"
+                    {
+                        over "L_Arm"
+                        {
+                            # float, as the control declares it: a
+                            # double spec here is a different type
+                            # from the base's and the samples do not
+                            # reach the blend -- the baked program
+                            # read 1 and the dynamic walk read the
+                            # float default 0, which is the arm
+                            # sitting in FK in one path and IK in
+                            # the other, 118 units apart.
+                            float avars:ikfk.timeSamples = {
+                                1: 0,
+                                24: 0,
+                                48: 1,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

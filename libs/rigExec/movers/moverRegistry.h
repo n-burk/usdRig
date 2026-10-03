@@ -280,6 +280,14 @@ void RigExecReadPhasedPoints(
     const SdfPath &readerMover,
     VtVec3fArray *out);
 
+/// A bare prim path names the transform domain -- except on a PointBased
+/// prim, where the same prim owns both write sets and the path is
+/// ambiguous. There it is in practice a typo for <prim>.points.
+/// Shared because the compiler asks it to decide frame work, and the
+/// matrix mover's validator asks it to decide a diagnostic.
+bool RigExecIsTransformDomainAmbiguous(
+    const UsdStageRefPtr &stage, const SdfPath &target);
+
 /// The "did you mean .points?" hint appended to a target diagnostic when
 /// the target names a bare PointBased prim. Empty for anything else, so
 /// callers append unconditionally.

@@ -111,6 +111,14 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.walkSteps = src.walkSteps;
     D.steps = src.steps;
     D.composeGroups = src.composeGroups;
+    // The space switches, and the per-slot index the compose step
+    // asks before it takes the switched branch. Left out, the
+    // frozen compose falls straight through to the namespace
+    // parent -- which moves every switched control and everything
+    // under it, and reads as a parity mismatch on 1509 control
+    // frames of a rig that is standing in the same place.
+    D.spaceSwitches = src.spaceSwitches;
+    D.spaceSwitchBySlot = src.spaceSwitchBySlot;
     D.commits = src.commits;
     D.revisionIndex = src.revisionIndex;
     D.derivedIndex = src.derivedIndex;

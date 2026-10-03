@@ -95,6 +95,22 @@ _ReadBools(RigExecWireReader *reader, std::vector<uint8_t> *values)
     return true;
 }
 
+// Rotation-filter bytes, in RigExecRotationFilter range (All/Twist/Swing).
+bool
+_ReadRotationFilters(RigExecWireReader *reader,
+                     std::vector<uint8_t> *values)
+{
+    if (!_ReadU8s(reader, values)) {
+        return false;
+    }
+    for (uint8_t value : *values) {
+        if (value > 2) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Pose-type bytes, in RigExecRbfPoseType range (Whole/Swing/Twist).
 bool
 _ReadPoseTypes(RigExecWireReader *reader, std::vector<uint8_t> *values)
@@ -802,6 +818,14 @@ RigExecWireEncodeDomainPose(const RigExecWireDomainPose &pose,
     RigExecWirePutU8(out, pose.phasedReads ? uint8_t(1) : uint8_t(0));
     RigExecWirePutU8(out, pose.publishWeightFields ? uint8_t(1)
                                                    : uint8_t(0));
+    // The constraints' space slots, as one trailing block after every
+    // table rather than a field inside each constraint: a binary written
+    // before rigExec:space reached the rotation constraint simply ends
+    // above, and the decoder reads that as -1 everywhere, which is what
+    // those files were baked from.
+    for (const RigExecWireConstraint &constraint : pose.constraints) {
+        RigExecWirePutI32(out, constraint.spaceSlot);
+    }
     return true;
 }
 
@@ -1222,6 +1246,17 @@ RigExecWireDecodeDomainPose(RigExecWireReader *reader,
         return _Fail(error);
     }
     pose->publishWeightFields = flag != 0;
+    // The optional trailing constraint-space block. Absent on every binary
+    // baked before the rotation constraint carried rigExec:space, and its
+    // absence is the old answer -- no space, no carry -- so this is a
+    // read, not a requirement.
+    if (!reader->Exhausted()) {
+        for (RigExecWireConstraint &constraint : pose->constraints) {
+            if (!reader->ReadI32(&constraint.spaceSlot)) {
+                return _Fail(error);
+            }
+        }
+    }
     if (!reader->Exhausted()) {
         if (error) {
             *error = "trailing bytes in pose tables";
@@ -1268,6 +1303,153 @@ RigExecWireDecodeSolverStarts(RigExecWireReader *reader,
     if (!reader->Exhausted()) {
         if (error) {
             *error = "trailing bytes in solver starts";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool
+RigExecWireEncodePoseNumerics(
+    const std::vector<RigExecWirePoseNumeric> &numerics,
+    std::vector<uint8_t> *out)
+{
+    RigExecWirePutU32(out, uint32_t(numerics.size()));
+    for (const RigExecWirePoseNumeric &entry : numerics) {
+        RigExecWirePutU32(out, entry.interpolator);
+        RigExecWirePutU8(out, entry.enableTranslation ? 1 : 0);
+        RigExecWirePutU32(out, uint32_t(entry.values.size()));
+        for (const RigExecWireInput &value : entry.values) {
+            _PutInput(out, value);
+        }
+    }
+    return true;
+}
+
+bool
+RigExecWireDecodePoseNumerics(
+    RigExecWireReader *reader,
+    std::vector<RigExecWirePoseNumeric> *numerics, std::string *error)
+{
+    uint32_t count = 0;
+    if (!reader->ReadU32(&count)) {
+        return _Fail(error);
+    }
+    numerics->resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        RigExecWirePoseNumeric &entry = (*numerics)[i];
+        uint8_t translation = 0;
+        uint32_t values = 0;
+        if (!reader->ReadU32(&entry.interpolator) ||
+            !reader->ReadU8(&translation) || translation > 1 ||
+            !reader->ReadU32(&values)) {
+            return _Fail(error);
+        }
+        // The compile reads at most three dials, one per axis, and
+        // refuses a fourth; a file claiming more is corrupt, not new.
+        if (values > 3) {
+            return _Fail(error);
+        }
+        entry.enableTranslation = translation != 0;
+        entry.values.resize(values);
+        for (uint32_t v = 0; v < values; ++v) {
+            if (!_ReadInput(reader, &entry.values[v])) {
+                return _Fail(error);
+            }
+        }
+    }
+    if (!reader->Exhausted()) {
+        if (error) {
+            *error = "trailing bytes in pose numerics";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool
+RigExecWireEncodeSpaceSwitches(
+    const std::vector<RigExecWireSpaceSwitch> &switches,
+    std::vector<uint8_t> *out)
+{
+    RigExecWirePutU32(out, uint32_t(switches.size()));
+    for (const RigExecWireSpaceSwitch &sw : switches) {
+        RigExecWirePutI32(out, sw.slot);
+        _PutI32s(out, sw.sourceSlots);
+        _PutU8s(out, sw.filters);
+        RigExecWirePutVec3d(out, sw.twistAxis);
+        _PutInput(out, sw.active);
+        for (int axis = 0; axis < 3; ++axis) {
+            RigExecWirePutU8(out, sw.affectTranslation[axis] ? 1 : 0);
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            RigExecWirePutU8(out, sw.affectRotation[axis] ? 1 : 0);
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            RigExecWirePutU8(out, sw.affectScale[axis] ? 1 : 0);
+        }
+    }
+    // The space slots, as one trailing block rather than a field inside
+    // each switch: a binary written before rigExec:space existed simply
+    // ends here, and the decoder reads that as -1 everywhere, which is
+    // what those files were baked from.
+    for (const RigExecWireSpaceSwitch &sw : switches) {
+        RigExecWirePutI32(out, sw.spaceSlot);
+    }
+    return true;
+}
+
+bool
+RigExecWireDecodeSpaceSwitches(
+    RigExecWireReader *reader,
+    std::vector<RigExecWireSpaceSwitch> *switches, std::string *error)
+{
+    const auto readMask = [&](bool mask[3]) {
+        for (int axis = 0; axis < 3; ++axis) {
+            uint8_t on = 0;
+            if (!reader->ReadU8(&on) || on > 1) {
+                return false;
+            }
+            mask[axis] = on != 0;
+        }
+        return true;
+    };
+    uint32_t count = 0;
+    if (!reader->ReadU32(&count)) {
+        return _Fail(error);
+    }
+    switches->resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        RigExecWireSpaceSwitch &sw = (*switches)[i];
+        if (!reader->ReadI32(&sw.slot) ||
+            !_ReadI32s(reader, &sw.sourceSlots) ||
+            !_ReadRotationFilters(reader, &sw.filters) ||
+            !RigExecWireReadVec3d(reader, &sw.twistAxis) ||
+            !_ReadInput(reader, &sw.active) ||
+            !readMask(sw.affectTranslation) ||
+            !readMask(sw.affectRotation) || !readMask(sw.affectScale)) {
+            return _Fail(error);
+        }
+        // Filters are parallel to the sources or absent entirely; any
+        // other length would silently mis-filter a space.
+        if (!sw.filters.empty() &&
+            sw.filters.size() != sw.sourceSlots.size()) {
+            return _Fail(error);
+        }
+    }
+    // The optional trailing space-slot block. Absent on every binary baked
+    // before rigExec:space, and its absence is the old answer -- no space,
+    // no carry -- so this is a read, not a requirement.
+    if (!reader->Exhausted()) {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (!reader->ReadI32(&(*switches)[i].spaceSlot)) {
+                return _Fail(error);
+            }
+        }
+    }
+    if (!reader->Exhausted()) {
+        if (error) {
+            *error = "trailing bytes in space switches";
         }
         return false;
     }

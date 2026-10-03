@@ -63,12 +63,11 @@ writes the touch layer beside the rig, never the rig itself.
 import os
 import sys
 
-from pxr import Gf, Sdf, Usd
+from pxr import Gf, Sdf, Tf, Usd
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 if __name__ != "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import touchPoseModel
 
 # Per-session state (one controller and one panel per usdview window) lives
 # in rigExecUsdview's registry, like gizmoUI's controllers: several usdview
@@ -77,13 +76,32 @@ import touchPoseModel
 # plugin: bin/_env.bat and the pipeline launchers put it there), which is
 # also how the gizmo helpers below reach gizmoUI.
 import sessionRegistry
+import touchPoseModel
+
+# Voice-to-select. OPTIONAL IN THE STRONGEST SENSE, and the dependency
+# runs one way: TouchPose does not need voice, voice needs TouchPose.
+# The module may be missing, the speech subpackage beside this checkout
+# may be missing, the machine may have no speech engine at all -- and
+# TouchPose opens, picks and paints exactly as it always did. Caught as
+# `Exception` and not `ImportError` on purpose: a syntax error or a
+# missing stdlib module in a file nobody here wrote must cost the
+# checkbox, not the panel. The reason ends up on the disabled checkbox,
+# where the animator is already looking, rather than in the terminal.
+try:
+    import touchPoseVoice
+except Exception:                                   # pragma: no cover
+    touchPoseVoice = None
 
 
-# What the highlight is drawn at when the touch layer does not say. The
-# authored file says 0.478 (`touchpose:alpha`), drawn over an UNSHADED
-# viewport; over a shaded body a neutral grey selection at 0.478 stops
-# reading, so the panel opens here and its slider moves it live.
-HIGHLIGHT_OPACITY = 0.85
+
+# What the highlight OPENS at, and the slider moves it live from there.
+# The authored file says 0.478 (`touchpose:alpha`), drawn over an
+# UNSHADED viewport; this is the value asked for over the shaded body.
+#
+# It is the opening value only. `Load` used to assign it on every load,
+# so switching layer -- or any reload at all -- threw the slider's value
+# away and snapped back to the default.
+HIGHLIGHT_OPACITY = 0.30
 
 
 
@@ -94,8 +112,80 @@ _LEGACY_OVERLAYS = ("/TouchPoseHighlight", "/TouchPoseSelected",
 # every click is a one-pixel band and the click path never runs at all.
 DRAG_SLOP = 3.0
 
+class FaceTableEdit(object):
+    """One paint stroke: the face -> region table before it and after.
+
+    Shaped to sit on rigExecUndo's stack next to a gizmo drag and a
+    channel scrub, which is why it carries a label: the toolbar's Undo
+    tooltip reads it.
+    """
+
+    def __init__(self, controller, before, after, label="Paint regions"):
+        self._controller = controller
+        self._before = before
+        self._after = after
+        self.label = label
+
+    def Undo(self):
+        self._controller.ApplyFaceTable(self._before)
+
+    def Redo(self):
+        self._controller.ApplyFaceTable(self._after)
+
+
+class UndoStack(object):
+    """A bounded linear stack of strokes; a push drops the redo branch.
+
+    The same shape as rigExecUndo.UndoStack, kept here rather than
+    imported: TouchPose loads as its own usdview plugin and has to open
+    on a session where the RigExec plugin is absent. Twenty lines is
+    cheaper than a soft import that silently disables undo when the
+    import misses.
+    """
+
+    LIMIT = 50
+
+    def __init__(self):
+        self._undo = []
+        self._redo = []
+
+    def Push(self, edit):
+        self._undo.append(edit)
+        del self._undo[:-self.LIMIT]
+        self._redo = []
+
+    def CanUndo(self):
+        return bool(self._undo)
+
+    def CanRedo(self):
+        return bool(self._redo)
+
+    def Undo(self):
+        if not self._undo:
+            return False
+        edit = self._undo.pop()
+        edit.Undo()
+        self._redo.append(edit)
+        return True
+
+    def Redo(self):
+        if not self._redo:
+            return False
+        edit = self._redo.pop()
+        edit.Redo()
+        self._undo.append(edit)
+        return True
+
+    def Clear(self):
+        self._undo = []
+        self._redo = []
+
+
 # How often the gizmo is asked whether a drag is in flight.
 DRAG_POLL_MS = 33
+# How long the timeline has to sit still after a frame change (playback or
+# a scrub) before TouchPose lights up again.
+TIME_QUIET_MS = 250
 
 # The floor between two hover evaluations, in milliseconds: one 60 Hz
 # frame, the fastest the highlight can be seen to change.
@@ -105,6 +195,31 @@ HOVER_MIN_MS = 16
 MODE_REPLACE = "replace"
 MODE_TOGGLE = "toggle"
 MODE_REMOVE = "remove"
+
+
+def RegionMatches(region, query):
+    """True when *region* should survive the panel's filter.
+
+    Every space-separated word has to appear somewhere in the region's
+    name or in the path of the control it selects, case-insensitively and
+    in any order -- so "l lid" finds the left eyelids whichever way round
+    the rig spells them, and a bare "jaw" finds the jaw whether the word
+    is in the region's name or only in its control's.
+
+    An empty or whitespace query keeps everything, which is what makes
+    clearing the box the way back.
+
+    Pure, and deliberately: the panel's list is rebuilt from this on every
+    keystroke, and a rule about which rows to show is a rule worth
+    testing without a Qt event loop.
+    """
+    words = (query or "").split()
+    if not words:
+        return True
+    hay = "%s %s" % (getattr(region, "label", "") or "",
+                     getattr(region, "control", "") or "")
+    hay = hay.lower()
+    return all(word.lower() in hay for word in words)
 
 
 def StageView(usdviewApi):
@@ -255,7 +370,8 @@ class Highlight(object):
         return self.Flush()
 
     def Suspend(self):
-        """Stand the hover down for a gizmo drag. The selection stays."""
+        """Stand every highlight down while the rig is being moved: a gizmo
+        drag, playback, a scrub. The state is kept, only not drawn."""
         if self.suspended:
             return False
         self.suspended = True
@@ -272,9 +388,16 @@ class Highlight(object):
         if not self.enabled:
             return False
         colors = self._model.StateColors()
-        changed = self._native.SetHighlightState(
-            None if self.suspended else self.hover, self.lead, self.selected,
-            self.editing, self.opacity, colors["lead"], colors["selected"])
+        if self.suspended:
+            # Nothing lit while the rig moves: the hover, the lead and the
+            # selection all go dark and come back as they were.
+            changed = self._native.SetHighlightState(
+                None, None, (), self.editing, self.opacity, colors["lead"],
+                colors["selected"])
+        else:
+            changed = self._native.SetHighlightState(
+                self.hover, self.lead, self.selected, self.editing,
+                self.opacity, colors["lead"], colors["selected"])
         if changed:
             self.flushes += 1
         return changed
@@ -315,6 +438,13 @@ class TouchPoseController(QtCore.QObject,
         """This session's controller if one was built, else None."""
         return cls._sessions.Get(usdviewApi)
 
+    # `mesh_path` PINS the controller to one mesh and is None by default,
+    # which means "every mesh the stage carries regions for". It is only
+    # ever read, never written back: writing the resolved mesh back onto
+    # it is what used to pin the whole panel to body_geo after the first
+    # load, and with it the layer switch -- measured on Biped_stack.usda,
+    # the switch listed one entry ("Body") and hid itself, so the two eye
+    # sets could not be reached from the panel at all.
     def __init__(self, usdviewApi, mesh_path=None):
         super(TouchPoseController, self).__init__()
         self._api = usdviewApi
@@ -323,7 +453,27 @@ class TouchPoseController(QtCore.QObject,
         self._view = StageView(usdviewApi)
         self._active = False
         self._installed = False
+        # EVERY region set on the stage, all live at once, and the ONE
+        # that is active -- listed in the panel, painted into and saved.
+        #
+        # WHY ALL OF THEM. A set states the mesh its faces index, so the
+        # body set indexes body_geo and the two eye sets index l_eye_geo
+        # and r_eye_geo. With one model open, the hover cast only ever
+        # reached the live set's mesh: measured at the pixel over the
+        # front of the left eyeball, the eyeball is hit at t = 332.45 and
+        # body_geo at t = 337.57 -- the eye is 5.1 units IN FRONT of the
+        # skin there -- and the hover still answered the body's face 489,
+        # which is unpainted, so hovering an eye lit nothing. The sets do
+        # not have to agree about anything to coexist: each owns its own
+        # mesh, its own BVH and its own highlight, and the pick simply
+        # takes the nearest hit across all of them.
+        self._models = []
+        self._highlights = []       # parallel to _models
         self._model = None
+        # The layer the panel is standing on, remembered across reloads so
+        # a stage edit or a save does not snap the switch back to the
+        # rig's first layer. Empty until the first successful load.
+        self._layer_name = None
         self._highlight = None
         self._opacity = HIGHLIGHT_OPACITY
         self._error = None
@@ -337,6 +487,10 @@ class TouchPoseController(QtCore.QObject,
         self._painting = None       # "add", "erase", or None
         self._brushRadius = None    # None = the model's own default
         self.stroke_faces = 0
+        # The face -> region table as the current stroke found it, and
+        # the fallback stack. See _EndStroke and _UndoStack.
+        self._strokeBefore = None
+        self._localUndo = UndoStack()
         self._pressAt = None
         self._pressMode = MODE_REPLACE
         self._suspended = False
@@ -349,6 +503,14 @@ class TouchPoseController(QtCore.QObject,
         self._dragPoll = QtCore.QTimer(self)
         self._dragPoll.setInterval(DRAG_POLL_MS)
         self._dragPoll.timeout.connect(self._PollDrag)
+        # Playback and scrubbing: every frame change marks the timeline busy
+        # and restarts a quiet timer; TouchPose stays dark until it fires.
+        self._timeBusy = False
+        self._timeQuiet = QtCore.QTimer(self)
+        self._timeQuiet.setSingleShot(True)
+        self._timeQuiet.setInterval(TIME_QUIET_MS)
+        self._timeQuiet.timeout.connect(self._OnTimeQuiet)
+        self._frameSignal = None
         # See `_HoverSoon`: the mouse reports far faster than the
         # highlight can usefully change.
         self._lastHover = 0
@@ -365,7 +527,26 @@ class TouchPoseController(QtCore.QObject,
 
     @property
     def model(self):
+        """The ACTIVE set: the one the panel lists, paints and saves."""
         return self._model
+
+    @property
+    def models(self):
+        """Every live set, the active one included, in switch order."""
+        return list(self._models)
+
+    @property
+    def layers(self):
+        """(label, scope path) per live set -- what the switch offers.
+
+        Taken from the models rather than re-walked off the stage, so
+        the switch can only ever offer a set that is actually open. It
+        used to come from `model.layers`, which `TouchModel` fills with
+        the layers on ITS OWN mesh: on Biped_stack.usda that is the one
+        body set, so the switch had a single entry, hid itself, and the
+        two eye sets were unreachable.
+        """
+        return [(m.layer_name, m.scope_path) for m in self._models]
 
     @property
     def highlight(self):
@@ -381,13 +562,24 @@ class TouchPoseController(QtCore.QObject,
         except Exception:
             return None
 
-    def Load(self):
-        """Read the touch regions off the stage. Returns a status line.
+    def Load(self, layer=None):
+        """Open every touch layer on the stage. Returns a status line.
 
-        Reloading while the mode is ON re-attaches the highlight to the new
-        model; the old one released its native mesh, and with it its
-        highlight, first. (This used to build a fresh overlay canvas beside
-        the old one and leave the old one lit.)
+        `layer` names the one that becomes ACTIVE -- listed in the panel,
+        painted into and saved. Unset keeps the one already active, and
+        failing that takes the rig's first. Keeping it is what makes a
+        plain Reload -- a stage edit, a save -- leave the switch where
+        the user put it instead of snapping back to the default.
+
+        Every OTHER layer is opened too and is just as live for hover,
+        click and marquee. See `__init__`: a layer is one mesh, so an
+        inactive layer is the only way the eyes can be touched while the
+        body is being worked on.
+
+        Reloading while the mode is ON re-attaches the highlights to the
+        new models; the old ones released their native meshes, and with
+        them their highlights, first. (This used to build a fresh overlay
+        canvas beside the old one and leave the old one lit.)
         """
         stage = self._Stage()
         if stage is None:
@@ -396,38 +588,95 @@ class TouchPoseController(QtCore.QObject,
         wasActive = self._active
         self._ReleaseModel()
         try:
-            selection = self._Selection()
-            selected = [p.GetPath() for p in selection.getPrims() if p] \
-                if selection is not None else []
-            self._mesh_path = (self._requestedMeshPath
-                               or touchPoseModel.DiscoverMesh(stage, selected))
-            if self._mesh_path is None:
-                raise ValueError("no mesh with authored touch regions")
-            self._model = touchPoseModel.TouchModel.FromStage(
-                stage, self._mesh_path)
+            if layer is None:
+                layer = self._layer_name
+            self._models, index = self._OpenLayers(stage, layer)
+            self._model = self._models[index]
+            self._layer_name = self._model.layer_name
         except Exception as exc:
+            self._models = []
             self._model = None
             self._error = str(exc)
-            return ("No touch regions on this stage (%s). Open a stage with "
-                    "RigExecTouchRegions, such as "
-                    "examples/biped/Biped_touch.usda." % exc)
-        self._opacity = HIGHLIGHT_OPACITY
-        self._highlight = Highlight(self._model, self._opacity)
-        self._model.SyncPose(self._Time(), force=True)
+            return ("No touch regions on this stage (%s). Import them with "
+                    "`bin\\run_touchpose.bat import_touch <rig>.usda` and "
+                    "open <rig>_touch.usda." % exc)
+        # THE OPACITY SURVIVES A LOAD. It used to be put back to
+        # HIGHLIGHT_OPACITY here, which is why changing layer snapped the
+        # highlight back to 85%: measured, a session set to 0.300 came
+        # back from the next Load at 0.850 while the slider still read
+        # 30%, so the panel and what was drawn disagreed as well. The
+        # slider is the only thing that sets it, so the value it is at IS
+        # the answer; `__init__` supplies the default for the first load.
+        self._highlights = [Highlight(m, self._opacity) for m in self._models]
+        self._highlight = self._highlights[index]
+        time = self._Time()
+        for model in self._models:
+            model.SyncPose(time, force=True)
         if wasActive:
-            self._highlight.Enable(True)
-            self._highlight.SetEditing(self._paint)
+            for highlight in self._highlights:
+                highlight.Enable(True)
+                highlight.SetEditing(self._paint)
             self.SyncSelection()
         regions, covered, faces = self._model.Coverage()
         self._error = None
         return ("%d regions cover %d of %d faces (%.0f%%)"
                 % (regions, covered, faces, 100.0 * covered / max(faces, 1)))
 
+    def _OpenLayers(self, stage, layer):
+        """Open a model per region set. Returns (models, active index).
+
+        The sets come from `FindLayers`, filtered by `self._mesh_path`
+        when the controller was pinned to one mesh -- which is how a shot
+        holding two characters keeps their sets apart. Each model is
+        opened BY SCOPE PATH, so the mesh it reads is the one its own set
+        names rather than whatever the first set happened to name.
+
+        A stage with no typed scope at all (the legacy GeomSubset layout)
+        yields no rows; one model is opened the old way so those files
+        keep working.
+
+        A set that will not open is SKIPPED rather than allowed to fail
+        the load: a scope whose mesh relationship is broken used to be
+        one set out of one, and is now one out of several, so letting it
+        throw would take the body down with it. If none of them opens,
+        the first failure is re-raised and the panel says so as before.
+        """
+        rows = touchPoseModel.FindLayers(stage, self._mesh_path)
+        if not rows:
+            model = touchPoseModel.TouchModel.FromStage(
+                stage, self._mesh_path, layer=layer)
+            return [model], 0
+        want = None if layer is None else str(layer)
+        models, kept, failure = [], [], None
+        for label, path, scope in rows:
+            try:
+                # The mesh is taken off the scope ROW rather than left to
+                # `FromStage` to re-derive: deriving it walks the whole
+                # stage again per set, measured at 72.3 ms for the
+                # biped's three against 49.9 ms when each scope is
+                # simply asked.
+                models.append(touchPoseModel.TouchModel.FromStage(
+                    stage,
+                    self._mesh_path or touchPoseModel.MeshOfScope(scope),
+                    layer=path))
+            except Exception as exc:
+                failure = failure if failure is not None else exc
+                continue
+            kept.append((label, path))
+        if not models:
+            raise failure if failure is not None else ValueError(
+                "no touch region set on this stage could be opened")
+        index = next((i for i, (label, path) in enumerate(kept)
+                      if want in (label, path)), 0)
+        return models, index
+
     def _ReleaseModel(self):
-        if self._highlight is not None:
-            self._highlight.Enable(False)
-        if self._model is not None:
-            self._model.Close()
+        for highlight in self._highlights:
+            highlight.Enable(False)
+        for model in self._models:
+            model.Close()
+        self._highlights = []
+        self._models = []
         self._highlight = None
         self._model = None
         self._hover = None
@@ -451,12 +700,19 @@ class TouchPoseController(QtCore.QObject,
             self._active = True
             self._GuardMesh()
             # The one step that compiles a shader. Everything after this is
-            # a colour-table upload.
-            self._highlight.Enable(True)
-            self._highlight.SetEditing(self._paint)
+            # a colour-table upload. Once per live set -- Storm compiles
+            # the wrapped material per material, and the eyes' is not the
+            # body's.
+            for highlight in self._highlights:
+                highlight.Enable(True)
+                highlight.SetEditing(self._paint)
             self.SyncSelection()
             self._dragPoll.start()
+            self._ConnectFrames(True)
         else:
+            self._ConnectFrames(False)
+            self._timeQuiet.stop()
+            self._timeBusy = False
             self._dragPoll.stop()
             self._hoverTimer.stop()
             self._pendingHover = None
@@ -466,9 +722,9 @@ class TouchPoseController(QtCore.QObject,
             self._band = None
             self._suspended = False
             self._HideBand()
-            if self._highlight is not None:
-                self._highlight.Clear()
-                self._highlight.Enable(False)
+            for highlight in self._highlights:
+                highlight.Clear()
+                highlight.Enable(False)
             self._hover = None
             self._lead = None
         self._active = active
@@ -492,27 +748,41 @@ class TouchPoseController(QtCore.QObject,
         return self._opacity
 
     def SetOpacity(self, opacity):
-        """How much of the body shows through the highlight. Live."""
+        """How much of the body shows through the highlight. Live.
+
+        One slider for every live set: a body patch and an eye patch at
+        different opacities would read as two different things, and the
+        slider does not say which set it means.
+        """
         self._opacity = max(0.0, min(1.0, float(opacity)))
-        if self._highlight is not None and self._highlight.SetOpacity(
-                self._opacity):
+        changed = False
+        for highlight in self._highlights:
+            changed = highlight.SetOpacity(self._opacity) or changed
+        if changed:
             self._Redraw()
         # Written back onto the MODEL so Save persists it as
         # `touchpose:alpha`.
-        if self._model is not None:
-            self._model.alpha = self._opacity
+        for model in self._models:
+            model.alpha = self._opacity
         return self._opacity
 
     def SetStateColor(self, state, colour):
-        """Change the lead or selected colour and repaint at once."""
+        """Change the lead or selected colour and repaint at once.
+
+        On every live set, for the same reason the opacity is: lead and
+        selected mean the same thing whichever set the region came from.
+        """
         if self._model is None:
             return None
         colour = tuple(float(c) for c in colour)
-        if state == "lead":
-            self._model.lead_color = colour
-        else:
-            self._model.selected_color = colour
-        if self._highlight is not None and self._highlight.Flush():
+        changed = False
+        for model, highlight in zip(self._models, self._highlights):
+            if state == "lead":
+                model.lead_color = colour
+            else:
+                model.selected_color = colour
+            changed = highlight.Flush() or changed
+        if changed:
             self._Redraw()
         return colour
 
@@ -553,12 +823,16 @@ class TouchPoseController(QtCore.QObject,
         this filter declined. The rule is about the SELECTION, so it is
         enforced on the selection. The legacy overlay prims are swept too,
         in case a session saved by the old version left one behind.
+
+        EVERY live set's mesh, not just the active one's: the eyeballs
+        are picked by TouchPose now, so they are no more selectable than
+        the body while the mode is on.
         """
         selection = self._Selection()
         stage = self._Stage()
         if selection is None or stage is None:
             return False
-        paths = [self._mesh_path] + list(_LEGACY_OVERLAYS)
+        paths = [m.mesh_path for m in self._models] + list(_LEGACY_OVERLAYS)
         held = set(str(p.GetPath()) for p in selection.getPrims() if p)
         unwanted = []
         for path in paths:
@@ -598,15 +872,36 @@ class TouchPoseController(QtCore.QObject,
         lead = self._lead if (self._lead and self._lead.control in paths) \
             else None
         if lead is None and paths:
-            lead = next((r for r in self._model.RegionsFor([paths[-1]])),
-                        None)
+            lead = next(iter(self._RegionsFor([paths[-1]])), None)
         self._lead = lead
-        chosen = self._model.RegionsFor(paths)
-        others = [r for r in chosen
-                  if lead is None or r.index != lead.index]
-        changed = self._highlight.SetSelection(lead, others)
+        # Per SET, because a region index means nothing outside the set
+        # it came from. There is at most one lead across all of them --
+        # the others get it as a plain selection, which is what makes a
+        # control selected in two sets light green in one and neutral in
+        # the other rather than green in both.
+        changed = False
+        for model, highlight in zip(self._models, self._highlights):
+            chosen = model.RegionsFor(paths)
+            mine = lead if any(r is lead for r in chosen) else None
+            others = [r for r in chosen
+                      if mine is None or r.index != mine.index]
+            changed = highlight.SetSelection(mine, others) or changed
         if changed:
             self._Redraw()
+        return changed
+
+    def _RegionsFor(self, paths):
+        """Every region on every live set whose control is in `paths`."""
+        found = []
+        for model in self._models:
+            found.extend(model.RegionsFor(paths))
+        return found
+
+    def _ClearHover(self):
+        """Drop the hover on every live set. True when one was lit."""
+        changed = False
+        for highlight in self._highlights:
+            changed = highlight.Clear() or changed
         return changed
 
     # -- installation ----------------------------------------------------
@@ -670,13 +965,38 @@ class TouchPoseController(QtCore.QObject,
 
     def RegionAt(self, x, y):
         """(region, face) under a physical pixel; face < 0 means no mesh."""
-        if self._model is None:
-            return None, -1
+        _model, region, face = self.CastAt(x, y)
+        return region, face
+
+    def CastAt(self, x, y):
+        """(model, region, face) under a physical pixel. Nearest wins.
+
+        Every live set is cast and the SMALLEST t is taken, which is the
+        surface actually in front of the cursor. Measured on the biped
+        at the pixel over the front of the left eyeball: l_eye_geo at
+        t = 332.45, body_geo at t = 337.57, so the eye wins by 5.1 units
+        and the hover lands on L_Eye instead of the unpainted body face
+        489 that used to answer there.
+
+        Three casts rather than one, and the two extra meshes are 384
+        faces each against body_geo's 26,274; a cast is a BVH descent, so
+        the cost is in the log of the face count, not the count.
+        """
+        if not self._models:
+            return None, None, -1
         ray = self.RayAt(x, y)
         if ray is None:
-            return None, -1
-        face, _t = self._model.Cast(ray[0], ray[1])
-        return self._model.RegionOfFace(face), face
+            return None, None, -1
+        best, bestFace, bestT = None, -1, None
+        for model in self._models:
+            face, t = model.Cast(ray[0], ray[1])
+            if face < 0:
+                continue
+            if bestT is None or t < bestT:
+                best, bestFace, bestT = model, face, t
+        if best is None:
+            return None, None, -1
+        return best, best.RegionOfFace(bestFace), bestFace
 
     # -- painting --------------------------------------------------------
 
@@ -691,17 +1011,35 @@ class TouchPoseController(QtCore.QObject,
         self._paint = bool(on)
         if not self._paint:
             self._painting = None
-        if self._highlight is not None and self._active:
-            if self._highlight.SetEditing(self._paint):
+        if self._active:
+            changed = False
+            for highlight in self._highlights:
+                changed = highlight.SetEditing(self._paint) or changed
+            if changed:
                 self._Redraw()
         return self._paint
 
     def HoverColorFor(self, region):
-        """The hover colour for the mode TouchPose is in."""
-        if self._model is None:
+        """The hover colour for the mode TouchPose is in.
+
+        Asked of the SET the region belongs to: the palette is per set,
+        so reading the active one's for an eye region would answer with
+        the body's colours.
+        """
+        model = self._ModelOf(region)
+        if model is None:
             return None
-        return (self._model.EditColor(region) if self._paint
-                else self._model.HoverColor(region))
+        return (model.EditColor(region) if self._paint
+                else model.HoverColor(region))
+
+    def _ModelOf(self, region):
+        """Which live set a region came from, by identity."""
+        if region is None:
+            return None
+        for model in self._models:
+            if any(r is region for r in model.regions):
+                return model
+        return None
 
     @property
     def brush(self):
@@ -716,6 +1054,76 @@ class TouchPoseController(QtCore.QObject,
     @property
     def paintTarget(self):
         return self._paintTarget
+
+    # -- undo ----------------------------------------------------------
+    #
+    # TouchPose paints into the MODEL, not the stage: a stroke moves faces
+    # between regions in a numpy table and the stage only hears about it
+    # on Save. So rigExecUndo, which snapshots Sdf specs, has nothing to
+    # snapshot here and this keeps a stack of its own. What it shares with
+    # rigExecUndo is the shape: one entry per gesture, a bounded stack, and
+    # a push that discards the redo branch.
+
+    def _UndoStack(self):
+        """The stack a stroke goes onto: the shared one when it is there.
+
+        The RigExec plugin's gizmo toolbar owns an application-wide
+        Ctrl+Z bound to rigExecUndo's stack, so a stroke kept on a stack
+        of our own would be unreachable by the only key an artist will
+        press -- and worse, Ctrl+Z would silently undo some earlier gizmo
+        drag instead of the stroke just painted. FaceTableEdit is shaped
+        to sit on that stack, so it goes there when it exists.
+
+        Read through gizmoUI's public surface, the same soft import
+        GizmoDragging already uses: TouchPose is its own usdview plugin
+        and has to open on a session without RigExec, which is what the
+        local stack is for.
+        """
+        try:
+            import gizmoUI
+            controller = gizmoUI.GetController()
+            stack = getattr(controller, "undoStack", None)
+            if stack is not None:
+                return stack
+        except Exception:
+            pass
+        return self._localUndo
+
+    def _BeginStroke(self):
+        """Remember the table the brush is about to change."""
+        self._strokeBefore = (self._model.SnapshotFaces()
+                              if self._model is not None else None)
+
+    def _EndStroke(self):
+        """Close the stroke, pushing it only if it changed something."""
+        before, self._strokeBefore = self._strokeBefore, None
+        if before is None or self._model is None or not self.stroke_faces:
+            return
+        after = self._model.SnapshotFaces()
+        if (before == after).all():
+            return
+        self._UndoStack().Push(FaceTableEdit(self, before, after))
+
+    def CanUndo(self):
+        return self._UndoStack().CanUndo()
+
+    def CanRedo(self):
+        return self._UndoStack().CanRedo()
+
+    def Undo(self):
+        """Take back the last paint stroke. True when one was there."""
+        return self._UndoStack().Undo()
+
+    def Redo(self):
+        return self._UndoStack().Redo()
+
+    def ApplyFaceTable(self, table):
+        """Undo/redo lands here: restore, republish, tell the panel."""
+        if self._model is None:
+            return
+        self._model.RestoreFaces(table)
+        self._Redraw()
+        self.strokeFinished.emit()
 
     def SetPaintTarget(self, region):
         """Which region a stroke gives its faces to."""
@@ -764,56 +1172,84 @@ class TouchPoseController(QtCore.QObject,
         return len(faces)
 
     def Save(self, path=None):
-        """Write the regions back to their own layer. Never the rig.
+        """Write the regions back to their own layers. Never the rig.
 
-        Defaults to the layer the regions were READ from, which is the
-        touch layer of the open stage -- so Save on a stage opened as
-        `Biped_all.usda` rewrites `Biped_touch_regions.usda` and leaves
-        the rig alone.
+        With no `path`, each region goes back to the layer it was READ
+        from, so a character whose body and face each carry a touch layer
+        (Biped_body_touch_regions.usda, Biped_face_touch_regions.usda)
+        saves each region into its own branch and leaves the rig alone. A
+        region painted new this session goes to the layer of the first
+        region. With a `path`, every region is written there.
+
+        Returns the first path written; `last_saved_paths` has them all.
         """
         from touchpose import usdexport
 
+        self.last_saved_paths = []
         if self._model is None:
             return None
-        path = path or self.RegionLayerPath()
-        if not path:
+        if path:
+            groups = [(path, self._model.Rows())]
+        else:
+            groups = self._RowsByLayer()
+        if not groups:
             return None
-        rows = self._model.Rows()
-        usdexport.save_regions(
-            path, self._mesh_path, rows,
-            palette=self._model.palette, alpha=self._model.alpha,
-            lead=self._model.lead_color, selected=self._model.selected_color,
-            scope_path=getattr(self._model, "scope_path", None))
+        for layer_path, rows in groups:
+            usdexport.save_regions(
+                layer_path, self._model.mesh_path, rows,
+                palette=self._model.palette, alpha=self._model.alpha,
+                lead=self._model.lead_color,
+                selected=self._model.selected_color,
+                scope_path=getattr(self._model, "scope_path", None))
+            self.last_saved_paths.append(layer_path)
         self._model.dirty = False
-        return path
+        return self.last_saved_paths[0]
 
-    def RegionLayerPath(self):
-        """The layer the region prims were authored in, if there is one.
+    def _RowsByLayer(self):
+        """[(layer path, rows)] in the order the layers are first met.
 
-        Found by asking USD which layer holds the strongest opinion on a
-        region's face list, rather than by guessing at a filename.
+        Every layer that held a region is listed, even when all its
+        regions were erased, so the rewrite drops them from that file.
         """
+        default = self.RegionLayerPath()
+        if not default:
+            return []
+        by_name = {row[0]: row for row in self._model.Rows()}
+        groups = {}
+        for region in self._model.regions:
+            layer = self._RegionLayer(region.name) or default
+            rows = groups.setdefault(layer, [])
+            if region.name in by_name:
+                rows.append(by_name[region.name])
+        return list(groups.items())
+
+    def _RegionScope(self):
         stage = self._Stage()
-        if stage is None or self._model is None or not self._model.regions:
+        if stage is None or self._model is None:
             return None
         # The scope the model was READ from, then any scope annotating THIS
         # mesh. (This asked the model for `mesh`, which it never had, so the
         # filter was always None and the first scope on the stage won --
         # the wrong layer as soon as a shot holds two characters.)
         scope_path = getattr(self._model, "scope_path", None)
-        scope = stage.GetPrimAtPath(Sdf.Path(scope_path)) if scope_path \
-            else None
+        scope = stage.GetPrimAtPath(Sdf.Path(scope_path)) if scope_path             else None
         if not scope or not scope.IsValid():
             scopes = touchPoseModel.FindRegionScopes(
                 stage, self._model.mesh_path)
             scope = scopes[0] if scopes else None
+        return scope
+
+    def _RegionLayer(self, name):
+        """The layer holding the strongest opinion on a region's faces."""
+        scope = self._RegionScope()
         if scope is None:
             return None
-        prim = stage.GetPrimAtPath(
-            scope.GetPath().AppendChild(self._model.regions[0].name))
+        prim = scope.GetStage().GetPrimAtPath(
+            scope.GetPath().AppendChild(name))
         attr = None
-        for name in (touchPoseModel.TYPED_FACES, touchPoseModel.FACES_ATTR):
-            candidate = prim.GetAttribute(name) if prim else None
+        for attr_name in (touchPoseModel.TYPED_FACES,
+                          touchPoseModel.FACES_ATTR):
+            candidate = prim.GetAttribute(attr_name) if prim else None
             if candidate and candidate.IsValid():
                 attr = candidate
                 break
@@ -825,6 +1261,16 @@ class TouchPoseController(QtCore.QObject,
                 return identifier
         return None
 
+    def RegionLayerPath(self):
+        """The layer the first region prim was authored in, if there is one.
+
+        Found by asking USD which layer holds the strongest opinion on a
+        region's face list, rather than by guessing at a filename.
+        """
+        if self._model is None or not self._model.regions:
+            return None
+        return self._RegionLayer(self._model.regions[0].name)
+
     # -- the loop --------------------------------------------------------
 
     def SyncPose(self, force=False):
@@ -834,25 +1280,55 @@ class TouchPoseController(QtCore.QObject,
         RigExec snapshot), so it runs per hover rather than on a timer. The
         highlight needs nothing here at all: it is drawn by the mesh's own
         shader, so it moves with the skin by construction.
+
+        Every live set, because every one of them is cast.
         """
-        if self._model is None:
+        if not self._models:
             return False
-        return self._model.SyncPose(self._Time(), force=force)
+        time = self._Time()
+        moved = False
+        for model in self._models:
+            moved = model.SyncPose(time, force=force) or moved
+        return moved
 
     @property
     def suspended(self):
-        """True while a gizmo drag has TouchPose stood down."""
+        """True while a gizmo drag, playback or a scrub has TouchPose
+        stood down."""
         return self._suspended
 
-    def _PollDrag(self):
-        """Stand the HOVER down for the length of a gizmo drag.
+    def _ConnectFrames(self, on):
+        signal = getattr(self._api.dataModel, "currentFrameChanged", None)
+        if on and signal is not None and self._frameSignal is None:
+            signal.connect(self._OnFrameChanged)
+            self._frameSignal = signal
+        elif not on and self._frameSignal is not None:
+            try:
+                self._frameSignal.disconnect(self._OnFrameChanged)
+            except (RuntimeError, TypeError):
+                pass
+            self._frameSignal = None
 
-        The selection highlight stays lit: it is part of the body's shader,
-        so it follows the pose being dragged at no cost.
+    def _OnFrameChanged(self, *args):
+        """The timeline moved: dark until it has been still a moment."""
+        self._timeBusy = True
+        self._timeQuiet.start()
+        self._PollDrag()
+
+    def _OnTimeQuiet(self):
+        self._timeBusy = False
+        self._PollDrag()
+
+    def _PollDrag(self):
+        """Stand TouchPose down while the rig is being moved.
+
+        A gizmo drag, playback and a scrub all turn every highlight off --
+        hover, lead and selection -- and the picking with them, and turn
+        them back on as they were once the rig is still.
         """
         if not self._active or self._model is None:
             return
-        dragging = GizmoDragging(self._api)
+        dragging = GizmoDragging() or self._timeBusy
         if dragging == self._suspended:
             return
         self._suspended = dragging
@@ -862,14 +1338,19 @@ class TouchPoseController(QtCore.QObject,
             # side of the suspend and light the hover mid-drag.
             self._hoverTimer.stop()
             self._pendingHover = None
-            if self._highlight is not None and self._highlight.Suspend():
+            changed = False
+            for highlight in self._highlights:
+                changed = highlight.Suspend() or changed
+            if changed:
                 self._Redraw()
             return
         self.SyncPose(force=True)
-        if self._highlight is not None:
-            self._highlight.Clear()
-            if self._highlight.Resume():
-                self._Redraw()
+        changed = False
+        for highlight in self._highlights:
+            highlight.Clear()
+            changed = highlight.Resume() or changed
+        if changed:
+            self._Redraw()
 
     def _HoverSoon(self, x, y):
         """One hover per frame at most, and never the last one dropped.
@@ -898,10 +1379,20 @@ class TouchPoseController(QtCore.QObject,
         self.Hover(*pending)
 
     def Hover(self, x, y):
-        """Light the region under a physical pixel. Returns it, or None."""
+        """Light the region under a physical pixel. Returns it, or None.
+
+        The hover is set on the set that was HIT and cleared on all the
+        others, so crossing from the cheek onto the eyeball puts the
+        body's hover out as the eye's comes on -- two lit patches would
+        read as two things being aimed at.
+        """
         self.SyncPose()
-        region, _face = self.RegionAt(x, y)
-        if self._highlight is not None and self._highlight.SetHover(region):
+        hit, region, _face = self.CastAt(x, y)
+        changed = False
+        for model, highlight in zip(self._models, self._highlights):
+            changed = highlight.SetHover(
+                region if model is hit else None) or changed
+        if changed:
             self._Redraw()
         if region is not self._hover:
             self._hover = region
@@ -1098,8 +1589,12 @@ class TouchPoseController(QtCore.QObject,
         return [str(p.GetPath()) for p in keep]
 
     def RegionsInBand(self, x0, y0, x1, y1):
-        """Regions the marquee touches, front-facing only."""
-        if self._model is None or self._view is None:
+        """Regions the marquee touches, front-facing only.
+
+        Across every live set, so a band drawn over the head catches the
+        eyes along with the face.
+        """
+        if not self._models or self._view is None:
             return []
         try:
             viewport = self._view.computeWindowViewport()
@@ -1112,8 +1607,11 @@ class TouchPoseController(QtCore.QObject,
         except Exception:
             return []
         self.SyncPose()
-        caught = self._model.RegionsInRect(
-            matrix, width, height, (eye[0], eye[1], eye[2]), x0, y0, x1, y1)
+        caught = []
+        for model in self._models:
+            caught.extend(model.RegionsInRect(
+                matrix, width, height, (eye[0], eye[1], eye[2]),
+                x0, y0, x1, y1))
 
         # A band catches a region when one of its face CENTROIDS is
         # inside, which is the right test at any useful size and the
@@ -1123,9 +1621,12 @@ class TouchPoseController(QtCore.QObject,
         # therefore cast as well -- a tiny marquee then behaves exactly
         # like the click it visually is, which is what stops a slightly
         # shaky click from clearing the selection.
+        #
+        # Compared by IDENTITY and not by `index`: an index is only
+        # unique within one set, and with the eyes live as well region 0
+        # exists three times over.
         middle, _face = self.RegionAt((x0 + x1) * 0.5, (y0 + y1) * 0.5)
-        if middle is not None and not any(r.index == middle.index
-                                          for r in caught):
+        if middle is not None and not any(r is middle for r in caught):
             caught.append(middle)
         return caught
 
@@ -1171,7 +1672,7 @@ class TouchPoseController(QtCore.QObject,
                 # The gizmo is drawing its own pre-selection highlight on
                 # this pixel; lighting a region behind it as well reads
                 # as two things being aimed at.
-                if self._highlight is not None and self._highlight.Clear():
+                if self._ClearHover():
                     self._Redraw()
                 self._hover = None
                 return False
@@ -1181,7 +1682,7 @@ class TouchPoseController(QtCore.QObject,
             self._hover = None
             self._hoverTimer.stop()
             self._pendingHover = None
-            if self._highlight is not None and self._highlight.Clear():
+            if self._ClearHover():
                 self._Redraw()
             return False
         if kind == QtCore.QEvent.MouseButtonPress:
@@ -1210,6 +1711,7 @@ class TouchPoseController(QtCore.QObject,
                 erase = bool(modifiers & QtCore.Qt.ShiftModifier)
                 self._painting = "erase" if erase else "add"
                 self.stroke_faces = 0
+                self._BeginStroke()
                 self.Paint(x, y, erase=erase)
                 self._consumedPress = True
                 return True
@@ -1237,6 +1739,7 @@ class TouchPoseController(QtCore.QObject,
                     QtCore.QEvent.MouseButtonDblClick):
             if self._painting is not None:
                 self._painting = None
+                self._EndStroke()
                 self.statusChanged.emit(
                     "stroke: %d faces" % self.stroke_faces)
                 self.strokeFinished.emit()
@@ -1303,11 +1806,47 @@ class TouchPosePanel(QtWidgets.QDialog):
         self._toggle.toggled.connect(self._OnToggled)
         layout.addWidget(self._toggle)
 
+        # ONE status line for the hover and the voice both. Built here so
+        # the voice mode can be wired to it, and added to the layout below
+        # the voice checkbox so it reads as the answer to whichever of the
+        # two spoke last.
         self._hoverLabel = QtWidgets.QLabel("")
         font = self._hoverLabel.font()
         font.setBold(True)
         self._hoverLabel.setFont(font)
+
+        self._voice = self._MakeVoice(usdviewApi)
+        layout.addWidget(self._voiceToggle)
         layout.addWidget(self._hoverLabel)
+
+        # -- the layer switch, and the filter ----------------------------
+        #
+        # One row, because they answer the same question -- which regions
+        # am I looking at -- and a panel this narrow cannot afford two.
+        # The switch hides itself on a rig with a single layer rather than
+        # showing a combo with one entry nobody can act on.
+        pick = QtWidgets.QHBoxLayout()
+        self._layerLabel = QtWidgets.QLabel("layer")
+        pick.addWidget(self._layerLabel)
+        self._layer = QtWidgets.QComboBox()
+        self._layer.setToolTip(
+            "Which set of touch regions the list below shows, and which "
+            "one a stroke paints into. Every set on the stage is live for "
+            "hovering and picking whatever this says -- the body and both "
+            "eyeballs at once -- because a set owns one mesh and the eyes "
+            "are not the body.")
+        self._layer.activated.connect(self._OnLayerChosen)
+        pick.addWidget(self._layer, 1)
+        self._search = QtWidgets.QLineEdit()
+        self._search.setPlaceholderText("find a region...")
+        self._search.setClearButtonEnabled(True)
+        self._search.setToolTip(
+            "Filter the list below. Matches the region's name and the "
+            "control it selects, case-insensitively; space-separated "
+            "words all have to match, in any order.")
+        self._search.textChanged.connect(self._OnSearchChanged)
+        pick.addWidget(self._search, 1)
+        layout.addLayout(pick)
 
         self._list = QtWidgets.QListWidget()
         self._list.itemClicked.connect(self._OnRowClicked)
@@ -1387,6 +1926,107 @@ class TouchPosePanel(QtWidgets.QDialog):
     @property
     def controller(self):
         return self._controller
+
+    @property
+    def voice(self):
+        return self._voice
+
+    # -- voice -----------------------------------------------------------
+
+    def _MakeVoice(self, usdviewApi):
+        """The voice mode and its checkbox, or a checkbox that says why not.
+
+        NOTHING HERE CAN STOP THE PANEL OPENING. The speech subpackage
+        lives in the shared TouchPose repo (`touchpose/scripts/touchpose/
+        voice`), and a checkout without it -- or a machine with no speech
+        engine -- gets a disabled box whose tooltip names the reason,
+        which is more use to whoever meets it than a feature that is
+        simply not there. Every path out of here returns a checkbox.
+        """
+        self._voiceToggle = QtWidgets.QCheckBox("Voice (hold %s)"
+                                                % (touchPoseVoice.
+                                                   PUSH_TO_TALK_LABEL
+                                                   if touchPoseVoice else "N"))
+        if touchPoseVoice is None:
+            self._voiceToggle.setEnabled(False)
+            self._voiceToggle.setToolTip(
+                "Voice-to-select is not available in this checkout.")
+            return None
+
+        try:
+            core, reason = touchPoseVoice.Available()
+        except Exception as error:                  # pragma: no cover
+            core, reason = None, "Voice-to-select is unavailable: %s" % error
+        if core is None:
+            self._voiceToggle.setEnabled(False)
+            self._voiceToggle.setToolTip(reason)
+            return None
+
+        self._voiceToggle.setToolTip(
+            "Hold %s anywhere in usdview and say a control's name -- "
+            "\"left clavicle\", \"right arm pole vector\". The control is "
+            "selected, its region lights on the skin, and the Avar Editor "
+            "follows. Saying a name without a side picks the one on the "
+            "side of the current selection, or both."
+            % touchPoseVoice.PUSH_TO_TALK_LABEL)
+        try:
+            voice = touchPoseVoice.TouchPoseVoice(self._controller,
+                                                  usdviewApi, self)
+        except Exception as error:                  # pragma: no cover
+            self._voiceToggle.setEnabled(False)
+            self._voiceToggle.setToolTip("Voice-to-select is unavailable: %s"
+                                         % error)
+            return None
+        voice.statusChanged.connect(self._hoverLabel.setText)
+        self._voiceToggle.toggled.connect(self._OnVoiceToggled)
+        # IT COMES UP WITH THE PANEL. The files are there and the engine
+        # works, so there is nothing for anybody to turn on: holding N
+        # just works. Deferred by one event-loop turn so starting the
+        # helper -- about 0.9 s, once -- never delays the window
+        # appearing, and so a failure to start cannot fail the
+        # constructor. The checkbox stays, because turning it OFF is a
+        # real thing to want: it gives N and the microphone back.
+        # OFF BY DEFAULT. It used to switch itself on once the panel was
+        # up, on the reasoning that a feature nobody has to enable is one
+        # nobody has to find. In practice it claims a hotkey and opens the
+        # microphone for everyone who opens TouchPose, including the many
+        # sessions that never say a word -- so it waits to be asked. The
+        # checkbox is the way in, and TOUCHPOSE_VOICE_AUTOSTART=1 brings
+        # the old behaviour back for anyone who wants it.
+        if os.environ.get("TOUCHPOSE_VOICE_AUTOSTART", "").strip() not in (
+                "", "0", "false", "False"):
+            QtCore.QTimer.singleShot(0, self._AutoStartVoice)
+        return voice
+
+    def _AutoStartVoice(self):
+        """Switch voice on by itself, quietly, once the panel is up."""
+        if self._voice is None or self._voice.enabled:
+            return
+        try:
+            if self._voice.SetEnabled(True):
+                self._SetChecked(self._voiceToggle, True)
+        except Exception as error:                  # pragma: no cover
+            # Nobody asked for this, so nobody gets a terminal line about
+            # it: the reason is already on the status line, and TouchPose
+            # carries on without it. Warned only because reaching here at
+            # all means SetEnabled raised, which it is written not to.
+            Tf.Warn("touchPose: voice did not start: %s" % error)
+
+    def _OnVoiceToggled(self, checked):
+        if self._voice is None:
+            return
+        try:
+            got = self._voice.SetEnabled(checked)
+        except Exception as error:                  # pragma: no cover
+            # SetEnabled is written not to raise; if it ever does, the
+            # checkbox goes back and TouchPose carries on regardless.
+            self._hoverLabel.setText("Voice unavailable: %s" % error)
+            got = False
+        if got != checked:
+            # Starting failed -- no microphone, no engine, no regions. The
+            # box goes back so it never claims a mode that is not on; the
+            # reason is already in the status line.
+            self._SetChecked(self._voiceToggle, got)
 
     # -- hotkeys ---------------------------------------------------------
 
@@ -1475,11 +2115,15 @@ class TouchPosePanel(QtWidgets.QDialog):
         self._SyncLook()
 
     def _SyncLook(self):
-        """Put the slider and the two swatches back on the model.
+        """Put the slider and the two swatches back where they belong.
 
-        Driven off the MODEL, not off the widgets: `Load` re-reads the
-        touch layer, and the panel must show what the layer says rather
-        than what the last session left in the widget.
+        The swatches are driven off the MODEL, not off the widgets:
+        `Load` re-reads the touch layer, and they must show what the
+        layer says rather than what the last session left in the widget.
+
+        The slider is driven off the CONTROLLER, which keeps the opacity
+        across a load, so this puts the widget back on a value the load
+        did not disturb rather than on one it reset.
         """
         self._opacity.blockSignals(True)
         self._opacity.setValue(int(round(self._controller.opacity * 100)))
@@ -1547,7 +2191,10 @@ class TouchPosePanel(QtWidgets.QDialog):
             self._list.setCurrentRow(keep)
 
     def _Fill(self, model):
+        query = self._search.text() if hasattr(self, "_search") else ""
         for region in sorted(model.regions, key=lambda r: r.label):
+            if not RegionMatches(region, query):
+                continue
             item = QtWidgets.QListWidgetItem(
                 "%-28s %5d faces" % (region.label, len(region.faces)))
             item.setData(QtCore.Qt.UserRole, region.index)
@@ -1556,10 +2203,88 @@ class TouchPosePanel(QtWidgets.QDialog):
                   for c in model.EditColor(region)])))
             self._list.addItem(item)
 
+    def _OnSearchChanged(self, _text):
+        """Refill the list against the filter.
+
+        The filter is a VIEW of the model and touches nothing else: the
+        regions, the paint and what the viewport draws are all unchanged,
+        so a search cannot lose work and clearing it puts everything
+        back. Refilling beats hiding rows because the list is hundreds of
+        items, not thousands, and a rebuild keeps one code path.
+        """
+        model = self._controller.model
+        self._list.clear()
+        if model is not None:
+            self._Fill(model)
+
+    def _SyncLayers(self):
+        """Put the switch where the model is standing.
+
+        Read off the CONTROLLER, which lists every set it has open --
+        `model.layers` lists only the sets on that model's own mesh, so
+        on the biped it was ['Body'] alone and the switch hid itself
+        with the two eye sets behind it.
+
+        Signals are blocked while the combo is repopulated: `activated`
+        does not fire on a programmatic change, but `setCurrentIndex`
+        with a stale handler attached has bitten this panel before, and
+        the block costs nothing.
+        """
+        model = self._controller.model
+        layers = list(getattr(self._controller, "layers", None)
+                      or getattr(model, "layers", []) or [])
+        self._layer.blockSignals(True)
+        self._layer.clear()
+        for label, path in layers:
+            self._layer.addItem(label, path)
+        live = getattr(model, "layer_name", "")
+        index = next((i for i, (label, _p) in enumerate(layers)
+                      if label == live), -1)
+        if index >= 0:
+            self._layer.setCurrentIndex(index)
+        self._layer.blockSignals(False)
+        # A single layer is not a choice; a rig with none has no switch
+        # to offer either.
+        multiple = len(layers) > 1
+        self._layer.setVisible(multiple)
+        self._layerLabel.setVisible(multiple)
+
+    def _OnLayerChosen(self, index):
+        """Make the chosen set active, keeping the filter and the toggles.
+
+        Every set stays live for hover and picking; this only moves which
+        one the list below shows and a stroke paints into.
+
+        `_SyncLook` is called at the end because the swatches belong to
+        the set -- lead and selected are read off it -- and because the
+        slider has to agree with what is drawn. It was missing, so a
+        layer change left the slider reading the old percentage while
+        `Load` had quietly put the highlight back to 85%.
+        """
+        label = self._layer.itemText(index)
+        if not label or label == getattr(self._controller.model,
+                                         "layer_name", ""):
+            return
+        self._status.setText(self._controller.Load(layer=label) or "")
+        self._list.clear()
+        model = self._controller.model
+        if model is not None:
+            self._Fill(model)
+        self._SyncLayers()
+        self.SyncToggles()
+        self._SyncLook()
+
     def Reload(self):
         self._status.setText(self._controller.Load() or "")
         self._list.clear()
         model = self._controller.model
+        self._SyncLayers()
+        # A new stage is a new vocabulary. Cheap enough to do on every
+        # reload -- the grammar took 0.12 s to load at 474 phrases -- and
+        # leaving it stale would have the recogniser answering with prim
+        # paths that are no longer on the stage.
+        if self._voice is not None:
+            self._voice.Refresh()
         if model is None:
             return
         self._Fill(model)
@@ -1623,16 +2348,31 @@ class TouchPosePanel(QtWidgets.QDialog):
                 "Nothing to save: no region layer was found for this "
                 "stage.")
             return
+        paths = getattr(self._controller, "last_saved_paths", None) or [path]
         self.Reload()
         self._status.setText("Saved %d regions to %s"
-                             % (len(self._controller.model.Rows()), path))
+                             % (len(self._controller.model.Rows()),
+                                ", ".join(os.path.basename(p)
+                                          for p in paths)))
 
     def closeEvent(self, event):
-        # Closing the window turns the mode off. A mode whose only
-        # visible control has been dismissed but which still eats every
-        # click on the character is the worst version of this feature.
-        self._controller.SetActive(False)
-        self._toggle.setChecked(False)
+        # THE MODE OUTLIVES THE WINDOW, deliberately, and this used to be
+        # the other way round. The old rule was that closing the window
+        # turned the mode off, on the grounds that a mode with no visible
+        # control which still eats every click is the worst version of
+        # this feature. The animator's answer is that the toggle IS the
+        # control: highlighting, clicking, dragging and moving controls
+        # in the viewport should keep working for as long as TouchPose is
+        # set active in the editor, panel open or not. So the toggle
+        # alone decides, and closing the window changes nothing.
+        #
+        # VOICE IS NOT INCLUDED and the old rule still holds for it: it
+        # owns a live microphone, an application-wide event filter and a
+        # subprocess, none of which may outlive the window that started
+        # them. None of the three is viewport interaction.
+        if self._voice is not None:
+            self._voice.SetEnabled(False)
+            self._SetChecked(self._voiceToggle, False)
         super(TouchPosePanel, self).closeEvent(event)
 
 

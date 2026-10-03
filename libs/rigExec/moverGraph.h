@@ -624,6 +624,14 @@ struct RigExecRevisionBinding {
     /// Optional provider the transform is measured against (matrix):
     /// T = M(transform) * inverse(M(transformSpace)).
     SdfPath transformSpace;
+    /// rigExec:space -- the provider whose own rest->pose map carries the
+    /// WHOLE RIG, normally a TRS master, and which is a different thing
+    /// from transformSpace above: that one is what the offset is MEASURED
+    /// against, this one is what the points the offset is applied to have
+    /// already been carried by. Empty when none is named, and then a
+    /// post-skin cluster keeps the scale-only correction it had before.
+    /// See RigExecClusterInPointFrame.
+    SdfPath carrySpace;
     /// Ordered computeMatrix providers (skin): rigExec:influences, which
     /// rigExec:jointIndices index. Every entry shares transformPhase.
     /// Matrix movers use [referenceTransform, referenceTransformSpace]
@@ -901,6 +909,33 @@ RigExecMoverStatus RigExecStatusForParameters(
 ///
 /// Shared by the mover-graph revision node and by the baked program, which
 /// runs the same operation with no VdfNetwork around it.
+/// The scale a posed frame carries: the length of each column of its linear
+/// part.
+///
+/// USD's row-vector convention puts a master's own transform on the RIGHT of
+/// its descendants (world = local * parent), so a frame under a scaled
+/// master factors as rigid * scale -- and for an orthonormal L,
+/// (L S)^T (L S) = S L^T L S = S^2, whose diagonal is exactly those column
+/// lengths. A frame nothing has scaled returns (1, 1, 1), so dividing by it
+/// is the identity: a rig with no scaled master measures what it always did,
+/// to the last bit.
+///
+/// A zero-length column is a degenerate frame that cannot be divided by, so
+/// it reports 1 and leaves that axis alone rather than producing infinities.
+inline GfVec3d
+RigExecFrameScale(const GfMatrix4d &frame)
+{
+    GfVec3d scale(1.0, 1.0, 1.0);
+    for (size_t c = 0; c < 3; ++c) {
+        const double length =
+            GfVec3d(frame[0][c], frame[1][c], frame[2][c]).GetLength();
+        if (length > 0.0) {
+            scale[c] = length;
+        }
+    }
+    return scale;
+}
+
 /// M(transform) * inverse(M(space)) for rigExec:transformSpace, with the
 /// projective column set exactly: the product of an affine matrix and an
 /// affine inverse is affine, but not to the last bit, and the matrix mover
@@ -925,6 +960,145 @@ RigExecMeasureFromReference(const GfMatrix4d &transform, const GfMatrix4d &refer
     m[0][3] = m[1][3] = m[2][3] = 0.0;
     m[3][3] = 1.0;
     return m;
+}
+
+/// inverse(M(space)) * M(transform): the same offset RigExecMeasureInSpace
+/// measures, conjugated into the space's CURRENT frame rather than left in
+/// the space's own coordinates.
+///
+/// The pair exists because world = local * parent in USD's row-vector
+/// convention, so transform * space^-1 cancels the space and hands back the
+/// driver's plain LOCAL matrix. Applied to world-space control points that
+/// is a local offset used as a world one, and it points wherever it pointed
+/// at bind however far the space has since been carried. Reversing the
+/// product gives space^-1 * local * space, which rides the space.
+///
+/// Both return identity when the transform sits exactly at its space, so
+/// swapping one for the other never makes a still rig move.
+inline GfMatrix4d
+RigExecMeasureInPosedSpace(const GfMatrix4d &transform, const GfMatrix4d &space)
+{
+    GfMatrix4d m = space.GetInverse() * transform;
+    m[0][3] = 0.0;
+    m[1][3] = 0.0;
+    m[2][3] = 0.0;
+    m[3][3] = 1.0;
+    return m;
+}
+
+
+/// The offset a cluster applies, in the frame its POINTS are already in.
+///
+/// RigExecMeasureInSpace hands back `transform * space^-1`, which IS
+/// invariant under anything applied above the rig: `(X*T) * (S*T)^-1` is
+/// `X * S^-1` again. What is NOT invariant is applying that offset to
+/// WORLD points, because those points have been carried:
+///
+///     gets    (p + T) * M  =  p*M + T*R
+///     wants    p*M + T
+///
+/// which agree only when M's rotation R is the identity.
+///
+/// \p carry is the rig's own rest->pose map -- rigExec:space's
+/// computeMatrix, normally a TRS master's -- and conjugating by it is the
+/// whole correction: `(p+T) * T^-1*M*T` is `p*M + T`, which is what
+/// rigidity wants, and the same product handles a rotated or scaled master
+/// because nothing about it assumed a translation. Measured 2026-09-24 on
+/// the biped with the face posed and Main moved (40, 0, 25):
+/// head_top_aim_cluster alone put 5.70 units of shear into body_geo, and
+/// with the carry named it is 0.0157 -- the residual every OTHER mover
+/// contributes, which this function cannot see.
+///
+/// WITHOUT a carry the correction falls back to conjugating by the SPACE's
+/// own scale, which is what this function did before a carry could be
+/// named: it fixes a scaled master (the squetch clusters went 25.02 ->
+/// 3.1e-5 on M_HeadwireTop tx=2.0) and does nothing whatever for a
+/// translated or rotated one. Kept, and kept bit-identical, because a rig
+/// that names no space must not lose the half-fix it already had.
+///
+/// The two never compose: a named carry already contains the master's
+/// scale, so applying the scale conjugation as well would apply it twice.
+///
+/// A rig naming no space and standing under an unscaled master measures
+/// (1,1,1) and gets \p m back untouched, so it is bit-identical.
+inline GfMatrix4d
+RigExecClusterInPointFrame(const GfMatrix4d &m, const GfMatrix4d &space,
+                           bool posedPoints,
+                           const GfMatrix4d *carry = nullptr)
+{
+    if (!posedPoints) {
+        return m;
+    }
+    GfMatrix4d out;
+    if (carry) {
+        // The guard is "a carry was NAMED", never "the carry is identity":
+        // `carry^-1 * m * carry` for a master standing at its rest is m to
+        // the last few ulps and not bit for bit, and a rig that named a
+        // space has asked for that product. What must stay untouched is the
+        // rig that named NOTHING, which is the branch below.
+        out = carry->GetInverse() * m * *carry;
+    } else {
+        const GfVec3d k = RigExecFrameScale(space);
+        if (k == GfVec3d(1.0)) {
+            return m;
+        }
+        GfMatrix4d scale(1.0), unscale(1.0);
+        scale.SetScale(k);
+        unscale.SetScale(GfVec3d(1.0 / k[0], 1.0 / k[1], 1.0 / k[2]));
+        out = unscale * m * scale;
+    }
+    out[0][3] = 0.0;
+    out[1][3] = 0.0;
+    out[2][3] = 0.0;
+    out[3][3] = 1.0;
+    return out;
+}
+
+/// Carries a transform-driven wire's two control polygons into the frame
+/// its POINTS are already in. The wire's counterpart of
+/// RigExecClusterInPointFrame: the same correction, applied to a
+/// difference vector instead of an offset matrix.
+///
+/// The applier adds `posed(u) - rest(u)`, and for a driver measured as
+/// `T * S^-1` that difference is master-invariant by construction: under a
+/// master motion M both T and S pick up M and it cancels. The control
+/// points the driver is applied to are the curve's AUTHORED ones, so the
+/// delta is computed wholly in the uncarried frame -- and then added to
+/// points a skin has already carried by M:
+///
+///     gets    p*M + d
+///     wants   (p + d)*M  =  p*M + d*M_linear
+///
+/// A translation leaves a difference vector alone, which is why this is
+/// invisible under a moved master and shows only under a rotated or
+/// scaled one. Transforming BOTH polygons by the carry makes the kernel's
+/// difference `d*M_linear`: the translation cancels in the subtraction,
+/// and NURBS evaluation commutes with an affine map because the basis is
+/// a partition of unity, so Evaluate(carried CVs) == carry(Evaluate(CVs)).
+/// The bind table (u, d) was measured against the authored rest curve and
+/// stays valid, because the carry moves both curves equally. Measured
+/// 2026-09-24 on the biped with the face posed and Main turned ry=35: the
+/// nine carried head wires put 1.0257 units of non-rigid residual into
+/// hair_geo, and with the carry applied the rig is rigid to 2e-5 -- the
+/// floor every other mover leaves.
+///
+/// Same guard rule as the cluster: called when a carry was NAMED, never
+/// because it is identity, so a rig naming nothing is bit for bit what it
+/// was. A named carry already holds the master's scale, so the scale-only
+/// correction an uncarried posed wire gets (its displacement multiplied by
+/// the measuring space's scale) is NOT applied beside it; the two never
+/// compose.
+inline void
+RigExecCarryWireCurves(std::vector<GfVec3f> *rest,
+                       std::vector<GfVec3f> *posed,
+                       const GfMatrix4d &carry)
+{
+    for (GfVec3f &p : *rest) {
+        p = GfVec3f(carry.TransformAffine(GfVec3d(p)));
+    }
+    for (GfVec3f &p : *posed) {
+        p = GfVec3f(carry.TransformAffine(GfVec3d(p)));
+    }
 }
 
 /// Whether a wire applies its envelope itself: a valid sparse field with a
@@ -1166,6 +1340,13 @@ struct RigExecProviderValues {
     const GfMatrix4d *transform = nullptr;          ///< computeMatrix
     /// computeMatrix per binding.influences entry, in that order (skin).
     const std::vector<GfMatrix4d> *influenceTransforms = nullptr;
+    /// computeMatrix of binding.carrySpace (rigExec:space), read at the
+    /// revision's declared phase, or null when the mover named none. A
+    /// POINTER because "named" is the guard, never "identity": a
+    /// transform-driven wire whose points are posed carries both control
+    /// polygons by it (RigExecCarryWireCurves), and a rig naming nothing
+    /// must take the untouched branch.
+    const GfMatrix4d *carry = nullptr;
     /// Bound computeWeightPacket, or null to use inputs:defaultWeight.
     const RigExecWeightPacket *weights = nullptr;
     const RigExecPointFrameArray *driverFrames = nullptr;

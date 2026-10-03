@@ -1,36 +1,37 @@
-"""A follower of solved joints reads the version at its own stack place.
+"""A follower of solved joints is not a cycle; a solver reading its own
+follower is -- and the compiler has to say WHICH.
 
 The shape under test is the conventional per-limb param node: a control under
 <rig>/Controls, parent-constrained from the limb's end joint, whose scalar
 `avars:ikfk` is what the limb's blend solver reads through
-`inputs:weight.connect`. Authored on the biped, the follower-at-the-bottom
-arrangement was once rejected with a "pose dependency cycle among:"
-naming sixty constraints and four solvers -- the blend reading the param
-control, the control written by a constraint that reads the ankle, the
-ankle written by the blend.
+`inputs:weight.connect`. Authored on the biped it was rejected with a
+"pose dependency cycle among:" followed by sixty constraints and four
+solvers, and that list was read as a prim-granular false cycle -- the
+blend reading the param control, the control written by a constraint that
+reads the ankle, the ankle written by the blend. Bisecting it showed the
+scalar read was never an edge at all: retargeting the constraint at a
+fresh control nothing reads, or disconnecting the weight, changed nothing.
 
-That rejection belonged to the two-phase compiler. Under the unified
-pose stack (spec 4.2) a FRAME read is positional: a step reads the
-version standing at its own place in the stack, so a reader below a
-writer sees the earlier version and that is not a contradiction. The
-follower below the solvers reads the pre-solve ankle; the same follower
-after the solvers reads the final ankle. Neither arrangement cycles,
-and neither does the shape that used to be the genuine loop -- the IK's
-effector constrained from the IK's own joint -- because every one of
-its reads is positional too.
+What actually closed the loop is the Movers STACK. Its namespace executes
+bottom-up (rigEvaluator.cpp, _GetMoverExecutionOrder), constraints keep
+that authored order, and a chain the builder appends lands at the bottom
+-- so the follower ran FIRST, before the reverse-foot constraints the leg
+IK's effector sits under. Follower waits on the blend, the blend on the
+IK, the IK on the foot constraint, and the foot constraint, by stack
+order, on the follower. The arms never cycled because nothing constrained
+sits above their effector. The same rig with the follower chain at the top
+of the stack compiles and tracks to 0.000000 cm.
 
 So this asserts three things on a minimal leg with a reverse foot:
 
-  1. the follower at the BOTTOM of the Movers stack compiles, and the
-     param control tracks the REST ankle -- the version standing where
-     the follower runs, before the solvers -- while the solved ankle
-     demonstrably moves on without it;
-  2. the same rig with the Solvers scope reordered last -- solvers
-     first, then the constraints -- compiles, the blend still reads the
-     scalar, and the param control tracks the solved ankle in FK and
-     in IK;
-  3. the former genuine loop compiles and evaluates valid in either
-     Movers order.
+  1. the follower at the BOTTOM of the stack is reported as a cycle, and
+     the report names the loop -- follower, blend, IK, foot constraint --
+     and NOT the unrelated step downstream of it;
+  2. the follower at the TOP compiles, the blend still reads the scalar
+     the constraint's target carries, and the param control tracks the
+     ankle in FK and in IK;
+  3. a genuine loop -- the IK's effector control itself constrained from
+     the IK's own joint -- fails in either order, and the report names it.
 
 Usage:
     python test_rigexec_pose_cycle.py [schema_resources_dir]
@@ -43,12 +44,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_rigexec_python import _setup_environment  # noqa: E402
 
 RIG = "/Rig"
+FOLLOWER = RIG + "/Movers/param_follow/params_to_ankle"
+FOOT_CONSTRAINT = RIG + "/Movers/foot/pivot_from_bank"
+TAIL_CONSTRAINT = RIG + "/Movers/tail/tail_from_ankle"
+EFFECTOR_CONSTRAINT = RIG + "/Movers/foot/foot_from_ankle"
 BLEND = RIG + "/Solvers/IkFk"
+IK = RIG + "/Solvers/Ik"
+FK = RIG + "/Solvers/Fk"
 PARAMS = RIG + "/Controls/Params"
 ANKLE = RIG + "/Joints/Thigh/Knee/Ankle"
-# Ankle rest from _build's chain: thigh at 0, knee -3 below it, ankle -3
-# below that.
-ANKLE_REST = (0.0, -6.0, 0.0)
 
 
 def _at(y):
@@ -72,6 +76,16 @@ def _build(rigexec, Usd, Sdf, follower_on_top, effector_constrained):
     Chains are created in the order tail, foot, param_follow, which is the
     order the biped's builder produces them, so param_follow is the BOTTOM
     of the stack -- first to execute -- unless `follower_on_top` moves it.
+
+    The SCOPES are ordered the way the shipped biped orders them (Joints,
+    Movers, Controls, Solvers), and under the unified pose stack that is
+    load-bearing rather than cosmetic: execution is the reverse composed
+    pre-order of the WHOLE rig (spec §4.2), so a scope's place in
+    nameChildren decides whether every mover runs before or after every
+    solver. Left in creation order the builder emits Solvers before Movers,
+    which executes every constraint ahead of every solver -- no position
+    within the Movers stack could then put the follower after the blend,
+    and the shape this test is about would not arise at all.
     """
     stage = Usd.Stage.CreateInMemory()
     builder = rigexec.Builder.create(stage, RIG)
@@ -145,15 +159,46 @@ def _build(rigexec, Usd, Sdf, follower_on_top, effector_constrained):
         names.remove("param_follow")
         movers.SetChildrenReorder(["param_follow"] + names)
 
+    # The shipped scope order (see the docstring). Authored after the
+    # scopes exist, because the builder creates them on first use.
+    root = stage.GetPrimAtPath(RIG)
+    present = [c.GetName() for c in root.GetChildren()]
+    shipped = [n for n in ("Joints", "Movers", "Controls", "Solvers")
+               if n in present]
+    root.SetChildrenReorder(
+        shipped + [n for n in present if n not in shipped])
+
     return stage, rigexec.Rig(stage, RIG)
 
 
-def _compile_error(rig):
+def _cycle_report(rig):
+    """The compiler's verdict on a cycle, however it is delivered.
+
+    A cycle is no one member's fault, so the compiler sets EVERY member
+    aside and compiles the rest of the rig -- one bad loop must not cost a
+    character its other four hundred operations. The report is then the
+    reason those operations carry, which is the same string a whole-rig
+    refusal used to raise. Returns (report, skipped_paths), or (None, {})
+    when the rig compiled clean.
+    """
     try:
         rig.compile()
     except ValueError as error:
-        return str(error)
-    return None
+        return str(error), {}
+    skipped = rig.skipped_operations()
+    reasons = {reason for reason in skipped.values()}
+    if len(reasons) > 1:
+        # More than one unrelated refusal: hand back all of them rather
+        # than pick, so an assertion names what actually happened.
+        return "\n".join(sorted(reasons)), skipped
+    return (reasons.pop() if reasons else None), skipped
+
+
+def _loop_part(message):
+    """The named loop, without the parenthetical that counts the rest."""
+    line = next(l for l in message.splitlines()
+                if "pose dependency cycle" in l)
+    return line.split(" (each step", 1)[0]
 
 
 def main():
@@ -165,34 +210,39 @@ def main():
 
     rigexec.load_schema_plugin(plugin_dir)
 
-    # --- 1. follower below the solvers: compiles, reads the rest --------
+    # --- 1. follower at the bottom of the stack: a cycle, named -----------
     stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=False,
                         effector_constrained=False)
-    message = _compile_error(rig)
-    assert message is None, (
-        "a frame read from below its writer is positional, not a cycle: %s"
+    message, skipped = _cycle_report(rig)
+    assert message and "pose dependency cycle" in message, message
+    for member in (FOLLOWER, BLEND, IK, FOOT_CONSTRAINT):
+        assert member in message, "%s missing from: %s" % (member, message)
+    assert FK not in message, "the FK chain has no wait: %s" % message
+    loop = _loop_part(message)
+    assert " -> " in loop, "the report walks the loop: %s" % message
+    assert TAIL_CONSTRAINT not in loop, (
+        "the tail constraint waits on the loop but is not on it: %s"
         % message)
-    pose = rig.evaluate(1.0)
-    assert pose.valid
-    params = _origin(pose.control_frame(PARAMS))
-    ankle = _origin(pose.joint_frame(ANKLE))
-    assert _distance(params, ANKLE_REST) < 1e-6, (
-        "the follower runs before the solvers, so it tracks the rest "
-        "ankle: %s" % (params,))
-    gap = _distance(params, ankle)
-    assert gap > 0.5, (
-        "the solved ankle moved on without it: gap %.6f" % gap)
-    print("bottom of the stack: compiles; params tracks rest %s, gap to "
-          "solved %.4f" % (params, gap))
+    assert "1 further pose step waits on the loop" in message, message
+    # And the loop's members, exactly, are what was set aside: the tail
+    # constraint waits on the loop but is not on it, so it keeps running.
+    if skipped:
+        assert TAIL_CONSTRAINT not in skipped, (
+            "the tail constraint was set aside too: %s" % sorted(skipped))
+        assert FK not in skipped, (
+            "the FK chain was set aside: %s" % sorted(skipped))
+        for member in (FOLLOWER, BLEND, IK, FOOT_CONSTRAINT):
+            assert member in skipped, (
+                "%s kept running on an order nobody chose: %s"
+                % (member, sorted(skipped)))
+    print("bottom of the stack: %s" % loop.strip())
 
-    # --- 2. solvers first: the follower tracks the solved ankle ---------
+    # --- 2. follower at the top: compiles, reads the scalar, tracks -------
     stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=True,
                         effector_constrained=False)
-    stage.GetPrimAtPath(RIG).SetChildrenReorder(
-        ["Joints", "Controls", "Movers", "Solvers"])
-    message = _compile_error(rig)
+    message, _skipped = _cycle_report(rig)
     assert message is None, (
-        "the solvers-first ordering should compile: %s" % message)
+        "the same rig with the follower executing last: %s" % message)
     dial = stage.GetPrimAtPath(PARAMS).GetAttribute("avars:ikfk")
     weight = stage.GetPrimAtPath(BLEND).GetAttribute("inputs:weight")
     assert weight.GetConnections() == [dial.GetPath()], (
@@ -214,17 +264,18 @@ def main():
     print("top of the stack: compiles; gap FK %.6f, IK %.6f; the ankle "
           "moved %.4f between the two" % (gaps[0.0], gaps[1.0], moved))
 
-    # --- 3. the former genuine loop: ordered reads, valid pose ---------
+    # --- 3. a genuine loop fails in either order, and is named ------------
     for on_top in (False, True):
         stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=on_top,
                             effector_constrained=True)
-        message = _compile_error(rig)
-        assert message is None, (
-            "positional reads resolve the old loop (follower on top: %s): "
-            "%s" % (on_top, message))
-        pose = rig.evaluate(1.0)
-        assert pose.valid, "follower on top: %s" % on_top
-    print("former loop: compiles and evaluates valid in both orders")
+        message, _skipped = _cycle_report(rig)
+        assert message and "pose dependency cycle" in message, (
+            "an effector constrained from its own IK's joint compiled "
+            "(follower on top: %s)" % on_top)
+        loop = _loop_part(message)
+        for member in (EFFECTOR_CONSTRAINT, BLEND, IK):
+            assert member in loop, "%s missing from: %s" % (member, message)
+    print("genuine loop: rejected in both orders; %s" % loop.strip())
     print("OK")
 
 

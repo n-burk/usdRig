@@ -64,7 +64,7 @@ def _Stage():
 
     The unbound one is the case the importer now skips at author time;
     it is here so `require_control` is asserted rather than assumed,
-    because an already-imported `Biped_touch.usda` from before the rule
+    because an already-imported region layer from before the rule
     changed still contains them.
     """
     layer = Sdf.Layer.CreateAnonymous("cube.usda")
@@ -738,14 +738,14 @@ def TestImporterSkipsUnboundSets():
            "the layer OVERS the mesh rather than defining it -- stacked "
            "over the wrong asset it must fail to find the mesh, not "
            "conjure one; got %s" % mesh.GetSpecifier())
-
-
-
-
-
-
-
-
+    # The regions live on their own scope, NOT under the mesh: a face
+    # GeomSubset is collected by hdSt whatever family it declares, and
+    # 98 of them collided with `body_geo`'s five materialBind subsets for
+    # 16,739 warnings on open, over data the renderer never draws.
+    # The path is DERIVED from the mesh, not a constant: it used to be
+    # the literal "/Biped/TouchPose", so TouchPose worked for exactly one
+    # character. Here the mesh is /Body, which has no asset scope above
+    # it, so the regions land beside it at /TouchPose.
     expected = usdexport.scope_path_for("/Body")
     scope = written.GetPrimAtPath(expected)
     _Check(scope and scope.IsValid(),
@@ -858,41 +858,123 @@ def TestColorSets():
           "the edit patch, %d faces coloured in one array" % len(colors))
 
 
-def TestMeshDiscovery():
-    stage = Usd.Stage.CreateInMemory()
-    for name in ("First", "Second"):
-        root = "/" + name
-        UsdGeom.Mesh.Define(stage, root + "/Geometry/Skin")
-        scope = stage.DefinePrim(root + "/Rig/Touch", "RigExecTouchRegions")
+def _LayeredStage():
+    """A cube carrying TWO touch layers over the same faces.
+
+    Deliberately over the SAME faces: the one-to-one face -> region table
+    holds WITHIN a layer, and the whole point of layers is that it carries
+    no obligation across them. A fixture whose layers were disjoint would
+    pass even if the reader merged them.
+    """
+    stage = Usd.Stage.CreateInMemory("layers.usda")
+    mesh = UsdGeom.Mesh.Define(stage, "/Body")
+    mesh.CreatePointsAttr([Gf.Vec3f(*p) for p in _CUBE_POINTS])
+    mesh.CreateFaceVertexCountsAttr([4] * len(_CUBE_FACES))
+    mesh.CreateFaceVertexIndicesAttr(
+        [i for face in _CUBE_FACES for i in face])
+    control = UsdGeom.Xform.Define(stage, "/Rig/front_ctl")
+
+    def layer(scope_name, label, order, region_name, faces):
+        scope = stage.DefinePrim("/Regions/" + scope_name,
+                                 touchPoseModel.REGIONS_TYPE)
         scope.CreateRelationship(touchPoseModel.TYPED_MESH).SetTargets(
-            [root + "/Geometry/Skin"])
-        region = stage.DefinePrim(str(scope.GetPath()) + "/Arm", "RigExecTouchRegion")
-        region.CreateRelationship(touchPoseModel.TYPED_CONTROL).SetTargets(
-            [root + "/Rig/Controls/Arm"])
-    _Check(touchPoseModel.DiscoverMesh(stage) == "/First/Geometry/Skin",
-           "discover the authored target without a biped mesh")
-    for selected in ("/Second", "/Second/Geometry/Skin", "/Second/Rig/Controls/Arm"):
-        _Check(touchPoseModel.DiscoverMesh(stage, [selected]) == "/Second/Geometry/Skin",
-               "prefer the selected character: " + selected)
-    composed = Usd.Stage.CreateInMemory()
-    composed.DefinePrim("/Shot/Actor").GetReferences().AddReference(
-        stage.GetRootLayer().identifier, "/Second")
-    _Check(touchPoseModel.DiscoverMesh(composed) == "/Shot/Actor/Geometry/Skin",
-           "discover remapped relationship targets")
-    stage.GetPrimAtPath("/First/Rig/Touch").SetActive(False)
-    _Check(touchPoseModel.DiscoverMesh(stage) == "/Second/Geometry/Skin",
-           "ignore inactive region scopes")
-    stage.RemovePrim("/Second/Geometry/Skin")
-    _Check(touchPoseModel.DiscoverMesh(stage) is None, "ignore dangling mesh targets")
-    _Check(touchPoseModel.DiscoverMesh(_Stage()) == "/Body", "discover legacy subsets")
-    _Check(touchPoseModel.DiscoverMesh(None) is None, "no stage has no mesh")
-    print("  mesh discovery: authored, selected, remapped, inactive and legacy cases")
+            [mesh.GetPath()])
+        scope.CreateAttribute(touchPoseModel.TYPED_LAYER_NAME,
+                              Sdf.ValueTypeNames.Token).Set(label)
+        scope.CreateAttribute(touchPoseModel.TYPED_LAYER_ORDER,
+                              Sdf.ValueTypeNames.Int).Set(order)
+        region = stage.DefinePrim(scope.GetPath().AppendChild(region_name),
+                                  touchPoseModel.REGION_TYPE)
+        region.CreateAttribute(touchPoseModel.TYPED_FACES,
+                               Sdf.ValueTypeNames.IntArray).Set(faces)
+        region.CreateRelationship(
+            touchPoseModel.TYPED_CONTROL).SetTargets([control.GetPath()])
+
+    # Authored second-first, so the ORDER attribute is what sorts them
+    # rather than the order they happen to appear on the stage.
+    layer("Detail", "Detail", 5, "detail_touch", [0, 1, 2])
+    layer("Broad", "Broad", 1, "broad_touch", [0, 1])
+    return stage
+
+
+def TestLayers():
+    stage = _LayeredStage()
+
+    found = [(label, path)
+             for label, path, _s in touchPoseModel.FindLayers(stage, "/Body")]
+    _Check([l for l, _p in found] == ["Broad", "Detail"],
+           "layers come back in order, got %s" % found)
+
+    # Unset opens the lowest order, not whatever the traversal met first.
+    model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
+    _Check(model.layer_name == "Broad",
+           "the first layer opens live, got %r" % model.layer_name)
+    _Check([r.name for r in model.regions] == ["broad_touch"],
+           "only the live layer's regions load: %s"
+           % [r.name for r in model.regions])
+    _Check(len(model.layers) == 2,
+           "the model carries the whole switch, got %s" % (model.layers,))
+
+    # By label, and by scope path.
+    other = touchPoseModel.TouchModel.FromStage(stage, "/Body", layer="Detail")
+    _Check(other.layer_name == "Detail" and
+           [r.name for r in other.regions] == ["detail_touch"],
+           "switching by label opens the other layer")
+    by_path = touchPoseModel.TouchModel.FromStage(
+        stage, "/Body", layer="/Regions/Detail")
+    _Check(by_path.layer_name == "Detail",
+           "switching by scope path works too")
+
+    # A name from a stale session must not open an empty panel.
+    stale = touchPoseModel.TouchModel.FromStage(stage, "/Body", layer="Gone")
+    _Check(stale.layer_name == "Broad" and stale.regions,
+           "an unknown layer falls back to the first, got %r"
+           % stale.layer_name)
+
+    # The two layers own the same face; that is legal ACROSS layers and
+    # each still resolves it to its own region.
+    _Check(model.RegionOfFace(0) is not None
+           and other.RegionOfFace(0) is not None,
+           "each layer resolves the shared face to its own region")
+
+
+def TestRegionFilter():
+    """The panel's search box, which is pure and lives in the UI module."""
+    import touchPoseUI
+
+    class _R(object):
+        def __init__(self, label, control):
+            self.label, self.control = label, control
+
+    lid = _R("lidUpper_l_touch", "/Rig/Controls/lidUpper_l_ctl")
+    jaw = _R("jaw_touch", "/Rig/Controls/face_lower_ctl/jaw_ctl")
+
+    _Check(touchPoseUI.RegionMatches(lid, ""), "an empty query keeps everything")
+    _Check(touchPoseUI.RegionMatches(lid, "   "), "whitespace keeps everything")
+    _Check(touchPoseUI.RegionMatches(lid, "lid"), "a name substring matches")
+    _Check(touchPoseUI.RegionMatches(lid, "LID"), "matching is case-insensitive")
+    _Check(not touchPoseUI.RegionMatches(lid, "jaw"), "a miss is a miss")
+    _Check(touchPoseUI.RegionMatches(lid, "l lid"),
+           "every word has to match, in any order")
+    _Check(not touchPoseUI.RegionMatches(lid, "lid brow"),
+           "one word missing drops the row")
+    # The whole control PATH is searched, ancestors included, so a short
+    # word can match the scaffolding ("r" is in /Rig/Controls/). That is
+    # the cost of being able to find a region by what drives it rather
+    # than only by its own name, and typing one more letter settles it.
+    _Check(touchPoseUI.RegionMatches(lid, "controls"),
+           "the path's ancestors are searched, noise and all")
+    # The control counts, which is what finds a region whose own name
+    # says nothing about what it drives.
+    _Check(touchPoseUI.RegionMatches(jaw, "face_lower"),
+           "the control path is searched too")
 
 
 def main():
     print("touchPoseModel:")
-    TestMeshDiscovery()
     TestReading()
+    TestLayers()
+    TestRegionFilter()
     TestCast()
     TestFollowsTheDeformedMesh()
     TestFollowsTheMeshTransform()

@@ -241,6 +241,14 @@ RigExecReadPhasedPoints(
     }
 }
 
+bool
+RigExecIsTransformDomainAmbiguous(
+    const UsdStageRefPtr &stage, const SdfPath &target)
+{
+    const UsdPrim prim = stage->GetPrimAtPath(target);
+    return prim && prim.IsA<UsdGeomPointBased>();
+}
+
 std::string
 RigExecPointsTargetHint(
     const UsdStageRefPtr &stage, const SdfPath &target)

@@ -2,13 +2,12 @@
 rem bin\run_usdview_touchpose.bat -- INTERACTIVE usdview with TouchPose.
 rem
 rem Usage: run_usdview_touchpose.bat [stage.usda] [renderer | usdview flags...]
-rem   stage defaults to examples\biped\Biped_all.usda: the touch
-rem   regions stacked over the LAYERED rig, which is also the stage
-rem   the Control Picker resolves against, so both panels work on
-rem   it. Biped_touch.usda is the same regions over the FLAT rig.
-rem   Biped_touch_regions.usda is the touch data alone and shows
-rem   nothing opened by itself -- it is `over`s with no geometry
-rem   under them, by design.
+rem   stage defaults to examples\biped\Biped_stack.usda: the whole
+rem   character, whose body and face branches each carry their own
+rem   touch regions and picker panel, so both panels work on it.
+rem   Biped_body_touch_regions.usda and Biped_face_touch_regions.usda
+rem   are the touch data alone and show nothing opened by themselves
+rem   -- they are `over`s with no geometry under them, by design.
 rem
 rem Then: RigExec -> Animation Editors -> TouchPose, tick the box, and hover the character.
 rem The region under the cursor lights up; click it and the control that
@@ -48,7 +47,7 @@ if not exist "%USDVIEW%" (
 )
 
 set "STAGE=%~1"
-if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_all.usda"
+if not defined STAGE set "STAGE=%RIG%\examples\biped\Biped_stack.usda"
 if not exist "%STAGE%" (
     >&2 echo ERROR: stage not found: %STAGE%
     >&2 echo        Pass an existing stage containing RigExecTouchRegions.

@@ -96,6 +96,31 @@ _FrameFromAxes(
 
 }  // namespace
 
+void
+RigExecTwoBoneIkLengths(
+    const std::array<std::array<GfVec3d, 4>, 3> &restPoints,
+    const GfMatrix4d &space, double upperOffset, double lowerOffset,
+    double *upperLength, double *lowerLength)
+{
+    const double rawUpper =
+        (restPoints[1][0] - restPoints[0][0]).GetLength();
+    const double rawLower =
+        (restPoints[2][0] - restPoints[1][0]).GetLength();
+    const GfVec3d s0 = space.Transform(restPoints[0][0]);
+    const GfVec3d s1 = space.Transform(restPoints[1][0]);
+    const GfVec3d s2 = space.Transform(restPoints[2][0]);
+    const double spacedUpper = (s1 - s0).GetLength();
+    const double spacedLower = (s2 - s1).GetLength();
+    if (upperLength) {
+        const double f = rawUpper > 1e-12 ? spacedUpper / rawUpper : 1.0;
+        *upperLength = spacedUpper + upperOffset * f;
+    }
+    if (lowerLength) {
+        const double f = rawLower > 1e-12 ? spacedLower / rawLower : 1.0;
+        *lowerLength = spacedLower + lowerOffset * f;
+    }
+}
+
 std::array<RigExecPointFrame, 3>
 RigExecSolveTwoBoneIk(
     const RigExecPointFrame &rootFrame,
@@ -209,6 +234,29 @@ RigExecSolveTwoBoneIk(
     std::array<RigExecPointFrame, 3> out;
     out[0] = _FrameFromAxes(restPoints[0], root, upperDir, bendUp);
     out[1] = _FrameFromAxes(restPoints[1], mid, lowerDir, bendUp);
+
+    // CARRY THE SPACE INTO THE PUBLISHED HANDLES. _FrameFromAxes keeps
+    // the rest handle lengths, so the posed/rest ratio the pose ladder
+    // reads as scale comes out 1 and every child that is not itself
+    // solver-posed sits at its unscaled offset -- a twist driver hanging
+    // off a solved knee stayed put while the leg doubled. The effector
+    // frame out[2] copies a control, which already carries its scale.
+    if (params.space != GfMatrix4d(1.0)) {
+        for (size_t f = 0; f < 2; ++f) {
+            const GfVec3d origin = out[f].points[0];
+            for (size_t a = 1; a < 4; ++a) {
+                const GfVec3d handle = out[f].points[a] - origin;
+                const double len = handle.GetLength();
+                if (len < 1e-12) {
+                    continue;
+                }
+                const GfVec3d dir = handle / len;
+                const double factor =
+                    params.space.TransformDir(dir).GetLength();
+                out[f].points[a] = origin + dir * (len * factor);
+            }
+        }
+    }
 
     // End frame copies the effector orientation at the solved end position.
     RigExecPointFrame end = effectorFrame;
@@ -747,6 +795,41 @@ _Affects(const RigExecConstraintAxisMask &mask, int axis)
     return axis == 0 ? mask.x : axis == 1 ? mask.y : mask.z;
 }
 
+// Shear belongs to the same linear block as scale, and a constraint that
+// governs all three scale axes governs that whole block.
+//
+// WHY THIS EXISTS. _FrameFromConstraintParams rebuilds L = R(q) H(s,h) from
+// the INPUT's decomposition with only the masked channels replaced, so a
+// shear the input inherited survived a constraint that had just overwritten
+// translation, rotation and scale from a clean source. On the biped that is
+// visible: M_HipSwivel ty=-50 stretches the spine 2.45x, the spline IK's
+// volume preservation gives spine_3_def a legitimate (1, 0.275, 0.275), and
+// composing that anisotropy with each child's rotated rest offset raises
+// shear -- 0.0587 at spine_0_def, 0.2327 by spine_5_def. Every scale
+// magnitude down the chain was already correct (each joint's scale
+// constraint had replaced it); only the shear rode through, and it reached
+// skull_def and face_upper_def at 0.157, which is what made the head and
+// shoulders visibly deform. Maya cannot reproduce it: 111 of the 112 joints
+// in skeleton.ma carry segmentScaleCompensate, so no joint there inherits a
+// parent's scale and no joint carries shear.
+//
+// Masked per-block rather than per-axis because shear is not axis
+// separable: (h_xy, h_xz, h_yz) each mix two axes, so a partial scale mask
+// has no meaningful share of them and leaves the input's shear alone.
+void
+_BlendGovernedShear(const RigExecConstraintAxisMask &scaleMask,
+                    const GfVec3d &targetShear, double weight,
+                    RigExecTransformParams *params)
+{
+    if (!scaleMask.x || !scaleMask.y || !scaleMask.z) {
+        return;
+    }
+    for (int i = 0; i < 3; ++i) {
+        params->shear[i] =
+            RigExecBlendEnvelope(params->shear[i], targetShear[i], weight);
+    }
+}
+
 bool
 _DecomposeConstraintFrame(
     const RigExecPointFrame &frame, RigExecTransformParams *params)
@@ -907,8 +990,22 @@ RigExecApplyRotationConstraint(
         return _ConstraintFailure(input);
     }
 
+    // rigExec:space. The mask below picks Euler components, and a master's
+    // rotation on the right of every frame changes which components those
+    // are -- so with a carry named, the input and the sources are measured
+    // with it stripped and the answer is carried back at the end. Every
+    // failure still hands back the ORIGINAL input, and a rig naming nothing
+    // takes the branch that never multiplies: see the params doc.
+    GfMatrix4d carryInverse(1.0);
+    RigExecPointFrame measured;
+    const RigExecPointFrame *in = &input;
+    if (params.carry) {
+        carryInverse = params.carry->GetInverse();
+        measured = RigExecTransformFrame(input, carryInverse);
+        in = &measured;
+    }
     RigExecTransformParams inputParams;
-    if (!_DecomposeConstraintFrame(input, &inputParams)) {
+    if (!_DecomposeConstraintFrame(*in, &inputParams)) {
         return _ConstraintFailure(input);
     }
     const GfVec3d inputEuler =
@@ -927,7 +1024,10 @@ RigExecApplyRotationConstraint(
             continue;
         }
         RigExecTransformParams sourceParams;
-        if (!_DecomposeConstraintFrame(source.frame, &sourceParams)) {
+        const RigExecPointFrame sourceMeasured =
+            params.carry ? RigExecTransformFrame(source.frame, carryInverse)
+                         : source.frame;
+        if (!_DecomposeConstraintFrame(sourceMeasured, &sourceParams)) {
             return _ConstraintFailure(input);
         }
         const GfVec3d sourceEuler =
@@ -957,7 +1057,12 @@ RigExecApplyRotationConstraint(
         inputEuler, targetEuler, params.affect, globalWeight);
     inputParams.rotation =
         _QuatFromEulerDegrees(outputEuler, params.rotationOrder);
-    return _FrameFromConstraintParams(input, inputParams);
+    const RigExecPointFrame solved =
+        _FrameFromConstraintParams(input, inputParams);
+    if (!params.carry || (solved.flags & RigExecPointFrameDegenerate)) {
+        return solved;
+    }
+    return RigExecTransformFrame(solved, *params.carry);
 }
 
 RigExecPointFrame
@@ -981,7 +1086,7 @@ RigExecApplyScaleConstraint(
     if (!_DecomposeConstraintFrame(input, &inputParams)) {
         return _ConstraintFailure(input);
     }
-    GfVec3d targetScale(0);
+    GfVec3d targetScale(0), targetShear(0);
     double totalWeight = 0.0;
     for (const RigExecConstraintSource &source : sources) {
         if (!_ValidateSourceWeight(source)) {
@@ -995,13 +1100,15 @@ RigExecApplyScaleConstraint(
             return _ConstraintFailure(input);
         }
         targetScale += sourceParams.scale * source.normalizedWeight;
+        targetShear += sourceParams.shear * source.normalizedWeight;
         totalWeight += source.normalizedWeight;
     }
     if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
         return totalWeight == 0.0 ? input : _ConstraintFailure(input);
     }
     targetScale = targetScale / totalWeight + params.offset;
-    if (!_IsFinite(targetScale)) {
+    targetShear /= totalWeight;
+    if (!_IsFinite(targetScale) || !_IsFinite(targetShear)) {
         return _ConstraintFailure(input);
     }
     for (int axis = 0; axis < 3; ++axis) {
@@ -1010,6 +1117,8 @@ RigExecApplyScaleConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
+    _BlendGovernedShear(params.affect, targetShear, globalWeight,
+                        &inputParams);
     return _FrameFromConstraintParams(input, inputParams);
 }
 
@@ -1030,8 +1139,18 @@ RigExecApplyParentConstraint(
         return _ConstraintFailure(input);
     }
 
+    // rigExec:space, as in RigExecApplyRotationConstraint: measured with
+    // the carry stripped, carried back at the end, failures untouched.
+    GfMatrix4d carryInverse(1.0);
+    RigExecPointFrame measured;
+    const RigExecPointFrame *in = &input;
+    if (params.carry) {
+        carryInverse = params.carry->GetInverse();
+        measured = RigExecTransformFrame(input, carryInverse);
+        in = &measured;
+    }
     RigExecTransformParams inputParams;
-    if (!_DecomposeConstraintFrame(input, &inputParams)) {
+    if (!_DecomposeConstraintFrame(*in, &inputParams)) {
         return _ConstraintFailure(input);
     }
     const GfVec3d inputEuler =
@@ -1039,7 +1158,7 @@ RigExecApplyParentConstraint(
     if (!_IsFinite(inputEuler)) {
         return _ConstraintFailure(input);
     }
-    GfVec3d targetTranslation(0), targetScale(0);
+    GfVec3d targetTranslation(0), targetScale(0), targetShear(0);
     GfVec3d sourceAnchor(0), weightedRotationDelta(0);
     bool hasSourceAnchor = false;
     double totalWeight = 0.0;
@@ -1054,12 +1173,15 @@ RigExecApplyParentConstraint(
             !_IsFinite(source.rotationOffsetDegrees)) {
             return _ConstraintFailure(input);
         }
-        if (!_IsUsableFrame(source.frame)) {
+        const RigExecPointFrame sourceMeasured =
+            params.carry ? RigExecTransformFrame(source.frame, carryInverse)
+                         : source.frame;
+        if (!_IsUsableFrame(sourceMeasured)) {
             return _ConstraintFailure(input);
         }
         GfMatrix4d sourceMatrix(1.0);
         if (!RigExecPointsToMatrix(
-                _IdentityLandmarks(), source.frame, &sourceMatrix)) {
+                _IdentityLandmarks(), sourceMeasured, &sourceMatrix)) {
             return _ConstraintFailure(input);
         }
 
@@ -1081,6 +1203,7 @@ RigExecApplyParentConstraint(
         targetTranslation +=
             targetParams.translation * source.normalizedWeight;
         targetScale += targetParams.scale * source.normalizedWeight;
+        targetShear += targetParams.shear * source.normalizedWeight;
 
         const GfVec3d sourceEuler =
             _EulerDegreesFromQuat(targetParams.rotation, params.rotationOrder);
@@ -1102,10 +1225,12 @@ RigExecApplyParentConstraint(
     }
     targetTranslation /= totalWeight;
     targetScale /= totalWeight;
+    targetShear /= totalWeight;
     const GfVec3d targetEuler =
         sourceAnchor + weightedRotationDelta / totalWeight;
     if (!_IsFinite(targetTranslation) || !_IsFinite(targetScale) ||
-        !_IsFinite(weightedRotationDelta) || !_IsFinite(targetEuler)) {
+        !_IsFinite(targetShear) || !_IsFinite(weightedRotationDelta) ||
+        !_IsFinite(targetEuler)) {
         return _ConstraintFailure(input);
     }
 
@@ -1120,11 +1245,18 @@ RigExecApplyParentConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
+    _BlendGovernedShear(params.scaleAxes, targetShear, globalWeight,
+                        &inputParams);
     const GfVec3d outputEuler = _ApplyEulerDelta(
         inputEuler, targetEuler, params.rotationAxes, globalWeight);
     inputParams.rotation =
         _QuatFromEulerDegrees(outputEuler, params.rotationOrder);
-    return _FrameFromConstraintParams(input, inputParams);
+    const RigExecPointFrame solved =
+        _FrameFromConstraintParams(input, inputParams);
+    if (!params.carry || (solved.flags & RigExecPointFrameDegenerate)) {
+        return solved;
+    }
+    return RigExecTransformFrame(solved, *params.carry);
 }
 
 RigExecPointFrame
