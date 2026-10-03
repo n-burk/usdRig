@@ -1,6 +1,7 @@
 // RigExec geometry mover kernels implementation.
 #include "geometryKernels.h"
 #include "deltaMushKernel.h"
+#include "wrinkleKernel.h"
 #include "pxr/base/gf/vec3d.h"
 
 #include <algorithm>
@@ -148,6 +149,16 @@ RigExecApplyDeltaMush(
     return RigExecApplyDeltaMushKernel<GfVec3f, GfVec3d>(
         points, rest, counts, indices, iterations, step, pinBorders,
         distanceWeight, displacement);
+}
+
+bool
+RigExecApplyWrinkle(
+    std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
+    const std::vector<int> &counts, const std::vector<int> &indices,
+    const RigExecWrinkleSettings &settings)
+{
+    return RigExecApplyWrinkleKernel<GfVec3f, GfVec3d>(
+        points, rest, counts, indices, settings);
 }
 
 std::vector<GfVec3f>

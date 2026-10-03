@@ -15,8 +15,8 @@
 //     delta the live path computes;
 //   * the selected weight object's resolved field as the influence
 //     overlay, from the runtime's published weight fields;
-//   * NO guides (joint skeletons, control shapes, volume iso-surfaces,
-//     curvenet guides): guide drawing stays a live-path visualisation,
+//   * NO guides (joint skeletons, control shapes, volume iso-surfaces):
+//     guide drawing stays a live-path visualisation,
 //     and a playback generation simply owns no guide leaves;
 //   * NO movedFloats: the runtime publishes no scalar moved properties,
 //     so tool reads of RigExecImaging_GetMovedFloats find nothing on a

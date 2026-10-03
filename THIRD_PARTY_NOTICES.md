@@ -33,8 +33,7 @@ The distribution [NOTICE](NOTICE) records these component boundaries.
 
 ## Published methods
 
-Curvenet articulation, curvenet weight interpolation, dual-quaternion skinning,
-and Delta Mush have public research references listed in
+Dual-quaternion skinning and Delta Mush have public research references listed in
 [Method references](docs/references.md). Those references identify techniques,
 not a claim that RigExec invented them or an endorsement by their authors.
 A citation alone does not establish rights to source code or assets.

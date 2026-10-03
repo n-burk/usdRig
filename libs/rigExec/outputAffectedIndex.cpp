@@ -527,8 +527,7 @@ _OverridablePathSeeds(const RigExecBakedProgramImpl &program,
                       const std::vector<std::vector<int>> &indexSeeds,
                       const SdfPath &path)
 {
-    if (program.folded.count(path) ||
-        program.execTypedArrayInputs.count(path)) {
+    if (program.folded.count(path)) {
         return {};
     }
     const auto found = program.overridableInputs.find(path);

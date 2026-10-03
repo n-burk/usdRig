@@ -393,8 +393,6 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
     gatherPoints(object.targetPoints, "targetPoints");
     gatherPoints(object.samplePoints, "samplePoints");
     gatherPoints(object.curvePoints, "curvePoints");
-    gatherPoints(object.curvenetMeshPoints, "curvenetMeshPoints");
-    gatherPoints(object.curvenetPoints, "curvenetPoints");
     if (!object.combineTargetPoints.empty()) {
         size_t count = 0;
         for (const UsdAttribute &a : object.combineTargetPoints) {
@@ -408,42 +406,6 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
         // not -- _HashVtValue has no uint64 arm).
         out->Add(_FrozenWeightArrayKey(object.path, "combineTargetCount"),
                  VtValue(static_cast<int>(count)), /*hasValue=*/true);
-    }
-    const auto gatherInts =
-        [&](const std::vector<UsdAttribute> &attributes, const char *role) {
-            if (attributes.empty()) {
-                return;
-            }
-            VtIntArray gathered;
-            for (const UsdAttribute &a : attributes) {
-                VtIntArray value;
-                if (_FrozenReadWeightArray(refreshed, a, time, &value)) {
-                    for (const int v : value) {
-                        gathered.push_back(v);
-                    }
-                }
-            }
-            out->Add(_FrozenWeightArrayKey(object.path, role),
-                     VtValue(gathered), /*hasValue=*/true);
-        };
-    gatherInts(object.curvenetCounts, "curvenetCounts");
-    gatherInts(object.curvenetIndices, "curvenetIndices");
-    gatherInts(object.curvenetSplines, "curvenetSplines");
-    if (object.curvenetWeights.IsValid()) {
-        VtFloatArray value;
-        const bool has = _FrozenReadWeightArray(refreshed,
-                                                object.curvenetWeights, time,
-                                                &value);
-        out->Add(_FrozenWeightArrayKey(object.path, "curvenetWeights"),
-                 VtValue(has ? value : VtFloatArray()), has);
-    }
-    if (object.curvenetAutoSmooth.IsValid()) {
-        VtIntArray value;
-        const bool has = _FrozenReadWeightArray(refreshed,
-                                                object.curvenetAutoSmooth,
-                                                time, &value);
-        out->Add(_FrozenWeightArrayKey(object.path, "curvenetAutoSmooth"),
-                 VtValue(has ? value : VtIntArray()), has);
     }
 }
 
@@ -583,141 +545,6 @@ _SampleBlendPoints(const SdfPath &key, const UsdAttribute &attribute,
         hasValue = attribute.Get(&value, time);
     }
     out->Add(key, VtValue(hasValue ? value : VtVec3fArray()), hasValue);
-}
-
-// Builds one curvenet profile bind from Default-time reads: the same two
-// calls the arm's build closure makes (RigExecAssembleParameters), minus
-// the cache the sampler must not touch -- the bind cache has no locking
-// at all, so resolving through it here would race the live prologue.
-// Pure stage reads plus pure math, so building per sample is race-free;
-// the burst memoizes per mover below. Null when the net is missing, when
-// the bind inputs are empty (live breaks before resolving), or when the
-// build itself fails (a remembered failed bind, as live).
-std::shared_ptr<const RigExecProfileMoverBinding>
-_BuildCurvenetBind(
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    const UsdStageRefPtr &stage)
-{
-    const RigExecRevisionBinding &binding = revision.binding;
-    if (!revision.moverPrim || !stage) {
-        return nullptr;
-    }
-    const UsdPrim netPrim = stage->GetPrimAtPath(binding.curvenet);
-    if (!netPrim) {
-        return nullptr;
-    }
-    const auto readPoints = [&](const SdfPath &path) {
-        std::vector<GfVec3f> out;
-        if (!path.IsEmpty()) {
-            if (const UsdAttribute a = stage->GetAttributeAtPath(path)) {
-                VtVec3fArray value;
-                if (a.Get(&value, UsdTimeCode::Default())) {
-                    out.assign(value.begin(), value.end());
-                }
-            }
-        }
-        return out;
-    };
-    const auto readInts = [&](const SdfPath &path) {
-        std::vector<int> out;
-        if (!path.IsEmpty()) {
-            if (const UsdAttribute a = stage->GetAttributeAtPath(path)) {
-                VtIntArray value;
-                if (a.Get(&value, UsdTimeCode::Default())) {
-                    out.assign(value.begin(), value.end());
-                }
-            }
-        }
-        return out;
-    };
-    const std::vector<GfVec3f> restNet = readPoints(binding.curvenetPoints);
-    const std::vector<GfVec3f> meshPoints = readPoints(binding.base);
-    const std::vector<int> counts = readInts(binding.topologyCounts);
-    const std::vector<int> indices = readInts(binding.topologyIndices);
-    if (restNet.empty() || counts.empty() || meshPoints.empty()) {
-        return nullptr;
-    }
-    std::vector<int> splineIndices;
-    if (const UsdAttribute a =
-            netPrim.GetAttribute(TfToken("rigExec:splineIndices"))) {
-        VtIntArray value;
-        if (a.Get(&value, UsdTimeCode::Default())) {
-            splineIndices.assign(value.begin(), value.end());
-        }
-    }
-    int samplesPerSpline = 5;
-    if (const UsdAttribute a =
-            netPrim.GetAttribute(TfToken("rigExec:samplesPerSpline"))) {
-        a.Get(&samplesPerSpline, UsdTimeCode::Default());
-    }
-    TfToken basisToken("bezier");
-    if (const UsdAttribute a =
-            netPrim.GetAttribute(TfToken("rigExec:basis"))) {
-        TfToken read;
-        if (a.Get(&read, UsdTimeCode::Default())) {
-            basisToken = read;
-        }
-    }
-    RigExecCurvenetTopology topology;
-    std::string reason;
-    const RigExecCurvenetBasis basis =
-        (basisToken == "catmullRom") ? RigExecCurvenetBasis::CatmullRom
-                                    : RigExecCurvenetBasis::Bezier;
-    if (!RigExecBuildCurvenetTopology(splineIndices, restNet.size(), basis,
-                                      restNet, nullptr, &topology,
-                                      &reason)) {
-        return nullptr;
-    }
-    auto bound = std::make_shared<RigExecProfileMoverBinding>();
-    if (!RigExecBindProfileMover(topology, restNet, meshPoints, counts,
-                                 indices, samplesPerSpline, bound.get(),
-                                 &reason)) {
-        return nullptr;
-    }
-    return bound;
-}
-
-// Resolves every curvenet profile bind for the job, parallel to
-// revisionIndex. A null entry is a non-curvenet revision, a missing net,
-// or a remembered failed bind. Epoch data: excluded from the digest.
-void
-_SampleCurvenetBinds(const RigExecBakedProgramImpl &B,
-                     RigExecFrameInputs *sampled,
-                     RigExecBurstSampleCache *burst)
-{
-    sampled->curvenetBinds.resize(B.revisionIndex.size());
-    for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
-        const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
-        const RigExecBakedProgramImpl::GeomRevision &revision =
-            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
-        if (revision.op != RigExecRevisionOp::Curvenet) {
-            continue;
-        }
-        // Prefer the live revision's own resolved bind: pointer-identical
-        // across samples, which is what keeps the worker's static-dirty
-        // compare honest -- a fresh build per sample would read dirty
-        // every frame and execute what live skips. The bind's inputs are
-        // all Default-time, so a bind live resolved at any frame of the
-        // epoch is this frame's bind.
-        if (revision.curvenetBindResolved) {
-            sampled->curvenetBinds[r] = revision.curvenetBind;
-            continue;
-        }
-        if (burst) {
-            const auto found = burst->curvenetBinds.find(
-                revision.moverPath);
-            if (found != burst->curvenetBinds.end()) {
-                sampled->curvenetBinds[r] = found->second;
-                continue;
-            }
-        }
-        std::shared_ptr<const RigExecProfileMoverBinding> bound =
-            _BuildCurvenetBind(revision, B.stage);
-        if (burst) {
-            burst->curvenetBinds[revision.moverPath] = bound;
-        }
-        sampled->curvenetBinds[r] = std::move(bound);
-    }
 }
 
 // Samples the stage-frame seeds at the job's time through the program's
@@ -860,6 +687,42 @@ _SampleTopologyArray(const SdfPath &path, UsdTimeCode time,
         }
     }
     out->Add(path, VtValue(value), hasValue);
+}
+
+void
+_SampleIterativeMoverInputs(
+    const RigExecBakedProgramImpl::GeomRevision &revision,
+    const RigExecResolvedInputs *refreshed, const UsdStageRefPtr &stage,
+    UsdTimeCode time, RigExecFrameInputs *out)
+{
+    if (revision.op != RigExecRevisionOp::DeltaMush &&
+        revision.op != RigExecRevisionOp::Wrinkle) {
+        return;
+    }
+    _SampleTopologyArray<GfVec3f>(
+        revision.moverPath.AppendProperty(TfToken("inputs:restPoints")),
+        UsdTimeCode::Default(), refreshed, stage, out);
+    _SampleTopologyArray<int>(revision.binding.topologyCounts, time,
+                              refreshed, stage, out);
+    _SampleTopologyArray<int>(revision.binding.topologyIndices, time,
+                              refreshed, stage, out);
+    RigExecMoverParameters parameters;
+    _VisitIterativeMoverScalars(revision.op, parameters,
+        [&](const char *name, auto fallback, auto &) {
+            const TfToken token(name);
+            _SampleMoverScalar(revision.moverPath.AppendProperty(token),
+                revision.moverPrim.GetAttribute(token), fallback,
+                time, refreshed, out);
+        });
+    if (revision.op == RigExecRevisionOp::Wrinkle) {
+        const TfToken topology("inputs:topology");
+        _SampleMoverScalar(revision.moverPath.AppendProperty(topology),
+            revision.moverPrim.GetAttribute(topology), TfToken("cloth"),
+            UsdTimeCode::Default(), refreshed, out);
+        _SampleTopologyArray<int>(
+            revision.moverPath.AppendProperty(TfToken("inputs:pinPoints")),
+            UsdTimeCode::Default(), refreshed, stage, out);
+    }
 }
 
 // Whether one attribute reads identically at every time code. USD answers
@@ -1053,28 +916,6 @@ _SampleMoverPathArrayAtDefault(const SdfPath &key, const SdfPath &path,
     out->Add(key, VtValue(value), hasValue);
 }
 
-// Samples one _Array arm that passes no resolved inputs (the curvenet
-// posed net): a raw stage read at the job's time.
-template <class T>
-void
-_SampleMoverPathArrayRawAtTime(const SdfPath &key, const SdfPath &path,
-                               UsdTimeCode time,
-                               const UsdStageRefPtr &stage,
-                               RigExecFrameInputs *out)
-{
-    if (key.IsEmpty() || path.IsEmpty()) {
-        return;
-    }
-    VtArray<T> value;
-    bool hasValue = false;
-    if (stage) {
-        if (const UsdAttribute a = stage->GetAttributeAtPath(path)) {
-            hasValue = a.Get(&value, time);
-        }
-    }
-    out->Add(key, VtValue(value), hasValue);
-}
-
 // Samples the lattice divisions exactly as the arm reads them: raw off the
 // mover prim at the evaluated time, no resolved arm. No sample when the
 // attribute does not exist; the worker falls back to {0, 0, 0} the same
@@ -1201,32 +1042,6 @@ _SampleLatticeDivisionsCached(const SdfPath &key,
     }
 }
 
-template <class T>
-void
-_SampleMoverPathArrayRawAtTimeCached(const SdfPath &key, const SdfPath &path,
-                                     UsdTimeCode time,
-                                     const UsdStageRefPtr &stage,
-                                     RigExecFrameInputs *out,
-                                     RigExecBurstSampleCache *cache)
-{
-    if (key.IsEmpty() || path.IsEmpty()) {
-        return;
-    }
-    const auto found = cache->staticStage.find(key);
-    if (found != cache->staticStage.end()) {
-        _ServeBurstStaticSample(out, found->second,
-                                RigExecBurstRouteStage);
-        return;
-    }
-    _SampleMoverPathArrayRawAtTime<T>(key, path, time, stage, out);
-    const UsdAttribute attribute =
-        stage ? stage->GetAttributeAtPath(path) : UsdAttribute();
-    if (_BurstAttributeIsStatic(attribute)) {
-        _MemoizeBurstStaticSample(out, &cache->staticStage,
-                                  RigExecBurstRouteStage);
-    }
-}
-
 } // namespace
 
 namespace frozenDetail {
@@ -1288,10 +1103,6 @@ _FrozenPlaceOverrides(const RigExecBakedProgramImpl &B,
             placeable = false;
             continue;
         }
-        if (B.execTypedArrayInputs.count(path)) {
-            placeable = false;
-            continue;
-        }
         const auto found = B.overridableInputs.find(path);
         if (found != B.overridableInputs.end()) {
             for (int index : found->second) {
@@ -1334,18 +1145,6 @@ _FrozenRibbonInputKey(const SdfPath &moverPath, const char *role)
 {
     return moverPath.AppendProperty(
         TfToken(std::string("frozenRibbon:") + role));
-}
-
-// Synthetic keys for the curvenet arm's reads, all under the mover: the
-// rest surface shares its path with the chain's own base read at a
-// different time, the net shares its path between rest and posed, and a
-// missing net must sample nothing at all so the worker breaks with
-// exactly the packet live breaks with.
-SdfPath
-_FrozenCurvenetInputKey(const SdfPath &moverPath, const char *role)
-{
-    return moverPath.AppendProperty(
-        TfToken(std::string("frozenCurvenet:") + role));
 }
 
 // The chain-sampling hook (Increment B).
@@ -1622,6 +1421,8 @@ RigExecSampleFrameInputsWithChainBindings(
         if (revision.op == RigExecRevisionOp::Wire) {
             _SampleWireInputs(revision, &refreshed, B.stage, time, &sampled);
         }
+        _SampleIterativeMoverInputs(revision, &refreshed, B.stage, time,
+                                    &sampled);
         if (revision.op == RigExecRevisionOp::BlendShape && moverPrim) {
             // rigExec:deltaSpace, exactly as the arm's _Token reads it: a
             // raw Default read with no resolved arm, "target" when absent.
@@ -1689,35 +1490,6 @@ RigExecSampleFrameInputsWithChainBindings(
                 revision.binding.bindCoords, time, &refreshed, B.stage,
                 &sampled);
         }
-        if (revision.op == RigExecRevisionOp::Curvenet && moverPrim) {
-            // The bind inputs are Default-time epoch data; the posed net
-            // is the only evaluated-time read, and it is raw (the arm's
-            // _Array call passes no resolved -- the net chain's result,
-            // when one binds, comes from the worker's own run). Nothing
-            // samples when the net prim is missing: live breaks before
-            // its first read.
-            const UsdPrim netPrim =
-                B.stage->GetPrimAtPath(revision.binding.curvenet);
-            if (netPrim) {
-                const SdfPath &moverPath = revision.moverPath;
-                const RigExecRevisionBinding &binding = revision.binding;
-                _SampleMoverPathArrayAtDefault<GfVec3f>(
-                    _FrozenCurvenetInputKey(moverPath, "restNet"),
-                    binding.curvenetPoints, B.stage, &sampled);
-                _SampleMoverPathArrayAtDefault<int>(
-                    _FrozenCurvenetInputKey(moverPath, "topologyCounts"),
-                    binding.topologyCounts, B.stage, &sampled);
-                _SampleMoverPathArrayAtDefault<int>(
-                    _FrozenCurvenetInputKey(moverPath, "topologyIndices"),
-                    binding.topologyIndices, B.stage, &sampled);
-                _SampleMoverPathArrayAtDefault<GfVec3f>(
-                    _FrozenCurvenetInputKey(moverPath, "restPoints"),
-                    binding.base, B.stage, &sampled);
-                _SampleMoverPathArrayRawAtTime<GfVec3f>(
-                    _FrozenCurvenetInputKey(moverPath, "posedNet"),
-                    binding.curvenetPoints, time, B.stage, &sampled);
-            }
-        }
     }
     for (const auto &[chainIndex, derivedIndex] : B.derivedIndex) {
         const RigExecBakedProgramImpl::GeomChain::Derived &derived =
@@ -1767,7 +1539,6 @@ RigExecSampleFrameInputsWithChainBindings(
             return fail(layoutError);
         }
     }
-    _SampleCurvenetBinds(B, &sampled, /*burst=*/nullptr);
     // Stage-frame seeds at the job's time, through the program's hook. A
     // decline names an unresolvable target, at which live gives the
     // generation back -- so the frame has no frozen job.
@@ -2115,6 +1886,8 @@ RigExecSampleFrameInputsWithBurstCache(
         if (revision.op == RigExecRevisionOp::Wire) {
             _SampleWireInputs(revision, &refreshed, B.stage, time, &sampled);
         }
+        _SampleIterativeMoverInputs(revision, &refreshed, B.stage, time,
+                                    &sampled);
         if (revision.op == RigExecRevisionOp::BlendShape && moverPrim) {
             // rigExec:deltaSpace, as the slow sampler reads it: raw Default,
             // no resolved arm. Unmemoized -- one token read per frame is
@@ -2176,29 +1949,6 @@ RigExecSampleFrameInputsWithBurstCache(
                 revision.binding.bindCoords, time, &refreshed, B.stage,
                 &sampled, cache);
         }
-        if (revision.op == RigExecRevisionOp::Curvenet && moverPrim) {
-            const UsdPrim netPrim =
-                B.stage->GetPrimAtPath(revision.binding.curvenet);
-            if (netPrim) {
-                const SdfPath &moverPath = revision.moverPath;
-                const RigExecRevisionBinding &binding = revision.binding;
-                _SampleMoverPathArrayAtDefaultCached<GfVec3f>(
-                    _FrozenCurvenetInputKey(moverPath, "restNet"),
-                    binding.curvenetPoints, B.stage, &sampled, cache);
-                _SampleMoverPathArrayAtDefaultCached<int>(
-                    _FrozenCurvenetInputKey(moverPath, "topologyCounts"),
-                    binding.topologyCounts, B.stage, &sampled, cache);
-                _SampleMoverPathArrayAtDefaultCached<int>(
-                    _FrozenCurvenetInputKey(moverPath, "topologyIndices"),
-                    binding.topologyIndices, B.stage, &sampled, cache);
-                _SampleMoverPathArrayAtDefaultCached<GfVec3f>(
-                    _FrozenCurvenetInputKey(moverPath, "restPoints"),
-                    binding.base, B.stage, &sampled, cache);
-                _SampleMoverPathArrayRawAtTimeCached<GfVec3f>(
-                    _FrozenCurvenetInputKey(moverPath, "posedNet"),
-                    binding.curvenetPoints, time, B.stage, &sampled, cache);
-            }
-        }
     }
     for (const auto &[chainIndex, derivedIndex] : B.derivedIndex) {
         const RigExecBakedProgramImpl::GeomChain::Derived &derived =
@@ -2240,7 +1990,6 @@ RigExecSampleFrameInputsWithBurstCache(
             return fail(layoutError);
         }
     }
-    _SampleCurvenetBinds(B, &sampled, cache);
     {
         std::string seedsError;
         if (!_SampleStageFrameSeeds(*cache->program, time, &sampled,

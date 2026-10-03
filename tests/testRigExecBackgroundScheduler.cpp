@@ -1228,6 +1228,82 @@ TestCancelPurgesWhileAJobRuns()
     CHECK(scheduler.Stats().queuedDepth == 0);
 }
 
+void
+TestScopedRetirementIncludesRunningFirstFills()
+{
+    ScopedFrameCacheMode on("on");
+    if (!RigExecBackgroundWarmingEnabled()) {
+        std::printf("SKIP TestScopedRetirementIncludesRunningFirstFills: "
+                    "warming unavailable in this process\n");
+        return;
+    }
+    std::mutex gateMutex;
+    std::condition_variable gateCv;
+    bool started = false;
+    bool released = false;
+    RigExecBackgroundScheduler scheduler(/*workerCount=*/1);
+    Recorder recorder;
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath other("/Other/Rig");
+    const RigExecFrameGeneration generation = scheduler.CurrentGeneration(rig);
+    RigExecWarmWork blocking = [&](const RigExecWarmRequest &request) {
+        {
+            std::lock_guard<std::mutex> lock(gateMutex);
+            started = true;
+        }
+        gateCv.notify_all();
+        {
+            std::unique_lock<std::mutex> lock(gateMutex);
+            gateCv.wait(lock, [&] { return released; });
+        }
+        return scheduler.IsWarmRequestCurrent(
+            request.rig, request.generation, request.time, request.fenceToken)
+                ? RigExecWarmOutcome::Published
+                : RigExecWarmOutcome::DeclinedGeneration;
+    };
+    CHECK(scheduler.Enqueue(rig, UsdTimeCode(1), RigExecWarmPriority::Sweep,
+                            generation, blocking));
+    {
+        std::unique_lock<std::mutex> lock(gateMutex);
+        gateCv.wait(lock, [&] { return started; });
+    }
+    // The running frame has never completed. A second request at its
+    // time and another frame wait behind it, while another rig is untouched.
+    CHECK(scheduler.Enqueue(rig, UsdTimeCode(1), RigExecWarmPriority::Sweep,
+                            generation, recorder.Work()));
+    CHECK(scheduler.Enqueue(rig, UsdTimeCode(2), RigExecWarmPriority::Sweep,
+                            generation, recorder.Work()));
+    CHECK(scheduler.Enqueue(other, UsdTimeCode(4), RigExecWarmPriority::Sweep,
+                            scheduler.CurrentGeneration(other), recorder.Work()));
+    const auto inFlight = scheduler.InFlightTimes(rig);
+    CHECK(inFlight == std::vector<UsdTimeCode>({UsdTimeCode(1), UsdTimeCode(2)}));
+    CHECK(scheduler.InFlightTimes(other) ==
+          std::vector<UsdTimeCode>({UsdTimeCode(4)}));
+    CHECK(scheduler.CancelGenerationTimes(rig, inFlight) == 2);
+    CHECK(scheduler.CurrentGeneration(rig) == generation);
+    CHECK(!scheduler.IsWarmRequestCurrent(rig, generation, UsdTimeCode(1), 0));
+    CHECK(scheduler.QueuedTimes(rig).empty());
+    CHECK(scheduler.InFlightTimes(rig) ==
+          std::vector<UsdTimeCode>({UsdTimeCode(1)}));
+    {
+        std::lock_guard<std::mutex> lock(gateMutex);
+        released = true;
+    }
+    gateCv.notify_all();
+    scheduler.WaitUntilIdle();
+    CHECK(scheduler.Stats().declinedGeneration == 1);
+    CHECK(scheduler.Stats().published == 1);
+    CHECK(scheduler.InFlightTimes(rig).empty());
+    CHECK(scheduler.InFlightTimes(other).empty());
+    CHECK(TimesEqual(RunTimes(recorder.Runs()), {4.0}));
+    // Fresh work can reuse the same generation after scoped cancellation.
+    CHECK(scheduler.Enqueue(rig, UsdTimeCode(1), RigExecWarmPriority::Sweep,
+                            generation, recorder.Work()));
+    scheduler.WaitUntilIdle();
+    CHECK(scheduler.Stats().published == 2);
+    CHECK(scheduler.InFlightTimes(rig).empty());
+}
+
 // Worker counts clamp to the documented range: production's 2-4, and zero
 // for the manual mode.
 void
@@ -1598,6 +1674,7 @@ main()
     TestShutdownDropsPendingJobs();
     TestShutdownJoinsARunningJob();
     TestCancelPurgesWhileAJobRuns();
+    TestScopedRetirementIncludesRunningFirstFills();
     TestWorkerCountClampsToRange();
     TestPriorityBackendReportsHonestly();
 

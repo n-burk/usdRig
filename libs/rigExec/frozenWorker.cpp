@@ -54,10 +54,8 @@
 //    (its scopes take only that profiler's own uncontended mutex), the
 //    guide taps at a null held privately (the bool test then skips), and
 //    replays the guide publication itself from the aggregates.
-//  * RigExecBakedPublishGeometry reads the stage UNCONDITIONALLY
-//    (bakedGeometry.cpp:2733, B.stage->GetPrimAtPath for the adjuster
-//    ladder), so it is replicated below (_FrozenPublishGeometry) for the
-//    gated subset (no curvenet adjusters).
+//  * Geometry publication uses the worker's own chain results through
+//    _FrozenPublishGeometry.
 //  * Shared kernels (skin, derived, solvers, constraints) are pure per-point
 //    math over worker-owned buffers, and their five WorkParallelForN launch
 //    sites in moverGraph.cpp (the blend-channel sum among them, which the
@@ -440,7 +438,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     // Geometry prologue (bakedGeometry.cpp:1759): base reads replay from the
     // sampled queries, with the same reset/count/swap/compare sequence; the
     // topology resolve replays the transported packet's layout with the same
-    // re-cut rule; blend and curvenet resolves are refused at freeze.
+    // re-cut rule; blend layouts travel with the sampled inputs.
     const auto resetRevision =
         [](RigExecBakedProgramImpl::GeomRevision *revision) {
         revision->created = true;
@@ -501,12 +499,6 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         chain.scheduleDirty = false;
         chain.baseDirty = !chain.haveResult || basePoints != chain.lastBase;
         chain.lastBase = basePoints;
-        for (RigExecBakedProgramImpl::GeomRevision &revision :
-             chain.revisions) {
-            if (revision.op == RigExecRevisionOp::CurvenetAdjuster) {
-                return false;
-            }
-        }
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
             // Derived bases key by target like chain bases; validity rides
@@ -699,13 +691,8 @@ _MakeProductionClusterRunner(
     return rebind;
 }
 
-// The frozen geometry epilogue: RigExecBakedPublishGeometry
-// (bakedGeometry.cpp:2719) minus the adjuster ladder, which reads the stage
-// (B.stage->GetPrimAtPath, unconditionally). No adjuster revision can reach
-// here (the freeze refuses the op), so the sweep -- step diagnostics in
-// program order, weight fields last-writer-wins per RevisionStatic step,
-// movedProperties per ChainStatus/Derived step under the haveBase gates --
-// is the whole function.
+// The frozen geometry epilogue follows RigExecBakedPublishGeometry's order:
+// step diagnostics, weight fields, then moved properties under haveBase gates.
 void
 _FrozenPublishGeometry(RigExecBakedProgramImpl &B, RigExecRigPose *pose)
 {
@@ -839,7 +826,7 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
 
     // Epilogue (bakedProgram.cpp:2644): chain lines first (live runs the
     // chains before everything), then the pose and geometry publication, the
-    // work counters, the curvenet drain, and the summary line, in live's
+    // work counters and the summary line, in live's
     // order. No timing replay, calibration, or cone verification: the worker
     // shares those statics with nothing and reports no trace.
     for (const std::string &line : inputs.chainDiagnostics) {
@@ -870,9 +857,6 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
         working.moverGraphSchedulesBuilt += step.counters.schedulesBuilt;
         chainsBuilt += step.counters.chainsBuilt;
         revisionsBuilt += step.counters.revisionsBuilt;
-    }
-    for (std::string message : B.curvenetBindings.TakeDiagnostics()) {
-        working.diagnostics.push_back(std::move(message));
     }
     working.diagnostics.push_back(
         "mover graph: " + std::to_string(chainsBuilt) + " chain(s), " +
@@ -1235,9 +1219,6 @@ RigExecRunPartialCone(
         working.moverGraphSchedulesBuilt += step.counters.schedulesBuilt;
         chainsBuilt += step.counters.chainsBuilt;
         revisionsBuilt += step.counters.revisionsBuilt;
-    }
-    for (std::string message : B.curvenetBindings.TakeDiagnostics()) {
-        working.diagnostics.push_back(std::move(message));
     }
     working.diagnostics.push_back(
         "mover graph: " + std::to_string(chainsBuilt) + " chain(s), " +

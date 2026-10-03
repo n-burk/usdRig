@@ -1258,7 +1258,9 @@ TestControlAvarScaleDrivesMatrixMover()
     const GfVec3d singleKnotScale(2.5, 1.25, 3.75);
     const TfType doubleType = TfType::Find<double>();
     for (int axis = 0; axis < 3; ++axis) {
-        const UsdAttribute attr = control.GetAttribute(
+        // Non-const: UsdAttribute::SetSpline is const-only from 26.08; the
+        // Houdini-vendored 26.05 still takes a mutable handle.
+        UsdAttribute attr = control.GetAttribute(
             TfToken(scaleNames[axis]));
         CHECK(attr.ClearAtTime(UsdTimeCode(0)));
         CHECK(attr.ClearAtTime(UsdTimeCode(10)));

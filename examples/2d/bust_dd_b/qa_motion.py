@@ -31,13 +31,16 @@ def track_points(stage):
         "mouth": ("Mouth", (0.08, -6.75), "MouthLine"),
         "brow_L": ("Brow_L", (-2.2, 1.6), None),
         "fringe_tip": ("Hair", (6.9, 2.6), "F1"),
-        "lock_tip": ("Hair", (13.0, -27.6), "LockR_A"),
-        "back_tip": ("BackHair", (-17.5, -30.0), None),
+        "lock_tip": ("Hair", (9.0, -15.0), "LockR_A"),
+        "back_tip": ("BackHair", (-7.0, -16.5), None),
         "earring": ("Earring", (-7.62, -6.7), None),
         "ribbon_tip": ("Ribbon", (1.75, -24.1), "RibbonTailR"),
     }
     out = {}
     for label, (mesh, xy, subset) in picks.items():
+        if stage.GetPrimAtPath("/Shion/Geom/Character"):
+            subset = subset or mesh
+            mesh = "Character"
         prim = stage.GetPrimAtPath("/Shion/Geom/" + mesh)
         pts = np.array(UsdGeom.Mesh(prim).GetPointsAttr().Get())
         cand = np.arange(len(pts))
@@ -124,7 +127,7 @@ def dead_stops(frames, data, keys=("nose", "iris_R", "chin"), thresh=0.01, run=4
 def main():
     path = sys.argv[1]
     out = sys.argv[2]
-    a, b = 1, 180
+    a, b = 1, 240
     if "--frames" in sys.argv:
         a, b = map(int, sys.argv[sys.argv.index("--frames") + 1].split(":"))
     os.makedirs(out, exist_ok=True)

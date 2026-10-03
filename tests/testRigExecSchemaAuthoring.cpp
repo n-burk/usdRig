@@ -220,7 +220,6 @@ TestAppliedSchemasAndRelationships(const UsdStageRefPtr &stage)
         {"RigExecVec3fMathMover", "inputs:weight"},
         {"RigExecMatrixMathMover", "inputs:weight"},
         {"RigExecSmoothMover", "inputs:strength"},
-        {"RigExecCurvenetMover", "inputs:strength"},
         {"RigExecVolumeCorrectMover", "inputs:strength"},
     };
     for (const auto &legacyEnvelopeName : legacyEnvelopeNames) {

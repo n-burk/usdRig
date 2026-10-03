@@ -18,13 +18,13 @@ from paint import catmull, resample, smooth
 
 # landmarks
 
-EW = 4.2
+EW = 3.8
 EYE_C = {+1: (4.12, -0.80), -1: (-4.12, -0.80)}
 NOSE_TIP = (0.18, -4.55)
 MOUTH_C = (0.08, -6.72)
 HEAD_PIVOT = (0.0, -8.6)
 NECK_PIVOT = (0.0, -14.2)
-BODY_PIVOT = (0.0, -42.0)
+BODY_PIVOT = (0.0, -57.0)
 
 LID_N = 49          # samples per lid (inner -> outer)
 BROW_N = 41
@@ -38,8 +38,8 @@ def lerp(a, b, t):
 # face outline
 
 FACE_R = [(0.0, 9.9), (4.7, 9.35), (7.0, 7.4), (7.55, 4.2), (7.5, 1.0), (7.32, -1.6),
-          (7.0, -3.5), (6.2, -5.65), (4.55, -7.7), (2.6, -9.3), (1.08, -9.93)]
-CHIN = (0.0, -10.0)
+          (7.0, -3.5), (6.2, -5.65), (4.55, -7.7), (2.6, -9.2), (1.08, -9.85)]
+CHIN = (0.0, -10.3)
 OUTLINE_N = 200
 
 
@@ -151,7 +151,7 @@ BROW_SHAPES = {
     "angry": [(-0.60, 0.375), (-0.36, 0.49), (-0.06, 0.60), (0.24, 0.672), (0.43, 0.676), (0.60, 0.60)],
     "worried": [(-0.62, 0.745), (-0.36, 0.742), (-0.06, 0.705), (0.24, 0.645), (0.43, 0.582), (0.60, 0.47)],
 }
-BROW_THICK = (0.46, 0.16)       # head, tail (model units)
+BROW_THICK = (0.30, 0.10)       # head, tail (model units)
 
 
 def brow_spine(side, shape="rest"):
@@ -185,10 +185,10 @@ def nose_marks():
 #   open 0..1.4, wide -1 (round) .. +1 (wide), smile -1 (frown) .. +1,
 #   smirk -1 (screen-left corner up) .. +1 (screen-right corner up)
 
-MOUTH_HALF = 1.70
+MOUTH_HALF = 1.52
 
 
-def mouth(open=0.0, wide=0.0, smile=0.0, smirk=0.0):
+def mouth(open=0.0, wide=0.0, smile=0.0, smirk=0.0, teeth=0.0):
     o = max(open, 0.0)
     oa = min(o, 1.0)
     ob = max(o - 1.0, 0.0)             # past the "A": the shout
@@ -197,7 +197,7 @@ def mouth(open=0.0, wide=0.0, smile=0.0, smirk=0.0):
     r_p, r_n = max(smirk, 0.0), max(-smirk, 0.0)
     mx, my = MOUTH_C
     mx = mx + 0.24 * (r_p - r_n)
-    half = MOUTH_HALF * (1.0 + 0.18 * w_p - 0.42 * w_n + 0.12 * s_p - 0.06 * s_n + 0.04 * oa)         + ob * (4.4 + 1.2 * w_p)
+    half = MOUTH_HALF * (1.0 + 0.25 * w_p - 0.42 * w_n + 0.12 * s_p - 0.06 * s_n + 0.04 * oa) + ob * (1.0 + 0.3 * w_p)
     u = np.linspace(-1.0, 1.0, MOUTH_N)
     au = np.abs(u)
     cy_l = 0.04 + 0.34 * s_p - 0.30 * s_n + 0.40 * r_n - 0.04 * r_p + 0.14 * oa * s_p - 0.55 * ob * (0.4 + s_n)
@@ -206,7 +206,7 @@ def mouth(open=0.0, wide=0.0, smile=0.0, smirk=0.0):
     bow = (-0.06 - 0.24 * s_p + 0.20 * s_n - 0.05 * w_n) * (1.0 - au ** 2)
     base = corner * au ** 1.6 + bow
     # opening
-    h = (2.1 * oa + 8.0 * ob) * (1.0 - 0.30 * w_p + 0.22 * w_n + 0.08 * s_p)
+    h = (1.65 * oa + 3.0 * ob) * (1.0 - 0.30 * w_p + 0.22 * w_n + 0.08 * s_p)
     lift = ((0.12 * oa + 0.42 * ob + 0.40 * w_n * oa) * (1.0 - au ** 2) ** 0.8
             + 0.22 * s_p * oa * (1.0 - au ** 2))
     p = 2.4 + 0.9 * w_p - 0.45 * w_n + 2.8 * ob + 0.6 * s_p
@@ -219,7 +219,7 @@ def mouth(open=0.0, wide=0.0, smile=0.0, smirk=0.0):
         U[:, 0] -= np.sign(u) * pinch * half
         L[:, 0] -= np.sign(u) * pinch * half
     gap = U[:, 1] - L[:, 1]
-    teeth_h = np.minimum(0.48 + 0.55 * ob, 0.40 * gap) * (1.0 - smooth(0.80, 1.0, au))
+    teeth_h = (0.10 + 0.60 * teeth) * gap * (1.0 - smooth(0.80, 1.0, au))
     T = U - np.stack([np.zeros_like(u), teeth_h], axis=1)
     tongue_h = np.minimum(0.55 * h * (1.0 - au ** 2) ** 0.8, 0.45 * gap)
     G = L + np.stack([np.zeros_like(u), tongue_h], axis=1)

@@ -248,13 +248,6 @@ RigExecRuntimeReader::Execute(std::string *error)
     }
     RrPublishGeometry(&program, record, &poseDiagnostics);
 
-    // Whatever the curvenet binds reported; drained so a cached bind
-    // stays silent on every later frame. Then the summary line, in
-    // the same words the baked epilogue uses.
-    for (std::string &message : store.curvenetBindDiagnostics) {
-        poseDiagnostics.push_back(std::move(message));
-    }
-    store.curvenetBindDiagnostics.clear();
     RigExecRuntimeCounters counters;
     for (const RrStepOutput &output : store.stepOutputs) {
         counters.revisionsExecuted += output.counters.revisionsExecuted;

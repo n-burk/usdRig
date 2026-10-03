@@ -133,7 +133,7 @@ static void TestRequestBoundaries(const RigExecSceneDb &db)
     const auto computed = expression.Evaluate(UsdTimeCode::Default());
     CHECK(computed.valid && computed.Get<GfMatrix4d>(0).ExtractTranslation() == GfVec3d(17, 0, 0));
     for (const char *type : {"RigExecRibbon", "RigExecSphereWeight", "RigExecPlaneWeight",
-                             "RigExecCurveWeight", "RigExecCurvenetAdjuster"}) {
+                             "RigExecCurveWeight"}) {
         auto unsupportedDb = db;
         unsupportedDb.prims[SdfPath("/Unsupported")].type = TfToken(type);
         RigExecStandaloneSystem unsupported(unsupportedDb);

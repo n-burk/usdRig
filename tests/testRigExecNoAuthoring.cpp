@@ -214,7 +214,7 @@ TestEveryExampleAuthorsNothing(const std::string &examplesDir)
         "/05_TwistRibbonSpine.usda", "/06_LatticeBulge.usda",
         "/07_SurfaceDrape.usda",  "/08_AimEyes.usda",
         "/09_PropertyMathMovers.usda", "/10_AimXformTurret.usda",
-        "/11_VolumeWeights.usda", "/12_CurvenetProfile.usda",
+        "/11_VolumeWeights.usda",
         "/13_ReadPhases.usda",
         "/ArmRig.usda",           "/rigexec_flat.usda",
     };

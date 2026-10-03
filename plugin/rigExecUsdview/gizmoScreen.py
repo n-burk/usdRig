@@ -3,9 +3,8 @@
 # the handle layout, hit-testing and drag mapping are testable with a
 # synthetic Gf.Camera and no Qt.
 #
-# Pixel space is the PHYSICAL pixel space of StageView.computePickFrustum
-# (curvenetUI.SurfacePicker.Project documents the mapping); callers
-# convert Qt's logical coordinates with devicePixelRatioF() and back.
+# Pixel space is the PHYSICAL pixel space of StageView.computePickFrustum.
+# Callers convert Qt's logical coordinates with devicePixelRatioF() and back.
 #
 import math
 

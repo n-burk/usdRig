@@ -6,10 +6,6 @@
 // agree bit for bit -- the baked program is accepted only when every
 // published value matches the dynamic path exactly -- so the arithmetic
 // lives here once and both sides call it with plain values.
-// This is the same arrangement RigExecComputeCurvenetWeightPacket already
-// has (curvenetWeightComputations.h): the exec adapter reads the context
-// and hands over C++ values, and nothing in this header knows that exec
-// exists.
 // It is NOT the CPU oracle. RigExecRigEvaluator::_ResolveWeights and
 // _ResolveVolumeWeights are a deliberately independent second
 // implementation (see the comment at the head of bakedProgram.cpp) and

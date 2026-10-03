@@ -128,11 +128,11 @@ _ValidateWeightObjectDomain(
     };
     const TfToken representation = readToken(
         "rigExec:representation",
-        (typeName == "RigExecCombineWeight" || typeName == "RigExecCurvenetWeight" ||
+        (typeName == "RigExecCombineWeight" ||
          _IsVolumeWeightType(typeName)) ? "dense" : "constant");
     const TfToken rangePolicy = readToken(
         "rigExec:rangePolicy",
-        (typeName == "RigExecCombineWeight" || typeName == "RigExecCurvenetWeight" ||
+        (typeName == "RigExecCombineWeight" ||
          _IsVolumeWeightType(typeName)) ? "clamp" : "strict");
     if (rangePolicy != "strict" && rangePolicy != "clamp") {
         *error = weightPath.GetString() +
@@ -154,46 +154,6 @@ _ValidateWeightObjectDomain(
                  ": generated/composed weights require dense "
                  "rigExec:representation";
         return false;
-    }
-
-    if (typeName == "RigExecCurvenetWeight") {
-        if (!pointDomain) { *error = "curvenet weights require a mesh point domain"; return false; }
-        const UsdPrim mesh = stage->GetPrimAtPath(moverTarget.GetPrimPath());
-        if (!mesh.IsA<UsdGeomMesh>()) {
-            *error = weightPath.GetString() + ": curvenet weights require a native mesh target";
-            return false;
-        }
-        const std::pair<const char *, SdfValueTypeName> inputs[] = {
-            {"rigExec:weightTarget", SdfValueTypeNames->Point3fArray},
-            {"rigExec:curvenetPoints", SdfValueTypeNames->Point3fArray},
-            {"rigExec:curvenetSplineIndices", SdfValueTypeNames->IntArray},
-            {"rigExec:meshFaceCounts", SdfValueTypeNames->IntArray},
-            {"rigExec:meshFaceIndices", SdfValueTypeNames->IntArray}};
-        for (const auto &[name, type] : inputs) {
-            SdfPathVector targets;
-            weightPrim.GetRelationship(TfToken(name)).GetTargets(&targets);
-            const UsdAttribute attr = targets.size() == 1 ?
-                weightPrim.GetStage()->GetAttributeAtPath(targets[0]) : UsdAttribute();
-            if (!attr || attr.GetTypeName() != type) {
-                *error = weightPath.GetString() + ": " + name + " must name one native property of the expected type";
-                return false;
-            }
-        }
-        auto targetOf = [&](const char *name) {
-            SdfPathVector targets;
-            weightPrim.GetRelationship(TfToken(name)).GetTargets(&targets);
-            return targets.front();
-        };
-        const SdfPath netPoints = targetOf("rigExec:curvenetPoints");
-        const UsdPrim net = stage->GetPrimAtPath(netPoints.GetPrimPath());
-        if (targetOf("rigExec:weightTarget") != moverTarget ||
-            targetOf("rigExec:meshFaceCounts") != mesh.GetPath().AppendProperty(TfToken("faceVertexCounts")) ||
-            targetOf("rigExec:meshFaceIndices") != mesh.GetPath().AppendProperty(TfToken("faceVertexIndices")) ||
-            net.GetTypeName() != "RigExecCurvenet" || netPoints.GetNameToken() != TfToken("points") ||
-            targetOf("rigExec:curvenetSplineIndices") != net.GetPath().AppendProperty(TfToken("rigExec:splineIndices"))) {
-            *error = weightPath.GetString() + ": parametrization inputs must name the matching native mesh and curvenet properties";
-            return false;
-        }
     }
 
     if (typeName == "RigExecStaticWeight") {
@@ -814,7 +774,6 @@ RigExecRigEvaluator::_DiscoverMovers(
                     {"rigExec:transform", "rigExec:transformReadPhase"},
                     {"rigExec:cage", "rigExec:cageReadPhase"},
                     {"rigExec:surface", "rigExec:surfaceReadPhase"},
-                    {"rigExec:curvenet", nullptr},
                     {"rigExec:bindCoordinates", nullptr},
                     {"rigExec:driverCurve", "rigExec:driverCurveReadPhase"},
                 };
@@ -834,6 +793,20 @@ RigExecRigEvaluator::_DiscoverMovers(
                         }
                     }
                     if (!ok) {
+                        return fail(record.schemaType.GetString() + " " +
+                                    prim.GetPath().GetString() + ": " +
+                                    phaseError, {prim.GetPath()});
+                    }
+                }
+            }
+            if (const RigExecMoverHandler *handler =
+                    RigExecFindMoverHandler(record.schemaType);
+                handler && handler->assembleExternal) {
+                for (const UsdRelationship &rel : prim.GetRelationships()) {
+                    RigExecReadPhase phase;
+                    std::string phaseError;
+                    if (!RigExecResolveReadPhase(rel, nullptr, &phase,
+                                                 &phaseError)) {
                         return fail(record.schemaType.GetString() + " " +
                                     prim.GetPath().GetString() + ": " +
                                     phaseError, {prim.GetPath()});

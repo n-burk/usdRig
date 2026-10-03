@@ -253,6 +253,25 @@ def TestUnknownRigPaintsUnavailableOnce():
     _Check(not model.Poll(lib), "then holds the paint")
 
 
+def TestUnavailableRigClearsPreviousCache():
+    lib = _FakeLib({b"/Asset/Rig": {frame: strip.CACHED
+                                    for frame in [1., 2., 3., 4.]}})
+    model = _Model()
+    model.Poll(lib)
+    _Check(model.Counts() == {"cached": 4}, "the first rig is cached")
+    model.SetRig("/RemovedRig")
+    _Check(model.Poll(lib), "switching to an unavailable rig repaints")
+    _Check(model.states is None and model.Counts() == {},
+           "an unavailable rig cannot show the previous rig's cached cells")
+    _Check(not model.Poll(lib), "an unchanged unavailable rig stays still")
+    model.SetRig("/Asset/Rig")
+    _Check(model.Poll(lib), "the valid rig becomes available again")
+    lib._statesFor.clear()
+    _Check(model.Poll(lib, panel.REASON_COMMIT),
+           "removing the same rig also clears its old green cells")
+    _Check(model.states is None, "no cached state survives removal")
+
+
 def TestCounts():
     lib = _FakeLib({b"/Asset/Rig": {1.0: strip.CACHED,
                                     2.0: strip.WARMING,
@@ -313,6 +332,8 @@ def main():
         ("warm action", TestWarmAction),
         ("unknown rig paints unavailable once",
          TestUnknownRigPaintsUnavailableOnce),
+        ("unavailable rig clears previous cache",
+         TestUnavailableRigClearsPreviousCache),
         ("counts tally by role", TestCounts),
         ("headless import, single palette", TestHeadlessAndSinglePalette),
     ]

@@ -7,6 +7,7 @@
 #define RIGEXEC_MATH_GEOMETRY_KERNELS_H
 
 #include "pointFrame.h"
+#include "wrinkleSettings.h"
 
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
@@ -24,6 +25,16 @@ bool RigExecApplyDeltaMush(
     const std::vector<int> &counts, const std::vector<int> &indices,
     int iterations = 10, double step = 0.5, bool pinBorders = true,
     double distanceWeight = 0.0, double displacement = 1.0);
+
+/// Resolve phase-guided rest-length constraints inside attachment balls about
+/// incoming points. A material phase field stabilizes the folds. Quasistatic:
+/// no history, velocity, or authored waveform. Invalid inputs fail atomically;
+/// pins, isolated vertices, and degenerate normals stay put.
+/// See docs/concepts/wrinkle-deformation.md and the cited Wrinkle Meshes paper.
+bool RigExecApplyWrinkle(
+    std::vector<GfVec3f> *points, const std::vector<GfVec3f> &rest,
+    const std::vector<int> &counts, const std::vector<int> &indices,
+    const RigExecWrinkleSettings &settings = {});
 
 /// Axis-aligned bound volume of a point set (zero for < 2 points).
 double RigExecBoundVolume(const GfVec3f *points, size_t count);

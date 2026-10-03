@@ -16,11 +16,8 @@ zigzags along the tips above it); broken highlight DASHES that line up on
 one ring round the skull; broken interior lines that fade before the root;
 a thin tapered outline.
 
-Design: wine-black, very long and straight, a deep side part on the
-screen-left; the fringe sweeps across the forehead to the right, a long
-face-framing lock falls in front of the right shoulder, the left side is
-tucked behind the ear (showing the earring), the back hair flares past the
-shoulders. One thin stray curl on the crown, two gold bar pins.
+Design: a warm chestnut bob with a deep side part, asymmetric jaw-length
+locks, a tucked ear, small brass pins, and a soft outward break at the nape.
 """
 
 import math
@@ -31,8 +28,8 @@ import paint as P
 from paint import catmull, resample, smooth
 from parts import Part, finish, painted, hull_mesh
 
-HAIR = dict(base="#34202F", shadow="#231627", deep="#150C19", hi="#93668A", hi2="#C094AE",
-            line="#0C070E", under="#4B2433", pin="#E3B35A", pin_sh="#A87A2C", scalp="#D9A79A")
+HAIR = dict(base="#553A32", shadow="#392A2B", deep="#241F27", hi="#BC8A6B", hi2="#D5AD85",
+            line="#221F26", under="#774E3D", pin="#DAB57C", pin_sh="#97734B", scalp="#D9A79A")
 TPU = 60
 SHADOW_OFF = np.array([0.30, -0.42])      # light from the upper left
 HL_C, HL_R = np.array([-0.4, 2.2]), 8.35   # the highlight ring
@@ -307,31 +304,18 @@ def crown_outline_pts():
 
 
 def back_mass():
-    outline = [(-7.6, 8.8), (-9.6, 4.0), (-10.4, -2.0), (-11.2, -8.0), (-12.6, -14.5), (-14.4, -20.2),
-               (-16.3, -25.0), (-17.9, -28.2), (-19.4, -30.4),
-               # the ends on the left: pointed tips flicking out
-               (-17.2, -30.0), (-16.6, -32.0), (-15.0, -29.6), (-13.6, -33.5), (-12.0, -30.0),
-               (-6.0, -34.0), (6.0, -34.0),
-               (12.2, -30.6), (13.8, -33.2), (15.2, -29.4), (16.8, -31.2), (17.6, -27.6),
-               (16.3, -24.2), (14.7, -19.6), (13.0, -14.0), (11.7, -8.0), (10.9, -2.0), (10.2, 4.0), (8.4, 8.8),
-               (0.0, 10.4)]
-    flows = [
-        [(-8.4, 5.0), (-9.8, -2.0), (-11.0, -9.0), (-12.8, -16.0), (-15.0, -22.5), (-16.8, -29.0)],
-        [(-7.4, 3.0), (-8.6, -4.0), (-9.8, -11.0), (-11.4, -18.0), (-13.4, -24.0), (-14.8, -29.0)],
-        [(8.8, 5.0), (10.2, -2.0), (11.2, -9.0), (12.6, -16.0), (14.4, -22.5), (15.6, -28.4)],
-        [(8.0, 3.0), (9.2, -4.0), (10.1, -11.0), (11.4, -18.0), (12.9, -24.0), (13.8, -30.0)],
-    ]
-
-    def shade(L, X, Y):
-        # the right half in shadow (away from the light)
-        return np.clip((X - 11.4 - 0.14 * (Y + 10)) * L.s * 0.5 + 0.5, 0, 1)
-
-    def deep(L, X, Y):
-        # the underside behind the neck: the deep tone with a jagged edge
-        edge = 7.0 + 0.10 * Y + 0.55 * P.sawtooth(Y * 0.22 + 0.3, 1.0, 0.85)
-        return np.clip((edge - np.abs(X - 0.3)) * L.s * 0.5 + 0.5, 0, 1) * (Y < 4.0)
-
-    return Mass("BackHair", outline, z=-2.95, flows=flows, shade_fn=shade, deep_fn=deep, chain=4, hi=False)
+    outline=[(-7.6,8.8),(-10.,4.),(-11.,-3.),(-10.7,-11.),(-10.,-15.),
+             (-7.,-17.),(-3.,-16.8),(3.,-16.8),(8.,-17.),(11.,-13.),
+             (11.5,-7.),(10.6,3.),(8.4,8.8),(0.,10.4)]
+    flows=[[(-8.4,5.),(-9.4,-2.),(-9.5,-10.),(-7.8,-15.7)],
+           [(-7.4,3.),(-8.4,-4.),(-8.5,-11.),(-6.4,-16.)],
+           [(8.8,5.),(10.,-2.),(10.,-9.),(8.4,-15.7)],
+           [(8.,3.),(8.8,-4.),(8.7,-11.),(6.5,-16.)]]
+    def shade(L,X,Y):
+        return (X>8.5-.08*(Y+4)).astype(float)
+    def deep(L,X,Y):
+        return (np.abs(X)<7.4)*(Y<1.)
+    return Mass('BackHair',outline,z=-2.95,flows=flows,shade_fn=shade,deep_fn=deep,chain=4,hi=False)
 
 
 def clumps():
@@ -339,14 +323,12 @@ def clumps():
     C.append(Clump("TuckL", [(-7.3, 6.4), (-8.8, 3.4), (-9.5, -0.6), (-9.6, -5.0), (-9.0, -9.6), (-8.6, -12.0)],
                    [(0, 1.8), (0.3, 2.1), (0.7, 1.6), (1.0, 0.0)], z=-0.30, chain=3, lines=2, shade=+1,
                    hi=False))
-    C.append(Clump("LockR_A", [(3.6, 10.75), (6.4, 9.35), (8.05, 6.9), (8.75, 3.2), (9.35, -2.4), (9.6, -8.6),
-                               (10.3, -15.2), (11.2, -20.6), (11.75, -24.4), (13.1, -27.6)],
-                   [(0, 0.6), (0.06, 2.0), (0.2, 2.7), (0.5, 2.5), (0.82, 2.2), (0.94, 1.4), (1.0, 0.0)], z=0.54, chain=6,
+    C.append(Clump("LockR_A", [(3.6, 10.75), (7.2, 8.5), (9.3, 3.), (10., -3.), (10.2, -10.5), (8.7, -15.2)],
+                   [(0, 0.6), (0.06, 2.0), (0.2, 2.7), (0.5, 2.8), (0.82, 3.1), (0.94, 1.8), (1.0, 0.0)], z=0.54, chain=4,
                    lines=3, shade=-1, under=0.09,
-                   forks=[(0.87, [(10.6, -25.6), (10.3, -28.8)], [(0, 1.0), (1, 0.0)])]))
-    C.append(Clump("LockR_B", [(5.4, 9.7), (7.2, 7.0), (7.95, 3.2), (8.2, -2.4), (8.1, -8.4), (8.2, -13.6),
-                               (8.6, -18.8), (8.95, -22.4), (8.7, -25.4)],
-                   [(0, 0.5), (0.07, 1.5), (0.25, 1.8), (0.6, 1.7), (0.88, 1.1), (1.0, 0.0)], z=0.56, chain=5, lines=2,
+                   forks=[(0.87, [(10.5, -14.3), (9.6, -16.4)], [(0, 1.0), (1, 0.0)])]))
+    C.append(Clump("LockR_B", [(5.4, 9.7), (7.9, 5.), (8.9, -1.), (8.9, -8.), (7.5, -14.)],
+                   [(0, 0.5), (0.07, 1.5), (0.25, 1.8), (0.6, 2.2), (0.88, 1.4), (1.0, 0.0)], z=0.56, chain=4, lines=2,
                    shade=+1, under=0.08))
     C.append(Clump("LooseL", [(-6.9, 6.6), (-7.9, 3.4), (-7.85, 0.0), (-7.35, -2.8)],
                    [(0, 0.6), (0.35, 0.52), (1.0, 0.0)], z=0.47, chain=3, lines=0, shade=+1, hi=False,

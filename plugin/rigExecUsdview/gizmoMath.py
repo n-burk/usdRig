@@ -602,8 +602,8 @@ def NoticeAffectsTarget(resyncedPaths, changedPaths, targetPath,
     A property path answers for the prim that owns it: an avar edit
     arrives as </Rig/Arm.avars:tx>, and what moved is /Rig/Arm.
 
-    Without the filter every notice on the stage -- the volume weight
-    panel, the curvenet panel, a timeline scrub -- costs a full rig walk,
+    Without the filter every notice on the stage -- a volume weight edit
+    or a timeline scrub -- costs a full rig walk,
     a resolveCamera() (which is NOT side-effect free, see gizmoUI._Camera)
     and a reprojection of the whole manipulator, for a target that
     usually did not change. A target-less controller is always affected:
@@ -1184,10 +1184,9 @@ def _PreferPublishedFrame(stage, prim, time, solverPosed, frames, ctx):
     The published frame is the host's snapshot of the evaluated control
     (RigExecImaging_GetControlFrameAssetSpace, installed by
     rigExecUsdview._ReadPublishedControlFrame), in asset space -- the
-    same space `posed` is in, so it substitutes directly. P follows from
-    it the way the curvenet adjustment above derives its own, so
-    posed == avars * P still holds and every consumer of P (the channel
-    and gimbal frames, the drag maths) stays consistent.
+    same space `posed` is in, so it substitutes directly. P is recovered
+    as avars^-1 * posed, preserving posed == avars * P so the channel
+    frames, gimbal frames, and drag maths stay consistent.
 
     Gated on `solverPosed` -- the prims the rig writes outright -- rather
     than asked for every prim. Three reasons, in order of weight. It is
@@ -1239,43 +1238,6 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
         # world origin.
         return _RefuseBothModes(
             frames, "%s is not under a RigExecRoot" % prim.GetName())
-    if prim.GetTypeName() == "RigExecCurvenetAdjustment":
-        # The adjustment scope depends on preceding point revisions. Its
-        # cached native frame is the authority; authored USD alone cannot
-        # reconstruct it without evaluating those revisions a second time.
-        matrix = _ReadPublishedControlFrame(stage, prim.GetPath(), time)
-        if matrix is None:
-            return _RefuseBothModes(
-                frames,
-                "Activate RigExec at this frame to edit the curvenet adjustment")
-        avars = AvarsMatrix(prim, time, ctx)
-        if not all(math.isfinite(avars[r][c]) for r in range(4) for c in range(4)) \
-                or abs(avars.GetDeterminant()) < 1e-12:
-            return _RefuseBothModes(
-                frames, "The adjustment's avar matrix is not invertible")
-        posedAttr = prim.GetAttribute(POSED_SPACE)
-        if posedAttr and (posedAttr.HasAuthoredConnections()
-                          or _MatrixAttr(prim, POSED_SPACE, time, ctx)
-                          != _IDENTITY):
-            return _RefuseBothModes(
-                frames, "posed:space drives this adjustment; edit its source")
-        frames.posed = Gf.Matrix4d(matrix)
-        frames.P = avars.GetInverse() * frames.posed
-        frames.published = True
-        frames.default = frames.P
-        frames.Q = frames.P
-        frames.rest = frames.P
-        frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0, ctx)
-        if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
-            _RefuseBothModes(
-                frames,
-                "The adjustment has a zero or non-finite translation unit scale")
-        frames.pivotReason = "Curvenet adjustment pivots follow the preceding deformation"
-        assetRoot = frames.rigRoot.GetParent()
-        if assetRoot and not assetRoot.IsPseudoRoot():
-            frames.assetToWorld = ctx.XformCache().GetLocalToWorldTransform(
-                assetRoot)
-        return frames
     if solverPosed is None:
         solverPosed = SolverPosedPaths(frames.rigRoot)
 
@@ -2736,9 +2698,8 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None,
         # Pose answers to `reason`. Pivot edits rest:t/r, which no solver
         # and no posed:space takes away -- a TwoBoneIk measures its bone
         # lengths FROM the bound joints' rest frames -- so it answers to
-        # `pivotReason` alone: the causes that leave the frames unusable,
-        # a curvenet adjustment, and a default space that selects the
-        # pivot independently of rest.
+        # `pivotReason` alone: the causes that leave the frames unusable
+        # and a default space that selects the pivot independently of rest.
         blocking = (frames.pivotReason if channels == CHANNELS_PIVOT
                     else frames.reason)
         if blocking:

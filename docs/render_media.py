@@ -186,8 +186,7 @@ GUIDE_XRAY = 0.78
 # plausible gradient over the wrong region looks exactly like a correct one.
 WEIGHT_SCHEMAS = frozenset((
     "RigExecStaticWeight", "RigExecDynamicWeight", "RigExecSphereWeight",
-    "RigExecPlaneWeight", "RigExecCurveWeight", "RigExecCombineWeight",
-    "RigExecCurvenetWeight"))
+    "RigExecPlaneWeight", "RigExecCurveWeight", "RigExecCombineWeight"))
 # The two ends of _WeightOverlayColor's ramp in 8-bit -- grey (0.55) at
 # w = 0, red (1.0, 0.05, 0.05) at w = 1 -- so the legend swatch and the
 # pixels cannot drift apart.

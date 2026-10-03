@@ -804,9 +804,8 @@ RigExecRigEvaluator::_EpochRestsMightVary(
 // Membership is tested as "a rest name on a key of _restTapIds", which is the
 // same set without spelling out seven paths per provider at every commit.
 // The keys are the providers the compile's type list recognizes, but
-// computeRestFrame is inherited -- a RigExecCurvenetAdjustment is a
-// RigExecControl to exec -- so a namespace ancestor that publishes a rest
-// frame need not be a key. A rest name edited on a prim that is not a key
+// computeRestFrame is inherited, so a namespace ancestor that publishes a
+// rest frame need not be a key. A rest name edited on a prim that is not a key
 // but has keys under it therefore marks the rests stale too: one of those
 // keys can read it through its namespace-ancestor input. It reaches no
 // provider's OWN channels, so it adds nothing to re-classify.

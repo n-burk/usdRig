@@ -25,17 +25,17 @@ TPU_E = 128         # eyes, brows, mouth
 SKIN = dict(base="#FCE6D8", shadow="#EDB7A4", deep="#D48A7C", line="#9A4E4A", blush="#F6A5A2",
             hatch="#D9535F", lip="#E3898A", lip_line="#B75A5C", gloss="#FFF3EE", mark="#5B3438",
             contour="#3A2228")
-EYE = dict(lash="#17121A", lash_warm="#3A2230", top="#1C2433", mid="#4A6488", low="#9DB8D8",
+EYE = dict(lash="#242127", lash_warm="#4B3833", top="#243F3B", mid="#476F66", low="#B3CAB5",
            pupil="#0D1119", ring="#111722", white="#FFFFFF", lid_shadow="#D8D2EA", hl="#FFFFFF",
            lower="#2A1D24", crease="#9A4E4A", duct="#F2B4AC")
-BROW = dict(fill="#2B1B27", edge="#140C13")
+BROW = dict(fill="#573D33", edge="#2B2427")
 MOUTH = dict(inside="#5A1A26", deep="#3A0E18", tongue="#E5707A", tongue_sh="#BF4F5D",
              teeth="#FFFDF8", teeth_sh="#D8D5E3", line="#2E1A20")
 OUTLINE = "#231A1F"
 
 # z (draw order); the eye stack sits between the face and the brows
 Z = dict(Neck=-1.60, Ear=-0.12, Earring=-0.10, Face=0.0, BlushBase=0.02, SidePlane=0.03,
-         MouthInside=0.05, Tongue=0.06, Teeth=0.07,
+         MouthInside=0.05, Tongue=0.06, Teeth=0.07, TongueOut=0.16,
          Sclera=0.06, LidShadow=0.065, Iris=0.07, Highlight=0.075,
          EyeMask=0.09, LipMask=0.09,
          FaceLine=0.10, MouthLine=0.11, LowerEdge=0.108, LowerLip=0.105,
@@ -70,7 +70,7 @@ def eye_curves_uw(side, st):
         else:
             ct = (H - o) + min(2.0 * c - 1.0, 1.0) * (C - H)
         v = (o + ct + w * (_shape("wide", i) - o) + s * (_shape("smile", i) - o)
-             + f * (_shape("flat", i) - o)
+             + (1.0 - c) * f * (_shape("flat", i) - o)
              + min(c, 1.0) * s * (_shape("smile_closed", i) - C - _shape("smile", i) + o))
         out.append(v)
     return out
@@ -510,7 +510,7 @@ def paint_brow(side):
 
 # mouth (collapsed at rest; painted at the PAINT pose)
 
-MOUTH_PAINT = dict(open=1.4, wide=0.35, smile=0.0, smirk=0.0)
+MOUTH_PAINT = dict(open=1.5, wide=0.35, smile=0.0, smirk=0.0, teeth=1.0)
 
 
 def mouth_curves(st):
@@ -563,6 +563,30 @@ def paint_teeth():
     L.paint_in(smooth(0.62, 0.82, np.abs(X - mx) / half), MOUTH["teeth_sh"])
     top_y = np.interp(X, c["U"][:, 0], c["U"][:, 1])
     L.paint_in(np.clip((Y - (top_y - 0.10)) * L.s + 0.5, 0, 1), MOUTH["teeth_sh"])
+    return L
+
+
+def tongue_out_points(st):
+    """A rounded protruding tongue, collapsed under the lips at zero."""
+    u = np.linspace(-1, 1, D.MOUTH_N)
+    amount = np.clip(st["mouth.tongue"], 0, 1)
+    mx, my = D.MOUTH_C
+    top = np.column_stack([mx + 0.70 * u, np.full_like(u, my - 0.30)])
+    bottom = np.column_stack([mx + 0.70 * u, my - 0.8 - 1.1 * np.sqrt(np.maximum(0, 1 - u * u))])
+    p = band_points(top, bottom, 7)
+    origin = np.array([mx, my - 0.25])
+    return origin + (p - origin) * amount
+
+
+def paint_tongue_out():
+    p = tongue_out_points(ST.S({"mouth.tongue": 1})).reshape(7, D.MOUTH_N, 2)
+    L = P.Layer("TongueOut", MOUTH_BOX, tpu=TPU_E, ss=3)
+    m = L.poly(np.vstack([p[0], p[-1, ::-1]]))
+    L.paint(m, MOUTH["tongue"])
+    L.paint_in(L.band_inside(m, 0.055), MOUTH["tongue_sh"])
+    mx, my = D.MOUTH_C
+    sp = resample(np.array([(mx, my - 0.36), (mx, my - 0.9), (mx + .02, my - 1.25)]), n=20)
+    L.paint_in(L.stroke(sp, P.taper(20, 0.04, head=.1, tail=.8)), MOUTH["tongue_sh"])
     return L
 
 
@@ -657,7 +681,13 @@ def lower_lip_points(st):
     k = len(Lc)
     i0, i1 = int(0.28 * (k - 1)), int(0.72 * (k - 1)) + 1
     sp = Lc[i0:i1]
-    return ribbon_points(sp, LLIP_V, np.tile(np.array([[0.0, 1.0]]), (len(sp), 1)))
+    # Opening stretches the orbicularis; broad vowels tighten it further.
+    # Keep thickness in model units, independent of jaw drop and lip width.
+    tightness = max(.24, 1.0 - .30 * st["mouth.open"] - .40 * st["mouth.wide"]
+                    + .10 * st["mouth.round"])
+    thickness = tightness + .85 * st["mouth.lipThick"]
+    return ribbon_points(sp, np.asarray(LLIP_V) * thickness,
+                         np.tile(np.array([[0.0, 1.0]]), (len(sp), 1)))
 
 
 def paint_lower_lip():
@@ -674,7 +704,7 @@ def paint_lower_lip():
     # lip tint: a flat rosy crescent under the line
     depth = 0.30 * np.clip(1 - u ** 2, 0, 1) ** 0.7
     tint = np.clip((ly - 0.05 - Y) * L.s + 0.5, 0, 1) * np.clip((Y - (ly - 0.05 - depth)) * L.s + 0.5, 0, 1)
-    L.paint(tint, SKIN["lip"], 0.9)
+    L.paint(tint, SKIN["lip"], 0.45)
     # the lower-lip stroke (coloured line) and a tiny crescent shadow under it
     sy = my - 0.54
     stroke = resample(np.array([(mx - 0.62, sy + 0.05), (mx, sy - 0.02), (mx + 0.62, sy + 0.05)]), n=24)
@@ -992,7 +1022,7 @@ def build(fringe_shadow=None, lock_shadows=(), log=print):
         parts.append(Part("Brow_" + tg, "Brows", Z["Brow"], "Brow_" + tg, p, grid_tris(len(BROW_V), D.BROW_N),
                           gen=lambda st, s=side: brow_points(s, st)))
         # blush: a constant faint base, a pop-in patch and the hatching
-        tex("BlushBase_" + tg, lambda: paint_blush(side, "BlushBase", 0.34))
+        tex("BlushBase_" + tg, lambda: paint_blush(side, "BlushBase", 0.20))
         bp, bt = blush_mesh(side)
         parts.append(Part("BlushBase_" + tg, "Face", Z["BlushBase"], "BlushBase_" + tg, bp, bt, material="blend"))
         tex("BlushPop_" + tg, lambda: paint_blush(side, "BlushPop", 0.55, 1.6, 0.66))
@@ -1009,9 +1039,13 @@ def build(fringe_shadow=None, lock_shadows=(), log=print):
                                     ("Tongue", paint_tongue, tongue_points, 4),
                                     ("LowerEdge", paint_lower_edge, lower_edge_points, len(LEDGE_V))):
         tex(name, painter)
-        paint_st = ST.S({"mouth.open": MOUTH_PAINT["open"], "mouth.wide": MOUTH_PAINT["wide"]})
+        paint_st = ST.S({"mouth.open": MOUTH_PAINT["open"], "mouth.wide": MOUTH_PAINT["wide"], "mouth.teeth": 1})
         parts.append(Part(name, "Mouth", Z[name], name, fn(ST.REST), grid_tris(rows, D.MOUTH_N),
                           uv_pts=fn(paint_st), gen=fn))
+    tex("TongueOut", paint_tongue_out)
+    parts.append(Part("TongueOut", "Mouth", Z["TongueOut"], "TongueOut", tongue_out_points(ST.REST),
+                      grid_tris(7, D.MOUTH_N), uv_pts=tongue_out_points(ST.S({"mouth.tongue": 1})),
+                      gen=tongue_out_points))
     tex("MouthLine", paint_mouth_line)
     parts.append(Part("MouthLine", "Mouth", Z["MouthLine"], "MouthLine", mouth_line_points(ST.REST),
                       grid_tris(len(MLINE_V), D.MOUTH_N), gen=mouth_line_points))

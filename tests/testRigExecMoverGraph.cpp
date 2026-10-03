@@ -1132,48 +1132,6 @@ TestEveryOperationUpdatesInteractively()
         check(RigExecRevisionOp::RecomputeExtent,
               VtVec3fArray({GfVec3f(0), GfVec3f(0)}), a, b);
     }
-    {
-        auto a = packet("curvenet");
-        std::vector<GfVec3f> mesh;
-        for (int y = 0; y <= 4; ++y) {
-            for (int x = 0; x <= 4; ++x) mesh.emplace_back(float(x), float(y), 0);
-        }
-        for (int y = 0; y < 4; ++y) {
-            for (int x = 0; x < 4; ++x) {
-                const int i = y * 5 + x;
-                a.topologyCounts.push_back(4);
-                a.topologyIndices.insert(a.topologyIndices.end(),
-                                         {i, i + 1, i + 6, i + 5});
-            }
-        }
-        a.auxPoints = {GfVec3f(2.5f, 2.5f, 0), GfVec3f(0, 2.5f, 0),
-                       GfVec3f(4, 2.5f, 0), GfVec3f(2.5f, 0, 0),
-                       GfVec3f(2.5f, 4, 0)};
-        std::vector<int> splines;
-        for (int tip = 1; tip <= 4; ++tip) {
-            const GfVec3f origin = a.auxPoints[0];
-            const GfVec3f delta = a.auxPoints[tip] - origin;
-            const int handle = int(a.auxPoints.size());
-            a.auxPoints.push_back(origin + delta / 3.0f);
-            a.auxPoints.push_back(origin + delta * (2.0f / 3.0f));
-            splines.insert(splines.end(), {0, handle, handle + 1, tip});
-        }
-        rigExec::RigExecCurvenetTopology topology;
-        std::string error;
-        CHECK(rigExec::RigExecBuildCurvenetTopology(
-            splines, a.auxPoints.size(), rigExec::RigExecCurvenetBasis::Bezier,
-            a.auxPoints, nullptr, &topology, &error));
-        auto binding = std::make_shared<rigExec::RigExecProfileMoverBinding>();
-        CHECK(rigExec::RigExecBindProfileMover(
-            topology, a.auxPoints, mesh, a.topologyCounts,
-            a.topologyIndices, 5, binding.get(), &error));
-        a.curvenetBinding = binding;
-        auto b = a;
-        for (auto &point : b.auxPoints) point[2] += 1;
-        VtVec3fArray base(mesh.size());
-        std::copy(mesh.begin(), mesh.end(), base.begin());
-        check(RigExecRevisionOp::Curvenet, base, a, b);
-    }
 }
 
 static void

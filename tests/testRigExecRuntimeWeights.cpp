@@ -483,10 +483,6 @@ _SynthObject(RigExecBinaryWriter *writer, const char *path,
     object.scaleZ = _SynthFloat(1.0f);
     object.extentU = _SynthFloat(1.0f);
     object.extentV = _SynthFloat(1.0f);
-    object.curvenetSamples = _SynthFloat(0.0f);
-    object.curvenetSamples.tag = RigExecWireInput::Tag::Int;
-    object.curvenetSamples.i32 = 5;
-    object.curvenetUnreached = _SynthFloat(0.0f);
     return object;
 }
 
@@ -792,7 +788,8 @@ _TestSyntheticBuilders()
         return in;
     };
     const std::vector<GfVec3f> signedSamples = {GfVec3f(1, 0, 0), GfVec3f(0, 1, 0), GfVec3f(0, 0, -2)};
-    // 11: sphere over pathReads points, smooth remap LUT.
+    // 11: sphere over pathReads points, smooth remap LUT, and varying
+    // signed/legacy scales whose uid order must match capture.
     {
         RigExecWireWeightObject object = _SynthObject(
             &writer, "/w/sphere", "RigExecSphereWeight", "dense",
@@ -800,7 +797,8 @@ _TestSyntheticBuilders()
         object.providerSlot = 0;
         object.falloffMax = _SynthFloat(2.0f);
         _SynthAttr(&writer, "/signed.points", &object.samplePoints, &object.sampleValid);
-        object.scaleXPos = _SynthFloat(2.0f);
+        object.scaleXPos = _SynthVaryingFloat(9.0f);
+        object.scaleY = _SynthVaryingFloat(9.0f);
         object.scaleYPos = _SynthFloat(3.0f);
         object.scaleZNeg = _SynthFloat(4.0f);
         object.falloffCurve =
@@ -811,6 +809,7 @@ _TestSyntheticBuilders()
         RigExecVolumeWeightInputs sphereIn =
             volumeInputs("y", "unbounded");
         sphereIn.samplePoints = signedSamples;
+        sphereIn.scales = GfVec3f(1.0f, 0.5f, 1.0f);
         sphereIn.positiveScales = GfVec3f(2.0f, 3.0f, 1.0f);
         sphereIn.negativeScales = GfVec3f(1.0f, 1.0f, 4.0f);
         sphereIn.params.curve =
@@ -908,19 +907,7 @@ _TestSyntheticBuilders()
         expected.push_back(RigExecBuildVolumeWeightPacket(
             TfToken("RigExecSphereWeight"), missingIn));
     }
-    // 17: curvenet with an invalid basis: invalid, no bind attempted.
-    {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/curvenetBadBasis", "RigExecCurvenetWeight",
-            "dense", "strict");
-        object.curvenetBasis = writer.AddString("linear");
-        geometry.weightObjects.push_back(object);
-        RigExecWeightPacket packet;
-        packet.representation = TfToken("dense");
-        packet.rangePolicy = TfToken("strict");
-        expected.push_back(packet);
-    }
-    // 18: unknown weight type: bare invalid packet.
+    // 17: unknown weight type: bare invalid packet.
     {
         RigExecWireWeightObject object = _SynthObject(
             &writer, "/w/magic", "RigExecMagicWeight", "dense",
@@ -928,7 +915,7 @@ _TestSyntheticBuilders()
         geometry.weightObjects.push_back(object);
         expected.push_back(RigExecWeightPacket());
     }
-    // 19-23: the remaining combine modes over objects 0 and 7.
+    // 18-22: the remaining combine modes over objects 0 and 7.
     for (const char *mode :
          {"multiply", "max", "min", "average", "overlay"}) {
         RigExecWireWeightObject object = _SynthObject(
@@ -942,7 +929,7 @@ _TestSyntheticBuilders()
             TfToken("dense"), TfToken("strict"), TfToken(mode),
             {expected[0], expected[7]}, 0, 1.0f, 0.0f));
     }
-    // 24: dynamic remapping object 1's sparse field (the default
+    // 23: dynamic remapping object 1's sparse field (the default
     // remaps; dense would pin zero).
     {
         RigExecWireWeightObject object = _SynthObject(
@@ -958,7 +945,7 @@ _TestSyntheticBuilders()
         expected.push_back(
             RigExecBuildDynamicWeightPacket(in, &expected[1]));
     }
-    // 25: static constant with an out-of-range default: invalid.
+    // 24: static constant with an out-of-range default: invalid.
     {
         RigExecWireWeightObject object = _SynthObject(
             &writer, "/w/constBad", "RigExecStaticWeight",
@@ -971,7 +958,7 @@ _TestSyntheticBuilders()
         in.defaultWeight = 2.0f;
         expected.push_back(RigExecBuildStaticWeightPacket(in));
     }
-    // 26: constant-only combine whose epilogue violates strict: the
+    // 25: constant-only combine whose epilogue violates strict: the
     // BARE invalid packet, not the token-carrying one.
     {
         RigExecWireWeightObject object = _SynthObject(
@@ -987,7 +974,7 @@ _TestSyntheticBuilders()
             TfToken("dense"), TfToken("strict"), TfToken("add"),
             {expected[2], expected[6]}, 3, 1.0f, 0.0f));
     }
-    // 27: sphere over a degenerate band: a hard step at distance 1.
+    // 26: sphere over a degenerate band: a hard step at distance 1.
     {
         RigExecWireWeightObject object = _SynthObject(
             &writer, "/w/degenerate", "RigExecSphereWeight",
@@ -1005,7 +992,7 @@ _TestSyntheticBuilders()
         expected.push_back(RigExecBuildVolumeWeightPacket(
             TfToken("RigExecSphereWeight"), in));
     }
-    // 28: unbounded plane with bad extents: valid, the extents are
+    // 27: unbounded plane with bad extents: valid, the extents are
     // not even read off the unbounded arm.
     {
         RigExecWireWeightObject object = _SynthObject(
@@ -1024,7 +1011,7 @@ _TestSyntheticBuilders()
             TfToken("RigExecPlaneWeight"),
             volumeInputs("y", "unbounded")));
     }
-    // 29: plane with an unknown axis: invalid, tokens kept.
+    // 28: plane with an unknown axis: invalid, tokens kept.
     {
         RigExecWireWeightObject object = _SynthObject(
             &writer, "/w/planeBadAxis", "RigExecPlaneWeight",
@@ -1040,7 +1027,7 @@ _TestSyntheticBuilders()
             TfToken("RigExecPlaneWeight"),
             volumeInputs("w", "unbounded")));
     }
-    // 30: strict sphere driven out of range by strength: the BARE
+    // 29: strict sphere driven out of range by strength: the BARE
     // invalid packet.
     {
         RigExecWireWeightObject object = _SynthObject(
@@ -1059,7 +1046,7 @@ _TestSyntheticBuilders()
         expected.push_back(RigExecBuildVolumeWeightPacket(
             TfToken("RigExecSphereWeight"), in));
     }
-    // 31: sphere with a matching sample override: the samples, not
+    // 30: sphere with a matching sample override: the samples, not
     // the targets, are measured (2 elements).
     {
         RigExecWireWeightObject object = _SynthObject(
@@ -1132,19 +1119,22 @@ _TestSyntheticBuilders()
         cones.chainBaseClusters = {{}};
     }
 
-    // The uid directory holds the one varying input (object 2's
-    // default): ladders, interpolators, solvers and constraints are
-    // absent, so the weight walk assigns uid 0.
-    inputs.directory.resize(1);
-    inputs.directory[0].tag = RigExecWireInput::Tag::Float;
+    // Capture visits object 2's default, then object 11's signed scale
+    // before its legacy scale. Distinct axes expose a swapped uid mapping.
+    inputs.directory.resize(3);
+    for (auto &entry : inputs.directory) {
+        entry.tag = RigExecWireInput::Tag::Float;
+    }
     {
         RigExecWireFrameInputs record;
         record.frame = 1.0;
-        record.uids = {0};
-        RigExecWireValue value;
-        value.tag = RigExecWireInput::Tag::Float;
-        value.f32 = 0.3f;
-        record.values.push_back(value);
+        record.uids = {0, 1, 2};
+        for (float input : {0.3f, 2.0f, 0.5f}) {
+            RigExecWireValue value;
+            value.tag = RigExecWireInput::Tag::Float;
+            value.f32 = input;
+            record.values.push_back(value);
+        }
         record.pathReads.push_back(
             _SynthPointsRead(&writer, "/signed.points", signedSamples));
         record.pathReads.push_back(

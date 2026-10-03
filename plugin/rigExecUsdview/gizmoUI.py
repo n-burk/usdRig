@@ -168,8 +168,7 @@ def StageView(usdviewApi):
     usdview's stage view widget, or None in a headless / pre-view state.
 
     The private-name mangling is usdview's own (UsdviewApi keeps the app
-    controller as __appController); curvenetUI.SurfacePicker reaches it
-    the same way.
+    controller as __appController).
     """
     try:
         return usdviewApi._UsdviewApi__appController._stageView
@@ -2546,8 +2545,8 @@ class GizmoController(QtCore.QObject):
         """
         Refresh the target, but only for a notice that can have moved it.
 
-        Notices arrive from the volume weight panel, the curvenet panel,
-        a timeline scrub and anything else authoring in the session, not
+        Notices arrive from the volume weight panel, a timeline scrub,
+        and anything else authoring in the session, not
         just from the gizmo. Refreshing unconditionally bought each of
         them a full rig walk plus a resolveCamera() -- which conforms
         the frustum and can emit signalFrustumChanged, see _Camera --
@@ -2555,9 +2554,9 @@ class GizmoController(QtCore.QObject):
         to come BEFORE any of that, not inside it.
         """
         # The hover preview's rig-written sets are only as fresh as
-        # the last authoring notice: the curvenet and volume-weight
-        # panels author rigExec:moves / rigExec:weightTarget in this
-        # session, and a stale set makes the marker offer a vertex
+        # the last authoring notice: editor panels author rigExec:moves
+        # and rigExec:weightTarget in this session, and a stale set makes
+        # the marker offer a vertex
         # the drag (which rebuilds its sets in _BeginDrag) then
         # refuses as rig-deformed. Likewise the snap geometry cache
         # may only keep prims no notice path touches. Both go ABOVE
@@ -3279,12 +3278,8 @@ class GizmoController(QtCore.QObject):
         (primPath, point, normal) under the cursor, guides excluded,
         or None.
 
-        Duplicates curvenetUI.SurfacePicker.Pick
-        (curvenetUI.py:530-553) rather than importing it, which would
-        pull a whole Qt panel into this module's import graph -- but
-        bypasses view.pick(): the plugin forces displayGuide on
-        (rigExecUsdview.py:583-588), so pick() returns a RigExec
-        guide for every hit (snapping design section 3). The fresh
+        Bypasses view.pick(): the plugin forces displayGuide on, so
+        pick() returns a RigExec guide for every hit. The fresh
         RenderParams carries the view settings with showGuides =
         False; view._renderParams is never mutated, since pick()
         reuses it for the artist's own picks. showGuides=False drops

@@ -2,7 +2,6 @@
 
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorConstraints.h"
-#include "curvenetWeightComputations.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/weightFields.h"
@@ -408,33 +407,6 @@ RigExecRigEvaluator::_ResolveWeights(
         *error = "unknown weight object type " + typeName.GetString() +
                  " on " + weightPrimPath.GetString();
         return false;
-    }
-    if (typeName == "RigExecCurvenetWeight") {
-        auto array = [&](const char *relationship, auto *out) {
-            SdfPathVector paths;
-            prim.GetRelationship(TfToken(relationship)).GetTargets(&paths);
-            return paths.size() == 1 && _resolvedInputs.GetAttribute(
-                _stage->GetAttributeAtPath(paths[0]), time, out);
-        };
-        VtVec3fArray mesh, net;
-        VtIntArray counts, indices, splines, smooth;
-        VtFloatArray authored;
-        if (!array("rigExec:weightTarget", &mesh) || !array("rigExec:curvenetPoints", &net) ||
-            !array("rigExec:meshFaceCounts", &counts) || !array("rigExec:meshFaceIndices", &indices) ||
-            !array("rigExec:curvenetSplineIndices", &splines)) {
-            *error = "unresolved curvenet weight geometry"; return false;
-        }
-        _resolvedInputs.GetAttribute(prim.GetAttribute(TfToken("inputs:weights")), time, &authored);
-        _resolvedInputs.GetAttribute(prim.GetAttribute(TfToken("rigExec:autoSmooth")), time, &smooth);
-        const auto packet = RigExecComputeCurvenetWeightPacket(
-            {mesh.begin(),mesh.end()}, {counts.begin(),counts.end()}, {indices.begin(),indices.end()},
-            {net.begin(),net.end()}, {splines.begin(),splines.end()},
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:basis",TfToken("catmullRom"),time),
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:samplesPerSpline",5,time),
-            {smooth.begin(),smooth.end()}, {authored.begin(),authored.end()},
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:rangePolicy",TfToken("clamp"),time),
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:unreachedValue",0.0f,time),error);
-        return packet.ResolveAll(count, weights);
     }
     if (_IsVolumeWeightType(typeName) || typeName == "RigExecCombineWeight") {
         std::vector<float> resolved;

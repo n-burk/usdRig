@@ -423,10 +423,13 @@ public:
                               UsdTimeCode time,
                               RigExecWarmFenceToken fenceToken) const;
 
-    /// The rig's currently queued times, in index order. The scoped-cancel
-    /// path unions these with the warm index's completed times to find
-    /// the affected set.
+    /// The rig's currently queued times, in index order.
     std::vector<UsdTimeCode> QueuedTimes(const SdfPath &rig) const;
+
+    /// The rig's queued and running times, unique and in time order.
+    /// Scoped edit retirement includes these even when a first-time warm
+    /// has not published any provenance or completion yet.
+    std::vector<UsdTimeCode> InFlightTimes(const SdfPath &rig) const;
 
     /// The publish fence mutex (plan 3.3): worker publish and cancel/clear
     /// share it. The background completion path holds it across the
@@ -644,6 +647,9 @@ private:
     // a popped job leaves the index, so a re-enqueue while it runs queues
     // honestly beside it (idempotent warming, not a duplicate run).
     std::map<std::pair<SdfPath, double>, _QueueKey> _queuedByRigAndTime;
+    // Running jobs remain visible to scoped edit retirement after they
+    // leave the queue. Counts cover overlapping jobs at the same time.
+    std::map<std::pair<SdfPath, double>, size_t> _runningByRigAndTime;
     // Per-time publish fence tokens (plan 2.1): (rig, time value) ->
     // current token, assigned by CancelGenerationTimes from the rig's
     // monotonic counter below. Absent means never-purged (token zero).

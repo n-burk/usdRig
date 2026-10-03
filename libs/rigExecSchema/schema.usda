@@ -1322,32 +1322,6 @@ class "RigExecWeightObject" (
     )
 }
 
-class RigExecCurvenetWeight "RigExecCurvenetWeight" (
-    inherits = </RigExecWeightObject>
-    customData = { string className = "CurvenetWeight" }
-    doc = """Surface parametrization from scalar maps on a curvenet. Native
-    property relationships carry mesh/net arrays into computeWeightPacket;
-    L + kappa B^T B is factorized per layout and reused for animated weights.
-    weightTarget must be the mesh's exact points property. The four array
-    relationships each target exactly one native property. Basis/sample count
-    may connect to the corresponding curvenet attributes."""
-)
-{
-    uniform token rigExec:representation = "dense" (allowedTokens = ["dense"])
-    uniform token rigExec:rangePolicy = "clamp" (allowedTokens = ["strict", "clamp"])
-    rel rigExec:curvenetPoints
-    rel rigExec:curvenetSplineIndices
-    rel rigExec:meshFaceCounts
-    rel rigExec:meshFaceIndices
-    float[] inputs:weights = []
-    int[] rigExec:autoSmooth = [] (
-        doc = "Control-pool indices whose values are interpolated from anchored neighbors."
-    )
-    uniform token rigExec:basis = "catmullRom" (allowedTokens = ["bezier", "catmullRom"])
-    uniform int rigExec:samplesPerSpline = 5
-    float rigExec:unreachedValue = 0
-}
-
 class RigExecStaticWeight "RigExecStaticWeight" (
     inherits = </RigExecWeightObject>
     customData = {
@@ -2363,6 +2337,75 @@ class RigExecDeltaMushMover "RigExecDeltaMushMover" (
     float inputs:displacement = 1
 }
 
+class RigExecWrinkleMover "RigExecWrinkleMover" (
+    inherits = </Typed>
+    customData = { string className = "WrinkleMover" }
+    doc = """Adds automatic quasistatic wrinkles to one native mesh points
+    property. Reference lengths and a deterministic fold guide define target
+    edge vectors. Iterative projection adjusts the incoming shape in three
+    dimensions, subject to attachment bounds, pins, and optional local
+    tangent-plane collisions. The guide follows smooth compression without
+    previous-frame state, so playback and seeking agree. The common mover
+    envelope blends the result once."""
+)
+{
+    uniform point3f[] inputs:restPoints = [] (
+        doc = """Static, unconnected reference points in target mesh local space,
+        with the same ordering and count as the target. Empty uses the target's
+        authored base points at the evaluation time, before its mover chain."""
+    )
+    int inputs:iterations = 80 (
+        doc = "Constraint solver iteration count in [0,1000]. Zero passes through."
+    )
+    uniform token inputs:topology = "cloth" (
+        allowedTokens = ["cloth", "surfaceStruts"]
+        doc = """Static, unconnected constraint topology. Both modes use
+        triangulated surface edges. Cloth adds weak across-triangle bend
+        links; surfaceStruts replaces these with weak links at exactly
+        neighborDistance hops through triangulated edge adjacency."""
+    )
+    int inputs:neighborDistance = 2 (
+        doc = "Exact triangulated-edge graph distance for surfaceStruts, in [1,8]."
+    )
+    float inputs:restLengthScale = 1 (
+        doc = "Finite positive scale on reference constraint lengths."
+    )
+    float inputs:stretchStiffness = 1 (
+        doc = "Correction strength for structural links stretched in the incoming pose, finite and in [0,1]."
+    )
+    float inputs:compressionStiffness = 1 (
+        doc = "Correction strength for structural links compressed in the incoming pose, finite and in [0,1]."
+    )
+    float inputs:bendStiffness = 0.1 (
+        doc = "Bend-link and surface-strut correction strength, finite and in [0,1]."
+    )
+    float inputs:maxDisplacement = 0.2 (
+        doc = """Finite nonnegative attachment radius around each incoming point
+        in mesh local units. The final displacement remains inside this radius,
+        including after wrinkleScale and displacement smoothing."""
+    )
+    bool inputs:pinBorders = true (
+        doc = "Keep vertices incident to a boundary edge at their incoming position."
+    )
+    uniform int[] inputs:pinPoints = [] (
+        doc = "Static, unconnected, unique nonnegative indices of additional pinned vertices."
+    )
+    bool inputs:tangentPlaneCollisions = true (
+        doc = """Prevent inward movement through each incoming vertex's local
+        tangent plane, offset inward by tangentPlaneInset. This is a local
+        surface approximation; there is no external or self-collision solve."""
+    )
+    float inputs:tangentPlaneInset = 0 (
+        doc = "Finite nonnegative inward tangent-plane offset in mesh local units."
+    )
+    float inputs:wrinkleScale = 1 (
+        doc = "Finite nonnegative scale on solved displacement, still bounded by maxDisplacement."
+    )
+    int inputs:smoothingIterations = 0 (
+        doc = "Displacement-field averaging passes in [0,100]; not rest-detail transport."
+    )
+}
+
 class RigExecSmoothMover "RigExecSmoothMover" (
     inherits = </Typed>
     customData = {
@@ -2376,112 +2419,6 @@ class RigExecSmoothMover "RigExecSmoothMover" (
     Laplacian step over the incoming points."""
 )
 {
-}
-
-class RigExecCurvenet "RigExecCurvenet" (
-    inherits = </Points>
-    customData = {
-        string className = "Curvenet"
-    }
-    doc = """A net of cubic splines profiling a surface, the rigging
-    representation of de Goes, Sheffler and Fleischer, "Character
-    Articulation through Profile Curves" (SIGGRAPH 2022), section 3.
-
-    Inherited `points` is the shared pool of control points -- knots AND
-    tangent handles -- in the PROJECTION pose, the pose the net was drawn
-    in. `rigExec:splineIndices` names four of them per cubic spline, and
-    two splines meet because they name the SAME pool entry: index sharing
-    is the whole connectivity model, which is what detaches the rig from
-    the surface tessellation.
-
-    The derived structure the deformation needs is computed, never
-    authored: an endpoint shared by three or more splines is an
-    intersection, one incident to a single spline is an anchor, and the
-    chains between them are the curves. Orientation and non-uniform scale
-    along every curve follow from that layout, so no normals, twists or
-    handles are authored anywhere.
-
-    Being a UsdGeomPointBased is deliberate: the pool is an exact native
-    point3f[], so every existing RigExec mover can pose the knots with no
-    curvenet-specific rigging code, which is what the paper means by
-    articulating knots "using traditional rigging tools"."""
-)
-{
-    int[] rigExec:splineIndices = [] (
-        doc = """Four control point indices per cubic spline. For the bezier
-        basis they are p0, h0, h1, p1, so entries 0 and 3 are the knots and
-        the two between are tangent handles."""
-    )
-    uniform token rigExec:basis = "bezier" (
-        allowedTokens = ["bezier", "catmullRom"]
-        doc = """Curve basis. "bezier" is the paper's cubic Bezier. The
-        centripetal Catmull-Rom of the 2026 face-parametrization talk puts
-        every control point exactly on the curve, which suits nets traced
-        onto a surface."""
-    )
-    uniform int rigExec:samplesPerSpline = 5 (
-        doc = """Sampling density before the mesh-resolution scaling of
-        section 3: the count per spline is this value times the ratio of the
-        spline's control polygon length to the surface's mean edge length."""
-    )
-}
-
-class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
-    inherits = </RigExecControl>
-    customData = { string className = "CurvenetAdjustment" }
-    doc = """An animation control on a curvenet knot. The Adjuster Mover
-    transports this control's local avar frame with preceding deformation.
-    Tangent adjustments are children of their incident knot adjustment and
-    use the parent's adjusted frame. No authored rest placement is needed."""
-)
-{
-    rel rigExec:curvenet
-    uniform int rigExec:knotIndex = -1
-    uniform token rigExec:pointKind = "knot" (
-        allowedTokens = ["knot", "tangent"]
-    )
-    uniform bool rigExec:includeTangents = true
-}
-
-class RigExecCurvenetAdjusterMover "RigExecCurvenetAdjusterMover" (
-    inherits = </Typed>
-    customData = { string className = "CurvenetAdjusterMover" }
-    doc = """Applies deformation-relative knot and tangent animation controls
-    to exactly one native RigExecCurvenet points property. Listed knot
-    adjustments include their tangent adjustment children automatically.
-    The common MoverAPI envelope blends over the preceding point revision."""
-)
-{
-    rel rigExec:adjustments
-}
-
-class RigExecCurvenetMover "RigExecCurvenetMover" (
-    inherits = </Typed>
-    customData = {
-        string className = "CurvenetMover"
-    }
-    doc = """The Profile Mover: propagates a rigged curvenet's articulation
-    over one exact native UsdGeomPointBased points property (2022 paper
-    section 4).
-
-    Binding is precomputed once per epoch against the target's authored
-    base points -- the projection pose -- by cutting the mesh along the
-    curvenet and factorizing the resulting cut-aware Laplacian. Each frame
-    the mover interpolates the curvenet's per-side deformation gradients
-    over that cut-mesh and reconstructs vertex positions, so the surface
-    reproduces the curves while keeping its own detail, and each side of a
-    curve deforms independently.
-
-    The surface this deforms FROM is whatever the preceding revision in the
-    chain produced, which is exactly the paper's section 5 separation of
-    the projection pose from the rest pose: a curvenet layers over skinning,
-    another curvenet, or a simulation with no extra setup. The common MoverAPI
-    envelope blends the solved surface over that incoming revision."""
-)
-{
-    rel rigExec:curvenet (
-        doc = "Exactly one RigExecCurvenet supplying the posed control points."
-    )
 }
 
 class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (

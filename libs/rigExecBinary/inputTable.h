@@ -154,10 +154,6 @@ struct RigExecWireFrameInputs {
     /// weight object measures against the points as they stand.
     std::vector<std::vector<RigExecWireWeightPacket>> revisionPhasePackets;
     std::vector<std::vector<RigExecWireWeightPacket>> derivedPhasePackets;
-    /// The adjuster ladder per revision, fresh where the have-flag
-    /// says. Main revisions only: the publish visits no derived ones.
-    std::vector<std::vector<RigExecWireMatrix4d>> revisionAdjusters;
-    std::vector<std::vector<uint8_t>> revisionAdjusterHave;
     /// Live ribbon driver points per solver, in program order. Empty
     /// where the solver binds no varying driver.
     std::vector<std::vector<RigExecWireVec3f>> solverRibbonPoints;

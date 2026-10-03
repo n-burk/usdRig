@@ -137,11 +137,6 @@ CONCRETE_SCHEMA_TYPES = (
     "RigExecControl",
     "RigExecCurveMover",
     "RigExecCurveWeight",
-    "RigExecCurvenet",
-    "RigExecCurvenetMover",
-    "RigExecCurvenetAdjustment",
-    "RigExecCurvenetAdjusterMover",
-    "RigExecCurvenetWeight",
     "RigExecDynamicWeight",
     "RigExecFkChain",
     "RigExecFloatMathMover",
@@ -160,6 +155,7 @@ CONCRETE_SCHEMA_TYPES = (
     "RigExecSkinMover",
     "RigExecSmoothMover",
     "RigExecDeltaMushMover",
+    "RigExecWrinkleMover",
     "RigExecSphereWeight",
     "RigExecSplineIk",
     "RigExecStaticWeight",
@@ -200,46 +196,8 @@ class SchemaFacadeTests(_ContractTestCase):
     def setUp(self):
         self.stage = Usd.Stage.CreateInMemory()
 
-    def test_curvenet_weight_authoring(self):
-        builder = rigexec.Builder.create(self.stage, "/Rig")
-        net = builder.add_curvenet("Net", [(0, 0, 0), (1, 0, 0),
-                                          (2, 0, 0), (3, 0, 0)])
-        net_prim = self.stage.GetPrimAtPath(net.path)
-        net_prim.GetAttribute("rigExec:splineIndices").Set([0, 1, 2, 3])
-        mesh = UsdGeom.Mesh.Define(self.stage, "/Mesh")
-        mesh.CreatePointsAttr([(0, 0, 0), (3, 0, 0), (0, 1, 0)])
-        mesh.CreateFaceVertexCountsAttr([3])
-        mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
-        result = rigexec.create_curvenet_weight(
-            self.stage, "/Rig/Weights/Net", net, mesh, [0, 0.3, 0.7, 1], [1, 2])
-        self.assertTrue(result.valid)
-        prim = self.stage.GetPrimAtPath(result.path)
-        self.assertEqual(prim.GetTypeName(), "RigExecCurvenetWeight")
-        expected = {
-            "rigExec:weightTarget": "/Mesh.points",
-            "rigExec:curvenetPoints": net.path + ".points",
-            "rigExec:curvenetSplineIndices": net.path + ".rigExec:splineIndices",
-            "rigExec:meshFaceCounts": "/Mesh.faceVertexCounts",
-            "rigExec:meshFaceIndices": "/Mesh.faceVertexIndices",
-        }
-        for name, target in expected.items():
-            self.assertEqual(_targets(prim.GetRelationship(name)), [target])
-        self.assertEqual(list(prim.GetAttribute("rigExec:autoSmooth").Get()), [1, 2])
-        self.assertEqual(prim.GetAttribute("rigExec:rangePolicy").Get(), "clamp")
-        self.assertAlmostEqual(prim.GetAttribute("inputs:weights").Get()[2], 0.7)
-        for name in ("rigExec:basis", "rigExec:samplesPerSpline"):
-            self.assertEqual(prim.GetAttribute(name).GetConnections(),
-                             [net_prim.GetPath().AppendProperty(name)])
-        original = self.stage.GetRootLayer().ExportToString()
-        for weights, smooth in (([0, 1], []), ([0, float("nan"), 1, 0], []),
-                                ([0, 0, 1, 1], [4]), ([0, 0, 1, 1], [1, 1])):
-            with self.assertRaises(ValueError):
-                rigexec.create_curvenet_weight(self.stage, "/Rig/Weights/Invalid", net,
-                                               mesh, weights, smooth)
-            self.assertEqual(self.stage.GetRootLayer().ExportToString(), original)
-
     def test_all_concrete_types_define_and_get(self):
-        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 40)
+        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 36)
         self.assertEqual(
             set(rigexec.schema.names()), set(CONCRETE_SCHEMA_TYPES))
         self.assertFalse(hasattr(rigexec.schema, "CustomConstraint"))
@@ -380,20 +338,6 @@ class SchemaFacadeTests(_ContractTestCase):
             root.set_relationship("rigExec:partition", ["/Target"])
         self.assertEqual(str(partition.Get()), "Character")
 
-        curvenet = rigexec.schema.Curvenet.define(
-            self.stage, "/CurvenetWithoutDeadGuides")
-        curvenet_prim = self.stage.GetPrimAtPath(
-            "/CurvenetWithoutDeadGuides")
-        for name, value in (
-                ("guide:displayColor", [0.9, 0.4, 1.0]),
-                ("guide:displayOpacity", 1.0),
-                ("guide:radius", 0.1)):
-            with self.subTest(curvenet_property=name):
-                self.assertFalse(curvenet_prim.HasProperty(name))
-                with self.assertRaises((KeyError, ValueError)):
-                    curvenet.set_attribute(name, value)
-                self.assertFalse(curvenet_prim.HasProperty(name))
-
         mover = rigexec.schema.MatrixMover.define(self.stage, "/Mover")
         enabled = self.stage.GetPrimAtPath("/Mover").GetAttribute(
             "inputs:enabled")
@@ -427,10 +371,10 @@ class SchemaFacadeTests(_ContractTestCase):
         self.assertFalse(display_color.IsCustom())
         self.assertEqual(display_color.Get(), Gf.Vec3f(0.2, 0.4, 0.8))
 
-        curvenet = rigexec.schema.Curvenet.define(self.stage, "/Curvenet")
+        points = rigexec.SchemaPrim.define(self.stage, "/Points", "Points")
         identifiers = [2**40, -(2**40)]
-        curvenet.set_attribute("ids", identifiers)
-        ids = self.stage.GetPrimAtPath("/Curvenet").GetAttribute("ids")
+        points.set_attribute("ids", identifiers)
+        ids = self.stage.GetPrimAtPath("/Points").GetAttribute("ids")
         self.assertEqual(ids.GetTypeName(), Sdf.ValueTypeNames.Int64Array)
         self.assertFalse(ids.IsCustom())
         self.assertEqual(list(ids.Get()), identifiers)
@@ -806,15 +750,14 @@ class BuilderDependencyTests(_ContractTestCase):
 
     def test_full_strength_mover_builder_defaults(self):
         self._make_points("/Driven")
-        curvenet = rigexec.schema.Curvenet.define(self.stage, "/Net")
         chain = self.builder.new_mover_chain(
             "DefaultEnvelopes", "/Driven.points")
 
         movers = (
             chain.add_smooth_mover("Smooth"),
             chain.add_delta_mush_mover("DeltaMush"),
+            chain.add_wrinkle_mover("Wrinkle"),
             chain.add_volume_correct_mover("Volume"),
-            chain.add_curvenet_mover("Profile", curvenet),
         )
         for mover in movers:
             with self.subTest(mover=mover.path):
@@ -861,6 +804,119 @@ class BuilderDependencyTests(_ContractTestCase):
         result = rig.evaluate(-1)
         self.assertTrue(result.valid)
         for actual, expected in zip(result.moved_property("/Body.points"), posed):
+            self.assertLess((Gf.Vec3f(*actual) - Gf.Vec3f(*expected)).GetLength(), 1e-6)
+
+    def test_wrinkle_authoring_and_evaluation(self):
+        width = 5
+        rest = [(0.25 * x, 0.25 * y, 0.0)
+                for y in range(width) for x in range(width)]
+        posed = [(0.65 * x, y, z) for x, y, z in rest]
+        mesh = UsdGeom.Mesh.Define(self.stage, "/Cloth")
+        mesh.CreatePointsAttr(posed)
+        mesh.CreateFaceVertexCountsAttr([4] * ((width - 1) ** 2))
+        mesh.CreateFaceVertexIndicesAttr([
+            index for y in range(width - 1) for x in range(width - 1)
+            for index in (y * width + x, y * width + x + 1,
+                          (y + 1) * width + x + 1, (y + 1) * width + x)])
+        mover = self.builder.new_mover_chain("Wrinkles").add_wrinkle_mover(
+            "Detail", default_weight=0.5, target="/Cloth.points")
+        self.assertIsInstance(mover, rigexec.WrinkleMover)
+        prim = self.stage.GetPrimAtPath(mover.path)
+        self.assertEqual(prim.GetTypeName(), "RigExecWrinkleMover")
+        self.assertEqual(_targets(prim.GetRelationship("rigExec:moves")),
+                         ["/Cloth.points"])
+        defaults = {
+            "iterations": 80, "topology": "cloth", "neighborDistance": 2,
+            "restLengthScale": 1.0, "stretchStiffness": 1.0,
+            "compressionStiffness": 1.0, "bendStiffness": 0.1,
+            "maxDisplacement": 0.2, "pinBorders": True,
+            "tangentPlaneCollisions": True, "tangentPlaneInset": 0.0,
+            "wrinkleScale": 1.0, "smoothingIterations": 0,
+        }
+        for name, expected in defaults.items():
+            attr = prim.GetAttribute("inputs:" + name)
+            self.assert_api_property(attr)
+            if isinstance(expected, float):
+                self.assertAlmostEqual(attr.Get(), expected)
+            else:
+                self.assertEqual(attr.Get(), expected)
+        for name in ("restPoints", "pinPoints"):
+            attr = prim.GetAttribute("inputs:" + name)
+            self.assert_api_property(attr)
+            self.assertEqual(attr.GetVariability(), Sdf.VariabilityUniform)
+            self.assertEqual(list(attr.Get()), [])
+        self.assertEqual(prim.GetAttribute("inputs:topology").GetVariability(),
+                         Sdf.VariabilityUniform)
+        mover.set_rest_points(rest)
+        mover.set_iterations(80)
+        mover.set_topology("surfaceStruts")
+        self.assertEqual(prim.GetAttribute("inputs:topology").Get(), "surfaceStruts")
+        mover.set_topology("cloth")
+        mover.set_neighbor_distance(2)
+        mover.set_rest_length_scale(1.0)
+        mover.set_stretch_stiffness(1.0)
+        mover.set_compression_stiffness(1.0)
+        mover.set_bend_stiffness(0.1)
+        mover.set_max_displacement(0.2)
+        mover.set_pin_borders(True)
+        mover.set_pin_points([12])
+        mover.set_tangent_plane_collisions(True)
+        mover.set_tangent_plane_inset(0.0)
+        mover.set_wrinkle_scale(2.0)
+        mover.set_smoothing_iterations(1)
+        self.assertEqual(list(prim.GetAttribute("inputs:pinPoints").Get()), [12])
+        self.assertEqual(prim.GetAttribute("inputs:wrinkleScale").Get(), 2.0)
+        self.assertEqual(prim.GetAttribute("inputs:smoothingIterations").Get(), 1)
+        original = self.stage.GetRootLayer().ExportToString()
+        invalid_values = (
+            (mover.set_rest_points, [(float("nan"), 0, 0)]),
+            (mover.set_iterations, -1),
+            (mover.set_iterations, 1001),
+            (mover.set_topology, "unsupported"),
+            (mover.set_neighbor_distance, 0),
+            (mover.set_neighbor_distance, 9),
+            (mover.set_rest_length_scale, 0.0),
+            (mover.set_rest_length_scale, float("inf")),
+            (mover.set_stretch_stiffness, -0.1),
+            (mover.set_stretch_stiffness, float("nan")),
+            (mover.set_compression_stiffness, 1.1),
+            (mover.set_compression_stiffness, float("inf")),
+            (mover.set_bend_stiffness, -0.1),
+            (mover.set_bend_stiffness, float("nan")),
+            (mover.set_max_displacement, -0.1),
+            (mover.set_max_displacement, float("inf")),
+            (mover.set_pin_points, [-1]),
+            (mover.set_pin_points, [1, 1]),
+            (mover.set_tangent_plane_inset, -0.1),
+            (mover.set_tangent_plane_inset, float("nan")),
+            (mover.set_wrinkle_scale, -0.1),
+            (mover.set_wrinkle_scale, float("inf")),
+            (mover.set_smoothing_iterations, -1),
+            (mover.set_smoothing_iterations, 101),
+        )
+        for method, invalid in invalid_values:
+            with self.subTest(method=method.__name__, value=invalid):
+                with self.assertRaises(ValueError):
+                    method(invalid)
+                self.assertEqual(self.stage.GetRootLayer().ExportToString(), original)
+        rig = rigexec.Rig(self.stage, self.builder.root_path)
+        rig.compile()
+        result = rig.evaluate(-1)
+        self.assertTrue(result.valid)
+        points = result.moved_property("/Cloth.points")
+        self.assertGreater(max(point[2] for point in points), 1e-5)
+        for index, (actual, incoming) in enumerate(zip(points, posed)):
+            displacement = (Gf.Vec3f(*actual) - Gf.Vec3f(*incoming)).GetLength()
+            self.assertLessEqual(displacement, 0.1 + 1e-6)
+            self.assertGreaterEqual(actual[2], -1e-6)
+            x, y = index % width, index // width
+            if x in (0, width - 1) or y in (0, width - 1) or index == 12:
+                self.assertLess(displacement, 1e-6)
+        self.assertEqual(self.stage.GetRootLayer().ExportToString(), original)
+        mover.set_default_weight(0.0)
+        result = rig.evaluate(-1)
+        self.assertTrue(result.valid)
+        for actual, expected in zip(result.moved_property("/Cloth.points"), posed):
             self.assertLess((Gf.Vec3f(*actual) - Gf.Vec3f(*expected)).GetLength(), 1e-6)
 
     def test_single_chain_ik_authors_the_complete_joint_write_set(self):

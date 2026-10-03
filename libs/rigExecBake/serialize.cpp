@@ -938,11 +938,10 @@ _RIGEXEC_BAKE_PIN_OP(SurfaceProject, 6);
 _RIGEXEC_BAKE_PIN_OP(Ribbon, 7);
 _RIGEXEC_BAKE_PIN_OP(Wire, 8);
 _RIGEXEC_BAKE_PIN_OP(EmitGuidePoints, 9);
-_RIGEXEC_BAKE_PIN_OP(Curvenet, 10);
-_RIGEXEC_BAKE_PIN_OP(CurvenetAdjuster, 11);
 _RIGEXEC_BAKE_PIN_OP(RecomputeNormals, 12);
 _RIGEXEC_BAKE_PIN_OP(RecomputeExtent, 13);
 _RIGEXEC_BAKE_PIN_OP(DeltaMush, 14);
+_RIGEXEC_BAKE_PIN_OP(Wrinkle, 15);
 #undef _RIGEXEC_BAKE_PIN_OP
 #define _RIGEXEC_BAKE_PIN_PHASE(name, value)                               \
     static_assert(uint8_t(RigExecReadPhaseKind::name) == value,            \
@@ -1003,8 +1002,6 @@ _ToBinding(const RigExecRevisionBinding &binding,
         int32_t(binding.driverBaseTransformCount);
     out.driverFrames = _PathRef(binding.driverFrames, writer);
     out.widths = _PathRef(binding.widths, writer);
-    out.curvenet = _PathRef(binding.curvenet, writer);
-    out.curvenetPoints = _PathRef(binding.curvenetPoints, writer);
     out.blendInputs.reserve(binding.blendInputs.size());
     for (const SdfPath &path : binding.blendInputs) {
         out.blendInputs.push_back(_PathRef(path, writer));
@@ -1064,29 +1061,6 @@ _ToRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
                         : 0;
     out.op = uint8_t(revision.op);
     out.binding = _ToBinding(revision.binding, writer);
-    out.curvenetChain = int32_t(revision.curvenetChain);
-    out.curvenetBindResolved = revision.curvenetBindResolved;
-    out.hasCurvenetBind = bool(revision.curvenetBind);
-    out.curvenetRestNet.reserve(revision.curvenetBindInputs.restNet.size());
-    for (const GfVec3f &p : revision.curvenetBindInputs.restNet) {
-        out.curvenetRestNet.push_back(_ToVec3f(p));
-    }
-    out.curvenetSplineIndices =
-        _ToI32s(revision.curvenetBindInputs.splineIndices);
-    out.curvenetSamplesPerSpline =
-        int32_t(revision.curvenetBindInputs.samplesPerSpline);
-    out.curvenetBasis =
-        _TokenRef(revision.curvenetBindInputs.basis, writer);
-    out.curvenetMeshPoints.reserve(
-        revision.curvenetBindInputs.meshPoints.size());
-    for (const GfVec3f &p : revision.curvenetBindInputs.meshPoints) {
-        out.curvenetMeshPoints.push_back(_ToVec3f(p));
-    }
-    out.curvenetMeshCounts =
-        _ToI32s(revision.curvenetBindInputs.meshCounts);
-    out.curvenetMeshIndices =
-        _ToI32s(revision.curvenetBindInputs.meshIndices);
-    out.curvenetBindInputsHeld = revision.curvenetBindInputs.held;
     out.blendChannels.reserve(revision.blendChannels.size());
     for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
          revision.blendChannels) {
@@ -1269,44 +1243,6 @@ RigExecBakeConvertDomainGeometry(const RigExecBakedProgramImpl &program,
         _ToAttributes(object.curvePoints, writer, &wire.curvePoints,
                       &wire.curveValid);
         wire.falloffCurve = object.falloffCurve;
-        _ToAttributes(object.curvenetMeshPoints, writer,
-                      &wire.curvenetMeshPoints, &wire.curvenetMeshValid);
-        _ToAttributes(object.curvenetPoints, writer, &wire.curvenetPoints,
-                      &wire.curvenetPointsValid);
-        _ToAttributes(object.curvenetCounts, writer, &wire.curvenetCounts,
-                      &wire.curvenetCountsValid);
-        _ToAttributes(object.curvenetIndices, writer, &wire.curvenetIndices,
-                      &wire.curvenetIndicesValid);
-        _ToAttributes(object.curvenetSplines, writer, &wire.curvenetSplines,
-                      &wire.curvenetSplinesValid);
-        wire.curvenetWeights = object.curvenetWeights
-                                   ? _PathRef(object.curvenetWeights.GetPath(),
-                                              writer)
-                                   : 0;
-        wire.curvenetWeightsValid = bool(object.curvenetWeights);
-        wire.curvenetAutoSmooth = object.curvenetAutoSmooth
-                                      ? _PathRef(object.curvenetAutoSmooth
-                                                     .GetPath(),
-                                                 writer)
-                                      : 0;
-        wire.curvenetAutoSmoothValid = bool(object.curvenetAutoSmooth);
-        wire.curvenetBasis = _TokenRef(object.curvenetBasis, writer);
-        wire.curvenetSamples = _ToInput(object.curvenetSamples, writer);
-        wire.curvenetUnreached = _ToInput(object.curvenetUnreached, writer);
-        wire.boundMesh.reserve(object.boundMesh.size());
-        for (const GfVec3f &p : object.boundMesh) {
-            wire.boundMesh.push_back(_ToVec3f(p));
-        }
-        wire.boundNet.reserve(object.boundNet.size());
-        for (const GfVec3f &p : object.boundNet) {
-            wire.boundNet.push_back(_ToVec3f(p));
-        }
-        wire.boundCounts = object.boundCounts;
-        wire.boundIndices = object.boundIndices;
-        wire.boundSmooth = object.boundSmooth;
-        wire.boundSplines = object.boundSplines;
-        wire.boundSamples = int32_t(object.boundSamples);
-        wire.bound = object.bound;
         geometry.weightObjects.push_back(std::move(wire));
     }
     geometry.falloffPaths.reserve(program.falloffLuts.size());

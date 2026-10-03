@@ -18,6 +18,14 @@ Purposes → Guide* in usdview to see them. Joints style via `guide:radius` /
 `guide:displayColor` / `guide:displayOpacity`; solvers draw one guide per
 aggregate frame element with their own radius, color, and opacity.
 
+## Articulated 2D character
+
+[Shion](2d/bust_dd_b/README.md) is the latest stomach-up anime example:
+limited head/body turns, subtle speech and expressions, separate teeth and
+tongue, articulated sleeves, hands and fingers, a character picker and
+whole-character TouchPose. Open `2d/bust_dd_b/bust_dd_b_anim.usda` for the
+performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
+
 ## The original arm
 
 - **ArmRig.usda** — the spec §4.5 arm asset: FK + IK + blend, twist
@@ -104,18 +112,6 @@ aggregate frame element with their own radius, color, and opacity.
   `inputs:extentU`/`extentV` size them *across* it and, under
   `rigExec:planeBounds = "bounded"`, stop the field at that rectangle. See
   [`docs/specs/volume-weights.md`](../docs/specs/volume-weights.md).
-- **12_CurvenetProfile.usda** — curvenets and the Profile Mover
-  (de Goes, Sheffler & Fleischer, SIGGRAPH 2022). Three profile rings
-  joined by four longitudinal rails around a tube; every ring knot is
-  shared by two ring spans and two rails, which is what makes it an
-  *intersection* and lets §3 deduce the frames, widths and twist that
-  nobody authors. The net's knots are posed by an ORDINARY
-  `RigExecMatrixMover` driven by an FK joint through a weight object —
-  76 pool points against 208 tube vertices the rig never mentions — and
-  `RigExecCurvenetMover` propagates that onto the surface. Re-mesh the
-  tube and the same net still articulates it. **Generated** by
-  `build_curvenet_example.py`; edit that, not the `.usda`. See
-  [`docs/specs/curvenet.md`](../docs/specs/curvenet.md).
 - **13_ReadPhases.usda** — read phases as property metadata. A Slab is
   deformed through a cage that is itself deformed by two movers, and the
   lattice declares which cage it wants. `base` leaves the slab alone,

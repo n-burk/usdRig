@@ -13,7 +13,7 @@ frames, FK/IK/blended/twist frame arrays, self-contained weight packets and blen
 sample/channel descriptors. Native USD attributes are source providers. The
 runtime and [pack exporter/loader](standalone-pack.md) use the same capability
 validation. Whole-rig mover revisions, solver-bound joint publication, ribbon and
-volume adapters, curvenet adjustment placement, and non-base input read phases
+volume adapters, and non-base input read phases
 require evaluator lowering and are rejected. An unknown requested computation
 fails instead of producing a successful empty aggregate.
 

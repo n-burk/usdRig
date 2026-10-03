@@ -2,6 +2,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExecBake/serialize.h"
 #include "rigExecBake/capture.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/container.h"
 
@@ -97,6 +98,17 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     }
     if (evaluator.HasInteractiveOverrides()) {
         return Fail("cannot bake with interactive overrides standing");
+    }
+    if (const RigExecBakedProgram *baked = evaluator.GetBakedProgram()) {
+        for (const auto &chain : baked->GetStepGraph().chains) {
+            for (const auto &revision : chain.revisions) {
+                if (revision.op == RigExecRevisionOp::External) {
+                    return Fail("cannot export external mover " +
+                                revision.moverPath.GetString() +
+                                ": .rigexec playback has no plugin kernel");
+                }
+            }
+        }
     }
     RigExecBinaryWriter writer;
     std::string captureError;
@@ -218,19 +230,8 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     const RigExecWireDomainGeometry wireGeometry =
         RigExecBakeConvertDomainGeometry(program, &writer);
     size_t revisionCount = 0;
-    size_t curvenetRevisions = 0;
-    size_t curvenetBindsHeld = 0;
     for (const RigExecWireChain &chain : wireGeometry.chains) {
         revisionCount += chain.revisions.size();
-        for (const RigExecWireRevision &revision : chain.revisions) {
-            // Curvenet is op 10 in RigExecRevisionOp order.
-            if (revision.op == 10) {
-                ++curvenetRevisions;
-                if (revision.curvenetBindInputsHeld) {
-                    ++curvenetBindsHeld;
-                }
-            }
-        }
     }
     if (!RigExecWireEncodeDomainGeometry(wireGeometry, &payload)) {
         return Fail("cannot encode the geometry tables");
@@ -265,10 +266,6 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     manifest += "  \"revisions\": " + std::to_string(revisionCount) + ",\n";
     manifest += "  \"weightObjects\": " +
                 std::to_string(wireGeometry.weightObjects.size()) + ",\n";
-    manifest += "  \"curvenetRevisions\": " +
-                std::to_string(curvenetRevisions) + ",\n";
-    manifest += "  \"curvenetBindsHeld\": " +
-                std::to_string(curvenetBindsHeld) + ",\n";
     manifest += "  \"inputs\": " +
                 std::to_string(capture.GetTable().directory.size()) +
                 ",\n";

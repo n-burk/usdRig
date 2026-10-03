@@ -213,18 +213,14 @@ main()
 
     // Movers that formerly required a per-type strength argument now share
     // MoverAPI's full-strength default and can be constructed without one.
-    const UsdPrim curvenet =
-        stage->DefinePrim(SdfPath("/Net"), TfToken("RigExecCurvenet"));
     RigExecMoverChain defaultEnvelopeChain =
         builder.NewMoverChain("DefaultEnvelopes", SdfPath("/Data.value"));
     const RigExecSmoothMoverHandle smooth =
         defaultEnvelopeChain.AddSmoothMover("Smooth");
     const RigExecVolumeCorrectMoverHandle volume =
         defaultEnvelopeChain.AddVolumeCorrectMover("Volume");
-    const RigExecCurvenetMoverHandle profile =
-        defaultEnvelopeChain.AddCurvenetMover("Profile", curvenet.GetPath());
     for (const UsdPrim &mover :
-         {smooth.GetPrim(), volume.GetPrim(), profile.GetPrim()}) {
+         {smooth.GetPrim(), volume.GetPrim()}) {
         float defaultWeight = 0.0f;
         CHECK(mover.GetAttribute(TfToken("inputs:defaultWeight"))
                   .Get(&defaultWeight));
@@ -242,10 +238,6 @@ main()
         defaultEnvelopeChain.AddVolumeCorrectMover("BadVolumeWeight", 2.0f);
     }));
     CHECK(Throws([&] {
-        defaultEnvelopeChain.AddCurvenetMover(
-            "BadCurvenetWeight", curvenet.GetPath(), nan);
-    }));
-    CHECK(Throws([&] {
         defaultEnvelopeChain.AddFloatMathMover(
             "BadFloatWeight", TfToken("add"), 1.0f, {}, nan);
     }));
@@ -258,7 +250,7 @@ main()
             "BadMatrixWeight", TfToken("multiply"), GfMatrix4d(1.0), {}, nan);
     }));
     for (const char *name : {
-             "BadSmoothWeight", "BadVolumeWeight", "BadCurvenetWeight",
+             "BadSmoothWeight", "BadVolumeWeight",
              "BadFloatWeight", "BadVecWeight", "BadMatrixWeight"}) {
         CHECK(!stage->GetPrimAtPath(
             defaultEnvelopeChain.GetScopePath().AppendChild(TfToken(name))));

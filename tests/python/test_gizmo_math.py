@@ -303,72 +303,6 @@ def TestDefaultSpacesAndUnits():
            "explicit parent space remains editable below a solver-owned joint")
 
 
-def TestCurvenetAdjustmentFrames():
-    native = _NativeModule()
-    if native is None:
-        return
-    import rigexec
-    stage = Usd.Stage.CreateInMemory()
-    UsdGeom.Xform.Define(stage, "/Asset").AddTranslateOp().Set(Gf.Vec3d(100, 0, 0))
-    builder = rigexec.Builder.create(stage, "/Asset/Rig")
-    net = builder.add_curvenet("Net", [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0),
-                                       (0, 1, 0), (0, 2, 0), (0, 3, 0)])
-    net.add_spline(0, 1, 2, 3)
-    net.add_spline(0, 4, 5, 6)
-    netToAsset = _Rot(Gf.Vec3d(0, 1, 0), 20)
-    netToAsset.SetTranslateOnly(Gf.Vec3d(10, 20, 30))
-    UsdGeom.Xformable(stage.GetPrimAtPath(net.path)).AddTransformOp().Set(netToAsset)
-    knot = builder.add_curvenet_adjustment("Knot", net.path, 0)
-    knot.set_avar_translation(1, 0, 0)
-    knot.set_avar_scale(2, 1, 1)
-    prim = stage.GetPrimAtPath(knot.path)
-    prim.GetAttribute("avars:unitScaleFactor").Set(2.5)
-    warp = builder.add_control("Warp")
-    warp.set_avar_rotation(0, 0, 90)
-    warp.set_avar_translation(5, 6, 7)
-    chain = builder.new_mover_chain("Shape", net.path + ".points")
-    chain.add_curvenet_adjuster_mover("Adjust", [knot.path])
-    chain.add_matrix_mover("Warp", warp.path)
-    rig = native.Rig(stage, "/Asset/Rig")
-    rig.compile()
-    time = Usd.TimeCode(1)
-
-    def published(queryStage, queryPath, queryTime):
-        if queryStage != stage or str(queryPath) != knot.path or queryTime != time:
-            return None
-        return Gf.Matrix4d(*rig.evaluate(1).control_frame(knot.path).to_matrix4())
-
-    gizmoMath.SetPublishedControlFrameReader(published)
-    try:
-        frames = gizmoMath.ComputeRigFrames(stage, prim, time)
-        _Check(frames.reason == "", frames.reason)
-        _Check(_MatClose(frames.posed, published(stage, prim.GetPath(), time)),
-               "adjustment uses the evaluated knot frame with scale")
-        _Check((frames.posed.ExtractTranslation() - netToAsset.Transform(
-            Gf.Vec3d(5, 8.5, 7))).GetLength() < 1e-5,
-            "native adjustment control frame is in asset space")
-        _Check(_MatClose(gizmoMath.AvarsMatrix(prim, time) * frames.P, frames.posed),
-               "adjustment avar scope reconstructs the published frame")
-        _Check(_Close(frames.unitScale, 2.5), "adjustment translation units")
-        writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
-        target, reason = gizmoMath.MakeTarget(stage, prim, gizmoMath.CHANNELS_POSE, writer)
-        _Check(target is not None, reason)
-        origin = (frames.posed * frames.assetToWorld).ExtractTranslation()
-        delta = Gf.Vec3d(0.7, -1.3, 2.1)
-        _Drag(target, lambda: target.ApplyTranslate(delta))
-        after = gizmoMath.ComputeRigFrames(stage, prim, time)
-        moved = (after.posed * after.assetToWorld).ExtractTranslation()
-        _Check((moved - origin - delta).GetLength() < 1e-5,
-               "posed knot drag follows preceding deformation and unit scale")
-        pivot, reason = gizmoMath.MakeTarget(stage, prim, gizmoMath.CHANNELS_PIVOT, writer)
-        _Check(pivot is None and "preceding deformation" in reason,
-               "automatic knot pivot identifies its source")
-        stale = gizmoMath.ComputeRigFrames(stage, prim, Usd.TimeCode(2))
-        _Check("Activate" in stale.reason, "stale published frames cannot drive a drag")
-    finally:
-        gizmoMath.SetPublishedControlFrameReader(None)
-
-
 def TestVolumeWeightScale():
     """
     A RigExecVolumeWeight must NOT take its scale from avars.
@@ -3034,7 +2968,6 @@ def main():
         ("compose avars", TestComposeAvarMatrix),
         ("rig frames replica", TestRigFramesReplica),
         ("default spaces and units", TestDefaultSpacesAndUnits),
-        ("curvenet adjustment frames", TestCurvenetAdjustmentFrames),
         ("volume weight scale", TestVolumeWeightScale),
         ("rig frames reasons", TestRigFramesReasons),
         ("writer", TestWriter),

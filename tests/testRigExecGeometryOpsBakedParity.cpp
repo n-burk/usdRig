@@ -1,18 +1,6 @@
-// The geometry operators that bake with no shipped rig to say so.
-// blendShape, curvenet, emitGuidePoints, ribbon and every read phase but the
-// default one bake, and not one of them is reachable from an example that
-// bakes: 04, 12 and 13 bind a weight object, 05 and ArmRig drive their curve
-// movers from a RigExecRibbon, and neither refusal is this group's to
-// remove. Left at that, five operations would ship with their only evidence
-// in somebody's scratch directory, and a regression in any of them would sit
-// invisible until another group's work happened to uncover it.
-// So this suite takes the shipped rigs and removes the OTHER group's blocker
-// in memory, on a session layer: a face whose weight object is unbound is
-// still the same blend shape over the same channels and in-between samples,
-// and a curvenet with no envelope is still the same net. Nothing here waits
-// on anyone. When the weights and solvers groups land, the example entries
-// pick up the weighted and ribbon-driven halves and these cases keep holding
-// the unweighted ones.
+// Geometry operators and read phases evaluated without weight objects.
+// Session-layer edits isolate blend shapes, guide points, ribbons and
+// geometry read phases while preserving the shipped example stages.
 // The claim, per case, is the one testRigExecExampleParity makes: every
 // frame agrees with the dynamic path exactly, and every generation CAME FROM
 // THE PROGRAM -- a rig that quietly declined would otherwise compare the
@@ -270,26 +258,6 @@ TestBlendShape(const std::string &examplesDir)
     delete rig;
 }
 
-// curvenet: the profile mover, its program-owned bind cache and the
-// cross-chain edge from the posed net's own chain. The bind's diagnostic is
-// drained once per (re)bind, so the FIRST generation is the only one that
-// can show a cache shared between the two paths -- and RunParity compares
-// the diagnostics of exactly that generation.
-void
-TestCurvenet(const std::string &examplesDir)
-{
-    const auto stage =
-        UsdStage::Open(examplesDir + "/12_CurvenetProfile.usda");
-    CHECK(stage);
-    if (!stage) {
-        return;
-    }
-    UnbindWeightObjects(stage);
-    const SdfPath tube("/CurvenetAsset/Geom/Tube.points");
-    CheckMoves("12 curvenet",
-               RunParity("12 curvenet", stage, ExampleFrames(), tube));
-}
-
 // Read phases, all three forms a geometry input can name, on the lattice
 // whose cage two movers rewrite. `base` reads the authored cage and takes no
 // snapshot; `final` and the mid-walk prim both come out of the run-local
@@ -380,7 +348,6 @@ main(int argc, char **argv)
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
     const std::string examplesDir = argv[1];
     TestBlendShape(examplesDir);
-    TestCurvenet(examplesDir);
     TestReadPhases(examplesDir);
     TestCurveModes(argv[2]);
     std::printf("testRigExecGeometryOpsBakedParity: %d failure(s)\n", failures);

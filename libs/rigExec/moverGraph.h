@@ -17,7 +17,6 @@
 
 #include "types.h"
 
-#include "rigExecMath/profileMover.h"
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
 
@@ -67,12 +66,14 @@ enum class RigExecRevisionOp {
     /// displacement at their bind parameter (RigExecApplyWire).
     Wire,
     EmitGuidePoints,
-    Curvenet,
-    CurvenetAdjuster,
-    RecomputeNormals,
+    // Values 10 and 11 are reserved by the binary wire format.
+    RecomputeNormals = 12,
     RecomputeExtent,
     // Append new ops: existing values are pinned by the binary wire format.
     DeltaMush,
+    Wrinkle,
+    /// A registered plugin supplies parameter assembly and point deformation.
+    External,
 };
 
 /// When in the walk a side input takes its value from.
@@ -649,8 +650,6 @@ struct RigExecRevisionBinding {
     int driverBaseTransformCount = 0;
     SdfPath driverFrames;     ///< aggregate frame provider
     SdfPath widths;           ///< authored widths (extent maintenance)
-    SdfPath curvenet;         ///< RigExecCurvenet prim (Profile Mover)
-    SdfPath curvenetPoints;   ///< that curvenet's points property
     std::vector<SdfPath> blendInputs;  ///< sorted blend channels
     std::map<SdfPath, std::vector<RigExecBlendSampleBinding>> blendSamples;
 
@@ -676,54 +675,9 @@ struct RigExecRevisionBinding {
     bool operator==(const RigExecRevisionBinding &o) const;
 };
 
-/// Profile Mover bindings, held across frames and keyed by (mover, target).
-///
-/// Cutting a mesh and factorizing its Laplacian is the expensive half of the
-/// technique and depends only on the layout -- the curvenet's rest points,
-/// its spline indices, and the target's base geometry. Rebuilding it per
-/// frame would make the mover unusable, and rebuilding it never would make an
-/// edited curvenet silently stale, so the cache is keyed by a digest of
-/// exactly those inputs.
-///
-/// A failed bind is remembered too: a rig whose curvenet cannot be bound
-/// should report that once, not re-attempt the cut on every frame.
-class RigExecCurvenetBindCache
-{
-public:
-    /// Returns the binding for \p key, calling \p build when the cached
-    /// digest differs. Returns null on a failed bind and fills \p error.
-    std::shared_ptr<const RigExecProfileMoverBinding> Resolve(
-        const SdfPath &mover, const SdfPath &target, size_t digest,
-        const std::function<bool(RigExecProfileMoverBinding *, std::string *)>
-            &build,
-        std::string *error);
-
-    /// Messages accumulated by binds since the last call, and clears them.
-    ///
-    /// Cutting a mesh is where a curvenet's real problems surface -- faces
-    /// the cut lost, segments it could not route, a net floating so far off
-    /// the surface that its profile means nothing. None of that is fatal, so
-    /// none of it can be an error return, and a silently bad deformation is
-    /// exactly the failure mode worth spending a diagnostic on.
-    std::vector<std::string> TakeDiagnostics();
-
-    void Clear() { _entries.clear(); }
-    size_t GetSize() const { return _entries.size(); }
-
-private:
-    struct _Entry {
-        size_t digest = 0;
-        std::shared_ptr<const RigExecProfileMoverBinding> binding;
-        std::string error;
-    };
-    std::map<std::pair<SdfPath, SdfPath>, _Entry> _entries;
-    std::vector<std::string> _pending;
-};
-
 /// Per-epoch skin layouts, keyed by the mover that owns them.
 ///
-/// Peer of RigExecCurvenetBindCache, and there for the same reason: the
-/// expensive half of the operation depends only on the layout, and the
+/// The expensive half of the operation depends only on the layout, and the
 /// layout is what an epoch IS. Here that half is reading two megabyte-scale
 /// arrays off the stage and range-checking every element of them.
 ///
@@ -931,22 +885,6 @@ RigExecMoverParameters RigExecAssembleSkinParameters(
     const std::shared_ptr<const RigExecSkinTopology> *resolvedTopology =
         nullptr);
 
-/// Assembles a curvenet-adjuster mover parameter packet.
-///
-/// The adjustment commands this mover poses, resolved against the target
-/// curvenet rest points and spline indices. See
-/// movers/curvenetAdjusterMover.cpp.
-RigExecMoverParameters RigExecAssembleCurvenetAdjusterParameters(
-    const UsdPrim &mover,
-    const SdfPath &target,
-    const RigExecWeightPacket *weights,
-    UsdTimeCode time,
-    const RigExecResolvedInputs *resolved);
-
-/// The adjustment prims a curvenet-adjuster mover poses, in canonical
-/// order: the rigExec:adjustments targets plus any nested
-/// RigExecCurvenetAdjustment descendants.
-std::vector<SdfPath> RigExecCurvenetAdjustmentPaths(const UsdPrim &mover);
 /// Derives a mover's status from its packet (spec §6.6): disabled and failed
 /// movers both pass their preceding revision through, and a failure records the
 /// first bad canonical address.
@@ -1163,9 +1101,7 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
                                std::vector<GfVec3f> *pts);
 
 /// Applies \p op to \p pts in place, returning false when the packet fails
-/// atomically. \p controlFrames receives the curvenet adjuster's fully
-/// adjusted control frames and is unread by every other operation; it may be
-/// null only when \p op is not RigExecRevisionOp::CurvenetAdjuster.
+/// atomically.
 ///
 /// The envelope is NOT applied here for the operations that take a separate
 /// blend: RigExecRunRevisionKernel below is where the "apply once" rule
@@ -1177,8 +1113,7 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
 /// and drifts on the ones that do not.
 bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
                                 const RigExecMoverParameters &p,
-                                std::vector<GfVec3f> *pts,
-                                std::vector<GfMatrix4d> *controlFrames);
+                                std::vector<GfVec3f> *pts);
 
 /// Runs one revision of \p op over \p pts in place, envelope included: the
 /// packet check, the full-strength fast path, RigExecApplyRevisionKernel and
@@ -1191,8 +1126,7 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
 /// operations blend and which fold the envelope into their own arithmetic.
 bool RigExecRunRevisionKernel(RigExecRevisionOp op,
                               const RigExecMoverParameters &p,
-                              std::vector<GfVec3f> *pts,
-                              std::vector<GfMatrix4d> *controlFrames);
+                              std::vector<GfVec3f> *pts);
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the
 /// copy of the preceding revision, the resolved envelope array and the blend
@@ -1228,26 +1162,6 @@ RigExecEnvelopeIsFullStrength(const RigExecWeightPacket &envelope)
 /// the application rather than substituting a default (spec §6.6). The one
 /// deliberate exception is weights: null means no weight object was bound,
 /// so inputs:defaultWeight supplies the common envelope.
-/// The Profile Mover bind's inputs, retained for the bake (M1 slice 3b).
-///
-/// The bind itself owns a factorization, which has no by-value form; the
-/// runtime re-binds from these, which are everything RigExecBindProfileMover
-/// takes plus the topology inputs RigExecBuildCurvenetTopology takes. Every
-/// one is read at Default with the resolved inputs bypassed, so the answer
-/// is epoch data however many frames fill it -- and only the first fill
-/// lands, because the arrays are mesh-scale and a second copy per frame per
-/// curvenet revision would be a performance regression for identical bytes.
-struct RigExecCurvenetBindInputs {
-    std::vector<GfVec3f> restNet;
-    std::vector<int> splineIndices;
-    int samplesPerSpline = 5;
-    TfToken basis;
-    std::vector<GfVec3f> meshPoints;
-    std::vector<int> meshCounts;
-    std::vector<int> meshIndices;
-    bool held = false;
-};
-
 struct RigExecProviderValues {
     const GfMatrix4d *transform = nullptr;          ///< computeMatrix
     /// computeMatrix per binding.influences entry, in that order (skin).
@@ -1257,31 +1171,9 @@ struct RigExecProviderValues {
     const RigExecPointFrameArray *driverFrames = nullptr;
     std::vector<GfVec3f> basePoints;   ///< authored base of the target
     std::vector<GfVec3f> blendDeltas;  ///< summed channel deltas
-    /// Posed control points of the mover's curvenet. Supplied by the
-    /// evaluator, which runs curvenet chains first so a curvenet posed by
-    /// ordinary movers reaches the Profile Mover already articulated; empty
-    /// falls back to reading the curvenet's authored points at the time.
-    std::vector<GfVec3f> curvenetPoints;
-    /// Cache for the expensive half of the Profile Mover. Null binds fresh
-    /// every call, which is correct but only sane in a test.
-    RigExecCurvenetBindCache *curvenetCache = nullptr;
-    /// A bind the CALLER already resolved, for a caller that may not touch
-    /// the cache where it assembles -- RigExecCurvenetBindCache has no
-    /// locking at all, so the baked program resolves it in its serial
-    /// prologue and hands the answer in here. Set -- even to a shared_ptr
-    /// holding null, which is a remembered failed bind -- it is used and
-    /// `curvenetCache` is not consulted. Peer of `skinTopology` below, and
-    /// there for the same reason.
-    const std::shared_ptr<const RigExecProfileMoverBinding> *curvenetBinding =
-        nullptr;
     /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
     /// and re-validates the arrays every call, which is what a layout that
     /// is animated, connected, or written by a property chain requires.
-    /// Retention sink for the bind inputs above. Null looks away; set, the
-    /// Curvenet assembly fills it once (see `held`) on whichever path reads
-    /// the inputs -- the baked program points it at the revision's own
-    /// storage, so the bake carries what the runtime re-binds from.
-    RigExecCurvenetBindInputs *curvenetBindInputs = nullptr;
     RigExecSkinTopologyCache *skinTopologyCache = nullptr;
     /// A layout the CALLER already resolved, for a caller that may not take
     /// the cache's lock where it assembles. Set -- even to a shared_ptr
@@ -1389,8 +1281,6 @@ public:
     /// Actual cached execution status, including kernel-time rejection.
     /// Evaluate the revision or a downstream output before querying it.
     RigExecMoverStatus GetRevisionStatus(const VdfMaskedOutput &revision) const;
-    /// Cached deformation-relative control frames produced by an adjuster.
-    std::vector<GfMatrix4d> GetRevisionControlFrames(const VdfMaskedOutput &revision) const;
 
     /// Number of revision nodes currently in the graph (excludes sources).
     size_t GetRevisionCount() const { return _revisionCount; }

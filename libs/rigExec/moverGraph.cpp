@@ -65,13 +65,13 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((volumeCorrect, "volumeCorrect"))
     ((smooth, "smooth"))
     ((deltaMush, "deltaMush"))
+    ((wrinkle, "wrinkle"))
     ((lattice, "lattice"))
     ((surfaceProject, "surfaceProject"))
     ((ribbon, "ribbon"))
     ((wire, "wire"))
     ((emitGuidePoints, "emitGuidePoints"))
-    ((curvenet, "curvenet"))
-    ((curvenetAdjuster, "curvenetAdjuster"))
+    ((external, "external"))
     ((recomputeNormals, "recomputeNormals"))
     ((recomputeExtent, "recomputeExtent"))
 );
@@ -92,10 +92,22 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((elementSize, "rigExec:elementSize"))
     ((skinningMethod, "rigExec:skinningMethod"))
     ((deltaSpace, "rigExec:deltaSpace"))
-    ((basis, "rigExec:basis"))
-    ((splineIndices, "rigExec:splineIndices"))
-    ((samplesPerSpline, "rigExec:samplesPerSpline"))
     ((divisions, "rigExec:divisions"))
+    ((restPoints, "inputs:restPoints"))
+    ((iterations, "inputs:iterations"))
+    ((topology, "inputs:topology"))
+    ((neighborDistance, "inputs:neighborDistance"))
+    ((restLengthScale, "inputs:restLengthScale"))
+    ((stretchStiffness, "inputs:stretchStiffness"))
+    ((compressionStiffness, "inputs:compressionStiffness"))
+    ((bendStiffness, "inputs:bendStiffness"))
+    ((maxDisplacement, "inputs:maxDisplacement"))
+    ((pinBorders, "inputs:pinBorders"))
+    ((pinPoints, "inputs:pinPoints"))
+    ((tangentPlaneCollisions, "inputs:tangentPlaneCollisions"))
+    ((tangentPlaneInset, "inputs:tangentPlaneInset"))
+    ((wrinkleScale, "inputs:wrinkleScale"))
+    ((smoothingIterations, "inputs:smoothingIterations"))
 );
 
 // The values those reads fall back to, and the three states a revision's
@@ -104,10 +116,11 @@ TF_DEFINE_PRIVATE_TOKENS(
     _valueTokens,
     ((classicLinear, "classicLinear"))
     ((target, "target"))
-    ((bezier, "bezier"))
     ((disabled, "disabled"))
     ((ok, "ok"))
     ((moverFailed, "moverFailed"))
+    ((cloth, "cloth"))
+    ((surfaceStruts, "surfaceStruts"))
 );
 
 namespace rigExec {
@@ -140,11 +153,9 @@ public:
 
     void Compute(const VdfContext &ctx) const override;
     const RigExecMoverStatus &GetStatus() const { return _resultStatus; }
-    const std::vector<GfMatrix4d> &GetControlFrames() const { return _controlFrames; }
 
 private:
     mutable RigExecMoverStatus _resultStatus;
-    mutable std::vector<GfMatrix4d> _controlFrames;
     RigExecRevisionOp _op;
     size_t *const _executionCount;
 };
@@ -177,6 +188,8 @@ _RevisionKindToken(RigExecRevisionOp op)
         return _kindTokens->smooth;
     case RigExecRevisionOp::DeltaMush:
         return _kindTokens->deltaMush;
+    case RigExecRevisionOp::Wrinkle:
+        return _kindTokens->wrinkle;
     case RigExecRevisionOp::Lattice:
         return _kindTokens->lattice;
     case RigExecRevisionOp::SurfaceProject:
@@ -187,10 +200,8 @@ _RevisionKindToken(RigExecRevisionOp op)
         return _kindTokens->wire;
     case RigExecRevisionOp::EmitGuidePoints:
         return _kindTokens->emitGuidePoints;
-    case RigExecRevisionOp::Curvenet:
-        return _kindTokens->curvenet;
-    case RigExecRevisionOp::CurvenetAdjuster:
-        return _kindTokens->curvenetAdjuster;
+    case RigExecRevisionOp::External:
+        return _kindTokens->external;
     case RigExecRevisionOp::RecomputeNormals:
         return _kindTokens->recomputeNormals;
     case RigExecRevisionOp::RecomputeExtent:
@@ -213,8 +224,7 @@ _RevisionKindToken(RigExecRevisionOp op)
 // VdfContext appears and neither path holds a copy of the other's dispatch.
 void
 _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
-               RigExecMoverStatus *resultStatus,
-               std::vector<GfMatrix4d> *controlFrames)
+               RigExecMoverStatus *resultStatus)
 {
     const RigExecMoverParameters *params =
         ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
@@ -248,7 +258,7 @@ _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
             scratch.push_back(*previous);
         }
     }
-    if (!RigExecRunRevisionKernel(op, *params, &scratch, controlFrames)) {
+    if (!RigExecRunRevisionKernel(op, *params, &scratch)) {
         passThrough();
         return;
     }
@@ -274,10 +284,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
     _resultStatus =
         status ? *status
                : RigExecMoverStatus{_valueTokens->moverFailed, {}};
-    // Node state that outlives one Compute, so a revision that passes through
-    // must not leave the frames of the last one that did not.
-    _controlFrames.clear();
-    _RunRevisionOp(ctx, _op, &_resultStatus, &_controlFrames);
+    _RunRevisionOp(ctx, _op, &_resultStatus);
 }
 
 }  // namespace
@@ -852,9 +859,7 @@ RigExecApplyDerivedKernel(RigExecRevisionOp op,
 }
 
 // Every revision operation, over the same kernels the revision node ran when
-// they were lambdas inside its VdfContext callback. \p controlFrames receives
-// the curvenet adjuster's fully adjusted control frames and is unread by every
-// other operation.
+// they were lambdas inside its VdfContext callback.
 // ONE definition, called by the mover-graph revision node and by the baked
 // program: a second copy of a deformation agrees on the fixtures that exist
 // and drifts on the ones that do not.
@@ -865,8 +870,7 @@ RigExecApplyDerivedKernel(RigExecRevisionOp op,
 bool
 RigExecApplyRevisionKernel(RigExecRevisionOp op,
                            const RigExecMoverParameters &p,
-                           std::vector<GfVec3f> *pts,
-                           std::vector<GfMatrix4d> *controlFrames)
+                           std::vector<GfVec3f> *pts)
 {
     switch (op) {
     case RigExecRevisionOp::Matrix:
@@ -886,6 +890,9 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
         return RigExecApplyDeltaMush(pts, p.restPoints, p.topologyCounts,
             p.topologyIndices, p.mushIterations, p.mushStep, p.mushPinBorders,
             p.mushDistanceWeight, p.mushDisplacement);
+    case RigExecRevisionOp::Wrinkle:
+        return RigExecApplyWrinkle(pts, p.restPoints, p.topologyCounts,
+            p.topologyIndices, p.wrinkleSettings);
     case RigExecRevisionOp::Lattice:
         if (p.restPoints.size() != pts->size()) {
             return false;  // cardinality mismatch fails atomically
@@ -993,44 +1000,17 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
         }
         return ok;
     }
-    case RigExecRevisionOp::CurvenetAdjuster: {
-        if (!controlFrames) {
-            return false;  // the adjuster's whole second output
+    case RigExecRevisionOp::External: {
+        const RigExecMoverHandler *handler = RigExecFindMoverHandler(p.externalSchema);
+        if (!handler || !handler->applyExternal) return false;
+        std::vector<GfVec3f> candidate = *pts;
+        if (!handler->applyExternal(p.externalData, &candidate) ||
+            candidate.size() != pts->size()) return false;
+        for (const GfVec3f &point : candidate) {
+            if (!std::isfinite(point[0]) || !std::isfinite(point[1]) ||
+                !std::isfinite(point[2])) return false;
         }
-        const auto preceding = *pts;
-        if (!RigExecApplyCurvenetAdjustments(pts, p.restPoints,
-            p.topologyIndices, p.curvenetAdjustmentBasis,
-            p.curvenetAdjustments, controlFrames)) return false;
-        // The frames follow the UNBLENDED adjusted points, weighted per
-        // control point; the points themselves are blended afterwards by
-        // the wrapper, so the envelope still lands exactly once on each.
-        for (size_t i = 0; i < controlFrames->size(); ++i) {
-            const int point = p.curvenetAdjustments[i].pointIndex;
-            const float weight = p.weights.Resolve(point, pts->size());
-            (*controlFrames)[i].SetTranslateOnly(GfVec3d(
-                preceding[point] + ((*pts)[point]-preceding[point])*weight));
-        }
-        return true;
-    }
-    case RigExecRevisionOp::Curvenet: {
-        if (!p.curvenetBinding) {
-            return false;
-        }
-        // The incoming points ARE the rest surface (§5): a curvenet
-        // layered on top of skinning deforms from the skinned shape,
-        // and when it is first in the chain they are the projection
-        // pose and the solve takes its fast path.
-        std::vector<GfVec3f> solved;
-        std::string error;
-        if (!RigExecEvaluateProfileMover(*p.curvenetBinding,
-                                         p.auxPoints, *pts, p.strength,
-                                         &solved, &error)) {
-            return false;
-        }
-        if (solved.size() != pts->size()) {
-            return false;
-        }
-        pts->swap(solved);
+        pts->swap(candidate);
         return true;
     }
     case RigExecRevisionOp::RecomputeNormals:
@@ -1053,8 +1033,7 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
 bool
 RigExecRunRevisionKernel(RigExecRevisionOp op,
                          const RigExecMoverParameters &p,
-                         std::vector<GfVec3f> *pts,
-                         std::vector<GfMatrix4d> *controlFrames)
+                         std::vector<GfVec3f> *pts)
 {
     if (!p.valid || p.kind != _RevisionKindToken(op)) {
         return false;
@@ -1068,7 +1047,7 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
         op == RigExecRevisionOp::RecomputeExtent ||
         (op == RigExecRevisionOp::Wire &&
          RigExecWireTakesSparseEnvelope(p.weights))) {
-        return RigExecApplyRevisionKernel(op, p, pts, controlFrames);
+        return RigExecApplyRevisionKernel(op, p, pts);
     }
 
     // A constant envelope at exactly full strength makes the blend below the
@@ -1082,7 +1061,7 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
     if (!fullStrengthEnvelope) {
         preceding = *pts;
     }
-    if (!RigExecApplyRevisionKernel(op, p, pts, controlFrames)) {
+    if (!RigExecApplyRevisionKernel(op, p, pts)) {
         return false;
     }
     if (pts->size() != precedingSize) {
@@ -1116,8 +1095,7 @@ RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
            driverTransformCount == o.driverTransformCount &&
            driverSpaceCount == o.driverSpaceCount &&
            driverBaseTransformCount == o.driverBaseTransformCount &&
-           widths == o.widths && curvenet == o.curvenet &&
-           curvenetPoints == o.curvenetPoints &&
+           widths == o.widths &&
            blendInputs == o.blendInputs && blendSamples == o.blendSamples &&
            phases == o.phases && transformPhase == o.transformPhase;
 }
@@ -1135,66 +1113,6 @@ RigExecRevisionOpForSchema(const TfToken &schemaType, const TfToken &curveMode)
     }
     return handler->resolveOp(curveMode);
 }
-
-std::shared_ptr<const RigExecProfileMoverBinding>
-RigExecCurvenetBindCache::Resolve(
-    const SdfPath &mover, const SdfPath &target, size_t digest,
-    const std::function<bool(RigExecProfileMoverBinding *, std::string *)>
-        &build,
-    std::string *error)
-{
-    _Entry &entry = _entries[{mover, target}];
-    if (entry.digest == digest && (entry.binding || !entry.error.empty())) {
-        if (!entry.binding && error) {
-            *error = entry.error;
-        }
-        return entry.binding;
-    }
-
-    entry.digest = digest;
-    entry.binding.reset();
-    entry.error.clear();
-    auto built = std::make_shared<RigExecProfileMoverBinding>();
-    std::string reason;
-    if (!build(built.get(), &reason)) {
-        // Remembered, so a rig with an unbindable curvenet reports once
-        // instead of re-cutting the mesh on every frame.
-        entry.error = reason.empty() ? "curvenet bind failed" : reason;
-        if (error) {
-            *error = entry.error;
-        }
-        return nullptr;
-    }
-    // Reported once per (re)bind, not per frame: the cache exists precisely
-    // so this happens on a layout change and nowhere else.
-    const RigExecCutMeshReport &cut = built->report;
-    char summary[320];
-    std::snprintf(
-        summary, sizeof(summary),
-        "curvenet bind %s -> %s: %d cut faces, %d samples, %d cracks, "
-        "%d traced, %d unknowns, %zu factor nonzeros",
-        mover.GetString().c_str(), target.GetString().c_str(),
-        cut.cutFaceCount, cut.sampleCount, cut.crackCount, cut.tracedSegments,
-        built->cutMesh.unknownCount,
-        built->solver ? built->solver->GetFactorNonzeros() : size_t(0));
-    _pending.push_back(summary);
-    for (const std::string &warning : cut.warnings) {
-        _pending.push_back("curvenet bind " + mover.GetString() + ": " +
-                           warning);
-    }
-
-    entry.binding = std::move(built);
-    return entry.binding;
-}
-
-std::vector<std::string>
-RigExecCurvenetBindCache::TakeDiagnostics()
-{
-    std::vector<std::string> out;
-    out.swap(_pending);
-    return out;
-}
-
 
 std::string
 RigExecReadPhase::GetAsString() const
@@ -1609,7 +1527,7 @@ namespace {
 
 // Reads a typed array from an exact property path on the mover's stage.
 // \p resolved is null for BIND-TIME reads and only for those. A rest cage, a
-// rest curvenet, a bind-time topology: those are the authored neutral pose the
+// rest geometry, a bind-time topology: those are the authored neutral pose the
 // deformation is measured against, so a read phase has nothing to say about
 // them -- and serving one the same phased value as the live read makes the two
 // operands equal and the whole deformation an identity.
@@ -2101,11 +2019,6 @@ RigExecAssembleParameters(
             moverPrim, values.influenceTransforms, values.weights, time,
             values.resolved, values.skinTopologyCache, values.skinTopology);
     }
-    if (op == RigExecRevisionOp::CurvenetAdjuster) {
-        return RigExecAssembleCurvenetAdjusterParameters(
-            moverPrim, binding.target, values.weights, time, values.resolved);
-    }
-
     RigExecMoverParameters params;
     const bool synthesizedDerived =
         op == RigExecRevisionOp::RecomputeNormals ||
@@ -2130,6 +2043,9 @@ RigExecAssembleParameters(
     case RigExecRevisionOp::DeltaMush:
         params.kind = _kindTokens->deltaMush;
         break;
+    case RigExecRevisionOp::Wrinkle:
+        params.kind = _kindTokens->wrinkle;
+        break;
     case RigExecRevisionOp::Lattice:
         params.kind = _kindTokens->lattice;
         break;
@@ -2145,8 +2061,8 @@ RigExecAssembleParameters(
     case RigExecRevisionOp::EmitGuidePoints:
         params.kind = _kindTokens->emitGuidePoints;
         break;
-    case RigExecRevisionOp::Curvenet:
-        params.kind = _kindTokens->curvenet;
+    case RigExecRevisionOp::External:
+        params.kind = _kindTokens->external;
         break;
     case RigExecRevisionOp::RecomputeNormals:
         params.kind = _kindTokens->recomputeNormals;
@@ -2155,8 +2071,7 @@ RigExecAssembleParameters(
         params.kind = _kindTokens->recomputeExtent;
         break;
     case RigExecRevisionOp::Matrix:
-        break;  // handled above
-    case RigExecRevisionOp::CurvenetAdjuster:
+    case RigExecRevisionOp::Skin:
         break;  // handled above
     }
 
@@ -2226,133 +2141,59 @@ RigExecAssembleParameters(
         params.mushDisplacement = _RecordedInput<float>(moverPrim, TfToken("inputs:displacement"), 1.0f, time, values.resolved);
         params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
         break;
-    case RigExecRevisionOp::Curvenet: {
-        params.strength = 1.0f;
-        const UsdPrim netPrim =
-            binding.curvenet.IsEmpty()
-                ? UsdPrim()
-                : moverPrim.GetStage()->GetPrimAtPath(binding.curvenet);
-        if (!netPrim) {
-            break;  // no curvenet: MoverFailed pass-through
-        }
-
-        // The projection pose is the curvenet and the surface as AUTHORED --
-        // Default time on both. Everything the cut depends on is read here,
-        // and its digest is what decides whether the cache still applies.
-        const std::vector<GfVec3f> restNet = _Array<GfVec3f>(moverPrim, binding.curvenetPoints, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
-        std::vector<int> splineIndices;
-        if (const UsdAttribute a =
-                netPrim.GetAttribute(_attrTokens->splineIndices)) {
-            VtIntArray value;
-            a.Get(&value, UsdTimeCode::Default());
-            splineIndices.assign(value.begin(), value.end());
-        }
-        int samplesPerSpline = 5;
-        if (const UsdAttribute a =
-                netPrim.GetAttribute(_attrTokens->samplesPerSpline)) {
-            a.Get(&samplesPerSpline);
-        }
-        const TfToken basisToken =
-            _Token(netPrim, _attrTokens->basis, _valueTokens->bezier);
-        params.topologyCounts =
-            _Array<int>(moverPrim, binding.topologyCounts, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
-        params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
-        // The projection surface is the target's points at DEFAULT, not at
-        // the evaluated time. It is a fixed neutral pose by definition (§4.1
-        // cuts against it once), and reading the animated value instead would
-        // put a per-frame quantity in the bind digest -- re-cutting the mesh
-        // and re-factorizing its Laplacian on every frame, while also making
-        // the cut mean something different at each one.
-        params.restPoints = _Array<GfVec3f>(moverPrim, binding.base, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
-        if (restNet.empty() || splineIndices.empty() ||
-            params.topologyCounts.empty() || params.restPoints.empty()) {
-            break;
-        }
-
-        // The posed net: the evaluator hands over the result of the
-        // curvenet's own mover chain when it has one, so knots articulated by
-        // ordinary movers arrive already posed. Otherwise the authored value
-        // at this time, which is what a keyframed or sculpted net gives.
-        params.auxPoints = values.curvenetPoints.empty()
-                               ? _Array<GfVec3f>(moverPrim,
-                                                 binding.curvenetPoints, time)
-                               : values.curvenetPoints;
-        if (params.auxPoints.size() != restNet.size()) {
-            break;  // the pool changed shape under the bind
-        }
-
-        // Retain the bind's inputs for the bake, on whichever path read
-        // them: the early path below skips the digest and the cache, but the
-        // reads above already happened, and a remembered failure re-binds
-        // from the same arrays a success did.
-        if (values.curvenetBindInputs && !values.curvenetBindInputs->held) {
-            values.curvenetBindInputs->restNet = restNet;
-            values.curvenetBindInputs->splineIndices = splineIndices;
-            values.curvenetBindInputs->samplesPerSpline = samplesPerSpline;
-            values.curvenetBindInputs->basis = basisToken;
-            values.curvenetBindInputs->meshPoints = params.restPoints;
-            values.curvenetBindInputs->meshCounts = params.topologyCounts;
-            values.curvenetBindInputs->meshIndices = params.topologyIndices;
-            values.curvenetBindInputs->held = true;
-        }
-        // A caller that resolved the bind for itself -- because it may not
-        // touch the cache where it assembles -- says so here, before the
-        // digest, which is the cache's KEY and nothing else. Everything
-        // above this line is still read and still lands in the packet: the
-        // rest surface and the topology are compared per frame whoever bound
-        // the mover.
-        if (values.curvenetBinding) {
-            params.curvenetBinding = *values.curvenetBinding;
-            params.valid = params.curvenetBinding != nullptr;
-            break;
-        }
-
-        size_t digest = TfHash()(basisToken);
-        digest = TfHash::Combine(digest, samplesPerSpline);
-        for (int index : splineIndices) {
-            digest = TfHash::Combine(digest, index);
-        }
-        for (const GfVec3f &p : restNet) {
-            digest = TfHash::Combine(digest, p[0], p[1], p[2]);
-        }
-        for (const GfVec3f &p : params.restPoints) {
-            digest = TfHash::Combine(digest, p[0], p[1], p[2]);
-        }
-        for (int c : params.topologyCounts) {
-            digest = TfHash::Combine(digest, c);
-        }
-        for (int i : params.topologyIndices) {
-            digest = TfHash::Combine(digest, i);
-        }
-
-        auto build = [&](RigExecProfileMoverBinding *out, std::string *why) {
-            RigExecCurvenetTopology topology;
-            const RigExecCurvenetBasis basis =
-                (basisToken == "catmullRom")
-                    ? RigExecCurvenetBasis::CatmullRom
-                    : RigExecCurvenetBasis::Bezier;
-            if (!RigExecBuildCurvenetTopology(splineIndices, restNet.size(),
-                                              basis, restNet, nullptr,
-                                              &topology, why)) {
-                return false;
-            }
-            return RigExecBindProfileMover(
-                topology, restNet, params.restPoints, params.topologyCounts,
-                params.topologyIndices, samplesPerSpline, out, why);
-        };
-
-        std::string reason;
-        if (values.curvenetCache) {
-            params.curvenetBinding = values.curvenetCache->Resolve(
-                binding.moverPath, binding.target, digest, build, &reason);
-        } else {
-            auto fresh = std::make_shared<RigExecProfileMoverBinding>();
-            if (build(fresh.get(), &reason)) {
-                params.curvenetBinding = fresh;
-            }
-        }
-        params.valid = params.curvenetBinding != nullptr;
+    case RigExecRevisionOp::Wrinkle: {
+        params.restPoints = _Array<GfVec3f>(moverPrim,
+            moverPrim.GetPath().AppendProperty(_attrTokens->restPoints),
+            UsdTimeCode::Default(), values.resolved, _RecorderOf(values.resolved));
+        if (params.restPoints.empty()) params.restPoints = values.basePoints;
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts,
+            time, values.resolved, _RecorderOf(values.resolved));
+        params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices,
+            time, values.resolved, _RecorderOf(values.resolved));
+        auto &settings = params.wrinkleSettings;
+        const TfToken topology = _RecordedInput<TfToken>(moverPrim,
+            _attrTokens->topology, _valueTokens->cloth,
+            UsdTimeCode::Default(), values.resolved);
+        if (topology != _valueTokens->cloth && topology != _valueTokens->surfaceStruts) break;
+        settings.topology = topology == _valueTokens->cloth
+            ? RigExecWrinkleTopology::Cloth : RigExecWrinkleTopology::SurfaceStruts;
+        settings.pinPoints = _Array<int>(moverPrim,
+            moverPrim.GetPath().AppendProperty(_attrTokens->pinPoints),
+            UsdTimeCode::Default(), values.resolved, _RecorderOf(values.resolved));
+        settings.iterations = _RecordedInput<int>(moverPrim,
+            _attrTokens->iterations, 80, time, values.resolved);
+        settings.neighborDistance = _RecordedInput<int>(moverPrim,
+            _attrTokens->neighborDistance, 2, time, values.resolved);
+        settings.restLengthScale = _RecordedInput<float>(moverPrim,
+            _attrTokens->restLengthScale, 1.0f, time, values.resolved);
+        settings.stretchStiffness = _RecordedInput<float>(moverPrim,
+            _attrTokens->stretchStiffness, 1.0f, time, values.resolved);
+        settings.compressionStiffness = _RecordedInput<float>(moverPrim,
+            _attrTokens->compressionStiffness, 1.0f, time, values.resolved);
+        settings.bendStiffness = _RecordedInput<float>(moverPrim,
+            _attrTokens->bendStiffness, 0.1f, time, values.resolved);
+        settings.maxDisplacement = _RecordedInput<float>(moverPrim,
+            _attrTokens->maxDisplacement, 0.2f, time, values.resolved);
+        settings.pinBorders = _RecordedInput<bool>(moverPrim,
+            _attrTokens->pinBorders, true, time, values.resolved);
+        settings.tangentPlaneCollisions = _RecordedInput<bool>(moverPrim,
+            _attrTokens->tangentPlaneCollisions, true, time, values.resolved);
+        settings.tangentPlaneInset = _RecordedInput<float>(moverPrim,
+            _attrTokens->tangentPlaneInset, 0.0f, time, values.resolved);
+        settings.wrinkleScale = _RecordedInput<float>(moverPrim,
+            _attrTokens->wrinkleScale, 1.0f, time, values.resolved);
+        settings.smoothingIterations = _RecordedInput<int>(moverPrim,
+            _attrTokens->smoothingIterations, 0, time, values.resolved);
+        params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
+        break;
+    }
+    case RigExecRevisionOp::External: {
+        params.externalSchema = moverPrim.GetTypeName();
+        const RigExecMoverHandler *handler =
+            RigExecFindMoverHandler(params.externalSchema);
+        params.valid = handler && handler->assembleExternal &&
+            handler->assembleExternal(moverPrim, binding, values, time,
+                                      &params.externalData);
         break;
     }
 
@@ -2631,7 +2472,6 @@ RigExecAssembleParameters(
 
     case RigExecRevisionOp::Matrix:
     case RigExecRevisionOp::Skin:
-    case RigExecRevisionOp::CurvenetAdjuster:
         break;
     }
 
@@ -2872,13 +2712,7 @@ RigExecMoverGraph::GetRevisionExecutionCount() const
     return _runtime->executionCount;
 }
 
-std::vector<GfMatrix4d>
-RigExecMoverGraph::GetRevisionControlFrames(const VdfMaskedOutput &revision) const
-{
-    const auto it = _runtime->revisions.find(revision);
-    return it == _runtime->revisions.end() ? std::vector<GfMatrix4d>()
-        : static_cast<const _RevisionNode &>(revision.GetOutput()->GetNode()).GetControlFrames();
-}
+
 
 RigExecMoverStatus
 RigExecMoverGraph::GetRevisionStatus(const VdfMaskedOutput &revision) const

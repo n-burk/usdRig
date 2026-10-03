@@ -172,6 +172,46 @@ def TestHermite():
     print("  ok: hermite tangents")
 
 
+def TestAvarEditInvalidation():
+    """A static double avar feeding a float chain must update at the same time."""
+    import _rigexec
+    for mode in ("dynamic", "reference", "baked", "parity"):
+        stage = Usd.Stage.CreateInMemory()
+        stage.DefinePrim("/Asset/Rig", "RigExecRoot")
+        control = stage.DefinePrim("/Asset/Rig/Control", "RigExecControl")
+        source = control.GetAttribute("avars:ty")
+        source.Set(0.0)
+        target = stage.DefinePrim("/Asset/Rig/Channels", "Scope").CreateAttribute(
+            "weight", Sdf.ValueTypeNames.Float)
+        target.Set(0.0)
+        for name, op, value in (("Read", "add", None), ("Negate", "multiply", -1.0)):
+            mover = stage.DefinePrim("/Asset/Rig/Ops/" + name, "RigExecFloatMathMover")
+            mover.AddAppliedSchema("RigExecMoverAPI")
+            mover.GetRelationship("rigExec:moves").SetTargets([target.GetPath()])
+            mover.GetAttribute("rigExec:operation").Set(op)
+            if value is None:
+                mover.GetAttribute("inputs:value").SetConnections([source.GetPath()])
+            else:
+                mover.GetAttribute("inputs:value").Set(value)
+        stage.GetPrimAtPath("/Asset/Rig/Ops").SetChildrenReorder(["Negate", "Read"])
+        rig = _rigexec.Rig(stage, "/Asset/Rig")
+        rig.compile()
+        rig.evaluation_mode = mode
+        for value in (0., -.2, -1., .3, 0.):
+            source.Set(value)
+            pose = rig.evaluate(1.)
+            got = pose.moved_property(str(target.GetPath()))
+            _Check(abs(got + value) < 1e-6,
+                   "%s: edited avar %g left stale scalar %g" % (mode, value, got))
+            _Check(pose.baked_parity_mismatches == 0, "edited avar parity")
+        source.Set(-.4, 1.)
+        source.Set(-1., 3.)
+        for time, want in ((1., .4), (2., .7), (3., 1.)):
+            got = rig.evaluate(time).moved_property(str(target.GetPath()))
+            _Check(abs(got - want) < 1e-6, "%s: newly animated avar" % mode)
+    print("  ok: avar edits invalidate scalar chains without recompilation")
+
+
 def main():
     _RegisterSchema()
     import _rigexec
@@ -238,6 +278,7 @@ def main():
     print("  ok: compile refusals")
 
     TestDrivenAvar()
+    TestAvarEditInvalidation()
     TestHermite()
     print("RIGEXEC_FLOAT_CURVE_OP_OK")
     return 0

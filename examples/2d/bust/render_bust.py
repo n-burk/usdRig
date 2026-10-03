@@ -2,13 +2,14 @@
 
     source bin/_env.sh
     RIG=$(pwd) "$PY" examples/2d/bust/render_bust.py <stage> <out_prefix> \
-        --frames 1,30,60 [--guides 1.0] [--wire] [--height 50] [--center 0,-8]
+        --frames 1,30,60 [--textured] [--guides 1.0] [--wire] [--height 50] [--center 0,-8]
 
 Each frame is TWO passes composited in PIL over a pastel gradient:
 
   art     the whole stage, UNLIT (enableLighting off), so every vertex
           colour lands on screen exactly as authored -- the flat look of a
-          layered mesh deformation model;
+          layered mesh deformation model. --textured instead uses a neutral
+          camera light and sRGB display conversion for painted materials;
   guides  only the RigExecRoot subtree with showGuides on: joints,
           controls, solver guides and the lattice wires, lit, drawn OVER
           the art at the requested opacity.
@@ -56,7 +57,7 @@ def ortho_camera(center, height, aspect):
 
 
 def render_pass(vp, stage, time, guides=False, wire=False, root=None,
-                lit=False):
+                lit=False, textured=False):
     """One RGBA pass; art passes are unlit, the guide pass is lit."""
     from OpenGL import GL
     from pxr import Gf, Usd, UsdImagingGL
@@ -71,7 +72,10 @@ def render_pass(vp, stage, time, guides=False, wire=False, root=None,
     params.enableSampleAlphaToCoverage = True
     params.enableSceneMaterials = True
     params.enableSceneLights = False
-    params.enableLighting = bool(lit)
+    # Storm's unlit fallback ignores PreviewSurface texture networks.
+    params.enableLighting = bool(lit or textured)
+    if textured:
+        params.colorCorrectionMode = "sRGB"
     params.clearColor = Gf.Vec4f(0, 0, 0, 0)
     params.cullStyle = UsdImagingGL.CullStyle.CULL_STYLE_NOTHING
     if wire:
@@ -114,6 +118,7 @@ def main(argv=None):
     ap.add_argument("--guides", type=float, default=0.0,
                     help="guide pass opacity (0 = no guide pass)")
     ap.add_argument("--wire", action="store_true")
+    ap.add_argument("--textured", action="store_true", help="render painted PreviewSurface materials with a neutral camera light")
     ap.add_argument("--height", type=float, default=50.0)
     ap.add_argument("--center", default="0,-8.0")
     ap.add_argument("--size", default="1920x1080")
@@ -127,15 +132,26 @@ def main(argv=None):
     subs = [s for s in args.sublayers.split(",") if s]
 
     vp = rm.Viewport(W, H)
+    if args.textured:
+        # The colour AOV enables Storm's sRGB display conversion, as in usdview.
+        vp.engine.SetRendererAov("color")
     rm.ImagingBridge()
     stage = open_stage(args.stage, subs)
     rig = find_rig_root(stage)
     cam = ortho_camera(center, args.height, W / float(H))
     vp.set_camera(cam)
+    if args.textured:
+        from pxr import Glf
+        light = Glf.SimpleLight()
+        light.position = (0, 0, 1, 0)
+        light.diffuse = (1, 1, 1, 1)
+        light.ambient = (0, 0, 0, 1)
+        light.specular = (0, 0, 0, 1)
+        vp.engine.SetLightingState([light], Glf.SimpleMaterial(), (0, 0, 0, 1))
     bg = rm._gradient(W, H, BG_TOP, BG_BOTTOM).convert("RGBA")
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     for i, f in enumerate(frames):
-        art = render_pass(vp, stage, f, wire=args.wire)
+        art = render_pass(vp, stage, f, wire=args.wire, textured=args.textured)
         frame = bg.copy()
         frame.alpha_composite(art)
         if args.guides > 0 and rig is not None:

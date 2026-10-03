@@ -91,20 +91,18 @@ enum RrWeightField : int {
     RrWeightInvert = 5,
     RrWeightFalloffMin = 6,
     RrWeightFalloffMax = 7,
-    RrWeightScaleX = 8,
-    RrWeightScaleY = 9,
-    RrWeightScaleZ = 10,
-    RrWeightExtentU = 11,
-    RrWeightExtentV = 12,
-    RrWeightCurvenetSamples = 13,
-    RrWeightCurvenetUnreached = 14,
-    RrWeightScaleXPos = 15,
-    RrWeightScaleYPos = 16,
-    RrWeightScaleZPos = 17,
-    RrWeightScaleXNeg = 18,
-    RrWeightScaleYNeg = 19,
-    RrWeightScaleZNeg = 20,
-    RrWeightFieldCount = 21,
+    RrWeightScaleXPos = 8,
+    RrWeightScaleYPos = 9,
+    RrWeightScaleZPos = 10,
+    RrWeightScaleXNeg = 11,
+    RrWeightScaleYNeg = 12,
+    RrWeightScaleZNeg = 13,
+    RrWeightScaleX = 14,
+    RrWeightScaleY = 15,
+    RrWeightScaleZ = 16,
+    RrWeightExtentU = 17,
+    RrWeightExtentV = 18,
+    RrWeightFieldCount = 19,
 };
 
 // One slot's live ladder values, recomputed by the pose prologue when
@@ -119,14 +117,12 @@ struct RrLadderLive {
 };
 
 // One revision's publish row, filled by the geometry steps for the
-// epilogue's weight-field, adjuster and moved-property publication.
+// epilogue's weight-field and moved-property publication.
 struct RrRevisionPublish {
     bool weightFieldPublished = false;
     uint32_t weightFieldTarget = 0;
     std::vector<float> weightField;
     std::string resultStatus;
-    std::vector<RrMat4d> controlFrames;
-    std::vector<uint32_t> adjusterPaths;
     uint32_t target = 0;
 };
 
@@ -205,9 +201,6 @@ struct RrStore {
     std::map<uint32_t, std::vector<RrVec3f>> movedProperties;
     std::map<uint32_t, RrWeightFieldPublish> weightFields;
     std::vector<char> jointMatrixPublished;
-    // Pending curvenet bind lines, drained by the epilogue so a
-    // cached bind stays silent on every later frame.
-    std::vector<std::string> curvenetBindDiagnostics;
     std::vector<RrInputValue> inputHolders;
     RrSnapshots runSnapshots;
     std::vector<RrStepOutput> stepOutputs;

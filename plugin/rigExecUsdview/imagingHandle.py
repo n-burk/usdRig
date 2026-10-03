@@ -65,6 +65,7 @@ _PER_STAGE = {
     "ClearFrameCache": (_i, [_s]),
     "WarmRange": (_i, [_s, _dp, _i]),
     "GetWarmingCompletedCount": (_ll, []),
+    "GetWarmingProgressCount": (_ll, []),
     "BeginPreview": (_i, [_s]),
     "UpdatePreview": (_i, [_dp, _i]),
     "EndPreview": (_i, []),

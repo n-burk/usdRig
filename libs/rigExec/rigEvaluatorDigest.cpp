@@ -5,6 +5,7 @@
 #include "rigEvaluatorConstraints.h"
 #include "parallel.h"
 #include "pathText.h"
+#include "movers/moverRegistry.h"
 
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/withScopedParallelism.h"
@@ -360,9 +361,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += '|';
         appendRelTargets(w, "rigExec:weightTarget", true);
         appendRelTargets(w, "rigExec:baseWeight", true);
-        for (const char *input : {"rigExec:curvenetPoints", "rigExec:curvenetSplineIndices",
-                "rigExec:meshFaceCounts", "rigExec:meshFaceIndices"})
-            appendRelTargets(w, input, true);
         appendToken(w, "rigExec:representation");
         appendToken(w, "rigExec:rangePolicy");
         appendToken(w, "rigExec:operation");
@@ -1591,17 +1589,24 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             appendRelTargets(prim, "rigExec:surface", false);
             appendRelTargets(prim, "rigExec:bindCoordinates", false);
             for (const char *phased : {"rigExec:transform", "rigExec:cage",
-                                       "rigExec:surface", "rigExec:curvenet",
+                                       "rigExec:surface",
                                        "rigExec:bindCoordinates",
                                        "rigExec:driverCurve"}) {
                 appendPhase(prim, phased);
             }
             appendRelTargets(prim, "rigExec:driverFrames", false);
             appendRelTargets(prim, "rigExec:driverCurve", false);
-            // Authored order, not sorted: the binding takes targets[0], so
-            // reordering a multi-target relationship changes the wiring and
-            // must therefore change the digest.
-            appendRelTargets(prim, "rigExec:curvenet", false);
+            if (const RigExecMoverHandler *handler =
+                    RigExecFindMoverHandler(prim.GetTypeName());
+                handler && handler->assembleExternal) {
+                // Plugin bindings may use relationships unknown to core.
+                // Their target order and read phases are compiled wiring.
+                for (const UsdRelationship &rel : prim.GetRelationships()) {
+                    if (rel.GetName() == _movesRel) continue;
+                    appendRelTargetsNamed(prim, rel.GetName(), false);
+                    appendPhase(prim, rel.GetName().GetText());
+                }
+            }
             for (const SdfPath &w :
                  appendRelTargets(prim, "rigExec:weightObject", true)) {
                 appendWeightObject(w);

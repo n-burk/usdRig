@@ -323,15 +323,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         return fail("Rig is instance-proxy/prototype hosted: " +
                     _rigPath.GetString());
     }
-    std::string adjustmentReadError;
-    SdfPath adjustmentOperation;
-    if (!_ValidateAdjustmentPoseConsumers(_stage, rig, &adjustmentReadError,
-                                          &adjustmentOperation,
-                                          _skippedOperations)) {
-        return fail(adjustmentReadError, adjustmentOperation.IsEmpty()
-            ? SdfPathVector{} : SdfPathVector{adjustmentOperation});
-    }
-
     // Phase A: validation into locals. Nothing below mutates evaluator
     // state until every check passes, so a failed structural edit keeps
     // the previous epoch publishable (spec §4.1 atomic transactions).

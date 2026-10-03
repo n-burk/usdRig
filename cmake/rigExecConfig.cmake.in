@@ -14,6 +14,7 @@ set_and_check(rigExec_LIBRARY_DIR "@PACKAGE_RIGEXEC_INSTALL_LIBDIR@")
 set(rigExec_PLUGINPATHS
     "${rigExec_PLUGIN_DIR}/rigExecSchema/resources"
     "${rigExec_PLUGIN_DIR}/rigExecImaging/resources"
+    "${rigExec_PLUGIN_DIR}/rigExecMoverPlugins"
     "${rigExec_PYTHON_DIR}/rigExecUsdview")
 
 # RigExec's public link interface exposes OpenUSD imported targets (usd, sdf,
@@ -48,5 +49,7 @@ else()
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/rigExecTargets.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/rigExecMoverPlugin.cmake")
 
 check_required_components(rigExec)

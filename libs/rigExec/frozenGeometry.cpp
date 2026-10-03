@@ -3,9 +3,7 @@
 #include "frozenContextInternal.h"
 #include "weightPackets.h"
 #include "movers/moverRegistry.h"
-#include "rigExecMath/curvenet.h"
 #include "rigExecMath/geometryKernels.h"
-#include "rigExecMath/profileMover.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -157,16 +155,6 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
             }
         }
     };
-    const auto sampleInts = [&](const char *role, std::vector<int> *out) {
-        if (const RigExecSampledInput *sample =
-                findSample(_FrozenWeightArrayKey(object.path, role))) {
-            if (sample->hasValue && sample->value.IsHolding<VtIntArray>()) {
-                const VtIntArray &held =
-                    sample->value.UncheckedGet<VtIntArray>();
-                out->assign(held.begin(), held.end());
-            }
-        }
-    };
     if (object.type == _frozenWeightTokens->staticWeight) {
         RigExecStaticWeightInputs packetInputs;
         packetInputs.representation = object.representation;
@@ -260,65 +248,6 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
             // the step left, which for a fresh run is default (invalid).
             B.weightPackets[size_t(id)] = RigExecWeightPacket();
         }
-        return true;
-    }
-    if (object.type == _frozenWeightTokens->curvenetWeight) {
-        std::vector<GfVec3f> mesh, net;
-        std::vector<int> counts, indices, splines, autoSmooth;
-        std::vector<float> weights;
-        samplePoints("curvenetMeshPoints", &mesh);
-        samplePoints("curvenetPoints", &net);
-        sampleInts("curvenetCounts", &counts);
-        sampleInts("curvenetIndices", &indices);
-        sampleInts("curvenetSplines", &splines);
-        if (const RigExecSampledInput *sample = findSample(
-                _FrozenWeightArrayKey(object.path, "curvenetWeights"))) {
-            if (sample->hasValue &&
-                sample->value.IsHolding<VtFloatArray>()) {
-                const VtFloatArray &held =
-                    sample->value.UncheckedGet<VtFloatArray>();
-                weights.assign(held.begin(), held.end());
-            }
-        }
-        sampleInts("curvenetAutoSmooth", &autoSmooth);
-        const int samples = rd(object.curvenetSamples);
-        if (!RigExecCurvenetWeightTokensAreValid(object.curvenetBasis,
-                                                object.rangePolicy)) {
-            RigExecWeightPacket packet;
-            packet.representation = object.representation;
-            packet.rangePolicy = object.rangePolicy;
-            B.weightPackets[size_t(id)] = packet;
-            return true;
-        }
-        if (!object.bound || object.boundMesh != mesh ||
-            object.boundNet != net ||
-            object.boundCounts != counts ||
-            object.boundIndices != indices ||
-            object.boundSplines != splines ||
-            object.boundSmooth != autoSmooth ||
-            object.boundSamples != samples) {
-            object.curvenetBinding = RigExecBindCurvenetWeightPacket(
-                mesh, counts, indices, net, splines, object.curvenetBasis,
-                samples, autoSmooth, nullptr);
-            object.boundMesh = mesh;
-            object.boundNet = net;
-            object.boundCounts = counts;
-            object.boundIndices = indices;
-            object.boundSplines = splines;
-            object.boundSmooth = autoSmooth;
-            object.boundSamples = samples;
-            object.bound = true;
-        }
-        if (!object.curvenetBinding) {
-            RigExecWeightPacket packet;
-            packet.representation = object.representation;
-            packet.rangePolicy = object.rangePolicy;
-            B.weightPackets[size_t(id)] = packet;
-            return true;
-        }
-        B.weightPackets[size_t(id)] = RigExecCurvenetWeightPacketFromBinding(
-            *object.curvenetBinding, weights, object.rangePolicy,
-            rd(object.curvenetUnreached), nullptr);
         return true;
     }
     B.weightPackets[size_t(id)] = RigExecWeightPacket();
@@ -415,6 +344,76 @@ _FrozenSideArray(
     const VtArray<T> &held = sample.value.UncheckedGet<VtArray<T>>();
     out->assign(held.begin(), held.end());
     return true;
+}
+
+bool
+_FrozenAssembleIterativeMover(
+    const RigExecBakedProgramImpl &B,
+    const RigExecBakedProgramImpl::GeomRevision &revision, float defaultWeight,
+    const VtVec3fArray &basePoints, const std::map<SdfPath, size_t> &index,
+    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
+{
+    *params = RigExecMoverParameters();
+    params->kind = RigExecRevisionKindToken(revision.op);
+    params->enabled = _FrozenSampledEnabled(index, inputs, revision.moverPath);
+    if (!params->enabled) {
+        params->valid = true;
+        return true;
+    }
+    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
+        return true;
+    }
+    const SdfPath rest = revision.moverPath.AppendProperty(
+        TfToken("inputs:restPoints"));
+    if (!_FrozenSideArray(revision, rest, rest, index, inputs,
+                          &params->restPoints) ||
+        !_FrozenSideArray(revision, revision.binding.topologyCounts,
+                          revision.binding.topologyCounts, index, inputs,
+                          &params->topologyCounts) ||
+        !_FrozenSideArray(revision, revision.binding.topologyIndices,
+                          revision.binding.topologyIndices, index, inputs,
+                          &params->topologyIndices)) {
+        return false;
+    }
+    if (params->restPoints.empty()) {
+        params->restPoints.assign(basePoints.begin(), basePoints.end());
+    }
+    bool validSamples = true;
+    const auto scalar = [&](const char *name, auto fallback, auto &value) {
+        value = fallback;
+        const SdfPath path = revision.moverPath.AppendProperty(TfToken(name));
+        if (const VtValue *phased = _FrozenPhasedValue(revision, path)) {
+            if (_SampleHolds(*phased, &value)) {
+                return;
+            }
+        }
+        const auto found = index.find(path);
+        if (found != index.end()) {
+            const RigExecSampledInput &sample = inputs.values[found->second];
+            if (sample.hasValue && !_SampleHolds(sample.value, &value)) {
+                validSamples = false;
+            }
+        }
+    };
+    _VisitIterativeMoverScalars(revision.op, *params, scalar);
+    if (revision.op == RigExecRevisionOp::Wrinkle) {
+        TfToken topology;
+        scalar("inputs:topology", TfToken("cloth"), topology);
+        if (topology != "cloth" && topology != "surfaceStruts") {
+            return validSamples;
+        }
+        params->wrinkleSettings.topology = topology == "cloth"
+            ? RigExecWrinkleTopology::Cloth
+            : RigExecWrinkleTopology::SurfaceStruts;
+        const SdfPath pins = revision.moverPath.AppendProperty(
+            TfToken("inputs:pinPoints"));
+        if (!_FrozenSideArray(revision, pins, pins, index, inputs,
+                              &params->wrinkleSettings.pinPoints)) {
+            return false;
+        }
+    }
+    params->valid = !params->restPoints.empty() && !params->topologyCounts.empty();
+    return validSamples;
 }
 
 // RigExecAssembleMatrixParameters over frozen state: kind, the enabled
@@ -1073,84 +1072,6 @@ _FrozenAssembleEmitGuidePoints(
     return true;
 }
 
-// The Curvenet arm over frozen state: kind, enabled, the shared envelope,
-// then the rest net, the rest surface and its topology, the posed net, and
-// the transported bind, in live order. The sampler sampled nothing when
-// the net prim was missing, so the empty-check below breaks with exactly
-// the packet live's netPrim check breaks with. The bake-retention sink is
-// skipped: a per-assembly scratch nothing downstream reads on the worker.
-bool
-_FrozenAssembleCurvenet(
-    const RigExecBakedProgramImpl &B,
-    const RigExecBakedProgramImpl::GeomRevision &revision,
-    float defaultWeight, size_t revisionPosition,
-    const std::map<SdfPath, size_t> &index,
-    const RigExecFrameInputs &inputs, RigExecMoverParameters *params)
-{
-    const SdfPath &moverPath = revision.moverPath;
-    params->kind = RigExecRevisionKindToken(RigExecRevisionOp::Curvenet);
-    params->enabled =
-        _FrozenSampledEnabled(index, inputs, moverPath);
-    if (!params->enabled) {
-        params->valid = true;  // disabled is an ordinary pass-through
-        return true;
-    }
-    if (!_FrozenCommonEnvelope(B, revision, defaultWeight, params)) {
-        return true;  // MoverFailed (kind+enabled stay set, as live)
-    }
-    params->strength = 1.0f;
-    std::vector<GfVec3f> restNet;
-    if (!_FrozenSampledArray(
-            index, inputs, _FrozenCurvenetInputKey(moverPath, "restNet"),
-            &restNet) ||
-        !_FrozenSampledArray(
-            index, inputs,
-            _FrozenCurvenetInputKey(moverPath, "topologyCounts"),
-            &params->topologyCounts) ||
-        !_FrozenSampledArray(
-            index, inputs,
-            _FrozenCurvenetInputKey(moverPath, "topologyIndices"),
-            &params->topologyIndices) ||
-        !_FrozenSampledArray(
-            index, inputs,
-            _FrozenCurvenetInputKey(moverPath, "restPoints"),
-            &params->restPoints)) {
-        return false;
-    }
-    if (restNet.empty() || params->topologyCounts.empty() ||
-        params->restPoints.empty()) {
-        return true;  // MoverFailed
-    }
-    std::vector<GfVec3f> posed;
-    if (revision.curvenetChain >= 0) {
-        if (size_t(revision.curvenetChain) >= B.chains.size()) {
-            return false;
-        }
-        const RigExecBakedProgramImpl::GeomChain &net =
-            B.chains[size_t(revision.curvenetChain)];
-        if (net.haveBase && net.haveResult) {
-            posed.assign(net.result.begin(), net.result.end());
-        }
-    }
-    if (posed.empty() &&
-        !_FrozenSampledArray(
-            index, inputs, _FrozenCurvenetInputKey(moverPath, "posedNet"),
-            &posed)) {
-        return false;
-    }
-    params->auxPoints = std::move(posed);
-    if (params->auxPoints.size() != restNet.size()) {
-        return true;  // MoverFailed
-    }
-    if (revisionPosition >= inputs.curvenetBinds.size()) {
-        return false;
-    }
-    // A null transport is a remembered failed bind, served as-is.
-    params->curvenetBinding = inputs.curvenetBinds[revisionPosition];
-    params->valid = params->curvenetBinding != nullptr;
-    return true;
-}
-
 // worker-side derived assembly (normals/extent), and the mover-prim
 // defaultWeight read replaced by its sample. Everything else -- status,
 // dirty compare, publication sizing, layout and envelope decisions -- is the
@@ -1260,6 +1181,13 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
                                    index, inputs, &revision.parameters)) {
             return false;
         }
+    } else if (revision.op == RigExecRevisionOp::DeltaMush ||
+               revision.op == RigExecRevisionOp::Wrinkle) {
+        if (!_FrozenAssembleIterativeMover(B, revision, revision.defaultWeight,
+                                          chain.lastBase, index, inputs,
+                                          &revision.parameters)) {
+            return false;
+        }
     } else if (revision.op == RigExecRevisionOp::Lattice) {
         if (!_FrozenAssembleLattice(B, revision, revision.defaultWeight,
                                     chain.lastBase, index, inputs,
@@ -1281,12 +1209,6 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         if (!_FrozenAssembleEmitGuidePoints(B, revision,
                                             revision.defaultWeight, index,
                                             inputs, &revision.parameters)) {
-            return false;
-        }
-    } else if (revision.op == RigExecRevisionOp::Curvenet) {
-        if (!_FrozenAssembleCurvenet(B, revision, revision.defaultWeight,
-                                     size_t(step->object), index, inputs,
-                                     &revision.parameters)) {
             return false;
         }
     } else {
@@ -1397,8 +1319,7 @@ _FrozenDerived(_FrozenWorker *worker, RigExecBakedStep *step,
                                     derived.lastBase.end());
         const bool applied =
             status.AllowsApply() &&
-            RigExecRunRevisionKernel(revision.op, parameters, &values,
-                                     /*controlFrames=*/nullptr);
+            RigExecRunRevisionKernel(revision.op, parameters, &values);
         revision.resultStatus = status.state;
         if (!applied) {
             values.assign(derived.lastBase.begin(), derived.lastBase.end());

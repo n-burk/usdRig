@@ -1720,10 +1720,8 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
                     prim.dataSource = _BuildVolumeGuidePrim(
                         it->second, volumeIndex, parent.dataSource,
                         _ResolveAssetRootWorld(
-                            !it->second.volumeGuideAnchor.IsEmpty()
-                                ? it->second.volumeGuideAnchor
-                                : (it->second.assetRoot.IsEmpty()
-                                    ? snapshot->assetRoot : it->second.assetRoot),
+                            it->second.assetRoot.IsEmpty()
+                                ? snapshot->assetRoot : it->second.assetRoot,
                             *snapshot));
                     return prim;
                 }

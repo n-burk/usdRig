@@ -42,6 +42,37 @@ Bytes(const std::string &path)
 }
 
 static void
+TestWrinkleWireExtensions()
+{
+    std::vector<uint8_t> bytes;
+    std::string error;
+    RigExecWireDomainGeometry geometry;
+    geometry.chains.resize(1);
+    geometry.chains[0].revisions.resize(1);
+    geometry.chains[0].revisions[0].op = 15;
+    bytes.clear();
+    CHECK(RigExecWireEncodeDomainGeometry(geometry, &bytes));
+    RigExecWireReader geoCursor(bytes.data(), bytes.size());
+    RigExecWireDomainGeometry decodedGeometry;
+    CHECK(RigExecWireDecodeDomainGeometry(&geoCursor, &decodedGeometry, &error));
+    CHECK(decodedGeometry.chains.size() == 1);
+    if (decodedGeometry.chains.size() == 1) {
+        CHECK(decodedGeometry.chains[0].revisions.size() == 1);
+        if (decodedGeometry.chains[0].revisions.size() == 1) {
+            CHECK(decodedGeometry.chains[0].revisions[0].op == 15);
+        }
+    }
+    for (const uint8_t op : {10, 11, 16}) {
+        geometry.chains[0].revisions[0].op = op;
+        bytes.clear();
+        CHECK(RigExecWireEncodeDomainGeometry(geometry, &bytes));
+        RigExecWireReader unknownOp(bytes.data(), bytes.size());
+        CHECK(!RigExecWireDecodeDomainGeometry(
+            &unknownOp, &decodedGeometry, &error));
+    }
+}
+
+static void
 TestContainerRoundTrip()
 {
     RigExecBinaryWriter writer;
@@ -102,10 +133,12 @@ TestContainerRejections()
 
     CHECK(!RigExecBinaryReader::Open(good.data(), 3, &error));
 
-    bad = good;
-    bad[4] = 1;  // legacy records must be rejected by the major 2 reader
-    CHECK(!RigExecBinaryReader::Open(bad.data(), bad.size(), &error));
-    CHECK(error.find("version") != std::string::npos);
+    for (const uint8_t legacyMajor : {1, 2}) {
+        bad = good;
+        bad[4] = legacyMajor;
+        CHECK(!RigExecBinaryReader::Open(bad.data(), bad.size(), &error));
+        CHECK(error.find("version") != std::string::npos);
+    }
 
     // A section count the buffer cannot hold.
     bad = good;
@@ -172,7 +205,7 @@ _BinaryExpectedVariance(const std::string &fixture)
         "05_TwistRibbonSpine.usda", "06_LatticeBulge.usda",
         "07_SurfaceDrape.usda", "08_AimEyes.usda",
         "09_PropertyMathMovers.usda", "10_AimXformTurret.usda",
-        "11_VolumeWeights.usda", "12_CurvenetProfile.usda",
+        "11_VolumeWeights.usda",
         "13_ReadPhases.usda", "14_VolumeConstrainedSweep.usda",
         "aimtest.usda", "aimtest_points.usda",
         "rotateConstraint.usda", "rigexec_flat.usda",
@@ -435,6 +468,7 @@ main(int argc, char **argv)
     }
     TestContainerRoundTrip();
     TestContainerRejections();
+    TestWrinkleWireExtensions();
     auto BakeOne = [&](const std::string &stage,
                        const std::vector<double> &frames) {
         std::printf("bake conformance: %s\n", stage.c_str());

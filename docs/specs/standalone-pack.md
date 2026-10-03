@@ -56,13 +56,13 @@ the prior database afterward.
 
 The pack exporter rejects mover applications, reverse solver-to-joint output
 bindings, native instances and provider types that require evaluator-only
-packet adapters. In particular, Ribbon's driver packet, volume falloff LUTs
-and curvenet adjustment placement are not silently replaced by their empty
+packet adapters. In particular, Ribbon's driver packet and volume falloff LUTs
+are not silently replaced by their empty
 callback defaults. The supported RigExec provider classes are Root, Control,
 Joint without solver-output bindings, FkChain, TwoBoneIk, BlendPointFrames,
-TwistDistribution, StaticWeight, DynamicWeight, CombineWeight and
-CurvenetWeight. BlendInput and BlendSample also support their registered
-descriptor computations; Curvenet may carry ordinary source data. Standard
+TwistDistribution, StaticWeight, DynamicWeight, and CombineWeight.
+BlendInput and BlendSample also support their registered
+descriptor computations. Standard
 USD prims and attributes can be retained, subject to the
 computations actually registered by the installed OpenExec library. Aggregate
 solver requests use explicit dependencies. `rigExec:joints` is permitted and

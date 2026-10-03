@@ -8,12 +8,20 @@ affiliation, endorsement, or ownership of the underlying techniques.
 |---|---|---|
 | Typed dependency evaluation | [OpenExec introduction](https://openusd.org/release/intro_to_openexec.html) and [system design](https://openusd.org/dev/api/page__execution__system__design.html) | `libs/rigExec` |
 | Scene-index publication | [Hydra getting started](https://openusd.org/dev/api/_page__hydra__getting__started__guide.html) | `libs/rigExecImaging` |
-| Curvenet articulation | de Goes, Sheffler, and Fleischer, *Character Articulation through Profile Curves* (2022), [author-hosted paper](https://graphics.pixar.com/library/ProfileMover/paper.pdf), [DOI](https://doi.org/10.1145/3528223.3530060) | `curvenet.cpp`, `cutMesh.cpp`, `profileMover.cpp` in `libs/rigExecMath` |
-| Curvenet weight interpolation | Talbot, Sheffler, and de Goes, *Face Rigging through Curvenet Parametrization* (2026), [author publication list](https://fdegoes.github.io/), [DOI](https://doi.org/10.1145/3799818.3812074) | `libs/rigExecMath/curvenetWeights.cpp` |
 | Dual-quaternion skinning | Kavan et al., *Geometric Skinning with Approximate Dual Quaternion Blending* (2008), [author project page](https://users.cs.utah.edu/~ladislav/dq/index.html) | `libs/rigExecMath/dualQuat.cpp` |
 | Delta Mush | Mancewicz, Derksen, and Wilson, *Delta Mush: Smoothing Deformations While Preserving Detail* (2014), [publisher entry](https://dl.acm.org/doi/10.1145/2614106.2614144) | `libs/rigExecMath/deltaMushKernel.h` |
+| Position projection concepts | Müller, Heidelberger, Hennix, and Ratcliff, *Position Based Dynamics* (2007), [author-hosted paper](https://matthias-research.github.io/pages/publications/posBasedDyn.pdf), [DOI](https://doi.org/10.1016/j.jvcir.2007.01.005) | `libs/rigExecMath/wrinkleKernel.h` |
+| Wrinkle reference lengths and bounded offsets | Müller and Chentanez, *Wrinkle Meshes* (2010), [author-hosted paper](https://matthias-research.github.io/pages/publications/wrinkleMeshes.pdf), [DOI](https://doi.org/10.2312/SCA/SCA10/085-091) | `libs/rigExecMath/wrinkleKernel.h`; [method and limitations](concepts/wrinkle-deformation.md) |
+| Wrinkle deformer behavior | SideFX, [Wrinkle Deformer SOP](https://www.sidefx.com/docs/houdini/nodes/sop/wrinkledeformer.html) and [wrinkle workflow](https://www.sidefx.com/docs/houdini/vellum/wrinkledeformer.html) | [Wrinkle mover controls](concepts/wrinkle-deformation.md) |
 
 Implementation details and limitations are documented with each operator.
 In particular, referencing Delta Mush does not claim implementation of the
 distinct Direct Delta Mush method. Third-party source and asset provenance
 is tracked separately in [third-party notices](../THIRD_PARTY_NOTICES.md).
+The wrinkle mover independently adapts position projection, reference lengths,
+and bounded offsets using a deterministic fold guide and affine edge targets.
+Its guide and target equations are documented in the
+[method guide](concepts/wrinkle-deformation.md). It does not reproduce the
+papers' nonlinear distance projection, the separate refined mesh, or the
+persistent offset state of *Wrinkle Meshes*. Its public behavior references
+do not imply use of proprietary implementation code.

@@ -19,7 +19,9 @@ character converted to RigExec.
 
 - FK, two-bone and single-chain IK, spline IK, twist, and transform constraints.
 - Ordered deformation operations called **movers**, including skinning,
-  blend shapes, lattices, smoothing, Delta Mush, and curvenets.
+  blend shapes, lattices, smoothing, and Delta Mush.
+- External mover plugins built from separate repositories through a public
+  registration API and CMake helper.
 - Scalar, vector, and matrix operations; painted and procedural weight fields.
 - Dynamic evaluation, a baked program, and experimental `.rigexec` export
   with a standalone binary runtime.
@@ -92,9 +94,9 @@ status documented in the third-party notices.
 
 - [Node reference and tutorials](docs/index.md)
 - [Architecture and repository boundaries](docs/specs/spec.md)
-- [Curvenet authoring](docs/specs/curvenet.md)
 - [Viewport tools](docs/specs/viewport-gizmos.md) and [graph editor](docs/specs/graph-editor.md)
 - [Bake and inverse APIs](docs/specs/python-bake-inverse.md)
+- [Build and register external movers](docs/concepts/external-movers.md)
 - [Standalone runtime](docs/specs/standalone-runtime.md)
 - [Public method references](docs/references.md)
 - [Agent and contributor guide](AGENTS.md)

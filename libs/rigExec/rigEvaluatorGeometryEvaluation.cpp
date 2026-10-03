@@ -2,7 +2,6 @@
 
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorConstraints.h"
-#include "curvenetWeightComputations.h"
 #include "parallel.h"
 #include "movers/moverRegistry.h"
 #include "frameExtraction.h"
@@ -124,12 +123,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
     size_t graphRevisionsBuilt = 0;
 
     // Chains run in dependency order, computed at compile (_chainPlan.order).
-    // This used to be "curvenets first, then everything else", which was the
-    // only cross-chain dependency that existed: a Profile Mover needs its
-    // net's own chain already evaluated. A phased read is the same shape of
-    // dependency stated in general -- a cage read at `final` needs the cage's
-    // chain first, exactly as the net does -- so the special case became one
-    // edge in a topological sort and the heuristic went away.
     // What one chain produced, held apart from the pose until the walk folds
     // it in.
     // Independent chains can run at the same time, and two of them appending
@@ -142,7 +135,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
         std::vector<std::string> diagnostics;
         std::vector<std::pair<SdfPath, VtValue>> movedProperties;
         std::map<SdfPath, RigExecResolvedWeightField> weightFields;
-        std::vector<std::pair<SdfPath, RigExecPointFrame>> controlFrames;
         RigExecChainSnapshots snapshots;
         size_t revisionsCreated = 0;
         size_t revisionsExecuted = 0;
@@ -159,9 +151,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
         }
         for (auto &[path, field] : work.weightFields) {
             pose.weightFields[path] = std::move(field);
-        }
-        for (const auto &[path, frame] : work.controlFrames) {
-            pose.controlFrames[path] = frame;
         }
         _chainSnapshots.Merge(std::move(work.snapshots));
         pose.moverGraphRevisionsCreated += work.revisionsCreated;
@@ -505,6 +494,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 revision.op == RigExecRevisionOp::BlendShape ||
                 revision.op == RigExecRevisionOp::VolumeCorrect ||
                 revision.op == RigExecRevisionOp::DeltaMush ||
+                revision.op == RigExecRevisionOp::Wrinkle ||
+                revision.op == RigExecRevisionOp::External ||
                 revision.op == RigExecRevisionOp::Lattice ||
                 revision.op == RigExecRevisionOp::RecomputeNormals ||
                 revision.op == RigExecRevisionOp::RecomputeExtent;
@@ -514,19 +505,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
             if (revision.op == RigExecRevisionOp::Skin &&
                 revision.skinTopologyFixed) {
                 values.skinTopologyCache = &_skinTopologies;
-            }
-            if (revision.op == RigExecRevisionOp::Curvenet) {
-                values.curvenetCache = &_curvenetBindings;
-                // The curvenet's own chain result if it has one; pass 0 above
-                // guarantees it has already been computed.
-                const auto posed =
-                    pose.movedProperties.find(revision.binding.curvenetPoints);
-                if (posed != pose.movedProperties.end() &&
-                    posed->second.IsHolding<VtVec3fArray>()) {
-                    const VtVec3fArray &net =
-                        posed->second.UncheckedGet<VtVec3fArray>();
-                    values.curvenetPoints.assign(net.begin(), net.end());
-                }
             }
             if (!revision.binding.blendInputs.empty()) {
                 std::vector<RigExecBlendChannel> channels;
@@ -659,37 +637,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
             if (graph.GetRevisionStatus(live->revisions[i]).state == "moverFailed") {
                 work.diagnostics.push_back("MoverFailed " + revisions[i].moverPath.GetString() +
                     ": execution rejected its inputs; revision passed through");
-            }
-            if (revisions[i].op == RigExecRevisionOp::CurvenetAdjuster &&
-                graph.GetRevisionStatus(live->revisions[i]).AllowsApply()) {
-                const auto frames = graph.GetRevisionControlFrames(live->revisions[i]);
-                const auto paths = RigExecCurvenetAdjustmentPaths(
-                    _stage->GetPrimAtPath(revisions[i].moverPath));
-                // Kernels operate on net-local points. Control outputs use
-                // the same asset-space contract as ordinary rig controls.
-                GfMatrix4d netToAsset(1.0);
-                for (UsdPrim prim = _stage->GetPrimAtPath(target.GetPrimPath());
-                     prim && !prim.IsPseudoRoot() && prim != assetRoot;
-                     prim = prim.GetParent()) {
-                    const UsdGeomXformable xform(prim);
-                    if (!xform) continue;
-                    GfMatrix4d local(1.0);
-                    bool reset = false;
-                    xform.GetLocalTransformation(&local, &reset, time);
-                    const auto driven = pose.providerXforms.find(prim.GetPath());
-                    if (driven != pose.providerXforms.end()) local = driven->second;
-                    netToAsset = netToAsset * local;
-                    if (reset) {
-                        netToAsset = netToAsset *
-                            chainXformCache.GetLocalToWorldTransform(assetRoot).GetInverse();
-                        break;
-                    }
-                }
-                for (size_t j = 0; j < std::min(frames.size(), paths.size()); ++j) {
-                    work.controlFrames.emplace_back(
-                        paths[j],
-                        RigExecFrameFromMatrix(frames[j] * netToAsset));
-                }
             }
         }
         work.revisionsExecuted +=
@@ -869,10 +816,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 !graphIt->second.IsHolding<VtVec3fArray>()) {
                 continue;
             }
-            // A Profile Mover has no scalar oracle (see _EvaluateChain), so
-            // comparing against one reports a "mismatch" that means only
-            // "the reference does not implement this". Skipped and said,
-            // rather than counted as a defect.
             const RigExecMoverRecord *unoracled = nullptr;
             for (const RigExecMoverRecord *mover : chain) {
                 const RigExecMoverHandler *parityHandler =
@@ -923,13 +866,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
         }
     }
 
-    // Whatever the Profile Mover binds reported. Emitted here rather than
-    // from inside packet assembly because that has no diagnostic channel,
-    // and drained so a cached bind stays silent on every later frame.
-    for (std::string &message : _curvenetBindings.TakeDiagnostics()) {
-        pose.diagnostics.push_back(std::move(message));
-    }
-
     // Report actual reference comparisons, not every graph/derived chain that
     // happened to build.  Derived normals/extents are not part of this scalar
     // point-chain oracle and a mismatched point chain is never an agreement.
@@ -966,10 +902,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
             }
         }
         for (const auto &[target, chain] : chains) {
-            // A chain containing a Profile Mover has no scalar oracle (see
-            // _EvaluateChain), so publishing a CPU value for it would report
-            // a "mismatch" that means only "the reference does not implement
-            // this". Skip the chain and say so instead.
             const RigExecMoverRecord *unoracled = nullptr;
             for (const RigExecMoverRecord *mover : chain) {
                 const RigExecMoverHandler *parityHandler =

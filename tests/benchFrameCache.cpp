@@ -165,8 +165,7 @@ MoverParametersBytes(const RigExecMoverParameters &params)
            params.wireBindCoords.size() * sizeof(GfVec2f) +
            VecBytes(params.curveKnots) + VecBytes(params.widths) +
            VecBytes(params.skinTransforms) + VecBytes(params.skinIndices) +
-           VecBytes(params.skinWeights) +
-           VecBytes(params.curvenetAdjustments);
+           VecBytes(params.skinWeights);
 }
 
 // Every published map of one evaluated pose, in payload bytes. Prints the
@@ -301,8 +300,6 @@ GeomRevisionBytes(
     bytes += VecBytes(revision.influences) + VecBytes(revision.rows) +
              VecBytes(revision.palette);
     bytes += WeightPacketBytes(revision.currentPhasePacket);
-    bytes += VecBytes(revision.controlFrames);
-    bytes += sizeof(revision.lastAdjusterNetToAsset);
     for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision.chunks) {
         bytes += VecBytes(chunk.transforms) + VecBytes(chunk.rows) +
                  VecBytes(chunk.palette) + VecBytes(chunk.key);
@@ -459,15 +456,6 @@ MeasureArenaBytes(const RigExecBakedProgramImpl &B, const char *rig)
     for (const RigExecWeightPacket &packet : B.weightPackets) {
         weightBytes += WeightPacketBytes(packet);
     }
-    for (const RigExecBakedProgramImpl::WeightObject &object :
-         B.weightObjects) {
-        weightBytes += VecBytes(object.boundMesh) +
-                       VecBytes(object.boundNet) +
-                       VecBytes(object.boundCounts) +
-                       VecBytes(object.boundIndices) +
-                       VecBytes(object.boundSplines) +
-                       VecBytes(object.boundSmooth);
-    }
     line("weight packets", weightBytes);
 
     line("constraint deltas",
@@ -605,8 +593,6 @@ CollectWeightBindings(const RigExecBakedProgramImpl::WeightObject &object,
     CollectBinding(object.scaleZ, queries, chainAttrs, overrides);
     CollectBinding(object.extentU, queries, chainAttrs, overrides);
     CollectBinding(object.extentV, queries, chainAttrs, overrides);
-    CollectBinding(object.curvenetSamples, queries, chainAttrs, overrides);
-    CollectBinding(object.curvenetUnreached, queries, chainAttrs, overrides);
 }
 
 // Reads the whole sampled vector at \p time, the way the UI thread will at

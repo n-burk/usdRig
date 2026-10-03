@@ -21,10 +21,10 @@ namespace rigExec {
 /// Magic bytes "REXB" as a little-endian u32.
 inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 
-/// Major 2 adds six signed-axis sphere inputs to geometry weight records.
-/// Re-export major 1 files; incompatible records must not be misread.
+/// Major 3 uses the current geometry and frame record layouts.
+/// Re-export earlier files; incompatible records must not be misread.
 /// Encoded (minor << 16) | major.
-inline constexpr uint32_t RigExecBinaryVersion = 0x00000002u;
+inline constexpr uint32_t RigExecBinaryVersion = 0x00000003u;
 inline constexpr uint32_t RigExecBinaryMajor(uint32_t version)
 {
     return version & 0xffffu;

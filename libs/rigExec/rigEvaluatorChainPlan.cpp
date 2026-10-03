@@ -63,11 +63,6 @@ RigExecRigEvaluator::_CompileChainPlan(
                 for (const auto &[inputPath, phase] : revision.binding.GetPhasedInputs()) {
                     addEdge(inputPath);
                 }
-                // The Profile Mover's implicit dependency: its net's knots
-                // are posed by ordinary movers and it must see them posed.
-                // Stated as an edge now rather than as a pass ordering, so
-                // one mechanism carries both kinds.
-                addEdge(revision.binding.curvenetPoints);
             }
         }
 
@@ -269,13 +264,6 @@ RigExecRigEvaluator::_IsChainLevelParallelSafe(
         }
         std::set<SdfPath> chainWeightObjects;
         for (const _GraphRevision &revision : chain->second) {
-            // A Profile Mover reads its curvenet's posed points out of the
-            // generation being built and binds through a cut/factorization
-            // cache every profile chain shares. Both are things a serial walk
-            // has finished with before the next chain asks.
-            if (revision.op == RigExecRevisionOp::Curvenet) {
-                return false;
-            }
             // Defence in depth against a future edge type, not a hazard the
             // dependency graph can currently produce: a phased read is an
             // edge addEdge already records, so a phased reader and the chain

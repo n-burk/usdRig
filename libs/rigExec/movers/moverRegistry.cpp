@@ -2,10 +2,15 @@
 #include "moverRegistry.h"
 #include "moverExecCommon.h"
 
+#include "pxr/base/plug/plugin.h"
+#include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/diagnostic.h"
 #include "pxr/usd/usdGeom/pointBased.h"
 #include "pxr/usd/usdSkel/blendShape.h"
 
 #include <cmath>
+#include <deque>
+#include <mutex>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -15,39 +20,167 @@ TF_DEFINE_PUBLIC_TOKENS(RigExecMoverExecTokens, RIGEXEC_MOVER_EXEC_TOKENS);
 
 namespace {
 
-std::vector<RigExecMoverHandler> &
-_Rows()
+struct _Entry {
+    explicit _Entry(RigExecMoverHandler value)
+        : schemaType(value.schemaType), handler(std::move(value))
+    {
+        handler.schemaType = schemaType.c_str();
+    }
+    std::string schemaType;
+    RigExecMoverHandler handler;
+};
+
+struct _Registry {
+    // Deque insertion keeps previously returned handler pointers valid.
+    std::deque<_Entry> rows;
+    std::mutex mutex;
+};
+
+_Registry &
+_GetRegistry()
 {
-    // Function-local so registration during library load cannot run
-    // before it exists, whatever order the mover TUs initialize in.
-    // After load the table is only read; see the header.
-    static std::vector<RigExecMoverHandler> rows;
-    return rows;
+    static _Registry registry;
+    return registry;
 }
 
-}  // namespace
+struct _PluginLoader {
+    std::recursive_mutex mutex;
+    bool discovered = false;
+};
 
-void
-RigExecRegisterMoverHandler(RigExecMoverHandler handler)
+_PluginLoader &
+_GetPluginLoader()
 {
-    _Rows().push_back(std::move(handler));
+    static _PluginLoader loader;
+    return loader;
 }
 
 const RigExecMoverHandler *
-RigExecFindMoverHandler(const TfToken &schemaType)
+_Find(const TfToken &schemaType)
 {
-    for (const RigExecMoverHandler &handler : _Rows()) {
-        if (schemaType == handler.schemaType) {
-            return &handler;
+    _Registry &registry = _GetRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    for (const _Entry &entry : registry.rows) {
+        if (schemaType == entry.handler.schemaType) {
+            return &entry.handler;
         }
     }
     return nullptr;
 }
 
-const std::vector<RigExecMoverHandler> &
+}  // namespace
+
+bool
+RigExecRegisterMoverHandler(RigExecMoverHandler handler, std::string *error)
+{
+    const auto fail = [error](const std::string &message) {
+        if (error) {
+            *error = message;
+        } else {
+            TF_WARN("%s", message.c_str());
+        }
+        return false;
+    };
+    if (!handler.schemaType || !*handler.schemaType || !handler.resolveOp) {
+        return fail("Mover registration requires a schema type and resolveOp");
+    }
+    const bool external =
+        handler.resolveOp(TfToken()) == RigExecRevisionOp::External;
+    if (external || handler.assembleExternal || handler.applyExternal) {
+        if (!external || handler.domain != RigExecMoverDomain::Points ||
+            !handler.assembleExternal || !handler.applyExternal) {
+            return fail(std::string(handler.schemaType) +
+                ": external movers require the External points operation "
+                "and both assembleExternal and applyExternal callbacks");
+        }
+        if (!handler.oracle) {
+            handler.hasScalarOracle = false;
+        }
+    }
+    _Registry &registry = _GetRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    for (const _Entry &entry : registry.rows) {
+        if (entry.schemaType == handler.schemaType) {
+            return fail("Mover already registered: " + entry.schemaType);
+        }
+    }
+    registry.rows.emplace_back(std::move(handler));
+    return true;
+}
+
+bool
+RigExecLoadMoverPlugins(std::vector<std::string> *diagnostics)
+{
+    // Plug::Load can run registration code which itself performs a lookup.
+    // Do not hold the row mutex across library initialization or recursively
+    // ask Plug to load the library whose initializer is running.
+    _PluginLoader &loader = _GetPluginLoader();
+    static thread_local bool loading = false;
+    std::lock_guard<std::recursive_mutex> lock(loader.mutex);
+    if (loading) {
+        return true;
+    }
+    struct _LoadingGuard {
+        bool &flag;
+        explicit _LoadingGuard(bool &value) : flag(value) { flag = true; }
+        ~_LoadingGuard() { flag = false; }
+    } guard(loading);
+    loader.discovered = true;
+    bool ok = true;
+    for (const PlugPluginPtr &plugin :
+             PlugRegistry::GetInstance().GetAllPlugins()) {
+        const JsObject metadata = plugin->GetMetadata();
+        const auto version = metadata.find("RigExecMoverPlugin");
+        if (version == metadata.end()) {
+            continue;
+        }
+        std::string message;
+        if (!version->second.IsInt() ||
+            version->second.GetInt() != RigExecMoverPluginApiVersion) {
+            message = "Mover plugin " + plugin->GetName() +
+                " has an incompatible RigExecMoverPlugin API version; "
+                "expected " + std::to_string(RigExecMoverPluginApiVersion);
+        } else if (!plugin->Load()) {
+            message = "Could not load mover plugin " + plugin->GetName();
+        }
+        if (!message.empty()) {
+            ok = false;
+            if (diagnostics) {
+                diagnostics->push_back(std::move(message));
+            } else {
+                TF_WARN("%s", message.c_str());
+            }
+        }
+    }
+    return ok;
+}
+
+const RigExecMoverHandler *
+RigExecFindMoverHandler(const TfToken &schemaType)
+{
+    if (const RigExecMoverHandler *handler = _Find(schemaType)) {
+        return handler;
+    }
+    _PluginLoader &loader = _GetPluginLoader();
+    std::lock_guard<std::recursive_mutex> lock(loader.mutex);
+    if (!loader.discovered) {
+        RigExecLoadMoverPlugins();
+    }
+    return _Find(schemaType);
+}
+
+std::vector<RigExecMoverHandler>
 RigExecMoverHandlers()
 {
-    return _Rows();
+    RigExecLoadMoverPlugins();
+    _Registry &registry = _GetRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    std::vector<RigExecMoverHandler> result;
+    result.reserve(registry.rows.size());
+    for (const _Entry &entry : registry.rows) {
+        result.push_back(entry.handler);
+    }
+    return result;
 }
 
 SdfPathVector

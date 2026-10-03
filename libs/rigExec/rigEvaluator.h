@@ -523,7 +523,7 @@ public:
     /// another, in order, and concatenating them reproduces the compiled
     /// chain order exactly. A level a rig cannot safely spread out -- one
     /// that is too short to pay for the dispatch, or that holds a phased
-    /// read, a Profile Mover, or two chains sharing a weight object -- says
+    /// read or two chains sharing a weight object -- says
     /// so here and is walked in order like any other.
     size_t GetChainLevelCount() const { return _chainPlan.levels.size(); }
 
@@ -1510,18 +1510,10 @@ private:
         const std::map<SdfPath, std::vector<_GraphRevision>> &graphChains,
         const std::set<SdfPath> &currentPhaseWeights);
 
-    /// Profile Mover cut-meshes and factorizations, kept across frames.
-    ///
-    /// Lives on the evaluator rather than in the parameter packet because it
-    /// is epoch state, not a value: the cut depends on the layout, and the
-    /// layout is what an epoch IS. Keyed and digest-checked internally, so a
-    /// curvenet edit rebinds and an unchanged one does not.
-    mutable RigExecCurvenetBindCache _curvenetBindings;
     /// Per-epoch skin layouts, keyed by mover path.
     ///
-    /// Lives here for the same reason the curvenet bindings do: it is epoch
-    /// state, not a value, and it must not outlive the evaluator that read
-    /// the stage it came from. Cleared by a change notice that reaches a
+    /// This is epoch state, not a value, and must not outlive the evaluator
+    /// that read the stage it came from. Cleared by a change notice that reaches a
     /// layout input (_ClearValueCaches), by an interactive-override change
     /// that can reach one, and by the commit of a new epoch.
     RigExecSkinTopologyCache _skinTopologies;

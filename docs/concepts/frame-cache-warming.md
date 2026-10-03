@@ -20,6 +20,9 @@ re-evaluation.
   tick, as today; warming never serves a neighboring frame's pose in place
   of the requested one, and it never makes a drag laggier. When you release
   (edit-commit), the neighbors re-warm in the background.
+- **Edit a mover parameter** and the strip shows affected frames as dirty
+  while the edit is in progress. Once the edit settles, warming samples
+  the changed inputs and refills those frames automatically.
 - **During playback** warming gets out of the way: the sweep skips frames
   the playhead already passed.
 
@@ -30,8 +33,10 @@ re-evaluation.
   result is recoverable, a plausible wrong one is not. A new edit cancels
   in-flight warming for that rig, and stale results are dropped, never
   published.
-- **Never blocks the viewport.** Cache fill and warming run on low-priority
-  background threads; the UI thread never waits on them.
+- **Background workers handle supported frozen programs.** Other operations
+  fill one missing frame per idle tick through the live evaluator. This
+  fallback costs one evaluation on the UI thread, pauses during edits and
+  playback, and does not change the displayed frame.
 - **Never serves the playhead from the pool.** A miss at the requested frame
   evaluates live on the calling thread and is never slower than with the
   cache off.
@@ -52,11 +57,16 @@ re-evaluation.
 usdview prepares an executable program by default so the background workers
 can fill the animation range before playback. Explicit evaluation modes and
 an authored `rigExec:baked = false` retain their requested behavior. Rigs that
-cannot prepare a program still cache frames as you visit them.
+cannot prepare or freeze a program fill the requested range one frame per
+idle tick. Every valid live result can also be cached as you visit frames.
+These fallback entries use frame time and the stage edit serial, so adding
+an operation does not require adding a separate cache input sampler.
+Background sampling also discards its saved static inputs after a stage
+edit, including edits that keep the same executable program and bindings.
 
 Set `RIGEXEC_DYNAMIC_RUNS_PROGRAM=0` to opt out of the viewport default.
-This leaves visited-frame caching enabled but prevents background warming
-for rigs using the dynamic evaluator.
+This leaves visited-frame caching and idle range filling enabled, but
+prevents worker-thread warming for rigs using the dynamic evaluator.
 
 ## Switches
 
@@ -69,10 +79,9 @@ for rigs using the dynamic evaluator.
 ## Limits worth knowing
 
 - **Rigs that decline the bake** (see [Baked and dynamic
-  evaluation](baked-vs-dynamic.md)) still benefit: frames you
-  scrubbed yourself are remembered and served back. But there is no
-  background warming for them, because the dynamic path cannot run off the
-  UI thread.
+  evaluation](baked-vs-dynamic.md)) use the idle fallback. A costly dynamic
+  rig can therefore make an idle tick take as long as one frame evaluation.
+  Worker-thread warming remains the preferred path.
 - **`.rigexec` playback sessions** are unchanged and never consult the
   frame cache.
 - The cache is **in memory only** — there is no on-disk persistence, so
@@ -90,3 +99,6 @@ usdview, waits for automatic range warming, and replays the range in both
 directions. Pass another animated stage as its first argument. The native
 `testRigExecImagingFrameCacheDefault` suite checks default-mode cache hits,
 zero evaluator pulls on warmed frames, edit invalidation, and mode overrides.
+`bin/test/run_testusdview_wrinkle_framecache.bat` (or `.sh`) checks Wrinkle
+parameter edits, immediate dirty display, automatic rebuilding, and cached
+geometry against a fresh evaluation in usdview.

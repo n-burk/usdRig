@@ -190,7 +190,16 @@ export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/build/python${PY_SITE:+:$PY_S
 # plugInfo carries the LibraryPath and implementsComputeExtent that let Plug
 # load the compute-extent registration. The checked-in copy under plugin/ is a
 # data-only fallback and will not give RigExec prims their bounds.
-export PXR_PLUGINPATH_NAME="$RIG/build/usd/rigExecSchema/resources:$RIG/build/usd/rigExecImaging/resources:$RIG/plugin/rigExecUsdview${PXR_PLUGINPATH_NAME:+:$PXR_PLUGINPATH_NAME}"
+export PXR_PLUGINPATH_NAME="$RIG/build/usd/rigExecSchema/resources:$RIG/build/usd/rigExecImaging/resources:$RIG/build/usd/rigExecMoverPlugins:$RIG/plugin/rigExecUsdview${PXR_PLUGINPATH_NAME:+:$PXR_PLUGINPATH_NAME}"
+
+# The usdMayaRig sidecar (Maya ASCII file format) staged beside the repo,
+# when built: its build-tree plugInfo carries an absolute LibraryPath, and
+# the checked-in usdview/ companion registers the usdview integration.
+# Skipped silently when the sidecar was never built.
+if [ -f "$_SIBLINGS/usdMayaRig/build/usd/usdMayaRig/resources/plugInfo.json" ]; then
+    export PXR_PLUGINPATH_NAME="$_SIBLINGS/usdMayaRig/build/usd/usdMayaRig/resources:$_SIBLINGS/usdMayaRig/usdview:$PXR_PLUGINPATH_NAME"
+    export PYTHONPATH="$PYTHONPATH:$_SIBLINGS/usdMayaRig/usdview"
+fi
 
 # The python tests resolve pxr themselves through this, rather than inheriting
 # a PYTHONPATH that may or may not carry it (see tests/python/

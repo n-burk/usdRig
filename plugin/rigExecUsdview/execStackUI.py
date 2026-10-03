@@ -83,9 +83,8 @@ def _CompilableStage(stage):
 _GROUPS = {
     "All": None,
     "Deformers": ("SkinMover", "MatrixMover", "CurveMover", "LatticeMover",
-                  "SurfaceMover", "SmoothMover", "DeltaMushMover", "BlendShapeMover",
-                  "VolumeCorrectMover", "CurvenetMover",
-                  "CurvenetAdjusterMover"),
+                  "SurfaceMover", "SmoothMover", "DeltaMushMover", "WrinkleMover", "BlendShapeMover",
+                  "VolumeCorrectMover"),
     "Constraints": ("Constraint",),
     "Solvers": ("FkChain", "TwoBoneIk", "BlendPointFrames",
                 "TwistDistribution", "Ribbon", "SplineIk"),
@@ -100,7 +99,7 @@ _SOLVER_TYPES = ("RigExecFkChain", "RigExecTwoBoneIk",
                  "RigExecRibbon", "RigExecSplineIk")
 
 _DEFORMER_TOKENS = ("SkinMover", "MatrixMover", "CurveMover",
-                    "LatticeMover", "SurfaceMover", "SmoothMover", "DeltaMushMover",
+                    "LatticeMover", "SurfaceMover", "SmoothMover", "DeltaMushMover", "WrinkleMover",
                     "BlendShapeMover", "VolumeCorrectMover")
 
 

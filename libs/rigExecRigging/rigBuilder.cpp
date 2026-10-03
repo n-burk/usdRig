@@ -1718,58 +1718,6 @@ RigExecPoseHandle::GetWeightOutput() const
     return _path.AppendProperty(TfToken("outputs:weight"));
 }
 
-// Curvenet
-
-void
-RigExecCurvenetHandle::SetPoints(const std::vector<GfVec3f> &points)
-{
-    _AuthorAttr(
-        GetPrim(), "points", SdfValueTypeNames->Point3fArray,
-        VtValue(VtArray<GfVec3f>(points.begin(), points.end())));
-}
-
-void
-RigExecCurvenetHandle::AddSpline(int p0, int h0, int h1, int p1)
-{
-    const int requested[] = { p0, h0, h1, p1 };
-    VtArray<GfVec3f> points;
-    const UsdAttribute pointsAttr = GetPrim().GetAttribute(TfToken("points"));
-    if (!pointsAttr || !pointsAttr.Get(&points)) {
-        throw std::runtime_error("curvenet points are unavailable");
-    }
-    for (const int index : requested) {
-        if (index < 0 || static_cast<size_t>(index) >= points.size()) {
-            throw std::invalid_argument(
-                "spline index is outside the current curvenet point pool");
-        }
-    }
-    VtIntArray indices;
-    const UsdAttribute attr =
-        GetPrim().GetAttribute(TfToken("rigExec:splineIndices"));
-    attr.Get(&indices);
-    indices.push_back(p0);
-    indices.push_back(h0);
-    indices.push_back(h1);
-    indices.push_back(p1);
-    _AuthorAttr(
-        GetPrim(), "rigExec:splineIndices", SdfValueTypeNames->IntArray,
-        VtValue(indices));
-}
-
-void
-RigExecCurvenetHandle::SetBasis(const TfToken &basis)
-{
-    _AuthorAttr(
-        GetPrim(), "rigExec:basis", SdfValueTypeNames->Token, VtValue(basis));
-}
-
-void
-RigExecCurvenetHandle::SetSamplesPerSpline(int count)
-{
-    _AuthorAttr(
-        GetPrim(), "rigExec:samplesPerSpline", SdfValueTypeNames->Int, VtValue(count));
-}
-
 // Mover handles
 
 void
@@ -2007,20 +1955,6 @@ RigExecSmoothMoverHandle::SetStrength(float strength)
 
 void
 RigExecVolumeCorrectMoverHandle::SetStrength(float strength)
-{
-    SetDefaultWeight(strength);
-}
-
-void
-RigExecCurvenetMoverHandle::SetCurvenet(const SdfPath &path)
-{
-    _RequireTypedPrim(
-        _stage, path, TfToken("RigExecCurvenet"), "curvenet mover input");
-    SetRel("rigExec:curvenet", { path });
-}
-
-void
-RigExecCurvenetMoverHandle::SetStrength(float strength)
 {
     SetDefaultWeight(strength);
 }
@@ -2322,104 +2256,172 @@ RigExecMoverChain::AddDeltaMushMover(const std::string &name, float weight, cons
     return handle;
 }
 
+void
+RigExecWrinkleMoverHandle::SetRestPoints(const std::vector<GfVec3f> &points)
+{
+    for (const GfVec3f &point : points) {
+        if (!std::isfinite(point[0]) || !std::isfinite(point[1]) ||
+            !std::isfinite(point[2])) {
+            throw std::invalid_argument("wrinkle rest points must be finite");
+        }
+    }
+    _AuthorAttr(GetPrim(), "inputs:restPoints", SdfValueTypeNames->Point3fArray,
+                VtValue(VtVec3fArray(points.begin(), points.end())));
+}
+
+void
+RigExecWrinkleMoverHandle::SetIterations(int iterations)
+{
+    if (iterations < 0 || iterations > 1000) {
+        throw std::invalid_argument("wrinkle iterations must be in [0,1000]");
+    }
+    _AuthorAttr(GetPrim(), "inputs:iterations", SdfValueTypeNames->Int,
+                VtValue(iterations));
+}
+
+void
+RigExecWrinkleMoverHandle::SetTopology(const TfToken &topology)
+{
+    if (topology != TfToken("cloth") && topology != TfToken("surfaceStruts")) {
+        throw std::invalid_argument("wrinkle topology must be cloth or surfaceStruts");
+    }
+    _AuthorAttr(GetPrim(), "inputs:topology", SdfValueTypeNames->Token,
+                VtValue(topology));
+}
+
+void
+RigExecWrinkleMoverHandle::SetNeighborDistance(int distance)
+{
+    if (distance < 1 || distance > 8) {
+        throw std::invalid_argument("wrinkle neighbor distance must be in [1,8]");
+    }
+    _AuthorAttr(GetPrim(), "inputs:neighborDistance", SdfValueTypeNames->Int,
+                VtValue(distance));
+}
+
+void
+RigExecWrinkleMoverHandle::SetRestLengthScale(float scale)
+{
+    if (!std::isfinite(scale) || scale <= 0.0f) {
+        throw std::invalid_argument("wrinkle rest length scale must be finite and positive");
+    }
+    _AuthorAttr(GetPrim(), "inputs:restLengthScale", SdfValueTypeNames->Float,
+                VtValue(scale));
+}
+
+void
+RigExecWrinkleMoverHandle::SetStretchStiffness(float stiffness)
+{
+    if (!std::isfinite(stiffness) || stiffness < 0.0f || stiffness > 1.0f) {
+        throw std::invalid_argument("wrinkle stretch stiffness must be finite and in [0,1]");
+    }
+    _AuthorAttr(GetPrim(), "inputs:stretchStiffness", SdfValueTypeNames->Float,
+                VtValue(stiffness));
+}
+
+void
+RigExecWrinkleMoverHandle::SetCompressionStiffness(float stiffness)
+{
+    if (!std::isfinite(stiffness) || stiffness < 0.0f || stiffness > 1.0f) {
+        throw std::invalid_argument("wrinkle compression stiffness must be finite and in [0,1]");
+    }
+    _AuthorAttr(GetPrim(), "inputs:compressionStiffness", SdfValueTypeNames->Float,
+                VtValue(stiffness));
+}
+
+void
+RigExecWrinkleMoverHandle::SetBendStiffness(float stiffness)
+{
+    if (!std::isfinite(stiffness) || stiffness < 0.0f || stiffness > 1.0f) {
+        throw std::invalid_argument("wrinkle bend stiffness must be finite and in [0,1]");
+    }
+    _AuthorAttr(GetPrim(), "inputs:bendStiffness", SdfValueTypeNames->Float,
+                VtValue(stiffness));
+}
+
+void
+RigExecWrinkleMoverHandle::SetMaxDisplacement(float radius)
+{
+    if (!std::isfinite(radius) || radius < 0.0f) {
+        throw std::invalid_argument("wrinkle maximum displacement must be finite and nonnegative");
+    }
+    _AuthorAttr(GetPrim(), "inputs:maxDisplacement", SdfValueTypeNames->Float,
+                VtValue(radius));
+}
+
+void
+RigExecWrinkleMoverHandle::SetPinBorders(bool pin)
+{
+    _AuthorAttr(GetPrim(), "inputs:pinBorders", SdfValueTypeNames->Bool, VtValue(pin));
+}
+
+void
+RigExecWrinkleMoverHandle::SetPinPoints(const std::vector<int> &indices)
+{
+    std::vector<int> sorted(indices);
+    std::sort(sorted.begin(), sorted.end());
+    if ((!sorted.empty() && sorted.front() < 0) ||
+        std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
+        throw std::invalid_argument("wrinkle pin points must be unique nonnegative indices");
+    }
+    _AuthorAttr(GetPrim(), "inputs:pinPoints", SdfValueTypeNames->IntArray,
+                VtValue(VtIntArray(indices.begin(), indices.end())));
+}
+
+void
+RigExecWrinkleMoverHandle::SetTangentPlaneCollisions(bool enabled)
+{
+    _AuthorAttr(GetPrim(), "inputs:tangentPlaneCollisions", SdfValueTypeNames->Bool,
+                VtValue(enabled));
+}
+
+void
+RigExecWrinkleMoverHandle::SetTangentPlaneInset(float inset)
+{
+    if (!std::isfinite(inset) || inset < 0.0f) {
+        throw std::invalid_argument("wrinkle tangent plane inset must be finite and nonnegative");
+    }
+    _AuthorAttr(GetPrim(), "inputs:tangentPlaneInset", SdfValueTypeNames->Float,
+                VtValue(inset));
+}
+
+void
+RigExecWrinkleMoverHandle::SetWrinkleScale(float scale)
+{
+    if (!std::isfinite(scale) || scale < 0.0f) {
+        throw std::invalid_argument("wrinkle scale must be finite and nonnegative");
+    }
+    _AuthorAttr(GetPrim(), "inputs:wrinkleScale", SdfValueTypeNames->Float,
+                VtValue(scale));
+}
+
+void
+RigExecWrinkleMoverHandle::SetSmoothingIterations(int iterations)
+{
+    if (iterations < 0 || iterations > 100) {
+        throw std::invalid_argument("wrinkle smoothing iterations must be in [0,100]");
+    }
+    _AuthorAttr(GetPrim(), "inputs:smoothingIterations", SdfValueTypeNames->Int,
+                VtValue(iterations));
+}
+
+RigExecWrinkleMoverHandle
+RigExecMoverChain::AddWrinkleMover(
+    const std::string &name, float defaultWeight, const SdfPath &target)
+{
+    _RequireNormalizedMoverWeight(defaultWeight);
+    RigExecWrinkleMoverHandle handle(
+        _stage, _AddMoverPrim("RigExecWrinkleMover", name, target));
+    handle.SetDefaultWeight(defaultWeight);
+    return handle;
+}
+
 RigExecVolumeCorrectMoverHandle
 RigExecMoverChain::AddVolumeCorrectMover(
     const std::string &name, float defaultWeight, const SdfPath &target)
 {
     _RequireNormalizedMoverWeight(defaultWeight);
     RigExecVolumeCorrectMoverHandle handle(_stage, _AddMoverPrim("RigExecVolumeCorrectMover", name, target));
-    handle.SetDefaultWeight(defaultWeight);
-    return handle;
-}
-
-void
-RigExecCurvenetAdjustmentHandle::SetCurvenet(const SdfPath &path)
-{
-    _RequireTypedPrim(_stage, path, TfToken("RigExecCurvenet"), "adjustment curvenet");
-    SetRel("rigExec:curvenet", {path});
-}
-
-void
-RigExecCurvenetAdjustmentHandle::SetKnotIndex(int index)
-{
-    SdfPathVector nets;
-    GetPrim().GetRelationship(TfToken("rigExec:curvenet")).GetTargets(&nets);
-    VtVec3fArray points;
-    if (nets.size()!=1 || !_stage->GetPrimAtPath(nets[0])
-            .GetAttribute(TfToken("points")).Get(&points) ||
-        index<0 || size_t(index)>=points.size()) {
-        throw std::invalid_argument("adjustment index is outside its curvenet point pool");
-    }
-    SetAttr("rigExec:knotIndex", TfToken("int"), VtValue(index));
-}
-
-void
-RigExecCurvenetAdjustmentHandle::SetIncludeTangents(bool include)
-{
-    SetAttr("rigExec:includeTangents", TfToken("bool"), VtValue(include));
-}
-
-RigExecCurvenetAdjustmentHandle
-RigExecCurvenetAdjustmentHandle::AddTangent(const std::string &name, int index)
-{
-    _RequireName(name, "tangent adjustment name");
-    SdfPathVector nets;
-    GetPrim().GetRelationship(TfToken("rigExec:curvenet")).GetTargets(&nets);
-    VtVec3fArray points;
-    if (nets.size()!=1 || !_stage->GetPrimAtPath(nets[0])
-            .GetAttribute(TfToken("points")).Get(&points) ||
-        index<0 || size_t(index)>=points.size()) {
-        throw std::invalid_argument("tangent index is outside its curvenet point pool");
-    }
-    const SdfPath path=_path.AppendChild(TfToken(name));
-    if (_stage->GetPrimAtPath(path)) throw std::invalid_argument("tangent adjustment already exists");
-    const auto prim=RigExecSchemaPrim::Define(_stage,path,TfToken("RigExecCurvenetAdjustment")).GetPrim();
-    _ApplyApiRequired(prim,_kControlApi);
-    _ApplyApiRequired(prim,_kNodeGraphApi);
-    RigExecCurvenetAdjustmentHandle child(_stage,path);
-    child.SetCurvenet(nets[0]);
-    child.SetKnotIndex(index);
-    child.SetAttr("rigExec:pointKind",TfToken("token"),VtValue(TfToken("tangent")));
-    child.SetIncludeTangents(false);
-    return child;
-}
-
-void
-RigExecCurvenetAdjusterMoverHandle::SetAdjustments(const std::vector<SdfPath> &paths)
-{
-    if (paths.empty()) throw std::invalid_argument("adjuster needs at least one adjustment");
-    for (const auto &path:paths) _RequireTypedPrim(
-        _stage,path,TfToken("RigExecCurvenetAdjustment"),"curvenet adjustment");
-    SetRel("rigExec:adjustments",paths);
-}
-
-RigExecCurvenetAdjusterMoverHandle
-RigExecMoverChain::AddCurvenetAdjusterMover(
-    const std::string &name, const std::vector<SdfPath> &adjustments,
-    float defaultWeight, const SdfPath &target)
-{
-    _RequireNormalizedMoverWeight(defaultWeight);
-    if (adjustments.empty()) throw std::invalid_argument("adjuster needs at least one adjustment");
-    for (const auto &path:adjustments) _RequireTypedPrim(
-        _stage,path,TfToken("RigExecCurvenetAdjustment"),"curvenet adjustment");
-    RigExecCurvenetAdjusterMoverHandle handle(_stage,
-        _AddMoverPrim("RigExecCurvenetAdjusterMover",name,target));
-    handle.SetAdjustments(adjustments);
-    handle.SetDefaultWeight(defaultWeight);
-    return handle;
-}
-
-RigExecCurvenetMoverHandle
-RigExecMoverChain::AddCurvenetMover(
-    const std::string &name, const SdfPath &curvenetPrim, float defaultWeight,
-    const SdfPath &target)
-{
-    _RequireNormalizedMoverWeight(defaultWeight);
-    _RequireTypedPrim(
-        _stage, curvenetPrim, TfToken("RigExecCurvenet"),
-        "curvenet mover input");
-    RigExecCurvenetMoverHandle handle(_stage, _AddMoverPrim("RigExecCurvenetMover", name, target));
-    handle.SetCurvenet(curvenetPrim);
     handle.SetDefaultWeight(defaultWeight);
     return handle;
 }
@@ -3084,39 +3086,6 @@ RigExecRigBuilder::AddPoseInterpolator(
     _ApplyApiRequired(prim, _kNodeGraphApi);
     RigExecPoseInterpolatorHandle handle(_stage, prim.GetPath());
     handle.SetDriver(driver);
-    return handle;
-}
-
-RigExecCurvenetHandle
-RigExecRigBuilder::AddCurvenet(
-    const std::string &name, const std::vector<GfVec3f> &points)
-{
-    _RequireName(name, "curvenet name");
-    const SdfPath scope = _EnsureScope("Curvenets");
-    UsdPrim prim = _DefineTyped(scope, "RigExecCurvenet", name);
-    _ApplyApiRequired(prim, _kNodeGraphApi);
-    RigExecCurvenetHandle handle(_stage, prim.GetPath());
-    handle.SetPoints(points);
-    return handle;
-}
-
-RigExecCurvenetAdjustmentHandle
-RigExecRigBuilder::AddCurvenetAdjustment(
-    const std::string &name, const SdfPath &curvenet, int knotIndex)
-{
-    _RequireName(name,"curvenet adjustment name");
-    _RequireTypedPrim(_stage,curvenet,TfToken("RigExecCurvenet"),"adjustment curvenet");
-    const auto net=_stage->GetPrimAtPath(curvenet);
-    VtVec3fArray points;
-    net.GetAttribute(TfToken("points")).Get(&points);
-    if (knotIndex<0 || size_t(knotIndex)>=points.size())
-        throw std::invalid_argument("adjustment index is outside its curvenet point pool");
-    const auto prim=_DefineTyped(_EnsureScope("Adjustments"),"RigExecCurvenetAdjustment",name);
-    _ApplyApiRequired(prim,_kControlApi);
-    _ApplyApiRequired(prim,_kNodeGraphApi);
-    RigExecCurvenetAdjustmentHandle handle(_stage,prim.GetPath());
-    handle.SetCurvenet(curvenet);
-    handle.SetKnotIndex(knotIndex);
     return handle;
 }
 

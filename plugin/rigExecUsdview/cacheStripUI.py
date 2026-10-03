@@ -230,6 +230,23 @@ class CacheStripPanel(QtWidgets.QDialog):
         self._Poll(cacheStripPanel.REASON_RANGE, True)
         self._RefreshButtons()
 
+    def _SyncStage(self):
+        """Follow root and range edits without requiring a stage reload."""
+        stage = self._Stage()
+        roots = self._RigRoots(stage)
+        if roots != [self._rootBox.itemText(i)
+                     for i in range(self._rootBox.count())]:
+            selected = self._model.rigPath
+            self.Rebuild()
+            index = self._rootBox.findText(selected)
+            if index >= 0:
+                self._rootBox.setCurrentIndex(index)
+        if stage is not None:
+            self._model.SetRange(stage.GetStartTimeCode(),
+                                 stage.GetEndTimeCode())
+        else:
+            self._model.SetRange(None, None)
+
     def _OnRigChanged(self):
         if self._model.SetRig(self._rootBox.currentText()):
             self._Poll(cacheStripPanel.REASON_RANGE, True)
@@ -256,7 +273,15 @@ class CacheStripPanel(QtWidgets.QDialog):
         """
         if not self.isVisible():
             return
+        self._SyncStage()
         self._Poll(cacheStripPanel.REASON_TICK, mayHaveEnqueued)
+
+    def PollAfterEdit(self):
+        """Show native retirement even while the warming timer is paused."""
+        if not self.isVisible():
+            return
+        self._SyncStage()
+        self._Poll(cacheStripPanel.REASON_COMMIT, False)
 
     def _Poll(self, reason, mayHaveEnqueued):
         lib = self._Library()
@@ -282,6 +307,7 @@ class CacheStripPanel(QtWidgets.QDialog):
                                  "rigExecImaging has no ClearFrameCache.")
 
     def WarmRange(self):
+        self._SyncStage()
         lib = self._Library()
         if lib is None or not self._model.rigPath:
             return

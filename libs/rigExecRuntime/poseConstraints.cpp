@@ -1544,14 +1544,13 @@ _RrResolveWeightPacketAll(const RrProgram *program,
 }
 
 // Whether the wire weight object names a type the oracle understands
-// (_IsWeightObjectType: static, dynamic, curvenet, combine, and the
+// (_IsWeightObjectType: static, dynamic, combine, and the
 // three volumetric kinds).
 bool
 _RrIsWeightObjectType(const RrProgram *program, uint32_t type)
 {
     return program->TokenEquals(type, "RigExecStaticWeight") ||
            program->TokenEquals(type, "RigExecDynamicWeight") ||
-           program->TokenEquals(type, "RigExecCurvenetWeight") ||
            program->TokenEquals(type, "RigExecCombineWeight") ||
            program->TokenEquals(type, "RigExecSphereWeight") ||
            program->TokenEquals(type, "RigExecPlaneWeight") ||
