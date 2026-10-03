@@ -720,6 +720,7 @@ struct RigExecBurstSampleCache {
     /// in table order, so the cached sampler visits in emission order.
     /// avarBindings needs none: it holds the varying ones only.
     std::vector<size_t> ladderSites;
+    std::vector<size_t> spaceSwitchSites;
     std::vector<size_t> solverSites;
     std::vector<size_t> constraintSites;
     std::vector<size_t> weightSites;

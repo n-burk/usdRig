@@ -244,6 +244,11 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
          B.poseInterpolators) {
         interpolator.enabledValue =
             RigExecBakedRead(interpolator.enabled, R, time, &B.overridden);
+        // A numeric driver's dials, as RigExecBakedRunInputs reads them.
+        for (size_t i = 0; i < interpolator.valueInputs.size(); ++i) {
+            interpolator.values[i] = RigExecBakedRead(
+                interpolator.valueInputs[i], R, time, &B.overridden);
+        }
     }
 
     // RunSolverSources (bakedPose.cpp:2156): ribbon points replay from the

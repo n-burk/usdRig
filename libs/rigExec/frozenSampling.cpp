@@ -191,6 +191,18 @@ _BurstLadderNeedsVisit(const RigExecBakedProgramImpl::Ladder &ladder,
 }
 
 bool
+_BurstSpaceSwitchNeedsVisit(
+    const RigExecBakedProgramImpl::SpaceSwitch &spaceSwitch,
+    const std::vector<char> &flags)
+{
+    bool needed = false;
+    _VisitSpaceSwitchInputs(spaceSwitch, [&](const auto &input) {
+        needed = needed || _BurstInputNeedsVisit(input, flags);
+    });
+    return needed;
+}
+
+bool
 _BurstSolverNeedsVisit(const RigExecBakedProgramImpl::Solver &solver,
                        const std::vector<char> &flags)
 {
@@ -1293,10 +1305,19 @@ RigExecSampleFrameInputsWithChainBindings(
                                   time, &sampled, chainFresh);
         });
     }
+    for (const RigExecBakedProgramImpl::SpaceSwitch &spaceSwitch :
+         B.spaceSwitches) {
+        _VisitSpaceSwitchInputs(spaceSwitch, [&](const auto &input) {
+            _SampleFlaggedBinding(input, resolved, &refreshed, overrideFlags,
+                                  time, &sampled, chainFresh);
+        });
+    }
     for (const RigExecBakedProgramImpl::PoseInterpolator &interp :
          B.poseInterpolators) {
-        _SampleFlaggedBinding(interp.enabled, resolved, &refreshed,
-                              overrideFlags, time, &sampled, chainFresh);
+        _VisitInterpolatorInputs(interp, [&](const auto &input) {
+            _SampleFlaggedBinding(input, resolved, &refreshed, overrideFlags,
+                                  time, &sampled, chainFresh);
+        });
     }
     for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
         _SampleSolverBindings(solver, resolved, &refreshed, overrideFlags,
@@ -1581,6 +1602,7 @@ RigExecBurstSampleCache::Clear()
     placeable = false;
     usable = false;
     ladderSites.clear();
+    spaceSwitchSites.clear();
     solverSites.clear();
     constraintSites.clear();
     weightSites.clear();
@@ -1633,6 +1655,12 @@ RigExecBuildBurstSampleCache(
     for (size_t i = 0; i < B.ladders.size(); ++i) {
         if (_BurstLadderNeedsVisit(B.ladders[i], cache->overrideFlags)) {
             cache->ladderSites.push_back(i);
+        }
+    }
+    for (size_t i = 0; i < B.spaceSwitches.size(); ++i) {
+        if (_BurstSpaceSwitchNeedsVisit(B.spaceSwitches[i],
+                                        cache->overrideFlags)) {
+            cache->spaceSwitchSites.push_back(i);
         }
     }
     for (size_t i = 0; i < B.solvers.size(); ++i) {
@@ -1750,6 +1778,13 @@ RigExecSampleFrameInputsWithBurstCache(
     }
     for (size_t i : cache->ladderSites) {
         _VisitLadderInputs(B.ladders[i], [&](const auto &input) {
+            _SampleFlaggedBinding(input, resolved, &refreshed,
+                                  cache->overrideFlags, time, &sampled,
+                                  chainFresh);
+        });
+    }
+    for (size_t i : cache->spaceSwitchSites) {
+        _VisitSpaceSwitchInputs(B.spaceSwitches[i], [&](const auto &input) {
             _SampleFlaggedBinding(input, resolved, &refreshed,
                                   cache->overrideFlags, time, &sampled,
                                   chainFresh);

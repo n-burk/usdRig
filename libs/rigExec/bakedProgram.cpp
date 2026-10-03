@@ -523,7 +523,11 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     };
 
     for (const auto &constraint : E._frameConstraints) {
-        if (!_IsBakedConstraintType(constraint.schemaType)) {
+        // A transform-domain matrix mover rides the constraint walk without
+        // being a constraint operator, so it is admitted by name here
+        // rather than through the operator registry's subset check.
+        if (constraint.schemaType != "RigExecMatrixMover" &&
+            !_IsBakedConstraintType(constraint.schemaType)) {
             say("constraint type not baked (" +
                     constraint.schemaType.GetString() + ")",
                 constraint.moverPath);
@@ -2598,6 +2602,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             entry.constraint.weightObject = fc.weightObject;
             entry.constraint.worldUpXform = fc.worldUpObject.xformPath;
             entry.constraint.space = fc.spacePath;
+            entry.constraint.blendShear = fc.blendShear;
+            entry.constraint.worldUpRotationOnly = fc.worldUpRotationOnly;
+            entry.constraint.radialBlend = fc.radialBlend;
         }
         walk.push_back(std::move(entry));
     }

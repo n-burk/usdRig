@@ -100,6 +100,19 @@ _BindMatrixMover(const rigExec::RigExecMoverBindContext &ctx)
         }
     }
     binding.transformSpace = space;
+    // rigExec:space, the rig's carry, read at the transform's phase. Only a
+    // cluster whose points are posed applies it (RigExecClusterInPointFrame).
+    const SdfPathVector carries =
+        rigExec::RigExecRelationshipTargets(moverPrim, "rigExec:space");
+    SdfPath carry = carries.empty() ? SdfPath() : carries[0];
+    if (!carry.IsEmpty() &&
+        binding.transformPhase.kind == rigExec::RigExecReadPhaseKind::Final) {
+        const auto it = frameChainHeads.find(carry);
+        if (it != frameChainHeads.end()) {
+            carry = it->second;
+        }
+    }
+    binding.carrySpace = carry;
     // Matrix movers use the shared ordered provider list for optional
     // neutral references: transform first, then transformSpace. This gives
     // them the same phase, dependency, invalidation and frozen-run handling
@@ -358,7 +371,8 @@ _MakeHandler()
     handler.customTargetValidation = true;
     handler.frameRelationships = {
         "rigExec:transform", "rigExec:transformSpace",
-        "rigExec:referenceTransform", "rigExec:referenceTransformSpace"};
+        "rigExec:referenceTransform", "rigExec:referenceTransformSpace",
+        "rigExec:space"};
     handler.transformRelationship = "rigExec:transform";
     handler.spaceRelationship = "rigExec:transformSpace";
     handler.bind = &_BindMatrixMover;

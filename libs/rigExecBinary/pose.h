@@ -211,6 +211,21 @@ struct RigExecWireSolver {
 
 /// One constraint's epoch description. Weight-oracle scratch is NOT on the
 /// wire: the runtime re-resolves per frame like the program does.
+/// Bits of RigExecWireConstraint::flags.
+enum RigExecWireConstraintFlag : uint8_t {
+    /// rigExec:blendShear on a Scale or Parent constraint.
+    RigExecWireConstraintBlendShear = 1u << 0,
+    /// rigExec:worldUpRotationOnly on an Aim constraint.
+    RigExecWireConstraintWorldUpRotationOnly = 1u << 1,
+    /// rigExec:weightBlend = "radial" on a transform-domain matrix mover.
+    RigExecWireConstraintRadialBlend = 1u << 2,
+};
+/// Every bit this reader understands; any other bit is refused.
+inline constexpr uint8_t RigExecWireConstraintKnownFlags =
+    RigExecWireConstraintBlendShear |
+    RigExecWireConstraintWorldUpRotationOnly |
+    RigExecWireConstraintRadialBlend;
+
 struct RigExecWireConstraint {
     uint32_t path = 0;
     uint32_t type = 0;
@@ -261,6 +276,10 @@ struct RigExecWireConstraint {
     /// the behaviour those files were baked from. See
     /// RigExecWireDecodeDomainPose.
     int32_t spaceSlot = -1;
+    /// RigExecWireConstraintFlag bits: opt-in behaviours that change the
+    /// operator's arithmetic. A second trailing block after the space
+    /// slots; a binary without it decodes as 0, the original arithmetic.
+    uint8_t flags = 0;
     bool snapshotAfter = false;
     // SingleChainIK
     bool singleChainIk = false;

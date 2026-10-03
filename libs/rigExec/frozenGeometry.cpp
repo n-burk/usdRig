@@ -562,7 +562,6 @@ _FrozenAssembleWire(
         if (table->size() < t + s + bt) {
             return true;  // MoverFailed (valid stays false)
         }
-        const size_t bs = table->size() - t - s - bt;
         VtFloatArray driverWeights, driverBaseWeights;
         if (const RigExecSampledInput *sample =
                 findSample("driverWeights")) {
@@ -580,38 +579,33 @@ _FrozenAssembleWire(
                     sample->value.UncheckedGet<VtFloatArray>();
             }
         }
-        const auto pick = [](size_t count, size_t j) {
-            return count <= 1 ? size_t(0) : j % count;
-        };
-        const auto measured = [&](size_t first, size_t count,
-                                  size_t spaceFirst, size_t spaceCount,
-                                  size_t j) {
-            GfMatrix4d m = (*table)[first + pick(count, j)];
-            if (spaceCount > 0) {
-                m = RigExecMeasureInSpace(
-                    m, (*table)[spaceFirst + pick(spaceCount, j)]);
+        // The wire's two frame tokens, off the recorded reads as live
+        // records them, and the fold's carry: the live arm's inputs.
+        const auto sampledToken = [&](const char *name,
+                                      const TfToken &fallback) {
+            const auto found = index.find(
+                moverPath.AppendProperty(TfToken(name)));
+            TfToken value = fallback;
+            if (found != index.end()) {
+                const RigExecSampledInput &sample =
+                    inputs.values[found->second];
+                TfToken held;
+                if (sample.hasValue && _SampleHolds(sample.value, &held)) {
+                    value = held;
+                }
             }
-            return m;
+            return value;
         };
-        params->auxPoints.resize(params->restPoints.size());
-        for (size_t j = 0; j < params->restPoints.size(); ++j) {
-            GfVec3f &rest = params->restPoints[j];
-            if (bt > 0) {
-                const GfMatrix4d b =
-                    measured(t + s, bt, t + s + bt, bs, j);
-                const float wb = driverBaseWeights.empty()
-                    ? 1.0f
-                    : driverBaseWeights[pick(driverBaseWeights.size(), j)];
-                const GfVec3f moved(b.TransformAffine(GfVec3d(rest)));
-                rest = rest + (moved - rest) * wb;
-            }
-            const GfMatrix4d m = measured(0, t, t, s, j);
-            const float w = driverWeights.empty()
-                ? 1.0f
-                : driverWeights[pick(driverWeights.size(), j)];
-            const GfVec3f moved(m.TransformAffine(GfVec3d(rest)));
-            params->auxPoints[j] = rest + (moved - rest) * w;
-        }
+        RigExecWireDriverFrame frame;
+        frame.posedPoints =
+            sampledToken("rigExec:pointFrame", TfToken("rest")) == "posed";
+        frame.posedDelta =
+            sampledToken("rigExec:driverDeltaFrame", TfToken("local")) ==
+            "posed";
+        frame.carry = revision.haveCarry ? &revision.carry : nullptr;
+        RigExecPoseWireDrivers(*table, t, s, bt, driverWeights,
+                               driverBaseWeights, frame, &params->restPoints,
+                               &params->auxPoints);
     } else if (const VtValue *phased =
                    _FrozenPhasedValue(revision,
                                        binding.driverCurvePoints)) {

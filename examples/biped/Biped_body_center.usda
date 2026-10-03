@@ -195,6 +195,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/neck_ik_neck_0_def/neck_ik_neck_1_def/neck_ik_neck_2_def/neck_ik_neck_3_def/neck_ik_skull_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 6.16)
@@ -215,6 +216,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/neck_ik_neck_0_def/neck_ik_neck_1_def/neck_ik_neck_2_def/neck_ik_neck_3_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 6.38)
@@ -235,6 +237,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/neck_ik_neck_0_def/neck_ik_neck_1_def/neck_ik_neck_2_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 6.6)
@@ -255,6 +258,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/neck_ik_neck_0_def/neck_ik_neck_1_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 6.82)
@@ -275,6 +279,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/neck_ik_neck_0_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 7.04)
@@ -287,6 +292,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 7.37)
@@ -321,6 +327,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def/spine_ik_spine_4_def/spine_ik_spine_5_def/spine_ik_chest_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 8.14)
@@ -341,6 +348,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def/spine_ik_spine_4_def/spine_ik_spine_5_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 8.36)
@@ -361,6 +369,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def/spine_ik_spine_4_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 8.58)
@@ -381,6 +390,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 8.8)
@@ -401,6 +411,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 9.02)
@@ -421,6 +432,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 9.24)
@@ -441,6 +453,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 9.46)
@@ -453,6 +466,7 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 9.57)
@@ -527,7 +541,9 @@ def "Biped"
                     </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def/spine_ik_spine_4_def/spine_ik_spine_5_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def/spine_ik_spine_4_def/spine_ik_spine_5_def/spine_ik_chest_def>,
                 ]
-                rel rigExec:midControl = </Biped/Rig/Main/Shot/Aux/Controls/spine_mid_follow/M_SpineMid>
+                rel rigExec:midControl = </Biped/Rig/Main/Shot/Aux/Controls/spine_mid_follow/M_SpineMid> (
+                    rigExecReadPhase = "final"
+                )
                 uniform token rigExec:restLength = "curve"
                 rel rigExec:rootControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal>
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>

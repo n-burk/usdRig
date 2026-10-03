@@ -1804,6 +1804,14 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             // the geometry domain reads, carried here as ordered sources so
             // the existing binding and phase machinery resolves them.
             constraint.targets = mover.targets;
+            {
+                TfToken blend("linear");
+                if (const UsdAttribute a = moverPrim.GetAttribute(
+                        TfToken("rigExec:weightBlend"))) {
+                    a.Get(&blend);
+                }
+                constraint.radialBlend = blend == "radial";
+            }
             const SdfPathVector xf = getTargets(moverPrim, "rigExec:transform");
             if (xf.size() != 1) {
                 return fail(mover.moverPath.GetString() +
@@ -1898,6 +1906,25 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         constraint.spacePath = space[0];
                     }
                 }
+            }
+
+            // Opt-in behaviours that change an operator's arithmetic. Both
+            // are uniform, so they are compiled once and hashed by the digest.
+            const auto readUniformBool = [&moverPrim](const char *name) {
+                bool value = false;
+                if (const UsdAttribute a =
+                        moverPrim.GetAttribute(TfToken(name))) {
+                    a.Get(&value);
+                }
+                return value;
+            };
+            if (mover.schemaType == "RigExecScaleConstraint" ||
+                mover.schemaType == "RigExecParentConstraint") {
+                constraint.blendShear = readUniformBool("rigExec:blendShear");
+            }
+            if (mover.schemaType == "RigExecAimConstraint") {
+                constraint.worldUpRotationOnly =
+                    readUniformBool("rigExec:worldUpRotationOnly");
             }
 
             if (mover.schemaType == "RigExecAimConstraint") {
@@ -2601,17 +2628,39 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         return it->second;
     };
     std::map<SdfPath, std::set<SdfPath>> solverFrameInputs;
+    // The read phase a solver declares on an input relationship, through the
+    // same optional rigExecReadPhase metadata a mover input uses. Without
+    // one the hierarchy decides (spec §4.2): a constraint ABOVE the solver
+    // revises what the solver already read. "final", or a prim path at or
+    // after that constraint, asks for the frame as the constraint left it,
+    // and the solver then waits on it (the frame-inheritance walk below).
+    // Base and preceding are the hierarchy rule and are not stored.
+    std::map<SdfPath, std::map<SdfPath, std::vector<RigExecReadPhase>>>
+        solverInputPhases;
     for (const auto &[solver, dependencies] : newSolverDependencies) {
         const UsdPrim prim = _stage->GetPrimAtPath(solver);
         for (const UsdRelationship &rel : prim.GetRelationships()) {
             if (rel.GetName() == "rigExec:joints") {
                 continue;
             }
+            RigExecReadPhase phase;
+            std::string phaseError;
+            if (!RigExecResolveReadPhase(rel, nullptr, &phase, &phaseError)) {
+                return fail(solver.GetString() + " " +
+                                rel.GetName().GetString() + ": " + phaseError,
+                            {solver});
+            }
+            const bool phased = phase.kind == RigExecReadPhaseKind::Final ||
+                                phase.kind == RigExecReadPhaseKind::AtPrim;
             SdfPathVector targets;
             rel.GetTargets(&targets);
             for (const SdfPath &target : targets) {
                 if (isFrameProvider(target.GetPrimPath())) {
                     solverFrameInputs[solver].insert(target.GetPrimPath());
+                    if (phased) {
+                        solverInputPhases[solver][target.GetPrimPath()]
+                            .push_back(phase);
+                    }
                 }
             }
         }
@@ -2678,10 +2727,27 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                                &poseInfoPrefetch);
     }
     std::map<SdfPath, std::set<SdfPath>> solverPoseReads;
+    // solverInputPhases spread over each input's pose closure, so the walk
+    // that visits closure members finds the phase of the input that reached
+    // them.
+    std::map<SdfPath, std::map<SdfPath, std::vector<RigExecReadPhase>>>
+        solverClosurePhases;
     for (const auto &[solver, inputs] : solverFrameInputs) {
+        const auto declared = solverInputPhases.find(solver);
         for (const SdfPath &input : inputs) {
             const std::set<SdfPath> &closure = poseProviderClosure(input);
             solverPoseReads[solver].insert(closure.begin(), closure.end());
+            if (declared != solverInputPhases.end()) {
+                const auto phases = declared->second.find(input);
+                if (phases != declared->second.end()) {
+                    for (const SdfPath &member : closure) {
+                        std::vector<RigExecReadPhase> &into =
+                            solverClosurePhases[solver][member];
+                        into.insert(into.end(), phases->second.begin(),
+                                    phases->second.end());
+                    }
+                }
+            }
             for (const SdfPath &provider : closure) {
                 const auto owner = newJointBinding.find(provider);
                 if (owner != newJointBinding.end()) {
@@ -2850,6 +2916,46 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // behaviour of solverPoseReads[solver] identical to the old code, which
     // only reached that operator[] when at least one constraint survived the
     // pointsTarget test.
+    // The last stack ordinal at or beneath a prim: the moment an AtPrim read
+    // phase names, since the stack runs a scope's contents before the scope.
+    // -1 when nothing in the stack is there, which no constraint precedes.
+    std::map<SdfPath, int> phasePrimOrdinals;
+    const auto phaseOrdinal = [&](const SdfPath &prim) {
+        const auto found = phasePrimOrdinals.find(prim);
+        if (found != phasePrimOrdinals.end()) {
+            return found->second;
+        }
+        int last = -1;
+        for (const auto &[step, ordinal] : poseStackOrdinal) {
+            if (step.HasPrefix(prim)) {
+                last = std::max(last, ordinal);
+            }
+        }
+        phasePrimOrdinals.emplace(prim, last);
+        return last;
+    };
+    // Whether \p solver declared that it reads \p input as of \p constraint
+    // or later: a "final" phase, or an AtPrim phase at or after it.
+    const auto readsAfter = [&](const SdfPath &solver, const SdfPath &input,
+                                const SdfPath &constraint) {
+        const auto bySolver = solverClosurePhases.find(solver);
+        if (bySolver == solverClosurePhases.end()) {
+            return false;
+        }
+        const auto phases = bySolver->second.find(input);
+        if (phases == bySolver->second.end()) {
+            return false;
+        }
+        const int at = stackOrdinalOf(constraint);
+        for (const RigExecReadPhase &phase : phases->second) {
+            if (phase.kind == RigExecReadPhaseKind::Final ||
+                (phase.kind == RigExecReadPhaseKind::AtPrim &&
+                 phaseOrdinal(phase.prim) >= at)) {
+                return true;
+            }
+        }
+        return false;
+    };
     if (!constraintsByTarget.empty()) {
         for (const SdfPath &solver : requiredSolvers) {
             for (const SdfPath &input : solverPoseReads[solver]) {
@@ -2863,28 +2969,43 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         // solver already read, so the solver must NOT wait
                         // on it -- the constraint waits on the solver
                         // instead. (Producers have no position and keep the
-                        // unconditional edge.)
-                        //
-                        // ONLY WHERE THE TWO WRITE THE SAME JOINT. The pose
-                        // stack orders the steps that write a JOINT; a
-                        // constraint that moves something else this solver
-                        // READS -- an FK control parked on a wrist, so the
-                        // hand travels with the arm -- is an ordinary
-                        // producer, and deferring it leaves the solver
-                        // reading a control still standing at its rest. The
-                        // whole Solvers scope sits after Movers in the
-                        // namespace, so without this test EVERY constraint
-                        // reads as "above" every solver: measured on the
-                        // biped, the finger chains stopped following the
-                        // wrist entirely.
-                        const bool sharedJoint =
-                            newJointBinding.count(p) > 0;
+                        // unconditional edge.) A solver input that declares
+                        // a later read phase is the exception, and the only
+                        // one: it reads the frame as the constraint left it.
                         const bool positional =
-                            sharedJoint && poseStackOrdinal.count(solver) > 0;
+                            poseStackOrdinal.count(solver) > 0;
                         const int here = stackOrdinalOf(solver);
                         for (const SdfPath &constraint : it->second) {
-                            if (positional &&
-                                stackOrdinalOf(constraint) > here) {
+                            const bool above =
+                                positional && stackOrdinalOf(constraint) > here;
+                            const bool declared =
+                                above && readsAfter(solver, input, constraint);
+                            if (declared) {
+                                // The solver also writes the joint this
+                                // constraint moves, and the stack orders the
+                                // two writers by position: a declared read of
+                                // the later one would be a cycle.
+                                const auto writers = newJointBinding.find(p);
+                                if (writers != newJointBinding.end()) {
+                                    for (const auto &[writer, element] :
+                                         writers->second) {
+                                        if (writer != solver) continue;
+                                        return fail(
+                                            solver.GetString() +
+                                                " declares a read phase that "
+                                                "reads " + p.GetString() +
+                                                " after " +
+                                                constraint.GetString() +
+                                                ", but it also writes that "
+                                                "joint and executes before "
+                                                "the constraint; move the "
+                                                "constraint below the solver "
+                                                "instead (spec §4.2)",
+                                            {solver});
+                                    }
+                                }
+                            }
+                            if (above && !declared) {
                                 poseReverseEdges.emplace_back(constraint,
                                                               solver);
                                 continue;

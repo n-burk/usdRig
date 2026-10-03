@@ -1101,6 +1101,111 @@ RigExecCarryWireCurves(std::vector<GfVec3f> *rest,
     }
 }
 
+/// How a transform-driven wire measures its drivers.
+///
+/// \p posedPoints is rigExec:pointFrame == "posed" (the wire runs after a
+/// skin on its target), \p posedDelta is rigExec:driverDeltaFrame ==
+/// "posed" (the offset is applied in the space's current frame), and
+/// \p carry is rigExec:space's computeMatrix, or null when none is named.
+struct RigExecWireDriverFrame {
+    bool posedPoints = false;
+    bool posedDelta = false;
+    const GfMatrix4d *carry = nullptr;
+};
+
+/// One driver's offset from its space, as a wire applies it.
+///
+/// "local" is RigExecMeasureInSpace and "posed" RigExecMeasureInPosedSpace.
+/// When either frame option is posed and the space carries a scale, both
+/// matrices are unscaled first so the offset is measured in the asset's own
+/// units; \p spaceScale receives that scale for the posed-point correction.
+/// A wire asking for neither keeps the plain measurement bit for bit. The
+/// runtime twin is the `measured` lambda in RrGeoAssembleWire.
+inline GfMatrix4d
+RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
+                         const RigExecWireDriverFrame &frame,
+                         GfVec3d *spaceScale)
+{
+    const GfVec3d k = RigExecFrameScale(space);
+    if (spaceScale) {
+        *spaceScale = k;
+    }
+    if ((frame.posedPoints || frame.posedDelta) &&
+        k != GfVec3d(1.0, 1.0, 1.0)) {
+        GfMatrix4d unscale(1.0);
+        unscale.SetScale(GfVec3d(1.0 / k[0], 1.0 / k[1], 1.0 / k[2]));
+        transform = transform * unscale;
+        space = space * unscale;
+    }
+    return frame.posedDelta ? RigExecMeasureInPosedSpace(transform, space)
+                            : RigExecMeasureInSpace(transform, space);
+}
+
+/// Poses a transform-driven wire's control polygon from its provider table.
+///
+/// \p table holds the driver transforms, then their spaces, then the base
+/// transforms, then their spaces (counts \p t, \p s, \p bt, and the rest).
+/// \p restPoints is the authored polygon on input and the base-moved rest
+/// polygon on output; \p auxPoints receives the posed polygon. A posed wire
+/// with no carry has its displacement multiplied by the space's scale; one
+/// with a carry has both polygons carried instead (RigExecCarryWireCurves).
+/// Shared by the live assembler, the frozen replay and nothing else, so the
+/// two USD-side paths cannot drift; the runtime restates it.
+inline void
+RigExecPoseWireDrivers(const std::vector<GfMatrix4d> &table, size_t t,
+                       size_t s, size_t bt, const VtFloatArray &weights,
+                       const VtFloatArray &baseWeights,
+                       const RigExecWireDriverFrame &frame,
+                       std::vector<GfVec3f> *restPoints,
+                       std::vector<GfVec3f> *auxPoints)
+{
+    const size_t bs = table.size() - t - s - bt;
+    const auto pick = [](size_t count, size_t j) {
+        return count <= 1 ? size_t(0) : j % count;
+    };
+    const auto measured = [&](size_t first, size_t count, size_t spaceFirst,
+                              size_t spaceCount, size_t j,
+                              GfVec3d *spaceScale) {
+        GfMatrix4d m = table[first + pick(count, j)];
+        if (spaceCount > 0) {
+            m = RigExecMeasureWireDriver(
+                m, table[spaceFirst + pick(spaceCount, j)], frame,
+                spaceScale);
+        }
+        return m;
+    };
+    const bool carried = frame.posedPoints && frame.carry;
+    auxPoints->resize(restPoints->size());
+    for (size_t j = 0; j < restPoints->size(); ++j) {
+        GfVec3f &rest = (*restPoints)[j];
+        // A base motion moves the curve AND its rest: the wire then deforms
+        // by the driver's motion on top of it.
+        if (bt > 0) {
+            const GfMatrix4d b = measured(t + s, bt, t + s + bt, bs, j,
+                                          nullptr);
+            const float wb = baseWeights.empty()
+                ? 1.0f : baseWeights[pick(baseWeights.size(), j)];
+            const GfVec3f moved(b.TransformAffine(GfVec3d(rest)));
+            rest = rest + (moved - rest) * wb;
+        }
+        GfVec3d scale(1.0, 1.0, 1.0);
+        const GfMatrix4d m = measured(0, t, t, s, j, &scale);
+        const float w =
+            weights.empty() ? 1.0f : weights[pick(weights.size(), j)];
+        const GfVec3f moved(m.TransformAffine(GfVec3d(rest)));
+        GfVec3f displacement = (moved - rest) * w;
+        if (frame.posedPoints && !carried) {
+            displacement = GfVec3f(displacement[0] * float(scale[0]),
+                                   displacement[1] * float(scale[1]),
+                                   displacement[2] * float(scale[2]));
+        }
+        (*auxPoints)[j] = rest + displacement;
+    }
+    if (carried) {
+        RigExecCarryWireCurves(restPoints, auxPoints, *frame.carry);
+    }
+}
+
 /// Whether a wire applies its envelope itself: a valid sparse field with a
 /// zero default, where only the named points are worth evaluating.
 inline bool

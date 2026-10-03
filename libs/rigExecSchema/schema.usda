@@ -1167,6 +1167,14 @@ class RigExecAimConstraint "RigExecAimConstraint" (
 )
 {
     # inputs:rotationOffset and rigExec:rotationOrder are inherited.
+    uniform bool rigExec:worldUpRotationOnly = false (
+        doc = """Take the world-up direction from the up object's ROTATION
+        alone, orthonormalizing its frame first. A rotation extracted from a
+        scaled or sheared frame is not that frame's rotation, so under a
+        scaled rig root the derived up can swing far enough to turn an
+        aim-constrained foot. Off (the default) extracts the rotation from
+        the up object's frame as authored."""
+    )
     double3 inputs:aimVector = (1, 0, 0) (
         doc = "Local-space vector that points toward the constrained aim direction."
     )
@@ -1242,6 +1250,16 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
 )
 {
     # inputs:affectScale* and inputs:scaleOffset are inherited.
+    uniform bool rigExec:blendShear = false (
+        doc = """With all three scale axes governed, blend the sources' SHEAR
+        as well as their scale. Shear lives in the same linear block as
+        scale, so a constraint that replaces scale from a clean source can
+        still leave behind a shear the input inherited -- a chain stretched
+        by a spline IK with volume preservation carries one down to every
+        child. Off (the default) keeps the input's shear, which is the FBX
+        behaviour. Ignored when any scale axis is masked off: shear mixes two
+        axes at a time, so a partial mask has no meaningful share of it."""
+    )
 }
 
 class RigExecParentConstraint "RigExecParentConstraint" (
@@ -1269,6 +1287,16 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     )
     double3[] inputs:rotationOffsets = [] (
         doc = "Per-source Euler rotation offsets parallel to rigExec:sources."
+    )
+    uniform bool rigExec:blendShear = false (
+        doc = """With all three inputs:affectScale axes on, blend the sources' SHEAR
+        as well as their scale. Shear lives in the same linear block as
+        scale, so a constraint that replaces scale from a clean source can
+        still leave behind a shear the input inherited -- a chain stretched
+        by a spline IK with volume preservation carries one down to every
+        child. Off (the default) keeps the input's shear, which is the FBX
+        behaviour. Ignored when any scale axis is masked off: shear mixes two
+        axes at a time, so a partial mask has no meaningful share of it."""
     )
     # rigExec:rotationOrder is inherited.
 }
@@ -2568,14 +2596,26 @@ class RigExecCurveMover "RigExecCurveMover" (
         The two corrections are in OPPOSITE directions, which is why one
         blanket rule cannot serve both families and why the wire has to
         say. Which one a given wire is, is not a rigging choice -- it is
-        where the compiler put it relative to its skin -- so
-        tools/biped/wire_point_frame.py reads the compiled mover order
-        and authors this, rather than asking for a list kept by hand.
+        where the compiler put it relative to its skin -- so a build tool
+        should author it from the compiled mover order rather than from a
+        list kept by hand.
 
         Both are IDENTICAL while nothing above the rig is scaled,
-        because the scale in question measures one. A rig with no scaled
-        master is therefore bit for bit what it was, whichever of the
-        two it says."""
+        because the scale in question measures one. A wire that names
+        neither posed frame keeps the plain measurement bit for bit."""
+    )
+    rel rigExec:space (
+        doc = """wire: the prim whose movement away from its rest carries
+        the whole rig -- normally a TRS master. Only meaningful with
+        rigExec:driverTransforms and rigExec:pointFrame = "posed".
+
+        A posed wire adds a displacement computed in the uncarried frame
+        to points a skin has already carried. With a space named, both
+        control polygons are transformed by that space's rest->pose map
+        (its computeMatrix) before the wire is evaluated, so the
+        displacement is carried with the points; the scale-only correction
+        of rigExec:pointFrame is then not applied beside it. Read at the
+        drivers' rigExec:transformReadPhase."""
     )
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "final"]

@@ -341,7 +341,8 @@ struct RigExecMoverParameters {
 
     bool operator==(const RigExecMoverParameters &o) const {
         return kind == o.kind && enabled == o.enabled && valid == o.valid &&
-               transform == o.transform && weights == o.weights &&
+               transform == o.transform && radialWeight == o.radialWeight &&
+               weights == o.weights &&
                blendDeltas == o.blendDeltas && blendSurfaceFrame == o.blendSurfaceFrame &&
                referenceVolume == o.referenceVolume &&
                strength == o.strength &&

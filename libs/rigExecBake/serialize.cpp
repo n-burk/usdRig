@@ -775,6 +775,12 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
             writer->AddString(constraint.worldUpPath.GetString());
         out.worldUpObjectNamed = constraint.worldUpObjectNamed;
         out.spaceSlot = int32_t(constraint.spaceSlot);
+        out.flags = uint8_t(
+            (constraint.blendShear ? RigExecWireConstraintBlendShear : 0) |
+            (constraint.worldUpRotationOnly
+                 ? RigExecWireConstraintWorldUpRotationOnly
+                 : 0) |
+            (constraint.radialBlend ? RigExecWireConstraintRadialBlend : 0));
         out.snapshotAfter = constraint.snapshotAfter;
         out.singleChainIk = constraint.singleChainIk;
         out.ikMode = uint8_t(constraint.ikMode);

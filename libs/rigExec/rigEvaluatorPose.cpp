@@ -110,6 +110,7 @@ _SolveScaleConstraint(const _ConstraintSolveContext &c)
         *c.resolved, c.prim, "inputs:scaleOffset", GfVec3d(0), c.time);
     params.affect = c.affect;
     params.weight = c.weight;
+    params.blendShear = c.blendShear;
     return RigExecApplyScaleConstraint(c.inputFrame, *c.sources, params);
 }
 
@@ -137,6 +138,7 @@ _SolveParentConstraint(const _ConstraintSolveContext &c)
     params.rotationOrder = c.order;
     params.weight = c.weight;
     params.carry = c.carry;
+    params.blendShear = c.blendShear;
     return RigExecApplyParentConstraint(c.inputFrame, *c.sources, params);
 }
 

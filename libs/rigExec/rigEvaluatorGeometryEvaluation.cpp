@@ -362,6 +362,22 @@ RigExecRigEvaluator::_EvaluateGeometry(
             if (values.transform && hasReference) {
                 transform = RigExecMeasureFromReference(transform, referenceMatrix(0));
             }
+            // rigExec:space, the rig's carry: the provider's computeMatrix at
+            // the transform's phase, exactly what the baked fold reads from
+            // its base or final matrix table. A pointer, because a revision
+            // naming no carry must take the untouched branch.
+            GfMatrix4d carry(1.0);
+            if (revision.carrySpaceTap >= 0) {
+                carry = snapshot.Get<GfMatrix4d>(revision.carrySpaceTap);
+                if (revision.transformFinalPhase) {
+                    const auto revisedIt =
+                        finalMatrices.find(revision.binding.carrySpace);
+                    if (revisedIt != finalMatrices.end()) {
+                        carry = revisedIt->second;
+                    }
+                }
+                values.carry = &carry;
+            }
             // A space provider: the transform measured against it, read at
             // the same phase, so the points take only the handle's motion
             // inside the space.
@@ -378,7 +394,11 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 if (hasReference && revision.influenceTaps.size() > 1) {
                     space = RigExecMeasureFromReference(space, referenceMatrix(1));
                 }
-                transform = RigExecMeasureInSpace(transform, space);
+                // The reference refines the space first, then the carry
+                // consumes it, in the baked fold's order.
+                transform = RigExecClusterInPointFrame(
+                    RigExecMeasureInSpace(transform, space), space,
+                    revision.transformPosedPoints, values.carry);
             }
             // Skin influences: the phase rules of the single transform
             // above, applied to every rigExec:influences entry in order.

@@ -30,6 +30,8 @@ struct _ConstraintSolveContext {
     /// the kernel's untouched branch rather than one multiplied by an
     /// identity (see RigExecRotationConstraintParams::carry).
     const GfMatrix4d *carry = nullptr;
+    /// rigExec:blendShear, compiled (Scale and Parent).
+    bool blendShear = false;
 };
 
 using _ConstraintSolveFn =

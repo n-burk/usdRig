@@ -798,6 +798,13 @@ _BinaryCompareConstraint(
     CHECK(live.worldUpPath.GetString() ==
           _BinaryString(reader, wire.worldUpPath));
     CHECK(live.worldUpObjectNamed == wire.worldUpObjectNamed);
+    CHECK(live.spaceSlot == wire.spaceSlot);
+    CHECK(live.blendShear ==
+          ((wire.flags & RigExecWireConstraintBlendShear) != 0));
+    CHECK(live.worldUpRotationOnly ==
+          ((wire.flags & RigExecWireConstraintWorldUpRotationOnly) != 0));
+    CHECK(live.radialBlend ==
+          ((wire.flags & RigExecWireConstraintRadialBlend) != 0));
     CHECK(live.snapshotAfter == wire.snapshotAfter);
     CHECK(live.singleChainIk == wire.singleChainIk);
     CHECK(uint8_t(live.ikMode) == wire.ikMode);

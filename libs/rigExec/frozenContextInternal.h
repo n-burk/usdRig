@@ -90,6 +90,7 @@ _VisitSolverInputs(Obj &solver, Fn &&fn)
     fn(solver.minLengthRatio);
     fn(solver.twistTurns);
     fn(solver.ribbonSampleCount);
+    fn(solver.ikSpace);
 }
 
 template <class Obj, class Fn>
@@ -126,6 +127,17 @@ _VisitInterpolatorInputs(
     Obj &interp, Fn &&fn)
 {
     fn(interp.enabled);
+    // A numeric driver's dials, in rigExec:driverAttributes order.
+    for (auto &value : interp.valueInputs) {
+        fn(value);
+    }
+}
+
+template <class Obj, class Fn>
+void
+_VisitSpaceSwitchInputs(Obj &spaceSwitch, Fn &&fn)
+{
+    fn(spaceSwitch.activeInput);
 }
 
 template <class Obj, class Fn>
@@ -248,6 +260,9 @@ _ForEachPatchableInput(Impl &B, Fn &&fn)
     }
     for (auto &ladder : B.ladders) {
         _VisitLadderInputs(ladder, fn);
+    }
+    for (auto &spaceSwitch : B.spaceSwitches) {
+        _VisitSpaceSwitchInputs(spaceSwitch, fn);
     }
     for (auto &interpolator : B.poseInterpolators) {
         _VisitInterpolatorInputs(interpolator, fn);

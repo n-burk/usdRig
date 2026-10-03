@@ -1421,6 +1421,12 @@ class RigExecAimConstraint "RigExecAimConstraint" (
             string userDocBrief = "Optional single transform provider used by object world-up modes."
         }
     )
+    uniform bool rigExec:worldUpRotationOnly = 0 (
+        customData = {
+            string userDocBrief = """Take the world-up direction from the up object's ROTATION\r
+        alone, orthonormalizing its frame first."""
+        }
+    )
     uniform token rigExec:worldUpType = "none" (
         allowedTokens = ["sceneUp", "objectUp", "objectRotationUp", "vector", "none"]
     )
@@ -1611,6 +1617,12 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
             string userDocBrief = "Additive translation offset applied after the source blend."
         }
     )
+    uniform bool rigExec:blendShear = 0 (
+        customData = {
+            string userDocBrief = """With all three scale axes governed, blend the sources' SHEAR\r
+        as well as their scale."""
+        }
+    )
     uniform bool rigExec:locked = 0 (
         customData = {
             string userDocBrief = "Authoring lock metadata for application interchange."
@@ -1687,6 +1699,12 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     double3[] inputs:translationOffsets = [] (
         customData = {
             string userDocBrief = "Per-source translation offsets parallel to rigExec:sources."
+        }
+    )
+    uniform bool rigExec:blendShear = 0 (
+        customData = {
+            string userDocBrief = """With all three inputs:affectScale axes on, blend the sources' SHEAR\r
+        as well as their scale."""
         }
     )
     uniform bool rigExec:locked = 0 (
@@ -3481,6 +3499,12 @@ class RigExecCurveMover "RigExecCurveMover" (
 \r
         A wire adds a displacement read off its driver curve to the\r
         points it moves."""
+        }
+    )
+    rel rigExec:space (
+        customData = {
+            string userDocBrief = """wire: the prim whose movement away from its rest carries\r
+        the whole rig -- normally a TRS master."""
         }
     )
     uniform token rigExec:transformReadPhase = "base" (

@@ -1406,6 +1406,33 @@ _Enabled(const UsdPrim &prim, UsdTimeCode time,
          const RigExecResolvedInputs *resolved,
          RigExecBakeReadRecorder *bakeRecorder);
 
+// A structural token on the mover (rigExec:weightBlend, rigExec:pointFrame,
+// rigExec:driverDeltaFrame), read off the authored stage and RECORDED. The
+// runtime and the frozen replay have no stage to ask; they replay this read,
+// and a read nobody records replays as the fallback. Guarded on the prim
+// because the frozen replay calls the assemblers with none.
+TfToken
+_RecordedToken(const UsdPrim &prim, const TfToken &name,
+               const TfToken &fallback, UsdTimeCode time,
+               const RigExecResolvedInputs *resolved)
+{
+    TfToken value = fallback;
+    if (!prim) {
+        return value;
+    }
+    if (const UsdAttribute a = prim.GetAttribute(name)) {
+        a.Get(&value, time);
+        RigExecRecordStageRead(nullptr, _RecorderOf(resolved), a.GetPath(),
+                               a, time, VtValue(value), /*forceFrame=*/false);
+    } else {
+        RigExecRecordStageRead(nullptr, _RecorderOf(resolved),
+                               prim.GetPath().AppendProperty(name),
+                               UsdAttribute(), time, VtValue(value),
+                               /*forceFrame=*/false);
+    }
+    return value;
+}
+
 }  // namespace
 
 std::shared_ptr<const RigExecSkinTopology>
@@ -1514,36 +1541,18 @@ RigExecAssembleMatrixParameters(
     RigExecMoverParameters params;
     params.kind = _kindTokens->matrix;
 
-
-    // Read HERE, in the assembly both paths share, and not only in the
-    // exec parameter builder. The biped runs its BAKED program, which
-    // fills these parameters through this function and never touched the
-    // exec builder -- so a flag set only there is silently ignored on
-    // exactly the rig it was turned on for.
-    // Guarded on the prim, as _Enabled is: the frozen replay calls this
-    // with no stage prim at all, and reading one would throw.
-    if (moverPrim) {
-        static const TfToken radial("radial");
-        static const TfToken weightBlend("rigExec:weightBlend");
-        TfToken blend;
-        // RECORDED, like rigExec:pointFrame below and for the same reason:
-        // the zero-USD runtime has no stage to ask, it replays this read,
-        // and a read nobody records replays as the empty token -- a linear
-        // blend on a mover the two USD paths turn radially.
-        if (const UsdAttribute a = moverPrim.GetAttribute(weightBlend)) {
-            a.Get(&blend, time);
-            RigExecRecordStageRead(nullptr, _RecorderOf(resolved),
-                                   a.GetPath(), a, time, VtValue(blend),
-                                   /*forceFrame=*/false);
-        } else {
-            RigExecRecordStageRead(nullptr, _RecorderOf(resolved),
-                                   moverPrim.GetPath().AppendProperty(
-                                       weightBlend),
-                                   UsdAttribute(), time, VtValue(blend),
-                                   /*forceFrame=*/false);
-        }
-        params.radialWeight = blend == radial;
-    }
+    // Read in the assembly every path shares, not only in the exec builder:
+    // the baked program fills these parameters through this function.
+    static const TfToken radial("radial");
+    static const TfToken weightBlend("rigExec:weightBlend");
+    static const TfToken pointFrame("rigExec:pointFrame");
+    params.radialWeight =
+        _RecordedToken(moverPrim, weightBlend, TfToken(), time, resolved) ==
+        radial;
+    // The USD paths take rigExec:pointFrame from compile (it selects
+    // RigExecClusterInPointFrame in the fold); it is recorded here so the
+    // runtime's fold replays the same choice.
+    _RecordedToken(moverPrim, pointFrame, TfToken(), time, resolved);
 
     params.enabled =
         _Enabled(moverPrim, time, resolved, _RecorderOf(resolved));
@@ -2378,7 +2387,6 @@ RigExecAssembleParameters(
             if (!table || table->size() < t + s + bt) {
                 break;  // MoverFailed
             }
-            const size_t bs = table->size() - t - s - bt;
             const auto floats = [&](const char *name) {
                 VtFloatArray out;
                 if (const UsdAttribute a =
@@ -2407,38 +2415,22 @@ RigExecAssembleParameters(
             };
             const VtFloatArray weights = floats("inputs:driverWeights");
             const VtFloatArray baseWeights = floats("inputs:driverBaseWeights");
-            const auto pick = [](size_t count, size_t j) {
-                return count <= 1 ? size_t(0) : j % count;
-            };
-            const auto measured = [&](size_t first, size_t count,
-                                      size_t spaceFirst, size_t spaceCount,
-                                      size_t j) {
-                GfMatrix4d m = (*table)[first + pick(count, j)];
-                if (spaceCount > 0) {
-                    m = RigExecMeasureInSpace(
-                        m, (*table)[spaceFirst + pick(spaceCount, j)]);
-                }
-                return m;
-            };
-            params.auxPoints.resize(params.restPoints.size());
-            for (size_t j = 0; j < params.restPoints.size(); ++j) {
-                GfVec3f &rest = params.restPoints[j];
-                // A base motion moves the curve AND its rest: the wire
-                // then deforms by the driver's motion on top of it, as a
-                // wire does whose base curve rides the same deformers.
-                if (bt > 0) {
-                    const GfMatrix4d b = measured(t + s, bt, t + s + bt, bs, j);
-                    const float wb = baseWeights.empty()
-                        ? 1.0f : baseWeights[pick(baseWeights.size(), j)];
-                    const GfVec3f moved(b.TransformAffine(GfVec3d(rest)));
-                    rest = rest + (moved - rest) * wb;
-                }
-                const GfMatrix4d m = measured(0, t, t, s, j);
-                const float w =
-                    weights.empty() ? 1.0f : weights[pick(weights.size(), j)];
-                const GfVec3f moved(m.TransformAffine(GfVec3d(rest)));
-                params.auxPoints[j] = rest + (moved - rest) * w;
-            }
+            // Which frame the wire's points are already in, and which frame
+            // the driver's offset is applied in. Recorded, so the runtime and
+            // the frozen replay make the same choice.
+            static const TfToken pointFrameName("rigExec:pointFrame");
+            static const TfToken deltaFrameName("rigExec:driverDeltaFrame");
+            RigExecWireDriverFrame frame;
+            frame.posedPoints =
+                _RecordedToken(moverPrim, pointFrameName, TfToken("rest"),
+                               time, values.resolved) == "posed";
+            frame.posedDelta =
+                _RecordedToken(moverPrim, deltaFrameName, TfToken("local"),
+                               time, values.resolved) == "posed";
+            frame.carry = values.carry;
+            RigExecPoseWireDrivers(*table, t, s, bt, weights, baseWeights,
+                                   frame, &params.restPoints,
+                                   &params.auxPoints);
         } else {
             params.auxPoints = _Array<GfVec3f>(
                 moverPrim, binding.driverCurvePoints, time, values.resolved, _RecorderOf(values.resolved));

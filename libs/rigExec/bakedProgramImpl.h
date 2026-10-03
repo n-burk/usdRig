@@ -1733,6 +1733,14 @@ struct RigExecBakedProgramImpl {
         /// (posedM and defaultRoundTrip); see the dynamic path, which
         /// derives it from the same pair of taps.
         int spaceSlot = -1;
+        /// rigExec:blendShear (Scale, Parent) and
+        /// rigExec:worldUpRotationOnly (Aim), compiled; both off is the
+        /// original arithmetic.
+        bool blendShear = false;
+        bool worldUpRotationOnly = false;
+        /// rigExec:weightBlend == "radial" on a transform-domain
+        /// RigExecMatrixMover, compiled.
+        bool radialBlend = false;
         /// True when any target wants a record, which is the one branch a
         /// rig with no read phase pays per constraint.
         bool snapshotAfter = false;
@@ -2803,6 +2811,11 @@ struct RigExecBakedConstraintSpec {
     SdfPath worldUpXform;
     /// rigExec:space on a rotation constraint; empty when none is named.
     SdfPath space;
+    /// rigExec:blendShear and rigExec:worldUpRotationOnly, compiled.
+    bool blendShear = false;
+    bool worldUpRotationOnly = false;
+    /// rigExec:weightBlend == "radial" (transform-domain matrix mover).
+    bool radialBlend = false;
     /// rigExec:weightObject, empty when the constraint binds none.
     SdfPath weightObject;
 };

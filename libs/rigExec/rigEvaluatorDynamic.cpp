@@ -2,7 +2,6 @@
 
 #include "rigEvaluatorInternal.h"
 #include "rigExecMath/geometryKernels.h"
-#include "pxr/base/tf/getenv.h"
 #include "rigEvaluatorConstraints.h"
 #include "parallel.h"
 #include "frameExtraction.h"
@@ -1903,30 +1902,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 }
                 transform = RigExecMeasureInSpace(transform, space);
             }
-            TfToken blend("linear");
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:weightBlend"))) {
-                a.Get(&blend);
-            }
-            if (TfGetenvBool("RIGEXEC_DEBUG_XFORM_MOVER", false)) {
-                const auto ri =
-                    _providerIndex.find(constraint.sources[0].sourcePath);
-                const bool known =
-                    ri != _providerIndex.end() && restLive[ri->second];
-                pose.diagnostics.push_back(
-                    constraint.moverPath.GetName() + ": restFrame " +
-                    (!known
-                         ? "MISSING"
-                         : (restFrames[ri->second].IsValid() ? "ok"
-                                                             : "INVALID")) +
-                    ", T translation " +
-                    TfStringify(transform.ExtractTranslation().GetLength()) +
-                    ", w " + TfStringify(weight) +
-                    ", inputFrame origin " +
-                    TfStringify(inputFrame.Origin()));
-            }
             RigExecPointFrame solved = inputFrame;
-            if (blend == "radial") {
+            if (constraint.radialBlend) {
                 const GfMatrix4d partial =
                     RigExecPartialTransform(transform, weight);
                 for (GfVec3d &q : solved.points) {
@@ -1953,6 +1930,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             solveContext.precompTranslation = constraint.precompTranslation;
             solveContext.precompRotation = constraint.precompRotation;
             solveContext.precompScale = constraint.precompScale;
+            solveContext.blendShear = constraint.blendShear;
             // rigExec:space. The carry is the SEED's answer for the space,
             // default^-1 * posed, exactly as the space switch takes it --
             // and hasCarry, not "carry == identity": a constraint naming
@@ -2104,17 +2082,17 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                     " has a degenerate world-up object");
                                 candidateReady = false;
                             } else {
-                                // AN UP DIRECTION COMES FROM ROTATION,
-                                // NEVER FROM SCALE. Under a scaled rig
-                                // root the up object's frame carries that
-                                // scale, and ExtractRotation on a scaled
-                                // matrix does not return the rotation --
-                                // the derived up swung far enough to turn
-                                // the aim-constrained foot 90 degrees
-                                // between scale 1 and 2, dragging every
-                                // toe round with it.
+                                // rigExec:worldUpRotationOnly takes the up
+                                // direction from the up object's rotation
+                                // alone: ExtractRotation on a scaled frame
+                                // does not return its rotation, and under a
+                                // scaled rig root the derived up can swing
+                                // far enough to turn an aim-constrained
+                                // foot. Off is the original extraction.
                                 params.worldUpDirection =
-                                    upMatrix.GetOrthonormalized(false)
+                                    (constraint.worldUpRotationOnly
+                                         ? upMatrix.GetOrthonormalized(false)
+                                         : upMatrix)
                                         .ExtractRotation()
                                         .TransformDir(authoredWorldUp);
                             }

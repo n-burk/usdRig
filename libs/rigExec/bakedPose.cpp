@@ -15,6 +15,7 @@
 #include "solverKernels.h"
 #include "types.h"
 
+#include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/splineIk.h"
@@ -873,6 +874,9 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         // rigExec:space, on the operators the compile reads it for. The
         // compile only keeps a provider here, so a named space that has no
         // slot is a bake-time contradiction, not a per-frame one.
+        c.blendShear = fc.blendShear;
+        c.worldUpRotationOnly = fc.worldUpRotationOnly;
+        c.radialBlend = fc.radialBlend;
         if (!fc.space.IsEmpty()) {
             c.spaceSlot = slotOf(fc.space);
             if (c.spaceSlot < 0) {
@@ -3557,7 +3561,56 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             carry = B.defaultRoundTrip[size_t(c.spaceSlot)].GetInverse() *
                     B.posedM[size_t(c.spaceSlot)];
         }
-        if (c.type == "RigExecPositionConstraint") {
+        if (c.type == "RigExecMatrixMover") {
+            // The transform-domain matrix mover, as the dynamic walk's arm:
+            // each source is measured as its rest->posed map, the transform
+            // in its space, and the envelope is applied to the target's four
+            // landmarks with the point kernel's rule.
+            const auto mapOf = [&](size_t k, GfMatrix4d *out) {
+                const int slot = c.sources[k];
+                const bool haveRest =
+                    slot >= 0 && B.restFrames[size_t(slot)].IsValid();
+                const auto &landmarks =
+                    haveRest ? B.restFrames[size_t(slot)].points
+                             : RigExecIdentityLandmarks();
+                return RigExecPointsToMatrix(landmarks, sources[k].frame,
+                                             out);
+            };
+            GfMatrix4d transform(1.0);
+            if (sources.empty() || !mapOf(0, &transform)) {
+                step->diagnostics.push_back(
+                    c.path.GetString() +
+                    " could not resolve rigExec:transform; mover passed "
+                    "through");
+                finish();
+                return;
+            }
+            if (sources.size() > 1) {
+                GfMatrix4d space(1.0);
+                if (!mapOf(1, &space)) {
+                    step->diagnostics.push_back(
+                        c.path.GetString() +
+                        " could not resolve rigExec:transformSpace; mover "
+                        "passed through");
+                    finish();
+                    return;
+                }
+                transform = RigExecMeasureInSpace(transform, space);
+            }
+            RigExecPointFrame solved = input;
+            if (c.radialBlend) {
+                const GfMatrix4d partial =
+                    RigExecPartialTransform(transform, weight);
+                for (GfVec3d &q : solved.points) {
+                    q = partial.TransformAffine(q);
+                }
+            } else {
+                for (GfVec3d &q : solved.points) {
+                    q = q + weight * (transform.TransformAffine(q) - q);
+                }
+            }
+            candidate = solved;
+        } else if (c.type == "RigExecPositionConstraint") {
             RigExecPositionConstraintParams params;
             params.offset = rd(c.offset);
             params.affect = affect;
@@ -3576,6 +3629,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.offset = rd(c.offset);
             params.affect = affect;
             params.weight = solveWeight;
+            params.blendShear = c.blendShear;
             candidate = RigExecApplyScaleConstraint(input, sources, params);
         } else if (c.type == "RigExecParentConstraint") {
             RigExecParentConstraintParams params;
@@ -3591,6 +3645,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.rotationOrder = c.order;
             params.weight = solveWeight;
             params.carry = hasCarry ? &carry : nullptr;
+            params.blendShear = c.blendShear;
             candidate = RigExecApplyParentConstraint(input, sources, params);
         } else {
             // Aim: the same weighted source set reduced to the target point
@@ -3675,10 +3730,12 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                 " has a degenerate world-up object");
                             candidateReady = false;
                         } else if (candidateReady) {
-                            // Rotation only -- see the dynamic path: a
-                            // scaled up object turned the foot 90 degrees.
+                            // rigExec:worldUpRotationOnly, as the
+                            // dynamic path takes it.
                             params.worldUpDirection =
-                                up.GetOrthonormalized(false)
+                                (c.worldUpRotationOnly
+                                     ? up.GetOrthonormalized(false)
+                                     : up)
                                     .ExtractRotation()
                                     .TransformDir(authoredWorldUp);
                         }

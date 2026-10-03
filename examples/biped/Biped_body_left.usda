@@ -332,6 +332,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_l_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 7.15)
@@ -362,6 +363,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:worldUpRotationOnly = 1
                     double3 inputs:aimVector = (0.23189309080662804, 0.9727412782626987, 8.879605041259261e-17)
                     float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_l_ikfk.inputs:weight>
                     double3 inputs:upVector = (0, 0, 1)
@@ -380,6 +382,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:worldUpRotationOnly = 1
                     double3 inputs:aimVector = (0.4511614741232851, 0.8924423366620975, -5.66177160178592e-17)
                     float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_l_ikfk.inputs:weight>
                     double3 inputs:upVector = (0, 0, 1)
@@ -1065,7 +1068,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/index_001_l_bind_fk_follow/L_IndexMeta/L_IndexBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/index_001_l_bind_fk_follow/L_IndexMeta/L_IndexBase/L_IndexMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/index_001_l_bind_fk_follow/L_IndexMeta/L_IndexBase/L_IndexMid/L_IndexTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 uniform token rigExec:controlSpace = "parentRelative"
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_l_def/shoulder_l_def/elbow_l_def/wrist_l_def/index_001_l_def>,
@@ -1085,7 +1090,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/middle_001_l_bind_fk_follow/L_MiddleMeta/L_MiddleBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/middle_001_l_bind_fk_follow/L_MiddleMeta/L_MiddleBase/L_MiddleMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/middle_001_l_bind_fk_follow/L_MiddleMeta/L_MiddleBase/L_MiddleMid/L_MiddleTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 uniform token rigExec:controlSpace = "parentRelative"
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_l_def/shoulder_l_def/elbow_l_def/wrist_l_def/middle_001_l_def>,
@@ -1106,7 +1113,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/pinkyCup_l_bind_fk_follow/L_PinkyCup/L_PinkyMeta/L_PinkyBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/pinkyCup_l_bind_fk_follow/L_PinkyCup/L_PinkyMeta/L_PinkyBase/L_PinkyMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/pinkyCup_l_bind_fk_follow/L_PinkyCup/L_PinkyMeta/L_PinkyBase/L_PinkyMid/L_PinkyTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 uniform token rigExec:controlSpace = "parentRelative"
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_l_def/shoulder_l_def/elbow_l_def/wrist_l_def/pinkyCup_l_def>,
@@ -1127,7 +1136,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/ring_001_l_bind_fk_follow/L_RingMeta/L_RingBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/ring_001_l_bind_fk_follow/L_RingMeta/L_RingBase/L_RingMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/ring_001_l_bind_fk_follow/L_RingMeta/L_RingBase/L_RingMid/L_RingTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 uniform token rigExec:controlSpace = "parentRelative"
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_l_def/shoulder_l_def/elbow_l_def/wrist_l_def/ring_001_l_def>,
@@ -1147,7 +1158,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/thumbCup_l_bind_fk_follow/L_ThumbMeta/L_ThumbBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/thumbCup_l_bind_fk_follow/L_ThumbMeta/L_ThumbBase/L_ThumbMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/thumbCup_l_bind_fk_follow/L_ThumbMeta/L_ThumbBase/L_ThumbMid/L_ThumbTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 uniform token rigExec:controlSpace = "parentRelative"
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_l_def/shoulder_l_def/elbow_l_def/wrist_l_def/thumbCup_l_def>,

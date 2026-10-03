@@ -320,6 +320,11 @@ struct RigExecScaleConstraintParams {
     GfVec3d offset{0, 0, 0};
     RigExecConstraintAxisMask affect;
     double weight = 1.0;
+    /// rigExec:blendShear. With all three scale axes governed, blend the
+    /// sources' shear as well, so a shear the input inherited does not
+    /// survive a constraint that replaced its scale. Off keeps the
+    /// input's shear, which is the FBX behaviour.
+    bool blendShear = false;
 };
 
 struct RigExecParentConstraintParams {
@@ -329,6 +334,9 @@ struct RigExecParentConstraintParams {
     RigExecConstraintAxisMask scaleAxes{false, false, false};
     RigExecEulerOrder rotationOrder = RigExecEulerOrder::XYZ;
     double weight = 1.0;
+    /// rigExec:blendShear, as RigExecScaleConstraintParams::blendShear,
+    /// governed by scaleAxes.
+    bool blendShear = false;
     /// rigExec:space, or nullptr. A Parent with ONE source is a plain copy
     /// and equivariant already; with two or more it averages the sources'
     /// Euler angles, and a mean of Euler angles moves under an outer

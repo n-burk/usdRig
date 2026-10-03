@@ -1677,6 +1677,16 @@ private:
         SdfPath spacePath;
         RigExecTapId spacePosedTap = -1;
         RigExecTapId spaceDefaultTap = -1;
+        /// rigExec:blendShear (Scale, Parent): blend the sources' shear when
+        /// every scale axis is governed. Off is the FBX behaviour.
+        bool blendShear = false;
+        /// rigExec:worldUpRotationOnly (Aim): orthonormalize the world-up
+        /// object's frame before taking its rotation, so a scaled up object
+        /// gives the same up direction as an unscaled one.
+        bool worldUpRotationOnly = false;
+        /// rigExec:weightBlend == "radial" on a transform-domain matrix
+        /// mover: take a fraction of the rotation, as the point kernel does.
+        bool radialBlend = false;
         _FrameSourceBinding effector;
         std::vector<_FrameSourceBinding> poleObjects;
         std::vector<SdfPath> ikChain;

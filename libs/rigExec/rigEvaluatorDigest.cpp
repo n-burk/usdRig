@@ -1353,6 +1353,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                     const SdfPathVector targets =
                         appendRelTargetsNamed(solver, name, false);
                     appendFrameBindingIdentityNamed(solver, name);
+                    // A read phase on a solver input orders it against the
+                    // constraints above it, so it is schedule identity.
+                    appendPhase(solver, name.GetText());
                     for (const SdfPath &target : targets) {
                         digest += ancestorChainToken(target.GetPrimPath());
                     }
@@ -1583,6 +1586,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             appendToken(prim, "rigExec:operation");
             appendToken(prim, "rigExec:mode");
             appendToken(prim, "rigExec:deltaSpace");
+            // Compiled into the revision: it selects the cluster's
+            // point-frame correction in the fold.
+            appendToken(prim, "rigExec:pointFrame");
             for (const char *input : {
                      "inputs:defaultWeight", "inputs:enabled",
                      "inputs:value", "inputs:min", "inputs:max",
@@ -1618,6 +1624,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 appendToken(prim, "rigExec:poleVectorMode");
                 appendToken(prim, "rigExec:evaluationMode");
                 appendToken(prim, "rigExec:orientationMode");
+                // Uniform opt-ins compiled into the constraint record.
+                appendScalar(prim, "rigExec:blendShear");
+                appendScalar(prim, "rigExec:worldUpRotationOnly");
             }
             // Static-input relationships captured at compile into generated
             // resolved*/rest* wiring (lattice cage, surface, curve bind/
