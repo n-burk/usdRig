@@ -1,0 +1,65 @@
+#!/bin/bash
+# bin/usdview.sh -- interactive usdview on a RigExec stage with the live Hydra
+# integration. The POSIX twin of launch_usdview.bat.
+#
+# Usage: bin/usdview.sh [stage.usda] [rendererDisplayName | usdview flags...]
+#   stage defaults to an empty stage carrying a single World Xform, so that
+#     opening the app to build something is the no-argument case; pass
+#     examples/ArmShotAnim.usda for the rig that deforms on the timeline.
+#   a bare second argument is the renderer (e.g. Embree); anything starting
+#   with - is passed to usdview untouched.
+#
+set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]:-$0}")/_env.sh"
+
+# Register TouchPose for interactive sessions. This launcher
+# is the one an animator opens, and the toolset is not something they
+# should have to pick a launcher for: without this the RigExec menu
+# simply has no TouchPose item and nothing says why. `plugin/touchPose`
+# is NOT on _env.sh's PYTHONPATH the way rigExecUsdview is, so both the
+# plugin path and the import path are added here.
+export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/touchPose"
+export PYTHONPATH="$RIG/plugin/touchPose:${PYTHONPATH:-}"
+export TOUCHPOSE_PLUGIN_DIR="$RIG/plugin/touchPose"
+
+# The Shape Editor rides along, for the same reason and with the same caveat:
+# a self-contained plugin directory whose container asks findOrCreateMenu for
+# the RigExec menu, so its item lands under the same menu whichever container
+# loads first. `plugin/shapeEditor` is not on _env.sh's PYTHONPATH either, so
+# the module search path is added beside the plugin path.
+export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/shapeEditor"
+export PYTHONPATH="$RIG/plugin/shapeEditor:${PYTHONPATH:-}"
+
+rigexec_require_python
+rigexec_require_usd "$USDVIEW"
+rigexec_build
+rigexec_register_usdnoodles
+
+# Rewritten every run rather than kept, so an edited or truncated leftover
+# cannot turn into a confusing "blank" stage on the next launch.
+BLANK="${TMPDIR:-/tmp}/rigexec-blank.usda"
+_write_blank() {
+    cat > "$BLANK" <<'USD'
+#usda 1.0
+def Xform "World" {
+}
+USD
+}
+
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    STAGE="$1"; shift
+    rigexec_require_stage "$STAGE"
+else
+    _write_blank
+    STAGE="$BLANK"
+fi
+
+# A bare (non-flag) argument is the renderer display name, matching the .bat
+# helpers. Prepending to the positional parameters rather than collecting an
+# array keeps this working under bash 3.2, where expanding an empty array with
+# set -u is an "unbound variable" error.
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    set -- --renderer "$@"
+fi
+
+exec "$PY" "$USDVIEW" "$@" "$STAGE"

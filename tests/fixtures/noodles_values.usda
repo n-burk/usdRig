@@ -1,0 +1,59 @@
+#usda 1.0
+(
+    """
+    Fixture for tests/testUsdviewNoodlesValues.py: one prim carrying one
+    attribute of every shape the inline value cells have to handle, plus a
+    RigExecFkChain for the allowedTokens popup.
+
+    /Values is deliberately flat. Each attribute is there to pin one rule:
+
+      plain     float, authored          click-edit and drag target
+      dbl       double, authored         the Esc cases
+      driven    connected                read-only, shows its resolved value
+      animated  has time samples         styled ANIMATED, edits author a key
+      count     int                      steps exactly 1 per pixel
+      flag      bool                     a checkbox, no drag, no typing
+      vec       float3                   three independently editable cells
+      tint      color3f                  swatch + three cells
+      label     string                   click-edits, never drags
+
+    and the four below get NO cell at all, which is half the point of the
+    type whitelist:
+
+      xf        matrix4d
+      arr       float[]
+      tex       asset
+      q         quatf
+
+    The RigExec schema may not be registered in every environment; the
+    FkChain assertions skip rather than fail when it is not.
+    """
+    defaultPrim = "Values"
+)
+
+def Scope "Values"
+{
+    float plain = 1.0
+    double dbl = 2.5
+    float driven = 0.0
+    float driven.connect = </Values.plain>
+    float animated = 0.0
+    float animated.timeSamples = {
+        1: 0.0,
+        24: 1.0,
+    }
+    int count = 3
+    bool flag = false
+    float3 vec = (1, 2, 3)
+    color3f tint = (1, 0, 0)
+    string label = "hello"
+
+    matrix4d xf = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    float[] arr = [1, 2, 3]
+    asset tex = @./none.exr@
+    quatf q = (1, 0, 0, 0)
+}
+
+def RigExecFkChain "Chain"
+{
+}

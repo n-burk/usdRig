@@ -1,0 +1,173 @@
+#usda 1.0
+(
+    """
+    RigExec example 09 - property-domain math movers.
+
+    Covers the three statically typed property movers that no other example
+    exercises: RigExecFloatMathMover, RigExecVec3fMathMover, and
+    RigExecMatrixMathMover. Each moves an exact scalar/vector/matrix property
+    rather than a point3f[] array, so none of them is a point-chain revision -
+    they are the THIRD output domain, alongside joint frames and geometry.
+
+    A property chain works exactly like a point chain: the base is the
+    target attribute's own authored value, one revision per mover in composed
+    post-order, last writer wins. What differs is that every input a math
+    mover needs is authored on the mover itself, so the chain owes exec
+    nothing and resolves before exec runs - which is what lets its result be
+    handed BACK to exec as the attribute's value. 03_IkFkBlendClamp is where
+    that matters: its clamped weight is what RigExecBlendPointFrames reads.
+
+    Each operation is r = op(incoming), mixed through the common mover
+    envelope as incoming + inputs:defaultWeight * (r - incoming); the
+    envelope defaults to 1.
+    remap normalizes [min, max] to [0, 1] and does not clamp - compose a
+    clamp mover after it if you want the result bounded.
+
+    A revised property reaches BOTH kinds of consumer. One reads the
+    attribute through exec and gets a value override; packet assembly reads
+    it straight off the stage and never touches exec, so it gets the same
+    value through RigExecResolvedInputs. Both are filled from the one chain
+    result before anything reads an input, so a mover that revises another
+    mover's inputs:defaultWeight actually changes the deformation.
+
+    Results at Default time, asserted by TestPropertyMathMoversAreEvaluated:
+      rigExec:gain         2.5   -> 1.0             (clamp into [0, 1])
+      rigExec:offset       (0,3,0) -> (0,5,0)       (add (0,2,0))
+      rigExec:localOffset  identity -> translate(0,5,0)  (post-multiply)
+
+    Structure: a single joint driven by an FK chain, plus three property
+    targets that the math movers name via rigExec:moves.
+    """
+    defaultPrim = "PropMathAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PropMathAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PropMathAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "RootCtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 40; post linear,
+                    1048: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </PropMathAsset/Rig/Controls/RootCtl>
+                rel rigExec:joints = </PropMathAsset/Rig/Joints/Root>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        # The three property targets. Each is an ordinary authored attribute;
+        # the movers below name them with rigExec:moves exactly the way a
+        # point-chain mover names a .points property.
+        def Scope "Channels"
+        {
+            def Scope "Dials"
+            {
+                float rigExec:gain = 2.5
+                float3 rigExec:offset = (0, 3, 0)
+                matrix4d rigExec:localOffset = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # Clamp a float dial into [0, 1]: the authored 2.5 publishes as 1.
+            def RigExecFloatMathMover "ClampGain" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "clamp"
+                float inputs:min = 0
+                float inputs:max = 1
+                rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:gain>
+            }
+
+            # Add a constant vector to a float3 dial.
+            def RigExecVec3fMathMover "OffsetLift" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float3 inputs:value = (0, 2, 0)
+                rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:offset>
+            }
+
+            # Post-multiply a matrix dial by a constant translation.
+            def RigExecMatrixMathMover "OffsetSpace" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "multiply"
+                float inputs:defaultWeight = 1
+                matrix4d inputs:value = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
+                rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:localOffset>
+            }
+
+            # A point chain alongside the property chains, so the file shows
+            # both output domains in one rig: the witness card follows the
+            # posed joint. This is the part that deforms geometry.
+            def RigExecMatrixMover "CardSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:transform = </PropMathAsset/Rig/Joints/Root>
+                uniform token rigExec:transformReadPhase = "final"
+                rel rigExec:weightObject = </PropMathAsset/Rig/Weights/CardW>
+                rel rigExec:moves = </PropMathAsset/Geom/Card.points>
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "CardW"
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </PropMathAsset/Geom/Card.points>
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # A witness mesh carried by the joint, so the file is viewable and the
+        # rig has a point chain next to its property chains.
+        def Mesh "Card"
+        {
+            float3[] extent = [(-1, -0.5, 0), (1, 0.5, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-1, -0.5, 0), (1, -0.5, 0), (1, 0.5, 0), (-1, 0.5, 0)]
+        }
+    }
+}

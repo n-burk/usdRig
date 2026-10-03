@@ -1,0 +1,21 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "rigExecUsdview.RigExecUsdviewContainer": {
+                        "bases": [
+                            "pxr.Usdviewq.plugin.PluginContainer"
+                        ],
+                        "displayName": "RigExec live evaluation"
+                    }
+                }
+            },
+            "LibraryPath": "",
+            "Name": "rigExecUsdview",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "python"
+        }
+    ]
+}

@@ -1,0 +1,181 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecCurvenetWeight.
+
+    One slab, one curvenet, and eight authored numbers. A rail runs the
+    length of the slab and two profile curves cross it at shared knots;
+    only those eight knot values are painted, and the fourteen tangent
+    handles are auto-smoothed. The field is solved onto all 65 slab
+    vertices and a matrix mover uses it as its envelope, so the Lift
+    control's single Z rotation lands as a graded bend that also twists,
+    because the profile curves carry different values on their near and
+    far ends.
+
+    Scrub 1001-1024; the rest pose is held through 1005 so the painted
+    field can be read before anything moves.
+    """
+    defaultPrim = "CurvenetWeightAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "CurvenetWeightAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "CurvenetWeightAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Lift" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1005: 0; post linear,
+                    1014: 42; post linear,
+                    1024: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "LiftChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </CurvenetWeightAsset/Rig/Controls/Lift>
+                rel rigExec:joints = </CurvenetWeightAsset/Rig/Joints/Root>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            # Eight authored knot values against 65 slab vertices. The
+            # fourteen tangent handles are listed in rigExec:autoSmooth, so
+            # their entries in inputs:weights are ignored and solved from
+            # the anchored knots instead.
+            def RigExecCurvenetWeight "SlabField" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float[] inputs:weights = [0, 0.12, 0.62, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.36, 0, 0, 0.44, 0, 0, 0.95, 0, 0]
+                int[] rigExec:autoSmooth = [4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21]
+                uniform token rigExec:basis = "bezier"
+                rel rigExec:curvenetPoints = </CurvenetWeightAsset/Geom/ProfileNet.points>
+                rel rigExec:curvenetSplineIndices = </CurvenetWeightAsset/Geom/ProfileNet.rigExec:splineIndices>
+                rel rigExec:meshFaceCounts = </CurvenetWeightAsset/Geom/Slab.faceVertexCounts>
+                rel rigExec:meshFaceIndices = </CurvenetWeightAsset/Geom/Slab.faceVertexIndices>
+                uniform token rigExec:rangePolicy = "clamp"
+                uniform token rigExec:representation = "dense"
+                uniform int rigExec:samplesPerSpline = 5
+                float rigExec:unreachedValue = 0
+                rel rigExec:weightTarget = </CurvenetWeightAsset/Geom/Slab.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/curvenet_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecMatrixMover "Bend" (
+                prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:moves = </CurvenetWeightAsset/Geom/Slab.points>
+                rel rigExec:transform = </CurvenetWeightAsset/Rig/Joints/Root>
+                uniform token rigExec:transformReadPhase = "final"
+                rel rigExec:weightObject = </CurvenetWeightAsset/Rig/Weights/SlabField>
+                uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # 13 columns x 5 rows, 48 quads. The extra rows in Z are what
+        # make the across-width lopsidedness of the painted field legible,
+        # and re-meshing this way needs no change to the curvenet: the
+        # eight authored knot values are re-solved onto whatever vertices
+        # are there.
+        def Mesh "Slab"
+        {
+            color3f[] primvars:displayColor = [(0.62, 0.66, 0.72)]
+            float3[] extent = [(-0.2, -0.2, -1.2), (6.2, 0.2, 1.2)]
+            int[] faceVertexCounts = [
+                4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+                4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4
+            ]
+            int[] faceVertexIndices = [
+                0, 13, 14, 1, 1, 14, 15, 2, 2, 15, 16, 3, 3, 16, 17, 4, 4, 17, 18, 5, 5, 18, 19, 6,
+                6, 19, 20, 7, 7, 20, 21, 8, 8, 21, 22, 9, 9, 22, 23, 10, 10, 23, 24, 11, 11, 24, 25, 12,
+                13, 26, 27, 14, 14, 27, 28, 15, 15, 28, 29, 16, 16, 29, 30, 17, 17, 30, 31, 18, 18, 31, 32, 19,
+                19, 32, 33, 20, 20, 33, 34, 21, 21, 34, 35, 22, 22, 35, 36, 23, 23, 36, 37, 24, 24, 37, 38, 25,
+                26, 39, 40, 27, 27, 40, 41, 28, 28, 41, 42, 29, 29, 42, 43, 30, 30, 43, 44, 31, 31, 44, 45, 32,
+                32, 45, 46, 33, 33, 46, 47, 34, 34, 47, 48, 35, 35, 48, 49, 36, 36, 49, 50, 37, 37, 50, 51, 38,
+                39, 52, 53, 40, 40, 53, 54, 41, 41, 54, 55, 42, 42, 55, 56, 43, 43, 56, 57, 44, 44, 57, 58, 45,
+                45, 58, 59, 46, 46, 59, 60, 47, 47, 60, 61, 48, 48, 61, 62, 49, 49, 62, 63, 50, 50, 63, 64, 51
+            ]
+            point3f[] points = [
+                (0, 0, -1), (0.5, 0, -1), (1, 0, -1), (1.5, 0, -1), (2, 0, -1),
+                (2.5, 0, -1), (3, 0, -1), (3.5, 0, -1), (4, 0, -1), (4.5, 0, -1),
+                (5, 0, -1), (5.5, 0, -1), (6, 0, -1), (0, 0, -0.5), (0.5, 0, -0.5),
+                (1, 0, -0.5), (1.5, 0, -0.5), (2, 0, -0.5), (2.5, 0, -0.5), (3, 0, -0.5),
+                (3.5, 0, -0.5), (4, 0, -0.5), (4.5, 0, -0.5), (5, 0, -0.5), (5.5, 0, -0.5),
+                (6, 0, -0.5), (0, 0, 0), (0.5, 0, 0), (1, 0, 0), (1.5, 0, 0),
+                (2, 0, 0), (2.5, 0, 0), (3, 0, 0), (3.5, 0, 0), (4, 0, 0),
+                (4.5, 0, 0), (5, 0, 0), (5.5, 0, 0), (6, 0, 0), (0, 0, 0.5),
+                (0.5, 0, 0.5), (1, 0, 0.5), (1.5, 0, 0.5), (2, 0, 0.5), (2.5, 0, 0.5),
+                (3, 0, 0.5), (3.5, 0, 0.5), (4, 0, 0.5), (4.5, 0, 0.5), (5, 0, 0.5),
+                (5.5, 0, 0.5), (6, 0, 0.5), (0, 0, 1), (0.5, 0, 1), (1, 0, 1),
+                (1.5, 0, 1), (2, 0, 1), (2.5, 0, 1), (3, 0, 1), (3.5, 0, 1),
+                (4, 0, 1), (4.5, 0, 1), (5, 0, 1), (5.5, 0, 1), (6, 0, 1)
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+
+        # The net is the field's domain, not a deformer: it is left at rest
+        # while the slab bends, because the parametrization reads the
+        # authored pool, never a mover's output.
+        def RigExecCurvenet "ProfileNet"
+        {
+            uniform token rigExec:basis = "bezier"
+            uniform int rigExec:samplesPerSpline = 5
+            int[] rigExec:splineIndices = [0, 4, 5, 1, 1, 6, 7, 2, 2, 8, 9, 3, 10, 11, 12, 1, 1, 14, 15, 13, 16, 17, 18, 2, 2, 20, 21, 19]
+            point3f[] points = [(0, 0.06, 0), (2, 0.06, 0), (4, 0.06, 0), (6, 0.06, 0), (0.666667, 0.06, 0), (1.33333, 0.06, 0), (2.66667, 0.06, 0), (3.33333, 0.06, 0), (4.66667, 0.06, 0), (5.33333, 0.06, 0), (2, 0.06, -1), (2, 0.06, -0.666667), (2, 0.06, -0.333333), (2, 0.06, 1), (2, 0.06, 0.333333), (2, 0.06, 0.666667), (4, 0.06, -1), (4, 0.06, -0.666667), (4, 0.06, -0.333333), (4, 0.06, 1), (4, 0.06, 0.333333), (4, 0.06, 0.666667)]
+            uniform asset ui:nodegraph:node:icon = @../../icons/curvenet.png@
+            float[] widths = [0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08]
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1589, 137.5)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (10.84, 6.702, 12.54)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

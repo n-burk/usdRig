@@ -1,0 +1,11 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = "The whole character in one stage: the layered rig (model, then center/left/right), the face, and the TouchPose regions. Open this to use the Control Picker and TouchPose together."
+    subLayers = [
+        @./Biped_touch_regions.usda@,
+        @./Biped_face_rig.usda@,
+        @./Biped_layered.usda@
+    ]
+)
+

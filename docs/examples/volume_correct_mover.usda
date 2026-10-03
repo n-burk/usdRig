@@ -1,0 +1,129 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecVolumeCorrectMover.
+
+    One cage bulges two slabs side by side. The grey slab shows the raw
+    lattice bulge; the orange slab runs the same bulge through a volume
+    corrector that pulls it back toward its rest bound volume, so the pair
+    shows exactly what the correction takes away.
+    """
+    defaultPrim = "VolumeAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "VolumeAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "VolumeAsset"
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "SlabRoot" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecLatticeMover "RawBulge" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    uniform token rigExec:basis = "bernstein"
+                    rel rigExec:cage = </VolumeAsset/Geom/Cage>
+                    uniform token rigExec:cageReadPhase = "base"
+                    int3 rigExec:divisions = (2, 3, 2)
+                    rel rigExec:moves = </VolumeAsset/Geom/Raw.points>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/lattice_mover.png@
+                }
+
+                def RigExecVolumeCorrectMover "Correct" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 0.6
+                    rel rigExec:moves = </VolumeAsset/Geom/Fixed.points>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/volume_correct_mover.png@
+
+                    def RigExecLatticeMover "FixedBulge" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        uniform token rigExec:basis = "bernstein"
+                        rel rigExec:cage = </VolumeAsset/Geom/Cage>
+                        uniform token rigExec:cageReadPhase = "base"
+                        int3 rigExec:divisions = (2, 3, 2)
+                        rel rigExec:moves = </VolumeAsset/Geom/Fixed.points>
+                        uniform asset ui:nodegraph:node:icon = @../../icons/lattice_mover.png@
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Points "Cage"
+        {
+            point3f[] points = [(-1, 0, 1), (1, 0, 1), (-1, 2, 1), (1, 2, 1), (-1, 4, 1), (1, 4, 1), (-1, 0, -1), (1, 0, -1), (-1, 2, -1), (1, 2, -1), (-1, 4, -1), (1, 4, -1)]
+            point3f[] points.timeSamples = {
+                1001: [(-1, 0, 1), (1, 0, 1), (-1, 2, 1), (1, 2, 1), (-1, 4, 1), (1, 4, 1), (-1, 0, -1), (1, 0, -1), (-1, 2, -1), (1, 2, -1), (-1, 4, -1), (1, 4, -1)],
+                1006: [(-1, 0, 1), (1, 0, 1), (-2, 2, 2), (2, 2, 2), (-1, 4, 1), (1, 4, 1), (-1, 0, -1), (1, 0, -1), (-2, 2, -2), (2, 2, -2), (-1, 4, -1), (1, 4, -1)],
+                1012: [(-1, 0, 1), (1, 0, 1), (-1, 2, 1), (1, 2, 1), (-1, 4, 1), (1, 4, 1), (-1, 0, -1), (1, 0, -1), (-1, 2, -1), (1, 2, -1), (-1, 4, -1), (1, 4, -1)],
+            }
+            token visibility = "invisible"
+            float[] widths = [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] (
+                interpolation = "vertex"
+            )
+        }
+
+        def Mesh "Raw"
+        {
+            color3f[] primvars:displayColor = [(0.6, 0.6, 0.6)]
+            float3[] extent = [(-0.9, 0, 0), (-0.1, 4, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-0.9, 0, 0), (-0.1, 0, 0), (-0.9, 1, 0), (-0.1, 1, 0), (-0.9, 2, 0), (-0.1, 2, 0), (-0.9, 3, 0), (-0.1, 3, 0), (-0.9, 4, 0), (-0.1, 4, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "Fixed"
+        {
+            color3f[] primvars:displayColor = [(1, 0.55, 0.1)]
+            float3[] extent = [(0.1, 0, 0), (0.9, 4, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0.1, 0, 0), (0.9, 0, 0), (0.1, 1, 0), (0.9, 1, 0), (0.1, 2, 0), (0.9, 2, 0), (0.1, 3, 0), (0.9, 3, 0), (0.1, 4, 0), (0.9, 4, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1912, 164.8)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-12, 20, 0)
+        double3 xformOp:translate = (6.398, 5.976, 17.58)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

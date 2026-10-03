@@ -1,0 +1,95 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecMatrixMover.
+
+    A solid box control sits on a flat card and carries it. The mover's
+    rigExec:transform points straight at the control, so the card is
+    rigidly attached to the handle: the box slides 2.2 units along X and
+    yaws 24 degrees and back, and the card goes with it, corner for
+    corner. No weight object is bound and the envelope stays at 1, so the
+    follow is at full strength everywhere on the card.
+    """
+    defaultPrim = "MatrixAsset"
+    endTimeCode = 1016
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "MatrixAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "MatrixAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Carrier" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1009: -24; post linear,
+                    1016: 0; post linear,
+                }
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1009: 2.2; post linear,
+                    1016: 0; post linear,
+                }
+                uniform token guide:drawMode = "geometry"
+                double3 guide:offset = (0, 0.35, 0)
+                double guide:scaleX = 0.35
+                double guide:scaleY = 0.35
+                double guide:scaleZ = 0.35
+                uniform token guide:shape = "cube"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecMatrixMover "Skin" (
+                prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:moves = </MatrixAsset/Geom/Card.points>
+                rel rigExec:transform = </MatrixAsset/Rig/Controls/Carrier>
+                uniform token rigExec:transformReadPhase = "final"
+                uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Card"
+        {
+            color3f[] primvars:displayColor = [(0.1, 0.75, 0.7)]
+            uniform bool doubleSided = 1
+            float3[] extent = [(-2, 0, -1.2), (2, 0, 1.2)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 5, 6, 1, 1, 6, 7, 2, 2, 7, 8, 3, 3, 8, 9, 4, 5, 10, 11, 6, 6, 11, 12, 7, 7, 12, 13, 8, 8, 13, 14, 9, 10, 15, 16, 11, 11, 16, 17, 12, 12, 17, 18, 13, 13, 18, 19, 14]
+            point3f[] points = [(-2, 0, -1.2), (-1, 0, -1.2), (0, 0, -1.2), (1, 0, -1.2), (2, 0, -1.2), (-2, 0, -0.4), (-1, 0, -0.4), (0, 0, -0.4), (1, 0, -0.4), (2, 0, -0.4), (-2, 0, 0.4), (-1, 0, 0.4), (0, 0, 0.4), (1, 0, 0.4), (2, 0, 0.4), (-2, 0, 1.2), (-1, 0, 1.2), (0, 0, 1.2), (1, 0, 1.2), (2, 0, 1.2)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1392, 121.8)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (7.981, 4.761, 11.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

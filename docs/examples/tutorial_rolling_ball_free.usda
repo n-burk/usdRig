@@ -1,0 +1,32 @@
+#usda 1.0
+(
+    defaultPrim = "BallAsset"
+    startTimeCode = 1001
+    endTimeCode = 1001
+    timeCodesPerSecond = 24
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# The game uses one authored unit as one metre (radius = 1).
+# This is the tutorial rig with the position-driven roll mover disabled.
+def Xform "BallAsset" (
+    prepend references = @tutorial_rolling_ball.usda@</BallAsset>
+    variants = { string rollMode = "free" }
+)
+{
+    over "Rig" {
+        over "Controls" {
+            over "Move" {
+                custom string rigExec:publicName = "Move"
+                custom token[] rigExec:exposedAvars = ["tx", "ty", "tz"]
+                over "Squash" {
+                    over "Roll" {
+                        custom string rigExec:publicName = "Roll"
+                        custom token[] rigExec:exposedAvars = ["rx", "ry", "rz"]
+                    }
+                }
+            }
+        }
+    }
+}

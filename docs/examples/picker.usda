@@ -1,0 +1,432 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecPicker.
+
+    A two-bone arm with an IK/FK blend, and the picker panel an animator
+    drives it from. The picker is scene data, not a sidecar: one
+    RigExecPicker holding one RigExecPickerPanel of RigExecPickerButtons,
+    each naming its controls by relationship. Open the stage in usdview
+    and use the Control Picker panel -- nothing here is animated, and
+    nothing here is evaluated by the rig.
+    """
+    defaultPrim = "PickerAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PickerAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PickerAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "ArmParams" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+                doc = """The limb's parameter control. The IK/FK dial lives
+                HERE rather than on the blend solver: a picker's attribute
+                button and its modeDial both resolve against the rig's
+                controls and joints, so a dial on a solver reads as dead."""
+            )
+            {
+                custom float avars:ikfk = 0 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                        }
+                    }
+                )
+                color3f guide:displayColor = (1, 0.85, 0.1)
+                uniform token guide:shape = "cube"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "ShoulderFK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "ElbowFK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 40
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "WristFK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "HandIK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3.5, -2.5, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "ElbowPole" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 2, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "ArmFK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </PickerAsset/Rig/Controls/ShoulderFK>,
+                    </PickerAsset/Rig/Controls/ElbowFK>,
+                    </PickerAsset/Rig/Controls/WristFK>,
+                ]
+                rel rigExec:joints = [
+                    </PickerAsset/Rig/Joints/Shoulder>,
+                    </PickerAsset/Rig/Joints/Shoulder/Elbow>,
+                    </PickerAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecTwoBoneIk "ArmIK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:softness = 0.1
+                float inputs:stretch = 0
+                rel rigExec:effectorControl = </PickerAsset/Rig/Controls/HandIK>
+                rel rigExec:joints = [
+                    </PickerAsset/Rig/Joints/Shoulder>,
+                    </PickerAsset/Rig/Joints/Shoulder/Elbow>,
+                    </PickerAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                rel rigExec:poleControl = </PickerAsset/Rig/Controls/ElbowPole>
+                double rigExec:preferredBendRadians = 0.3
+                rel rigExec:rootControl = </PickerAsset/Rig/Controls/ShoulderFK>
+                uniform token rigExec:stretchPolicy = "uniformSegments"
+                uniform token rigExec:unreachablePolicy = "clampWithSoftness"
+                uniform asset ui:nodegraph:node:icon = @../../icons/two_bone_ik.png@
+            }
+
+            def RigExecBlendPointFrames "IKFKBlend" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                float inputs:weight.connect = </PickerAsset/Rig/Controls/ArmParams.avars:ikfk>
+                rel rigExec:inputA = </PickerAsset/Rig/Solvers/ArmFK>
+                rel rigExec:inputB = </PickerAsset/Rig/Solvers/ArmIK>
+                rel rigExec:joints = [
+                    </PickerAsset/Rig/Joints/Shoulder>,
+                    </PickerAsset/Rig/Joints/Shoulder/Elbow>,
+                    </PickerAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                uniform token rigExec:rotationBlend = "shortestArc"
+                uniform token rigExec:scaleBlend = "log"
+                uniform asset ui:nodegraph:node:icon = @../../icons/blend_point_frames.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Shoulder" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Elbow" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "Wrist" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "UpperW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </PickerAsset/Geom/Upper.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "ForeW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </PickerAsset/Geom/Fore.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "UpperSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </PickerAsset/Geom/Upper.points>
+                    rel rigExec:transform = </PickerAsset/Rig/Joints/Shoulder>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </PickerAsset/Rig/Weights/UpperW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "ForeSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </PickerAsset/Geom/Fore.points>
+                    rel rigExec:transform = </PickerAsset/Rig/Joints/Shoulder/Elbow>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </PickerAsset/Rig/Weights/ForeW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def RigExecPicker "Arm" (
+        prepend apiSchemas = ["NodeGraphNodeAPI"]
+    )
+    {
+        rel rigExec:picker:rig = </PickerAsset/Rig>
+        uniform string ui:label = "Arm"
+        uniform asset ui:nodegraph:node:icon = @../../icons/picker.png@
+        uniform int ui:order = 0
+
+        def RigExecPickerPanel "Body"
+        {
+            uniform color4f ui:background = (0.16, 0.16, 0.16, 1)
+            uniform string ui:label = "Body"
+            uniform int ui:order = 0
+            uniform float2 ui:size = (200, 260)
+
+            def RigExecPickerButton "backdrop" (
+                doc = """No controls and no attribute: a decoration. Drawn,
+                never clickable, never counted as dead."""
+            )
+            {
+                uniform color4f ui:fill = (0.22, 0.24, 0.28, 1)
+                uniform float2 ui:position = (12, 12)
+                uniform float ui:depth = -1
+                uniform float ui:roundness = 0.1
+                uniform token ui:shape = "roundedRectangle"
+                uniform float2 ui:size = (176, 236)
+                uniform color4f ui:stroke = (0, 0, 0, 0.8)
+            }
+
+            def RigExecPickerButton "b_Zero" (
+                doc = """A command button. `ui:text` is left unauthored on
+                purpose: the panel derives the label from the command, and
+                the LABEL is what it dispatches on."""
+            )
+            {
+                uniform token rigExec:picker:command = "zero_ctrls"
+                uniform color4f ui:fill = (0.4, 0.4, 0.4, 1)
+                uniform float ui:fontSize = 9
+                uniform float2 ui:position = (24, 24)
+                uniform float ui:roundness = 0.3
+                uniform token ui:shape = "roundedRectangle"
+                uniform float2 ui:size = (64, 20)
+                uniform color4f ui:textColor = (0.95, 0.95, 0.95, 1)
+            }
+
+            def RigExecPickerButton "b_ArmIkFk" (
+                doc = """An attribute button: it edits the blend weight
+                rather than selecting anything. Labels are low to high, so
+                weight 0 reads FK (input A) and weight 1 reads IK."""
+            )
+            {
+                rel rigExec:picker:attribute = </PickerAsset/Rig/Controls/ArmParams.avars:ikfk>
+                uniform token[] rigExec:picker:attributeLabels = ["FK", "IK"]
+                uniform color4f ui:fill = (0.21, 0.21, 0.21, 1)
+                uniform float ui:fontSize = 9
+                uniform float2 ui:position = (112, 24)
+                uniform float ui:roundness = 0.3
+                uniform token ui:shape = "roundedRectangle"
+                uniform float2 ui:size = (64, 20)
+                uniform string ui:text = "Arm"
+                uniform token ui:textAlign = "left"
+                uniform color4f ui:textColor = (0.6, 0.6, 0.6, 1)
+                uniform color4f ui:valueColor = (0.84, 0.78, 0.1, 1)
+            }
+
+            def RigExecPickerButton "b_Shoulder" (
+                doc = "Selects the shoulder; shown in both modes."
+            )
+            {
+                rel rigExec:picker:controls = </PickerAsset/Rig/Controls/ShoulderFK>
+                uniform color4f ui:fill = (0.28, 0.59, 0.88, 1)
+                uniform float2 ui:position = (84, 72)
+                uniform float ui:roundness = 0.2
+                uniform token ui:shape = "roundedRectangle"
+                uniform float2 ui:size = (32, 22)
+                uniform color4f ui:stroke = (0.12, 0.12, 0.12, 1)
+                uniform string ui:text = "Sh"
+            }
+
+            def RigExecPickerButton "b_Elbow" (
+                doc = "FK half of the pair: drawn only while the dial reads 0."
+            )
+            {
+                rel rigExec:picker:controls = </PickerAsset/Rig/Controls/ElbowFK>
+                uniform token rigExec:picker:mode = "fk"
+                rel rigExec:picker:modeDial = </PickerAsset/Rig/Controls/ArmParams.avars:ikfk>
+                uniform color4f ui:fill = (0.28, 0.59, 0.88, 1)
+                uniform float2 ui:position = (84, 112)
+                uniform float ui:roundness = 0.2
+                uniform token ui:shape = "roundedRectangle"
+                uniform float2 ui:size = (32, 22)
+                uniform color4f ui:stroke = (0.12, 0.12, 0.12, 1)
+                uniform string ui:text = "Elb"
+            }
+
+            def RigExecPickerButton "b_Wrist" (
+                doc = "FK half of the pair."
+            )
+            {
+                rel rigExec:picker:controls = </PickerAsset/Rig/Controls/WristFK>
+                uniform token rigExec:picker:mode = "fk"
+                rel rigExec:picker:modeDial = </PickerAsset/Rig/Controls/ArmParams.avars:ikfk>
+                uniform color4f ui:fill = (0.28, 0.59, 0.88, 1)
+                uniform float2 ui:position = (84, 152)
+                uniform float ui:roundness = 0.2
+                uniform token ui:shape = "roundedRectangle"
+                uniform float2 ui:size = (32, 22)
+                uniform color4f ui:stroke = (0.12, 0.12, 0.12, 1)
+                uniform string ui:text = "Wri"
+            }
+
+            def RigExecPickerButton "b_Pole" (
+                doc = "IK half of the pair: drawn only while the dial reads 1."
+            )
+            {
+                rel rigExec:picker:controls = </PickerAsset/Rig/Controls/ElbowPole>
+                uniform token rigExec:picker:mode = "ik"
+                rel rigExec:picker:modeDial = </PickerAsset/Rig/Controls/ArmParams.avars:ikfk>
+                uniform color4f ui:fill = (0.95, 0.63, 0.22, 1)
+                uniform float2 ui:position = (128, 112)
+                uniform token ui:shape = "circle"
+                uniform float2 ui:size = (26, 26)
+                uniform color4f ui:stroke = (0.12, 0.12, 0.12, 1)
+                uniform string ui:text = "Pv"
+            }
+
+            def RigExecPickerButton "b_Hand" (
+                doc = "IK half of the pair."
+            )
+            {
+                rel rigExec:picker:controls = </PickerAsset/Rig/Controls/HandIK>
+                uniform token rigExec:picker:mode = "ik"
+                rel rigExec:picker:modeDial = </PickerAsset/Rig/Controls/ArmParams.avars:ikfk>
+                uniform color4f ui:fill = (0.95, 0.63, 0.22, 1)
+                uniform float2 ui:position = (128, 152)
+                uniform token ui:shape = "hexagon"
+                uniform float2 ui:size = (26, 26)
+                uniform color4f ui:stroke = (0.12, 0.12, 0.12, 1)
+                uniform string ui:text = "Hd"
+            }
+
+            def RigExecPickerButton "b_Arm" (
+                doc = """One button, three controls: a click selects the
+                whole FK arm in the order listed."""
+            )
+            {
+                rel rigExec:picker:controls = [
+                    </PickerAsset/Rig/Controls/ShoulderFK>,
+                    </PickerAsset/Rig/Controls/ElbowFK>,
+                    </PickerAsset/Rig/Controls/WristFK>,
+                ]
+                uniform color4f ui:fill = (0.45, 0.45, 0.5, 1)
+                uniform float ui:fontSize = 9
+                uniform float2 ui:position = (24, 208)
+                uniform float ui:roundness = 0.3
+                uniform token ui:shape = "roundedRectangle"
+                uniform float2 ui:size = (152, 20)
+                uniform color4f ui:stroke = (0.12, 0.12, 0.12, 1)
+                uniform string ui:text = "All FK"
+                uniform color4f ui:textColor = (0.95, 0.95, 0.95, 1)
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Upper"
+        {
+            color3f[] primvars:displayColor = [(1, 0.6, 0.15)]
+            float3[] extent = [(0, -0.3, 0), (3, 0.3, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0, -0.3, 0), (3, -0.3, 0), (3, 0.3, 0), (0, 0.3, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "Fore"
+        {
+            color3f[] primvars:displayColor = [(0.25, 0.8, 0.35)]
+            float3[] extent = [(3, -0.25, 0), (6, 0.25, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(3, -0.25, 0), (6, -0.25, 0), (6, 0.25, 0), (3, 0.25, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1207, 103.4)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (8.75, 4.787, 9.636)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

@@ -1,0 +1,21 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "shapeEditorUsdview.ShapeEditorContainer": {
+                        "bases": [
+                            "pxr.Usdviewq.plugin.PluginContainer"
+                        ],
+                        "displayName": "Shape Editor: pose-space correctives"
+                    }
+                }
+            },
+            "LibraryPath": "",
+            "Name": "shapeEditorUsdview",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "python"
+        }
+    ]
+}

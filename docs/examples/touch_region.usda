@@ -1,0 +1,213 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecTouchRegion.
+
+    A two-segment limb whose skin is painted into two named touch regions.
+    "Upper" owns the six faces over the first bone and selects the Upper
+    control; "Fore" owns the six faces over the second bone and selects the
+    Fore control. Scrub 1001-1016 to see the limb fold and unfold -- the
+    regions ride the deformed skin because they index faces, not points.
+    """
+    defaultPrim = "TouchAsset"
+    endTimeCode = 1016
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "TouchAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "TouchAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Upper" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1008: 24; post linear,
+                    1016: 0; post linear,
+                }
+                uniform token guide:shape = "circle"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "Fore" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1008: 62; post linear,
+                    1016: 0; post linear,
+                }
+                uniform token guide:shape = "circle"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </TouchAsset/Rig/Controls/Upper>,
+                    </TouchAsset/Rig/Controls/Fore>,
+                ]
+                rel rigExec:joints = [
+                    </TouchAsset/Rig/Joints/UpperJnt>,
+                    </TouchAsset/Rig/Joints/UpperJnt/ForeJnt>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "UpperJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "ForeJnt" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "UpperW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [1, 1, 1, 0.5, 0, 0, 0, 1, 1, 1, 0.5, 0, 0, 0, 1, 1, 1, 0.5, 0, 0, 0]
+                rel rigExec:weightTarget = </TouchAsset/Geom/Skin.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "ForeW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0.5, 1, 1, 1, 0, 0, 0, 0.5, 1, 1, 1, 0, 0, 0, 0.5, 1, 1, 1]
+                rel rigExec:weightTarget = </TouchAsset/Geom/Skin.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "UpperSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </TouchAsset/Geom/Skin.points>
+                    rel rigExec:transform = </TouchAsset/Rig/Joints/UpperJnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </TouchAsset/Rig/Weights/UpperW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+
+                    def RigExecMatrixMover "ForeSkin" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        rel rigExec:moves = </TouchAsset/Geom/Skin.points>
+                        rel rigExec:transform = </TouchAsset/Rig/Joints/UpperJnt/ForeJnt>
+                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:weightObject = </TouchAsset/Rig/Weights/ForeW>
+                        uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                    }
+                }
+            }
+        }
+
+        def RigExecTouchRegions "TouchPose" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            uniform float rigExec:touch:alpha = 0.5
+            rel rigExec:touch:mesh = </TouchAsset/Geom/Skin>
+            uniform color3f[] rigExec:touch:palette = [(0.06, 0.34, 0.72), (0.72, 0.28, 0.06)]
+            uniform asset ui:nodegraph:node:icon = @../../icons/touch_regions.png@
+
+            def RigExecTouchRegion "Upper" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:touch:control = </TouchAsset/Rig/Controls/Upper>
+                uniform token rigExec:touch:elementType = "face"
+                uniform int[] rigExec:touch:faces = [0, 1, 2, 6, 7, 8]
+                uniform asset ui:nodegraph:node:icon = @../../icons/touch_region.png@
+            }
+
+            def RigExecTouchRegion "Fore" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:touch:control = </TouchAsset/Rig/Controls/Fore>
+                uniform token rigExec:touch:elementType = "face"
+                uniform int[] rigExec:touch:faces = [3, 4, 5, 9, 10, 11]
+                uniform asset ui:nodegraph:node:icon = @../../icons/touch_region.png@
+            }
+
+            def RigExecTouchOverlay "Overlay"
+            {
+                token visibility = "invisible"
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Skin"
+        {
+            float3[] extent = [(0, -0.7, 0), (6, 0.7, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 8, 7, 1, 2, 9, 8, 2, 3, 10, 9, 3, 4, 11, 10, 4, 5, 12, 11, 5, 6, 13, 12, 7, 8, 15, 14, 8, 9, 16, 15, 9, 10, 17, 16, 10, 11, 18, 17, 11, 12, 19, 18, 12, 13, 20, 19]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0, -0.7, 0), (1, -0.7, 0), (2, -0.7, 0), (3, -0.7, 0), (4, -0.7, 0), (5, -0.7, 0), (6, -0.7, 0), (0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0), (5, 0, 0), (6, 0, 0), (0, 0.7, 0), (1, 0.7, 0), (2, 0.7, 0), (3, 0.7, 0), (4, 0.7, 0), (5, 0.7, 0), (6, 0.7, 0)]
+            color3f[] primvars:displayColor = [(0.42, 0.48, 0.58)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.19, 160)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (12.07, 7.889, 14.88)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

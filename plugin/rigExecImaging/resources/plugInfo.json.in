@@ -1,0 +1,41 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "RigExecTouchOverlayAdapter": {
+                        "bases": [
+                            "UsdImagingMeshAdapter"
+                        ],
+                        "displayName": "RigExec TouchPose highlight overlay",
+                        "primTypeName": "RigExecTouchOverlay"
+                    },
+                    "RigExecTouchPoseSceneIndexPlugin": {
+                        "bases": [
+                            "UsdImagingSceneIndexPlugin"
+                        ],
+                        "displayName": "RigExec TouchPose shader highlight"
+                    },
+                    "RigExecImagingRigAdapter": {
+                        "bases": [
+                            "UsdImagingAPISchemaAdapter"
+                        ],
+                        "displayName": "RigExec rig time trigger",
+                        "apiSchemaName": ""
+                    },
+                    "RigExecUsdImagingSceneIndexPlugin": {
+                        "bases": [
+                            "UsdImagingSceneIndexPlugin"
+                        ],
+                        "displayName": "RigExec results scene indices"
+                    }
+                }
+            },
+            "LibraryPath": "../../@RIGEXEC_IMAGING_LIBRARY_FILENAME@",
+            "Name": "rigExecImaging",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

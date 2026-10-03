@@ -1,0 +1,227 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecPositionConstraint.
+
+    One plate hangs between two posts of different heights. The constraint
+    blends the two post origins by inputs:sourceWeights, lifts the blend by
+    inputs:translationOffset, and writes the result onto the Slide joint;
+    a matrix mover carries the plate. The weights start EVEN at (1, 1) --
+    the blend sitting at the posts' midpoint, which is the joint's rest --
+    then swing to (1, 0), to (0, 1) and back to even over 1001-1023, so the
+    blue start-frame ghost is the rest blend and the plate departs from it
+    in both directions with nothing else in the rig animated.
+    """
+    defaultPrim = "PositionAsset"
+    endTimeCode = 1023
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PositionAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PositionAsset"
+
+        def Scope "Controls"
+        {
+            # The two ends of the blend. Neither is animated: the whole
+            # shot is the weight sweep on the constraint.
+            def RigExecControl "PostA" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2.6, 0.6, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "PostB" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.6, 2.6, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            # Rest sits at the midpoint of the two posts, so an even blend
+            # with no offset would leave the joint exactly where it is;
+            # every bit of motion you see is the blend or the offset.
+            def RigExecJoint "Slide" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.6, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "PlateW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </PositionAsset/Geom/Plate.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # The hierarchy is the displayed stack: bottom executes first.
+            # Keep Pose below Geometry so final pose is available to skinning.
+            reorder nameChildren = ["Geometry", "Pose"]
+            def Scope "Pose"
+            {
+                def RigExecPositionConstraint "SlideBetween" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    # RigExec has no maintainOffset switch: the offset is an
+                    # authored vector, added after the source blend, so the
+                    # plate rides 0.9 units above the line between the posts.
+                    double3 inputs:translationOffset = (0, 0.9, 0)
+                    float[] inputs:sourceWeights.timeSamples = {
+                        1001: [1, 1],
+                        1008: [1, 0],
+                        1016: [0, 1],
+                        1024: [1, 1],
+                    }
+                    rel rigExec:moves = </PositionAsset/Rig/Joints/Slide>
+                    rel rigExec:sources = [
+                        </PositionAsset/Rig/Controls/PostA>,
+                        </PositionAsset/Rig/Controls/PostB>,
+                    ]
+                    uniform asset ui:nodegraph:node:icon = @../../icons/position_constraint.png@
+                }
+            }
+
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "PlateSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </PositionAsset/Geom/Plate.points>
+                    rel rigExec:transform = </PositionAsset/Rig/Joints/Slide>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </PositionAsset/Rig/Weights/PlateW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+
+        # Set dressing, not rig: a vertical shaft under each control ring so
+        # the ring reads as the TOP of a post standing on the ground, and the
+        # 2 units of height between them reads as height and not as depth.
+        def Mesh "PostAShaft"
+        {
+            color3f[] primvars:displayColor = [(0.14, 0.14, 0.14)]
+            float3[] extent = [(-2.72, 0.0, -0.12), (-2.48, 0.6, 0.12)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                4, 5, 6, 7,
+                1, 0, 3, 2,
+                0, 4, 7, 3,
+                5, 1, 2, 6,
+                3, 7, 6, 2,
+                0, 1, 5, 4
+            ]
+            point3f[] points = [(-2.72, 0, -0.12), (-2.48, 0, -0.12), (-2.48, 0.6, -0.12), (-2.72, 0.6, -0.12), (-2.72, 0, 0.12), (-2.48, 0, 0.12), (-2.48, 0.6, 0.12), (-2.72, 0.6, 0.12)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        # Set dressing, not rig: a vertical shaft under each control ring so
+        # the ring reads as the TOP of a post standing on the ground, and the
+        # 2 units of height between them reads as height and not as depth.
+        def Mesh "PostBShaft"
+        {
+            color3f[] primvars:displayColor = [(0.14, 0.14, 0.14)]
+            float3[] extent = [(2.48, 0.0, -0.12), (2.72, 2.6, 0.12)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                4, 5, 6, 7,
+                1, 0, 3, 2,
+                0, 4, 7, 3,
+                5, 1, 2, 6,
+                3, 7, 6, 2,
+                0, 1, 5, 4
+            ]
+            point3f[] points = [(2.48, 0, -0.12), (2.72, 0, -0.12), (2.72, 2.6, -0.12), (2.48, 2.6, -0.12), (2.48, 0, 0.12), (2.72, 0, 0.12), (2.72, 2.6, 0.12), (2.48, 2.6, 0.12)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        # The line the two source origins define. The constrained joint never
+        # sits ON it: inputs:translationOffset lifts the blend 0.9 above it,
+        # and that gap is the whole of "maintain offset" here.
+        def BasisCurves "SourceSpan"
+        {
+            uniform token type = "linear"
+            int[] curveVertexCounts = [2]
+            point3f[] points = [(-2.6, 0.6, 0), (2.6, 2.6, 0)]
+            float[] widths = [0.06] (
+                interpolation = "constant"
+            )
+            color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
+        }
+        def Mesh "Plate"
+        {
+            color3f[] primvars:displayColor = [(0.35, 0.6, 0.95)]
+            float3[] extent = [(-1.2, 1, 0), (1.2, 2.2, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 1, 6, 5,
+                1, 2, 7, 6,
+                2, 3, 8, 7,
+                3, 4, 9, 8,
+                5, 6, 11, 10,
+                6, 7, 12, 11,
+                7, 8, 13, 12,
+                8, 9, 14, 13,
+                10, 11, 16, 15,
+                11, 12, 17, 16,
+                12, 13, 18, 17,
+                13, 14, 19, 18
+            ]
+            normal3f[] normals = [
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)
+            ] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [
+                (-1.2, 1, 0), (-0.6, 1, 0), (0, 1, 0), (0.6, 1, 0), (1.2, 1, 0),
+                (-1.2, 1.4, 0), (-0.6, 1.4, 0), (0, 1.4, 0), (0.6, 1.4, 0), (1.2, 1.4, 0),
+                (-1.2, 1.8, 0), (-0.6, 1.8, 0), (0, 1.8, 0), (0.6, 1.8, 0), (1.2, 1.8, 0),
+                (-1.2, 2.2, 0), (-0.6, 2.2, 0), (0, 2.2, 0), (0.6, 2.2, 0), (1.2, 2.2, 0)
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1567, 135.1)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (7.952, 7.096, 12.73)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

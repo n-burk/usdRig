@@ -1,0 +1,95 @@
+#usda 1.0
+(
+    doc = """The whole character, one layer per thing it is made of.
+
+    Open this and the Layer Stack view reads top to bottom as the order
+    opinions are resolved, strongest first. Every layer here contributes
+    one kind of data and composes over the ones below it, so any of them
+    can be republished without touching the rest, and any of them can be
+    dropped to get a lighter character:
+
+      Biped_picker.usda         the control picker: RigExecPicker prims,
+                                found by type. Strongest, because it is
+                                the layer an animator overrides -- a
+                                button moved or deactivated wins over
+                                the published layout.
+
+      Biped_touch_regions.usda  TouchPose regions. `over`s only: it
+                                annotates the mesh with named face sets
+                                and the control each drives, and adds no
+                                geometry of its own, so it has to sit
+                                above what it annotates.
+
+      Biped_psd.usda            the pose-space deformation: one
+                                RigExecPoseInterpolator per corrective,
+                                each reading joint poses and publishing
+                                a weight.
+
+      Biped_face_rig.usda       the face, as its own branch of the
+                                tree: the face layer and the eyes,
+                                mouth, brows and cheeks over it, each
+                                still its own layer (see that file).
+
+      Biped_shapes.usdc         the blend shapes those weights drive --
+                                UsdSkelBlendShape targets and the mover
+                                that applies them. Crate, because it is
+                                four megabytes of point offsets.
+
+      Biped_layered.usda        the rig, which is itself four layers
+                                (see below).
+
+    The middle two are deliberately useless apart: the interpolators
+    publish weights nothing reads, and the shapes wait for weights nobody
+    writes. Together they are the corrective system, and either one alone
+    is inert rather than broken, which is the property that lets a shot
+    drop the correctives without editing anything.
+
+    Biped_layered.usda brings the rig in as four more layers:
+
+      Biped_layered_left.usda   the left limbs
+      Biped_layered_right.usda  the right limbs
+      Biped_layered_center.usda the spine, neck, head and the rig root
+      Biped_layered_model.usda  the geometry and materials
+
+    Left, right and centre are rig layers stacked on the model layer, so
+    the model is publishable on its own and the rig is three files that
+    two riggers can work in at once without colliding."""
+    defaultPrim = "Biped"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    subLayers = [
+        @./Biped_picker.usda@,
+        @./Biped_touch_regions.usda@,
+        @./Biped_psd.usda@,
+        @./Biped_face_rig.usda@,
+        @./Biped_shapes.usdc@,
+        @./Biped_layered.usda@
+    ]
+)
+
+# VIEWING DEFAULTS, and only viewing defaults. This is the layer that
+# assembles the character, so it is where an opinion about what is drawn
+# on open belongs -- not in the rig layers, which should describe the rig
+# the same way whoever opens them wants to see it.
+#
+# Joints and solvers are hidden. They are the rig's internals: an
+# animator grabs CONTROLS, and 252 joint guides plus the solver guides
+# on top of them bury the controls they are meant to sit behind. Both
+# come back with a `visibility = "inherited"` opinion in any stronger
+# layer, or by unchecking them in the viewer, so nothing is lost -- the
+# rig still publishes every one of them.
+over "Biped"
+{
+    over "Rig"
+    {
+        over "Joints"
+        {
+            token visibility = "invisible"
+        }
+
+        over "Solvers"
+        {
+            token visibility = "invisible"
+        }
+    }
+}

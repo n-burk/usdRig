@@ -1,0 +1,84 @@
+# Dependencies, builds, and generated documentation
+docs/papers/
+docs/site/
+docs/sizzle/
+sizzle/
+sizzle_build/
+build/
+build-*/
+verify-out/
+examples/python/out/
+*.obj
+*.o
+*.os
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# Local tools, assistant state, and caches
+.codex*/
+.claude/
+.omc/
+.omp/
+.omo/
+.cache/
+.ruff_cache/
+autoresearch/
+__pycache__/
+*.py[cod]
+
+# Credentials
+.env
+.env.*
+.envrc
+credentials.json
+secrets.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Editor and operating-system files
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local conversion tools and generated scratch stages
+/tools/biped/
+/plugin/touchPose/import_touch.py
+/plugin/touchPose/spikes/
+/env-*.sh
+/biped*.usda
+
+# Local presentation capture tools requiring ignored production inputs
+/docs/build_usdview_ball_media.py
+/examples/2d/bust_dd_b/qa_strip.py
+
+# Local experiments and agent output; supported tests and generators stay tracked.
+/scratch/
+/scratchpad/
+/tmp/
+/reports/
+/docs/plans/
+/docs/superpowers/
+/examples/2d/bust_v2a/
+/examples/2d/bust_v2b/
+/docs/build_godot_walkthrough_media.py
+*.prompt.txt
+*.prompt.md
+*_capture_manifest.json
+*.bak
+*.orig
+*.rej
+.aider*
+.cursor/
+.windsurf/
+.pytest_cache/
+*.egg-info/

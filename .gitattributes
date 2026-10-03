@@ -1,0 +1,19 @@
+* text=auto
+# Shell scripts must retain platform-compatible line endings.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.usda text
+*.usd  -text -diff
+*.cpp text
+*.h text
+*.py text
+*.md text
+*.txt text
+*.json text
+*.cmake text
+*.png binary
+*.jpg binary
+*.gif binary
+*.exr binary

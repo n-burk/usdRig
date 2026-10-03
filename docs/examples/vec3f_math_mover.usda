@@ -1,0 +1,118 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecVec3fMathMover.
+
+    A card squashes and stretches from a handle you can see. The Squash
+    control publishes one animator channel, `inputs:squash`, a float3 that
+    carries the whole performance; the mover's `inputs:value` is CONNECTED
+    to that channel, so the control -- not the mover -- is where the
+    animation lives. The mover multiplies the channel onto the card Xform's
+    `xformOp:scale`, component by component, while the authored scale stays
+    (1, 1, 1).
+
+    The guide disc sits in the card's own plane at its pivot, so the card
+    breathes around the handle that drives it. Scrub 1001-1012.
+    """
+    defaultPrim = "VecMathAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "VecMathAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "VecMathAsset"
+
+        def Scope "Controls"
+        {
+            # The handle. Its rest frame is rotated 90 degrees about X so the
+            # planar circle guide (normal +Y in its local frame) lies in the
+            # card's XY plane, and it is nudged forward in Z so the disc is
+            # not coplanar with the card.
+            def RigExecControl "Squash" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 0, 1, 0), (0, -1, 0, 0), (0, 0, 0.08, 1) )
+                uniform token guide:shape = "circle"
+                uniform token guide:drawMode = "geometry"
+                # A quarter of the card's 2-unit width across: big enough
+                # to grab in usdview, small enough that the card -- not the
+                # handle -- is what the picture is of.
+                double guide:scaleX = 0.25
+                double guide:scaleY = 0.25
+                double guide:scaleZ = 0.25
+
+                # The animator channel this page is about: one float3 on the
+                # control, keyed with time samples because USD splines are
+                # scalar-valued. The mover reads it through a connection, so
+                # this is the only animation in the file.
+                custom float3 inputs:squash = (1, 1, 1)
+                custom float3 inputs:squash.timeSamples = {
+                    1001: (1, 1, 1),
+                    1004: (1.45, 0.6, 1),
+                    1008: (0.72, 1.5, 1),
+                    1012: (1, 1, 1),
+                }
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Property"
+            {
+                # multiply is component-wise: the incoming (1, 1, 1) becomes
+                # the control's channel outright at full envelope. Swap the
+                # operation to `add` and the same channel becomes an offset.
+                def RigExecVec3fMathMover "SquashScale" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "multiply"
+                    float inputs:defaultWeight = 1
+                    float3 inputs:value.connect = </VecMathAsset/Rig/Controls/Squash.inputs:squash>
+                    rel rigExec:moves = </VecMathAsset/Geom/Card.xformOp:scale>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/vec3f_math_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # The mover revises this Xform's scale; the mesh hangs underneath, so
+        # the whole card follows without a single point being touched.
+        def Xform "Card"
+        {
+            float3 xformOp:scale = (1, 1, 1)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+
+            def Mesh "Panel"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.8, 0.9)]
+                float3[] extent = [(-1, -0.6, 0), (1, 0.6, 0)]
+                int[] faceVertexCounts = [4]
+                int[] faceVertexIndices = [0, 1, 2, 3]
+                point3f[] points = [(-1, -0.6, 0), (1, -0.6, 0), (1, 0.6, 0), (-1, 0.6, 0)]
+                uniform token subdivisionScheme = "none"
+            }
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.07106, 60.23)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (3.539, 2.431, 5.663)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

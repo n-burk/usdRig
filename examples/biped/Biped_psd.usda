@@ -1,0 +1,3345 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        uniform token rigExec:partition = "Biped"
+
+        def Scope "PoseInterpolators"
+        {
+            def RigExecPoseInterpolator "ankleSwing_l_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/ankleTwist_l_bind/ankleSwing_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 4.135903e-25, 8.4703295e-22, -6.938894e-18)
+                    float rigExec:rotationRadius = 0.5747138
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_l_up_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind/leg_l_fk_ankle_l_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                    ]
+                    double[] rigExec:poseControlValues = [55.007958901864576, 0.01745329]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.88694364, 0.000002930971, 0.000005214161, 0.46187764)
+                    float rigExec:rotationRadius = 0.57613325
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_l_out_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.88736576, 0.014477712, 0.4607745, 0.007700642)
+                    float rigExec:rotationRadius = 0.5747282
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_l_in_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.88737124, -0.01447728, -0.4607639, 0.007700639)
+                    float rigExec:rotationRadius = 0.5747138
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_l_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7072098, -0.0000040914724, 0.0000043632463, -0.7070037)
+                    float rigExec:rotationRadius = 0.9423029
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "ankleSwing_r_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankleTwist_r_bind/ankleSwing_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 4.135903e-25, 8.4703295e-22, -6.938894e-18)
+                    float rigExec:rotationRadius = 0.57471377
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_r_up_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0.0000217452397539377, 0.00034185164294960627, 55.00795096085168, 0, -0.00023762589536707214, -0.00008193207831945743, 0.000024780347054883164, 0.000006154164377762229, -0.000006102109692610024, -4.229432116209416e-7, -1.9576513333870408e-7, 0.00010320268352276179, 0.00011277534826990885]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.8869437, 0.000002930947, 0.0000052141963, 0.46187758)
+                    float rigExec:rotationRadius = 0.57613313
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_r_out_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0.00002174523985657175, 55.000318028597306, 0.007982724910195832, 0, -0.00023762589536707214, -0.00008193207831945743, 0.000024780347054883164, 0.000006154164377762229, -0.000006102109692610024, -4.229432116209416e-7, -1.9576513333870408e-7, 0.00010320268352276179, 0.00011277534826990885]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.88736576, 0.01447771, 0.46077445, 0.0077006402)
+                    float rigExec:rotationRadius = 0.57472813
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_r_in_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0.000021745239642371047, -54.99963432531146, 0.007982724910232178, 0, -0.0002376258865543531, -0.00008193210415680581, 0.000024780346135737565, 0.000006154163369448462, -0.0000061021059982834, -4.229440251505873e-7, -1.9578615039413766e-7, 0.00010315965328402743, 0.00011274389006833318]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.8873713, -0.014477279, -0.46076384, 0.007700637)
+                    float rigExec:rotationRadius = 0.57471377
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ankle_r_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0.000021745239784376724, 0.0003418516429337555, -89.99197829192424, 0, -0.0002376258865543531, -0.00008193210415680581, 0.000024780346135737565, 0.000006154163369448462, -0.0000061021059982834, -4.229440251505873e-7, -1.9578615039413766e-7, 0.00010315965328402743, 0.00011274389006833318]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7072099, -0.000004091513, 0.0000043632344, -0.70700365)
+                    float rigExec:rotationRadius = 0.9423028
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "elbow_l_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/elbowTwist_l_bind/elbow_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 6.938894e-18)
+                    float rigExec:rotationRadius = 0.7444987
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "elbow_l_forward_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [-85.31325420610526]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7354277, 0, 0, -0.67760324)
+                    float rigExec:rotationRadius = 0.5235988
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "elbow_l_forward_150" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [-145.31324554317837]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.2980974, 0, 0, -0.9545354)
+                    float rigExec:rotationRadius = 0.5235988
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "elbow_r_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/elbowTwist_r_bind/elbow_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 6.938894e-18)
+                    float rigExec:rotationRadius = 0.7444987
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "elbow_r_forward_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [-85.31325420610526]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7354277, 0, 0, -0.67760324)
+                    float rigExec:rotationRadius = 0.5235988
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "elbow_r_forward_150" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [-145.3132455431783]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.2980974, 0, 0, -0.9545354)
+                    float rigExec:rotationRadius = 0.5235988
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "index_002_l" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "index_002_l_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (-7.1054274e-15, 1.4210855e-14, 1.8873791e-15)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "index_002_l_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (-7.1054274e-15, 1.4210855e-14, 1.8873791e-15)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "index_002_r" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "index_002_r_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (2.1316282e-14, -4.2632564e-14, -3.3861802e-15)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "index_002_r_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (2.1316282e-14, -4.2632564e-14, -3.3861802e-15)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "knee_l_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/kneeTwist_l_bind/knee_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "knee_l_back_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-2.5393712379152325e-14, -1.6046823187407858e-15, -89.99966693558589, 0, -0.00023762640781776687, -0.00008193077558124709, 0.00002477974025018526, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 2.6596313167541466e-7, -0.000040777114035919385, 0.000007515718443938671]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710194, 0, 0, -0.70711166)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "knee_l_back_130" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-2.98811932945925e-14, -1.3064603642834344e-14, -129.99965538501746, 0, -0.00023762641663031413, -0.00008193074974394158, 0.000024779741169288623, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 1.9696818368999155e-7, 0.00010069051283384269, 0.00011093876980061205]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.42261213, 0, 0, -0.9063106)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "knee_l_forward_40" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [5.894391345225403e-15, -1.0803965140711893e-14, 40.00029552506682, 0, -0.00023762641663031413, -0.00008193074974394158, 0.000024779741169288623, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 1.9696818368999155e-7, 0.00010069051283384269, 0.00011093876980061205]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.93969506, 0, 0, 0.3420135)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "knee_r_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/kneeTwist_r_bind/knee_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "knee_r_back_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-2.539371237915457e-14, -1.6046823187433308e-15, -89.99966693559671, 0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.0000061508001904159335, -0.000006089766949346095, -4.256474678899931e-7, -2.6593620367495196e-7, -0.000040565778786017326, 0.000007670255292147095]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710194, 0, 0, -0.70711166)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "knee_r_back_130" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-2.988119329459259e-14, -1.3064603642837739e-14, -129.99965538502823, 0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.000006154110290209806, -0.0000061018947117495835, -4.2297680683194025e-7, -1.9694126071580407e-7, 0.00010069420296490069, 0.00011094146900624265]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.42261213, 0, 0, -0.9063106)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "knee_r_forward_40" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                    ]
+                    double[] rigExec:poseControlValues = [5.8943913452248945e-15, -1.0803965140708548e-14, 40.00029552505603, 0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.000006154110290209806, -0.0000061018947117495835, -4.2297680683194025e-7, -1.9694126071580407e-7, 0.00010069420296490069, 0.00011094146900624265]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.93969506, 0, 0, 0.3420135)
+                    float rigExec:rotationRadius = 1.8151418
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "middle_002_l" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "middle_002_l_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (-2.842171e-14, 1.4210855e-14, 7.771561e-16)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "middle_002_l_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (-2.842171e-14, 1.4210855e-14, 7.771561e-16)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "middle_002_r" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "middle_002_r_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (3.5527137e-15, 0, 1.2212453e-15)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "middle_002_r_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (3.5527137e-15, 0, 1.2212453e-15)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "neckTwist" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.9549359
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "neckTwist_l_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [54.902538431629154, 3.98850543382323, 2.0725859612195086]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.8870108, 0.4589365, 0.050882734, -3.3653635e-15)
+                    float rigExec:rotationRadius = 0.9549359
+                    float3 rigExec:translation = (1.6003, -0.001, 1.7763568e-15)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "neckTwist_r_55" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-54.90253843162916, -3.9885054338232173, 2.072585961219516]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.8870108, -0.4589365, -0.050882734, -3.4208747e-15)
+                    float rigExec:rotationRadius = 0.9549359
+                    float3 rigExec:translation = (1.6003, -0.001, -1.7763568e-15)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "neck" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.5215786
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "neck_l_side" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-5.778369441205374, 49.754012813568394, -2.681195677761657]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.90630776, -0.03588562, 0.42109194, -5.551115e-17)
+                    float rigExec:rotationRadius = 0.5215786
+                    float3 rigExec:translation = (0, 0, -4.2632564e-14)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "neck_r_side" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [5.778369441205388, -49.754012813568394, -2.6811956777616754]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.90630776, 0.03588562, -0.42109194, -2.7755576e-17)
+                    float rigExec:rotationRadius = 0.5215786
+                    float3 rigExec:translation = (0, 0, 4.2632564e-14)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "neck_forward" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rz>
+                    double[] rigExec:poseControlValues = [-49.999993010194196]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.90630776, 0, 0, -0.42261827)
+                    float rigExec:rotationRadius = 0.5235988
+                    float3 rigExec:translation = (0, -2.1316282e-14, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "neck_back" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl.avars:rz>
+                    double[] rigExec:poseControlValues = [49.999993010194196]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.90630776, 0, 0, 0.42261827)
+                    float rigExec:rotationRadius = 0.5235988
+                    float3 rigExec:translation = (0, 7.1054274e-15, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "pinky_002_l" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "pinky_002_l_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 1.7763568e-15)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "pinky_002_l_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 1.7763568e-15)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "pinky_002_r" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "pinky_002_r_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (7.1054274e-15, 0, 1.7763568e-15)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "pinky_002_r_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (7.1054274e-15, 0, 1.7763568e-15)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "ring_002_l" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ring_002_l_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (7.1054274e-15, 0, 2.6645353e-15)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ring_002_l_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (7.1054274e-15, 0, 2.6645353e-15)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "ring_002_r" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ring_002_r_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [-89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, -0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (2.1316282e-14, 0, 4.440892e-16)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "ring_002_r_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk.avars:rz>
+                    double[] rigExec:poseControlValues = [89.99998700560963]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0, 0, 0.70710677)
+                    float rigExec:rotationRadius = 2.1991148
+                    float3 rigExec:translation = (2.1316282e-14, 0, 4.440892e-16)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "shoulder_l_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/clavicle_trans_l_bind/shoulder_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, -1.323489e-23, 0, 3.1554436e-30)
+                    float rigExec:rotationRadius = 0.93529546
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_up_45" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:ry>,
+                    ]
+                    double[] rigExec:poseControlValues = [-0.8530999326820312, -45.34299344360123, 1.950700007538558, -44.999999655303505]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7048656, -0.005305396, -0.70897067, 0.022294402)
+                    float rigExec:rotationRadius = 0.9426211
+                    float3 rigExec:translation = (17.227499, 4.3680997, -3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:ry>,
+                    ]
+                    double[] rigExec:poseControlValues = [-0.8530999326820312, -45.34299344360123, 1.950700007538558, 89.99998085311091]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.92474383, -0.022627644, 0.37989953, 0.0036302237)
+                    float rigExec:rotationRadius = 0.93529546
+                    float3 rigExec:translation = (17.227499, 4.3680997, -3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_forward_135" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-0.8530999326820312, -45.34299344360123, 1.950700007538558, -135.00103274686637]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.3701878, 0.350796, -0.15984444, -0.845194)
+                    float rigExec:rotationRadius = 1.2983328
+                    float3 rigExec:translation = (17.227499, 4.3680997, -3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_back_135" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-0.8530999326820312, -45.34299344360123, 1.950700007538558, 134.9989282699625]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.33588016, -0.36107734, -0.13502318, 0.8594047)
+                    float rigExec:rotationRadius = 1.8769904
+                    float3 rigExec:translation = (17.227499, 4.3680997, -3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_down_135" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-0.8530999326820312, -45.34299344360123, 1.950700007538558, 179.99999043040845, 45.00002564408429, 179.99894776154855]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70897067, -0.022294413, 0.7048656, -0.005305407)
+                    float rigExec:rotationRadius = 0.9426186
+                    float3 rigExec:translation = (17.227499, 4.3680997, -3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_up_0" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-0.8530999326820312, -45.34299344360123, 1.950700007538558]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.9225222, -0.013433205, -0.3852631, 0.018567115)
+                    float rigExec:rotationRadius = 0.9426211
+                    float3 rigExec:translation = (17.227499, 4.3680997, -3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_forward_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-0.8530999326820312, -45.34299344360123, 1.950700007538558, -90.00103924406157]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.66545063, 0.26292342, -0.28192085, -0.63919276)
+                    float rigExec:rotationRadius = 1.2983328
+                    float3 rigExec:translation = (17.227499, 4.3680997, -3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "shoulder_l_twist_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/clavicle_trans_l_bind/shoulder_l_driver/shoulder_l_twist_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (1, 1.7347235e-18, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_twistUp_170" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [-168.99993636786743]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.09584222, 0.99539655, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_twistDown_170" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [168.9999172286887]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.09585001, -0.9953958, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_twistUp_090" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [-89.999996575199]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.707104, 0.7071096, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_l_twistDown_090" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [89.99997743602026]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.7071095, -0.707104, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "shoulder_r_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/clavicle_trans_r_bind/shoulder_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.93529546
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_up_45" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:ry>,
+                    ]
+                    double[] rigExec:poseControlValues = [1.4153283645610177, -45.35364013982166, -1.276900570669793, 44.99999965373286]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7048656, -0.005305396, -0.70897067, 0.022294402)
+                    float rigExec:rotationRadius = 0.9426211
+                    float3 rigExec:translation = (-17.227499, -4.3680997, 3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:ry>,
+                    ]
+                    double[] rigExec:poseControlValues = [1.4153283645610177, -45.35364013982166, -1.276900570669793, -89.99998085468157]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.92474383, -0.022627644, 0.37989953, 0.0036302237)
+                    float rigExec:rotationRadius = 0.93529546
+                    float3 rigExec:translation = (-17.227499, -4.3680997, 3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_forward_135" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [1.4153283645610177, -45.35364013982166, -1.276900570669793, -135.00103274759596]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.3701878, 0.350796, -0.15984444, -0.845194)
+                    float rigExec:rotationRadius = 1.2983328
+                    float3 rigExec:translation = (-17.227499, -4.3680997, 3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_back_135" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [1.4153283645610177, -45.35364013982166, -1.276900570669793, 134.99892826923292]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.33588016, -0.36107734, -0.13502318, 0.8594047)
+                    float rigExec:rotationRadius = 1.8769904
+                    float3 rigExec:translation = (-17.227499, -4.3680997, 3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_down_135" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [1.4153283645610177, -45.35364013982166, -1.276900570669793, -179.99999039138953, -45.00002564251364, 179.99894776081914]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70897067, -0.022294413, 0.7048656, -0.005305407)
+                    float rigExec:rotationRadius = 0.9426186
+                    float3 rigExec:translation = (-17.227499, -4.3680997, 3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_up_0" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [1.4153283645610177, -45.35364013982166, -1.276900570669793]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.9225222, -0.013433205, -0.3852631, 0.018567117)
+                    float rigExec:rotationRadius = 0.9426211
+                    float3 rigExec:translation = (-17.227499, -4.3680997, 3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_forward_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root.avars:rz>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [1.4153283645610177, -45.35364013982166, -1.276900570669793, -90.00103924479113]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.66545063, 0.26292342, -0.28192085, -0.63919276)
+                    float rigExec:rotationRadius = 1.2983328
+                    float3 rigExec:translation = (-17.227499, -4.3680997, 3.2069988)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "shoulder_r_twist_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/clavicle_trans_r_bind/shoulder_r_driver/shoulder_r_twist_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_twistUp_170" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [168.9999608074584]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.0958421, 0.99539655, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_twistDown_170" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [-168.99994159023865]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.095849894, -0.9953958, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_twistDown_090" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [-89.99997739699978]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.7071095, -0.707104, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "shoulder_r_twistUp_090" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind.avars:rx>
+                    double[] rigExec:poseControlValues = [89.99999661421947]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.707104, 0.7071096, 0, 0)
+                    float rigExec:rotationRadius = 2.5132616
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "thigh_l_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/pelvis_trans_l_bind/thigh_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_l_out_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376264342554022, -0.00008193069806932199, 0.000024779743007494693, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 1.9574297779730214e-7, 0.00010320268184225653, 0.00011277534676257337, -0.00025834032645457417, 89.99974904997487, -0.00021440789852330823]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7071097, -0.0000048524594, 0.7071039, -0.0000015239846)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_l_in_25" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376264342554022, -0.00008193069806932199, 0.000024779743007494693, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 1.9574297779730214e-7, 0.00010320268184225653, 0.00011277534676257337, -0.0002583459066837234, -25.000217742140986, -0.00021441347856438815]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.9762952, -0.0000038925195, -0.21644342, 0.000003273681)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_l_forward_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.00023762642544285925, -0.00008193072390663319, 0.00002477974208839176, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 1.9576399485426675e-7, 0.00010315958835121991, 0.00011274384230862002, -0.00025834590664523344, -0.00022496124624710658, 89.99975959774257]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7071052, -0.0000059644735, 4.1194002e-7, 0.7071084)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_l_back_60" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.00023762642544285925, -0.00008193072390663319, 0.00002477974208839176, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 1.9576399485426675e-7, 0.00010315958835121991, 0.00011274384230862002, -0.0002583459066627542, -0.00022496124621708757, -60.00019708762595]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.86602664, -0.0000019416239, -0.0000056546205, -0.49999788)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_l_out_120" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_l_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_l_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root/leg_l_fk_thigh_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376264342554022, -0.00008193069806932199, 0.000024779743007494693, -0.0000061541726690562855, -0.000006102110305882858, -4.2292805262908207e-7, 1.9574297779730214e-7, 0.00010320268184225653, 0.00011277534676257337, 179.99974165409304, 60.00024228710004, 179.99978558652109]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.5000034, -0.000004292668, 0.8660235, -0.0000027279473)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "thigh_r_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/pelvis_trans_r_bind/thigh_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_r_out_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.000006154169070655204, -0.000006102110075430487, -4.229293814803567e-7, -1.9571605491237152e-7, 0.00010320268463052211, 0.00011277534964941689, 0.00025834624910684356, -89.99974904994885, -0.00021441463287145786]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7071097, -0.0000048524607, 0.7071039, -0.0000015239656)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_r_in_25" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.000006154169070655204, -0.000006102110075430487, -4.229293814803567e-7, -1.9571605491237152e-7, 0.00010320268463052211, 0.00011277534964941689, 0.00025834444760234514, 25.000217742167045, -0.00021441283115099488]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.9762952, -0.0000038925045, -0.21644342, 0.0000032736925)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_r_forward_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.000006154168062341437, -0.000006102106381103863, -4.229301950100024e-7, -1.957370719678051e-7, 0.00010315965439178774, 0.00011274389144784122, 0.0002583444475647669, 0.00022496127225476564, 89.99975959838994]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.7071052, -0.000005964465, 4.11931e-7, 0.7071084)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_r_back_60" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.000006154168062341437, -0.000006102106381103863, -4.229301950100024e-7, -1.957370719678051e-7, 0.00010315965439178774, 0.00011274389144784122, 0.00025834444754724615, 0.00022496127228478402, -60.00019708697854]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.86602664, -0.0000019416132, -0.0000056546146, -0.49999788)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "thigh_r_out_120" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/leg_r_params.avars:ikfk>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ry>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:rz>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_ik.avars:tz>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tx>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:ty>,
+                        </Biped/Rig/Controls/leg_r_pv.avars:tz>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root/leg_r_fk_thigh_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [0, -0.0002376283412193786, 0.0001180664773524224, 0.000024781431440043172, 0.000006154169070655204, -0.000006102110075430487, -4.229293814803567e-7, -1.9571605491237152e-7, 0.00010320268463052211, 0.00011277534964941689, -179.9997416555522, -60.00024228712611, 179.99978558716856]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.5000034, -0.0000042926745, 0.8660235, -0.0000027279293)
+                    float rigExec:rotationRadius = 4.084082
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "toe_l" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/ankle_l_bind/toe_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.62814945
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeBall_l_up_60" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/ankle_l_bind/ball_l_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [59.98387366811651]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.86609584, -0.0000019282832, -0.0000012804576, 0.49987796)
+                    float rigExec:rotationRadius = 0.62814945
+                    float3 rigExec:translation = (1.2411485, -2.026577, -0.00027895844)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeBall_l_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/ankle_l_bind/ball_l_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [-90.01613332245594]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70700705, 7.3775084e-7, -0.0000021939854, -0.7072065)
+                    float rigExec:rotationRadius = 0.942647
+                    float3 rigExec:translation = (1.2411485, -2.026577, -0.00027895844)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "toe_l_twist" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/ankle_l_bind/toe_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.785392
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeTwist_l_out_45" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/ankle_l_bind/ball_l_bind.avars:ry>
+                    double[] rigExec:poseControlValues = [-45.000502868564546]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.6533727, -0.27063823, -0.2705606, 0.6531891)
+                    float rigExec:rotationRadius = 0.7854044
+                    float3 rigExec:translation = (1.2411485, -2.026577, -0.00027895844)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeTwist_l_in_45" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind/ankle_l_bind/ball_l_bind.avars:ry>
+                    double[] rigExec:poseControlValues = [44.999500179863304]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.6533744, 0.27063417, 0.27055925, 0.6531897)
+                    float rigExec:rotationRadius = 0.785392
+                    float3 rigExec:translation = (1.2411485, -2.026577, -0.00027895844)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "toe_r" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/toe_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.62814945
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeBall_r_up_60" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [59.98387366728278]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.86609584, -0.0000019282977, -0.0000012804629, 0.49987796)
+                    float rigExec:rotationRadius = 0.62814945
+                    float3 rigExec:translation = (-1.2411485, 2.026577, 0.00027895797)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeBall_r_down_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind.avars:rz>
+                    double[] rigExec:poseControlValues = [-90.01613332328967]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70700705, 7.3775226e-7, -0.0000021940007, -0.7072065)
+                    float rigExec:rotationRadius = 0.942647
+                    float3 rigExec:translation = (-1.2411485, 2.026577, 0.00027895797)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "toe_r_twist" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/toe_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "linear"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.785392
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeTwist_r_out_45" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind.avars:ry>
+                    double[] rigExec:poseControlValues = [-45.0005028725779]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.6533727, -0.27063823, -0.2705606, 0.6531891)
+                    float rigExec:rotationRadius = 0.7854044
+                    float3 rigExec:translation = (-1.2411485, 2.026577, 0.00027895797)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "toeTwist_r_in_45" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind.avars:ry>
+                    double[] rigExec:poseControlValues = [44.99950017585002]
+                    uniform token rigExec:poseType = "twist"
+                    quatf rigExec:rotation = (0.6533744, 0.27063417, 0.27055925, 0.6531897)
+                    float rigExec:rotationRadius = 0.785392
+                    float3 rigExec:translation = (-1.2411485, 2.026577, 0.00027895797)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "torso" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Controls/hips_ctl/torso_ctl>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "Y"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.7853982
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "torso_forward_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl.avars:rx>
+                    double[] rigExec:poseControlValues = [89.99998700560961]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, 0.70710677, 0, 0)
+                    float rigExec:rotationRadius = 1.4137167
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "torso_back_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl.avars:rx>
+                    double[] rigExec:poseControlValues = [-89.99998700560961]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.70710677, -0.70710677, 0, 0)
+                    float rigExec:rotationRadius = 1.4137167
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "torso_l_50" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl.avars:rz>
+                    double[] rigExec:poseControlValues = [-49.999992780894225]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.9063078, 0, 0, -0.42261827)
+                    float rigExec:rotationRadius = 0.7853982
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "torso_r_50" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </Biped/Rig/Controls/hips_ctl/torso_ctl.avars:rz>
+                    double[] rigExec:poseControlValues = [49.999992780894225]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.9063078, 0, 0, 0.42261827)
+                    float rigExec:rotationRadius = 0.7853982
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "wristSwing_l_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wristTwist_l_bind/wristSwing_l_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, -1.3552527e-20, -1.3877788e-17, -2.1684043e-19)
+                    float rigExec:rotationRadius = 0.6283193
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_l_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-179.99999095082507, -80.00002117992457, 179.88161828805838]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.6427874, -0.00073328725, -0.7660439, -0.00073328725)
+                    float rigExec:rotationRadius = 1.0471972
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_l_down_70" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [59.99999807878608, -0.11838171194030647]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.86602485, 0.00059481297, 0.49999988, -0.000849481)
+                    float rigExec:rotationRadius = 0.6283193
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_l_front_70" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-9.999991814466291, -70.11837160519204]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.81543964, 0.04999036, -0.07139364, -0.57224303)
+                    float rigExec:rotationRadius = 0.73758996
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_l_back_70" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-9.999991814466242, 69.88160818131155]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.8166293, -0.04999036, -0.07139363, 0.57054406)
+                    float rigExec:rotationRadius = 0.7351155
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+
+            def RigExecPoseInterpolator "wristSwing_r_driver" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wristTwist_r_bind/wristSwing_r_driver>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = None
+                    double[] rigExec:poseControlValues = []
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 0.6283193
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_r_up_90" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:rx>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-179.99999091180777, -80.00002118154747, 179.88161828869212]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.6427874, -0.00073328725, -0.7660439, -0.00073328725)
+                    float rigExec:rotationRadius = 1.0471972
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_r_down_70" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [59.99999808040899, -0.11838171130633944]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.86602485, 0.00059481297, 0.49999988, -0.000849481)
+                    float rigExec:rotationRadius = 0.6283193
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_r_front_70" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-9.999991812843433, -70.118371604558]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.81543964, 0.04999036, -0.07139364, -0.57224303)
+                    float rigExec:rotationRadius = 0.73758996
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+
+                def RigExecPose "wrist_r_back_70" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:ry>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-9.999991812843257, 69.88160818194558]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.8166293, -0.04999036, -0.07139363, 0.57054406)
+                    float rigExec:rotationRadius = 0.7351155
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                }
+            }
+        }
+
+        over "Movers"
+        {
+            over "shapes_body_geo"
+            {
+                over "body_geo_shapes"
+                {
+                    over "ankle_l_up_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_l_driver/ankle_l_up_55.outputs:weight>
+                    }
+
+                    over "ankle_l_out_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_l_driver/ankle_l_out_55.outputs:weight>
+                    }
+
+                    over "ankle_l_in_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_l_driver/ankle_l_in_55.outputs:weight>
+                    }
+
+                    over "ankle_l_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_l_driver/ankle_l_down_90.outputs:weight>
+                    }
+
+                    over "ankle_r_up_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_r_driver/ankle_r_up_55.outputs:weight>
+                    }
+
+                    over "ankle_r_out_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_r_driver/ankle_r_out_55.outputs:weight>
+                    }
+
+                    over "ankle_r_in_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_r_driver/ankle_r_in_55.outputs:weight>
+                    }
+
+                    over "ankle_r_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ankleSwing_r_driver/ankle_r_down_90.outputs:weight>
+                    }
+
+                    over "elbow_l_forward_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/elbow_l_driver/elbow_l_forward_90.outputs:weight>
+                    }
+
+                    over "elbow_l_forward_150"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/elbow_l_driver/elbow_l_forward_150.outputs:weight>
+                    }
+
+                    over "elbow_r_forward_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/elbow_r_driver/elbow_r_forward_90.outputs:weight>
+                    }
+
+                    over "elbow_r_forward_150"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/elbow_r_driver/elbow_r_forward_150.outputs:weight>
+                    }
+
+                    over "index_002_l_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/index_002_l/index_002_l_down_90.outputs:weight>
+                    }
+
+                    over "index_002_l_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/index_002_l/index_002_l_up_90.outputs:weight>
+                    }
+
+                    over "index_002_r_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/index_002_r/index_002_r_down_90.outputs:weight>
+                    }
+
+                    over "index_002_r_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/index_002_r/index_002_r_up_90.outputs:weight>
+                    }
+
+                    over "knee_l_back_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/knee_l_driver/knee_l_back_90.outputs:weight>
+                    }
+
+                    over "knee_l_back_130"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/knee_l_driver/knee_l_back_130.outputs:weight>
+                    }
+
+                    over "knee_l_forward_40"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/knee_l_driver/knee_l_forward_40.outputs:weight>
+                    }
+
+                    over "knee_r_back_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/knee_r_driver/knee_r_back_90.outputs:weight>
+                    }
+
+                    over "knee_r_back_130"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/knee_r_driver/knee_r_back_130.outputs:weight>
+                    }
+
+                    over "knee_r_forward_40"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/knee_r_driver/knee_r_forward_40.outputs:weight>
+                    }
+
+                    over "middle_002_l_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/middle_002_l/middle_002_l_down_90.outputs:weight>
+                    }
+
+                    over "middle_002_l_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/middle_002_l/middle_002_l_up_90.outputs:weight>
+                    }
+
+                    over "middle_002_r_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/middle_002_r/middle_002_r_down_90.outputs:weight>
+                    }
+
+                    over "middle_002_r_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/middle_002_r/middle_002_r_up_90.outputs:weight>
+                    }
+
+                    over "neckTwist_l_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/neckTwist/neckTwist_l_55.outputs:weight>
+                    }
+
+                    over "neckTwist_r_55"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/neckTwist/neckTwist_r_55.outputs:weight>
+                    }
+
+                    over "neck_l_side"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/neck/neck_l_side.outputs:weight>
+                    }
+
+                    over "neck_r_side"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/neck/neck_r_side.outputs:weight>
+                    }
+
+                    over "neck_forward"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/neck/neck_forward.outputs:weight>
+                    }
+
+                    over "neck_back"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/neck/neck_back.outputs:weight>
+                    }
+
+                    over "pinky_002_l_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/pinky_002_l/pinky_002_l_down_90.outputs:weight>
+                    }
+
+                    over "pinky_002_l_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/pinky_002_l/pinky_002_l_up_90.outputs:weight>
+                    }
+
+                    over "pinky_002_r_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/pinky_002_r/pinky_002_r_down_90.outputs:weight>
+                    }
+
+                    over "pinky_002_r_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/pinky_002_r/pinky_002_r_up_90.outputs:weight>
+                    }
+
+                    over "ring_002_l_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ring_002_l/ring_002_l_down_90.outputs:weight>
+                    }
+
+                    over "ring_002_l_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ring_002_l/ring_002_l_up_90.outputs:weight>
+                    }
+
+                    over "ring_002_r_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ring_002_r/ring_002_r_down_90.outputs:weight>
+                    }
+
+                    over "ring_002_r_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/ring_002_r/ring_002_r_up_90.outputs:weight>
+                    }
+
+                    over "shoulder_l_up_45"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_driver/shoulder_l_up_45.outputs:weight>
+                    }
+
+                    over "shoulder_l_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_driver/shoulder_l_down_90.outputs:weight>
+                    }
+
+                    over "shoulder_l_forward_135"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_driver/shoulder_l_forward_135.outputs:weight>
+                    }
+
+                    over "shoulder_l_back_135"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_driver/shoulder_l_back_135.outputs:weight>
+                    }
+
+                    over "shoulder_l_down_135"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_driver/shoulder_l_down_135.outputs:weight>
+                    }
+
+                    over "shoulder_l_up_0"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_driver/shoulder_l_up_0.outputs:weight>
+                    }
+
+                    over "shoulder_l_forward_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_driver/shoulder_l_forward_90.outputs:weight>
+                    }
+
+                    over "shoulder_l_twistUp_170"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_twist_driver/shoulder_l_twistUp_170.outputs:weight>
+                    }
+
+                    over "shoulder_l_twistDown_170"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_twist_driver/shoulder_l_twistDown_170.outputs:weight>
+                    }
+
+                    over "shoulder_l_twistUp_090"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_twist_driver/shoulder_l_twistUp_090.outputs:weight>
+                    }
+
+                    over "shoulder_l_twistDown_090"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_l_twist_driver/shoulder_l_twistDown_090.outputs:weight>
+                    }
+
+                    over "shoulder_r_up_45"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_driver/shoulder_r_up_45.outputs:weight>
+                    }
+
+                    over "shoulder_r_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_driver/shoulder_r_down_90.outputs:weight>
+                    }
+
+                    over "shoulder_r_forward_135"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_driver/shoulder_r_forward_135.outputs:weight>
+                    }
+
+                    over "shoulder_r_back_135"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_driver/shoulder_r_back_135.outputs:weight>
+                    }
+
+                    over "shoulder_r_down_135"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_driver/shoulder_r_down_135.outputs:weight>
+                    }
+
+                    over "shoulder_r_up_0"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_driver/shoulder_r_up_0.outputs:weight>
+                    }
+
+                    over "shoulder_r_forward_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_driver/shoulder_r_forward_90.outputs:weight>
+                    }
+
+                    over "shoulder_r_twistUp_170"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_twist_driver/shoulder_r_twistUp_170.outputs:weight>
+                    }
+
+                    over "shoulder_r_twistDown_170"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_twist_driver/shoulder_r_twistDown_170.outputs:weight>
+                    }
+
+                    over "shoulder_r_twistDown_090"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_twist_driver/shoulder_r_twistDown_090.outputs:weight>
+                    }
+
+                    over "shoulder_r_twistUp_090"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/shoulder_r_twist_driver/shoulder_r_twistUp_090.outputs:weight>
+                    }
+
+                    over "thigh_l_out_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_l_driver/thigh_l_out_90.outputs:weight>
+                    }
+
+                    over "thigh_l_in_25"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_l_driver/thigh_l_in_25.outputs:weight>
+                    }
+
+                    over "thigh_l_forward_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_l_driver/thigh_l_forward_90.outputs:weight>
+                    }
+
+                    over "thigh_l_back_60"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_l_driver/thigh_l_back_60.outputs:weight>
+                    }
+
+                    over "thigh_l_out_120"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_l_driver/thigh_l_out_120.outputs:weight>
+                    }
+
+                    over "thigh_r_out_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_r_driver/thigh_r_out_90.outputs:weight>
+                    }
+
+                    over "thigh_r_in_25"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_r_driver/thigh_r_in_25.outputs:weight>
+                    }
+
+                    over "thigh_r_forward_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_r_driver/thigh_r_forward_90.outputs:weight>
+                    }
+
+                    over "thigh_r_back_60"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_r_driver/thigh_r_back_60.outputs:weight>
+                    }
+
+                    over "thigh_r_out_120"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/thigh_r_driver/thigh_r_out_120.outputs:weight>
+                    }
+
+                    over "toeBall_l_up_60"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_l/toeBall_l_up_60.outputs:weight>
+                    }
+
+                    over "toeBall_l_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_l/toeBall_l_down_90.outputs:weight>
+                    }
+
+                    over "toeTwist_l_out_45"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_l_twist/toeTwist_l_out_45.outputs:weight>
+                    }
+
+                    over "toeTwist_l_in_45"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_l_twist/toeTwist_l_in_45.outputs:weight>
+                    }
+
+                    over "toeBall_r_up_60"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_r/toeBall_r_up_60.outputs:weight>
+                    }
+
+                    over "toeBall_r_down_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_r/toeBall_r_down_90.outputs:weight>
+                    }
+
+                    over "toeTwist_r_out_45"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_r_twist/toeTwist_r_out_45.outputs:weight>
+                    }
+
+                    over "toeTwist_r_in_45"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/toe_r_twist/toeTwist_r_in_45.outputs:weight>
+                    }
+
+                    over "torso_forward_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/torso/torso_forward_90.outputs:weight>
+                    }
+
+                    over "torso_back_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/torso/torso_back_90.outputs:weight>
+                    }
+
+                    over "torso_l_50"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/torso/torso_l_50.outputs:weight>
+                    }
+
+                    over "torso_r_50"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/torso/torso_r_50.outputs:weight>
+                    }
+
+                    over "wrist_l_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_l_driver/wrist_l_up_90.outputs:weight>
+                    }
+
+                    over "wrist_l_down_70"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_l_driver/wrist_l_down_70.outputs:weight>
+                    }
+
+                    over "wrist_l_front_70"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_l_driver/wrist_l_front_70.outputs:weight>
+                    }
+
+                    over "wrist_l_back_70"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_l_driver/wrist_l_back_70.outputs:weight>
+                    }
+
+                    over "wrist_r_up_90"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_r_driver/wrist_r_up_90.outputs:weight>
+                    }
+
+                    over "wrist_r_down_70"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_r_driver/wrist_r_down_70.outputs:weight>
+                    }
+
+                    over "wrist_r_front_70"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_r_driver/wrist_r_front_70.outputs:weight>
+                    }
+
+                    over "wrist_r_back_70"
+                    {
+                        float inputs:weight = 0
+                        float inputs:weight.connect = </Biped/Rig/PoseInterpolators/wristSwing_r_driver/wrist_r_back_70.outputs:weight>
+                    }
+                }
+            }
+        }
+    }
+}
+

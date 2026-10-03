@@ -1,0 +1,43 @@
+#usda 1.0
+(
+    """
+    Fixture for tests/testUsdviewNoodlesIcons.py: three sibling prims that
+    differ only in what ui:nodegraph:node:icon says.
+
+    The icon paths are RELATIVE, exactly as every docs/examples stage
+    authors them, because that is the case that broke: a relative asset
+    path is relative to THIS LAYER (tests/fixtures/), never to wherever
+    usdview was started, so ../../icons reaches the repository's icons
+    directory.
+
+      Iconed       an icon that exists  -> that image, on the title bar
+      MissingIcon  an icon that does not exist -> the built-in default,
+                   silently (the path still anchors to this layer)
+      NoIcon       no opinion at all -> the built-in default
+
+    Plain Xforms on purpose: the node factory's generic fallback handles
+    them, so the test says nothing about rig schemas.
+    """
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Xform "Iconed" (
+        prepend apiSchemas = ["NodeGraphNodeAPI"]
+    )
+    {
+        uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+    }
+
+    def Xform "MissingIcon" (
+        prepend apiSchemas = ["NodeGraphNodeAPI"]
+    )
+    {
+        uniform asset ui:nodegraph:node:icon = @../../icons/no_such_icon.png@
+    }
+
+    def Xform "NoIcon"
+    {
+    }
+}

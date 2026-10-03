@@ -1,0 +1,155 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecFloatMathMover.
+
+    The incoming channel ramps straight up and back down, 0 -> 4.8 -> 0
+    in its own units, but the blendshape that opens the panel wants
+    0 -> 1. Two math movers sit on that one float property: Normalize
+    (remap, min 0 max 4) divides the raw number down to a weight, and
+    Bound (clamp, min 0 max 1) catches the 1.2 the overshoot produces.
+    There is no hold anywhere in the animation: the raw number crosses 4
+    on the way up at about 1005.2 and again on the way down at about
+    1007.0, and for those ~1.8 timecodes the panel stands still at its
+    target shape while the number keeps climbing past it. That stall is
+    Bound, and nothing else.
+
+    Movers under Movers execute as a stack -- reversed namespace order,
+    each parent after its children -- so the reorder lists Bound first
+    to make Normalize run first. The chain resolves before exec runs and
+    its result is handed to the blendshape mover as the value of
+    inputs:weight: the raw number is what the stage carries, the
+    normalized and bounded one is what the shape gets.
+    """
+    defaultPrim = "FloatMathAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "FloatMathAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "FloatMathAsset"
+
+        def Scope "Joints"
+        {
+            # A landmark, not a driver: nothing targets this joint. It marks
+            # the hinge line the blendshape curls the panel about, at the
+            # origin along +X. (It is also load bearing for imaging: a
+            # partition with no RigExecJoint at all trips a mover-status
+            # type error in Storm.)
+            def RigExecJoint "Hinge" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "PanelOpen" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                float inputs:weight.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1006: 4.8; post linear,
+                    1012: 0; post linear,
+                }
+                rel rigExec:samples = </FloatMathAsset/Rig/BlendInputs/PanelOpen/Full>
+                uniform asset ui:nodegraph:node:icon = @../../icons/blend_input.png@
+
+                def RigExecBlendSample "Full" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </FloatMathAsset/Targets/PanelUp.points>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/blend_sample.png@
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Channel"
+            {
+                reorder nameChildren = ["Bound", "Normalize"]
+                def RigExecFloatMathMover "Normalize" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:max = 4
+                    float inputs:min = 0
+                    rel rigExec:moves = </FloatMathAsset/Rig/BlendInputs/PanelOpen.inputs:weight>
+                    uniform token rigExec:operation = "remap"
+                    uniform asset ui:nodegraph:node:icon = @../../icons/float_math_mover.png@
+                }
+
+                def RigExecFloatMathMover "Bound" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:max = 1
+                    float inputs:min = 0
+                    rel rigExec:moves = </FloatMathAsset/Rig/BlendInputs/PanelOpen.inputs:weight>
+                    uniform token rigExec:operation = "clamp"
+                    uniform asset ui:nodegraph:node:icon = @../../icons/float_math_mover.png@
+                }
+            }
+
+            def Scope "Geometry"
+            {
+                def RigExecBlendShapeMover "OpenPanel" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:blendInputs = </FloatMathAsset/Rig/BlendInputs/PanelOpen>
+                    rel rigExec:moves = </FloatMathAsset/Geom/Panel.points>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/blendshape_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Panel"
+        {
+            color3f[] primvars:displayColor = [(0.35, 0.65, 0.85)]
+            uniform bool doubleSided = true
+            float3[] extent = [(-2.5, 0, 0), (2.5, 2.1, 3)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 5, 6, 1, 1, 6, 7, 2, 2, 7, 8, 3, 3, 8, 9, 4, 5, 10, 11, 6, 6, 11, 12, 7, 7, 12, 13, 8, 8, 13, 14, 9, 10, 15, 16, 11, 11, 16, 17, 12, 12, 17, 18, 13, 13, 18, 19, 14, 15, 20, 21, 16, 16, 21, 22, 17, 17, 22, 23, 18, 18, 23, 24, 19, 20, 25, 26, 21, 21, 26, 27, 22, 22, 27, 28, 23, 23, 28, 29, 24, 25, 30, 31, 26, 26, 31, 32, 27, 27, 32, 33, 28, 28, 33, 34, 29]
+            point3f[] points = [(-2.5, 0, 0), (-1.25, 0, 0), (0, 0, 0), (1.25, 0, 0), (2.5, 0, 0), (-2.5, 0, 0.5), (-1.25, 0, 0.5), (0, 0, 0.5), (1.25, 0, 0.5), (2.5, 0, 0.5), (-2.5, 0, 1), (-1.25, 0, 1), (0, 0, 1), (1.25, 0, 1), (2.5, 0, 1), (-2.5, 0, 1.5), (-1.25, 0, 1.5), (0, 0, 1.5), (1.25, 0, 1.5), (2.5, 0, 1.5), (-2.5, 0, 2), (-1.25, 0, 2), (0, 0, 2), (1.25, 0, 2), (2.5, 0, 2), (-2.5, 0, 2.5), (-1.25, 0, 2.5), (0, 0, 2.5), (1.25, 0, 2.5), (2.5, 0, 2.5), (-2.5, 0, 3), (-1.25, 0, 3), (0, 0, 3), (1.25, 0, 3), (2.5, 0, 3)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "Targets"
+    {
+        def Points "PanelUp"
+        {
+            point3f[] points = [(-2.5, 0, 0), (-1.25, 0, 0), (0, 0, 0), (1.25, 0, 0), (2.5, 0, 0), (-2.5, 0.0722, 0.493), (-1.25, 0.0722, 0.493), (0, 0.0722, 0.493), (1.25, 0.0722, 0.493), (2.5, 0.0722, 0.493), (-2.5, 0.2828, 0.9445), (-1.25, 0.2828, 0.9445), (0, 0.2828, 0.9445), (1.25, 0.2828, 0.9445), (2.5, 0.2828, 0.9445), (-2.5, 0.614, 1.3167), (-1.25, 0.614, 1.3167), (0, 0.614, 1.3167), (1.25, 0.614, 1.3167), (2.5, 0.614, 1.3167), (-2.5, 1.0381, 1.5783), (-1.25, 1.0381, 1.5783), (0, 1.0381, 1.5783), (1.25, 1.0381, 1.5783), (2.5, 1.0381, 1.5783), (-2.5, 1.5193, 1.7073), (-1.25, 1.5193, 1.7073), (0, 1.5193, 1.7073), (1.25, 1.5193, 1.7073), (2.5, 1.5193, 1.7073), (-2.5, 2.0174, 1.6928), (-1.25, 2.0174, 1.6928), (0, 2.0174, 1.6928), (1.25, 2.0174, 1.6928), (2.5, 2.0174, 1.6928)]
+            token visibility = "invisible"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1422, 123.5)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (6.907, 5.753, 12.55)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

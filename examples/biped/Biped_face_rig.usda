@@ -1,0 +1,30 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = """The whole face rig, as one branch of the biped's layer tree.
+
+    Each part stays its own additive layer, strongest first, and each is
+    built over the ones below it:
+
+      Biped_cheeks.usda   the cluster controls around the cheeks, nose and
+                          ears: cheeks, cheek puff and lift, mask flare,
+                          sneer, nostril flare, septum, chin, ears
+      Biped_brows.usda    the brows' cluster controls: the corrugators
+      Biped_mouth.usda    mouthMain, the lip clusters, the mouth corners
+                          driving lip main, and the lip curve's tweaks
+      Biped_eyes.usda     the lids and the blink, the socket stretch and
+                          lift, the eye drag, lid squash, and the lid and
+                          socket curves' tweaks
+      Biped_face.usda     the face's skeleton controls: jaw, mid-face,
+                          nose, brows, eye look-ats
+
+    Drop a part by removing its line; the parts above it expect the ones
+    below, so drop from the top."""
+    subLayers = [
+        @./Biped_cheeks.usda@,
+        @./Biped_brows.usda@,
+        @./Biped_mouth.usda@,
+        @./Biped_eyes.usda@,
+        @./Biped_face.usda@
+    ]
+)
