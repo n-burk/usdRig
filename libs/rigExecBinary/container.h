@@ -31,12 +31,15 @@ inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 /// incompatible records must not be misread.
 ///
 /// MINOR 1 on that major adds the optional PoseNumeric, SpaceSwitch and
-/// InputPolicy sections and the trailing per-constraint and per-revision
-/// space-slot blocks. Files without them load with every interpolator
-/// driven by a transform's rotation alone, every provider in its authored
-/// parent, the narrow input directory and no carry space, which is what
-/// those files were baked from. A minor-0 reader rejects a minor-1 file
-/// that carries constraints or geometry revisions.
+/// InputPolicy sections, the trailing per-constraint space-slot and flags
+/// blocks, the trailing per-revision space-slot block, and the derived
+/// matrix revision ops 17 (SurfaceProjector) and 18 (ShaderDials) with
+/// their trailing projector block. Files without them load with every
+/// interpolator driven by a transform's rotation alone, every provider in
+/// its authored parent, the narrow input directory, no carry space and no
+/// constraint flags, which is what those files were baked from. A minor-0
+/// reader rejects a minor-1 file that carries constraints or geometry
+/// revisions.
 inline constexpr uint32_t RigExecBinaryVersion = 0x00010003u;
 inline constexpr uint32_t RigExecBinaryMajor(uint32_t version)
 {
