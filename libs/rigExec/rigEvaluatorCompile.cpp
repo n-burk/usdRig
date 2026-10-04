@@ -41,6 +41,17 @@ namespace rigExec {
 
 using namespace evaluatorDetail;
 
+namespace {
+
+// Removed attributes the compile refuses, interned once at load: interning
+// takes the token registry's lock.
+const TfToken _removedSamplePhase("rigExec:samplePhase");
+const TfToken _removedRibbonPhases[] = {
+    TfToken("rigExec:driverCurveReadPhase"),
+    TfToken("rigExec:surfaceReadPhase")};
+
+} // namespace
+
 bool
 RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 {
@@ -1650,8 +1661,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             // than composing as an inert custom attribute.
             bool inFlight = false;
             std::string phaseError;
-            const UsdAttribute old =
-                w.GetAttribute(TfToken("rigExec:samplePhase"));
+            const UsdAttribute old = w.GetAttribute(_removedSamplePhase);
             if (old && old.HasAuthoredValue()) {
                 volumeWeightError =
                     weightPath.GetString() +
@@ -2792,11 +2802,11 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         const UsdPrim prim = _stage->GetPrimAtPath(solver);
         // The ribbon's read-phase attributes were replaced by metadata and
         // would now compose as inert custom attributes.
-        for (const char *removed :
-             {"rigExec:driverCurveReadPhase", "rigExec:surfaceReadPhase"}) {
-            const UsdAttribute old = prim.GetAttribute(TfToken(removed));
+        for (const TfToken &removed : _removedRibbonPhases) {
+            const UsdAttribute old = prim.GetAttribute(removed);
             if (old && old.HasAuthoredValue()) {
-                return fail(solver.GetString() + " authors " + removed +
+                return fail(solver.GetString() + " authors " +
+                                removed.GetString() +
                                 ", which was replaced by rigExecReadPhase "
                                 "metadata on the input relationship",
                             {solver});

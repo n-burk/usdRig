@@ -1227,6 +1227,14 @@ RigExecParseReadPhase(
     return true;
 }
 
+namespace {
+
+// Interned once, at load: some readers resolve a phase every frame, and
+// interning a name takes the token registry's lock.
+const TfToken _readPhaseField(RigExecReadPhaseMetadataName);
+
+}  // namespace
+
 bool
 RigExecResolveReadPhase(
     const UsdObject &property,
@@ -1241,8 +1249,7 @@ RigExecResolveReadPhase(
         return true;
     }
     std::string authored;
-    if (!property.GetMetadata(TfToken(RigExecReadPhaseMetadataName),
-                              &authored) ||
+    if (!property.GetMetadata(_readPhaseField, &authored) ||
         authored.empty()) {
         return true;
     }

@@ -372,6 +372,34 @@ _ValidateWeightObjectDomain(
 
 } // namespace evaluatorDetail
 
+namespace {
+
+// Names every mover's checks below look up, interned once at load:
+// interning takes the token registry's lock.
+
+// A read-phase attribute replaced by metadata, and the input it moved to.
+struct _RemovedPhase {
+    TfToken name;
+    const char *input;
+};
+
+const _RemovedPhase _removedPhases[] = {
+    {TfToken("rigExec:transformReadPhase"),
+     "rigExec:transform, rigExec:influences or rigExec:driverTransforms"},
+    {TfToken("rigExec:cageReadPhase"), "rigExec:cage"},
+    {TfToken("rigExec:surfaceReadPhase"), "rigExec:surface"},
+    {TfToken("rigExec:driverCurveReadPhase"), "rigExec:driverCurve"},
+    {TfToken("rigExec:pointsReadPhase"), "rigExec:targetPoints"},
+};
+
+const TfToken _phasedInputs[] = {
+    TfToken("rigExec:transform"),   TfToken("rigExec:influences"),
+    TfToken("rigExec:driverTransforms"), TfToken("rigExec:cage"),
+    TfToken("rigExec:surface"),     TfToken("rigExec:bindCoordinates"),
+    TfToken("rigExec:driverCurve")};
+
+} // namespace
+
 bool
 RigExecRigEvaluator::_DiscoverMovers(
     std::vector<RigExecMoverRecord> &newMovers,
@@ -787,30 +815,16 @@ RigExecRigEvaluator::_DiscoverMovers(
             // The read-phase attributes were replaced by rigExecReadPhase
             // metadata on the input relationship. An old opinion would now
             // compose as an inert custom attribute, so it is refused.
-            {
-                static const std::pair<const char *, const char *>
-                    kRemovedPhases[] = {
-                        {"rigExec:transformReadPhase",
-                         "rigExec:transform, rigExec:influences or "
-                         "rigExec:driverTransforms"},
-                        {"rigExec:cageReadPhase", "rigExec:cage"},
-                        {"rigExec:surfaceReadPhase", "rigExec:surface"},
-                        {"rigExec:driverCurveReadPhase",
-                         "rigExec:driverCurve"},
-                        {"rigExec:pointsReadPhase", "rigExec:targetPoints"},
-                    };
-                for (const auto &[oldName, input] : kRemovedPhases) {
-                    const UsdAttribute old =
-                        prim.GetAttribute(TfToken(oldName));
-                    if (old && old.HasAuthoredValue()) {
-                        return fail(record.schemaType.GetString() + " " +
-                                        prim.GetPath().GetString() +
-                                        " authors " + oldName +
-                                        ", which was replaced by "
-                                        "rigExecReadPhase metadata on " +
-                                        input,
-                                    {prim.GetPath()});
-                    }
+            for (const _RemovedPhase &removed : _removedPhases) {
+                const UsdAttribute old = prim.GetAttribute(removed.name);
+                if (old && old.HasAuthoredValue()) {
+                    return fail(record.schemaType.GetString() + " " +
+                                    prim.GetPath().GetString() + " authors " +
+                                    removed.name.GetString() +
+                                    ", which was replaced by "
+                                    "rigExecReadPhase metadata on " +
+                                    removed.input,
+                                {prim.GetPath()});
                 }
             }
             // Read phases, validated from the AUTHORED stage.
@@ -820,22 +834,14 @@ RigExecRigEvaluator::_DiscoverMovers(
             // silently: the author asked for a specific revision and got the
             // authored value. The parse verdict belongs here, in Phase A,
             // where it can reject the compile before any epoch state moves.
-            {
-                static const char *const kPhased[] = {
-                    "rigExec:transform", "rigExec:influences",
-                    "rigExec:driverTransforms", "rigExec:cage",
-                    "rigExec:surface", "rigExec:bindCoordinates",
-                    "rigExec:driverCurve"};
-                for (const char *relName : kPhased) {
-                    RigExecReadPhase phase;
-                    std::string phaseError;
-                    if (!RigExecResolveReadPhase(
-                            prim.GetRelationship(TfToken(relName)), &phase,
-                            &phaseError)) {
-                        return fail(record.schemaType.GetString() + " " +
-                                    prim.GetPath().GetString() + ": " +
-                                    phaseError, {prim.GetPath()});
-                    }
+            for (const TfToken &relName : _phasedInputs) {
+                RigExecReadPhase phase;
+                std::string phaseError;
+                if (!RigExecResolveReadPhase(prim.GetRelationship(relName),
+                                             &phase, &phaseError)) {
+                    return fail(record.schemaType.GetString() + " " +
+                                prim.GetPath().GetString() + ": " +
+                                phaseError, {prim.GetPath()});
                 }
             }
             if (const RigExecMoverHandler *handler =

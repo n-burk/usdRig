@@ -219,17 +219,22 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // exactly the way retargeting the relationship does. Authored on the
     // property, so it is hashed alongside that property's targets rather than
     // as another prim-level token.
-    auto appendPhase = [&digest](const UsdPrim &prim, const char *name) {
+    auto appendPhaseNamed = [&digest, &phaseField](const UsdPrim &prim,
+                                                   const TfToken &name) {
         std::string authored;
-        if (const UsdRelationship rel = prim.GetRelationship(TfToken(name))) {
-            rel.GetMetadata(TfToken(RigExecReadPhaseMetadataName), &authored);
-        } else if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-            a.GetMetadata(TfToken(RigExecReadPhaseMetadataName), &authored);
+        if (const UsdRelationship rel = prim.GetRelationship(name)) {
+            rel.GetMetadata(phaseField, &authored);
+        } else if (const UsdAttribute a = prim.GetAttribute(name)) {
+            a.GetMetadata(phaseField, &authored);
         }
-        digest += name;
+        digest += name.GetString();
         digest += "@phase=";
         digest += authored;
         digest += '|';
+    };
+    auto appendPhase = [&appendPhaseNamed](const UsdPrim &prim,
+                                           const char *name) {
+        appendPhaseNamed(prim, TfToken(name));
     };
     auto appendToken = [&digest](const UsdPrim &prim, const char *name) {
         TfToken value;
@@ -1363,7 +1368,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                     appendFrameBindingIdentityNamed(solver, name);
                     // A read phase on a solver input orders it against the
                     // constraints above it, so it is schedule identity.
-                    appendPhase(solver, name.GetText());
+                    appendPhaseNamed(solver, name);
                     for (const SdfPath &target : targets) {
                         digest += ancestorChainToken(target.GetPrimPath());
                     }
@@ -1661,7 +1666,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 for (const UsdRelationship &rel : prim.GetRelationships()) {
                     if (rel.GetName() == _movesRel) continue;
                     appendRelTargetsNamed(prim, rel.GetName(), false);
-                    appendPhase(prim, rel.GetName().GetText());
+                    appendPhaseNamed(prim, rel.GetName());
                 }
             }
             for (const SdfPath &w :
