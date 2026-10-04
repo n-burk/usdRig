@@ -338,6 +338,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             }
         }
     }
+    const TfToken rotationSignName("avars:rotationSign");
     for (const auto &[path, tap] : E._firstFramePoseFrames) {
         const UsdPrim prim = E._stage->GetPrimAtPath(path);
         if (!prim) {
@@ -431,6 +432,21 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             if (a && a.HasAuthoredConnections() &&
                 a.GetConnections(&connections) && !connections.empty()) {
                 say("connected default:space on provider", path);
+            }
+        }
+        // avars:rotationSign is captured once per slot (Build folds it, so
+        // an edit rebuilds), while exec reads it every frame: a sign that
+        // varies, is connected or is written by a chain is not one value.
+        {
+            const UsdAttribute a = prim.GetAttribute(rotationSignName);
+            if (a && (a.ValueMightBeTimeVarying() ||
+                      a.HasAuthoredConnections())) {
+                say("animated or connected avars:rotationSign on provider",
+                    path);
+            }
+            if (chainTargets.count(path.AppendProperty(rotationSignName))) {
+                say("property chain writes avars:rotationSign on provider",
+                    path);
             }
         }
         (void)probe;
@@ -1819,6 +1835,13 @@ RigExecBakedBuildContext::Fold(const UsdPrim &prim, const char *name)
 }
 
 void
+RigExecBakedBuildContext::Fold(const UsdPrim &prim, const TfToken &name)
+{
+    RigExecBakedProgramSink sink{program};
+    RigExecBakedRecordFold(&sink, prim, name);
+}
+
+void
 RigExecBakedCommitShard::Seal()
 {
     for (SdfPathVector *paths : {&prims, &named, &rebuild, &folded}) {
@@ -2084,6 +2107,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // accepts is seeded); FirstFramePose wins a collision, because that is the kind
     // the compose can actually write.
     {
+        const TfToken rotationSignName("avars:rotationSign");
         std::map<SdfPath, RigExecBakedSlotKind> ordered;
         for (const auto &[path, tap] : E._firstFramePoseFrames) {
             ordered.emplace(path, RigExecBakedSlotKind::FirstFramePose);
@@ -2104,11 +2128,13 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                 prim && _IsVolumeWeightTypeName(prim.GetTypeName()) ? 1 : 0);
             // avars:rotationSign is rig structure, not animation: it is read
             // once here beside the type, and the compose applies it to
-            // whatever the avar inputs carry that frame.
+            // whatever the avar inputs carry that frame. Folded, so an edit
+            // rebuilds the program and a drag on it falls back.
             GfVec3d sign(1, 1, 1);
             if (prim) {
+                ctx.Fold(prim, rotationSignName);
                 if (const UsdAttribute attr =
-                        prim.GetAttribute(TfToken("avars:rotationSign"))) {
+                        prim.GetAttribute(rotationSignName)) {
                     attr.Get(&sign);
                 }
             }

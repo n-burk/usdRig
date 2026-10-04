@@ -2770,16 +2770,26 @@ RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
 /// RigExecBakedBuildContext::Fold, which is this into the program.
 template <class Sink>
 void
+RigExecBakedRecordFold(Sink *sink, const UsdPrim &prim, const TfToken &name)
+{
+    if (!prim) {
+        return;
+    }
+    const SdfPath path = prim.GetPath().AppendProperty(name);
+    sink->Rebuild(path);
+    sink->Folded(path);
+    sink->Named(path);
+    sink->Prim(prim.GetPath());
+}
+
+template <class Sink>
+void
 RigExecBakedRecordFold(Sink *sink, const UsdPrim &prim, const char *name)
 {
     if (!prim) {
         return;
     }
-    const SdfPath path = prim.GetPath().AppendProperty(TfToken(name));
-    sink->Rebuild(path);
-    sink->Folded(path);
-    sink->Named(path);
-    sink->Prim(prim.GetPath());
+    RigExecBakedRecordFold(sink, prim, TfToken(name));
 }
 
 // The compiled epoch, in terms the program can name.
@@ -2908,6 +2918,7 @@ struct RigExecBakedBuildContext {
     /// Records \p name as read for its VALUE: an edit rebuilds the program
     /// and an interactive override on it cannot be placed.
     void Fold(const UsdPrim &prim, const char *name);
+    void Fold(const UsdPrim &prim, const TfToken &name);
     /// Records \p name as read for its SHAPE -- whether it is authored at
     /// all. An edit rebuilds; an override, which authors nothing, places.
     void FoldShape(const UsdPrim &prim, const char *name);

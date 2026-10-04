@@ -2731,6 +2731,58 @@ TestRotationSignBakesExactly()
               /* expectBakeable = */ true) > 0);
 }
 
+static void RefusalNames(const char *what,
+                         const std::vector<std::string> &reasons,
+                         const char *expected);
+
+// The program captures the sign once, so an edit to it after the bake has
+// to rebuild the program rather than leave the old sign composing, and a
+// sign that animates is one the capture cannot hold at all.
+static void
+TestRotationSignEditRebuildsTheProgram()
+{
+    const GfVec3d plain(1, 1, 1);
+    const GfVec3d mirrored(-1, -1, 1);
+    const GfVec3d pose(30, 20, 40);
+    const SdfPath rigPath("/Asset/Rig");
+    const UsdStageRefPtr stage = MakeARotationSignRig(plain, pose);
+    RigExecRigEvaluator baked(stage, rigPath);
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(baked.Compile());
+    CHECK(baked.Evaluate(UsdTimeCode(1.0)).valid);
+    const size_t builds = baked.GetBakedProgramBuildCount();
+
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Arm"))
+        .GetAttribute(TfToken("avars:rotationSign"))
+        .Set(mirrored);
+    const size_t generations = baked.GetBakedGenerationCount();
+    const RigExecRigPose edited = baked.Evaluate(UsdTimeCode(1.0));
+    CHECK(edited.valid);
+    CHECK(baked.GetBakedProgramBuildCount() > builds);
+    CHECK(baked.GetBakedGenerationCount() == generations + 1);
+    RigExecRigEvaluator reference(MakeARotationSignRig(mirrored, pose),
+                                  rigPath);
+    MakeItTheReference(&reference);
+    CHECK(reference.Compile());
+    CompareEveryMap("a rotation sign edited after the bake",
+                    reference.Evaluate(UsdTimeCode(1.0)), edited);
+
+    std::vector<std::string> refusals;
+    const char *const what = "an animated rotation sign";
+    const UsdStageRefPtr animated = MakeARotationSignRig(plain, pose);
+    const UsdStageRefPtr animatedReference = MakeARotationSignRig(plain, pose);
+    for (const UsdStageRefPtr &s : {animated, animatedReference}) {
+        const UsdAttribute sign = s->GetPrimAtPath(SdfPath("/Asset/Rig/Arm"))
+                                      .GetAttribute(TfToken("avars:rotationSign"));
+        sign.Set(plain, UsdTimeCode(1.0));
+        sign.Set(mirrored, UsdTimeCode(3.0));
+    }
+    CHECK(BakedAgreesWithDynamic(what, animated, animatedReference,
+                                 /* expectBakeable = */ false,
+                                 &refusals) == 0);
+    RefusalNames(what, refusals, "animated or connected avars:rotationSign");
+}
+
 // Asserts that \p reasons names \p expected, so a refusal that changed its
 // mind about WHY is a failure rather than a pass.
 static void
@@ -3023,6 +3075,7 @@ main(int argc, char **argv)
     // The mirrored-limb rotation sign, in the compose and in the program.
     TestRotationSignNegatesTheAvar();
     TestRotationSignBakesExactly();
+    TestRotationSignEditRebuildsTheProgram();
     // The second deliberate negative: a volume weight a constraint moves,
     // which the DYNAMIC path gives two placements at once.
     TestAConstrainedVolumeWeightFallsBack();
