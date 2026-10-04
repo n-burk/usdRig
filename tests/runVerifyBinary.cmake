@@ -6,7 +6,7 @@
 # loudly on either half. Required -D arguments: BAKE, POSE, STAGE, FRAMES,
 # OUT; optional: MIN_ENVELOPES, MIN_PHASE_PACKETS, MIN_PROPERTY_VALUES,
 # MIN_CHAIN_READS, MIN_REGISTERED_READS, MIN_BLEND_WEIGHTS,
-# MIN_DEFAULT_WEIGHTS, MIN_PATH_READS.
+# MIN_DEFAULT_WEIGHTS, MIN_PATH_READS, MIN_BLEND_ACTIVATIONS.
 if (NOT DEFINED BAKE OR NOT DEFINED POSE OR NOT DEFINED STAGE
         OR NOT DEFINED FRAMES OR NOT DEFINED OUT)
     message(FATAL_ERROR "runVerifyBinary.cmake: BAKE, POSE, STAGE, FRAMES "
@@ -38,23 +38,26 @@ if (NOT _pose_rc EQUAL 0)
     message(FATAL_ERROR
         "verify-binary failed (${_pose_rc}):\n${_pose_err}")
 endif()
-# The ledger every run prints with the cross-check on, one count per kind.
+# The ledger every run prints with the cross-check on, one count per kind
+# (the total is not captured: a CMake regex keeps nine groups).
 if (NOT _pose_out MATCHES
-        "cross-check: ([0-9]+) computed value\\(s\\) matched the frame records \\(([0-9]+) envelope\\(s\\), ([0-9]+) current-phase packet\\(s\\), ([0-9]+) property value\\(s\\), ([0-9]+) chain read\\(s\\), ([0-9]+) registered read\\(s\\), ([0-9]+) blend weight\\(s\\), ([0-9]+) default weight\\(s\\), ([0-9]+) path read\\(s\\)\\)")
+        "cross-check: [0-9]+ computed value\\(s\\) matched the frame records \\(([0-9]+) envelope\\(s\\), ([0-9]+) current-phase packet\\(s\\), ([0-9]+) property value\\(s\\), ([0-9]+) chain read\\(s\\), ([0-9]+) registered read\\(s\\), ([0-9]+) blend weight\\(s\\), ([0-9]+) default weight\\(s\\), ([0-9]+) path read\\(s\\), ([0-9]+) blend activation\\(s\\)\\)")
     message(FATAL_ERROR "verify-binary printed no cross-check ledger")
 endif()
-set(_envelopes "${CMAKE_MATCH_2}")
-set(_packets "${CMAKE_MATCH_3}")
-set(_properties "${CMAKE_MATCH_4}")
-set(_chainReads "${CMAKE_MATCH_5}")
-set(_registeredReads "${CMAKE_MATCH_6}")
-set(_blendWeights "${CMAKE_MATCH_7}")
-set(_defaultWeights "${CMAKE_MATCH_8}")
-set(_pathReads "${CMAKE_MATCH_9}")
+set(_envelopes "${CMAKE_MATCH_1}")
+set(_packets "${CMAKE_MATCH_2}")
+set(_properties "${CMAKE_MATCH_3}")
+set(_chainReads "${CMAKE_MATCH_4}")
+set(_registeredReads "${CMAKE_MATCH_5}")
+set(_blendWeights "${CMAKE_MATCH_6}")
+set(_defaultWeights "${CMAKE_MATCH_7}")
+set(_pathReads "${CMAKE_MATCH_8}")
+set(_blendActivations "${CMAKE_MATCH_9}")
 # Optional MIN_ENVELOPES / MIN_PHASE_PACKETS / MIN_PROPERTY_VALUES /
 # MIN_CHAIN_READS / MIN_REGISTERED_READS / MIN_BLEND_WEIGHTS /
-# MIN_DEFAULT_WEIGHTS / MIN_PATH_READS: a fixture that exists to reach the
-# computed paths fails when the cross-check compared fewer values.
+# MIN_DEFAULT_WEIGHTS / MIN_PATH_READS / MIN_BLEND_ACTIVATIONS: a fixture
+# that exists to reach the computed paths fails when the cross-check
+# compared fewer values.
 foreach(_kind IN ITEMS
         "MIN_ENVELOPES;_envelopes;envelope(s)"
         "MIN_PHASE_PACKETS;_packets;current-phase packet(s)"
@@ -63,7 +66,8 @@ foreach(_kind IN ITEMS
         "MIN_REGISTERED_READS;_registeredReads;registered read(s)"
         "MIN_BLEND_WEIGHTS;_blendWeights;blend weight(s)"
         "MIN_DEFAULT_WEIGHTS;_defaultWeights;default weight(s)"
-        "MIN_PATH_READS;_pathReads;path read(s)")
+        "MIN_PATH_READS;_pathReads;path read(s)"
+        "MIN_BLEND_ACTIVATIONS;_blendActivations;blend activation(s)")
     list(GET _kind 0 _option)
     list(GET _kind 1 _count)
     list(GET _kind 2 _label)

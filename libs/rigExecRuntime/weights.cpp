@@ -7,8 +7,8 @@
 // Gf -> Rr, TfToken comparisons -> string-table text comparisons, the
 // arithmetic untouched: float stays float, in the same order.
 // Where the baked step reads the stage per frame, the runtime reads the
-// frame record. Scalar inputs arrive through the uid holders (the
-// runtime form of RigExecBakedRead); the point arrays a volume measures
+// frame record. Scalar inputs are read over the input slots (ReadWeight,
+// the runtime form of RigExecBakedRead); the point arrays a volume measures
 // resolve through two layers, in order: a live (wasDefault == false)
 // pathReads entry for the attribute, else the chain base of the chain
 // whose target IS that attribute path. Chain targets are attribute
@@ -91,9 +91,6 @@ RrWeightSizeScratch(RrProgram *program, std::string *error)
         scratch->chainByTarget.emplace(chains[c].target, c);
     }
     const RigExecWireComputed *computed = program->inputState.computed;
-    if (!computed) {
-        return true;
-    }
     using Kind = RrWeightOracleKind;
     scratch->oracleKinds.reserve(computed->weightObjects.size());
     for (const v4::RigExecWireWeightObject &object :
@@ -201,10 +198,9 @@ _RrRefreshReads(RrProgram *program, const RigExecWireFrameInputs *record)
     scratch->recordFrame = record->frame;
 }
 
-// A bound weight input as the float the builders consume. The holder
-// (or the wire constant when the input takes no uid) always carries
-// the input's own tag; the double arm mirrors the float-from-double
-// coercion GetAttribute applies to a scalar float read.
+// A bound weight input as the float the builders consume. The read
+// carries the input's own tag; the double arm mirrors the
+// float-from-double coercion GetAttribute applies to a scalar float read.
 float
 _RrReadWeightFloat(const RrProgram *program, size_t object, int field)
 {
@@ -1820,7 +1816,7 @@ RrResolveWeightOracle(const RrProgram *program, size_t object, size_t count,
     // A wire violation, not an oracle answer: Open checked every index the
     // pose and geometry tables hand in, and the section keeps each entry's
     // composition below the entry itself.
-    if (!scratch || !program->inputState.computed ||
+    if (!scratch ||
         object >= program->inputState.computed->weightObjects.size() ||
         object >= scratch->oracleKinds.size()) {
         *why = "the computed section holds no weight object " +

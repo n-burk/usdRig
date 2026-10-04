@@ -402,7 +402,8 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
         ++comparedFixtures;
         std::printf("%s: compared %d frames, %llu cross-checked (%llu "
                     "registered read(s), %llu blend weight(s), %llu default "
-                    "weight(s), %llu path read(s))\n",
+                    "weight(s), %llu path read(s), %llu blend "
+                    "activation(s))\n",
                     name.c_str(), comparedFrames,
                     static_cast<unsigned long long>(
                         reader->GetCrossCheckCountForTesting()),
@@ -417,7 +418,10 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
                             RrCrossCheckDefaultWeight)),
                     static_cast<unsigned long long>(
                         reader->GetCrossCheckCountForTesting(
-                            RrCrossCheckPathRead)));
+                            RrCrossCheckPathRead)),
+                    static_cast<unsigned long long>(
+                        reader->GetCrossCheckCountForTesting(
+                            RrCrossCheckBlendActivation)));
     }
 }
 
@@ -704,14 +708,14 @@ _ForcedPathRead(RigExecWireInputTable *table,
     return nullptr;
 }
 
-// A record altered at frame \p f: with the cross-check on, Execute fails
-// naming \p field; with it off the file plays, and the points at frame
-// \p f differ from the untouched file's (the replay still consumes the
-// record) while the first frame's do not.
+// A record altered at one frame: with the cross-check on, Execute fails
+// naming \p field; with it off the file plays, and every frame's points
+// are the untouched file's: the read is evaluated over the input slots,
+// so only the cross-check reads the record.
 static void
 _ExpectRecordMismatch(const char *name, const std::vector<uint8_t> &bytes,
                       const std::vector<uint8_t> &tampered,
-                      const std::vector<double> &frames, size_t f,
+                      const std::vector<double> &frames,
                       const std::string &field)
 {
     std::string error;
@@ -728,9 +732,10 @@ _ExpectRecordMismatch(const char *name, const std::vector<uint8_t> &bytes,
     CHECK(replayed.size() == frames.size() &&
           untouched.size() == frames.size());
     if (replayed.size() == frames.size() &&
-        untouched.size() == frames.size() && f > 0) {
-        CHECK(_SamePoints({replayed[0]}, {untouched[0]}));
-        CHECK(!_SamePoints({replayed[f]}, {untouched[f]}));
+        untouched.size() == frames.size()) {
+        for (size_t k = 0; k < frames.size(); ++k) {
+            CHECK(_SamePoints({replayed[k]}, {untouched[k]}));
+        }
     }
 }
 
@@ -815,7 +820,7 @@ TestPathReadsFixture()
     if (read) {
         read->value.f32 = 0.55f;
         _ExpectRecordMismatch(name, result.bytes,
-                              _WithRecords(result.bytes, altered), frames, 1,
+                              _WithRecords(result.bytes, altered), frames,
                               "pathReads[" + step + "]");
     }
     altered = table;
@@ -825,7 +830,7 @@ TestPathReadsFixture()
         !altered.frames[2].revisionDefaultWeights[0].empty()) {
         altered.frames[2].revisionDefaultWeights[0][0] = 0.5f;
         _ExpectRecordMismatch(name, result.bytes,
-                              _WithRecords(result.bytes, altered), frames, 2,
+                              _WithRecords(result.bytes, altered), frames,
                               "revisionDefaultWeights[0][0]");
     }
 }
@@ -961,8 +966,223 @@ TestPoseDrivenBlendWeights()
     CHECK(recorded > 0.0f && recorded < 1.0f);
     table.frames[1].blendWeights[0][0][0] = recorded + 0.125f;
     _ExpectRecordMismatch(name, result.bytes,
-                          _WithRecords(result.bytes, table), frames, 1,
+                          _WithRecords(result.bytes, table), frames,
                           "blendWeights[0][0][0]");
+}
+
+// A blend channel of two dense samples: Half's rigExec:activation is
+// connected to a control's keyed avars:tx, Full's is authored 1. Dragged
+// to 1.5, the avar carries Half's activation past Full's, which reorders
+// the channel's samples. Half's shape is off the line from the base to
+// Full's, so at each baked frame the drag moves the points.
+static UsdStageRefPtr
+_ActivationDragStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls"), TfToken("Scope"));
+    const UsdPrim control = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Shape"), TfToken("RigExecControl"));
+    control.CreateAttribute(TfToken("rest:space"), SdfValueTypeNames->Matrix4d)
+        .Set(GfMatrix4d(1.0));
+    const UsdAttribute tx =
+        control.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
+    tx.Set(0.25, UsdTimeCode(1.0));
+    tx.Set(0.75, UsdTimeCode(3.0));
+    const VtVec3fArray base{GfVec3f(0.0f, 0.0f, 0.0f),
+                            GfVec3f(1.0f, 0.0f, 0.0f)};
+    stage->DefinePrim(SdfPath("/Asset/Geom/Mesh"), TfToken("Mesh"))
+        .GetAttribute(TfToken("points"))
+        .Set(base);
+    const auto target = [&](const char *path, float dz) {
+        VtVec3fArray points = base;
+        for (GfVec3f &p : points) {
+            p[2] += dz;
+        }
+        stage->DefinePrim(SdfPath(path), TfToken("Points"))
+            .CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray)
+            .Set(points);
+    };
+    target("/Asset/Targets/Half", 4.0f);
+    target("/Asset/Targets/Full", 10.0f);
+    const UsdPrim input = stage->DefinePrim(
+        SdfPath("/Asset/Rig/BlendInputs/Smile"), TfToken("RigExecBlendInput"));
+    input.GetAttribute(TfToken("inputs:weight")).Set(0.6f);
+    const auto sample = [&](const char *name, const char *targetPath) {
+        const UsdPrim prim = stage->DefinePrim(
+            input.GetPath().AppendChild(TfToken(name)),
+            TfToken("RigExecBlendSample"));
+        prim.CreateRelationship(TfToken("rigExec:targetPoints"))
+            .SetTargets({SdfPath(targetPath)});
+        return prim;
+    };
+    const UsdPrim half = sample("Half", "/Asset/Targets/Half.points");
+    half.GetAttribute(TfToken("rigExec:activation"))
+        .SetConnections({tx.GetPath()});
+    const UsdPrim full = sample("Full", "/Asset/Targets/Full.points");
+    full.GetAttribute(TfToken("rigExec:activation")).Set(1.0f);
+    input.CreateRelationship(TfToken("rigExec:samples"))
+        .SetTargets({half.GetPath(), full.GetPath()});
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim blend = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Blend"), TfToken("RigExecBlendShapeMover"));
+    blend.ApplyAPI(TfToken("RigExecMoverAPI"));
+    blend.GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/Mesh.points")});
+    blend.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    blend.CreateRelationship(TfToken("rigExec:blendInputs"))
+        .SetTargets({input.GetPath()});
+    return stage;
+}
+
+// Whether the runtime's moved points equal \p pose's bit for bit, path for
+// path.
+static bool
+_SameMovedPoints(const RigExecRigPose &pose,
+                 const std::vector<RigExecRuntimePoints> &got)
+{
+    size_t want = 0;
+    for (const auto &[path, value] : pose.movedProperties) {
+        if (!value.IsHolding<VtVec3fArray>()) {
+            continue;
+        }
+        ++want;
+        const VtVec3fArray &points = value.UncheckedGet<VtVec3fArray>();
+        const auto found = std::find_if(
+            got.begin(), got.end(), [&](const RigExecRuntimePoints &moved) {
+                return moved.path == path.GetString();
+            });
+        if (found == got.end() || found->points.size() != points.size() ||
+            (!points.empty() &&
+             std::memcmp(found->points.data(), points.cdata(),
+                         points.size() * sizeof(GfVec3f)) != 0)) {
+            return false;
+        }
+    }
+    return want == got.size();
+}
+
+// A drag that reaches a blend sample's activation through its connection.
+// The runtime reads each activation over the input slots as the baked
+// gather reads it through the resolved inputs, so under SetAvar its points
+// equal the baked program's under the same interactive override bit for
+// bit (and the baked program agrees with the dynamic evaluator): before,
+// while and after the drag, and released at the frame it stood on. The
+// cross-check compares every activation with the record while no drag
+// stands; a record altered at one fails it naming the field and, with the
+// cross-check off, moves nothing.
+static void
+TestBlendActivationDrag()
+{
+    const char *const name = "blend activation drag";
+    const std::vector<double> frames = {1.0, 2.0, 3.0};
+    const UsdStageRefPtr stage = _ActivationDragStage();
+    RrCrossCheckCounts counts{};
+    _TestStage(name, stage, frames, nullptr, &counts);
+    // Two samples per frame, over the warm-up pass and the compared pass.
+    CHECK(counts[RrCrossCheckBlendActivation] == 2 * 2 * frames.size());
+
+    const SdfPath rigPath("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    const std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        return;
+    }
+    reader->SetCrossCheckForTesting(true);
+    RigExecRigEvaluator program(stage, rigPath);
+    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    // One frame under whatever overrides stand, against the program.
+    const auto run = [&](const char *what, double frame,
+                         std::vector<std::vector<RigExecRuntimePoints>>
+                             *played) {
+        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid && pose.bakedParityMismatches == 0);
+        if (!pose.valid) {
+            return false;
+        }
+        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+            std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
+                        error.c_str());
+            CHECK(false);
+            return false;
+        }
+        played->push_back(reader->GetPoints());
+        if (!_SameMovedPoints(pose, played->back())) {
+            std::printf("%s, %s frame %.17g: the runtime's points differ "
+                        "from the baked program's\n",
+                        name, what, frame);
+            return false;
+        }
+        return true;
+    };
+    const auto pass = [&](const char *what,
+                          std::vector<std::vector<RigExecRuntimePoints>>
+                              *played) {
+        bool same = true;
+        for (const double frame : frames) {
+            same = run(what, frame, played) && same;
+        }
+        return same;
+    };
+    const std::string txPath = "/Asset/Rig/Controls/Shape.avars:tx";
+    std::vector<std::vector<RigExecRuntimePoints>> undragged, dragged,
+        released, releasedHere;
+    CHECK(pass("undragged", &undragged));
+    CHECK(reader->SetAvar(txPath, 1.5, &error));
+    program.SetInteractiveOverrides(
+        {RigExecValueOverride{SdfPath("/Asset/Rig/Controls/Shape"), TfToken(),
+                              TfToken("avars:tx"), VtValue(1.5)}});
+    const uint64_t compared =
+        reader->GetCrossCheckCountForTesting(RrCrossCheckBlendActivation);
+    CHECK(pass("dragged", &dragged));
+    CHECK(reader->GetCrossCheckCountForTesting(RrCrossCheckBlendActivation) ==
+          compared);
+    CHECK(dragged.size() == frames.size() &&
+          undragged.size() == frames.size());
+    for (size_t f = 0; f < dragged.size() && f < undragged.size(); ++f) {
+        CHECK(!_SamePoints({dragged[f]}, {undragged[f]}));
+    }
+    // Released at the frame the drag stood on, then over every frame.
+    reader->ClearAvars();
+    program.ClearInteractiveOverrides();
+    CHECK(run("released in place", frames.back(), &releasedHere));
+    CHECK(!releasedHere.empty() && !undragged.empty() &&
+          _SamePoints({releasedHere.back()}, {undragged.back()}));
+    CHECK(pass("released", &released));
+    CHECK(_SamePoints(released, undragged));
+    CHECK(reader->GetCrossCheckCountForTesting(RrCrossCheckBlendActivation) >
+          compared);
+
+    RigExecBakeResult baked;
+    RigExecWireInputTable table;
+    std::unique_ptr<RigExecBinaryReader> binary;
+    CHECK(_BakeRecords(stage, frames, &baked, &table, &binary));
+    if (table.frames.size() != frames.size() ||
+        table.frames[1].blendActivations.empty() ||
+        table.frames[1].blendActivations[0].empty() ||
+        table.frames[1].blendActivations[0][0].empty() ||
+        table.frames[1].blendActivations[0][0][0].size() != 2) {
+        CHECK(false);
+        return;
+    }
+    table.frames[1].blendActivations[0][0][0][0] += 0.125f;
+    _ExpectRecordMismatch(name, baked.bytes, _WithRecords(baked.bytes, table),
+                          frames, "blendActivations[0][0][0][0]");
+    std::printf("%s: checked\n", name);
 }
 
 static const RigExecRuntimeWeightField *
@@ -1273,7 +1493,7 @@ _TestSlotValuesDriveCurrentPhase()
     CHECK(_RunField(result.bytes, frames, true, sphere, &untouched, &error));
     CHECK(!_RunField(tampered, frames, true, sphere, &ignored, &error));
     // The registered read of the altered slot is compared first, against
-    // the record-driven weight step's holder.
+    // the value the frame record holds for it.
     CHECK(error.find("registered reads: cross-check mismatch at "
                      "weightObjects[0].falloffMax") != std::string::npos);
     std::printf("geometry-domain arm, altered slot value: %s\n",
@@ -1881,9 +2101,8 @@ TestComputedOpenRefusals()
     CHECK(openError(result.bytes).empty());
     std::string got = openError(
         _WithoutSection(result.bytes, RigExecBinarySection::Computed));
-    CHECK(got == "/Asset/Rig/Movers/Sweep/Pull measures a current-phase "
-                 "weight, which needs the computed section this file does "
-                 "not carry; rebake it");
+    CHECK(got == "the file carries no computed section, which every input "
+                 "read needs; rebake it");
     std::printf("current phase without the computed section: %s\n",
                 got.c_str());
 
@@ -1936,6 +2155,7 @@ main(int argc, char **argv)
     TestComputedOpenRefusals();
     TestPathReadsFixture();
     TestPoseDrivenBlendWeights();
+    TestBlendActivationDrag();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {

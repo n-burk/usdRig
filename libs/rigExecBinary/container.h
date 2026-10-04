@@ -73,12 +73,9 @@ enum class RigExecBinarySection : uint32_t {
     Presentation = 13, ///< Optional embedded render geometry/materials and public controls
     PoseNumeric = 14,  ///< numeric drivers and translation channels
     SpaceSwitch = 15,  ///< labelled parent spaces
-    /// How the input directory was built. Absent means the default rule --
-    /// only inputs that vary were given uids -- which is what every binary
-    /// written before this section did, so its absence is the old answer
-    /// and no version moves. Present and set, the directory also holds
-    /// every input an override can reach, and the loader has to route by
-    /// the same widened rule or the uids drift apart. See capture.h.
+    /// Retired: how an input directory was built. No bake writes it, and
+    /// a reader skips it; every input is read over the Computed section's
+    /// slots.
     InputPolicy = 16,
     /// Plugin movers' epoch and per-frame bytes (minor 3). Absent when the
     /// rig holds none.

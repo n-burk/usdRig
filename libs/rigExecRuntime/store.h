@@ -1,8 +1,9 @@
 // rigExecRuntime program state and pipeline contracts (M2 framework).
 // RrStore owns every framework-visible slot domain: the avar table, the
 // SSA fin/base version pools, matrices, aggregates, commit scratch, the
-// prologue's retained arrays and their lasts, snapshots, step outputs,
-// and the input-value holders. Family .cpps own their private scratch
+// prologue's retained arrays and their lasts, snapshots, step outputs and
+// the override flags. Every input a step reads is evaluated over the
+// input slots (inputs.h). Family .cpps own their private scratch
 // (solver live rests, revision packets, weight oracles) behind the three
 // extension points on RrProgram, and implement the pipeline functions
 // declared here. The framework implements Open/closure/walk/publish.
@@ -17,20 +18,18 @@
 #include "rigExecBinary/program.h"
 #include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/values.h"
-#include "rigExecMath/autoClavicleKernel.h"
 
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace rigExec {
 
-// Capture-order field indices for the uid replay. Each list is in the
-// order RigExecBakeCapture::RigExecBakeCapture walks it; a field whose
-// wire input is not (varying && bound) takes no uid.
+// The runtime's field numbers of each table's inputs, in the capture's
+// field order. A registered read (rigExecBinary/computed.h) names the
+// table field it binds by them.
 enum RrLadderField : int {
     RrLadderRestSpace = 0,
     RrLadderDefaultSpace = 1,
@@ -211,7 +210,10 @@ struct RrStore {
     std::vector<RrWeightPacket> weightPackets;
     std::map<uint32_t, RrMat4d> weightFrames;
     std::vector<float> poseWeights;
+    // One flag per override number (RigExecBakedProgramImpl::overridden),
+    // set while an interactive override stands on the read's walk.
     std::vector<char> overridden, lastOverridden;
+    bool anyOverridden = false;
     std::map<uint32_t, RrMat4d> providerXforms, providerBaseXforms;
     std::map<uint32_t, RrMat4d> jointMatricesFinal;
     std::map<uint32_t, RrPointFrame> jointFramesBase, jointFramesFinal;
@@ -221,7 +223,6 @@ struct RrStore {
     std::map<uint32_t, RrMat4d> movedMatrices;
     std::map<uint32_t, RrWeightFieldPublish> weightFields;
     std::vector<char> jointMatrixPublished;
-    std::vector<RrInputValue> inputHolders;
     RrSnapshots runSnapshots;
     std::vector<RrStepOutput> stepOutputs;
     std::vector<uint64_t> closedWords;
@@ -262,38 +263,22 @@ struct RrProgram {
 
     RrStore store;
 
-    // Slot path -> slot index, for avar-head routing at Open.
-    std::unordered_map<std::string, int> pathIndex;
-
-    // Uid routing, replayed at Open in capture order; -1 takes no uid.
-    std::vector<std::array<int32_t, RrLadderFieldCount>> ladderUid;
-    std::vector<int32_t> spaceSwitchUid;
-    std::vector<int32_t> interpUid;
-    // Per interpolator, one uid per numeric dial. Three because the
+    // The registered read (an index into the Computed section's
+    // registeredReads) each table field binds, by row and field number;
+    // RrInputsBindReads fills every entry.
+    std::vector<std::array<int32_t, RrLadderFieldCount>> ladderRead;
+    std::vector<int32_t> spaceSwitchRead;
+    std::vector<int32_t> interpRead;
+    // Per interpolator, one read per numeric dial. Three because the
     // compile reads at most three, one per axis, and refuses a fourth.
-    std::vector<std::array<int32_t, 3>> interpValueUid;
+    std::vector<std::array<int32_t, 3>> interpValueRead;
     // Per provider slot: its space switch's index, or -1. Built once at
     // Open so the compose pays one array lookup per slot and a rig with
     // no switch pays nothing at all. Empty when the binary carries none.
     std::vector<int32_t> spaceSwitchBySlot;
-    // Per auto clavicle: the IK blend and amount uids, its constants, and
-    // per provider slot its index (empty when the binary carries none).
-    std::vector<std::array<int32_t, 2>> autoClavicleUid;
-    std::vector<RigExecAutoClavicleConstants> autoClavicleConstants;
-    std::vector<int32_t> autoClavicleBySlot;
-    // Per limb record: the pin, upper/lower scale, soft distance and twist
-    // uids, and per solver its record's index (empty when the binary
-    // carries no LimbSolvers section).
-    std::vector<std::array<int32_t, 5>> limbUid;
-    std::vector<int32_t> limbBySolver;
-    // Per auto clavicle: the limb record of the two-bone IK whose end and
-    // pole are its IK target and pole, or -1.
-    std::vector<int32_t> autoClavicleLimb;
-    std::vector<std::array<int32_t, RrSolverFieldCount>> solverUid;
-    std::vector<std::array<int32_t, RrConstraintFieldCount>> constraintUid;
-    std::vector<std::array<int32_t, RrWeightFieldCount>> weightUid;
-    // Per uid: the avar flat index, or -1 when the uid is not an avar.
-    std::vector<int32_t> avarUidTarget;
+    std::vector<std::array<int32_t, RrSolverFieldCount>> solverRead;
+    std::vector<std::array<int32_t, RrConstraintFieldCount>> constraintRead;
+    std::vector<std::array<int32_t, RrWeightFieldCount>> weightRead;
 
     // Joint path id -> row in the jointBinding* tables.
     std::map<uint32_t, size_t> jointBindingIndex;
@@ -328,6 +313,14 @@ struct RrProgram {
     // way.
     bool crossCheck = false;
 
+    // The cross-check applies to a run with no interactive override
+    // standing: the frame record holds the inputs as the bake read them,
+    // and a drag is an input it never saw.
+    bool CrossCheckThisRun() const
+    {
+        return crossCheck && inputState.overrides.empty();
+    }
+
     bool GetText(uint32_t id, std::string *out) const
     {
         return strings && strings->GetString(id, out);
@@ -347,73 +340,58 @@ struct RrProgram {
         return TextOrEmpty(id) == literal;
     }
 
-    // The holder when the input takes a uid, else its constant: the
-    // runtime form of RigExecBakedRead.
-    RrInputValue ReadUid(const RigExecWireInput &input, int32_t uid) const
-    {
-        if (uid >= 0 && size_t(uid) < store.inputHolders.size()) {
-            return store.inputHolders[size_t(uid)];
-        }
-        return RrWireInputConstant(input);
-    }
-
+    // The table inputs the registered reads are checked against.
     const RigExecWireInput &LadderInput(size_t slot, int field) const;
     const RigExecWireInput &SolverInput(size_t solver, int field) const;
     const RigExecWireInput &ConstraintInput(size_t constraint,
                                             int field) const;
     const RigExecWireInput &WeightInput(size_t object, int field) const;
 
+    // Registered read \p read of the Computed section.
+    const v4::RigExecWireInput &RegisteredInput(int32_t read) const
+    {
+        return inputState.computed->registeredReads[size_t(read)].read;
+    }
+    // The runtime form of RigExecBakedRead: the registered read evaluated
+    // over this run's slots.
+    RrInputValue ReadRegistered(int32_t read) const
+    {
+        return RrValueFromWire(RrReadInput(this, RegisteredInput(read)));
+    }
+    // The read's folded constant (RigExecBakedInput::constant).
+    RrInputValue RegisteredConstant(int32_t read) const
+    {
+        return RrValueFromWire(
+            inputState.computed->values[RegisteredInput(read).constant]);
+    }
+
     RrInputValue ReadLadder(size_t slot, int field) const
     {
-        return ReadUid(LadderInput(slot, field),
-                       ladderUid[slot][size_t(field)]);
+        return ReadRegistered(ladderRead[slot][size_t(field)]);
     }
     RrInputValue ReadSolver(size_t solver, int field) const
     {
-        return ReadUid(SolverInput(solver, field),
-                       solverUid[solver][size_t(field)]);
+        return ReadRegistered(solverRead[solver][size_t(field)]);
     }
     RrInputValue ReadConstraint(size_t constraint, int field) const
     {
-        return ReadUid(ConstraintInput(constraint, field),
-                       constraintUid[constraint][size_t(field)]);
+        return ReadRegistered(constraintRead[constraint][size_t(field)]);
     }
     RrInputValue ReadWeight(size_t object, int field) const
     {
-        return ReadUid(WeightInput(object, field),
-                       weightUid[object][size_t(field)]);
+        return ReadRegistered(weightRead[object][size_t(field)]);
     }
     RrInputValue ReadInterp(size_t interp) const
     {
-        const RigExecWirePoseInterpolator &in =
-            poses->poseInterpolators[interp];
-        return ReadUid(in.enabled, interpUid[interp]);
+        return ReadRegistered(interpRead[interp]);
     }
     RrInputValue ReadInterpValue(size_t interp, size_t axis) const
     {
-        const RigExecWirePoseInterpolator &in =
-            poses->poseInterpolators[interp];
-        return ReadUid(in.valueInputs[axis],
-                       interpValueUid[interp][axis]);
-    }
-    RrInputValue ReadAutoClavicle(size_t index, size_t which) const
-    {
-        const RigExecWireAutoClavicle &ac = poses->autoClavicles[index];
-        return ReadUid(which == 0 ? ac.ikBlend : ac.amount,
-                       autoClavicleUid[index][which]);
-    }
-    RrInputValue ReadLimb(size_t index, size_t which) const
-    {
-        const RigExecWireLimbSolver &l = poses->limbSolvers[index];
-        const RigExecWireInput *inputs[5] = {&l.pin, &l.upperScale,
-                                             &l.lowerScale, &l.softDistance,
-                                             &l.twist};
-        return ReadUid(*inputs[which], limbUid[index][which]);
+        return ReadRegistered(interpValueRead[interp][axis]);
     }
     RrInputValue ReadSpaceSwitch(size_t index) const
     {
-        return ReadUid(poses->spaceSwitches[index].active,
-                       spaceSwitchUid[index]);
+        return ReadRegistered(spaceSwitchRead[index]);
     }
 };
 
@@ -428,22 +406,21 @@ bool RrPoseSizeScratch(RrProgram *program, std::string *error);
 bool RrGeometrySizeScratch(RrProgram *program, std::string *error);
 bool RrWeightSizeScratch(RrProgram *program, std::string *error);
 /// Classifies the Computed section's property chains and sizes the
-/// publish entries; checks that each chain read's uid routes to an input
-/// that reads the long way. Refuses a rig with property chains and no
-/// section. Runs after the uid routing and the holders are set up.
+/// publish entries. Runs after the reads are bound.
 bool RrPropertySizeScratch(RrProgram *program, std::string *error);
 
 /// The property chains (RigExecRigEvaluator::_EvaluatePropertyChains,
-/// rigEvaluatorProperties.cpp) over this run's slot values, in dependency
-/// order, before every prologue: each published result lands in
-/// RrStore::propertyResults at once, so a later chain or any read crossing
-/// the target sees it. Diagnostics are appended to \p poseDiagnostics in
-/// chain order. False only when the section and the classified chains
-/// disagree.
+/// rigEvaluatorProperties.cpp) over this run's slot values and standing
+/// overrides, in dependency order, before every prologue: each published
+/// result lands in RrStore::propertyResults at once, so a later chain or
+/// any read crossing the target sees it. A phased reader with an override
+/// on its consumer or a hop stands aside and publishes nothing.
+/// Diagnostics are appended to \p poseDiagnostics in chain order. False
+/// only when the section and the classified chains disagree.
 bool RrRunPropertyChains(RrProgram *program,
                          std::vector<std::string> *poseDiagnostics);
 
-/// Cross-check (RrProgram::crossCheck): this run's property results
+/// Cross-check (RrProgram::CrossCheckThisRun): this run's property results
 /// against \p record's, path set, tag and bits. False naming the field,
 /// e.g. "propertyValues[/Rig/Channels/Dial.rigExec:amount]"; otherwise adds
 /// the number of values compared to \p compared.
@@ -451,24 +428,23 @@ bool RrCrossCheckPropertyResults(const RrProgram *program,
                                  const RigExecWireFrameInputs &record,
                                  uint64_t *compared, std::string *error);
 
-/// The program's registered reads that cross a property-chain target (the
-/// Computed section's chainReads), after the chains and before every
-/// prologue: each is evaluated by RrReadInput over this run's slot values
-/// and chain results and handed to its uid's holder, which is what the
-/// consuming step reads. Under RrProgram::crossCheck each is first compared
-/// bit for bit with the value \p record holds for that uid, when it holds
-/// one; a mismatch fails naming the field, e.g. "values[uid 12,
-/// /Rig/Movers/Follow.inputs:defaultWeight]", otherwise the number compared
+/// Cross-check (RrProgram::CrossCheckThisRun), after the chains: each
+/// registered read that crosses a property-chain target (the Computed
+/// section's chainReads), evaluated by RrReadInput, against the value
+/// \p record holds for its uid, where it holds one. A mismatch fails
+/// naming the field, e.g. "values[uid 12,
+/// /Rig/Movers/Follow.inputs:defaultWeight]"; otherwise the number compared
 /// is added to \p compared.
-bool RrRunChainReads(RrProgram *program, const RigExecWireFrameInputs &record,
-                     uint64_t *compared, std::string *error);
+bool RrCrossCheckChainReads(const RrProgram *program,
+                            const RigExecWireFrameInputs &record,
+                            uint64_t *compared, std::string *error);
 
-/// Cross-check (RrProgram::crossCheck), after the chain-read hand-off and
-/// before every prologue: each registered read the chain hand-off does not
-/// cover, evaluated by RrReadInput, against what the record-driven steps
-/// consume for it -- its holder or constant, or for an avar binding the
-/// avar table's value -- wherever that is this frame's value (a read
-/// made per run only at the frames \p record holds its uid); and each
+/// Cross-check (RrProgram::CrossCheckThisRun), after the chains and before
+/// every prologue: each registered read the chain-read check does not
+/// cover, evaluated by RrReadInput, against the value \p record holds for
+/// its uid, or where it holds none, against the table input's constant (an
+/// avar binding's: the avar table's) -- a read made per run is compared
+/// only at the frames \p record holds its uid; and each
 /// connection-following mover scalar against the value \p record holds
 /// under its head's path, where a forced live read put one. A mismatch
 /// fails naming the field, e.g. "registered reads: ... at solvers[0].bend
@@ -479,10 +455,10 @@ bool RrCrossCheckReads(const RrProgram *program,
                        RrCrossCheckCounts *counts, std::string *error);
 
 /// Cross-check of the reads geometry chain \p chain's revision \p revision
-/// (derived target \p revision when \p derived) consumed from \p record
-/// this run: its blend channel weights where no pose weight drives the
-/// channel and, for a chain revision, its inputs:defaultWeight, each
-/// evaluated by RrReadInput. Counted in \p output; false naming the field.
+/// (derived target \p revision when \p derived) consumed this run against
+/// \p record: its blend channel weights and, for a chain revision, its
+/// inputs:defaultWeight, as RrReadBlendWeight and RrReadDefaultWeight read
+/// them. Counted in \p output; false naming the field.
 bool RrCrossCheckRevisionReads(const RrProgram *program,
                                const RigExecWireFrameInputs *record,
                                size_t chain, size_t revision, bool derived,
@@ -570,18 +546,12 @@ RrMat4d RrMaskTransform(const RrMat4d &m, const bool translation[3],
                         const bool rotation[3], const bool scale[3]);
 
 /// Mirrors RigExecRotationFilter bit for bit.
-enum class RrRotationFilter : uint8_t { All = 0, Twist = 1, Swing = 2, Orient = 3 };
+enum class RrRotationFilter : uint8_t { All = 0, Twist = 1, Swing = 2 };
 
 /// RigExecFilterSpaceRotation: keep only the twist of \p m's rotation about
 /// \p axis, or only the swing. `All` returns \p m untouched.
 RrMat4d RrFilterSpaceRotation(const RrMat4d &m, const RrVec3d &axis,
                               RrRotationFilter filter);
-
-/// RigExecOrientSpaceDelta: \p delta with the switched frame's origin taken
-/// from \p unswitched -- a rotation-only space.
-RrMat4d RrOrientSpaceDelta(const RrMat4d &delta, const RrMat4d &local,
-                           const RrMat4d &localInverse,
-                           const RrMat4d &unswitched);
 
 }  // namespace rigExec
 

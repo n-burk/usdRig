@@ -191,6 +191,11 @@ struct PhasedConsumer {
     /// converts), else the chain's own type (no conversion).
     PropertyValueType consumerType = PropertyValueType::Float;
     uint32_t applied = 0;   ///< 0 = the base; at most the revision count
+    /// Slot ids of the consumer, then of each attribute its connection walk
+    /// passes before the chain target (RigExecPhasedConnection::hops). An
+    /// interactive override on any of them stands the reader aside: nothing
+    /// is published at the consumer, and its walk meets the override.
+    std::vector<uint32_t> hops;
 };
 
 /// Wrapper for a pooled points array (v4 vec3f_arrays entry).
@@ -279,9 +284,10 @@ struct RigExecWireWeightObject {
 
 /// A program-registered read whose walk crosses a property-chain target
 /// (Baked mode, Varying, LongWay and ViaChain), with the InputTable uid its
-/// per-frame value is recorded under. The runtime evaluates it after the
-/// chains and gives the uid's holder the result (temporary: the uids go
-/// with the frame records).
+/// per-frame value is recorded under: a restatement of the registered read
+/// with that uid, which the cross-check evaluates and compares with the
+/// frame record's value under the uid (temporary: the uids go with the
+/// frame records).
 struct RigExecWireChainRead {
     uint32_t uid = 0;
     v4::RigExecWireInput read;
@@ -324,12 +330,16 @@ struct RigExecWireRegisteredRead {
 /// weight slot instead, unless a property-chain result or phased value is
 /// published at the channel's own weight path; only then does the
 /// assembly use this read.
+/// `activations`: each of the channel's samples' rigExec:activation, in
+/// binding order (Resolved, Float, fallback 1), which the assembly reads
+/// every run before it sorts the samples by them.
 struct RigExecWireBlendWeightRead {
     uint32_t chain = 0;
     uint32_t revision = 0;
     bool derived = false;
     uint32_t channel = 0;
     v4::RigExecWireInput read;
+    std::vector<v4::RigExecWireInput> activations;
 };
 
 /// A geometry revision's inputs:defaultWeight as the RevisionStatic step
@@ -411,9 +421,11 @@ bool RigExecWireEncodeComputed(const RigExecWireComputed &computed,
 /// revision reads typed and moded as their revision reads them, chain-
 /// crossing registered reads in ascending uid with a chain target on their
 /// walk, registered reads in Baked mode and the geometry reads Resolved,
-/// one blend read per channel, one default weight read per revision, path
+/// one blend read per channel (its activation reads Resolved Floats too),
+/// one default weight read per revision, path
 /// reads headed by the attribute they are keyed by and unique by path,
-/// frame vectors one per slot. Rejects trailing bytes.
+/// phased consumers' hops headed by the consumer and short of the chain
+/// target, frame vectors one per slot. Rejects trailing bytes.
 bool RigExecWireDecodeComputed(RigExecWireReader *reader,
                                RigExecWireComputed *computed,
                                std::string *error);
@@ -425,7 +437,8 @@ bool RigExecWireDecodeComputed(RigExecWireReader *reader,
 /// registered read with a uid naming a directory entry of its tag,
 /// override number and head, each registered read naming a table row of
 /// the pose or geometry section, each geometry read naming a revision (and
-/// a blend channel) the geometry section holds -- and copies each
+/// a blend channel, with one activation read per sample of it) the
+/// geometry section holds -- and copies each
 /// constraint's index into \p pose.
 bool RigExecWireApplyComputed(const RigExecWireComputed &computed,
                               const RigExecWireDomainGeometry &geometry,

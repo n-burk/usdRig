@@ -840,6 +840,17 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 Fail(why);
                 return;
             }
+            // The attributes an override stands the reader aside on.
+            phased.hops.reserve(p.hops.size());
+            for (const SdfPath &hop : p.hops) {
+                uint32_t id = 0;
+                if (!S.Slot(hop, "phased consumer " + p.consumer.GetString(),
+                            &id, &why)) {
+                    Fail(why);
+                    return;
+                }
+                phased.hops.push_back(id);
+            }
             C.phasedConsumers.push_back(phased);
         }
     }
@@ -1020,7 +1031,8 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
 
     // The geometry assembly's own reads: every blend channel's weight (a
     // pose-driven channel reads it only when a value is published at the
-    // weight itself), a revision's inputs:defaultWeight (RevisionStatic),
+    // weight itself) and its samples' activations, a revision's
+    // inputs:defaultWeight (RevisionStatic),
     // and the scalar mover inputs the assemblers read through their
     // connections and record under the head's path.
     {
@@ -1038,6 +1050,16 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                     entry.channel = uint32_t(ch);
                     if (!S.Resolved(bound.weight, 0.0f, &entry.read, &why)) {
                         return false;
+                    }
+                    // Each sample's activation, which the gather reads
+                    // through the same resolved inputs; an absent one keeps
+                    // RigExecBlendSampleData's 1.
+                    entry.activations.resize(bound.samples.size());
+                    for (size_t s = 0; s < bound.samples.size(); ++s) {
+                        if (!S.Resolved(bound.samples[s].activation, 1.0f,
+                                        &entry.activations[s], &why)) {
+                            return false;
+                        }
                     }
                     C.blendWeightReads.push_back(std::move(entry));
                 }
@@ -1262,6 +1284,9 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     }
     for (v4::PhasedConsumer &phased : C.phasedConsumers) {
         phased.consumer = remap[phased.consumer];
+        for (uint32_t &hop : phased.hops) {
+            hop = remap[hop];
+        }
     }
     for (RigExecWireChainRead &entry : C.chainReads) {
         remapWalk(entry.read);
@@ -1271,6 +1296,9 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     }
     for (RigExecWireBlendWeightRead &entry : C.blendWeightReads) {
         remapWalk(entry.read);
+        for (v4::RigExecWireInput &activation : entry.activations) {
+            remapWalk(activation);
+        }
     }
     for (RigExecWireDefaultWeightRead &entry : C.defaultWeightReads) {
         remapWalk(entry.read);

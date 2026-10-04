@@ -596,6 +596,14 @@ target_compile_definitions(testRigExecRuntimePose PRIVATE
     RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecRuntimePose COMMAND testRigExecRuntimePose
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# The same suite baked with every step in its own cluster, so a drag at a
+# fixed frame reaches each step only through the dirtying owed to it (a
+# moved avar, an override flag, a moved chain result) and never through a
+# cluster it shares with another step.
+add_test(NAME testRigExecRuntimePoseFineClusters COMMAND testRigExecRuntimePose
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecRuntimePoseFineClusters PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
 
 add_executable(testRigExecRuntimeWeights tests/testRigExecRuntimeWeights.cpp)
 target_link_libraries(testRigExecRuntimeWeights PRIVATE rigExecRuntime rigExecBake)
@@ -640,11 +648,12 @@ add_test(NAME testRigExecBinary COMMAND testRigExecBinary
 # MIN_PROPERTY_VALUES property-chain values, MIN_CHAIN_READS registered
 # reads crossing a chain, MIN_REGISTERED_READS the other registered reads,
 # MIN_BLEND_WEIGHTS blend channel weights, MIN_DEFAULT_WEIGHTS geometry
-# revisions' default weights, and MIN_PATH_READS the assemblers'
-# connection-following scalar reads.
+# revisions' default weights, MIN_PATH_READS the assemblers'
+# connection-following scalar reads, and MIN_BLEND_ACTIVATIONS blend
+# samples' activations.
 function(rigexec_add_verify_binary_test)
     cmake_parse_arguments(A ""
-        "NAME;RIG;STAGE;FRAMES;MIN_ENVELOPES;MIN_PHASE_PACKETS;MIN_PROPERTY_VALUES;MIN_CHAIN_READS;MIN_REGISTERED_READS;MIN_BLEND_WEIGHTS;MIN_DEFAULT_WEIGHTS;MIN_PATH_READS"
+        "NAME;RIG;STAGE;FRAMES;MIN_ENVELOPES;MIN_PHASE_PACKETS;MIN_PROPERTY_VALUES;MIN_CHAIN_READS;MIN_REGISTERED_READS;MIN_BLEND_WEIGHTS;MIN_DEFAULT_WEIGHTS;MIN_PATH_READS;MIN_BLEND_ACTIVATIONS"
         "" ${ARGN})
     if (NOT DEFINED A_NAME OR NOT DEFINED A_FRAMES OR
             (NOT DEFINED A_RIG AND NOT DEFINED A_STAGE) OR
@@ -662,7 +671,8 @@ function(rigexec_add_verify_binary_test)
     set(_expect)
     foreach(_option IN ITEMS MIN_ENVELOPES MIN_PHASE_PACKETS
             MIN_PROPERTY_VALUES MIN_CHAIN_READS MIN_REGISTERED_READS
-            MIN_BLEND_WEIGHTS MIN_DEFAULT_WEIGHTS MIN_PATH_READS)
+            MIN_BLEND_WEIGHTS MIN_DEFAULT_WEIGHTS MIN_PATH_READS
+            MIN_BLEND_ACTIVATIONS)
         if (DEFINED A_${_option})
             list(APPEND _expect "-D${_option}=${A_${_option}}")
         endif()
@@ -681,15 +691,18 @@ endfunction()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/verify-binary")
 # Floors on examples whose geometry reads the cross-check compares: the
-# blend shape face's channel weights (one per channel and frame), the
-# tail's default weights and enable reads, and the biped stack's, whose
-# blend weights are mostly pose-driven (it compares 18 channels that are
-# not, so a floor of 400 fails if the pose-driven arm stops comparing).
-set(_verify_binary_floors_04_BlendShapeFace MIN_BLEND_WEIGHTS 10)
+# blend shape face's channel weights (one per channel and frame) and
+# sample activations, the tail's default weights and enable reads, and the
+# biped stack's, whose blend weights are mostly pose-driven (it compares 18
+# channels that are not, so a floor of 400 fails if the pose-driven arm
+# stops comparing).
+set(_verify_binary_floors_04_BlendShapeFace
+    MIN_BLEND_WEIGHTS 10 MIN_BLEND_ACTIVATIONS 15)
 set(_verify_binary_floors_01_FkChainTail
     MIN_DEFAULT_WEIGHTS 20 MIN_PATH_READS 20)
 set(_verify_binary_floors_biped_Biped_stack
-    MIN_BLEND_WEIGHTS 400 MIN_DEFAULT_WEIGHTS 400 MIN_PATH_READS 500)
+    MIN_BLEND_WEIGHTS 400 MIN_DEFAULT_WEIGHTS 400 MIN_PATH_READS 500
+    MIN_BLEND_ACTIVATIONS 400)
 foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
     string(REPLACE "|" ";" _fixture_fields "${_fixture}")
     list(GET _fixture_fields 0 _fixture_stage)

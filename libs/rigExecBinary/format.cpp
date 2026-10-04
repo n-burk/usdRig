@@ -1794,7 +1794,9 @@ private:
                 !_Pool(sample.pointsValue, _f.vec3fArrays.size(), at,
                        "points_value") ||
                 !_Size(sample.offsets.size(), sample.indices.size(), at,
-                       "offsets")) {
+                       "offsets") ||
+                !_ReadPtr(sample.activationRead, int(InputTag::Float),
+                          _Resolved, at, "activation_read")) {
                 return false;
             }
         }
@@ -2132,6 +2134,16 @@ private:
                    _IsScalar(chain.valueType))) ||
                 phased.applied > chain.revisions.size()) {
                 return _Bad(row + ": does not fit its chain");
+            }
+            // The consumer first, then the walk's attributes short of the
+            // target.
+            bool hops = !phased.hops.empty() &&
+                        phased.hops[0] == phased.consumer;
+            for (uint32_t hop : phased.hops) {
+                hops = hops && hop < _f.inputs.size() && hop != chain.target;
+            }
+            if (!hops) {
+                return _Bad(row + ": malformed hops");
             }
         }
         return true;

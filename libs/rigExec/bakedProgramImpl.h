@@ -3494,6 +3494,9 @@ struct RigExecBakedPropertyChainDesc {
         /// float and double and passes every other value through.
         ValueType consumerType = ValueType::Float;
         size_t applied = 0;
+        /// RigExecPhasedConnection::hops: the consumer, then each attribute
+        /// its walk passes before the target.
+        SdfPathVector hops;
     };
     SdfPath target;
     UsdAttribute targetAttr;

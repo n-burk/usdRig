@@ -107,7 +107,7 @@ public:
 
     // Opens a .rigexec image. False with the reason on a malformed file,
     // an undecodable section, or tables whose cross-references do not
-    // close (versions, uid routing, cone sizes).
+    // close (versions, input reads, cone sizes).
     static std::unique_ptr<RigExecRuntimeReader> Open(
         const uint8_t *bytes, size_t size, std::string *error);
 
@@ -118,15 +118,18 @@ public:
     // miss when the file carries no such frame.
     bool SetFrame(double frame, std::string *error);
 
-    // Persistent local TRS avar overrides, applied after the selected frame
-    // and before FK/geometry evaluation. Angles are degrees. Only compiled
-    // control slots with TRS poses are supported; property-mover outputs are
-    // refused because a chain computes them from the frame's inputs, which
-    // an override does not reach. An avar that reads a chain at a phase is
-    // accepted: the override replaces its read, as a drag stands such a
-    // reader aside in the USD evaluators. Local only: an attribute that
-    // reads the avar through a connection keeps its frame value or its own
-    // phased read, where the USD evaluators route the drag to it.
+    // Persistent TRS avar overrides, placed on every Execute as the program
+    // places interactive overrides. Angles are degrees. Only compiled
+    // control slots with TRS poses are supported. The override is what
+    // every read whose connection walk passes the avar meets there, the
+    // avar's own binding and any reader downstream of it alike; a reader
+    // that reads a chain at a phase stands aside when the override is on
+    // it or on a hop of its connection, as in the USD evaluators.
+    // Two gaps against the USD evaluators remain for now: an avar math
+    // movers revise (a property-mover output) is refused until what a drag
+    // on one means is settled, and a plugin mover applies the payload its
+    // bake assembled for the frame, so a drag that reaches an input the
+    // plugin reads does not reach that mover's output.
     bool SetAvar(const std::string &propertyPath, double value,
                  std::string *error);
     void ClearAvars();
@@ -160,14 +163,14 @@ public:
     // Test-only cross-check of what the runtime computes against the frame
     // record the bake also wrote, bit for bit: every property-chain result,
     // constraint envelope and current-phase weight packet; every registered
-    // read evaluated over the slots against the value the record-driven
-    // step consumes (a read that crosses a chain against the record before
-    // its holder takes the computed value); every blend channel weight,
+    // read evaluated over the slots against the record's value where it
+    // holds one, else the table's constant; every blend channel weight,
     // revision default weight and connection-following mover scalar the
-    // assembly reads, where the record holds it. A mismatch fails Execute
-    // naming the record field and its index. Off by default;
-    // RIGEXEC_RUNTIME_CROSSCHECK set to anything but empty or "0" when Open
-    // runs turns it on.
+    // assembly reads, where the record holds it. A run with an avar
+    // override standing is not compared: the record never saw the drag. A
+    // mismatch fails Execute naming the record field and its index. Off by
+    // default; RIGEXEC_RUNTIME_CROSSCHECK set to anything but empty or "0"
+    // when Open runs turns it on.
     void SetCrossCheckForTesting(bool enabled);
     bool GetCrossCheckForTesting() const { return _program.crossCheck; }
     // Values the cross-check compared since Open, over the Executes that
@@ -298,7 +301,8 @@ private:
     RigExecWireDomainGeometry _geometry;
     RigExecWireInputTable _inputs;
     RigExecWireExternalMovers _external;
-    // The Computed section (temporary; absent in files baked before it).
+    // The Computed section (temporary): the input slots every read
+    // evaluates over.
     RigExecWireComputed _computed;
     bool _hasSteps = false;
     bool _hasPoses = false;
@@ -313,7 +317,8 @@ private:
 
     size_t _frameIndex = 0;
     bool _frameSelected = false;
-    std::map<size_t, double> _avarOverrides;
+    // The standing avar overrides, by input slot.
+    std::map<uint32_t, double> _avarOverrides;
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;

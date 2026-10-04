@@ -667,6 +667,7 @@ _RichFile()
     sample.offsets = {_V3f(1), _V3f(5)};
     sample.indices = {0, 3};
     sample.pointsValue = 1;
+    sample.activationRead = _In(InputTag::Float, ReadMode::Resolved, {1});
     // One sample per float special, so the one F32 field carries each:
     // samples[k] holds _SF(k + 1).
     for (size_t k = 0; k < _specialCount; ++k) {
@@ -787,6 +788,7 @@ _RichFile()
     phased.consumer = 1;
     phased.consumerType = fb::PropertyValueType::Float;
     phased.applied = 1;
+    phased.hops = {1};
     f.phasedConsumers.push_back(std::move(phased));
 
     f.compileDiagnostics = {"compile note", ""};
@@ -953,6 +955,9 @@ TestBitExactness()
     }
     const fb::RigExecWireBlendSample &bs = samples[0];
     CHECK(_Same(bs.offsets, samples0[0].offsets));
+    CHECK(bs.activationRead && samples0[0].activationRead &&
+          bs.activationRead->mode == ReadMode::Resolved &&
+          bs.activationRead->walk == samples0[0].activationRead->walk);
 
     // Structs.
     CHECK(_Same(s.ikRests, s0.ikRests));
@@ -1286,6 +1291,7 @@ TestValidationSmoke()
     expect("unsorted listed", "sorted", [](F &f) {
         std::swap(f.inputs[0], f.inputs[1]);
         f.phasedConsumers[0].consumer = 0;
+        f.phasedConsumers[0].hops = {0};
     });
     expect("slot default tag", "inputs[0]", [](F &f) {
         f.inputs[0] = fb::InputSlot(_pCtlTx, _vFloatNaN, -1, -1,
@@ -1323,6 +1329,10 @@ TestValidationSmoke()
     });
     expect("missing required read", "twist_turns: missing",
            [](F &f) { f.pose->solvers[0].twistTurns.reset(); });
+    expect("activation read tag", "activation_read", [](F &f) {
+        f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+            .activationRead = _In(InputTag::Double, ReadMode::Resolved);
+    });
     // Avar bindings.
     expect("avar flat", "flat", [](F &f) { f.pose->avarBindings[0].flat = 11; });
     // Slot tables and constants.
@@ -1399,6 +1409,10 @@ TestValidationSmoke()
     // Property chains.
     expect("phased applied", "phased_consumers[0]",
            [](F &f) { f.phasedConsumers[0].applied = 2; });
+    expect("phased hops", "malformed hops",
+           [](F &f) { f.phasedConsumers[0].hops = {0, 1}; });
+    expect("phased hop at the target", "malformed hops",
+           [](F &f) { f.phasedConsumers[0].hops = {1, 2}; });
     expect("chain flag", "has_property_chains",
            [](F &f) { f.pose->hasPropertyChains = false; });
     expect("keys off a curve", "keys", [](F &f) {

@@ -4156,6 +4156,7 @@ RigExecBakedProgram::DescribePropertyChains(
                                       ? consumer
                                       : chain.valueType;
             phased.applied = connection.applied;
+            phased.hops = connection.hops;
             chain.phased.push_back(std::move(phased));
         }
         chains->push_back(std::move(chain));

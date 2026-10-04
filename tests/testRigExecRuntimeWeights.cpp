@@ -514,6 +514,134 @@ _SynthPointsRead(RigExecBinaryWriter *writer, const char *path,
     return read;
 }
 
+// The Computed section a bake writes beside the synthetic tables: one
+// registered read per weight object field, each input the directory gives
+// a uid (in the capture's order) read per run through a slot named as that
+// entry's head and holding each frame's recorded value, every other field
+// its table constant; and one step-backed weight object per table entry,
+// whose reads only the weight oracle makes.
+static std::vector<uint8_t>
+_SynthComputed(RigExecBinaryWriter *writer,
+               const RigExecWireDomainGeometry &geometry,
+               RigExecWireInputTable *inputs)
+{
+    using v4::InputTag;
+    RigExecWireComputed computed;
+    computed.bakeTime =
+        inputs->frames.empty() ? 0.0 : inputs->frames[0].frame;
+    computed.values.push_back(v4::RigExecWireValue());
+    computed.vec3fArrays.emplace_back();
+    std::map<uint32_t, uint32_t> floats;
+    const auto intern = [&](float f) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &f, sizeof(bits));
+        const auto found =
+            floats.emplace(bits, uint32_t(computed.values.size()));
+        if (found.second) {
+            v4::RigExecWireValue value;
+            value.tag = InputTag::Float;
+            value.bits = bits;
+            computed.values.push_back(value);
+        }
+        return found.first->second;
+    };
+    // The uid of each slot, in slot order.
+    std::vector<uint32_t> slotUids;
+    uint32_t nextUid = 0;
+    for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
+        const RigExecWireWeightObject &wire = geometry.weightObjects[i];
+        const RigExecWireInput *const fields[RrWeightFieldCount] = {
+            &wire.defaultWeight, &wire.driver,    &wire.scale,
+            &wire.bias,          &wire.strength,  &wire.invert,
+            &wire.falloffMin,    &wire.falloffMax, &wire.scaleXPos,
+            &wire.scaleYPos,     &wire.scaleZPos, &wire.scaleXNeg,
+            &wire.scaleYNeg,     &wire.scaleZNeg, &wire.scaleX,
+            &wire.scaleY,        &wire.scaleZ,    &wire.extentU,
+            &wire.extentV};
+        v4::RigExecWireWeightObject object;
+        object.path = wire.path;
+        object.type = wire.type;
+        object.representation = wire.representation;
+        object.rangePolicy = wire.rangePolicy;
+        v4::RigExecWireInput *const reads[RrWeightFieldCount] = {
+            &object.defaultWeight, &object.driver,    &object.scale,
+            &object.bias,          &object.strength,  &object.invert,
+            &object.falloffMin,    &object.falloffMax, &object.scaleXPos,
+            &object.scaleYPos,     &object.scaleZPos, &object.scaleXNeg,
+            &object.scaleYNeg,     &object.scaleZNeg, &object.scaleX,
+            &object.scaleY,        &object.scaleZ,    &object.extentU,
+            &object.extentV};
+        for (size_t f = 0; f < size_t(RrWeightFieldCount); ++f) {
+            const RigExecWireInput &input = *fields[f];
+            reads[f]->tag = InputTag::Float;
+            reads[f]->mode = v4::ReadMode::Resolved;
+            reads[f]->constant = intern(input.f32);
+            RigExecWireRegisteredRead entry;
+            entry.family = RigExecWireRegisteredFamily::WeightObject;
+            entry.object = uint32_t(i);
+            entry.field = uint32_t(f);
+            entry.read.tag = InputTag::Float;
+            entry.read.mode = v4::ReadMode::Baked;
+            entry.read.overrideIndex = input.overrideIndex;
+            entry.read.constant = intern(input.f32);
+            if (input.varying) {
+                entry.read.flags |= uint8_t(v4::InputReadFlags::Varying);
+            }
+            if (input.varying && input.bound) {
+                const uint32_t slot = uint32_t(computed.inputs.size());
+                v4::InputSlot attribute;
+                attribute.name = writer->AddString(
+                    "/Synth/" + std::to_string(slot) + ".value");
+                attribute.type = InputTag::Float;
+                attribute.flags =
+                    uint8_t(v4::InputSlotFlags::Listed) |
+                    uint8_t(v4::InputSlotFlags::Animated) |
+                    uint8_t(v4::InputSlotFlags::HasValue);
+                attribute.value = entry.read.constant;
+                computed.inputs.push_back(attribute);
+                CHECK(nextUid < inputs->directory.size());
+                if (nextUid < inputs->directory.size()) {
+                    inputs->directory[nextUid].head = attribute.name;
+                }
+                entry.uid = int32_t(nextUid);
+                entry.read.walk = {slot};
+                entry.read.selected = 0;
+                slotUids.push_back(nextUid++);
+            }
+            computed.registeredReads.push_back(entry);
+        }
+        computed.weightObjects.push_back(std::move(object));
+    }
+    computed.listedInputs = uint32_t(computed.inputs.size());
+    for (const RigExecWireFrameInputs &record : inputs->frames) {
+        RigExecWireComputedFrame frame;
+        frame.frame = record.frame;
+        for (const uint32_t uid : slotUids) {
+            float value = 0.0f;
+            for (size_t k = 0; k < record.uids.size(); ++k) {
+                if (record.uids[k] == uid) {
+                    value = record.values[k].f32;
+                }
+            }
+            frame.values.push_back(intern(value));
+            frame.hasValue.push_back(1);
+        }
+        computed.frames.push_back(std::move(frame));
+    }
+    for (size_t s = 0; s < computed.inputs.size() &&
+                       !computed.frames.empty();
+         ++s) {
+        computed.inputs[s].value = computed.frames[0].values[s];
+    }
+    std::vector<uint8_t> payload;
+    std::string error;
+    CHECK(RigExecWireEncodeComputed(computed, &payload, &error));
+    if (!error.empty()) {
+        std::printf("synthetic computed section: %s\n", error.c_str());
+    }
+    return payload;
+}
+
 static bool
 _SynthCompare(const char *name, const RigExecWeightPacket &expected,
               const RrWeightPacket &actual,
@@ -1162,6 +1290,9 @@ _TestSyntheticBuilders()
         inputs.frames.push_back(record);
     }
 
+    const std::vector<uint8_t> computed =
+        _SynthComputed(&writer, geometry, &inputs);
+    writer.AddSection(RigExecBinarySection::Computed, computed);
     std::vector<uint8_t> payload;
     CHECK(RigExecWireEncodeSteps(steps, &payload));
     writer.AddSection(RigExecBinarySection::Steps, payload);
@@ -1198,8 +1329,8 @@ _TestSyntheticBuilders()
         return;
     }
     // Pose and geometry prologues are siblings' work; the weight walk
-    // runs under its own bit. The file carries no Computed section, which
-    // a rig with no envelope and no current-phase field does not need.
+    // runs under its own bit. Every weight object field is read through
+    // the Computed section, as a bake writes it.
     runtime->SetCrossCheckForTesting(true);
     runtime->SetRunMaskForTesting(0x2u);
     CHECK(runtime->SetFrame(1.0, &error));

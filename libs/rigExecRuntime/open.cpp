@@ -1,9 +1,9 @@
 // rigExecRuntime Open (M2 framework).
 // Decodes every section, then derives what the file implies but does not
-// store: the uid routing (replaying the capture traversal), the SSA
-// version pool sizes and last-version maps (scanning the commit writes),
-// and the store sizing. Cross-references that do not close are Open
-// errors naming the table.
+// store: the input reads each table field binds, the SSA version pool
+// sizes and last-version maps (scanning the commit writes), and the store
+// sizing. Cross-references that do not close are Open errors naming the
+// table.
 #include "rigExecRuntime/runtime.h"
 
 #include <algorithm>
@@ -14,44 +14,6 @@
 namespace rigExec {
 
 namespace {
-
-/// Set from the InputPolicy section: the bake also gave uids to inputs an
-/// override can reach. File-scope rather than threaded through eight call
-/// sites, and set once per open before any routing runs.
-bool _gOverridableInputs = false;
-
-bool
-_RouteField(const RigExecWireInput &input,
-            const std::vector<RigExecWireInputDirectoryEntry> &directory,
-            size_t *nextUid, int32_t *uid, std::string *error)
-{
-    // The writer's rule, restated: live, or -- when the bake widened it --
-    // reachable by an override. The two have to agree exactly, because the
-    // directory is replayed positionally and one extra or missing entry
-    // shifts every uid after it.
-    const bool live = input.varying && input.bound;
-    const bool overridable =
-        _gOverridableInputs && input.overrideIndex >= 0 && input.head != 0;
-    if (!live && !overridable) {
-        *uid = -1;
-        return true;
-    }
-    if (*nextUid >= directory.size()) {
-        if (error) {
-            *error = "input directory ends before the uid replay does";
-        }
-        return false;
-    }
-    if (directory[*nextUid].tag != input.tag) {
-        if (error) {
-            *error = "input directory tag drifted from the tables";
-        }
-        return false;
-    }
-    *uid = int32_t(*nextUid);
-    ++(*nextUid);
-    return true;
-}
 
 /// RIGEXEC_RUNTIME_CROSSCHECK, read once per Open: set to anything but
 /// empty or "0" turns the record cross-check on.
@@ -72,17 +34,6 @@ _CrossCheckFromEnvironment()
     const char *value = std::getenv(name);
     return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
 #endif
-}
-
-int
-_AvarChannel(const std::string &property)
-{
-    for (int c = 0; c < 11; ++c) {
-        if (property == RrAvarNames[c]) {
-            return c;
-        }
-    }
-    return -1;
 }
 
 // Minimal manifest reader for the "compileDiagnostics" string array. The
@@ -246,13 +197,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     };
     const uint8_t *data = nullptr;
     size_t bytesOut = 0;
-    // Before anything routes. Absent is the old rule, which is why a
-    // binary written before the section still replays exactly.
-    _gOverridableInputs = false;
-    if (reader.FindSection(RigExecBinarySection::InputPolicy, &data,
-                           &bytesOut)) {
-        _gOverridableInputs = bytesOut >= 1 && data[0] != 0;
-    }
     if (!section(RigExecBinarySection::Steps, "steps", &data, &bytesOut)) {
         return fail(*error);
     }
@@ -393,11 +337,11 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         }
         self->_hasInputTable = true;
     }
-    // The Computed section (temporary): the slots and weight objects the
-    // runtime computes envelopes and current-phase fields from. Absent in
-    // files baked before it; RrInputsOpen below refuses such a file only
-    // when its tables need it. Present but malformed, or not matching the
-    // tables it extends: fail.
+    // The Computed section (temporary): the input slots every read the
+    // steps make is evaluated over, and the weight objects and property
+    // chains the runtime computes from them. Absent, malformed, or not
+    // matching the tables it extends: fail (RrInputsOpen below refuses a
+    // file without it).
     bool hasComputed = false;
     if (reader.FindSection(RigExecBinarySection::Computed, &data,
                            &bytesOut)) {
@@ -493,48 +437,23 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     program.inputs = &self->_inputs;
     program.strings = self->_reader.get();
     program.crossCheck = _CrossCheckFromEnvironment();
+    const size_t slots = self->_slotMeta.paths.size();
+    const size_t clusters = self->_clustering.clusters.size();
+    const size_t revisions = self->_geometry.revisionIndex.size();
+    if (self->_constants.avarConstants.size() != slots * 11) {
+        return fail("avar constants do not cover the slots");
+    }
+    // The input reads: each table field the steps read binds one of the
+    // section's registered reads.
     {
         std::string why;
         if (!RrInputsOpen(&program, hasComputed ? &self->_computed : nullptr,
-                          &why)) {
+                          &why) ||
+            !RrInputsBindReads(&program, &why)) {
             return fail(why);
         }
     }
 
-    const size_t slots = self->_slotMeta.paths.size();
-    const size_t clusters = self->_clustering.clusters.size();
-    const size_t revisions = self->_geometry.revisionIndex.size();
-
-    // Slot path -> slot index.
-    for (size_t i = 0; i < slots; ++i) {
-        std::string path;
-        if (!reader.GetString(self->_slotMeta.paths[i], &path)) {
-            return fail("slot inventory names a missing string");
-        }
-        program.pathIndex[path] = int(i);
-    }
-
-    // Uid routing, replaying the capture traversal in order.
-    const std::vector<RigExecWireInputDirectoryEntry> &directory =
-        self->_inputs.directory;
-    size_t nextUid = 0;
-    program.ladderUid.resize(self->_poses.ladders.size());
-    for (size_t i = 0; i < self->_poses.ladders.size(); ++i) {
-        for (int f = 0; f < RrLadderFieldCount; ++f) {
-            if (!_RouteField(program.LadderInput(i, f), directory,
-                             &nextUid,
-                             &program.ladderUid[i][size_t(f)], error)) {
-                return fail(*error);
-            }
-        }
-    }
-    program.spaceSwitchUid.assign(self->_poses.spaceSwitches.size(), -1);
-    for (size_t i = 0; i < self->_poses.spaceSwitches.size(); ++i) {
-        if (!_RouteField(self->_poses.spaceSwitches[i].active, directory,
-                         &nextUid, &program.spaceSwitchUid[i], error)) {
-            return fail(*error);
-        }
-    }
     // Switch index by provider slot, dense, so the compose reads one int
     // per slot. Left empty when the rig has no switch, which is the
     // branch the compose tests first.
@@ -554,147 +473,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             program.spaceSwitchBySlot[size_t(sw.slot)] = int32_t(i);
         }
     }
-    program.interpUid.assign(self->_poses.poseInterpolators.size(), -1);
-    program.interpValueUid.assign(self->_poses.poseInterpolators.size(),
-                                  {-1, -1, -1});
-    for (size_t i = 0; i < self->_poses.poseInterpolators.size(); ++i) {
-        const RigExecWirePoseInterpolator &interp =
-            self->_poses.poseInterpolators[i];
-        if (!_RouteField(interp.enabled, directory, &nextUid,
-                         &program.interpUid[i], error)) {
-            return fail(*error);
-        }
-        for (size_t v = 0; v < interp.valueInputs.size(); ++v) {
-            if (!_RouteField(interp.valueInputs[v], directory, &nextUid,
-                             &program.interpValueUid[i][v], error)) {
-                return fail(*error);
-            }
-        }
-    }
-    program.solverUid.resize(self->_poses.solvers.size());
-    for (size_t i = 0; i < self->_poses.solvers.size(); ++i) {
-        for (int f = 0; f < RrSolverFieldCount; ++f) {
-            if (!_RouteField(program.SolverInput(i, f), directory,
-                             &nextUid,
-                             &program.solverUid[i][size_t(f)], error)) {
-                return fail(*error);
-            }
-        }
-    }
-    program.constraintUid.resize(self->_poses.constraints.size());
-    for (size_t i = 0; i < self->_poses.constraints.size(); ++i) {
-        for (int f = 0; f < RrConstraintFieldCount; ++f) {
-            if (!_RouteField(program.ConstraintInput(i, f), directory,
-                             &nextUid,
-                             &program.constraintUid[i][size_t(f)],
-                             error)) {
-                return fail(*error);
-            }
-        }
-    }
-    program.weightUid.resize(self->_geometry.weightObjects.size());
-    for (size_t i = 0; i < self->_geometry.weightObjects.size(); ++i) {
-        for (int f = 0; f < RrWeightFieldCount; ++f) {
-            if (!_RouteField(program.WeightInput(i, f), directory,
-                             &nextUid,
-                             &program.weightUid[i][size_t(f)], error)) {
-                return fail(*error);
-            }
-        }
-    }
-    // The directory tail is the avar bindings, routed by head path:
-    // "primpath.avars:xx" -> (slot, channel).
-    program.avarUidTarget.assign(directory.size(), -1);
-    for (size_t uid = nextUid; uid < directory.size(); ++uid) {
-        std::string head;
-        if (directory[uid].head == 0 ||
-            !reader.GetString(directory[uid].head, &head)) {
-            return fail("avar directory entry has no routable head");
-        }
-        const size_t dot = head.find_last_of('.');
-        if (dot == std::string::npos) {
-            return fail("avar head is not a property path: " + head);
-        }
-        const auto slot = program.pathIndex.find(head.substr(0, dot));
-        const int channel = _AvarChannel(head.substr(dot + 1));
-        if (slot == program.pathIndex.end() || channel < 0) {
-            return fail("avar head routes nowhere: " + head);
-        }
-        program.avarUidTarget[uid] = int32_t(slot->second * 11 + channel);
-    }
-
-    // Holder seeds: wire constants positionally, avar constants by target.
     RrStore &store = program.store;
-    store.inputHolders.assign(directory.size(), RrInputValue());
-    for (size_t i = 0; i < program.ladderUid.size(); ++i) {
-        for (int f = 0; f < RrLadderFieldCount; ++f) {
-            const int32_t uid = program.ladderUid[i][size_t(f)];
-            if (uid >= 0) {
-                store.inputHolders[size_t(uid)] =
-                    RrWireInputConstant(program.LadderInput(i, f));
-            }
-        }
-    }
-    for (size_t i = 0; i < program.spaceSwitchUid.size(); ++i) {
-        if (program.spaceSwitchUid[i] >= 0) {
-            store.inputHolders[size_t(program.spaceSwitchUid[i])] =
-                RrWireInputConstant(self->_poses.spaceSwitches[i].active);
-        }
-    }
-    for (size_t i = 0; i < program.interpUid.size(); ++i) {
-        const RigExecWirePoseInterpolator &interp =
-            self->_poses.poseInterpolators[i];
-        if (program.interpUid[i] >= 0) {
-            store.inputHolders[size_t(program.interpUid[i])] =
-                RrWireInputConstant(interp.enabled);
-        }
-        for (size_t v = 0; v < interp.valueInputs.size(); ++v) {
-            const int32_t uid = program.interpValueUid[i][v];
-            if (uid >= 0) {
-                store.inputHolders[size_t(uid)] =
-                    RrWireInputConstant(interp.valueInputs[v]);
-            }
-        }
-    }
-    for (size_t i = 0; i < program.solverUid.size(); ++i) {
-        for (int f = 0; f < RrSolverFieldCount; ++f) {
-            const int32_t uid = program.solverUid[i][size_t(f)];
-            if (uid >= 0) {
-                store.inputHolders[size_t(uid)] =
-                    RrWireInputConstant(program.SolverInput(i, f));
-            }
-        }
-    }
-    for (size_t i = 0; i < program.constraintUid.size(); ++i) {
-        for (int f = 0; f < RrConstraintFieldCount; ++f) {
-            const int32_t uid = program.constraintUid[i][size_t(f)];
-            if (uid >= 0) {
-                store.inputHolders[size_t(uid)] =
-                    RrWireInputConstant(program.ConstraintInput(i, f));
-            }
-        }
-    }
-    for (size_t i = 0; i < program.weightUid.size(); ++i) {
-        for (int f = 0; f < RrWeightFieldCount; ++f) {
-            const int32_t uid = program.weightUid[i][size_t(f)];
-            if (uid >= 0) {
-                store.inputHolders[size_t(uid)] =
-                    RrWireInputConstant(program.WeightInput(i, f));
-            }
-        }
-    }
-    if (self->_constants.avarConstants.size() != slots * 11) {
-        return fail("avar constants do not cover the slots");
-    }
-    for (size_t uid = 0; uid < directory.size(); ++uid) {
-        const int32_t target = program.avarUidTarget[uid];
-        if (target >= 0) {
-            store.inputHolders[uid].tag =
-                RigExecWireInput::Tag::Double;
-            store.inputHolders[uid].f64 =
-                self->_constants.avarConstants[size_t(target)];
-        }
-    }
     store.avars = self->_constants.avarConstants;
     store.lastAvars = store.avars;
 
@@ -891,19 +670,22 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     store.aggregates.assign(self->_poses.solvers.size(),
                             RrPointFrameArray());
     store.ladders.assign(slots, RrLadderLive());
+    // Seeded with the reads' folded constants until a prologue composes.
     for (size_t i = 0;
          i < std::min(slots, self->_poses.ladders.size()); ++i) {
-        const RigExecWireLadder &ladder = self->_poses.ladders[i];
         RrLadderLive &live = store.ladders[i];
-        live.restSpace = RrWireInputConstant(ladder.restSpace).matrix;
-        live.defaultSpace =
-            RrWireInputConstant(ladder.defaultSpace).matrix;
-        live.posedSpace = RrWireInputConstant(ladder.posedSpace).matrix;
+        const auto constant = [&](int field) {
+            return program.RegisteredConstant(
+                program.ladderRead[i][size_t(field)]);
+        };
+        live.restSpace = constant(RrLadderRestSpace).matrix;
+        live.defaultSpace = constant(RrLadderDefaultSpace).matrix;
+        live.posedSpace = constant(RrLadderPosedSpace).matrix;
         for (int k = 0; k < 6; ++k) {
-            live.restAvars[k] = ladder.restAvars[k].f64;
-            live.defaultAvars[k] = ladder.defaultAvars[k].f64;
+            live.restAvars[k] = constant(RrLadderRestAvar0 + k).f64;
+            live.defaultAvars[k] = constant(RrLadderDefaultAvar0 + k).f64;
         }
-        live.rotationOrder = ladder.rotationOrder.token;
+        live.rotationOrder = constant(RrLadderRotationOrder).token;
     }
     store.solverOutFrames.assign(self->_poses.solvers.size(), {});
     store.solverOutPresent.assign(self->_poses.solvers.size(), {});
@@ -1007,15 +789,14 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             maxOverride = std::max(maxOverride, input);
         }
     }
-    for (const auto &entry : directory) {
-        maxOverride = std::max(maxOverride, entry.overrideIndex);
+    for (const RigExecWireRegisteredRead &entry :
+         self->_computed.registeredReads) {
+        maxOverride = std::max(maxOverride, entry.read.overrideIndex);
     }
     store.overridden.assign(size_t(maxOverride + 1), 0);
     store.lastOverridden.assign(size_t(maxOverride + 1), 0);
+    store.anyOverridden = false;
 
-    if (!RrInputsBindReads(&program, error)) {
-        return fail(error ? *error : std::string("read binding failed"));
-    }
     if (!RrPoseSizeScratch(&program, error)) {
         return fail(error ? *error : std::string("pose sizing failed"));
     }

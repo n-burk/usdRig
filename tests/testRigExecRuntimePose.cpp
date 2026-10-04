@@ -1034,7 +1034,7 @@ _TestSlotValuesDriveEnvelopes()
     CHECK(!_RunTargetX(tampered, frames, true, "/Asset/TargetA", &ignored,
                        &error));
     // The registered read of the altered slot (the dial's avar binding) is
-    // compared first, against the avar table the record drives.
+    // compared first, against the value the frame record holds for it.
     CHECK(error.find("registered reads: cross-check mismatch at "
                      "avarBindings[0].input") != std::string::npos);
     std::printf("avar-driven dynamic envelope, altered slot value: %s\n",
@@ -1258,8 +1258,8 @@ TestComputedOpenRefusals()
 
     expect("no computed section",
            _WithoutSection(result.bytes, RigExecBinarySection::Computed),
-           "constraint /Asset/Rig/Movers/B resolves an envelope, which needs "
-           "the computed section this file does not carry; rebake it");
+           "the file carries no computed section, which every input read "
+           "needs; rebake it");
     {
         std::vector<uint8_t> truncated = original;
         truncated.pop_back();
@@ -2514,11 +2514,11 @@ TestComputedChainsFixture()
     if (!binary) {
         return;
     }
-    // Without the computed section nothing can run the chains.
+    // Without the computed section nothing can read an input.
     CHECK(_OpenError(_WithoutSection(result.bytes,
                                      RigExecBinarySection::Computed)) ==
-          "the rig runs property chains, which need the computed section "
-          "this file does not carry; rebake it");
+          "the file carries no computed section, which every input read "
+          "needs; rebake it");
 
     const std::string dial = "/Asset/Rig/Channels/Dial.rigExec:amount";
     const std::string follow = "/Asset/Rig/Movers/Follow.inputs:defaultWeight";
@@ -2681,9 +2681,9 @@ TestComputedChainsFixture()
 // spaceMatrix is a registered read the frame records carry at every frame
 // (a bake that left it out of the directory refused the rig), the runtime
 // plays the fixture bit for bit with the baked program, and the solver
-// consumes the value: the recorded matrix moved at one frame fails the
-// registered-read cross-check naming solvers[k].ikSpace and, with the
-// cross-check off, moves the arm at that frame only.
+// reads it through its slot: the recorded matrix moved at one frame fails
+// the registered-read cross-check naming solvers[k].ikSpace and, with the
+// cross-check off, moves nothing.
 static void
 TestIkSpaceFixture()
 {
@@ -2764,10 +2764,12 @@ TestIkSpaceFixture()
           error.find("].ikSpace (uid " + std::to_string(uid) + ", " +
                      spaceMatrix + ").matrix[0][0]") != std::string::npos);
     std::printf("%s, tampered record: %s\n", name, error.c_str());
+    // The solver reads the spaceMatrix through its slot, so the altered
+    // record moves nothing.
     CHECK(_PlayFrames(tampered, frames, false, &replayed, &error));
     CHECK(replayed.size() == untouched.size());
     for (size_t f = 0; f < replayed.size() && f < untouched.size(); ++f) {
-        CHECK((replayed[f].fin != untouched[f].fin) == (f == 1));
+        CHECK(replayed[f].fin == untouched[f].fin);
     }
 
     // A constant spaceMatrix and no space keep the leg on the solver's
@@ -2951,11 +2953,11 @@ TestConstraintAndAvarReadersReplay(const std::string &examplesDir)
 }
 
 // A drag on an avar that reads a chain at its base. The USD evaluators
-// stand the reader aside and pose with the drag; the runtime replaces the
-// avar's read with the override after the prologue, so SetAvar accepts it
-// and every frame the step graph pools hold matches the baked program
-// under the same drag bit for bit. An avar a math mover revises stays
-// refused: its value is the chain's to compute.
+// stand the reader aside and pose with the drag; so does the runtime,
+// whose SetAvar places the drag as an interactive override, and every
+// frame the step graph pools hold matches the baked program under the
+// same drag bit for bit. An avar a math mover revises stays refused: its
+// value is the chain's to compute.
 static void
 TestSetAvarOnPhasedReader()
 {
@@ -3031,6 +3033,667 @@ TestSetAvarOnPhasedReader()
     }
 }
 
+// Whether the runtime's version pools equal the baked program's bit for
+// bit, naming the first slot that differs.
+static bool
+_SamePools(const char *what, double frame, const RigExecRuntimeReader &reader,
+           const RigExecBakedProgramImpl &graph)
+{
+    const std::vector<RrPointFrame> &fin = reader.GetFinFrames();
+    const std::vector<RrPointFrame> &base = reader.GetBaseFrames();
+    if (fin.size() != graph.fin.size() || base.size() != graph.base.size()) {
+        std::printf("%s frame %.17g: the version pools differ in size\n",
+                    what, frame);
+        return false;
+    }
+    for (size_t i = 0; i < fin.size(); ++i) {
+        if (!_FramesEqual(graph.fin[i], fin[i])) {
+            std::printf("%s frame %.17g: fin[%zu] differs\n", what, frame,
+                        i);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < base.size(); ++i) {
+        if (!_FramesEqual(graph.base[i], base[i])) {
+            std::printf("%s frame %.17g: base[%zu] differs\n", what, frame,
+                        i);
+            return false;
+        }
+    }
+    return true;
+}
+
+// A drag on an avar partway along other readers' connections. Hop's
+// avars:tx reads the Raise chain's target at its base and Lift's avars:ty
+// reads that chain through Hop's tx, so both are phased readers; Reach's
+// avars:tz reads Pin's avars:tx, which no chain revises. A drag on Hop's
+// tx stands both phased readers aside and reaches Lift through the hop;
+// a drag on Pin's tx reaches Reach. The runtime's SetAvar places the same
+// overrides the baked program does: before, while and after the drags
+// stand, every version-pool frame equals the baked program's bit for bit,
+// and the baked program agrees with the dynamic evaluator.
+static void
+TestSetAvarOnHop()
+{
+    const char *const name = "set avar on a hop";
+    const UsdStageRefPtr stage = _LiftReadStage(false);
+    const UsdAttribute height = stage->GetAttributeAtPath(
+        SdfPath("/Asset/Rig/Channels/Lift.rigExec:height"));
+    const auto control = [&](const char *path) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        return prim;
+    };
+    const UsdPrim hop = control("/Asset/Rig/Controls/Hop");
+    const UsdAttribute hopTx =
+        hop.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
+    hopTx.SetConnections({height.GetPath()});
+    const UsdPrim lift =
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Controls/Lift"));
+    lift.GetAttribute(TfToken("avars:ty")).SetConnections({hopTx.GetPath()});
+    const UsdPrim pin = control("/Asset/Rig/Controls/Pin");
+    const UsdAttribute pinTx =
+        pin.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
+    pinTx.Set(0.25);
+    const UsdPrim reach = control("/Asset/Rig/Controls/Reach");
+    reach.CreateAttribute(TfToken("avars:tz"), SdfValueTypeNames->Double)
+        .SetConnections({pinTx.GetPath()});
+
+    const SdfPath rigPath("/Asset/Rig");
+    const std::vector<double> frames = {1.0, 4.0};
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        return;
+    }
+    reader->SetCrossCheckForTesting(true);
+    const std::string hopPath = hopTx.GetPath().GetString();
+    const std::string liftPath = "/Asset/Rig/Controls/Lift.avars:ty";
+    // Each phased reader's record is published while no drag stands.
+    const auto published = [&](const std::string &path) {
+        for (const RigExecRuntimePropertyValue &value :
+             reader->GetPropertyResultsForTesting()) {
+            if (value.path == path) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    RigExecRigEvaluator program(stage, rigPath);
+    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    // One pass over the frames with the overrides standing, or none.
+    const auto pass = [&](const char *what, bool dragging) {
+        bool same = true;
+        for (const double frame : frames) {
+            const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
+            CHECK(pose.valid && pose.bakedParityMismatches == 0);
+            const RigExecBakedProgram *baked = program.GetBakedProgram();
+            CHECK(baked);
+            if (!pose.valid || !baked) {
+                return false;
+            }
+            CHECK(reader->SetFrame(frame, &error));
+            if (!reader->Execute(&error)) {
+                std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
+                            error.c_str());
+                CHECK(false);
+                return false;
+            }
+            same = _SamePools(what, frame, *reader, baked->GetStepGraph()) &&
+                   same;
+            // The drag reaches the reader downstream of the hop, and the
+            // reader of the unrevised avar.
+            const auto at = [&](const UsdPrim &prim, size_t axis) {
+                const auto found = pose.controlFrames.find(prim.GetPath());
+                return found == pose.controlFrames.end()
+                           ? std::nan("")
+                           : found->second.points[0][axis];
+            };
+            if (dragging) {
+                CHECK(at(lift, 1) == 5.5 && at(hop, 0) == 5.5);
+                CHECK(at(reach, 2) == -0.75);
+            } else {
+                CHECK(at(lift, 1) != 5.5 && at(lift, 1) == at(hop, 0));
+                CHECK(at(reach, 2) == 0.25);
+            }
+            CHECK(published(liftPath) == !dragging &&
+                  published(hopPath) == !dragging);
+        }
+        CHECK(same);
+        return same;
+    };
+    const uint64_t before = reader->GetCrossCheckCountForTesting();
+    CHECK(pass("undragged", false));
+    CHECK(reader->GetCrossCheckCountForTesting() > before);
+
+    CHECK(reader->SetAvar(hopPath, 5.5, &error));
+    CHECK(reader->SetAvar(pinTx.GetPath().GetString(), -0.75, &error));
+    program.SetInteractiveOverrides(
+        {RigExecValueOverride{hop.GetPath(), TfToken(), TfToken("avars:tx"),
+                              VtValue(5.5)},
+         RigExecValueOverride{pin.GetPath(), TfToken(), TfToken("avars:tx"),
+                              VtValue(-0.75)}});
+    // A standing drag is an input the frame record never saw: nothing is
+    // compared against it.
+    const uint64_t dragged = reader->GetCrossCheckCountForTesting();
+    CHECK(pass("dragged", true));
+    CHECK(reader->GetCrossCheckCountForTesting() == dragged);
+
+    reader->ClearAvars();
+    program.ClearInteractiveOverrides();
+    CHECK(pass("released", false));
+    CHECK(reader->GetCrossCheckCountForTesting() > dragged);
+    std::printf("%s: checked\n", name);
+}
+
+// A drag on an avar a provider ladder reads: Ctl's rest:tx is connected to
+// Pin's constant avars:tx, so no frame recomposes the ladder until a drag
+// stands on Pin's tx, and the frame after its release recomposes it once
+// more to write the authored rest back. The runtime's SetAvar places the
+// same override as the baked program: every version-pool frame equals the
+// baked program's bit for bit undragged, dragged, released at the frame
+// the drag stood on, and released, and the drag moves the pools.
+static void
+TestSetAvarOnLadderInput()
+{
+    const char *const name = "set avar on a ladder input";
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(4.0);
+    UsdGeomXform::Define(stage, SdfPath("/Asset"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *path) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        return prim;
+    };
+    const UsdPrim pin = control("/Asset/Rig/Controls/Pin");
+    const UsdAttribute pinTx =
+        pin.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
+    pinTx.Set(0.25);
+    const UsdPrim ctl = control("/Asset/Rig/Controls/Ctl");
+    ctl.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+        .SetConnections({pinTx.GetPath()});
+
+    const SdfPath rigPath("/Asset/Rig");
+    const std::vector<double> frames = {1.0, 4.0};
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        return;
+    }
+    reader->SetCrossCheckForTesting(true);
+    RigExecRigEvaluator program(stage, rigPath);
+    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    // One frame under whatever overrides stand: the pools, against the
+    // program's, into \p fin.
+    const auto run = [&](const char *what, double frame,
+                         std::vector<std::vector<RrPointFrame>> *fin) {
+        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid && pose.bakedParityMismatches == 0);
+        const RigExecBakedProgram *baked = program.GetBakedProgram();
+        CHECK(baked);
+        if (!pose.valid || !baked) {
+            return false;
+        }
+        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+            std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
+                        error.c_str());
+            CHECK(false);
+            return false;
+        }
+        fin->push_back(reader->GetFinFrames());
+        return _SamePools(what, frame, *reader, baked->GetStepGraph());
+    };
+    const auto pass = [&](const char *what,
+                          std::vector<std::vector<RrPointFrame>> *fin) {
+        bool same = true;
+        for (const double frame : frames) {
+            same = run(what, frame, fin) && same;
+        }
+        return same;
+    };
+    std::vector<std::vector<RrPointFrame>> undragged, dragged, releasedHere,
+        released;
+    CHECK(pass("undragged", &undragged));
+    CHECK(reader->SetAvar(pinTx.GetPath().GetString(), -0.75, &error));
+    program.SetInteractiveOverrides({RigExecValueOverride{
+        pin.GetPath(), TfToken(), TfToken("avars:tx"), VtValue(-0.75)}});
+    CHECK(pass("dragged", &dragged));
+    CHECK(dragged.size() == frames.size() &&
+          undragged.size() == frames.size());
+    for (size_t f = 0; f < dragged.size() && f < undragged.size(); ++f) {
+        CHECK(dragged[f] != undragged[f]);
+    }
+    reader->ClearAvars();
+    program.ClearInteractiveOverrides();
+    CHECK(run("released in place", frames.back(), &releasedHere));
+    CHECK(!releasedHere.empty() && releasedHere.back() == undragged.back());
+    CHECK(pass("released", &released));
+    CHECK(released == undragged);
+    std::printf("%s: checked\n", name);
+}
+
+// The runtime's property results against \p pose's published values, both
+// ways, bit for bit.
+static bool
+_SamePropertyResults(const char *what, const RigExecRigPose &pose,
+                     const RigExecRuntimeReader &reader)
+{
+    bool same = true;
+    std::map<std::string, RrPropertyValue> got;
+    for (const RigExecRuntimePropertyValue &value :
+         reader.GetPropertyResultsForTesting()) {
+        got[value.path] = value.value;
+        const auto found = pose.movedProperties.find(SdfPath(value.path));
+        if (found == pose.movedProperties.end() ||
+            !_SamePropertyValue(found->second, value.value)) {
+            std::printf("%s: %s differs from the baked program\n", what,
+                        value.path.c_str());
+            same = false;
+        }
+    }
+    for (const auto &[path, value] : pose.movedProperties) {
+        if (_IsPropertyResult(value) && !got.count(path.GetString())) {
+            std::printf("%s: the runtime publishes nothing at %s\n", what,
+                        path.GetText());
+            same = false;
+        }
+    }
+    return same;
+}
+
+// A drag at a fixed frame on \p control's avars:tx, which a property
+// chain's input reads through a connection, the chain's result at
+// \p chainPath being what a constraint moving /Asset/Target weighs by.
+// The frame does not change, so the drag reaches the constraint only
+// through the chain result it moves; baked with every step in its own
+// cluster (RIGEXEC_BAKED_GRAIN_US=0), nothing else dirties the
+// constraint's step. Under the same interactive override
+// the runtime's property results and version pools equal the baked
+// program's bit for bit, dragged and released, and the drag moves the
+// chain's result and the constrained transform.
+static void
+_DragChainInput(const std::string &name, const UsdStageRefPtr &stage,
+                const SdfPath &control, const std::string &chainPath)
+{
+    const SdfPath rigPath("/Asset/Rig");
+    const std::vector<double> frames = {1.0, 5.0};
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("%s: open: %s\n", name.c_str(), error.c_str());
+        return;
+    }
+    reader->SetCrossCheckForTesting(true);
+    RigExecRigEvaluator program(stage, rigPath);
+    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    // One run at \p frame: the property results and pools against the
+    // program's; the chain's result and Target's transform out.
+    const auto run = [&](const char *what, double frame, float *chainValue,
+                         RrMat4d *target) {
+        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid && pose.bakedParityMismatches == 0);
+        const RigExecBakedProgram *baked = program.GetBakedProgram();
+        CHECK(baked);
+        if (!pose.valid || !baked) {
+            return false;
+        }
+        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+            std::printf("%s, %s frame %.17g: %s\n", name.c_str(), what,
+                        frame, error.c_str());
+            CHECK(false);
+            return false;
+        }
+        bool chainFound = false, targetFound = false;
+        for (const RigExecRuntimePropertyValue &value :
+             reader->GetPropertyResultsForTesting()) {
+            if (value.path == chainPath) {
+                *chainValue = value.value.f32;
+                chainFound = true;
+            }
+        }
+        for (const RigExecRuntimeProviderXform &x :
+             reader->GetProviderXforms()) {
+            if (x.path == "/Asset/Target") {
+                *target = x.matrix;
+                targetFound = true;
+            }
+        }
+        CHECK(chainFound && targetFound);
+        const std::string label = name + ", " + what;
+        const bool properties =
+            _SamePropertyResults(label.c_str(), pose, *reader);
+        return _SamePools(label.c_str(), frame, *reader,
+                          baked->GetStepGraph()) &&
+               properties;
+    };
+    float undraggedChain = 0.0f, draggedChain = 0.0f, releasedChain = 0.0f;
+    RrMat4d undraggedTarget(1.0), draggedTarget(1.0), releasedTarget(1.0);
+    float ignoredChain = 0.0f;
+    RrMat4d ignoredTarget(1.0);
+    CHECK(run("first frame", frames.front(), &ignoredChain, &ignoredTarget));
+    CHECK(run("undragged", frames.back(), &undraggedChain,
+              &undraggedTarget));
+    const uint64_t compared = reader->GetCrossCheckCountForTesting();
+    CHECK(reader->SetAvar(control.GetString() + ".avars:tx", 2.0, &error));
+    program.SetInteractiveOverrides({RigExecValueOverride{
+        control, TfToken(), TfToken("avars:tx"), VtValue(2.0)}});
+    CHECK(run("dragged", frames.back(), &draggedChain, &draggedTarget));
+    CHECK(reader->GetCrossCheckCountForTesting() == compared);
+    CHECK(draggedChain != undraggedChain);
+    CHECK(draggedTarget != undraggedTarget);
+    reader->ClearAvars();
+    program.ClearInteractiveOverrides();
+    CHECK(run("released", frames.back(), &releasedChain, &releasedTarget));
+    CHECK(std::memcmp(&releasedChain, &undraggedChain, sizeof(float)) == 0);
+    CHECK(releasedTarget == undraggedTarget);
+    CHECK(reader->GetCrossCheckCountForTesting() > compared);
+    std::printf("%s: checked\n", name.c_str());
+}
+
+// A position constraint whose own inputs:defaultWeight a math mover
+// multiplies by Controls/Knob.avars:tx through a connection. Nothing
+// declares a read phase, so the runtime runs only what a frame dirties.
+static UsdStageRefPtr
+_RevisedWeightStage()
+{
+    const UsdStageRefPtr stage = _ChainBaseStage();
+    UsdGeomXform::Define(stage, SdfPath("/Asset/Target"))
+        .AddTransformOp()
+        .Set(GfMatrix4d(1.0));
+    UsdGeomXform::Define(stage, SdfPath("/Asset/Source"))
+        .AddTransformOp()
+        .Set(GfMatrix4d(1.0).SetTranslate(GfVec3d(10.0, 0.0, 0.0)));
+    const UsdPrim knob = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Knob"), TfToken("RigExecControl"));
+    knob.CreateAttribute(TfToken("rest:space"), SdfValueTypeNames->Matrix4d)
+        .Set(GfMatrix4d(1.0));
+    const UsdAttribute tx =
+        knob.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
+    tx.Set(0.25, UsdTimeCode(1.0));
+    tx.Set(0.75, UsdTimeCode(10.0));
+    const UsdPrim follow =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Follow"),
+                          TfToken("RigExecPositionConstraint"));
+    CHECK(follow.ApplyAPI(TfToken("RigExecMoverAPI")));
+    const UsdAttribute weight = follow.CreateAttribute(
+        TfToken("inputs:defaultWeight"), SdfValueTypeNames->Float);
+    weight.Set(0.5f);
+    follow.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Target")});
+    follow.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+    const UsdPrim gain =
+        _MathMover(stage, "Gain", "RigExecFloatMathMover", "multiply", weight);
+    gain.CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float)
+        .SetConnections({tx.GetPath()});
+    return stage;
+}
+
+// computed_chains' Gain multiplies the dial by Controls/Dial.avars:tx and
+// Follow's weight reads the dial's result at its declared `final`; and the
+// rig above, where nothing declares a phase.
+static void
+TestSetAvarOnChainInput()
+{
+    const std::string fixture =
+        (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
+         "fixtures" / "computed_chains.usda")
+            .string();
+    const UsdStageRefPtr stage = UsdStage::Open(fixture);
+    CHECK(stage);
+    if (stage) {
+        _DragChainInput("set avar on a chain input", stage,
+                        SdfPath("/Asset/Rig/Controls/Dial"),
+                        "/Asset/Rig/Channels/Dial.rigExec:amount");
+    }
+    _DragChainInput("set avar on a revised weight's input",
+                    _RevisedWeightStage(),
+                    SdfPath("/Asset/Rig/Controls/Knob"),
+                    "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
+}
+
+// Open refuses a Computed section whose registered reads do not bind the
+// runtime's tables exactly, each with its own text: two avar bindings
+// headed by one attribute, a table field bound twice, a uid given twice,
+// a table field left unbound, a chain read that differs from the
+// registered read of its uid in its constant, an override number reaching
+// another attribute than the program registered it on, and a walk through
+// an attribute the program registered no override on. SetAvar refuses an
+// attribute that heads no avar binding.
+static void
+TestRegisteredReadRefusals()
+{
+    const char *const name = "registered read refusals";
+    const std::string fixture =
+        (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
+         "fixtures" / "computed_chains.usda")
+            .string();
+    const UsdStageRefPtr stage = UsdStage::Open(fixture);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = {1.0, 5.0};
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    CHECK(_OpenError(result.bytes).empty());
+    const std::unique_ptr<RigExecBinaryReader> binary =
+        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
+                                  &error);
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+    RigExecWireComputed computed;
+    if (!binary ||
+        !binary->FindSection(RigExecBinarySection::Computed, &data, &size)) {
+        CHECK(false);
+        return;
+    }
+    {
+        RigExecWireReader cursor(data, size);
+        CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
+    }
+    const auto with = [&](const RigExecWireComputed &edited) {
+        std::vector<uint8_t> payload;
+        std::string why;
+        CHECK(RigExecWireEncodeComputed(edited, &payload, &why));
+        return _ReplaceSection(result.bytes, RigExecBinarySection::Computed,
+                               payload);
+    };
+    const auto expect = [&](const char *what,
+                            const RigExecWireComputed &edited,
+                            const std::string &text) {
+        const std::string got = _OpenError(with(edited));
+        if (got != text) {
+            std::printf("%s, %s: open said '%s', expected '%s'\n", name,
+                        what, got.c_str(), text.c_str());
+            CHECK(false);
+        }
+    };
+    using Family = RigExecWireRegisteredFamily;
+    const std::vector<RigExecWireRegisteredRead> &reads =
+        computed.registeredReads;
+    const auto isAvar = [](const RigExecWireRegisteredRead &entry) {
+        return entry.family == Family::AvarBinding ||
+               entry.family == Family::AvarConstantBinding;
+    };
+    // An avar binding with a uid (Dial's keyed tx), an avar binding with
+    // none and an override number, another avar's, and a ladder field.
+    size_t recorded = reads.size(), constant = reads.size();
+    size_t other = reads.size(), ladder = reads.size();
+    for (size_t k = 0; k < reads.size(); ++k) {
+        if (isAvar(reads[k]) && reads[k].uid >= 0 &&
+            recorded == reads.size()) {
+            recorded = k;
+        }
+        if (isAvar(reads[k]) && reads[k].uid < 0 &&
+            reads[k].read.overrideIndex >= 0 && !reads[k].read.walk.empty() &&
+            constant == reads.size()) {
+            constant = k;
+        }
+        if (reads[k].family == Family::Ladder && ladder == reads.size()) {
+            ladder = k;
+        }
+    }
+    for (size_t k = 0; k < reads.size() && constant < reads.size(); ++k) {
+        if (isAvar(reads[k]) && k < constant && reads[k].avar >= 0 &&
+            reads[k].avar != reads[constant].avar &&
+            !reads[k].read.walk.empty()) {
+            other = k;
+        }
+    }
+    CHECK(recorded < reads.size() && constant < reads.size() &&
+          other < reads.size() && ladder < reads.size() &&
+          !computed.chainReads.empty());
+    if (recorded >= reads.size() || constant >= reads.size() ||
+        other >= reads.size() || ladder >= reads.size() ||
+        computed.chainReads.empty()) {
+        return;
+    }
+    const std::string prefix = "the computed section's registered read ";
+    {
+        RigExecWireComputed edited = computed;
+        edited.registeredReads[constant].read.walk[0] =
+            reads[other].read.walk[0];
+        expect("two avars at one head", edited,
+               prefix + std::to_string(constant) + " heads two avars");
+    }
+    {
+        RigExecWireComputed edited = computed;
+        edited.registeredReads.push_back(reads[ladder]);
+        expect("a field bound twice", edited,
+               prefix + std::to_string(reads.size()) +
+                   " binds a field another read binds");
+    }
+    {
+        RigExecWireComputed edited = computed;
+        edited.registeredReads.push_back(reads[recorded]);
+        expect("a uid given twice", edited,
+               prefix + std::to_string(reads.size()) + " repeats uid " +
+                   std::to_string(reads[recorded].uid));
+    }
+    {
+        RigExecWireComputed edited = computed;
+        edited.registeredReads.erase(edited.registeredReads.begin() +
+                                     std::ptrdiff_t(ladder));
+        expect("a field left unbound", edited,
+               "the computed section binds no read to a field of ladders[" +
+                   std::to_string(reads[ladder].object) + "]");
+    }
+    {
+        // The chain read's constant re-pointed at another value of its
+        // tag: a read the steps never make.
+        RigExecWireComputed edited = computed;
+        v4::RigExecWireInput &read = edited.chainReads[0].read;
+        size_t another = computed.values.size();
+        for (size_t v = 0; v < computed.values.size(); ++v) {
+            if (v != read.constant && computed.values[v].tag == read.tag) {
+                another = v;
+                break;
+            }
+        }
+        CHECK(another < computed.values.size());
+        read.constant = uint32_t(another);
+        expect("a chain read of another constant", edited,
+               "the computed section's chain read of uid " +
+                   std::to_string(computed.chainReads[0].uid) +
+                   " restates no registered read");
+    }
+    {
+        // The constant binding's override number given another's: its own
+        // attribute now reaches a number the program put elsewhere.
+        RigExecWireComputed edited = computed;
+        edited.registeredReads[constant].read.overrideIndex =
+            reads[other].read.overrideIndex;
+        std::string head;
+        CHECK(binary->GetString(
+            computed.inputs[reads[constant].read.walk[0]].name, &head));
+        expect("an override number moved", edited,
+               "the computed section's reads reach other override numbers "
+               "at " + head + " than the program registered there");
+    }
+    {
+        // A slot no overridable read walks, appended to one that does.
+        std::vector<char> walked(computed.inputs.size(), 0);
+        for (const RigExecWireRegisteredRead &entry : reads) {
+            if (entry.read.overrideIndex >= 0) {
+                for (const uint32_t slot : entry.read.walk) {
+                    walked[slot] = 1;
+                }
+            }
+        }
+        const auto unwalked = std::find(walked.begin(), walked.end(), 0);
+        CHECK(unwalked != walked.end());
+        if (unwalked != walked.end()) {
+            RigExecWireComputed edited = computed;
+            edited.registeredReads[constant].read.walk.push_back(
+                uint32_t(unwalked - walked.begin()));
+            expect("a walk through an unregistered attribute", edited,
+                   "the computed section's reads reach attributes the "
+                   "program registered no override on");
+        }
+    }
+
+    // An attribute that heads no avar binding: a chain target, and a path
+    // the file does not name.
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader);
+    if (reader) {
+        for (const char *path : {"/Asset/Rig/Channels/Dial.rigExec:amount",
+                                 "/Asset/Rig/Controls/Dial.avars:none"}) {
+            error.clear();
+            CHECK(!reader->SetAvar(path, 1.0, &error));
+            CHECK(error == std::string("expected a finite TRS avar on a "
+                                       "compiled pose slot: ") +
+                               path);
+        }
+    }
+    std::printf("%s: checked\n", name);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3059,6 +3722,10 @@ main(int argc, char **argv)
     }
     TestConstraintAndAvarReadersReplay(examplesDir);
     TestSetAvarOnPhasedReader();
+    TestSetAvarOnHop();
+    TestSetAvarOnLadderInput();
+    TestSetAvarOnChainInput();
+    TestRegisteredReadRefusals();
     bool sawBaking = false;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
         if (!fixture.bakesToday) {

@@ -184,8 +184,11 @@ A drag on the reading input, or on a property along its connection, is what
 that reader gets. A drag on the revised property itself replaces its final
 value only: `base` and checkpoint readers, a checkpoint at the last revision
 included, keep reading the chain computed from the authored value. The
-`.rigexec` runtime's `SetAvar` is local: it replaces the avar's own read,
-phased or not, but not what reads that avar through a connection.
+`.rigexec` runtime's `SetAvar` drags an avar the same way, with two gaps
+that remain for now: it refuses a drag on an avar that math movers revise,
+and a plugin mover applies the payload its bake assembled for the frame,
+so a drag that reaches an input the plugin reads does not move that
+mover's output.
 [Example 16](../../examples/16_ConnectionReadPhases.usda) reads one dial
 three ways, with math movers and with mover envelopes.
 

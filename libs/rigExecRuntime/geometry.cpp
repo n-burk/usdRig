@@ -2,8 +2,10 @@
 // RevisionChunk, RevisionFuse, ChainStatus, Derived.
 // A zero-USD port of the baked geometry loop (libs/rigExec/bakedGeometry.cpp
 // driven by the movers in libs/rigExec/moverGraph.cpp and the kernels in
-// libs/rigExecMath). Stage reads replay from the frame record's pathReads;
-// epoch state (skin layouts, blend shapes, partitions)
+// libs/rigExecMath). The scalars an assembler reads through their
+// connections, blend channel weights and default weights are read over the
+// input slots; the remaining stage reads replay from the frame record's
+// pathReads; epoch state (skin layouts, blend shapes, partitions)
 // replays from the wire geometry tables. Bitwise: same ops in the same
 // order, float stays float.
 
@@ -2841,6 +2843,10 @@ struct RrGeometryScratch {
     const RigExecWireFrameInputs *frame = nullptr;
     std::map<std::pair<uint32_t, uint8_t>, const RigExecWirePathValue *>
         pathReads;
+    // The connection-following scalars this run, in the Computed section's
+    // pathScalarReads order; pathReads points at them in place of the
+    // recorded values.
+    std::vector<RigExecWirePathValue> pathReadValues;
     std::map<std::pair<uint32_t, uint32_t>, const RigExecWireRefusedLayout *>
         refusedLayouts;
     std::vector<Chain> chains;
@@ -2922,7 +2928,7 @@ RrGeoStorePacket(const RrProgram *program, const RrWeightPacket &packet)
     return out;
 }
 
-// The cross-check (RrProgram::crossCheck) of a computed current-phase
+// The cross-check (RrProgram::CrossCheckThisRun) of a computed current-phase
 // packet against the frame record's: every field bit for bit, the token
 // fields as text. False with the text naming the first field that
 // differs.
@@ -3051,9 +3057,11 @@ RrGeoRefusedLayout(const RigExecWireRefusedLayout &wire)
     return layout;
 }
 
-// A typed stage read, replayed: the property-chain overlay first (exact
-// type, as RigExecResolvedInputs::GetAttribute checks it), then the
-// recorded stage value, else the fallback. Array sites take the phase
+// A typed stage read: the resolved-inputs overlay first (RrInputsOverlay:
+// a standing override or a property-chain result, exact type, as
+// RigExecResolvedInputs::GetAttribute checks it), then this run's stage
+// value (a connection-following scalar evaluated over the input slots, else
+// the recorded one), else the fallback. Array sites take the phase
 // overlay's points instead of the property results, which carry no arrays.
 bool
 RrGeoReadBool(const RrProgram *program,
@@ -3073,12 +3081,10 @@ RrGeoReadFloat(const RrProgram *program,
                const RrGeometryScratch *scratch, uint32_t path, bool wasDefault,
                float fallback)
 {
-    if (path != 0) {
-        const auto it = program->store.propertyResults.find(path);
-        if (it != program->store.propertyResults.end() &&
-            it->second.tag == RrPropertyValue::Tag::Float) {
-            return it->second.f32;
-        }
+    v4::RigExecWireValue held;
+    if (path != 0 &&
+        RrInputsOverlay(program, path, v4::InputTag::Float, &held)) {
+        return RrWireValueFloat(held);
     }
     const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
     if (read && read->tag == RigExecWirePathValue::Tag::Float) {
@@ -3092,12 +3098,12 @@ RrGeoReadDouble(const RrProgram *program,
                 const RrGeometryScratch *scratch, uint32_t path,
                 bool wasDefault, double fallback)
 {
-    if (path != 0) {
-        const auto it = program->store.propertyResults.find(path);
-        if (it != program->store.propertyResults.end() &&
-            it->second.tag == RrPropertyValue::Tag::Double) {
-            return it->second.f64;
-        }
+    v4::RigExecWireValue held;
+    if (path != 0 &&
+        RrInputsOverlay(program, path, v4::InputTag::Double, &held)) {
+        double value = 0.0;
+        std::memcpy(&value, &held.bits, sizeof(value));
+        return value;
     }
     const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
     if (read && read->tag == RigExecWirePathValue::Tag::Double) {
@@ -3329,6 +3335,8 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
         }
     }
 
+    scratch->pathReadValues.resize(
+        program->inputState.computed->pathScalarReads.size());
     program->geo = std::move(scratch);
     return true;
 }
@@ -3523,18 +3531,16 @@ RrGeoAssembleEnabled(const RrGeoAssembleInputs &in)
     return RrGeoReadBool(in.program, in.scratch, path, false, true);
 }
 
-// inputs:defaultWeight as RevisionStatic read it, which is what the record
-// carries for every main revision -- and the same value the assembly's own
-// resolved read answers, because a phase overlay holds no scalars.
+// inputs:defaultWeight as RevisionStatic reads it, for every main
+// revision -- the same value the assembly's own resolved read answers,
+// because a phase overlay holds no scalars. A derived target reads 1.
 float
 RrGeoAssembleDefaultWeight(const RrGeoAssembleInputs &in)
 {
-    if (!in.record || in.derived ||
-        in.chain >= in.record->revisionDefaultWeights.size() ||
-        in.revision >= in.record->revisionDefaultWeights[in.chain].size()) {
+    if (in.derived) {
         return 1.0f;
     }
-    return in.record->revisionDefaultWeights[in.chain][in.revision];
+    return RrReadDefaultWeight(in.program, in.chain, in.revision);
 }
 
 RrGeoWeightPacket
@@ -3571,10 +3577,11 @@ RrGeoReadBindingVec3fArray(const RrGeoAssembleInputs &in, uint32_t path,
                         out);
 }
 
-// The blend channels out of the record: the weights, activations and dense
-// points the baked gather consumed, in binding order, each channel's
-// samples stable-sorted by activation. Sparse samples take the refused
-// layout when this frame refused the cache and the epoch one otherwise.
+// The blend channels: each channel's weight and each sample's activation
+// read over the slots, and the dense points the baked gather consumed, out
+// of the record, in binding order, each channel's samples stable-sorted by
+// activation. Sparse samples take the refused layout when this frame
+// refused the cache and the epoch one otherwise.
 bool
 RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
                          const std::vector<RrVec3f> &base,
@@ -3586,55 +3593,19 @@ RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
     for (size_t c = 0; c < in.wire->blendChannels.size(); ++c) {
         const RigExecWireBlendChannel &bound = in.wire->blendChannels[c];
         RrGeoBlendChannel channel;
-        if (record) {
-            if (!in.derived && in.chain < record->blendWeights.size() &&
-                in.revision < record->blendWeights[in.chain].size() &&
-                c < record->blendWeights[in.chain][in.revision].size()) {
-                channel.weight =
-                    record->blendWeights[in.chain][in.revision][c];
-            } else if (in.derived &&
-                       in.chain < record->derivedBlendWeights.size() &&
-                       in.revision <
-                           record->derivedBlendWeights[in.chain].size() &&
-                       c < record->derivedBlendWeights[in.chain][in.revision]
-                               .size()) {
-                channel.weight = record->derivedBlendWeights[in.chain]
-                                                             [in.revision][c];
-            }
-        }
-        // A pose-driven weight is this run's interpolator slot, as the baked
-        // gather reads it (bakedGeometry.cpp): computed from the live pose,
-        // not the value the bake recorded. An override on the weight itself
-        // is the one thing that outranks the slot there, and the runtime
-        // places none on a blend weight.
-        if (bound.poseWeight >= 0 &&
-            size_t(bound.poseWeight) < in.program->store.poseWeights.size()) {
-            channel.weight =
-                in.program->store.poseWeights[size_t(bound.poseWeight)];
-        }
+        channel.weight = RrReadBlendWeight(in.program, in.chain, in.revision,
+                                           in.derived, c);
         for (size_t s = 0; s < bound.samples.size(); ++s) {
             const RigExecWireBlendChannel::Sample &boundSample =
                 bound.samples[s];
             RrGeoBlendSampleData sample;
+            sample.activation = RrReadBlendActivation(
+                in.program, in.chain, in.revision, in.derived, c, s);
             if (record) {
-                const std::vector<std::vector<std::vector<
-                    std::vector<float>>>> *acts = nullptr;
                 const std::vector<std::vector<std::vector<std::vector<
-                    std::vector<RigExecWireVec3f>>>>> *pts = nullptr;
-                if (!in.derived) {
-                    acts = &record->blendActivations;
-                    pts = &record->blendPoints;
-                } else {
-                    acts = &record->derivedBlendActivations;
-                    pts = &record->derivedBlendPoints;
-                }
-                if (in.chain < acts->size() &&
-                    in.revision < (*acts)[in.chain].size() &&
-                    c < (*acts)[in.chain][in.revision].size() &&
-                    s < (*acts)[in.chain][in.revision][c].size()) {
-                    sample.activation =
-                        (*acts)[in.chain][in.revision][c][s];
-                }
+                    std::vector<RigExecWireVec3f>>>>> *pts =
+                    in.derived ? &record->derivedBlendPoints
+                               : &record->blendPoints;
                 if (!boundSample.blendShape && in.chain < pts->size() &&
                     in.revision < (*pts)[in.chain].size() &&
                     c < (*pts)[in.chain][in.revision].size() &&
@@ -4827,6 +4798,21 @@ RrPrologueGeometry(RrProgram *program, double time,
         scratch->pathReads[std::make_pair(read.path, read.wasDefault)] =
             &read.value;
     }
+    // The scalars the assemblers read through their connections at the
+    // evaluation time, evaluated over the slots in place of the recorded
+    // ones.
+    const RigExecWireComputed &computed = *program->inputState.computed;
+    for (size_t k = 0; k < computed.pathScalarReads.size() &&
+                       k < scratch->pathReadValues.size();
+         ++k) {
+        const RigExecWirePathScalarRead &entry = computed.pathScalarReads[k];
+        RigExecWirePathValue &value = scratch->pathReadValues[k];
+        if (RrPathValueFromRead(entry, RrReadPathScalar(program, entry),
+                                &value)) {
+            scratch->pathReads[std::make_pair(entry.path, uint8_t(0))] =
+                &value;
+        }
+    }
     scratch->refusedLayouts.clear();
     for (const RigExecWireRefusedLayout &refused : record.refusedLayouts) {
         scratch->refusedLayouts[std::make_pair(refused.mover,
@@ -4991,7 +4977,7 @@ RrPrologueGeometry(RrProgram *program, double time,
 namespace {
 
 // A surface projector target, as RigExecRunProjectorTarget runs it on the
-// USD side: the providers' asset frames out of the rest frames and the
+// USD side: the providers' world frames out of the rest frames and the
 // base and final matrix tables, the recorded settings and dials, and the
 // shared kernel on the chain's authored and final points.
 bool
@@ -5055,7 +5041,7 @@ RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
             in.worldToMesh[i][j] = wire.meshWorldInverse[size_t(i * 4 + j)];
         }
     }
-    // Providers: transform, transformSpace and carry slots, each an asset
+    // Providers: transform, transformSpace and carry slots, each a world
     // frame as rest * computeMatrix at base and at final.
     const RrPoseScratch *pose = runtimePoseDetail::_RrScratch(program);
     const int32_t slots[3] = {wire.transformSlot, wire.transformSpaceSlot,
@@ -5191,7 +5177,7 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
     in.derived = true;
     in.diagnostics = &output.diagnostics;
     RrGeoMoverParameters parameters = RrGeoAssembleRevision(in);
-    if (program->crossCheck &&
+    if (program->CrossCheckThisRun() &&
         !RrCrossCheckRevisionReads(program, record, chainIndex, derivedIndex,
                                    true, &output, error)) {
         if (error) {
@@ -5394,7 +5380,7 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             output.diagnostics.push_back("current-phase weight failed: " +
                                          why);
         }
-        if (program->crossCheck &&
+        if (program->CrossCheckThisRun() &&
             !RrGeoCrossCheckPhasePacket(program, record, chainIndex,
                                         revisionIndex, rev.currentPhasePacket,
                                         &output, error)) {
@@ -5422,7 +5408,7 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
         rev.parameters, program->TextOrEmpty(wire.moverPath));
     output.counters.revisionsBuilt = 1;
     rev.defaultWeight = RrGeoAssembleDefaultWeight(in);
-    if (program->crossCheck &&
+    if (program->CrossCheckThisRun() &&
         !RrCrossCheckRevisionReads(program, record, chainIndex, revisionIndex,
                                    false, &output, error)) {
         if (error) {

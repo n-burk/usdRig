@@ -1725,7 +1725,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
             return finish();
         }
         weight = envelope[0];
-        if (program->crossCheck) {
+        if (program->CrossCheckThisRun()) {
             // The record's envelope is the program's own resolve at this
             // frame, which a successful resolve here must equal.
             const std::string field = "[" + std::to_string(ci) + "]";

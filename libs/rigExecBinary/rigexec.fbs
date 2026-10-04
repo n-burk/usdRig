@@ -15,7 +15,8 @@
 //    (0 = Double +0.0). Pool ids index the typed array pools (0 = the empty
 //    array). Table indices use -1 for none.
 //  * Input slot ids index File.inputs; only Input.walk,
-//    PropertyChain.target and PhasedConsumer.consumer hold them.
+//    PropertyChain.target, PhasedConsumer.consumer and PhasedConsumer.hops
+//    hold them.
 //    Provider slots index slot_meta.paths: SpaceSwitch.slot,
 //    AncestorRead.slot, Commit.slots, every *_slot and *_slots field, and
 //    the solver's start, root, mid, end, pole, in_a, in_b and controls.
@@ -783,6 +784,10 @@ table BlendSample {
   /// vec3f_arrays[]: the dense points at bake_time; a phased sample falls
   /// back to them.
   points_value: uint;
+  /// rigExec:activation (Resolved, Float, fallback 1), read every run
+  /// before the channel's samples are sorted by it; activation_value is
+  /// its value at bake_time.
+  activation_read: Input (required);
 }
 /// One blend channel, in accumulation order.
 table BlendChannel {
@@ -1065,6 +1070,10 @@ table PhasedConsumer {
   consumer_type: PropertyValueType;
   /// 0 = the base; at most the chain's revision count.
   applied: uint;
+  /// Slot ids of the consumer, then of each attribute its connection walk
+  /// passes before the chain target. An interactive override on any of
+  /// them stands the reader aside: nothing is published at the consumer.
+  hops: [uint];
 }
 
 // --------------------------------------------------------- external movers

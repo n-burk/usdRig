@@ -9675,6 +9675,11 @@ struct RigExecWireBlendSample : public ::flatbuffers::NativeTable {
   bool layoutValid = false;
   float activationValue{};
   uint32_t pointsValue = 0;
+  std::unique_ptr<rigExec::fb::RigExecWireInput> activationRead{};
+  RigExecWireBlendSample() = default;
+  RigExecWireBlendSample(const RigExecWireBlendSample &o);
+  RigExecWireBlendSample(RigExecWireBlendSample&&) FLATBUFFERS_NOEXCEPT = default;
+  RigExecWireBlendSample &operator=(RigExecWireBlendSample o) FLATBUFFERS_NOEXCEPT;
 };
 
 /// One sample of a blend channel: its stage handles, its epoch layout, and
@@ -9701,7 +9706,8 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_POINTCOUNT = 26,
     VT_LAYOUTVALID = 28,
     VT_ACTIVATIONVALUE = 30,
-    VT_POINTSVALUE = 32
+    VT_POINTSVALUE = 32,
+    VT_ACTIVATIONREAD = 34
   };
   uint32_t samplePath() const {
     return GetField<uint32_t>(VT_SAMPLEPATH, 0);
@@ -9751,6 +9757,12 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint32_t pointsValue() const {
     return GetField<uint32_t>(VT_POINTSVALUE, 0);
   }
+  /// rigExec:activation (Resolved, Float, fallback 1), read every run
+  /// before the channel's samples are sorted by it; activation_value is
+  /// its value at bake_time.
+  const rigExec::fb::Input *activationRead() const {
+    return GetPointer<const rigExec::fb::Input *>(VT_ACTIVATIONREAD);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -9771,6 +9783,8 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_LAYOUTVALID, 1) &&
            VerifyField<rigExec::fb::F32>(verifier, VT_ACTIVATIONVALUE, 4) &&
            VerifyField<uint32_t>(verifier, VT_POINTSVALUE, 4) &&
+           VerifyOffsetRequired(verifier, VT_ACTIVATIONREAD) &&
+           verifier.VerifyTable(activationRead()) &&
            verifier.EndTable();
   }
   RigExecWireBlendSample *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -9827,6 +9841,9 @@ struct BlendSampleBuilder {
   void add_pointsValue(uint32_t pointsValue) {
     fbb_.AddElement<uint32_t>(BlendSample::VT_POINTSVALUE, pointsValue, 0);
   }
+  void add_activationRead(::flatbuffers::Offset<rigExec::fb::Input> activationRead) {
+    fbb_.AddOffset(BlendSample::VT_ACTIVATIONREAD, activationRead);
+  }
   explicit BlendSampleBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -9834,6 +9851,7 @@ struct BlendSampleBuilder {
   ::flatbuffers::Offset<BlendSample> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = ::flatbuffers::Offset<BlendSample>(end);
+    fbb_.Required(o, BlendSample::VT_ACTIVATIONREAD);
     return o;
   }
 };
@@ -9854,9 +9872,11 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSample(
     uint64_t pointCount = 0,
     bool layoutValid = false,
     const rigExec::fb::F32 *activationValue = nullptr,
-    uint32_t pointsValue = 0) {
+    uint32_t pointsValue = 0,
+    ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0) {
   BlendSampleBuilder builder_(_fbb);
   builder_.add_pointCount(pointCount);
+  builder_.add_activationRead(activationRead);
   builder_.add_pointsValue(pointsValue);
   builder_.add_activationValue(activationValue);
   builder_.add_indices(indices);
@@ -9895,7 +9915,8 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSampleDirect(
     uint64_t pointCount = 0,
     bool layoutValid = false,
     const rigExec::fb::F32 *activationValue = nullptr,
-    uint32_t pointsValue = 0) {
+    uint32_t pointsValue = 0,
+    ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0) {
   auto offsets__ = offsets ? _fbb.CreateVectorOfStructs<rigExec::fb::Vec3f>(*offsets) : 0;
   auto indices__ = indices ? _fbb.CreateVector<int32_t>(*indices) : 0;
   return rigExec::fb::CreateBlendSample(
@@ -9914,7 +9935,8 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSampleDirect(
       pointCount,
       layoutValid,
       activationValue,
-      pointsValue);
+      pointsValue,
+      activationRead);
 }
 
 ::flatbuffers::Offset<BlendSample> CreateBlendSample(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireBlendSample *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -12884,6 +12906,7 @@ struct RigExecWirePhasedConsumer : public ::flatbuffers::NativeTable {
   uint32_t consumer = 0;
   rigExec::fb::PropertyValueType consumerType = rigExec::fb::PropertyValueType::Float;
   uint32_t applied = 0;
+  std::vector<uint32_t> hops{};
 };
 
 /// A connection that reads a chain at its phase, the base unless it declares
@@ -12902,7 +12925,8 @@ struct PhasedConsumer FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_CHAIN = 4,
     VT_CONSUMER = 6,
     VT_CONSUMERTYPE = 8,
-    VT_APPLIED = 10
+    VT_APPLIED = 10,
+    VT_HOPS = 12
   };
   uint32_t chain() const {
     return GetField<uint32_t>(VT_CHAIN, 0);
@@ -12919,6 +12943,12 @@ struct PhasedConsumer FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint32_t applied() const {
     return GetField<uint32_t>(VT_APPLIED, 0);
   }
+  /// Slot ids of the consumer, then of each attribute its connection walk
+  /// passes before the chain target. An interactive override on any of
+  /// them stands the reader aside: nothing is published at the consumer.
+  const ::flatbuffers::Vector<uint32_t> *hops() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_HOPS);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -12926,6 +12956,8 @@ struct PhasedConsumer FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_CONSUMER, 4) &&
            VerifyField<uint8_t>(verifier, VT_CONSUMERTYPE, 1) &&
            VerifyField<uint32_t>(verifier, VT_APPLIED, 4) &&
+           VerifyOffset(verifier, VT_HOPS) &&
+           verifier.VerifyVector(hops()) &&
            verifier.EndTable();
   }
   RigExecWirePhasedConsumer *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -12949,6 +12981,9 @@ struct PhasedConsumerBuilder {
   void add_applied(uint32_t applied) {
     fbb_.AddElement<uint32_t>(PhasedConsumer::VT_APPLIED, applied, 0);
   }
+  void add_hops(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> hops) {
+    fbb_.AddOffset(PhasedConsumer::VT_HOPS, hops);
+  }
   explicit PhasedConsumerBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -12965,8 +13000,10 @@ inline ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumer(
     uint32_t chain = 0,
     uint32_t consumer = 0,
     rigExec::fb::PropertyValueType consumerType = rigExec::fb::PropertyValueType::Float,
-    uint32_t applied = 0) {
+    uint32_t applied = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> hops = 0) {
   PhasedConsumerBuilder builder_(_fbb);
+  builder_.add_hops(hops);
   builder_.add_applied(applied);
   builder_.add_consumer(consumer);
   builder_.add_chain(chain);
@@ -12978,6 +13015,23 @@ struct PhasedConsumer::Traits {
   using type = PhasedConsumer;
   static auto constexpr Create = CreatePhasedConsumer;
 };
+
+inline ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumerDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t chain = 0,
+    uint32_t consumer = 0,
+    rigExec::fb::PropertyValueType consumerType = rigExec::fb::PropertyValueType::Float,
+    uint32_t applied = 0,
+    const std::vector<uint32_t> *hops = nullptr) {
+  auto hops__ = hops ? _fbb.CreateVector<uint32_t>(*hops) : 0;
+  return rigExec::fb::CreatePhasedConsumer(
+      _fbb,
+      chain,
+      consumer,
+      consumerType,
+      applied,
+      hops__);
+}
 
 ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumer(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWirePhasedConsumer *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
@@ -15944,6 +15998,45 @@ inline ::flatbuffers::Offset<RevisionBinding> RevisionBinding::Pack(::flatbuffer
       &_transformPhase);
 }
 
+inline RigExecWireBlendSample::RigExecWireBlendSample(const RigExecWireBlendSample &o)
+      : samplePath(o.samplePath),
+        activation(o.activation),
+        activationValid(o.activationValid),
+        points(o.points),
+        pointsValid(o.pointsValid),
+        pointsPath(o.pointsPath),
+        phase(o.phase),
+        blendShape(o.blendShape),
+        hasLayout(o.hasLayout),
+        offsets(o.offsets),
+        indices(o.indices),
+        pointCount(o.pointCount),
+        layoutValid(o.layoutValid),
+        activationValue(o.activationValue),
+        pointsValue(o.pointsValue),
+        activationRead((o.activationRead) ? new rigExec::fb::RigExecWireInput(*o.activationRead) : nullptr) {
+}
+
+inline RigExecWireBlendSample &RigExecWireBlendSample::operator=(RigExecWireBlendSample o) FLATBUFFERS_NOEXCEPT {
+  std::swap(samplePath, o.samplePath);
+  std::swap(activation, o.activation);
+  std::swap(activationValid, o.activationValid);
+  std::swap(points, o.points);
+  std::swap(pointsValid, o.pointsValid);
+  std::swap(pointsPath, o.pointsPath);
+  std::swap(phase, o.phase);
+  std::swap(blendShape, o.blendShape);
+  std::swap(hasLayout, o.hasLayout);
+  std::swap(offsets, o.offsets);
+  std::swap(indices, o.indices);
+  std::swap(pointCount, o.pointCount);
+  std::swap(layoutValid, o.layoutValid);
+  std::swap(activationValue, o.activationValue);
+  std::swap(pointsValue, o.pointsValue);
+  std::swap(activationRead, o.activationRead);
+  return *this;
+}
+
 inline RigExecWireBlendSample *BlendSample::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::make_unique<RigExecWireBlendSample>();
   UnPackTo(_o.get(), _resolver);
@@ -15968,6 +16061,7 @@ inline void BlendSample::UnPackTo(RigExecWireBlendSample *_o, const ::flatbuffer
   { auto _e = layoutValid(); _o->layoutValid = _e; }
   { auto _e = activationValue(); if (_e) _o->activationValue = ::flatbuffers::UnPackF32(*_e); }
   { auto _e = pointsValue(); _o->pointsValue = _e; }
+  { auto _e = activationRead(); if (_e) { if(_o->activationRead) { _e->UnPackTo(_o->activationRead.get(), _resolver); } else { _o->activationRead = std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->UnPack(_resolver)); } } else if (_o->activationRead) { _o->activationRead.reset(); } }
 }
 
 inline ::flatbuffers::Offset<BlendSample> CreateBlendSample(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireBlendSample *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -15993,6 +16087,7 @@ inline ::flatbuffers::Offset<BlendSample> BlendSample::Pack(::flatbuffers::FlatB
   auto _layoutValid = _o->layoutValid;
   auto _activationValue = ::flatbuffers::PackF32(_o->activationValue);
   auto _pointsValue = _o->pointsValue;
+  auto _activationRead = _o->activationRead ? CreateInput(_fbb, _o->activationRead.get(), _rehasher) : 0;
   return rigExec::fb::CreateBlendSample(
       _fbb,
       _samplePath,
@@ -16009,7 +16104,8 @@ inline ::flatbuffers::Offset<BlendSample> BlendSample::Pack(::flatbuffers::FlatB
       _pointCount,
       _layoutValid,
       &_activationValue,
-      _pointsValue);
+      _pointsValue,
+      _activationRead);
 }
 
 inline RigExecWireBlendChannel::RigExecWireBlendChannel(const RigExecWireBlendChannel &o)
@@ -17057,6 +17153,7 @@ inline void PhasedConsumer::UnPackTo(RigExecWirePhasedConsumer *_o, const ::flat
   { auto _e = consumer(); _o->consumer = _e; }
   { auto _e = consumerType(); _o->consumerType = _e; }
   { auto _e = applied(); _o->applied = _e; }
+  { auto _e = hops(); if (_e) { _o->hops.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->hops[_i] = _e->Get(_i); } } else { _o->hops.resize(0); } }
 }
 
 inline ::flatbuffers::Offset<PhasedConsumer> CreatePhasedConsumer(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWirePhasedConsumer *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17071,12 +17168,14 @@ inline ::flatbuffers::Offset<PhasedConsumer> PhasedConsumer::Pack(::flatbuffers:
   auto _consumer = _o->consumer;
   auto _consumerType = _o->consumerType;
   auto _applied = _o->applied;
+  auto _hops = _o->hops.size() ? _fbb.CreateVector(_o->hops) : 0;
   return rigExec::fb::CreatePhasedConsumer(
       _fbb,
       _chain,
       _consumer,
       _consumerType,
-      _applied);
+      _applied,
+      _hops);
 }
 
 inline RigExecWireExternalMover *ExternalMover::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -18780,15 +18879,17 @@ inline const ::flatbuffers::TypeTable *BlendSampleTypeTable() {
     { ::flatbuffers::ET_ULONG, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_SEQUENCE, 0, 2 },
-    { ::flatbuffers::ET_UINT, 0, -1 }
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 3 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::ReadPhaseTypeTable,
     rigExec::fb::Vec3fTypeTable,
-    rigExec::fb::F32TypeTable
+    rigExec::fb::F32TypeTable,
+    rigExec::fb::InputTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 15, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 16, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19112,13 +19213,14 @@ inline const ::flatbuffers::TypeTable *PhasedConsumerTypeTable() {
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
-    { ::flatbuffers::ET_UINT, 0, -1 }
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_UINT, 1, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::PropertyValueTypeTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 4, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 5, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }

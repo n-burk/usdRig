@@ -377,6 +377,7 @@ TestComputedWire()
         phased.consumer = 3;
         phased.consumerType = v4::PropertyValueType::Double;
         phased.applied = 1;
+        phased.hops = {3, 1};
         chained.phasedConsumers = {phased};
     }
     bytes.clear();
@@ -402,6 +403,8 @@ TestComputedWire()
         CHECK(chainedBack.inputs[2].chain == 0 &&
               chainedBack.inputs[3].phased == 0);
         CHECK(chainedBack.phasedConsumers[0].applied == 1);
+        CHECK(chainedBack.phasedConsumers[0].hops ==
+              std::vector<uint32_t>({3, 1}));
     }
     for (size_t size = 0; size < bytes.size(); ++size) {
         RigExecWireReader prefix(bytes.data(), size);
@@ -422,6 +425,19 @@ TestComputedWire()
     CHECK(refused(bad));
     bad = chained;
     bad.phasedConsumers[0].consumerType = v4::PropertyValueType::Vec3f;
+    CHECK(refused(bad));
+    // Hops start at the consumer and stop short of the target.
+    bad = chained;
+    bad.phasedConsumers[0].hops.clear();
+    CHECK(refused(bad));
+    bad = chained;
+    bad.phasedConsumers[0].hops = {1, 3};
+    CHECK(refused(bad));
+    bad = chained;
+    bad.phasedConsumers[0].hops = {3, 2};
+    CHECK(refused(bad));
+    bad = chained;
+    bad.phasedConsumers[0].hops = {3, 9};
     CHECK(refused(bad));
     bad = chained;
     bad.propertyChains[0].revisions[0].value.tag = InputTag::Vec3f;
@@ -554,16 +570,18 @@ TestComputedWire()
     CHECK(!RigExecWireApplyComputed(crossing, geometry, wrong, &pose, &error));
 
     // The read tables: a registered solver read recorded under uid 1 and an
-    // avar binding's (Baked), a blend channel's weight, a revision's
-    // default weight and a forced float mover scalar recorded as a double
-    // that reads its head when the walk yields nothing (Resolved). They
-    // survive the trip; a registered read in another mode or with an avar
-    // index off the avar families, a geometry read that is not a Resolved
-    // Float, a path read naming no path, widening a non-float or headed by
-    // another attribute than its path, and a second read of one channel,
-    // revision or path are refused at encode; a read naming no row,
-    // channel, revision or matching directory entry is refused when
-    // applied, and a pose-driven channel's read is accepted.
+    // avar binding's (Baked), a blend channel's weight and its sample's
+    // activation, a revision's default weight and a forced float mover
+    // scalar recorded as a double that reads its head when the walk yields
+    // nothing (Resolved). They survive the trip; a registered read in
+    // another mode or with an avar index off the avar families, a geometry
+    // read that is not a Resolved Float, a path read naming no path,
+    // widening a non-float or headed by another attribute than its path,
+    // and a second read of one channel, revision or path are refused at
+    // encode; a read naming no row, channel, revision or matching directory
+    // entry, or reading another number of activations than its channel has
+    // samples, is refused when applied, and a pose-driven channel's read is
+    // accepted.
     RigExecWireComputed reads = crossing;
     {
         RigExecWireRegisteredRead solverRead;
@@ -585,6 +603,7 @@ TestComputedWire()
         weightRead.walk = {1};
         RigExecWireBlendWeightRead blend;
         blend.read = weightRead;
+        blend.activations = {weightRead};
         reads.blendWeightReads = {blend};
         RigExecWireDefaultWeightRead defaultWeight;
         defaultWeight.read = weightRead;
@@ -606,6 +625,7 @@ TestComputedWire()
     CHECK(again == bytes);
     CHECK(readsBack.registeredReads.size() == 2 &&
           readsBack.blendWeightReads.size() == 1 &&
+          readsBack.blendWeightReads[0].activations.size() == 1 &&
           readsBack.defaultWeightReads.size() == 1 &&
           readsBack.pathScalarReads.size() == 1);
     if (readsBack.registeredReads.size() == 2 &&
@@ -644,6 +664,9 @@ TestComputedWire()
     bad.blendWeightReads[0].read.mode = v4::ReadMode::Pinned;
     CHECK(refused(bad));
     bad = reads;
+    bad.blendWeightReads[0].activations[0].mode = v4::ReadMode::Pinned;
+    CHECK(refused(bad));
+    bad = reads;
     bad.defaultWeightReads[0].read.tag = InputTag::Double;
     bad.defaultWeightReads[0].read.constant = 2;
     CHECK(refused(bad));
@@ -675,6 +698,7 @@ TestComputedWire()
     blended.chains.resize(1);
     blended.chains[0].revisions.resize(1);
     blended.chains[0].revisions[0].blendChannels.resize(1);
+    blended.chains[0].revisions[0].blendChannels[0].samples.resize(1);
     pose.solvers.resize(1);
     CHECK(RigExecWireApplyComputed(reads, blended, directory, &pose, &error));
     bad = reads;
@@ -691,6 +715,10 @@ TestComputedWire()
     bad = reads;
     bad.blendWeightReads[0].derived = true;
     CHECK(!RigExecWireApplyComputed(bad, blended, directory, &pose, &error));
+    bad = reads;
+    bad.blendWeightReads[0].activations.clear();
+    CHECK(!RigExecWireApplyComputed(bad, blended, directory, &pose, &error));
+    CHECK(error.find("activations") != std::string::npos);
     bad = reads;
     bad.defaultWeightReads[0].revision = 1;
     CHECK(!RigExecWireApplyComputed(bad, blended, directory, &pose, &error));

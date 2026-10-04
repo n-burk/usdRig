@@ -1,15 +1,17 @@
 // rigExecRuntime input slot model and read evaluation: a line port of
 // RigExecResolvedInputs::GetAttribute (moverGraph.h), RigExecBakedRead
 // (bakedProgramImpl.h) and _PinnedRead (rigEvaluatorProperties.cpp) over
-// the Computed section's slot values. GetAttribute's overlay, the
-// generation's property-chain results, is RrStore::propertyResults, keyed
-// by the same attribute path ids as the slot names.
+// the Computed section's slot values. GetAttribute's overlay holds the
+// standing interactive overrides (RrInputState::overrides) and the
+// generation's property-chain results (RrStore::propertyResults), both
+// keyed by the same attribute path ids as the slot names.
 #include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <utility>
 
 namespace rigExec {
@@ -44,21 +46,42 @@ _RrFloatValue(float f)
     return value;
 }
 
-// RigExecResolvedInputs::Get<T>: the property-chain result published at
-// \p path this run, when it holds exactly \p tag. \p out is written only
-// on a hit.
+// The overlay's value at \p path: whichever of a standing override and a
+// published chain result holds the attribute (RrOverrideOutranksResult
+// ranks them when both do), when it is exactly \p tag.
 bool
-_RrOverlay(const RrStore &store, uint32_t path, v4::InputTag tag,
+_RrOverlay(const RrProgram &program, uint32_t path, v4::InputTag tag,
            v4::RigExecWireValue *out)
 {
-    if (store.propertyResults.empty()) {
+    const std::map<uint32_t, v4::RigExecWireValue> &overrides =
+        program.inputState.overrides;
+    const v4::RigExecWireValue *standing = nullptr;
+    if (!overrides.empty()) {
+        const auto held = overrides.find(path);
+        if (held != overrides.end()) {
+            standing = &held->second;
+        }
+    }
+    const RrStore &store = program.store;
+    const RrPropertyValue *result = nullptr;
+    if (!store.propertyResults.empty()) {
+        const auto found = store.propertyResults.find(path);
+        if (found != store.propertyResults.end()) {
+            result = &found->second;
+        }
+    }
+    if (standing &&
+        (!result || RrOverrideOutranksResult(&program, path))) {
+        if (standing->tag != tag) {
+            return false;
+        }
+        *out = *standing;
+        return true;
+    }
+    if (!result) {
         return false;
     }
-    const auto found = store.propertyResults.find(path);
-    if (found == store.propertyResults.end()) {
-        return false;
-    }
-    const RrPropertyValue &held = found->second;
+    const RrPropertyValue &held = *result;
     using HeldTag = RrPropertyValue::Tag;
     v4::RigExecWireValue value;
     value.tag = tag;
@@ -136,7 +159,7 @@ _RrLongWay(const RrProgram &program, const std::vector<uint32_t> &walk,
     }
     for (size_t k = from; k < walk.size(); ++k) {
         const v4::InputSlot &slot = slots[walk[k]];
-        if (_RrOverlay(program.store, slot.name, tag, &answer->wire)) {
+        if (_RrOverlay(program, slot.name, tag, &answer->wire)) {
             answer->direct = true;
             return true;
         }
@@ -265,6 +288,11 @@ RrInputsOpen(RrProgram *program, const RigExecWireComputed *computed,
     }
     RrInputState &state = program->inputState;
     state = RrInputState();
+    // Every input a step reads is evaluated over the section's slots.
+    if (!computed) {
+        return _RrFail(error, "the file carries no computed section, which "
+                              "every input read needs; rebake it");
+    }
     state.computed = computed;
     const RigExecWireDomainPose &poses = *program->poses;
     const RigExecWireDomainGeometry &geometry = *program->geometry;
@@ -273,15 +301,10 @@ RrInputsOpen(RrProgram *program, const RigExecWireComputed *computed,
     for (const RigExecWireConstraint &c : poses.constraints) {
         const bool envelope = c.weightObject != 0 && c.pointsTarget == 0;
         if (envelope && c.weightObjectIndex < 0) {
-            return _RrFail(
-                error,
-                computed ? "constraint " + program->TextOrEmpty(c.path) +
-                               " resolves an envelope the computed section "
-                               "does not carry"
-                         : "constraint " + program->TextOrEmpty(c.path) +
-                               " resolves an envelope, which needs the "
-                               "computed section this file does not carry; "
-                               "rebake it");
+            return _RrFail(error, "constraint " +
+                                      program->TextOrEmpty(c.path) +
+                                      " resolves an envelope the computed "
+                                      "section does not carry");
         }
         if (!envelope && c.weightObjectIndex >= 0) {
             return _RrFail(error, "the computed section gives constraint " +
@@ -290,7 +313,7 @@ RrInputsOpen(RrProgram *program, const RigExecWireComputed *computed,
         }
         // The entry must be the constraint's own weight object (both are
         // ids into the one string table).
-        if (envelope && computed &&
+        if (envelope &&
             (size_t(c.weightObjectIndex) >= computed->weightObjects.size() ||
              computed->weightObjects[size_t(c.weightObjectIndex)].path !=
                  c.weightObject)) {
@@ -312,13 +335,6 @@ RrInputsOpen(RrProgram *program, const RigExecWireComputed *computed,
             if (!revision.weightCurrentPhase || revision.weightObject < 0) {
                 continue;
             }
-            if (!computed) {
-                return _RrFail(error,
-                               program->TextOrEmpty(revision.moverPath) +
-                                   " measures a current-phase weight, which "
-                                   "needs the computed section this file "
-                                   "does not carry; rebake it");
-            }
             if (size_t(revision.weightObject) >=
                 computed->weightObjects.size()) {
                 return _RrFail(error,
@@ -327,9 +343,6 @@ RrInputsOpen(RrProgram *program, const RigExecWireComputed *computed,
                                    "section does not carry");
             }
         }
-    }
-    if (!computed) {
-        return true;
     }
     // The oracle reads every scalar as a float (_ResolvedRead<float>).
     for (const v4::RigExecWireWeightObject &object : computed->weightObjects) {
@@ -360,9 +373,6 @@ bool
 RrInputsSelectFrame(RrProgram *program, size_t index, std::string *error)
 {
     RrInputState &state = program->inputState;
-    if (!state.computed) {
-        return true;
-    }
     if (index >= state.computed->frames.size()) {
         return _RrFail(error, "the computed section holds no slot values "
                               "for the selected frame");
@@ -377,9 +387,6 @@ v4::RigExecWireValue
 RrReadInput(const RrProgram *program, const v4::RigExecWireInput &input)
 {
     const RrInputState &state = program->inputState;
-    if (!state.computed) {
-        return v4::RigExecWireValue();
-    }
     const v4::RigExecWireValue &fallback =
         state.computed->values[input.constant];
     switch (input.mode) {
@@ -420,9 +427,8 @@ RrReadInput(const RrProgram *program, const v4::RigExecWireInput &input)
         }
         v4::RigExecWireValue overlay;
         if (!input.walk.empty() &&
-            _RrOverlay(program->store,
-                       state.computed->inputs[input.walk[0]].name, input.tag,
-                       &overlay)) {
+            _RrOverlay(*program, state.computed->inputs[input.walk[0]].name,
+                       input.tag, &overlay)) {
             return overlay;
         }
         return _RrHeadValue(state, input);
@@ -438,9 +444,6 @@ RrReadPathScalar(const RrProgram *program,
                  const RigExecWirePathScalarRead &entry)
 {
     const RrInputState &state = program->inputState;
-    if (!state.computed) {
-        return v4::RigExecWireValue();
-    }
     if (!entry.headFallback || entry.read.mode != v4::ReadMode::Resolved) {
         return RrReadInput(program, entry.read);
     }
@@ -459,9 +462,6 @@ RrReadResolvedFloat(const RrProgram *program,
                     const v4::RigExecWireInput &input, float fallback)
 {
     const RrInputState &state = program->inputState;
-    if (!state.computed) {
-        return fallback;
-    }
     _RrWalkAnswer answer;
     if (!_RrLongWay(*program, input.walk, 0, v4::InputTag::Float, &answer)) {
         return fallback;
@@ -559,8 +559,38 @@ _RrSameDouble(double a, double b)
     return std::memcmp(&a, &b, sizeof(double)) == 0;
 }
 
-// Bitwise equality of a computed read and the value a record-driven step
-// consumes, on the member the tag names; false with the mismatch text.
+// Whether two reads resolve alike: every field of the read.
+bool
+_RrSameRead(const v4::RigExecWireInput &a, const v4::RigExecWireInput &b)
+{
+    return a.tag == b.tag && a.mode == b.mode && a.flags == b.flags &&
+           a.overrideIndex == b.overrideIndex && a.constant == b.constant &&
+           a.walk == b.walk && a.selected == b.selected;
+}
+
+// A frame record's value in the steps' form, for the cross-check.
+RrInputValue
+_RrRecordedValue(const RigExecWireValue &value)
+{
+    RrInputValue out;
+    out.tag = value.tag;
+    out.f64 = value.f64;
+    out.f32 = value.f32;
+    out.boolean = value.boolean;
+    out.i32 = value.i32;
+    for (size_t r = 0; r < 4; ++r) {
+        for (size_t c = 0; c < 4; ++c) {
+            out.matrix[r][c] = value.matrix[r * 4 + c];
+        }
+    }
+    out.token = value.token;
+    out.vec = RrVec3d(value.vec[0], value.vec[1], value.vec[2]);
+    return out;
+}
+
+// Bitwise equality of a computed read and the recorded or table-constant
+// value the cross-check compares it with, on the member the tag names;
+// false with the mismatch text.
 // \p field() names the value and is called only on a mismatch.
 template <class Field>
 bool
@@ -757,24 +787,37 @@ bool
 RrInputsBindReads(RrProgram *program, std::string *error)
 {
     RrInputState &state = program->inputState;
-    state.registered.clear();
-    state.defaultWeightRead.clear();
-    state.blendReads.clear();
-    state.derivedBlendReads.clear();
-    state.pathReadIndex.clear();
     const RigExecWireComputed *computed = state.computed;
-    if (!computed) {
-        return true;
-    }
     const RigExecWireDomainPose &poses = *program->poses;
     const RigExecWireDomainGeometry &geometry = *program->geometry;
-    const RrStore &store = program->store;
-    std::vector<char> chainUid(store.inputHolders.size(), 0);
-    for (const RigExecWireChainRead &entry : computed->chainReads) {
-        if (entry.uid < chainUid.size()) {
-            chainUid[entry.uid] = 1;
-        }
-    }
+    const RigExecWireSlotMeta &meta = *program->slotMeta;
+    const size_t slots = computed->inputs.size();
+    const size_t avars = program->constants->avarConstants.size();
+    state.registered.clear();
+    state.avarBindingReads.clear();
+    state.avarConstantReads.clear();
+    state.ladderOverrides.clear();
+    state.slotAvar.assign(slots, -1);
+    std::array<int32_t, RrLadderFieldCount> ladderNone;
+    ladderNone.fill(-1);
+    program->ladderRead.assign(poses.ladders.size(), ladderNone);
+    program->spaceSwitchRead.assign(poses.spaceSwitches.size(), -1);
+    program->interpRead.assign(poses.poseInterpolators.size(), -1);
+    program->interpValueRead.assign(poses.poseInterpolators.size(),
+                                    {-1, -1, -1});
+    std::array<int32_t, RrSolverFieldCount> solverNone;
+    solverNone.fill(-1);
+    program->solverRead.assign(poses.solvers.size(), solverNone);
+    std::array<int32_t, RrConstraintFieldCount> constraintNone;
+    constraintNone.fill(-1);
+    program->constraintRead.assign(poses.constraints.size(), constraintNone);
+    std::array<int32_t, RrWeightFieldCount> weightNone;
+    weightNone.fill(-1);
+    program->weightRead.assign(geometry.weightObjects.size(), weightNone);
+
+    // (slot, override number) for every read whose walk passes the slot.
+    std::vector<std::pair<uint32_t, int32_t>> reach;
+    std::unordered_map<int32_t, size_t> byUid;
     state.registered.reserve(computed->registeredReads.size());
     for (size_t k = 0; k < computed->registeredReads.size(); ++k) {
         const RigExecWireRegisteredRead &entry = computed->registeredReads[k];
@@ -790,24 +833,26 @@ RrInputsBindReads(RrProgram *program, std::string *error)
             (flags & uint8_t(v4::InputReadFlags::Varying)) != 0 &&
             ((flags & uint8_t(v4::InputReadFlags::LongWay)) != 0 ||
              entry.read.selected >= 0);
-        if (entry.uid >= 0 &&
-            size_t(entry.uid) >= store.inputHolders.size()) {
-            return fail("names no input holder");
-        }
         const size_t object = entry.object;
         const uint32_t field = entry.field;
-        int32_t routed = -1;
+        int32_t *at = nullptr;
         switch (entry.family) {
         case _RrFamily::AvarBinding:
         case _RrFamily::AvarConstantBinding:
-            if (entry.avar < 0 || size_t(entry.avar) >= store.avars.size()) {
+            if (entry.avar < 0 || size_t(entry.avar) >= avars || field != 0 ||
+                entry.read.tag != v4::InputTag::Double) {
                 return fail("names no avar");
             }
-            if (entry.uid >= 0 &&
-                (size_t(entry.uid) >= program->avarUidTarget.size() ||
-                 program->avarUidTarget[size_t(entry.uid)] != entry.avar)) {
-                return fail("does not route to its avar");
+            if (!entry.read.walk.empty()) {
+                int32_t &head = state.slotAvar[entry.read.walk[0]];
+                if (head >= 0 && head != entry.avar) {
+                    return fail("heads two avars");
+                }
+                head = entry.avar;
             }
+            (entry.family == _RrFamily::AvarBinding ? state.avarBindingReads
+                                                    : state.avarConstantReads)
+                .push_back(uint32_t(k));
             break;
         case _RrFamily::Ladder:
             if (object >= poses.ladders.size() ||
@@ -815,14 +860,21 @@ RrInputsBindReads(RrProgram *program, std::string *error)
                 return fail("names no ladder field");
             }
             bound.wire = &program->LadderInput(object, int(field));
-            routed = program->ladderUid[object][field];
+            at = &program->ladderRead[object][field];
+            // RigExecBakedProgramImpl::ladderOverrides: the provider
+            // slots' ladders a drag recomposes.
+            if (entry.read.overrideIndex >= 0 &&
+                object < meta.slotKind.size() &&
+                meta.slotKind[object] == RigExecWireSlotKind::FirstFramePose) {
+                state.ladderOverrides.push_back(entry.read.overrideIndex);
+            }
             break;
         case _RrFamily::SpaceSwitch:
             if (object >= poses.spaceSwitches.size() || field != 0) {
                 return fail("names no space switch");
             }
             bound.wire = &poses.spaceSwitches[object].active;
-            routed = program->spaceSwitchUid[object];
+            at = &program->spaceSwitchRead[object];
             break;
         case _RrFamily::Interpolator:
             if (object >= poses.poseInterpolators.size() ||
@@ -832,11 +884,11 @@ RrInputsBindReads(RrProgram *program, std::string *error)
             }
             if (field == 0) {
                 bound.wire = &poses.poseInterpolators[object].enabled;
-                routed = program->interpUid[object];
+                at = &program->interpRead[object];
             } else {
                 bound.wire =
                     &poses.poseInterpolators[object].valueInputs[field - 1];
-                routed = program->interpValueUid[object][field - 1];
+                at = &program->interpValueRead[object][field - 1];
             }
             break;
         case _RrFamily::Solver:
@@ -845,7 +897,7 @@ RrInputsBindReads(RrProgram *program, std::string *error)
                 return fail("names no solver field");
             }
             bound.wire = &program->SolverInput(object, int(field));
-            routed = program->solverUid[object][field];
+            at = &program->solverRead[object][field];
             break;
         case _RrFamily::Constraint:
             if (object >= poses.constraints.size() ||
@@ -853,7 +905,7 @@ RrInputsBindReads(RrProgram *program, std::string *error)
                 return fail("names no constraint field");
             }
             bound.wire = &program->ConstraintInput(object, int(field));
-            routed = program->constraintUid[object][field];
+            at = &program->constraintRead[object][field];
             break;
         case _RrFamily::WeightObject:
             if (object >= geometry.weightObjects.size() ||
@@ -861,35 +913,192 @@ RrInputsBindReads(RrProgram *program, std::string *error)
                 return fail("names no weight object field");
             }
             bound.wire = &program->WeightInput(object, int(field));
-            routed = program->weightUid[object][field];
+            at = &program->weightRead[object][field];
             break;
         }
-        if (bound.wire) {
-            if (routed != entry.uid) {
-                return fail("carries uid " + std::to_string(entry.uid) +
-                            " where the uid replay routes " +
-                            std::to_string(routed));
+        if (at) {
+            if (*at >= 0) {
+                return fail("binds a field another read binds");
             }
-            if (uint8_t(bound.wire->tag) != uint8_t(entry.read.tag) ||
-                bound.wire->overrideIndex != entry.read.overrideIndex ||
-                (bound.wire->varying && bound.wire->bound) != bound.live) {
-                return fail("differs from the table input it names");
+            *at = int32_t(k);
+        }
+        // The table input it replaces carries the same type, override
+        // number and per-run liveness.
+        if (bound.wire &&
+            (uint8_t(bound.wire->tag) != uint8_t(entry.read.tag) ||
+             bound.wire->overrideIndex != entry.read.overrideIndex ||
+             (bound.wire->varying && bound.wire->bound) != bound.live)) {
+            return fail("differs from the table input it names");
+        }
+        if (entry.uid >= 0 && !byUid.emplace(entry.uid, k).second) {
+            return fail("repeats uid " + std::to_string(entry.uid));
+        }
+        if (entry.read.overrideIndex >= 0) {
+            for (uint32_t slot : entry.read.walk) {
+                reach.emplace_back(slot, entry.read.overrideIndex);
             }
         }
-        bound.chainRead = entry.uid >= 0 && chainUid[size_t(entry.uid)] != 0;
         state.registered.push_back(bound);
     }
-    state.defaultWeightRead.resize(geometry.chains.size());
-    state.blendReads.resize(geometry.chains.size());
-    state.derivedBlendReads.resize(geometry.chains.size());
-    for (size_t c = 0; c < geometry.chains.size(); ++c) {
-        state.defaultWeightRead[c].assign(geometry.chains[c].revisions.size(),
-                                          -1);
-        state.blendReads[c].resize(geometry.chains[c].revisions.size());
-        state.derivedBlendReads[c].resize(geometry.chains[c].derived.size());
+    // Every field of every table row is read, or a step would read none.
+    const auto unbound = [&](const char *table, size_t row) {
+        return _RrFail(error, "the computed section binds no read to a field "
+                              "of " + std::string(table) + "[" +
+                                  std::to_string(row) + "]");
+    };
+    for (size_t i = 0; i < program->ladderRead.size(); ++i) {
+        for (int32_t read : program->ladderRead[i]) {
+            if (read < 0) {
+                return unbound("ladders", i);
+            }
+        }
     }
-    // RigExecWireApplyComputed checked that each geometry read names a
-    // revision the geometry section holds.
+    for (size_t i = 0; i < program->spaceSwitchRead.size(); ++i) {
+        if (program->spaceSwitchRead[i] < 0) {
+            return unbound("spaceSwitches", i);
+        }
+    }
+    for (size_t i = 0; i < program->interpRead.size(); ++i) {
+        const size_t dials = poses.poseInterpolators[i].valueInputs.size();
+        if (program->interpRead[i] < 0) {
+            return unbound("poseInterpolators", i);
+        }
+        for (size_t v = 0; v < dials && v < 3; ++v) {
+            if (program->interpValueRead[i][v] < 0) {
+                return unbound("poseInterpolators", i);
+            }
+        }
+    }
+    for (size_t i = 0; i < program->solverRead.size(); ++i) {
+        for (int32_t read : program->solverRead[i]) {
+            if (read < 0) {
+                return unbound("solvers", i);
+            }
+        }
+    }
+    for (size_t i = 0; i < program->constraintRead.size(); ++i) {
+        for (int32_t read : program->constraintRead[i]) {
+            if (read < 0) {
+                return unbound("constraints", i);
+            }
+        }
+    }
+    for (size_t i = 0; i < program->weightRead.size(); ++i) {
+        for (int32_t read : program->weightRead[i]) {
+            if (read < 0) {
+                return unbound("weightObjects", i);
+            }
+        }
+    }
+    std::sort(state.ladderOverrides.begin(), state.ladderOverrides.end());
+    state.ladderOverrides.erase(std::unique(state.ladderOverrides.begin(),
+                                            state.ladderOverrides.end()),
+                                state.ladderOverrides.end());
+
+    // A chain read restates the registered read of its uid, field for
+    // field: the cross-check evaluates the chain read in place of the
+    // registered one the steps consume.
+    for (const RigExecWireChainRead &entry : computed->chainReads) {
+        const auto found = byUid.find(int32_t(entry.uid));
+        if (found == byUid.end() ||
+            !_RrSameRead(computed->registeredReads[found->second].read,
+                         entry.read)) {
+            return _RrFail(error, "the computed section's chain read of uid " +
+                                      std::to_string(entry.uid) +
+                                      " restates no registered read");
+        }
+        state.registered[found->second].chainRead = true;
+    }
+
+    // Where an override on each slot reaches, as an index by slot.
+    std::sort(reach.begin(), reach.end());
+    reach.erase(std::unique(reach.begin(), reach.end()), reach.end());
+    state.slotOverrideBegin.assign(slots + 1, 0);
+    state.slotOverrideNumbers.clear();
+    state.slotOverrideNumbers.reserve(reach.size());
+    for (const auto &[slot, number] : reach) {
+        ++state.slotOverrideBegin[slot + 1];
+        state.slotOverrideNumbers.push_back(number);
+    }
+    for (size_t s = 0; s < slots; ++s) {
+        state.slotOverrideBegin[s + 1] += state.slotOverrideBegin[s];
+    }
+    // That reach is the program's own (overridableInputs): the same
+    // override numbers on the same attributes, or an override placed here
+    // would move other reads than the program's would.
+    if (program->inputs) {
+        const RigExecWireInputTable &table = *program->inputs;
+        std::unordered_map<uint32_t, uint32_t> slotOf;
+        slotOf.reserve(slots);
+        for (size_t s = 0; s < slots; ++s) {
+            slotOf.emplace(computed->inputs[s].name, uint32_t(s));
+        }
+        size_t placed = 0;
+        for (size_t i = 0; i < table.overridablePaths.size() &&
+                           i < table.overridableIndices.size();
+             ++i) {
+            std::vector<int32_t> numbers = table.overridableIndices[i];
+            std::sort(numbers.begin(), numbers.end());
+            numbers.erase(std::unique(numbers.begin(), numbers.end()),
+                          numbers.end());
+            const auto found = slotOf.find(table.overridablePaths[i]);
+            const bool same =
+                found != slotOf.end() &&
+                std::equal(numbers.begin(), numbers.end(),
+                           state.slotOverrideNumbers.begin() +
+                               state.slotOverrideBegin[found->second],
+                           state.slotOverrideNumbers.begin() +
+                               state.slotOverrideBegin[found->second + 1]);
+            if (!same) {
+                return _RrFail(error,
+                               "the computed section's reads reach other "
+                               "override numbers at " +
+                                   program->TextOrEmpty(
+                                       table.overridablePaths[i]) +
+                                   " than the program registered there");
+            }
+            ++placed;
+        }
+        size_t reached = 0;
+        for (size_t s = 0; s < slots; ++s) {
+            reached += state.slotOverrideBegin[s + 1] !=
+                               state.slotOverrideBegin[s]
+                           ? 1
+                           : 0;
+        }
+        if (reached != placed) {
+            return _RrFail(error, "the computed section's reads reach "
+                                  "attributes the program registered no "
+                                  "override on");
+        }
+    }
+    state.nameIndex.clear();
+    state.nameIndex.reserve(slots);
+    for (size_t s = 0; s < slots; ++s) {
+        state.nameIndex.emplace(program->TextOrEmpty(computed->inputs[s].name),
+                                uint32_t(s));
+    }
+
+    // The geometry reads by revision and channel. RigExecWireApplyComputed
+    // checked that each names a revision, and a channel, the geometry
+    // section holds.
+    state.defaultWeightRead.assign(geometry.chains.size(), {});
+    state.blendReads.assign(geometry.chains.size(), {});
+    state.derivedBlendReads.assign(geometry.chains.size(), {});
+    for (size_t c = 0; c < geometry.chains.size(); ++c) {
+        const RigExecWireChain &chain = geometry.chains[c];
+        state.defaultWeightRead[c].assign(chain.revisions.size(), -1);
+        state.blendReads[c].resize(chain.revisions.size());
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            state.blendReads[c][r].assign(
+                chain.revisions[r].blendChannels.size(), -1);
+        }
+        state.derivedBlendReads[c].resize(chain.derived.size());
+        for (size_t d = 0; d < chain.derived.size(); ++d) {
+            state.derivedBlendReads[c][d].assign(
+                chain.derived[d].revision.blendChannels.size(), -1);
+        }
+    }
     for (size_t k = 0; k < computed->defaultWeightReads.size(); ++k) {
         const RigExecWireDefaultWeightRead &entry =
             computed->defaultWeightReads[k];
@@ -900,9 +1109,10 @@ RrInputsBindReads(RrProgram *program, std::string *error)
             computed->blendWeightReads[k];
         (entry.derived ? state.derivedBlendReads
                        : state.blendReads)[entry.chain][entry.revision]
-            .push_back(uint32_t(k));
+                                          [entry.channel] = int32_t(k);
     }
     // The decoder refused two path reads at one path.
+    state.pathReadIndex.clear();
     state.pathReadIndex.reserve(computed->pathScalarReads.size());
     for (size_t k = 0; k < computed->pathScalarReads.size(); ++k) {
         state.pathReadIndex.emplace_back(computed->pathScalarReads[k].path,
@@ -912,6 +1122,213 @@ RrInputsBindReads(RrProgram *program, std::string *error)
     return true;
 }
 
+void
+RrInputsSetOverrides(RrProgram *program,
+                     const std::map<uint32_t, double> &overrides)
+{
+    RrInputState &state = program->inputState;
+    RrStore &store = program->store;
+    if (store.anyOverridden) {
+        std::fill(store.overridden.begin(), store.overridden.end(), char(0));
+        store.anyOverridden = false;
+    }
+    state.overrides.clear();
+    const RigExecWireComputed *computed = state.computed;
+    for (const auto &[slot, value] : overrides) {
+        if (slot >= computed->inputs.size()) {
+            continue;
+        }
+        v4::RigExecWireValue held;
+        held.tag = v4::InputTag::Double;
+        std::memcpy(&held.bits, &value, sizeof(value));
+        state.overrides[computed->inputs[slot].name] = held;
+        for (uint32_t k = state.slotOverrideBegin[slot];
+             k < state.slotOverrideBegin[slot + 1]; ++k) {
+            const size_t number = size_t(state.slotOverrideNumbers[k]);
+            if (number < store.overridden.size()) {
+                store.overridden[number] = 1;
+                store.anyOverridden = true;
+            }
+        }
+    }
+}
+
+bool
+RrInputsAnyOverridden(const RrProgram *program,
+                      const std::vector<uint32_t> &slots)
+{
+    const RrInputState &state = program->inputState;
+    if (state.overrides.empty()) {
+        return false;
+    }
+    for (uint32_t slot : slots) {
+        if (state.overrides.count(state.computed->inputs[slot].name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+RrInputsPublished(const RrProgram *program, uint32_t path)
+{
+    return (!program->inputState.overrides.empty() &&
+            program->inputState.overrides.count(path) != 0) ||
+           (!program->store.propertyResults.empty() &&
+            program->store.propertyResults.count(path) != 0);
+}
+
+bool
+RrInputsOverlay(const RrProgram *program, uint32_t path, v4::InputTag tag,
+                v4::RigExecWireValue *out)
+{
+    return _RrOverlay(*program, path, tag, out);
+}
+
+// The target-drag rule (inputs.h). A change of rule is made in these three
+// functions and in what a phased reader of a dragged chain publishes.
+
+bool
+RrTargetDragAccepted(const RrProgram *program, uint32_t slot)
+{
+    const std::vector<v4::InputSlot> &slots =
+        program->inputState.computed->inputs;
+    return slot < slots.size() && slots[slot].chain < 0;
+}
+
+bool
+RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
+            v4::RigExecWireValue *base)
+{
+    const RrInputState &state = program->inputState;
+    const RigExecWireComputed &computed = *state.computed;
+    const uint32_t target = computed.propertyChains[chain].target;
+    if (!state.slotHasValue[target] || computed.inputs[target].type != tag) {
+        return false;
+    }
+    *base = computed.values[state.slotValue[target]];
+    return true;
+}
+
+bool
+RrOverrideOutranksResult(const RrProgram *, uint32_t)
+{
+    // The program places its overrides again after the chains publish.
+    return true;
+}
+
+bool
+RrPathValueFromRead(const RigExecWirePathScalarRead &entry,
+                    const v4::RigExecWireValue &value,
+                    RigExecWirePathValue *out)
+{
+    using Tag = RigExecWirePathValue::Tag;
+    if (entry.widen) {
+        out->tag = Tag::Double;
+        out->f64 = double(RrWireValueFloat(value));
+        return true;
+    }
+    switch (entry.read.tag) {
+    case v4::InputTag::Bool:
+        out->tag = Tag::Bool;
+        out->boolean = value.bits != 0;
+        return true;
+    case v4::InputTag::Int:
+        out->tag = Tag::Int;
+        out->i32 = int32_t(uint32_t(value.bits));
+        return true;
+    case v4::InputTag::Float:
+        out->tag = Tag::Float;
+        out->f32 = RrWireValueFloat(value);
+        return true;
+    case v4::InputTag::Double:
+        out->tag = Tag::Double;
+        out->f64 = _RrWireDouble(value);
+        return true;
+    case v4::InputTag::Token:
+        out->tag = Tag::Token;
+        out->token = uint32_t(value.bits);
+        return true;
+    case v4::InputTag::Matrix4d:
+        out->tag = Tag::Matrix4d;
+        out->matrix = value.matrix;
+        return true;
+    case v4::InputTag::Vec3d:
+        out->tag = Tag::Vec3d;
+        out->vec = value.vec3d;
+        return true;
+    default:
+        return false;
+    }
+}
+
+float
+RrReadBlendWeight(const RrProgram *program, size_t chain, size_t revision,
+                  bool derived, size_t channel)
+{
+    const RrInputState &state = program->inputState;
+    const std::vector<std::vector<std::vector<int32_t>>> &reads =
+        derived ? state.derivedBlendReads : state.blendReads;
+    if (chain >= reads.size() || revision >= reads[chain].size() ||
+        channel >= reads[chain][revision].size() ||
+        reads[chain][revision][channel] < 0) {
+        return 0.0f;
+    }
+    const RigExecWireChain &wireChain = program->geometry->chains[chain];
+    const RigExecWireRevision &wire =
+        derived ? wireChain.derived[revision].revision
+                : wireChain.revisions[revision];
+    const RigExecWireBlendChannel &bound = wire.blendChannels[channel];
+    if (bound.poseWeight >= 0 &&
+        !RrInputsPublished(program, bound.weightPath)) {
+        const std::vector<float> &weights = program->store.poseWeights;
+        return size_t(bound.poseWeight) < weights.size()
+                   ? weights[size_t(bound.poseWeight)]
+                   : 0.0f;
+    }
+    const RigExecWireBlendWeightRead &entry =
+        state.computed
+            ->blendWeightReads[size_t(reads[chain][revision][channel])];
+    return RrWireValueFloat(RrReadInput(program, entry.read));
+}
+
+float
+RrReadBlendActivation(const RrProgram *program, size_t chain,
+                      size_t revision, bool derived, size_t channel,
+                      size_t sample)
+{
+    const RrInputState &state = program->inputState;
+    const std::vector<std::vector<std::vector<int32_t>>> &reads =
+        derived ? state.derivedBlendReads : state.blendReads;
+    if (chain >= reads.size() || revision >= reads[chain].size() ||
+        channel >= reads[chain][revision].size() ||
+        reads[chain][revision][channel] < 0) {
+        return 1.0f;
+    }
+    const RigExecWireBlendWeightRead &entry =
+        state.computed
+            ->blendWeightReads[size_t(reads[chain][revision][channel])];
+    if (sample >= entry.activations.size()) {
+        return 1.0f;
+    }
+    return RrWireValueFloat(RrReadInput(program, entry.activations[sample]));
+}
+
+float
+RrReadDefaultWeight(const RrProgram *program, size_t chain, size_t revision)
+{
+    const RrInputState &state = program->inputState;
+    if (chain >= state.defaultWeightRead.size() ||
+        revision >= state.defaultWeightRead[chain].size() ||
+        state.defaultWeightRead[chain][revision] < 0) {
+        return 1.0f;
+    }
+    const RigExecWireDefaultWeightRead &entry =
+        state.computed->defaultWeightReads[size_t(
+            state.defaultWeightRead[chain][revision])];
+    return RrWireValueFloat(RrReadInput(program, entry.read));
+}
+
 bool
 RrCrossCheckReads(const RrProgram *program,
                   const RigExecWireFrameInputs &record,
@@ -919,39 +1336,44 @@ RrCrossCheckReads(const RrProgram *program,
 {
     const RrInputState &state = program->inputState;
     const RigExecWireComputed *computed = state.computed;
-    if (!computed) {
-        return true;
-    }
-    const RrStore &store = program->store;
     uint64_t registered = 0;
     for (size_t k = 0; k < state.registered.size(); ++k) {
         const RrInputState::BoundRead &bound = state.registered[k];
         if (bound.chainRead) {
             continue;
         }
-        // A read made per run is in the record only at the frames a step
-        // read it, which are the frames its holder holds this frame's
-        // value.
-        if (bound.live && !std::binary_search(record.uids.begin(),
-                                              record.uids.end(),
-                                              uint32_t(bound.uid))) {
+        // The record holds the value of a uid at the frames a step read
+        // it; a read made per run is compared only there, any other read
+        // against its constant where the record holds none.
+        const RigExecWireValue *held = nullptr;
+        if (bound.uid >= 0) {
+            const auto at = std::lower_bound(record.uids.begin(),
+                                             record.uids.end(),
+                                             uint32_t(bound.uid));
+            const size_t index = size_t(at - record.uids.begin());
+            if (at != record.uids.end() && *at == uint32_t(bound.uid) &&
+                index < record.values.size()) {
+                held = &record.values[index];
+            }
+        }
+        if (!held && bound.live) {
             continue;
         }
         const RigExecWireRegisteredRead &entry = computed->registeredReads[k];
         const v4::RigExecWireValue value = RrReadInput(program, entry.read);
-        RrInputValue used;
-        if (bound.wire) {
-            used = program->ReadUid(*bound.wire, bound.uid);
+        RrInputValue recorded;
+        if (held) {
+            recorded = _RrRecordedValue(*held);
+        } else if (bound.wire) {
+            recorded = RrWireInputConstant(*bound.wire);
         } else {
-            used.tag = RigExecWireInput::Tag::Double;
-            used.f64 = bound.uid >= 0
-                           ? store.inputHolders[size_t(bound.uid)].f64
-                           : program->constants
-                                 ->avarConstants[size_t(bound.avar)];
+            recorded.tag = RigExecWireInput::Tag::Double;
+            recorded.f64 =
+                program->constants->avarConstants[size_t(bound.avar)];
         }
         std::string why;
         if (!_RrSameAsUsed(
-                *program, value, used,
+                *program, value, recorded,
                 [&] { return _RrRegisteredField(*program, entry); }, &why)) {
             return _RrFail(error, "registered reads: " + why);
         }
@@ -999,7 +1421,7 @@ RrCrossCheckRevisionReads(const RrProgram *program,
 {
     const RrInputState &state = program->inputState;
     const RigExecWireComputed *computed = state.computed;
-    if (!computed || !record) {
+    if (!record) {
         return true;
     }
     // "[c][r]" and the field names are built only to report a failure.
@@ -1007,48 +1429,58 @@ RrCrossCheckRevisionReads(const RrProgram *program,
         return "[" + std::to_string(chain) + "][" + std::to_string(revision) +
                "]";
     };
-    const std::vector<std::vector<std::vector<uint32_t>>> &blends =
+    const std::vector<std::vector<std::vector<int32_t>>> &blends =
         derived ? state.derivedBlendReads : state.blendReads;
-    if (chain < blends.size() && revision < blends[chain].size() &&
-        !blends[chain][revision].empty()) {
+    if (chain < blends.size() && revision < blends[chain].size()) {
         const auto &weights =
             derived ? record->derivedBlendWeights : record->blendWeights;
-        // RigExecWireApplyComputed checked each read's revision and channel.
-        const RigExecWireChain &wireChain = program->geometry->chains[chain];
-        const RigExecWireRevision &wire =
-            derived ? wireChain.derived[revision].revision
-                    : wireChain.revisions[revision];
-        const RrStore &store = program->store;
-        for (uint32_t k : blends[chain][revision]) {
-            const RigExecWireBlendWeightRead &entry =
-                computed->blendWeightReads[k];
+        const auto &activations = derived ? record->derivedBlendActivations
+                                          : record->blendActivations;
+        const std::vector<int32_t> &channels = blends[chain][revision];
+        for (size_t channel = 0; channel < channels.size(); ++channel) {
+            if (channels[channel] < 0) {
+                continue;
+            }
+            const size_t samples =
+                computed->blendWeightReads[size_t(channels[channel])]
+                    .activations.size();
+            for (size_t s = 0; s < samples; ++s) {
+                const auto field = [&] {
+                    return std::string(derived ? "derivedBlendActivations"
+                                               : "blendActivations") +
+                           at() + "[" + std::to_string(channel) + "][" +
+                           std::to_string(s) + "]";
+                };
+                if (chain >= activations.size() ||
+                    revision >= activations[chain].size() ||
+                    channel >= activations[chain][revision].size() ||
+                    s >= activations[chain][revision][channel].size()) {
+                    return _RrFail(error,
+                                   "the frame record holds no " + field());
+                }
+                const float value = RrReadBlendActivation(
+                    program, chain, revision, derived, channel, s);
+                const float recorded =
+                    activations[chain][revision][channel][s];
+                if (!RrSameFloatBits(value, recorded)) {
+                    return _RrFail(error, RrCrossCheckMismatch(
+                                              field(), value, recorded));
+                }
+                ++output->crossChecked[RrCrossCheckBlendActivation];
+            }
             const auto field = [&] {
                 return std::string(derived ? "derivedBlendWeights"
                                            : "blendWeights") +
-                       at() + "[" + std::to_string(entry.channel) + "]";
+                       at() + "[" + std::to_string(channel) + "]";
             };
             if (chain >= weights.size() ||
                 revision >= weights[chain].size() ||
-                entry.channel >= weights[chain][revision].size()) {
+                channel >= weights[chain][revision].size()) {
                 return _RrFail(error, "the frame record holds no " + field());
             }
-            // The assembly's channel weight: a pose-driven channel reads its
-            // pose weight slot unless a value is published at the weight
-            // itself (bakedGeometry.cpp's `!R.Find(weightPath)`).
-            const RigExecWireBlendChannel &bound =
-                wire.blendChannels[entry.channel];
-            float value = 0.0f;
-            if (bound.poseWeight >= 0 &&
-                store.propertyResults.find(bound.weightPath) ==
-                    store.propertyResults.end()) {
-                if (size_t(bound.poseWeight) >= store.poseWeights.size()) {
-                    return _RrFail(error, field() + " names no pose weight");
-                }
-                value = store.poseWeights[size_t(bound.poseWeight)];
-            } else {
-                value = RrWireValueFloat(RrReadInput(program, entry.read));
-            }
-            const float recorded = weights[chain][revision][entry.channel];
+            const float value =
+                RrReadBlendWeight(program, chain, revision, derived, channel);
+            const float recorded = weights[chain][revision][channel];
             if (!RrSameFloatBits(value, recorded)) {
                 return _RrFail(error,
                                RrCrossCheckMismatch(field(), value, recorded));
@@ -1059,15 +1491,12 @@ RrCrossCheckRevisionReads(const RrProgram *program,
     if (!derived && chain < state.defaultWeightRead.size() &&
         revision < state.defaultWeightRead[chain].size() &&
         state.defaultWeightRead[chain][revision] >= 0) {
-        const RigExecWireDefaultWeightRead &entry =
-            computed->defaultWeightReads[size_t(
-                state.defaultWeightRead[chain][revision])];
         const auto field = [&] { return "revisionDefaultWeights" + at(); };
         if (chain >= record->revisionDefaultWeights.size() ||
             revision >= record->revisionDefaultWeights[chain].size()) {
             return _RrFail(error, "the frame record holds no " + field());
         }
-        const float value = RrWireValueFloat(RrReadInput(program, entry.read));
+        const float value = RrReadDefaultWeight(program, chain, revision);
         const float recorded = record->revisionDefaultWeights[chain][revision];
         if (!RrSameFloatBits(value, recorded)) {
             return _RrFail(error,

@@ -49,20 +49,6 @@ _RrWireLandmarks(const std::array<RigExecWireVec3d, 4> &wire)
     return out;
 }
 
-bool
-_RrLiveLadder(const RrProgram *program, size_t slot, int field)
-{
-    return _RrLive(program, program->LadderInput(slot, field),
-                   program->ladderUid[slot][size_t(field)]);
-}
-
-bool
-_RrLiveConstraint(const RrProgram *program, size_t constraint, int field)
-{
-    return _RrLive(program, program->ConstraintInput(constraint, field),
-                   program->constraintUid[constraint][size_t(field)]);
-}
-
 // RigExecBakedComposeLadder (bakedPose.cpp), over the scratch tables.
 // Reads through ReadLadder, the runtime form of RigExecBakedRead.
 void
@@ -243,28 +229,23 @@ _RrComposeAvars(double tx, double ty, double tz, double sx, double sy,
 }
 
 // The step body's `live`: whether a baked parameter has to be re-read
-// at all (bakedPose.cpp). `uid` is the input's routed uid, or -1.
+// at all (bakedPose.cpp): read per run, or an override stands on its walk.
 bool
-_RrLive(const RrProgram *program, const RigExecWireInput &input,
-        int32_t uid)
+_RrLive(const RrProgram *program, const v4::RigExecWireInput &read)
 {
-    if (input.varying) {
+    if ((read.flags & uint8_t(v4::InputReadFlags::Varying)) != 0) {
         return true;
     }
-    if (input.overrideIndex >= 0 &&
-        size_t(input.overrideIndex) < program->store.overridden.size() &&
-        program->store.overridden[size_t(input.overrideIndex)]) {
-        return true;
-    }
-    (void)uid;
-    return false;
+    return read.overrideIndex >= 0 &&
+           size_t(read.overrideIndex) < program->store.overridden.size() &&
+           program->store.overridden[size_t(read.overrideIndex)];
 }
 
 bool
 _RrLiveSolver(const RrProgram *program, size_t solver, int field)
 {
-    return _RrLive(program, program->SolverInput(solver, field),
-                   program->solverUid[solver][size_t(field)]);
+    return _RrLive(program, program->RegisteredInput(
+                                program->solverRead[solver][size_t(field)]));
 }
 
 RrPoseScratch *
@@ -525,28 +506,58 @@ RrProloguePose(RrProgram *program,
         }
         return false;
     }
-    // The avar table: every uid the capture routed to an avar binding
-    // carries this frame's value in its holder.
-    for (size_t uid = 0; uid < store.inputHolders.size(); ++uid) {
-        if (uid >= program->avarUidTarget.size()) {
-            break;
-        }
-        const int32_t target = program->avarUidTarget[uid];
-        if (target >= 0 && size_t(target) < store.avars.size()) {
-            store.avars[size_t(target)] =
-                store.inputHolders[uid].f64;
+    // RigExecBakedRunInputs. The provider ladder, before the avars that
+    // compose against it: it recomposes when a channel varies, while a drag
+    // stands on one of its channels, and once more after that drag is
+    // released, which writes the authored values back over the dragged.
+    const RrInputState &inputs = program->inputState;
+    bool ladderDragged = false;
+    if (store.anyOverridden) {
+        for (const int32_t index : inputs.ladderOverrides) {
+            if (size_t(index) < store.overridden.size() &&
+                store.overridden[size_t(index)]) {
+                ladderDragged = true;
+                break;
+            }
         }
     }
-    // The provider ladder, before the avars that compose against it.
-    // No overrides yet, so the dragged arm stays out: the recompute
-    // gate is the varying flag plus the disturbed one-more-pass.
     scratch->ladderRecomputed =
-        poses.ladderVarying || scratch->ladderDisturbed;
+        poses.ladderVarying || ladderDragged || scratch->ladderDisturbed;
     if (scratch->ladderRecomputed) {
         _RrComposeLadder(program, /* trackMoves = */ true);
-        scratch->ladderDisturbed = false;
+        scratch->ladderDisturbed = ladderDragged;
     } else if (!store.ladderMovedSlots.empty()) {
         store.ladderMovedSlots.clear();
+    }
+    // The avar table: each binding read per run. A drag lands on avars
+    // the bake captured as constants, so while one stands, and once more
+    // after it is released, every constant binding is walked too: the
+    // released avar holds the dragged value until its constant is written
+    // back over it.
+    const RigExecWireComputed &computed = *inputs.computed;
+    const auto avarOf = [&](uint32_t read) {
+        return size_t(computed.registeredReads[read].avar);
+    };
+    for (const uint32_t read : inputs.avarBindingReads) {
+        store.avars[avarOf(read)] =
+            program->ReadRegistered(int32_t(read)).f64;
+    }
+    for (const uint32_t read : inputs.avarConstantReads) {
+        // A constant binding an edit animated reads per run as well.
+        if ((program->RegisteredInput(int32_t(read)).flags &
+             uint8_t(v4::InputReadFlags::Varying)) != 0) {
+            store.avars[avarOf(read)] =
+                program->ReadRegistered(int32_t(read)).f64;
+        }
+    }
+    if (store.anyOverridden || scratch->avarsDisturbed) {
+        for (const uint32_t read : inputs.avarConstantReads) {
+            store.avars[avarOf(read)] =
+                _RrLive(program, program->RegisteredInput(int32_t(read)))
+                    ? program->ReadRegistered(int32_t(read)).f64
+                    : program->RegisteredConstant(int32_t(read)).f64;
+        }
+        scratch->avarsDisturbed = store.anyOverridden;
     }
     // The pose interpolators' enables, read here so their step reads
     // no input table.
@@ -610,7 +621,8 @@ RrProloguePose(RrProgram *program,
     // The recorded envelopes, which only the cross-check reads: the
     // Constraint step computes its own. Sizes were validated against the
     // constraints at the head.
-    for (size_t k = 0; program->crossCheck && k < poses.constraints.size();
+    for (size_t k = 0;
+         program->CrossCheckThisRun() && k < poses.constraints.size();
          ++k) {
         scratch->constraintHaveWeight[k] =
             k < record.constraintHaveWeight.size() &&

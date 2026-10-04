@@ -215,14 +215,7 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     }
     RigExecBinaryWriter writer;
     std::string captureError;
-    RigExecBakeCapture capture(evaluator, &writer, &captureError,
-                               opts.overridableInputs);
-    if (opts.overridableInputs) {
-        // One byte, written only when the rule was widened, so a default
-        // bake is byte-for-byte what it always was.
-        writer.AddSection(RigExecBinarySection::InputPolicy,
-                          std::vector<uint8_t>{1});
-    }
+    RigExecBakeCapture capture(evaluator, &writer, &captureError);
     if (!capture.Valid()) {
         return Fail(captureError);
     }

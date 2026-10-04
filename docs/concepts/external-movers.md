@@ -239,7 +239,8 @@ does not understand. Points named in `binding.phases` reach `apply` as playback
 evaluated them, so a playback posed through `SetAvar` moves them; frame bytes
 can still carry the value the export read, for a phase playback holds no value
 at. Everything else in the payload replays as the export captured it on that
-frame, the same way property-mover results do. The runtime applies `inputs:enabled` and the envelope, and fails the mover
+frame. That is a gap against the USD evaluators: a drag that reaches an input
+`assembleExternal` reads moves their result but not a playback's. The runtime applies `inputs:enabled` and the envelope, and fails the mover
 for that frame when `apply` returns false or produces a non-finite point.
 
 Extending the offset mover above:

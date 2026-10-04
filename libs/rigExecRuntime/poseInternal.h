@@ -36,8 +36,7 @@ _RrComposeAvars(double tx, double ty, double tz, double sx, double sy,
                 const std::string &order);
 
 bool
-_RrLive(const RrProgram *program, const RigExecWireInput &input,
-        int32_t uid);
+_RrLive(const RrProgram *program, const v4::RigExecWireInput &read);
 
 bool
 _RrLiveSolver(const RrProgram *program, size_t solver, int field);
@@ -270,7 +269,10 @@ struct RrPoseScratch {
     std::vector<char> lastPosedAuthored;
     std::vector<uint32_t> lastRotOrder;
     bool ladderRecomputed = false;
+    // A drag stood on the ladder last run, so this run recomposes it.
     bool ladderDisturbed = false;
+    // A drag stood last run, so this run writes the constant avars back.
+    bool avarsDisturbed = false;
     // Interpolator enables, read by the prologue so the step reads no
     // input table.
     std::vector<char> interpEnabled;
@@ -289,7 +291,8 @@ struct RrPoseScratch {
     std::vector<std::vector<float>> weightScratch;
     std::vector<std::string> weightError;
     // The frame record's constraint envelopes, copied by the prologue only
-    // for the cross-check (RrProgram::crossCheck) to compare against.
+    // for the cross-check (RrProgram::CrossCheckThisRun) to compare
+    // against.
     std::vector<float> constraintWeights;
     std::vector<char> constraintHaveWeight;
     // Geometry-domain constraint deltas. Conceptually framework-visible

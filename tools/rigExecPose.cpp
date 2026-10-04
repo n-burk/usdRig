@@ -1041,7 +1041,7 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
                     "packet(s), %llu property value(s), %llu chain "
                     "read(s), %llu registered read(s), %llu blend "
                     "weight(s), %llu default weight(s), %llu path "
-                    "read(s))\n",
+                    "read(s), %llu blend activation(s))\n",
                     static_cast<unsigned long long>(
                         reader->GetCrossCheckCountForTesting()),
                     count(rigExec::RrCrossCheckEnvelope),
@@ -1051,7 +1051,8 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
                     count(rigExec::RrCrossCheckRegisteredRead),
                     count(rigExec::RrCrossCheckBlendWeight),
                     count(rigExec::RrCrossCheckDefaultWeight),
-                    count(rigExec::RrCrossCheckPathRead));
+                    count(rigExec::RrCrossCheckPathRead),
+                    count(rigExec::RrCrossCheckBlendActivation));
     }
     if (skippedScalars > 0) {
         std::printf("  note: %zu scalar moved propert%s skipped "

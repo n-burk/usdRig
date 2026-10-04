@@ -2,9 +2,7 @@
 // appliers (RigExecRigEvaluator::_EvaluatePropertyChains,
 // rigEvaluatorProperties.cpp) over the Computed section. The chains run
 // before every prologue, as the baked prologue runs them, and publish into
-// RrStore::propertyResults, which every later read of a chain target sees;
-// the program's registered reads that cross a target are evaluated right
-// after and handed to the holders their consumers read.
+// RrStore::propertyResults, which every later read of a chain target sees.
 // The arithmetic is propertyMathKernel.h instantiated with the runtime's
 // own types, so each revision computes the evaluator's bits. USD-free.
 #include "rigExecRuntime/store.h"
@@ -50,8 +48,8 @@ struct RrPropertyScratch {
     std::vector<size_t> phasedPublish;
     /// Per propertyValues entry: the attribute path id it is published at.
     std::vector<uint32_t> publishNames;
-    /// Per chain read: the frame-record field it is compared with, named
-    /// for a mismatch.
+    /// Per chain read: the frame-record field the cross-check compares it
+    /// with, named for a mismatch.
     std::vector<std::string> chainReadFields;
     // Per-run scratch, reused across Executes.
     std::vector<RrPropertyValue> history;
@@ -352,6 +350,11 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
     history.push_back(_RrHold(value));
     for (size_t k = plan.phasedBegin; k < plan.phasedEnd; ++k) {
         const v4::PhasedConsumer &consumer = computed.phasedConsumers[k];
+        // An override on the consumer or on a hop before the target is
+        // what the reader's walk meets first: the reader stands aside.
+        if (RrInputsAnyOverridden(program, consumer.hops)) {
+            continue;
+        }
         RrPropertyValue held =
             history[std::min(size_t(consumer.applied), history.size() - 1)];
         // RigExecPhasedConsumerValue: a float/double pair converts, every
@@ -537,170 +540,103 @@ RrPropertySizeScratch(RrProgram *program, std::string *error)
     auto scratch = std::make_shared<RrPropertyScratch>();
     RrStore &store = program->store;
     const RigExecWireComputed *computed = program->inputState.computed;
-    if (!computed) {
-        if (program->poses && program->poses->hasPropertyChains) {
-            return _RrFail(error, "the rig runs property chains, which need "
-                                  "the computed section this file does not "
-                                  "carry; rebake it");
+    const size_t slots = computed->inputs.size();
+    std::vector<int64_t> slotEntry(slots, -1);
+    const auto entryOf = [&](uint32_t slot) {
+        if (slotEntry[slot] < 0) {
+            slotEntry[slot] = int64_t(scratch->publishNames.size());
+            scratch->publishNames.push_back(computed->inputs[slot].name);
         }
-    } else {
-        const size_t slots = computed->inputs.size();
-        std::vector<int64_t> slotEntry(slots, -1);
-        const auto entryOf = [&](uint32_t slot) {
-            if (slotEntry[slot] < 0) {
-                slotEntry[slot] = int64_t(scratch->publishNames.size());
-                scratch->publishNames.push_back(computed->inputs[slot].name);
-            }
-            return size_t(slotEntry[slot]);
-        };
-        scratch->chains.resize(computed->propertyChains.size());
-        for (size_t c = 0; c < computed->propertyChains.size(); ++c) {
-            const v4::PropertyChain &chain = computed->propertyChains[c];
-            RrPropertyScratch::Chain &plan = scratch->chains[c];
-            if (chain.target >= slots) {
-                return _RrFail(error, "a property chain targets no input "
-                                      "slot");
-            }
-            plan.target = program->TextOrEmpty(computed->inputs[chain.target]
-                                                   .name);
-            switch (chain.valueType) {
-            case v4::PropertyValueType::Float:
-                plan.baseTag = v4::InputTag::Float;
-                break;
-            case v4::PropertyValueType::Double:
-                plan.baseTag = v4::InputTag::Double;
-                break;
-            case v4::PropertyValueType::Matrix4d:
-                plan.baseTag = v4::InputTag::Matrix4d;
-                break;
-            case v4::PropertyValueType::Vec3f:
-                plan.baseTag = v4::InputTag::Vec3f;
-                break;
-            default:
-                return _RrFail(error, "property chain " + plan.target +
-                                          " has an unknown value type");
-            }
-            plan.publish = entryOf(chain.target);
-            plan.revisions.resize(chain.revisions.size());
-            for (size_t r = 0; r < chain.revisions.size(); ++r) {
-                const v4::PropertyRevision &revision = chain.revisions[r];
-                RrPropertyScratch::Revision &bound = plan.revisions[r];
-                bound.mover = program->TextOrEmpty(revision.mover);
-                if (revision.envelope >= 0 &&
-                    size_t(revision.envelope) >=
-                        computed->weightObjects.size()) {
-                    return _RrFail(error, bound.mover +
-                                              " binds a weight object the "
-                                              "computed section does not "
-                                              "carry");
-                }
-                // RigExecPropertyOp's enumerators in the section's order.
-                bound.opValid = revision.op != v4::PropertyOp::Invalid &&
-                                uint8_t(revision.op) < v4::PropertyOpLast;
-                if (bound.opValid) {
-                    bound.op = RigExecPropertyOp(int(revision.op));
-                }
-                bound.keys.reserve(revision.keys.size());
-                for (const RigExecWireVec2f &key : revision.keys) {
-                    bound.keys.emplace_back(key[0], key[1]);
-                }
-                bound.tangents.reserve(revision.tangents.size());
-                for (const RigExecWireVec2f &tangent : revision.tangents) {
-                    bound.tangents.emplace_back(tangent[0], tangent[1]);
-                }
-                bound.keysValid = RigExecValidateLinearKeysKernel(
-                    bound.keys.data(), bound.keys.size());
-            }
+        return size_t(slotEntry[slot]);
+    };
+    scratch->chains.resize(computed->propertyChains.size());
+    for (size_t c = 0; c < computed->propertyChains.size(); ++c) {
+        const v4::PropertyChain &chain = computed->propertyChains[c];
+        RrPropertyScratch::Chain &plan = scratch->chains[c];
+        if (chain.target >= slots) {
+            return _RrFail(error, "a property chain targets no input "
+                                  "slot");
         }
-        // Grouped by chain, so each chain's consumers are one range.
-        scratch->phasedPublish.resize(computed->phasedConsumers.size());
-        for (size_t k = 0; k < computed->phasedConsumers.size(); ++k) {
-            const v4::PhasedConsumer &consumer = computed->phasedConsumers[k];
-            if (consumer.chain >= scratch->chains.size() ||
-                consumer.consumer >= slots) {
-                return _RrFail(error, "a phased consumer names no chain or "
-                                      "no input slot");
-            }
-            RrPropertyScratch::Chain &plan = scratch->chains[consumer.chain];
-            if (plan.phasedBegin == plan.phasedEnd) {
-                plan.phasedBegin = k;
-            } else if (plan.phasedEnd != k) {
-                return _RrFail(error, "the phased consumers of property "
-                                      "chain " + plan.target +
-                                          " are not contiguous");
-            }
-            plan.phasedEnd = k + 1;
-            scratch->phasedPublish[k] = entryOf(consumer.consumer);
+        plan.target = program->TextOrEmpty(computed->inputs[chain.target]
+                                               .name);
+        switch (chain.valueType) {
+        case v4::PropertyValueType::Float:
+            plan.baseTag = v4::InputTag::Float;
+            break;
+        case v4::PropertyValueType::Double:
+            plan.baseTag = v4::InputTag::Double;
+            break;
+        case v4::PropertyValueType::Matrix4d:
+            plan.baseTag = v4::InputTag::Matrix4d;
+            break;
+        case v4::PropertyValueType::Vec3f:
+            plan.baseTag = v4::InputTag::Vec3f;
+            break;
+        default:
+            return _RrFail(error, "property chain " + plan.target +
+                                      " has an unknown value type");
         }
-        // A chain read's result goes to the holder of its uid, which the
-        // uid replay must route to an input that reads the long way, or to
-        // an avar binding.
-        std::vector<const RigExecWireInput *> routed(store.inputHolders.size(),
-                                                     nullptr);
-        const auto route = [&](int32_t uid, const RigExecWireInput &input) {
-            if (uid >= 0 && size_t(uid) < routed.size()) {
-                routed[size_t(uid)] = &input;
+        plan.publish = entryOf(chain.target);
+        plan.revisions.resize(chain.revisions.size());
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            const v4::PropertyRevision &revision = chain.revisions[r];
+            RrPropertyScratch::Revision &bound = plan.revisions[r];
+            bound.mover = program->TextOrEmpty(revision.mover);
+            if (revision.envelope >= 0 &&
+                size_t(revision.envelope) >=
+                    computed->weightObjects.size()) {
+                return _RrFail(error, bound.mover +
+                                          " binds a weight object the "
+                                          "computed section does not "
+                                          "carry");
             }
-        };
-        for (size_t i = 0; i < program->ladderUid.size(); ++i) {
-            for (int f = 0; f < RrLadderFieldCount; ++f) {
-                route(program->ladderUid[i][size_t(f)],
-                      program->LadderInput(i, f));
+            // RigExecPropertyOp's enumerators in the section's order.
+            bound.opValid = revision.op != v4::PropertyOp::Invalid &&
+                            uint8_t(revision.op) < v4::PropertyOpLast;
+            if (bound.opValid) {
+                bound.op = RigExecPropertyOp(int(revision.op));
             }
-        }
-        for (size_t i = 0; i < program->spaceSwitchUid.size(); ++i) {
-            route(program->spaceSwitchUid[i],
-                  program->poses->spaceSwitches[i].active);
-        }
-        for (size_t i = 0; i < program->interpUid.size(); ++i) {
-            const RigExecWirePoseInterpolator &interp =
-                program->poses->poseInterpolators[i];
-            route(program->interpUid[i], interp.enabled);
-            for (size_t v = 0; v < interp.valueInputs.size() && v < 3; ++v) {
-                route(program->interpValueUid[i][v], interp.valueInputs[v]);
+            bound.keys.reserve(revision.keys.size());
+            for (const RigExecWireVec2f &key : revision.keys) {
+                bound.keys.emplace_back(key[0], key[1]);
             }
-        }
-        for (size_t i = 0; i < program->solverUid.size(); ++i) {
-            for (int f = 0; f < RrSolverFieldCount; ++f) {
-                route(program->solverUid[i][size_t(f)],
-                      program->SolverInput(i, f));
+            bound.tangents.reserve(revision.tangents.size());
+            for (const RigExecWireVec2f &tangent : revision.tangents) {
+                bound.tangents.emplace_back(tangent[0], tangent[1]);
             }
+            bound.keysValid = RigExecValidateLinearKeysKernel(
+                bound.keys.data(), bound.keys.size());
         }
-        for (size_t i = 0; i < program->constraintUid.size(); ++i) {
-            for (int f = 0; f < RrConstraintFieldCount; ++f) {
-                route(program->constraintUid[i][size_t(f)],
-                      program->ConstraintInput(i, f));
-            }
+    }
+    // Grouped by chain, so each chain's consumers are one range.
+    scratch->phasedPublish.resize(computed->phasedConsumers.size());
+    for (size_t k = 0; k < computed->phasedConsumers.size(); ++k) {
+        const v4::PhasedConsumer &consumer = computed->phasedConsumers[k];
+        if (consumer.chain >= scratch->chains.size() ||
+            consumer.consumer >= slots) {
+            return _RrFail(error, "a phased consumer names no chain or "
+                                  "no input slot");
         }
-        for (size_t i = 0; i < program->weightUid.size(); ++i) {
-            for (int f = 0; f < RrWeightFieldCount; ++f) {
-                route(program->weightUid[i][size_t(f)],
-                      program->WeightInput(i, f));
-            }
+        RrPropertyScratch::Chain &plan = scratch->chains[consumer.chain];
+        if (plan.phasedBegin == plan.phasedEnd) {
+            plan.phasedBegin = k;
+        } else if (plan.phasedEnd != k) {
+            return _RrFail(error, "the phased consumers of property "
+                                  "chain " + plan.target +
+                                      " are not contiguous");
         }
-        scratch->chainReadFields.reserve(computed->chainReads.size());
-        for (const RigExecWireChainRead &entry : computed->chainReads) {
-            const std::string head =
-                entry.read.walk.empty()
-                    ? std::string()
-                    : program->TextOrEmpty(
-                          computed->inputs[entry.read.walk[0]].name);
-            const size_t uid = entry.uid;
-            const bool longWay =
-                uid < routed.size() &&
-                (routed[uid] ? routed[uid]->viaResolved
-                             : uid < program->avarUidTarget.size() &&
-                                   program->avarUidTarget[uid] >= 0);
-            if (!longWay) {
-                return _RrFail(error, "the computed section reads " + head +
-                                          " through a property chain, but "
-                                          "uid " + std::to_string(uid) +
-                                          " routes to no input that reads "
-                                          "the long way");
-            }
-            scratch->chainReadFields.push_back(
-                "values[uid " + std::to_string(uid) + ", " + head + "]");
-        }
+        plan.phasedEnd = k + 1;
+        scratch->phasedPublish[k] = entryOf(consumer.consumer);
+    }
+    scratch->chainReadFields.reserve(computed->chainReads.size());
+    for (const RigExecWireChainRead &entry : computed->chainReads) {
+        const std::string head =
+            entry.read.walk.empty()
+                ? std::string()
+                : program->TextOrEmpty(
+                      computed->inputs[entry.read.walk[0]].name);
+        scratch->chainReadFields.push_back(
+            "values[uid " + std::to_string(entry.uid) + ", " + head + "]");
     }
     const size_t entries = scratch->publishNames.size();
     store.propertyResults.clear();
@@ -723,7 +659,7 @@ RrRunPropertyChains(RrProgram *program,
     std::fill(store.propertyPublished.begin(), store.propertyPublished.end(),
               char(0));
     const RigExecWireComputed *computed = program->inputState.computed;
-    if (!computed || computed->propertyChains.empty()) {
+    if (computed->propertyChains.empty()) {
         return true;
     }
     RrPropertyScratch *scratch =
@@ -731,22 +667,18 @@ RrRunPropertyChains(RrProgram *program,
     if (!scratch || scratch->chains.size() != computed->propertyChains.size()) {
         return false;
     }
-    const RrInputState &state = program->inputState;
     for (size_t c = 0; c < computed->propertyChains.size(); ++c) {
         const v4::PropertyChain &chain = computed->propertyChains[c];
         const RrPropertyScratch::Chain &plan = scratch->chains[c];
-        // The base is the target's own typed value this frame; a missing
-        // value, or one of another type, fails that read.
-        const uint32_t target = chain.target;
-        if (!state.slotHasValue[target] ||
-            computed->inputs[target].type != plan.baseTag) {
+        // The base, as the target-drag rule gives it; a missing value, or
+        // one of another type, fails that read.
+        v4::RigExecWireValue base;
+        if (!RrChainBase(program, c, plan.baseTag, &base)) {
             poseDiagnostics->push_back("property chain " + plan.target +
                                        ": target has no authored value; "
                                        "chain skipped");
             continue;
         }
-        const v4::RigExecWireValue &base =
-            computed->values[state.slotValue[target]];
         switch (chain.valueType) {
         case v4::PropertyValueType::Float:
             _RrRunChain(program, scratch, c, RrWireValueFloat(base),
@@ -866,11 +798,12 @@ RrCrossCheckPropertyResults(const RrProgram *program,
 }
 
 bool
-RrRunChainReads(RrProgram *program, const RigExecWireFrameInputs &record,
-                uint64_t *compared, std::string *error)
+RrCrossCheckChainReads(const RrProgram *program,
+                       const RigExecWireFrameInputs &record,
+                       uint64_t *compared, std::string *error)
 {
     const RigExecWireComputed *computed = program->inputState.computed;
-    if (!computed || computed->chainReads.empty()) {
+    if (computed->chainReads.empty()) {
         return true;
     }
     const RrPropertyScratch *scratch =
@@ -880,30 +813,27 @@ RrRunChainReads(RrProgram *program, const RigExecWireFrameInputs &record,
         return _RrFail(error, "the chain reads disagree with the computed "
                               "section");
     }
-    RrStore &store = program->store;
     uint64_t checked = 0;
     for (size_t k = 0; k < computed->chainReads.size(); ++k) {
         const RigExecWireChainRead &entry = computed->chainReads[k];
-        const RigExecWireValue value =
-            _RrRecordForm(RrReadInput(program, entry.read));
         // The record holds a value for the uid only at the frames whose
         // step read it (uids ascending, paired with values); those are
         // compared.
-        if (program->crossCheck) {
-            const auto at = std::lower_bound(record.uids.begin(),
-                                             record.uids.end(), entry.uid);
-            const size_t index = size_t(at - record.uids.begin());
-            if (at != record.uids.end() && *at == entry.uid &&
-                index < record.values.size()) {
-                std::string why;
-                if (!_RrSameRecordBits(program, value, record.values[index],
-                                       scratch->chainReadFields[k], &why)) {
-                    return _RrFail(error, "chain reads: " + why);
-                }
-                ++checked;
-            }
+        const auto at = std::lower_bound(record.uids.begin(),
+                                         record.uids.end(), entry.uid);
+        const size_t index = size_t(at - record.uids.begin());
+        if (at == record.uids.end() || *at != entry.uid ||
+            index >= record.values.size()) {
+            continue;
         }
-        store.inputHolders[entry.uid] = RrWireFrameValue(value);
+        const RigExecWireValue value =
+            _RrRecordForm(RrReadInput(program, entry.read));
+        std::string why;
+        if (!_RrSameRecordBits(program, value, record.values[index],
+                               scratch->chainReadFields[k], &why)) {
+            return _RrFail(error, "chain reads: " + why);
+        }
+        ++checked;
     }
     if (compared) {
         *compared += checked;

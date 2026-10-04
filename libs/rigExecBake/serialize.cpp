@@ -856,7 +856,7 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
     }
     // Memory only: the SpaceSwitch section carries these (see bake.cpp).
     // The program holds them in slot order already, which is the order the
-    // capture traversal and the loader's uid replay both walk.
+    // capture traversal walks.
     pose.spaceSwitches.reserve(program.spaceSwitches.size());
     for (const RigExecBakedProgramImpl::SpaceSwitch &sw :
          program.spaceSwitches) {

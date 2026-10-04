@@ -10,7 +10,7 @@ namespace {
 
 /// Layout number of this hand codec, first in the payload, so a skew
 /// between bake and runtime builds fails rather than misreads.
-constexpr uint32_t _ComputedLayout = 6;
+constexpr uint32_t _ComputedLayout = 8;
 
 bool
 _Fail(std::string *error, const std::string &what)
@@ -577,6 +577,16 @@ _CheckPropertyChains(const RigExecWireComputed &computed, std::string *error)
             phased.applied > chain.revisions.size()) {
             return _Fail(error, where + " does not fit its chain");
         }
+        // The consumer first, then the walk's attributes short of the
+        // target.
+        bool hopsOk =
+            !phased.hops.empty() && phased.hops[0] == phased.consumer;
+        for (uint32_t hop : phased.hops) {
+            hopsOk = hopsOk && hop < slots && hop != chain.target;
+        }
+        if (!hopsOk) {
+            return _Fail(error, where + " has malformed hops");
+        }
     }
     return true;
 }
@@ -623,8 +633,9 @@ _IsAvarFamily(RigExecWireRegisteredFamily family)
 }
 
 /// The registered reads: Baked, an avar index exactly on the avar
-/// families; and the geometry reads: Resolved, a blend or default weight a
-/// Float, one blend read per channel and one default weight read per
+/// families; and the geometry reads: Resolved, a blend weight, a blend
+/// activation or a default weight a Float, one blend read per channel and
+/// one default weight read per
 /// revision, a path read headed by the attribute it is keyed by and unique
 /// by that path (a widened read is a Float).
 bool
@@ -648,7 +659,12 @@ _CheckReadTables(const RigExecWireComputed &computed, std::string *error)
                read.tag == v4::InputTag::Float;
     };
     for (size_t k = 0; k < computed.blendWeightReads.size(); ++k) {
-        if (!resolvedFloat(computed.blendWeightReads[k].read)) {
+        const RigExecWireBlendWeightRead &entry = computed.blendWeightReads[k];
+        bool ok = resolvedFloat(entry.read);
+        for (const v4::RigExecWireInput &activation : entry.activations) {
+            ok = ok && resolvedFloat(activation);
+        }
+        if (!ok) {
             return _Fail(error, "blend weight read " + std::to_string(k) +
                                     " is malformed");
         }
@@ -863,6 +879,7 @@ RigExecWireEncodeComputed(const RigExecWireComputed &computed,
         RigExecWirePutU32(out, phased.consumer);
         RigExecWirePutU8(out, uint8_t(phased.consumerType));
         RigExecWirePutU32(out, phased.applied);
+        _PutU32s(out, phased.hops);
     }
     RigExecWirePutU32(out, uint32_t(computed.chainReads.size()));
     for (const RigExecWireChainRead &entry : computed.chainReads) {
@@ -885,6 +902,10 @@ RigExecWireEncodeComputed(const RigExecWireComputed &computed,
         RigExecWirePutU8(out, entry.derived ? 1 : 0);
         RigExecWirePutU32(out, entry.channel);
         _PutInput(out, entry.read);
+        RigExecWirePutU32(out, uint32_t(entry.activations.size()));
+        for (const v4::RigExecWireInput &activation : entry.activations) {
+            _PutInput(out, activation);
+        }
     }
     RigExecWirePutU32(out, uint32_t(computed.defaultWeightReads.size()));
     for (const RigExecWireDefaultWeightRead &entry :
@@ -991,8 +1012,8 @@ RigExecWireDecodeComputed(RigExecWireReader *reader,
             return _Fail(error, "truncated or malformed property chain");
         }
     }
-    // Chain, consumer, consumer type and applied count.
-    if (!_ReadCount(reader, 13, &count)) {
+    // Chain, consumer, consumer type, applied count and the hops' count.
+    if (!_ReadCount(reader, 17, &count)) {
         return _Fail(error, "truncated phased consumers");
     }
     computed->phasedConsumers.resize(count);
@@ -1002,7 +1023,8 @@ RigExecWireDecodeComputed(RigExecWireReader *reader,
             !reader->ReadU32(&phased.consumer) ||
             !reader->ReadU8(&consumerType) ||
             consumerType > v4::PropertyValueTypeLast ||
-            !reader->ReadU32(&phased.applied)) {
+            !reader->ReadU32(&phased.applied) ||
+            !_ReadU32s(reader, &phased.hops)) {
             return _Fail(error, "truncated or malformed phased consumer");
         }
         phased.consumerType = v4::PropertyValueType(consumerType);
@@ -1034,20 +1056,30 @@ RigExecWireDecodeComputed(RigExecWireReader *reader,
         }
         entry.family = RigExecWireRegisteredFamily(family);
     }
-    // Chain, revision, derived flag, channel and a read.
-    if (!_ReadCount(reader, 13 + _InputMinBytes, &count)) {
+    // Chain, revision, derived flag, channel, a read and the activation
+    // reads' count.
+    if (!_ReadCount(reader, 17 + _InputMinBytes, &count)) {
         return _Fail(error, "truncated blend weight reads");
     }
     computed->blendWeightReads.resize(count);
     for (RigExecWireBlendWeightRead &entry : computed->blendWeightReads) {
         uint8_t derived = 0;
+        uint32_t activations = 0;
         if (!reader->ReadU32(&entry.chain) ||
             !reader->ReadU32(&entry.revision) || !reader->ReadU8(&derived) ||
             derived > 1 || !reader->ReadU32(&entry.channel) ||
-            !_ReadInput(reader, &entry.read)) {
+            !_ReadInput(reader, &entry.read) ||
+            !_ReadCount(reader, _InputMinBytes, &activations)) {
             return _Fail(error, "truncated or malformed blend weight read");
         }
         entry.derived = derived != 0;
+        entry.activations.resize(activations);
+        for (v4::RigExecWireInput &activation : entry.activations) {
+            if (!_ReadInput(reader, &activation)) {
+                return _Fail(error,
+                             "truncated or malformed blend activation read");
+            }
+        }
     }
     // Chain, revision and a read.
     if (!_ReadCount(reader, 8 + _InputMinBytes, &count)) {
@@ -1239,6 +1271,12 @@ RigExecWireApplyComputed(const RigExecWireComputed &computed,
         if (!revision || entry.channel >= revision->blendChannels.size()) {
             return _Fail(error, "blend weight read " + std::to_string(k) +
                                     " names no blend channel");
+        }
+        if (entry.activations.size() !=
+            revision->blendChannels[entry.channel].samples.size()) {
+            return _Fail(error, "blend weight read " + std::to_string(k) +
+                                    " reads another number of activations "
+                                    "than its channel has samples");
         }
     }
     for (size_t k = 0; k < computed.defaultWeightReads.size(); ++k) {

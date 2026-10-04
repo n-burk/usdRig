@@ -605,8 +605,14 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
             (s.ikRests[2][0] - s.ikRests[1][0]).GetLength();
         // The constant arm's lengths, measured in the folded spaceMatrix as
         // the baked rest refresh measures them.
-        _RrTwoBoneIkLengths(s.ikRests, RrWireInputConstant(wire.ikSpace).matrix,
-                            wire.upperOffset.f64, wire.lowerOffset.f64,
+        const std::array<int32_t, RrSolverFieldCount> &reads =
+            program->solverRead[solver];
+        const auto constant = [&](int field) {
+            return program->RegisteredConstant(reads[size_t(field)]);
+        };
+        _RrTwoBoneIkLengths(s.ikRests, constant(RrSolverIkSpace).matrix,
+                            constant(RrSolverUpperOffset).f64,
+                            constant(RrSolverLowerOffset).f64,
                             &s.ikParams.upperLength, &s.ikParams.lowerLength);
     } else if (type == "RigExecSplineIk") {
         std::vector<RrPointFrame> restJoints(size_t(wire.splineCount));

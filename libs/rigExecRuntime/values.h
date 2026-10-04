@@ -6,11 +6,13 @@
 #ifndef RIGEXEC_RUNTIME_VALUES_H
 #define RIGEXEC_RUNTIME_VALUES_H
 
+#include "rigExecBinary/computed.h"
 #include "rigExecBinary/program.h"
 #include "rigExecRuntime/runtimeMath.h"
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -100,8 +102,8 @@ struct RrPointFrameArray {
     }
 };
 
-// A resolved input value: holder contents or a wire constant, tagged
-// like RigExecWireInput.
+// A resolved input value, tagged like RigExecWireInput: a read the slots
+// answered, or a wire constant.
 struct RrInputValue {
     RigExecWireInput::Tag tag = RigExecWireInput::Tag::Double;
     double f64 = 0;
@@ -141,23 +143,46 @@ RrWireInputConstant(const RigExecWireInput &input)
     return out;
 }
 
+// A slot-model value in the steps' form: the member its tag names holds
+// the value's bits, every other member stays zero. The input tags share
+// numbers up to Vec3d; no step input reads a Vec3f.
 inline RrInputValue
-RrWireFrameValue(const RigExecWireValue &value)
+RrValueFromWire(const v4::RigExecWireValue &value)
 {
     RrInputValue out;
-    out.tag = value.tag;
-    out.f64 = value.f64;
-    out.f32 = value.f32;
-    out.boolean = value.boolean;
-    out.i32 = value.i32;
-    for (size_t r = 0; r < 4; ++r) {
-        for (size_t c = 0; c < 4; ++c) {
-            out.matrix[r][c] = value.matrix[r * 4 + c];
-        }
+    out.tag = RigExecWireInput::Tag(uint8_t(value.tag));
+    out.matrix.SetDiagonal(0.0);
+    switch (value.tag) {
+    case v4::InputTag::Double:
+        std::memcpy(&out.f64, &value.bits, sizeof(out.f64));
+        break;
+    case v4::InputTag::Float: {
+        const uint32_t bits = uint32_t(value.bits);
+        std::memcpy(&out.f32, &bits, sizeof(out.f32));
+        break;
     }
-    out.token = value.token;
-    out.vec =
-        RrVec3d(value.vec[0], value.vec[1], value.vec[2]);
+    case v4::InputTag::Bool:
+        out.boolean = value.bits != 0;
+        break;
+    case v4::InputTag::Int:
+        out.i32 = int32_t(uint32_t(value.bits));
+        break;
+    case v4::InputTag::Matrix4d:
+        for (size_t r = 0; r < 4; ++r) {
+            for (size_t c = 0; c < 4; ++c) {
+                out.matrix[r][c] = value.matrix[r * 4 + c];
+            }
+        }
+        break;
+    case v4::InputTag::Token:
+        out.token = uint32_t(value.bits);
+        break;
+    case v4::InputTag::Vec3d:
+        out.vec = RrVec3d(value.vec3d[0], value.vec3d[1], value.vec3d[2]);
+        break;
+    case v4::InputTag::Vec3f:
+        break;
+    }
     return out;
 }
 
@@ -338,11 +363,12 @@ struct RrStepCounters {
     void Clear() { *this = RrStepCounters(); }
 };
 
-// What a cross-check comparison compared (RrProgram::crossCheck): computed
-// results (constraint envelopes, current-phase weight packets, property
-// values) and computed reads (registered reads that cross a chain, every
-// other registered read, blend channel weights, revision default weights,
-// connection-following mover scalars).
+// What a cross-check comparison compared (RrProgram::CrossCheckThisRun):
+// computed results (constraint envelopes, current-phase weight packets,
+// property values) and computed reads (registered reads that cross a
+// chain, every other registered read, blend channel weights, revision
+// default weights, connection-following mover scalars, blend sample
+// activations).
 enum RrCrossCheckKind : size_t {
     RrCrossCheckEnvelope = 0,
     RrCrossCheckPhasePacket,
@@ -352,6 +378,7 @@ enum RrCrossCheckKind : size_t {
     RrCrossCheckBlendWeight,
     RrCrossCheckDefaultWeight,
     RrCrossCheckPathRead,
+    RrCrossCheckBlendActivation,
     RrCrossCheckKindCount,
 };
 
@@ -421,12 +448,6 @@ struct RrCommitScratch {
     std::vector<RrConstraintSource> sources;
     std::vector<RrPointFrame> ikChain, ikPrepared, ikRest, ikSolved;
 };
-
-// The 11 avar channels, in RigExecBakedAvarNames order.
-inline const char *const RrAvarNames[11] = {
-    "avars:tx", "avars:ty", "avars:tz", "avars:sx", "avars:sy", "avars:sz",
-    "avars:rx", "avars:ry", "avars:rz", "avars:rspin",
-    "avars:unitScaleFactor"};
 
 }  // namespace rigExec
 
