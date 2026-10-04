@@ -336,6 +336,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:collisionMax>
                     uniform token rigExec:operation = "blend"
@@ -382,6 +385,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:collisionRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:driverRx>
                     uniform token rigExec:operation = "blend"
@@ -391,7 +397,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float inputs:max = 40
+                    float inputs:max = 40 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:max.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:collisionMax>
                     float inputs:min = -1000000
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:driverRx>
@@ -430,6 +438,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot.avars:rx>
                     uniform token rigExec:operation = "blend"
@@ -449,6 +460,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot.face:driverRy>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot.avars:ry>
                     uniform token rigExec:operation = "blend"
@@ -468,6 +482,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.avars:rx>
                     uniform token rigExec:operation = "blend"
@@ -487,6 +504,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:driverRy>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.avars:ry>
                     uniform token rigExec:operation = "blend"
@@ -506,6 +526,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketStretch_l_pivot.avars:sy>
                     uniform token rigExec:operation = "blend"
@@ -646,6 +669,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:squashScale>
                     uniform token rigExec:operation = "blend"
@@ -655,6 +681,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:collisionRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:squashScale>
                     uniform token rigExec:operation = "add"
@@ -719,6 +748,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:squashScale>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot.avars:sx>
                     uniform token rigExec:operation = "blend"
@@ -755,6 +787,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot.face:squashOffset>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot.avars:sx>
                     uniform token rigExec:operation = "add"
@@ -764,6 +799,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot.avars:sy>
                     uniform token rigExec:operation = "blend"
@@ -773,6 +811,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot.avars:sz>
                     uniform token rigExec:operation = "blend"
@@ -800,6 +841,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot.face:squashScale>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot.avars:sx>
                     uniform token rigExec:operation = "blend"
@@ -836,6 +880,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot.face:squashOffset>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot.avars:sx>
                     uniform token rigExec:operation = "add"
@@ -845,6 +892,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot.avars:sy>
                     uniform token rigExec:operation = "blend"
@@ -854,6 +904,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot.avars:sz>
                     uniform token rigExec:operation = "blend"
@@ -1601,6 +1654,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:collisionMax>
                     uniform token rigExec:operation = "blend"
@@ -1647,6 +1703,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:collisionRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:driverRx>
                     uniform token rigExec:operation = "blend"
@@ -1656,7 +1715,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float inputs:max = 40
+                    float inputs:max = 40 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:max.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:collisionMax>
                     float inputs:min = -1000000
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:driverRx>
@@ -1695,6 +1756,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot.avars:rx>
                     uniform token rigExec:operation = "blend"
@@ -1714,6 +1778,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot.face:driverRy>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot.avars:ry>
                     uniform token rigExec:operation = "blend"
@@ -1733,6 +1800,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.avars:rx>
                     uniform token rigExec:operation = "blend"
@@ -1752,6 +1822,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:driverRy>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.avars:ry>
                     uniform token rigExec:operation = "blend"
@@ -1771,6 +1844,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketStretch_r_pivot.avars:sy>
                     uniform token rigExec:operation = "blend"
@@ -1911,6 +1987,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot.face:driverRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:squashScale>
                     uniform token rigExec:operation = "blend"
@@ -1920,6 +1999,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:collisionRx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:squashScale>
                     uniform token rigExec:operation = "add"
@@ -1984,6 +2066,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:squashScale>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot.avars:sx>
                     uniform token rigExec:operation = "blend"
@@ -2020,6 +2105,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot.face:squashOffset>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot.avars:sx>
                     uniform token rigExec:operation = "add"
@@ -2029,6 +2117,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot.avars:sy>
                     uniform token rigExec:operation = "blend"
@@ -2038,6 +2129,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot.avars:sz>
                     uniform token rigExec:operation = "blend"
@@ -2065,6 +2159,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot.face:squashScale>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot.avars:sx>
                     uniform token rigExec:operation = "blend"
@@ -2101,6 +2198,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot.face:squashOffset>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot.avars:sx>
                     uniform token rigExec:operation = "add"
@@ -2110,6 +2210,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot.avars:sy>
                     uniform token rigExec:operation = "blend"
@@ -2119,6 +2222,9 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot.avars:sx>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot.avars:sz>
                     uniform token rigExec:operation = "blend"
@@ -2828,6 +2934,9 @@ over "Biped"
                     apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/lookRot_aim/M_LookRot.face:convergeNeg>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/lookRot_aim/M_LookRot/eye_l_converge.avars:ry>
                     uniform token rigExec:operation = "add"
@@ -2873,6 +2982,9 @@ over "Biped"
                     apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/lookRot_aim/M_LookRot.face:convergePos>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/lookRot_aim/M_LookRot/eye_r_converge.avars:ry>
                     uniform token rigExec:operation = "add"

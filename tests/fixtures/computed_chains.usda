@@ -6,7 +6,9 @@
     Hermite curve with tangents, blend under a StaticWeight envelope, add
     under a clamped DynamicWeight envelope driven by another avar, pass
     through disabled and with an out-of-range inputs:defaultWeight, and
-    clamp; its result feeds a constraint's inputs:defaultWeight. Beside it
+    clamp; its result feeds a constraint's inputs:defaultWeight, which
+    declares rigExecReadPhase = "final" (a connection reads the base
+    unless it declares another phase). Beside it
     a double chain (computed in float), a vec3f and a matrix chain, a chain
     whose target has no authored value, and three phased consumers: the
     float chain's base, the float chain after its curve revision, and the
@@ -279,6 +281,9 @@ def Xform "Asset"
                 prepend apiSchemas = ["RigExecMoverAPI"]
             )
             {
+                float inputs:defaultWeight (
+                    rigExecReadPhase = "final"
+                )
                 prepend float inputs:defaultWeight.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
                 rel rigExec:moves = </Asset/Target>
                 rel rigExec:sources = </Asset/Source>

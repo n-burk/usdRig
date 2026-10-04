@@ -125,10 +125,10 @@ performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
   at half weight.
 - **16_ConnectionReadPhases.usda** — read phases on attribute
   connections. One dial is doubled and then clamped by two math movers,
-  and three readers connect to it: at `base`, at a checkpoint after the
-  doubling, and undeclared (`final`). Float math movers show the three
-  values as channels; three cards whose matrix-mover envelope is the
-  connection rise by them.
+  and three readers connect to it: undeclared (`base`, the authored
+  value), at a checkpoint after the doubling, and at a declared `final`.
+  Float math movers show the three values as channels; three cards whose
+  matrix-mover envelope is the connection rise by them.
 - **rigexec_flat.usda** — the smallest rig that exists, and a flattened
   capture of the shape an interactive session produces: one aim
   constraint, no joints at all, and both ends plain `UsdGeomXformable`s.

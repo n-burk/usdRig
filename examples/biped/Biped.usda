@@ -1244,7 +1244,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/ballRoll_l_down_rc/L_BallRoll_down_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1320,7 +1322,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/ballRoll_l_up_rc/L_BallRoll_up_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1372,7 +1376,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/toe_l_roll_rc/toe_l_roll_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1447,7 +1453,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/heel_l_roll_rc/L_Heel_roll_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1499,7 +1507,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:footRockTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/bankOut_l_pivot_rc/bankOut_l_pivot_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1551,7 +1561,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/L_Leg.avars:footRockTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/bankIn_l_pivot_rc/bankIn_l_pivot_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1642,7 +1654,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_down_rc/R_BallRoll_down_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1718,7 +1732,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_up_rc/R_BallRoll_up_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1770,7 +1786,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/toe_r_roll_rc/toe_r_roll_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1845,7 +1863,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/heel_r_roll_rc/R_Heel_roll_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1897,7 +1917,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRockTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/bankOut_r_pivot_rc/bankOut_r_pivot_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"
@@ -1949,7 +1971,9 @@ def "Biped"
                 )
                 {
                     float inputs:defaultWeight = 1
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRockTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/bankIn_r_pivot_rc/bankIn_r_pivot_rotation.inputs:defaultWeight>
                     uniform token rigExec:operation = "add"

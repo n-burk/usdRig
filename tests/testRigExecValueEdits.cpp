@@ -450,6 +450,8 @@ struct _InvalidationProbe : public TfWeakBase {
 // is routed through -- is not the walk the frame takes any more. The value
 // edit on the new upstream hop that follows then reaches the constraint,
 // where a program that had kept the old index would have routed it nowhere.
+// The weight declares no read phase, so it reads the clamp chain's BASE:
+// the driver as authored, published on the weight by the chain's run.
 void
 TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     const std::string &examplesDir)
@@ -470,7 +472,9 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
         CHECK(b.Set(0.2f, UsdTimeCode(100.0)));
         // A clamp on each: both are property-chain targets, so a walk that
         // reaches either resolves through the chain every frame (a
-        // `resolvedAttr` walk) and its hops are the input's override paths.
+        // `resolvedAttr` walk, answered at its head by the base the chain
+        // publishes on the weight) and its hops are the input's override
+        // paths.
         const SdfPath movers = kAimRig.AppendChild(TfToken("Movers"));
         for (const char *name : {"drv:a", "drv:b"}) {
             const UsdPrim clamp = stage->DefinePrim(
@@ -483,8 +487,10 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
                 .Set(TfToken("clamp"));
             clamp.CreateAttribute(TfToken("inputs:min"),
                                   SdfValueTypeNames->Float).Set(0.0f);
+            // Below the drivers' values at the held time, so the chain's
+            // base and final differ there.
             clamp.CreateAttribute(TfToken("inputs:max"),
-                                  SdfValueTypeNames->Float).Set(1.0f);
+                                  SdfValueTypeNames->Float).Set(0.5f);
             clamp.CreateRelationship(TfToken("rigExec:moves"))
                 .SetTargets({drivers.AppendProperty(TfToken(name))});
         }
@@ -512,7 +518,8 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     TfNotice::Revoke(key);
     // The walk resolved through a chain every frame, so nothing about its
     // value was captured -- and still the retarget is the program's own
-    // reason to rebuild.
+    // reason to rebuild (and a new epoch: the connection walk is in the
+    // structure digest).
     CHECK(probe.invalidated);
     CHECK(evaluator.GetLastNoticeDisposition() ==
           RigExecNoticeDisposition::Stale);
@@ -521,9 +528,19 @@ TestARetargetedWalkRebuildsBeforeItsUpstreamEdit(
     CHECK(evaluator.GetBakedProgramBuildCount() == builds + 1);
     CheckSamePose("retargeted walk", FreshPose(stage, kAimRig, time),
                   retargeted);
+    // What the weight read: drv:b as authored, not the clamp's 0.5.
+    const auto weightRead = retargeted.movedProperties.find(
+        kAim.AppendProperty(TfToken("inputs:defaultWeight")));
+    float authoredB = 0.0f;
+    CHECK(stage->GetAttributeAtPath(driverB).Get(&authoredB, time));
+    CHECK(authoredB > 0.5f);
+    CHECK(weightRead != retargeted.movedProperties.end() &&
+          weightRead->second.IsHolding<float>() &&
+          weightRead->second.UncheckedGet<float>() == authoredB);
     CHECK(evaluator.Evaluate(time).valid);
 
-    // The new upstream hop's value, at the held time.
+    // The new upstream hop's value, at the held time: the base the weight
+    // reads, so the chain's next run publishes it there.
     CHECK(stage->GetAttributeAtPath(driverB).Set(0.05f, UsdTimeCode(100.0)));
     const RigExecNoticeDisposition got = evaluator.GetLastNoticeDisposition();
     std::printf("  upstream edit after the retarget: %s\n",

@@ -404,7 +404,7 @@ bool
 RigExecRigEvaluator::_DiscoverMovers(
     std::vector<RigExecMoverRecord> &newMovers,
     std::vector<_SurfaceProjectorRecord> &newSurfaceProjectors,
-    size_t &inertMovers,
+    SdfPathVector &inertMovers,
     std::vector<std::string> *errors, _CompileFailure *failure) const
 {
     const auto fail = [failure](const std::string &message,
@@ -430,7 +430,7 @@ RigExecRigEvaluator::_DiscoverMovers(
     /// Mover-bearing prims discovered but skipped because nothing is wired to
     /// their rigExec:moves yet. They are not outputs, but they ARE evidence
     /// that the rig root points somewhere real.
-    inertMovers = 0;
+    inertMovers.clear();
     const UsdPrim moverRig = _stage->GetPrimAtPath(_rigPath);
     int ordinal = 0;
     if (moverRig) {
@@ -486,7 +486,7 @@ RigExecRigEvaluator::_DiscoverMovers(
                 // would otherwise announce itself, while an authored but
                 // empty write set is a wire the author meant to connect.
                 // So it is skipped and SAID, never skipped silently.
-                ++inertMovers;
+                inertMovers.push_back(prim.GetPath());
                 reportNotice("Mover has no moves targets: " +
                              prim.GetPath().GetString() +
                              "; it is inert this generation");

@@ -823,6 +823,10 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
         C.propertyChains.push_back(std::move(chain));
     }
+    // The connected readers' records (RigExecPhasedConnection: the base
+    // unless a reader declares another phase). Compile admits a reader only
+    // of the chain's value type, or float and double, so every consumer is
+    // a float, double, matrix4d or 3-float slot, as every chain target is.
     for (size_t c = 0; c < chainDescs.size(); ++c) {
         for (const RigExecBakedPropertyChainDesc::Phased &p :
              chainDescs[c].phased) {

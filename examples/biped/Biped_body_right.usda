@@ -372,7 +372,9 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/ballRoll_l_down_w/L_BallRoll_down_w_2_add>
                 )
                 {
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_down_rc/R_BallRoll_down_rotation.inputs:defaultWeight>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 13.64)
@@ -433,7 +435,9 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/ballRoll_l_up_w/L_BallRoll_up_w_0_add>
                 )
                 {
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_up_rc/R_BallRoll_up_rotation.inputs:defaultWeight>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 14.3)
@@ -474,7 +478,9 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/toe_l_roll_w/toe_l_roll_w_2_add>
                 )
                 {
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/toe_r_roll_rc/toe_r_roll_rotation.inputs:defaultWeight>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 14.74)
@@ -533,7 +539,9 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/heel_l_roll_w/L_Heel_roll_w_0_add>
                 )
                 {
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRollTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/heel_r_roll_rc/R_Heel_roll_rotation.inputs:defaultWeight>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 15.4)
@@ -574,7 +582,9 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/bankOut_l_pivot_w/bankOut_l_pivot_w_0_add>
                 )
                 {
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRockTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/bankOut_r_pivot_rc/bankOut_r_pivot_rotation.inputs:defaultWeight>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 15.84)
@@ -615,7 +625,9 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/bankIn_l_pivot_w/bankIn_l_pivot_w_0_add>
                 )
                 {
-                    float inputs:value = 0
+                    float inputs:value = 0 (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </Biped/Rig/Main/Shot/Aux/Controls/R_Leg.avars:footRockTotal>
                     rel rigExec:moves = </Biped/Rig/Movers/bankIn_r_pivot_rc/bankIn_r_pivot_rotation.inputs:defaultWeight>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 16.28)

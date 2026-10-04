@@ -680,6 +680,198 @@ TestChainedRigWarmsBitIdentical()
     }
 }
 
+// The read phase of a connection, warmed: the chained rig plus readout
+// movers that add what they read of the revised tx avar to float channels
+// of their own -- undeclared (the base: tx as authored), `final` (no record:
+// tx's published value answers it), `base` on a hop, `final` through that
+// hop (a record of every revision) and a checkpoint at the last revision.
+// The hook publishes each record on its reader as live does, the warmed
+// poses match live bit for bit, and so they do under each drag rule: on a
+// reader's own input, on the hop, and on the target, whose drag every
+// final reader reads while the base readers keep the authored value and
+// the checkpoint the chain's computed one.
+UsdStageRefPtr
+MakePhasedChainedRig()
+{
+    UsdStageRefPtr stage = MakeChainedRig();
+    const UsdPrim channels = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Channels/Readouts"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Readouts"), TfToken("Scope"));
+    const auto readout = [&](const char *name, const SdfPath &source,
+                             const char *phase) {
+        const UsdAttribute target = channels.CreateAttribute(
+            TfToken(std::string("rigExec:") + name), SdfValueTypeNames->Float);
+        target.Set(0.0f);
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Movers/Readouts/") + name),
+            TfToken("RigExecFloatMathMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.CreateAttribute(TfToken("rigExec:operation"),
+                              SdfValueTypeNames->Token)
+            .Set(TfToken("add"));
+        mover.GetRelationship(TfToken("rigExec:moves"))
+            .SetTargets({target.GetPath()});
+        const UsdAttribute value = mover.CreateAttribute(
+            TfToken("inputs:value"), SdfValueTypeNames->Float);
+        value.SetConnections({source});
+        if (phase) {
+            value.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+        }
+    };
+    const SdfPath tx("/Asset/Rig/AlongX.avars:tx");
+    readout("base", tx, nullptr);
+    readout("final", tx, "final");
+    readout("hop", tx, "base");
+    readout("finalViaHop",
+            SdfPath("/Asset/Rig/Movers/Readouts/hop.inputs:value"), "final");
+    readout("lastCheckpoint", tx, "/Asset/Rig/Movers/TxGain");
+    return stage;
+}
+
+static float
+_ReadoutOf(const RigExecRigPose &pose, const char *name)
+{
+    const auto it = pose.movedProperties.find(SdfPath(
+        std::string("/Asset/Rig/Channels/Readouts.rigExec:") + name));
+    return it != pose.movedProperties.end() && it->second.IsHolding<float>()
+               ? it->second.UncheckedGet<float>()
+               : -1.0f;
+}
+
+void
+TestPhasedReadsWarmBitIdentical()
+{
+    UsdStageRefPtr stage = MakePhasedChainedRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    // base, hop, finalViaHop and lastCheckpoint; `final` passes no
+    // recorded hop.
+    CHECK(evaluator.GetPhasedConnections().size() == 4);
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(frozen != nullptr);
+    RigExecBackgroundScheduler scheduler;
+
+    const SdfPath txPath("/Asset/Rig/AlongX.avars:tx");
+    double authored = 0.0;
+    CHECK(stage->GetAttributeAtPath(txPath).Get(&authored, UsdTimeCode(3.0)));
+    RigExecFrameInputs at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &at3,
+                                   &error));
+    CHECK(!at3.HasChainResolvedInputs());
+    // The hook publishes each record on its reader, as live does.
+    const auto carried = at3.chainResults.find(
+        SdfPath("/Asset/Rig/Movers/Readouts/base.inputs:value"));
+    CHECK(carried != at3.chainResults.end() &&
+          carried->second == VtValue(float(authored)));
+    const RigExecRigPose warmed3 =
+        RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live3.valid);
+    CheckPosesBitIdentical("phased reads, frame 3", live3, warmed3);
+    const auto revised = live3.movedProperties.find(txPath);
+    CHECK(revised != live3.movedProperties.end() &&
+          revised->second.IsHolding<double>());
+    const float final = revised != live3.movedProperties.end()
+                            ? float(revised->second.Get<double>())
+                            : 0.0f;
+    CHECK(final != float(authored));
+    CHECK(_ReadoutOf(live3, "base") == float(authored));
+    CHECK(_ReadoutOf(live3, "hop") == float(authored));
+    CHECK(_ReadoutOf(live3, "final") == final);
+    CHECK(_ReadoutOf(live3, "finalViaHop") == final);
+    CHECK(_ReadoutOf(live3, "lastCheckpoint") == final);
+
+    struct Drag {
+        const char *what;
+        RigExecValueOverride override;
+        float base, hop, final, finalViaHop, lastCheckpoint;
+    };
+    const auto at = [](const char *prim, const char *attribute,
+                       const VtValue &value) {
+        return RigExecValueOverride{SdfPath(prim), TfToken(),
+                                    TfToken(attribute), value};
+    };
+    const Drag drags[] = {
+        {"drag on a reader's input",
+         at("/Asset/Rig/Movers/Readouts/base", "inputs:value",
+            VtValue(0.5f)),
+         0.5f, float(authored), final, final, final},
+        {"drag on the hop",
+         at("/Asset/Rig/Movers/Readouts/hop", "inputs:value",
+            VtValue(0.25f)),
+         float(authored), 0.25f, final, 0.25f, final},
+        {"drag on the target",
+         at("/Asset/Rig/AlongX", "avars:tx", VtValue(3.25)),
+         float(authored), float(authored), 3.25f, 3.25f, final},
+    };
+    for (const Drag &drag : drags) {
+        evaluator.SetInteractiveOverrides({drag.override});
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        RigExecFrameInputs dragged;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0),
+                                       {drag.override}, &dragged, &error));
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, rig, frozen, dragged, &scheduler, nullptr);
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+        CHECK(live.valid);
+        CheckPosesBitIdentical(drag.what, live, warmed);
+        const bool read = _ReadoutOf(live, "base") == drag.base &&
+                          _ReadoutOf(live, "hop") == drag.hop &&
+                          _ReadoutOf(live, "final") == drag.final &&
+                          _ReadoutOf(live, "finalViaHop") ==
+                              drag.finalViaHop &&
+                          _ReadoutOf(live, "lastCheckpoint") ==
+                              drag.lastCheckpoint;
+        if (!read) {
+            std::printf("FAIL %s: read %.9g %.9g %.9g %.9g %.9g\n",
+                        drag.what, double(_ReadoutOf(live, "base")),
+                        double(_ReadoutOf(live, "hop")),
+                        double(_ReadoutOf(live, "final")),
+                        double(_ReadoutOf(live, "finalViaHop")),
+                        double(_ReadoutOf(live, "lastCheckpoint")));
+        }
+        CHECK(read);
+        evaluator.SetInteractiveOverrides({});
+    }
+
+    // A rewire that keeps every record's consumer, type and position but
+    // lengthens a walk -- finalViaHop now reads through a relay outside
+    // the rig, which reads nothing at a phase itself, before the hop --
+    // leaves bindings that would stand aside by the old hops: no longer
+    // current, so the caller rebinds.
+    RigExecChainSampleBindings bound;
+    CHECK(RigExecBindChainSampleInputs(evaluator, &bound, &error));
+    CHECK(RigExecChainSampleBindingsStillCurrent(bound, evaluator));
+    const SdfPath finalViaHop(
+        "/Asset/Rig/Movers/Readouts/finalViaHop.inputs:value");
+    const UsdAttribute relay =
+        stage->DefinePrim(SdfPath("/Asset/Relay"), TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:relay"),
+                             SdfValueTypeNames->Float);
+    relay.SetConnections(
+        {SdfPath("/Asset/Rig/Movers/Readouts/hop.inputs:value")});
+    stage->GetAttributeAtPath(finalViaHop).SetConnections({relay.GetPath()});
+    CHECK(evaluator.Evaluate(UsdTimeCode(3.0)).valid);
+    size_t hops = 0;
+    for (const RigExecPhasedConnection &connection :
+         evaluator.GetPhasedConnections()) {
+        if (connection.consumer == finalViaHop) {
+            hops = connection.hops.size();
+        }
+    }
+    CHECK(hops == 3);
+    CHECK(evaluator.GetPhasedConnections().size() == 4);
+    CHECK(!RigExecChainSampleBindingsStillCurrent(bound, evaluator));
+}
+
 // A chain binding a weight object declines at every layer: the hook names
 // the chain but refuses to evaluate it (the envelope resolves through the
 // evaluator's live oracle), the sampler falls back to the standing state
@@ -3399,6 +3591,7 @@ main(int argc, char **argv)
     TestDigestMovesWithControls();
     TestProductionRunnerIsBitIdenticalToLive();
     TestChainedRigWarmsBitIdentical();
+    TestPhasedReadsWarmBitIdentical();
     TestChainHookDeclinesWeightObjects();
     TestSessionBindingsMatchFreshBind();
     TestBurstCacheMatchesPinnedSampling();

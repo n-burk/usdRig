@@ -12886,10 +12886,11 @@ struct RigExecWirePhasedConsumer : public ::flatbuffers::NativeTable {
   uint32_t applied = 0;
 };
 
-/// A connection that reads a chain at a declared phase: after the chain
-/// runs, its value after the first `applied` revisions is published at the
-/// consumer, converted between float and double when the types differ.
-/// Grouped by chain, in the evaluator's order within each chain.
+/// A connection that reads a chain at its phase, the base unless it declares
+/// another: after the chain runs, its value after the first `applied`
+/// revisions is published at the consumer, converted between float and
+/// double when the types differ. Grouped by chain, in the evaluator's order
+/// within each chain.
 struct PhasedConsumer FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef RigExecWirePhasedConsumer NativeTableType;
   typedef PhasedConsumerBuilder Builder;

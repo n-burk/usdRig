@@ -2297,8 +2297,9 @@ TestComputedChainBake()
           narrow.applied == 0 &&
           narrow.consumerType == v4::PropertyValueType::Float);
 
-    // Follow's weight is the one registered read that crosses a chain: its
-    // walk runs from its own attribute to the dial's target.
+    // Follow's weight declares `final`, so it is the one registered read
+    // that crosses a chain rather than a phased consumer: its walk runs
+    // from its own attribute to the dial's target.
     CHECK(computed.chainReads.size() == 1);
     if (computed.chainReads.size() == 1) {
         const RigExecWireChainRead &weight = computed.chainReads[0];

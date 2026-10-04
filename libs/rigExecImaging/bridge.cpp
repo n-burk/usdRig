@@ -191,7 +191,10 @@ _ReadGuidePurpose(const UsdPrim &prim)
 // drew nothing different, and gave no hint why. This is the read-through.
 // A property-mover result for the source wins over its authored value,
 // exactly as the volume guides read their driven dimensions: a dial that
-// is itself computed must fade the guide by what it computed.
+// is itself computed must fade the guide by what it computed. A value the
+// rig published on the attribute itself wins over both: it is the
+// connection read at its phase (RigExecPhasedConnection), the base of a
+// computed dial unless the attribute declares another.
 bool
 _ReadConnectedValue(
     const UsdAttribute &attr, const RigExecRigPose &pose, VtValue *held)
@@ -199,6 +202,11 @@ _ReadConnectedValue(
     SdfPathVector connections;
     if (!attr.GetConnections(&connections) || connections.empty()) {
         return false;
+    }
+    const auto phased = pose.movedProperties.find(attr.GetPath());
+    if (phased != pose.movedProperties.end() && !phased->second.IsEmpty()) {
+        *held = phased->second;
+        return true;
     }
     const SdfPath &sourcePath = connections.front();
     if (!sourcePath.IsPropertyPath()) {

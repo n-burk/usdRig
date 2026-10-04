@@ -53,17 +53,29 @@ struct RigExecMoverRecord {
     bool enabledFallback = true;
 };
 
-/// An operator input whose connection reads a property chain at a declared
-/// phase rather than its final value: rigExecReadPhase on the input.
+/// An operator input whose connection reads a property chain at a phase:
+/// rigExecReadPhase on the input, `base` when none is authored.
 /// `applied` is how many of the chain's revisions the value includes -- 0
-/// for `base`, the revision count through a named prim for a checkpoint.
-/// The value is published on the consumer itself, so every reader of the
-/// input gets it through the routes a chain result takes.
+/// for `base`, the revision count through a named prim for a checkpoint,
+/// every revision for `final`. The value is published on the consumer
+/// itself, so every reader of the input gets it through the routes a chain
+/// result takes, whatever an intermediate hop of its connection declares.
+///
+/// `hops` is the consumer followed by every attribute its connection walk
+/// passes before the target. An interactive override on any of them is
+/// what the overlay walk meets first, so the record publishes nothing
+/// while one stands. An override on the target replaces the chain's final
+/// value only: a `final` record reads it, and every other record -- a
+/// checkpoint at the last revision too -- reads the chain's own history
+/// from the authored base.
 struct RigExecPhasedConnection {
     SdfPath consumer;
     SdfValueTypeName consumerType;
     SdfPath target;
     size_t applied = 0;
+    SdfPathVector hops;
+    /// Declared `final` (then `applied` is the revision count).
+    bool final = false;
 };
 
 /// One weight object's resolved field, as a mover actually consumed it.
@@ -523,9 +535,14 @@ public:
     }
 
     /// The read phases the last compile resolved on operator inputs'
-    /// connections: the movers' inputs in mover order, then the solvers'.
-    /// A connection with no declaration, or one declaring `final`, reads
-    /// the chain's final value and has none.
+    /// connections, in _ForEachConnectedInput order. Every connected input
+    /// whose walk reaches a property-chain target has one -- `base` when it
+    /// declares nothing -- except where the overlay walk already answers:
+    /// a `final` whose walk passes no recorded hop reads the target's
+    /// published value (unless it is a double reading a float chain, which
+    /// only a record widens), and an undeclared input that math movers
+    /// revise themselves, or whose value type differs from the target's,
+    /// never reads the chain through its connection.
     const std::vector<RigExecPhasedConnection> &GetPhasedConnections() const {
         return _phasedConnections;
     }
@@ -802,9 +819,11 @@ private:
     };
 
     /// Discover and validate movers without changing the active epoch.
+    /// \p inertMovers receives each mover prim with an empty rigExec:moves.
     bool _DiscoverMovers(std::vector<RigExecMoverRecord> &movers,
                          std::vector<_SurfaceProjectorRecord> &projectors,
-                         size_t &inertMovers, std::vector<std::string> *errors,
+                         SdfPathVector &inertMovers,
+                         std::vector<std::string> *errors,
                          _CompileFailure *failure) const;
 
     /// Whether \p path is an operation the current compile set aside.
@@ -1891,14 +1910,17 @@ private:
     };
 
     /// Bind property revisions and order their attribute/weight dependencies,
-    /// and resolve the read phases declared on connected inputs of the
-    /// movers and of \p solvers.
+    /// and resolve the read phase of every connected operator input
+    /// (_ForEachConnectedInput). \p movers and \p solvers name the
+    /// operation a bad declaration sets aside; an input that only
+    /// \p inertMovers or operations already set aside read is not resolved.
     bool _CompilePropertyChains(
         const std::vector<RigExecMoverRecord> &movers,
         std::map<SdfPath, std::vector<_PropertyRevision>> &chains,
         std::vector<SdfPath> &order,
         std::vector<RigExecPhasedConnection> &phased,
         const std::vector<UsdPrim> &solvers,
+        const SdfPathVector &inertMovers,
         _CompileFailure *failure) const;
     /// Exact scalar property target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;

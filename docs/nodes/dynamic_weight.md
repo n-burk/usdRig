@@ -134,7 +134,7 @@ python docs/render_media.py --page dynamic_weight
 
 - `rangePolicy: clamp` is what lets `inputs:scale` overdrive the paint: a result outside [0, 1] is clamped instead of failing the pose, so a driver can push part of a painted ramp to fully followed while the rest of it still fades.
 - The influence overlay paints the field a mover consumed, so point it at the dynamic weight, not the base it wraps: an unbound base has no resolved field of its own to show.
-- Drive the driver from another channel (a float math mover or a connection) to tie corrective strength to posing; each of driver, scale, and bias takes at most one float connection.
+- Drive the driver from another channel (a float math mover or a connection) to tie corrective strength to posing; each of driver, scale, and bias takes at most one float connection. A connection to a channel that float math movers revise reads its authored base unless the input declares `rigExecReadPhase = "final"`.
 
 ## See also
 

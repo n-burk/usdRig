@@ -1457,6 +1457,35 @@ TestControlGuides(const std::string &examplesDir)
         CHECK(std::abs(readOpacity(shoulderFk) - 0.3f) < 1e-6f);
         CHECK(std::abs(readOpacity(elbowFk) - 0.6f) < 1e-6f);
 
+        // A dial a math mover doubles: the guide reads it at the opacity
+        // attribute's own read phase -- the dial as authored by default,
+        // the doubled value once the attribute declares `final`.
+        {
+            const TfToken phaseField("rigExecReadPhase");
+            const UsdPrim gain = stage->DefinePrim(
+                SdfPath("/Shot/HeroArm/Rig/DialGain"),
+                TfToken("RigExecFloatMathMover"));
+            CHECK(gain.ApplyAPI(TfToken("RigExecMoverAPI")));
+            gain.CreateAttribute(TfToken("rigExec:operation"),
+                                 SdfValueTypeNames->Token)
+                .Set(TfToken("multiply"));
+            gain.CreateAttribute(TfToken("inputs:value"),
+                                 SdfValueTypeNames->Float)
+                .Set(2.0f);
+            gain.CreateRelationship(TfToken("rigExec:moves"))
+                .SetTargets({dial.GetPath()});
+            CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+            CHECK(std::abs(readOpacity(shoulderFk) - 0.3f) < 1e-6f);
+            CHECK(shoulderOpacity.SetMetadata(phaseField,
+                                              std::string("final")));
+            CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+            CHECK(std::abs(readOpacity(shoulderFk) - 0.6f) < 1e-6f);
+            CHECK(shoulderOpacity.ClearMetadata(phaseField));
+            CHECK(stage->RemovePrim(gain.GetPath()));
+            CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+            CHECK(std::abs(readOpacity(shoulderFk) - 0.3f) < 1e-6f);
+        }
+
         // Invert: the FK side of one switch draws the complement.
         const UsdAttribute invert =
             shoulder.GetAttribute(TfToken("guide:displayOpacityInvert"));

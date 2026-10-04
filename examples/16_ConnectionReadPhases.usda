@@ -3,33 +3,39 @@
     """
     RigExec example 16 - read phases on attribute connections.
 
-    A mover input connected to a property reads that property's FINAL value:
-    every math mover that revises it has already run. 13_ReadPhases declares
-    a different phase on a relationship; this file declares one on a
-    connection, with the same metadata on the connected input:
+    An input connected to a property that math movers revise reads that
+    property's BASE value, its authored value before any of them, unless
+    it declares another phase. 13_ReadPhases declares a phase on a
+    relationship; this file declares one on a connection, with the same
+    metadata on the connected input:
 
-        float inputs:value.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
         float inputs:value (
-            rigExecReadPhase = "base"
+            rigExecReadPhase = "final"
         )
+        float inputs:value.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
 
     Three phases apply to a connection:
 
-      final       the value after every math mover on the property. What an
-                  undeclared connection reads.
       base        the property's authored value, before any math mover.
+                  What an undeclared connection reads, as an unannotated
+                  relationship does.
+      final       the value after every math mover on the property.
       <prim path> the value as the last math mover at or beneath that prim
                   left it. A Scope names everything beneath it.
 
     `preceding` names a position in the reader's own chain, and a connection
     reads someone else's, so it is refused here. The connection must reach
     the revised property through single-source hops; the first property a
-    math mover writes on that walk is the one whose phase is chosen.
+    math mover writes on that walk is the one whose phase is chosen, and
+    the reading input's own phase decides, whatever a hop declares.
 
-    The phase is read on these inputs: inputs:enabled and
-    inputs:defaultWeight on every mover, and inputs:value, inputs:min,
-    inputs:max, inputs:keys and inputs:tangents on the math movers. It
-    needs the property's own type, or float and double either way round.
+    The phase is read on every connected attribute of a prim under the rig
+    root -- a mover's inputs, a solver's or a constraint's, a control's
+    avars -- and of the weight objects and blend inputs an operator names,
+    and on each attribute an operator names as one it reads, such as a
+    pose interpolator's rigExec:driverAttributes.
+    A declared phase needs the property's own value type, or float and
+    double either way round.
 
     WHAT THIS FILE DEMONSTRATES
 
@@ -41,9 +47,9 @@
 
     Three readers each connect to the dial and choose a phase:
 
-      Base     rigExecReadPhase = "base"        reads 0.45 at frame 1024
+      Base     no metadata: the default         reads 0.45 at frame 1024
       Gain     a path naming the Gain mover     reads 0.9
-      Final    no metadata                      reads 0.6
+      Final    rigExecReadPhase = "final"       reads 0.6
 
     The readers come in two kinds. The Readouts are float math movers that
     add what they read to a channel of their own, so the three values are
@@ -156,9 +162,6 @@ def Xform "PhaseConnectAsset"
                 )
                 {
                     uniform token rigExec:operation = "add"
-                    float inputs:value (
-                        rigExecReadPhase = "base"
-                    )
                     float inputs:value.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
                     rel rigExec:moves = </PhaseConnectAsset/Rig/Channels/Readouts.rigExec:base>
                 }
@@ -180,6 +183,9 @@ def Xform "PhaseConnectAsset"
                 )
                 {
                     uniform token rigExec:operation = "add"
+                    float inputs:value (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:value.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
                     rel rigExec:moves = </PhaseConnectAsset/Rig/Channels/Readouts.rigExec:final>
                 }
@@ -194,9 +200,6 @@ def Xform "PhaseConnectAsset"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float inputs:defaultWeight (
-                        rigExecReadPhase = "base"
-                    )
                     float inputs:defaultWeight.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
                     rel rigExec:transform = </PhaseConnectAsset/Rig/Joints/Lift> (
                         rigExecReadPhase = "final"
@@ -222,6 +225,9 @@ def Xform "PhaseConnectAsset"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
+                    float inputs:defaultWeight (
+                        rigExecReadPhase = "final"
+                    )
                     float inputs:defaultWeight.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
                     rel rigExec:transform = </PhaseConnectAsset/Rig/Joints/Lift> (
                         rigExecReadPhase = "final"

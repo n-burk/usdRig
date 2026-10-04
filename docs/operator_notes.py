@@ -2211,7 +2211,9 @@ event.""",
             # float_math_mover.usda moves a blend input's `.inputs:weight`.
             "Drive the driver from another channel (a float math mover or a "
             "connection) to tie corrective strength to posing; each of driver, "
-            "scale, and bias takes at most one float connection.",
+            "scale, and bias takes at most one float connection. A connection "
+            "to a channel that float math movers revise reads its authored "
+            "base unless the input declares `rigExecReadPhase = \"final\"`.",
         ],
         "see_also": [
             ("static_weight", "Static Weight"),
@@ -2639,9 +2641,12 @@ and it drives nothing, the blendshape does all the work.""",
             "after it whenever the incoming channel can overshoot.",
             # rigEvaluatorProperties.cpp, _CompilePropertyChains: the phased
             # connections, published on the reader by _EvaluatePropertyChains.
-            "A connection to a property these movers revise reads it after "
-            "all of them. `rigExecReadPhase` on the connected input reads it "
-            "at `base` or as a named prim's movers left it instead; see "
+            "A connection to a property these movers revise reads its base, "
+            "the authored value before any of them. Declare "
+            "`rigExecReadPhase = \"final\"` on the connected input to read "
+            "their result, or a prim path to read it as that prim's movers "
+            "left it. The phase is read on every connected attribute under "
+            "the rig root, whatever operator it belongs to; see "
             "[Connected inputs](../concepts/how-operators-fire.md#connected-inputs) "
             "and example 16.",
         ],
@@ -2683,7 +2688,9 @@ is what lets an animator channel published on a control drive the mover.
 The whole property chain still owes exec nothing, so it resolves BEFORE
 exec runs and its result is handed back as the attribute's own value; a
 chain whose input is produced by another property chain is ordered after
-its producer.""",
+its producer. That input reads the producer's base, its authored value,
+unless it declares `rigExecReadPhase = "final"` or a checkpoint (see
+[Connected inputs](../concepts/how-operators-fire.md#connected-inputs)).""",
         "wiring": [
             # rigEvaluator.cpp:3842-3866 -- a property mover's parameters are
             # mover-level, so a fan-out would alias them across targets: exactly

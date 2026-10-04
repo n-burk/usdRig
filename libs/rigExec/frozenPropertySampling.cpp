@@ -357,8 +357,9 @@ RigExecChainSampleBindingsStillCurrent(
     if (grouped.size() != bindings.chains.size()) {
         return false;
     }
-    // The same phased reads: a phase edit re-epochs the evaluator, which
-    // resolves them afresh.
+    // The same phased reads, each over the same hops: a phase edit or a
+    // rewire re-epochs the evaluator, which resolves them afresh, and the
+    // hops decide who stands aside for a drag.
     size_t phasedBound = 0;
     for (const RigExecChainSampleChain &chain : bindings.chains) {
         phasedBound += chain.phased.size();
@@ -377,7 +378,9 @@ RigExecChainSampleBindingsStillCurrent(
             if (k >= chain.phased.size() ||
                 chain.phased[k].consumer != connection.consumer ||
                 chain.phased[k].consumerType != connection.consumerType ||
-                chain.phased[k].applied != connection.applied) {
+                chain.phased[k].applied != connection.applied ||
+                chain.phased[k].final != connection.final ||
+                chain.phased[k].hops != connection.hops) {
                 return false;
             }
             ++k;
@@ -478,7 +481,30 @@ RigExecEvaluateChainsForTime(
         }
     };
 
-    for (const RigExecChainSampleChain &chain : bindings.chains) {
+    // The job's overrides, as they stand before any chain publishes: one on
+    // a target is the chain's final value for every reader of it, and a
+    // phased reader with one on a hop stands aside for the overlay walk --
+    // the live path's rules (_EvaluatePropertyChains).
+    std::vector<std::vector<char>> standAside(bindings.chains.size());
+    std::vector<VtValue> targetOverrides(bindings.chains.size());
+    for (size_t c = 0; c < bindings.chains.size(); ++c) {
+        const RigExecChainSampleChain &chain = bindings.chains[c];
+        if (const VtValue *held = resolved->Find(chain.targetPath)) {
+            targetOverrides[c] = *held;
+        }
+        standAside[c].assign(chain.phased.size(), 0);
+        for (size_t k = 0; k < chain.phased.size(); ++k) {
+            for (const SdfPath &hop : chain.phased[k].hops) {
+                if (resolved->Find(hop)) {
+                    standAside[c][k] = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    for (size_t c = 0; c < bindings.chains.size(); ++c) {
+        const RigExecChainSampleChain &chain = bindings.chains[c];
         const SdfPath &target = chain.targetPath;
         if (!chain.target) {
             diag("property chain " + target.GetString() +
@@ -486,8 +512,10 @@ RigExecEvaluateChainsForTime(
             continue;
         }
         resolved->ClearProperty(target);
-        for (const RigExecPhasedConnection &phased : chain.phased) {
-            resolved->ClearProperty(phased.consumer);
+        for (size_t k = 0; k < chain.phased.size(); ++k) {
+            if (!standAside[c][k]) {
+                resolved->ClearProperty(chain.phased[k].consumer);
+            }
         }
         const SdfValueTypeName &valueType = chain.valueType;
 
@@ -563,16 +591,25 @@ RigExecEvaluateChainsForTime(
                 }
                 value = next;
             }
+            const VtValue finalValue = targetOverrides[c].IsEmpty()
+                                           ? VtValue(value)
+                                           : targetOverrides[c];
             if (results) {
-                (*results)[target] = VtValue(value);
+                (*results)[target] = finalValue;
             }
-            resolved->SetProperty(target, VtValue(value));
+            resolved->SetProperty(target, finalValue);
             if (!chain.phased.empty()) {
                 history.push_back(value);
-                for (const RigExecPhasedConnection &phased : chain.phased) {
+                for (size_t k = 0; k < chain.phased.size(); ++k) {
+                    const RigExecPhasedConnection &phased = chain.phased[k];
+                    if (standAside[c][k]) {
+                        continue;
+                    }
                     const VtValue read = RigExecPhasedConsumerValue(
-                        VtValue(history[std::min(phased.applied,
-                                                 history.size() - 1)]),
+                        phased.final
+                            ? finalValue
+                            : VtValue(history[std::min(
+                                  phased.applied, chain.revisions.size())]),
                         phased.consumerType);
                     if (results) {
                         (*results)[phased.consumer] = read;

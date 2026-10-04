@@ -146,9 +146,21 @@ RigExecRuntimeReader::SetAvar(const std::string &path, double value,
         if (error) *error = "expected a finite TRS avar on a compiled pose slot: " + path;
         return false;
     }
+    // A chain target's value is the chain's to compute from the frame's
+    // inputs, which an override does not reach, so it is refused. A phased
+    // reader's own avar is not: its record still publishes, and the
+    // override, applied after the prologue, is what the pose reads -- the
+    // reader stands aside, as in the USD evaluators.
+    bool phasedReader = false;
+    for (const v4::InputSlot &input : _computed.inputs) {
+        if (input.phased >= 0 && _program.TextOrEmpty(input.name) == path) {
+            phasedReader = true;
+            break;
+        }
+    }
     for (const auto &frame : _inputs.frames) {
         for (uint32_t id : frame.propertyPaths) {
-            if (_program.TextOrEmpty(id) == path) {
+            if (!phasedReader && _program.TextOrEmpty(id) == path) {
                 if (error) *error = "cannot override a captured property-mover output: " + path;
                 return false;
             }

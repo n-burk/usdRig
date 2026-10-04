@@ -718,7 +718,7 @@ rigexec_add_verify_binary_test(NAME computed_weights
 # Property chains the runtime computes in the cases no example covers
 # together: envelopes on property movers, a double chain, vec3f and matrix
 # chains, the chains' diagnostics, phased consumers, and a constraint
-# weight read through a chain.
+# weight read through a chain at a declared `final`.
 rigexec_add_verify_binary_test(NAME computed_chains
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_chains.usda"
     FRAMES 1,3,5,7,10 MIN_PROPERTY_VALUES 50 MIN_CHAIN_READS 5)

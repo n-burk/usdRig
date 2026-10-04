@@ -815,8 +815,9 @@ TestStaticWeightEnvelope()
 // (b * d) * s and b * (d * s) differ at some frames. Blend: a
 // CombineWeight (max, invert 0.25, strength 0.75) over a constant 0.25
 // and the avar scaled by 0.5. With \p clampDial, a float math mover clamps
-// the avar to [0, 1], so every driver reads the chain's result through
-// the overlay rather than the authored value.
+// the avar to [0, 1] and every driver declares rigExecReadPhase "final",
+// so each reads the chain's result through the overlay rather than the
+// authored value (undeclared, it would read the chain's base).
 static UsdStageRefPtr
 _AvarDrivenStage(bool clampDial = false)
 {
@@ -850,8 +851,13 @@ _AvarDrivenStage(bool clampDial = false)
         w.CreateAttribute(TfToken("rigExec:representation"),
                           SdfValueTypeNames->Token)
             .Set(TfToken("constant"));
-        w.CreateAttribute(TfToken("inputs:driver"), SdfValueTypeNames->Float)
-            .AddConnection(tx.GetPath());
+        const UsdAttribute driver = w.CreateAttribute(
+            TfToken("inputs:driver"), SdfValueTypeNames->Float);
+        driver.AddConnection(tx.GetPath());
+        if (clampDial) {
+            driver.SetMetadata(TfToken("rigExecReadPhase"),
+                               std::string("final"));
+        }
         return w;
     };
     const UsdPrim driven = dynamicWeight("Driven", "/Asset/TargetA");
@@ -1846,6 +1852,56 @@ _PhasedStage()
     return stage;
 }
 
+// The default read phase: a dial keyed from 0.1 to 0.45, doubled by Gain and
+// clamped to 0.6 by Limit, read by add movers into readout channels --
+// undeclared (the base), `final` (no record: the dial's published value
+// answers it), `base` on a hop, `final` through that hop (a record of every
+// revision), and undeclared through a `final` hop (the base).
+static UsdStageRefPtr
+_DefaultPhaseStage()
+{
+    const UsdStageRefPtr stage = _ChainBaseStage();
+    const UsdAttribute amount =
+        _Channel(stage, "Dial", "rigExec:amount", SdfValueTypeNames->Float);
+    amount.Set(0.1f, UsdTimeCode(1.0));
+    amount.Set(0.45f, UsdTimeCode(10.0));
+    const UsdPrim limit = _MathMover(stage, "Limit", "RigExecFloatMathMover",
+                                     "clamp", amount);
+    _SetInput(limit, "inputs:min", SdfValueTypeNames->Float, 0.0f);
+    _SetInput(limit, "inputs:max", SdfValueTypeNames->Float, 0.6f);
+    const UsdPrim gain = _MathMover(stage, "Limit/Gain",
+                                    "RigExecFloatMathMover", "multiply",
+                                    amount);
+    _SetInput(gain, "inputs:value", SdfValueTypeNames->Float, 2.0f);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Readouts"), TfToken("Scope"));
+    const auto readout = [&](const char *name, const SdfPath &source,
+                             const char *phase) {
+        const UsdAttribute target =
+            _Channel(stage, "Readouts", (std::string("rigExec:") + name).c_str(),
+                     SdfValueTypeNames->Float);
+        target.Set(0.0f);
+        const UsdPrim mover =
+            _MathMover(stage, std::string("Readouts/") + name,
+                       "RigExecFloatMathMover", "add", target);
+        const UsdAttribute value = mover.CreateAttribute(
+            TfToken("inputs:value"), SdfValueTypeNames->Float);
+        value.AddConnection(source);
+        if (phase) {
+            value.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+        }
+    };
+    readout("undeclared", amount.GetPath(), nullptr);
+    readout("final", amount.GetPath(), "final");
+    readout("hop", amount.GetPath(), "base");
+    readout("finalViaHop",
+            SdfPath("/Asset/Rig/Movers/Readouts/hop.inputs:value"), "final");
+    readout("finalHop", amount.GetPath(), "final");
+    readout("baseViaFinalHop",
+            SdfPath("/Asset/Rig/Movers/Readouts/finalHop.inputs:value"),
+            nullptr);
+    return stage;
+}
+
 // Bases a chain cannot use and results it refuses: a float base keyed to
 // +inf at frame 3 and NaN at frame 5; a double base of 1e300, finite as a
 // double but not as the float it is tested through; a multiply that
@@ -2202,6 +2258,109 @@ TestPhasedConsumers()
     }
 }
 
+// The default read phase through the .rigexec: the runtime replays each
+// reader at its own phase, bit for bit with the baked program and the
+// dynamic evaluator, and the computed section carries a record per reader
+// the overlay walk alone would answer differently -- applied 0 for the
+// undeclared ones, every revision for the `final` behind a recorded hop.
+static void
+TestDefaultReadPhaseRoundTrip()
+{
+    const std::vector<double> frames = {1, 4, 7, 10};
+    std::vector<_ChainFrame> rows;
+    // Per frame: the dial's chain, six readout chains, four records.
+    if (!_RunChainCase("default read phase", _DefaultPhaseStage, frames,
+                       11 * frames.size(), &rows)) {
+        return;
+    }
+    const UsdStageRefPtr stage = _DefaultPhaseStage();
+    const UsdAttribute amount = stage->GetAttributeAtPath(
+        SdfPath("/Asset/Rig/Channels/Dial.rigExec:amount"));
+    const auto readout = [&](size_t f, const char *name) {
+        bool found = false;
+        const float value =
+            _Float(rows[f],
+                   std::string("/Asset/Rig/Channels/Readouts.rigExec:") + name,
+                   &found);
+        CHECK(found);
+        return value;
+    };
+    const auto consumer = [&](size_t f, const char *name, bool *found) {
+        return _Float(rows[f],
+                      std::string("/Asset/Rig/Movers/Readouts/") + name +
+                          ".inputs:value",
+                      found);
+    };
+    size_t clamped = 0;
+    for (size_t f = 0; f < frames.size(); ++f) {
+        float base = 0.0f;
+        CHECK(amount.Get(&base, UsdTimeCode(frames[f])));
+        const float final = std::min(base * 2.0f, 0.6f);
+        clamped += final != base * 2.0f;
+        CHECK(readout(f, "undeclared") == base);
+        CHECK(readout(f, "final") == final);
+        CHECK(readout(f, "hop") == base);
+        CHECK(readout(f, "finalViaHop") == final);
+        CHECK(readout(f, "finalHop") == final);
+        CHECK(readout(f, "baseViaFinalHop") == base);
+        // What the records publish on the readers themselves; none on the
+        // `final` readers the dial's value answers.
+        bool found = false;
+        CHECK(consumer(f, "undeclared", &found) == base && found);
+        CHECK(consumer(f, "finalViaHop", &found) == final && found);
+        CHECK(consumer(f, "baseViaFinalHop", &found) == base && found);
+        consumer(f, "final", &found);
+        CHECK(!found);
+        consumer(f, "finalHop", &found);
+        CHECK(!found);
+    }
+    CHECK(clamped > 0 && clamped < frames.size());
+
+    // The round trip: the records the computed section carries.
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    const std::unique_ptr<RigExecBinaryReader> binary =
+        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
+                                  &error);
+    CHECK(binary);
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+    if (!binary ||
+        !binary->FindSection(RigExecBinarySection::Computed, &data, &size)) {
+        CHECK(false);
+        return;
+    }
+    RigExecWireReader cursor(data, size);
+    RigExecWireComputed computed;
+    CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
+    std::map<std::string, uint32_t> applied;
+    std::string text;
+    for (const v4::PhasedConsumer &record : computed.phasedConsumers) {
+        CHECK(record.consumer < computed.inputs.size());
+        if (record.consumer < computed.inputs.size() &&
+            binary->GetString(computed.inputs[record.consumer].name, &text)) {
+            applied[text] = record.applied;
+        }
+    }
+    const std::string readers = "/Asset/Rig/Movers/Readouts/";
+    CHECK(applied.size() == 4);
+    CHECK(applied.count(readers + "undeclared.inputs:value") &&
+          applied[readers + "undeclared.inputs:value"] == 0);
+    CHECK(applied.count(readers + "hop.inputs:value") &&
+          applied[readers + "hop.inputs:value"] == 0);
+    CHECK(applied.count(readers + "finalViaHop.inputs:value") &&
+          applied[readers + "finalViaHop.inputs:value"] == 2);
+    CHECK(applied.count(readers + "baseViaFinalHop.inputs:value") &&
+          applied[readers + "baseViaFinalHop.inputs:value"] == 0);
+    std::printf("default read phase: %zu record(s) round-tripped\n",
+                applied.size());
+}
+
 static void
 TestNonFiniteBase()
 {
@@ -2311,7 +2470,8 @@ _PlayFrames(const std::vector<uint8_t> &bytes,
 // with tangents, envelopes on property revisions, double, vec3f and matrix
 // chains, the chains' diagnostics, phased consumers) under the baked parity
 // path and against the dynamic evaluator, 10 values per frame, plus the
-// constraint weight Follow reads through the dial's chain. Then the record
+// constraint weight Follow reads through the dial's chain at its declared
+// `final`. Then the record
 // is shown unread: a recorded property value, or Follow's recorded weight,
 // moved off what the runtime computes fails the cross-check naming it and,
 // with the cross-check off, plays exactly as the untouched file does; and a
@@ -2494,8 +2654,8 @@ TestComputedChainsFixture()
             return -1.0f;
         };
         CHECK((dialOf(recomputed[f]) != dialOf(untouched[f])) == (f == 2));
-        // Follow reads the dial's result as its weight, so the transform it
-        // revises moves with it.
+        // Follow reads the dial's result (it declares `final`) as its
+        // weight, so the transform it revises moves with it.
         const auto targetOf = [&](const _PlayedFrame &played,
                                   bool *found) {
             for (const RigExecRuntimeProviderXform &x : played.xforms) {
@@ -2642,6 +2802,235 @@ TestIkSpaceFixture()
     _TestStage("ik space fixture, constant leg space", constant, frames);
 }
 
+// The read phase on inputs outside the movers, replayed: the docs
+// single-chain IK with its twist connected to a channel a math mover
+// doubles (keyed 10 to 30 degrees), a control whose avars:ty reads a
+// height channel a mover scales by 1.5 (keyed 2 to 4) -- a double channel,
+// or a float one that only a record widens -- and the docs space switch
+// reading its index from a channel outside the rig that reads a pick a
+// mover adds 1 to. Undeclared each reads the channel's base, `final` the
+// revised value (testRigExecArm checks which); here the runtime must match
+// the baked program bit for bit at every frame either way.
+static UsdStageRefPtr
+_TwistReadStage(const std::string &examplesDir, bool final)
+{
+    const UsdStageRefPtr stage = UsdStage::Open(
+        examplesDir + "/../docs/examples/single_chain_ik_constraint.usda");
+    CHECK(stage);
+    if (!stage) {
+        return stage;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdAttribute degrees =
+        stage->DefinePrim(SdfPath("/ScIkAsset/Rig/Channels/Twist"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:degrees"),
+                             SdfValueTypeNames->Double);
+    degrees.Set(10.0, UsdTimeCode(1001.0));
+    degrees.Set(30.0, UsdTimeCode(1024.0));
+    const UsdPrim twice = stage->DefinePrim(
+        SdfPath("/ScIkAsset/Rig/Movers/TwistTwice"),
+        TfToken("RigExecFloatMathMover"));
+    CHECK(twice.ApplyAPI(TfToken("RigExecMoverAPI")));
+    twice.CreateAttribute(TfToken("rigExec:operation"),
+                          SdfValueTypeNames->Token)
+        .Set(TfToken("multiply"));
+    twice.CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float)
+        .Set(2.0f);
+    twice.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({degrees.GetPath()});
+    const UsdAttribute twist = stage->GetAttributeAtPath(
+        SdfPath("/ScIkAsset/Rig/Movers/Pose/ArmIK.inputs:twistDegrees"));
+    twist.SetConnections({degrees.GetPath()});
+    if (final) {
+        twist.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+    }
+    return stage;
+}
+
+static UsdStageRefPtr
+_LiftReadStage(bool final, bool floatChannel = false)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(10.0);
+    UsdGeomXform::Define(stage, SdfPath("/Asset"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim lift = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Lift"), TfToken("RigExecControl"));
+    lift.CreateAttribute(TfToken("rest:space"), SdfValueTypeNames->Matrix4d)
+        .Set(GfMatrix4d(1.0));
+    const UsdAttribute height =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Channels/Lift"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:height"),
+                             floatChannel ? SdfValueTypeNames->Float
+                                          : SdfValueTypeNames->Double);
+    if (floatChannel) {
+        height.Set(2.0f, UsdTimeCode(1.0));
+        height.Set(4.0f, UsdTimeCode(10.0));
+    } else {
+        height.Set(2.0, UsdTimeCode(1.0));
+        height.Set(4.0, UsdTimeCode(10.0));
+    }
+    const UsdPrim raise = _MathMover(stage, "Raise", "RigExecFloatMathMover",
+                                     "multiply", height);
+    _SetInput(raise, "inputs:value", SdfValueTypeNames->Float, 1.5f);
+    const UsdAttribute ty = lift.CreateAttribute(TfToken("avars:ty"),
+                                                 SdfValueTypeNames->Double);
+    ty.SetConnections({height.GetPath()});
+    if (final) {
+        ty.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+    }
+    return stage;
+}
+
+static UsdStageRefPtr
+_OutsideSpaceStage(const std::string &examplesDir, bool final)
+{
+    const UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/../docs/examples/space_switch.usda");
+    CHECK(stage);
+    if (!stage) {
+        return stage;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdAttribute pick =
+        stage->DefinePrim(SdfPath("/SpaceSwitchAsset/Rig/Channels"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:pick"),
+                             SdfValueTypeNames->Double);
+    pick.Set(0.0);
+    const UsdPrim next = stage->DefinePrim(
+        SdfPath("/SpaceSwitchAsset/Rig/Movers/NextSpace"),
+        TfToken("RigExecFloatMathMover"));
+    CHECK(next.ApplyAPI(TfToken("RigExecMoverAPI")));
+    next.CreateAttribute(TfToken("rigExec:operation"),
+                         SdfValueTypeNames->Token)
+        .Set(TfToken("add"));
+    next.CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float)
+        .Set(1.0f);
+    next.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({pick.GetPath()});
+    const UsdAttribute space =
+        stage->DefinePrim(SdfPath("/SpaceSwitchAsset/Dials"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:space"),
+                             SdfValueTypeNames->Double);
+    space.SetConnections({pick.GetPath()});
+    if (final) {
+        space.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+    }
+    stage->GetPrimAtPath(SdfPath("/SpaceSwitchAsset/Rig/Spaces/HandSpaces"))
+        .GetRelationship(TfToken("rigExec:activeSpaceAttribute"))
+        .SetTargets({space.GetPath()});
+    return stage;
+}
+
+static void
+TestConstraintAndAvarReadersReplay(const std::string &examplesDir)
+{
+    for (const bool final : {false, true}) {
+        const UsdStageRefPtr twist = _TwistReadStage(examplesDir, final);
+        if (twist) {
+            _TestStage(final ? "twist read final" : "twist read at its base",
+                       twist, {1001.0, 1006.0, 1012.0, 1024.0});
+        }
+        _TestStage(final ? "avar read final" : "avar read at its base",
+                   _LiftReadStage(final), {1.0, 4.0, 10.0});
+        _TestStage(final ? "avar read final, float channel"
+                         : "avar read at its base, float channel",
+                   _LiftReadStage(final, true), {1.0, 4.0, 10.0});
+        const UsdStageRefPtr space = _OutsideSpaceStage(examplesDir, final);
+        if (space) {
+            _TestStage(final ? "outside space index read final"
+                             : "outside space index read at its base",
+                       space, {1001.0, 1012.0, 1024.0, 1036.0});
+        }
+    }
+}
+
+// A drag on an avar that reads a chain at its base. The USD evaluators
+// stand the reader aside and pose with the drag; the runtime replaces the
+// avar's read with the override after the prologue, so SetAvar accepts it
+// and every frame the step graph pools hold matches the baked program
+// under the same drag bit for bit. An avar a math mover revises stays
+// refused: its value is the chain's to compute.
+static void
+TestSetAvarOnPhasedReader()
+{
+    const UsdStageRefPtr stage = _LiftReadStage(false);
+    const UsdPrim lift =
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Controls/Lift"));
+    const UsdAttribute tx =
+        lift.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
+    tx.Set(1.0);
+    const UsdPrim shift =
+        _MathMover(stage, "Shift", "RigExecFloatMathMover", "add", tx);
+    _SetInput(shift, "inputs:value", SdfValueTypeNames->Float, 0.5f);
+
+    const SdfPath rigPath("/Asset/Rig");
+    const std::vector<double> frames = {1.0, 4.0};
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("set avar on a phased reader: open: %s\n",
+                    error.c_str());
+        return;
+    }
+    reader->SetRunMaskForTesting(0x7u);
+    CHECK(!reader->SetAvar("/Asset/Rig/Controls/Lift.avars:tx", 2.0,
+                           &error));
+    CHECK(error.find("property-mover output") != std::string::npos);
+    const double drag = 5.5;
+    CHECK(reader->SetAvar("/Asset/Rig/Controls/Lift.avars:ty", drag,
+                          &error));
+
+    RigExecRigEvaluator dragged(stage, rigPath);
+    dragged.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    dragged.SetInteractiveOverrides({RigExecValueOverride{
+        lift.GetPath(), TfToken(), TfToken("avars:ty"), VtValue(drag)}});
+    for (const double frame : frames) {
+        const RigExecRigPose pose = dragged.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid);
+        const auto control = pose.controlFrames.find(lift.GetPath());
+        CHECK(control != pose.controlFrames.end() &&
+              control->second.points[0][1] == drag);
+        const RigExecBakedProgram *program = dragged.GetBakedProgram();
+        CHECK(program);
+        if (!pose.valid || !program) {
+            return;
+        }
+        const RigExecBakedProgramImpl &graph = program->GetStepGraph();
+        CHECK(reader->SetFrame(frame, &error));
+        CHECK(reader->Execute(&error));
+        const std::vector<RrPointFrame> &fin = reader->GetFinFrames();
+        CHECK(fin.size() == graph.fin.size());
+        bool same = fin.size() == graph.fin.size();
+        bool sawDrag = false;
+        for (size_t i = 0; same && i < fin.size(); ++i) {
+            same = _FramesEqual(graph.fin[i], fin[i]);
+            sawDrag = sawDrag || fin[i].points[0][1] == drag;
+        }
+        if (!same) {
+            std::printf("set avar on a phased reader frame %.17g: the "
+                        "runtime's frames differ from the baked drag\n",
+                        frame);
+        }
+        CHECK(same);
+        CHECK(sawDrag);
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2659,6 +3048,7 @@ main(int argc, char **argv)
     TestDisabledRevision();
     TestEnvelopeRevisions();
     TestPhasedConsumers();
+    TestDefaultReadPhaseRoundTrip();
     TestNonFiniteBase();
     TestComputedChainsFixture();
     TestIkSpaceFixture();
@@ -2667,6 +3057,8 @@ main(int argc, char **argv)
     if (argc > 1) {
         examplesDir = argv[1];
     }
+    TestConstraintAndAvarReadersReplay(examplesDir);
+    TestSetAvarOnPhasedReader();
     bool sawBaking = false;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
         if (!fixture.bakesToday) {

@@ -5,7 +5,8 @@
     0.5 superseding inputs:defaultWeight 0.25, a clamped DynamicWeight driven
     by a control avar, a DynamicWeight over a base only rigExec:baseWeight
     reaches, and a CombineWeight with invert and strength over a
-    DynamicWeight whose driver reads a channel a float math mover clamps)
+    DynamicWeight whose driver reads, at a declared `final`, a channel a
+    float math mover clamps)
     and a geometry-domain constraint whose weight object is a `preceding`
     sphere following a control through a connection, with a keyed
     inputs:falloffMax. Baked and played by verify_binary_computed_weights
@@ -158,6 +159,9 @@ def Xform "Asset"
 
             def RigExecDynamicWeight "Ramp"
             {
+                float inputs:driver (
+                    rigExecReadPhase = "final"
+                )
                 prepend float inputs:driver.connect = </Asset/Rig/Channels/Amount.rigExec:amount>
                 float inputs:scale = 0.5
                 uniform token rigExec:representation = "constant"

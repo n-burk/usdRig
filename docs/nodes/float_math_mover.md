@@ -173,7 +173,7 @@ python docs/render_media.py --page float_math_mover
 - Property chains resolve before exec runs, so a revised weight reaches solvers and movers in the same evaluation.
 - Same-target math movers run in mover-stack order — the reversed namespace walk — so the LAST sibling listed executes FIRST. `reorder nameChildren` is how the example puts remap before clamp.
 - `remap` only normalizes: `(v − min) / (max − min)`, with a zero-width range returning 0 rather than dividing. Chain a `clamp` after it whenever the incoming channel can overshoot.
-- A connection to a property these movers revise reads it after all of them. `rigExecReadPhase` on the connected input reads it at `base` or as a named prim's movers left it instead; see [Connected inputs](../concepts/how-operators-fire.md#connected-inputs) and example 16.
+- A connection to a property these movers revise reads its base, the authored value before any of them. Declare `rigExecReadPhase = "final"` on the connected input to read their result, or a prim path to read it as that prim's movers left it. The phase is read on every connected attribute under the rig root, whatever operator it belongs to; see [Connected inputs](../concepts/how-operators-fire.md#connected-inputs) and example 16.
 
 ## See also
 

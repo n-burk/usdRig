@@ -751,7 +751,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
 
     compileBlocks.Next("DiscoverValidate.MoverDiscovery");
     std::vector<RigExecMoverRecord> newMovers;
-    size_t inertMovers = 0;
+    SdfPathVector inertMovers;
     std::vector<_SurfaceProjectorRecord> newSurfaceProjectors;
     if (!_DiscoverMovers(newMovers, newSurfaceProjectors, inertMovers,
                          errors, failure)) {
@@ -776,7 +776,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // rig that found NOTHING, which is the misconfiguration it describes.
     if (newControlPaths.empty() && newJointPaths.empty() &&
         newVolumeWeightPaths.empty() &&
-        newMovers.empty() && inertMovers == 0) {
+        newMovers.empty() && inertMovers.empty()) {
         return fail("Rig publishes no outputs: " + _rigPath.GetString() +
                     " has no RigExecControl, RigExecJoint, or placed volume "
                     "weight prims and no movers");
@@ -2318,7 +2318,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     std::vector<RigExecPhasedConnection> newPhasedConnections;
     if (!_CompilePropertyChains(newMovers, newPropertyChains,
                                 newPropertyChainOrder, newPhasedConnections,
-                                orderedSolvers, failure)) {
+                                orderedSolvers, inertMovers, failure)) {
         return fail(failure->message, failure->operations);
     }
 

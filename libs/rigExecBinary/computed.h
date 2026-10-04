@@ -178,9 +178,10 @@ struct PropertyChain {
     std::vector<PropertyRevision> revisions;
 };
 
-/// A connection that reads a chain at a declared phase
-/// (RigExecPhasedConnection): after the chain runs, the value after its
-/// first `applied` revisions is published at the consumer, converted per
+/// A connection that reads a chain at its phase, the base unless it
+/// declares another (RigExecPhasedConnection): after the chain runs, the
+/// value after its first `applied` revisions is published at the consumer,
+/// converted per
 /// RigExecPhasedConsumerValue. Grouped by chain, in the evaluator's order
 /// within each chain.
 struct PhasedConsumer {

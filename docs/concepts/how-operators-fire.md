@@ -138,36 +138,54 @@ solver, the joint and the constraint.
 ### Connected inputs
 
 An attribute connection reads a property. When math movers revise that
-property, an undeclared connection reads it after all of them: the final
-value. The same metadata on the connected input chooses another point in
-that property's chain:
+property, an undeclared connection reads its **base**: the authored value,
+before any of them, as an unannotated relationship does. The same metadata
+on the connected input chooses another point in that property's chain:
 
 ```usda
 float inputs:defaultWeight (
-    rigExecReadPhase = "base"
+    rigExecReadPhase = "final"
 )
 float inputs:defaultWeight.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
 ```
 
-- **`final`** — after every math mover on the property. What an undeclared
-  connection reads.
-- **`base`** — the property's authored value, before any math mover.
+- **`base`** — the property's authored value, before any math mover. What an
+  undeclared connection reads.
+- **`final`** — after every math mover on the property. A reader that should
+  follow what the movers computed declares it.
 - **a checkpoint** — an absolute prim path: the value as the last math mover
   at or beneath that prim left it.
 
 `preceding` names a position in the reader's own chain, and a connection
-reads another property's, so compiling it fails. The phase applies to the
-first revised property along the connection's single-source hops, and needs
-that property's type, or float and double either way round.
+reads another property's, so it is refused. The phase applies to the first
+revised property along the connection's single-source hops, and the reading
+input's own phase decides, whatever a hop along the way declares. A declared
+phase needs that property's value type, or float and double either way
+round. A refused declaration sets aside the operation that reads the input
+— a mover, a solver or a pose interpolator — with a warning that says why.
+On an input no such operation reads, such as a control's, a joint's, a
+channel's, a space switch's or an expression's, it fails the compile. An
+input that only a mover already set aside, or one with no `rigExec:moves`
+targets, reads is not compiled, and its declaration is ignored.
 
-A connection phase is read on `inputs:enabled` and `inputs:defaultWeight` of
-every mover; `inputs:value`, `inputs:min`, `inputs:max`, `inputs:keys` and
-`inputs:tangents` of the math movers; the inputs of a weight object a mover
-binds; `inputs:weight` of a blend input a mover names; and every connected
-attribute of a solver. An unconnected input reads its own value, so a phase
-there has nothing to choose and is ignored. A drag on the revised property
-itself replaces its final value only: `base` and checkpoint readers keep
-reading the chain computed from the authored value.
+The phase is read on every connected attribute of a prim under the rig root
+— a mover's inputs, whatever its type, a solver's, a constraint's, a space
+switch's, a pose interpolator's and its poses', a control's or a joint's
+avars — on the weight objects and blend inputs an operator names, and on
+the attributes an operator names as ones it reads
+(`rigExec:driverAttributes`, `rigExec:shaderDialSources`,
+`rigExec:activeSpaceAttribute`). The dynamic evaluator, the baked program,
+the frame cache and the `.rigexec` runtime all read it the same way. An
+unconnected input reads its own value, so a phase there has nothing to
+choose and is ignored. An input that math movers revise itself reads its
+own chain's result, and a phase declared on it is refused as ambiguous.
+
+A drag on the reading input, or on a property along its connection, is what
+that reader gets. A drag on the revised property itself replaces its final
+value only: `base` and checkpoint readers, a checkpoint at the last revision
+included, keep reading the chain computed from the authored value. The
+`.rigexec` runtime's `SetAvar` is local: it replaces the avar's own read,
+phased or not, but not what reads that avar through a connection.
 [Example 16](../../examples/16_ConnectionReadPhases.usda) reads one dial
 three ways, with math movers and with mover envelopes.
 

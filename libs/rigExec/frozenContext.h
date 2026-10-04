@@ -560,8 +560,8 @@ struct RigExecChainSampleRevision {
     RigExecChainSampleInput tangents;
 };
 
-/// One sampled property chain: its target, its revisions, and the mover
-/// inputs that read it at a declared phase (RigExecPhasedConnection).
+/// One sampled property chain: its target, its revisions, and the operator
+/// inputs that read it at a phase (RigExecPhasedConnection).
 struct RigExecChainSampleChain {
     SdfPath targetPath;
     UsdAttribute target;
@@ -603,10 +603,10 @@ bool RigExecBindChainSampleInputs(
     std::string *error = nullptr);
 
 /// Whether \p bindings still name \p evaluator's epoch: the same math
-/// movers over the same targets of the same types, and every folded
-/// constant still reading the value it was pinned with. A stage edit that
-/// moves any of those answers false, and the caller rebinds. UI thread
-/// only: it reads the live stage.
+/// movers over the same targets of the same types, the same phased reads
+/// over the same hops, and every folded constant still reading the value
+/// it was pinned with. A stage edit that moves any of those answers false,
+/// and the caller rebinds. UI thread only: it reads the live stage.
 bool RigExecChainSampleBindingsStillCurrent(
     const RigExecChainSampleBindings &bindings,
     const RigExecRigEvaluator &evaluator);
@@ -614,10 +614,13 @@ bool RigExecChainSampleBindingsStillCurrent(
 /// Evaluates every bound chain at \p time into caller-owned state: the
 /// property-chain prologue for one sampling call, run on the UI thread.
 ///
-/// \p resolved carries the job's pre-chain overrides in and every chain
-/// output out, published per target as each chain runs so a later chain
-/// reads the revised value; \p results, when given, receives the final
-/// value per target; \p diagnostics, when given, receives the chains'
+/// \p resolved carries the job's pre-chain overrides in -- nothing else, so
+/// what it holds on entry is what the job overrides, which decides the
+/// phased readers as on the live path -- and every chain output out,
+/// published per target as each chain runs so a later chain reads the
+/// revised value; \p results, when given, receives the final value per
+/// target and each published phased reader's value; \p diagnostics, when
+/// given, receives the chains'
 /// lines in chain order (the first lines of the generation, as on the
 /// live path). Values and lines are exactly the live prologue's for the
 /// same time and overrides: the same revision loop over the same pinned

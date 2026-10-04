@@ -120,9 +120,13 @@ public:
 
     // Persistent local TRS avar overrides, applied after the selected frame
     // and before FK/geometry evaluation. Angles are degrees. Only compiled
-    // control slots with TRS poses are supported; property-mover outputs are refused
-    // because a chain computes them from the frame's inputs, which an
-    // override does not reach.
+    // control slots with TRS poses are supported; property-mover outputs are
+    // refused because a chain computes them from the frame's inputs, which
+    // an override does not reach. An avar that reads a chain at a phase is
+    // accepted: the override replaces its read, as a drag stands such a
+    // reader aside in the USD evaluators. Local only: an attribute that
+    // reads the avar through a connection keeps its frame value or its own
+    // phased read, where the USD evaluators route the drag to it.
     bool SetAvar(const std::string &propertyPath, double value,
                  std::string *error);
     void ClearAvars();
