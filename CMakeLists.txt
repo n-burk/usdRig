@@ -773,6 +773,8 @@ add_test(NAME testRigExecWeightOverlay COMMAND testRigExecWeightOverlay
 
 add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
+target_compile_definitions(testRigExecMoverGraph PRIVATE
+    ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 
 # The epoch-fixed skin layout: what has to invalidate it, and what Compile

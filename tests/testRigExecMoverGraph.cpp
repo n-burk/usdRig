@@ -10,6 +10,7 @@
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/exec/exec/typeRegistry.h"
@@ -292,9 +293,9 @@ TestSkinBindingAndAssembly()
 
     // "final" rebinding applies to every influence, as it does for the
     // matrix mover's one.
-    mover.GetRelationship(TfToken("rigExec:influences"))
-        .SetMetadata(TfToken(rigExec::RigExecReadPhaseMetadataName),
-                     std::string("final"));
+    CHECK(mover.GetRelationship(TfToken("rigExec:influences"))
+              .SetMetadata(TfToken(rigExec::RigExecReadPhaseMetadataName),
+                           std::string("final")));
     const RigExecRevisionBinding finalBinding = RigExecResolveRevisionBinding(
         mover, target,
         {{SdfPath("/Asset/Rig/Joints/A"), SdfPath("/Asset/Rig/Heads/A")}});
@@ -617,9 +618,9 @@ TestRevisionBindingResolution()
         CHECK(b.weightObject == SdfPath("/Asset/Rig/Weights/W"));
 
         // "final" swaps in the provider's frame-chain head instead.
-        mover.GetRelationship(TfToken("rigExec:transform"))
-            .SetMetadata(TfToken(rigExec::RigExecReadPhaseMetadataName),
-                         std::string("final"));
+        CHECK(mover.GetRelationship(TfToken("rigExec:transform"))
+                  .SetMetadata(TfToken(rigExec::RigExecReadPhaseMetadataName),
+                               std::string("final")));
         const std::map<SdfPath, SdfPath> heads = {
             {SdfPath("/Asset/Rig/Joints/J"), SdfPath("/Asset/Gen/Head")}};
         const RigExecRevisionBinding f =
@@ -1172,6 +1173,16 @@ TestLongResolvedInputConnections()
 int
 main(int argc, char **argv)
 {
+    // rigExecReadPhase lives in the schema plugin's SdfMetadata block.
+    // ctest does not set a plugin path for this suite.
+    if (PlugRegistry::GetInstance()
+            .RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR)
+            .empty()) {
+        std::printf("FAILED: schema plugin did not register from %s\n",
+                    RIGEXEC_SCHEMA_RESOURCE_DIR);
+        return 1;
+    }
+
     // Force the exec type registry to run its registry functions. The other
     // suites get this for free by constructing an ExecUsdSystem; this one talks
     // to VDF directly, and without it RigExecMoverParameters/RigExecMoverStatus
