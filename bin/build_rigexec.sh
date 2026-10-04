@@ -13,18 +13,25 @@ set -euo pipefail
 
 rigexec_require_python
 
-mover_args=()
-if [ -n "${RIGEXEC_MOVER_PLUGIN_DIRS:-}" ]; then
-    mover_args+=("-DRIGEXEC_MOVER_PLUGIN_DIRS=$RIGEXEC_MOVER_PLUGIN_DIRS")
-fi
-
 # CMAKE_PREFIX_PATH is not optional: without it pxrConfig's
 # find_dependency(OpenSubdiv 3.6.1) can resolve against an older OpenSubdiv
 # elsewhere on the machine and the configure fails with a version mismatch.
-cmake -S "$RIG" -B "$RIG/build" -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DUSD_INSTALL_DIR="$USD" \
-      -DCMAKE_PREFIX_PATH="$USD" "${mover_args[@]}"
+#
+# Branched rather than passed through an array: expanding an empty array
+# with set -u is an "unbound variable" error under bash 3.2 (macOS
+# /bin/bash); see bin/usdview.sh.
+if [ -n "${RIGEXEC_MOVER_PLUGIN_DIRS:-}" ]; then
+    cmake -S "$RIG" -B "$RIG/build" -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DUSD_INSTALL_DIR="$USD" \
+          -DCMAKE_PREFIX_PATH="$USD" \
+          "-DRIGEXEC_MOVER_PLUGIN_DIRS=$RIGEXEC_MOVER_PLUGIN_DIRS"
+else
+    cmake -S "$RIG" -B "$RIG/build" -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DUSD_INSTALL_DIR="$USD" \
+          -DCMAKE_PREFIX_PATH="$USD"
+fi
 cmake --build "$RIG/build" -j "$JOBS"
 
 if [ "${1:-}" = "--no-test" ]; then
