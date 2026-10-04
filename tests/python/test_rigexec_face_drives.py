@@ -17,7 +17,7 @@ control the animator cannot use, and that is what shipped:
     `face_eyes` ran L_Eye_drives_eye_l_def (153) BEFORE lookRot_aim_pose
     (154) and eye_l_follow_pose (156) and copied a stale control; and
     l_eye_geo was skinned solely to eye_l_trans_def, a joint nothing
-    drives which does not exist in the source Maya rig at all.
+    drives which does not exist in the source rig at all.
     Both look controls measured exactly 0.0000 on the mesh.
 
   - the lash proxies lost every weight when Biped_lashes.usda was

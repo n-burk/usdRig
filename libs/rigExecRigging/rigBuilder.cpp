@@ -349,6 +349,28 @@ _SetAvarScale(RigExecHandleBase *self, double sx, double sy, double sz)
     }
 }
 
+// avars:rotationSign: a mirrored limb's declaration, not a pose. Strict
+// authoring takes only +1 or -1 -- the evaluator's kernel is total and
+// resolves anything else to +1, but a rig that MEANT something else should
+// hear about it here rather than quietly lose it.
+void
+_SetRotationSign(RigExecHandleBase *self, double sx, double sy, double sz)
+{
+    const UsdPrim prim = self->GetPrim();
+    _RequireAttrDefinition(
+        prim, "avars:rotationSign", SdfValueTypeNames->Double3);
+    const double requested[3] = {sx, sy, sz};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (requested[axis] != 1.0 && requested[axis] != -1.0) {
+            throw std::invalid_argument(
+                std::string("avars:rotationSign must be +1 or -1 per axis "
+                            "at ") + prim.GetPath().GetString());
+        }
+    }
+    _AuthorAttr(prim, "avars:rotationSign", SdfValueTypeNames->Double3,
+                VtValue(GfVec3d(sx, sy, sz)));
+}
+
 void
 _SetAvarSpin(RigExecHandleBase *self, double degrees)
 {
@@ -370,6 +392,8 @@ void RigExecControlHandle::SetAvarScale(double sx, double sy, double sz)
 { _SetAvarScale(this, sx, sy, sz); }
 void RigExecControlHandle::SetAvarSpin(double degrees)
 { _SetAvarSpin(this, degrees); }
+void RigExecControlHandle::SetRotationSign(double sx, double sy, double sz)
+{ _SetRotationSign(this, sx, sy, sz); }
 
 void
 RigExecControlHandle::SetChannelRole(const TfToken &role)
@@ -389,6 +413,8 @@ void RigExecJointHandle::SetAvarScale(double sx, double sy, double sz)
 { _SetAvarScale(this, sx, sy, sz); }
 void RigExecJointHandle::SetAvarSpin(double degrees)
 { _SetAvarSpin(this, degrees); }
+void RigExecJointHandle::SetRotationSign(double sx, double sy, double sz)
+{ _SetRotationSign(this, sx, sy, sz); }
 
 // Solvers
 
@@ -1511,7 +1537,7 @@ RigExecBlendInputHandle::ConnectWeight(const SdfPath &output)
 }
 
 // Pose interpolators
-// the conventional poseInterpolator. The maths is libs/rigExecMath/rbf.h; this is only
+// a pose interpolator. The maths is libs/rigExecMath/rbf.h; this is only
 // the authoring side, and it deliberately stores no solved matrix: the
 // inverse is a function of the poses, the per-pose radii, the kernel and the
 // regularization, every one of which is authored here, so re-deriving it at

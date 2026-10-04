@@ -2368,6 +2368,7 @@ def "Biped"
                                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                                     )
                                                                                     {
+                                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                                         double guide:scaleX = 0
                                                                                         double guide:scaleY = 0
                                                                                         double guide:scaleZ = 0
@@ -2393,6 +2394,7 @@ def "Biped"
                                                                                                 }
                                                                                                 doc = "Flares the nostril."
                                                                                             )
+                                                                                            double3 avars:rotationSign = (-1, -1, 1)
                                                                                             custom double avars:sneerFollow = 1 (
                                                                                                 customData = {
                                                                                                     dictionary limits = {
@@ -2525,6 +2527,7 @@ def "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -2535,6 +2538,7 @@ def "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         color3f guide:displayColor = (1, 0, 0)
                                                                         double3 guide:offset = (-0.2066500003004758, 0.39674999913449926, -1.8949500013793386)
                                                                         uniform token guide:planeNormal = "Z"
@@ -2551,6 +2555,7 @@ def "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -2561,6 +2566,7 @@ def "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         custom float face:socketLineLowerTy = 0
                                                                         color3f guide:displayColor = (0, 0, 1)
                                                                         double3 guide:offset = (-0.04240000000021382, -0.5263000000003046, -1.3116500000001285)
@@ -2578,6 +2584,7 @@ def "Biped"
                                                                     prepend apiSchemas = ["RigExecControlAPI"]
                                                                 )
                                                                 {
+                                                                    double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:scaleX = 0
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
@@ -2588,6 +2595,7 @@ def "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         custom float face:cornerTerm = 0
                                                                         custom float face:jawTerm = 0
                                                                         color3f guide:displayColor = (1, 0, 0)
@@ -2703,6 +2711,7 @@ def "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         custom float face:browInner_l = 0
                                                                         custom float face:browInner_r = 0
                                                                         custom float face:browMain_r = 0
@@ -2832,6 +2841,7 @@ def "Biped"
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
                                                                     )
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -2842,6 +2852,7 @@ def "Biped"
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
+                                                                            double3 avars:rotationSign = (-1, -1, 1)
                                                                             custom double avars:suckPuff = 0 (
                                                                                 customData = {
                                                                                     dictionary limits = {

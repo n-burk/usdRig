@@ -111,7 +111,10 @@
 
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
+#include "pxr/base/tf/notice.h"
+#include "pxr/base/tf/weakBase.h"
 #include "pxr/usd/sdf/types.h"
+#include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
@@ -963,6 +966,71 @@ TestCommitDuringPreviewExcludesPlayhead()
     registry.ClearFrameCache(rig);
     registry.Deactivate();
 }
+
+// SETTLE. A release that commits exactly the previewed pose evaluates
+// nothing -- the published generation is already the stage's answer -- and
+// a commit of anything else evaluates as before.
+void
+TestCommitOfPreviewedPoseSkipsEvaluation()
+{
+    std::printf("progress: TestCommitOfPreviewedPoseSkipsEvaluation\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    UsdStageRefPtr stage = MakeTinyRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rig, UsdTimeCode(2.0), &errors));
+    UsdAttribute tx =
+        stage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongX.avars:tx"));
+
+    // The committed value is the previewed one: no evaluation, and the
+    // kept generation matches a fresh evaluation of the edited stage.
+    CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+    const double sample = 11.0;
+    CHECK(registry.UpdatePreview(&sample, 1));
+    const _GenerationGeometry previewed =
+        _CaptureGeometry(registry.GetStore()->Get());
+    const size_t pulls = registry.GetSessionEvaluationCount(rig);
+    CHECK(registry.EndPreview(/* publish = */ false));
+    tx.Set(sample, UsdTimeCode(2.0));
+    CHECK(registry.GetSessionEvaluationCount(rig) == pulls);
+    CHECK(_SameGeometry(previewed,
+                        _CaptureGeometry(registry.GetStore()->Get())));
+    {
+        RigExecImagingBridge fresh(stage, rig);
+        CHECK(fresh.Compile());
+        CHECK(fresh.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+        CHECK(_SameGeometry(previewed,
+                            _CaptureGeometry(fresh.GetStore()->Get())));
+    }
+
+    // A different committed value evaluates, and shows the stage's value.
+    CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+    const double dragged = 12.5;
+    CHECK(registry.UpdatePreview(&dragged, 1));
+    const _GenerationGeometry draggedPose =
+        _CaptureGeometry(registry.GetStore()->Get());
+    const size_t before = registry.GetSessionEvaluationCount(rig);
+    CHECK(registry.EndPreview(/* publish = */ false));
+    tx.Set(12.0, UsdTimeCode(2.0));
+    CHECK(registry.GetSessionEvaluationCount(rig) == before + 1);
+    CHECK(!_SameGeometry(draggedPose,
+                         _CaptureGeometry(registry.GetStore()->Get())));
+
+    // A withdrawn preview nobody commits still goes back to the stage.
+    const _GenerationGeometry authored =
+        _CaptureGeometry(registry.GetStore()->Get());
+    CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+    CHECK(registry.UpdatePreview(&dragged, 1));
+    CHECK(registry.EndPreview(/* publish = */ false));
+    CHECK(registry.SetTime(UsdTimeCode(2.0)));
+    CHECK(_SameGeometry(authored,
+                        _CaptureGeometry(registry.GetStore()->Get())));
+    registry.ClearFrameCache(rig);
+    registry.Deactivate();
+}
+
 
 // PRODUCTION. The C-API trigger path -- no injected runner -- enqueues real
 // jobs with sampled vectors through the production runner, which executes
@@ -3870,6 +3938,98 @@ TestOverlayMidWarmingServesNoStalePose()
 
 }  // namespace
 
+
+// The live sampler's chain bindings are bound once per binding epoch and kept
+// current by stage notices rather than re-verified on every sample (which on
+// the full biped stack cost 60 ms per call, twice per viewport release). The
+// contract that replaces the check: a chain mover's constant edited
+// mid-epoch -- which moves no epoch digest -- rebinds them; an edit to a
+// control that no chain reads does not; and the trusted sample always
+// digests exactly as the self-binding sampler's. The negative control proves
+// the rebind is load-bearing: bindings taken BEFORE the edit digest
+// differently once it has landed.
+struct _ChainNoticeForward : public TfWeakBase {
+    RigExecImagingBridge *bridge = nullptr;
+    void OnChanged(const UsdNotice::ObjectsChanged &notice,
+                   const UsdStageWeakPtr &)
+    {
+        bridge->NoteChainEdits(notice);
+    }
+};
+
+void
+TestLiveChainBindingsFollowNotices()
+{
+    UsdStageRefPtr stage = MakeTinyRig();
+    const UsdPrim gain = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/TxGain"), TfToken("RigExecFloatMathMover"));
+    gain.ApplyAPI(TfToken("RigExecMoverAPI"));
+    gain.GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Rig/AlongX.avars:tx")});
+    gain.CreateAttribute(TfToken("rigExec:operation"), SdfValueTypeNames->Token)
+        .Set(TfToken("multiply"));
+    gain.CreateAttribute(TfToken("inputs:defaultWeight"),
+                         SdfValueTypeNames->Float).Set(1.0f);
+    UsdAttribute value = gain.CreateAttribute(TfToken("inputs:value"),
+                                              SdfValueTypeNames->Float);
+    for (int t = 1; t <= 4; ++t) {
+        value.Set(0.5f * float(t), UsdTimeCode(double(t)));
+    }
+
+    RigExecImagingBridge bridge(stage, SdfPath("/Asset/Rig"));
+    CHECK(bridge.Compile());
+    CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+    _ChainNoticeForward forward;
+    forward.bridge = &bridge;
+    TfNotice::Key key = TfNotice::Register(
+        TfCreateWeakPtr(&forward), &_ChainNoticeForward::OnChanged, stage);
+
+    const RigExecRigEvaluator &evaluator = bridge.GetEvaluator();
+    const std::vector<RigExecValueOverride> none;
+    const auto digestsAgree = [&](const RigExecChainSampleBindings &bound) {
+        RigExecFrameInputs trusted, plain;
+        if (!RigExecSampleFrameInputsWithTrustedChainBindings(
+                evaluator, UsdTimeCode(3.0), none, bound, &trusted) ||
+            !RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), none,
+                                      &plain)) {
+            return false;
+        }
+        return RigExecControlStateDigest(trusted, none) ==
+               RigExecControlStateDigest(plain, none);
+    };
+
+    uint64_t first = 0;
+    const RigExecChainSampleBindings *bound =
+        bridge.AcquireChainBindings(&first);
+    CHECK(bound != nullptr && bound->chains.size() == 1);
+    CHECK(bound && digestsAgree(*bound));
+    const RigExecChainSampleBindings before = *bound;
+
+    // An avar no chain reads: the bindings stand. Authoring it for the first
+    // time creates its spec, which USD reports as a PROPERTY resync; that
+    // must not drop them either.
+    uint64_t now = 0;
+    stage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongY.avars:tz"))
+        .Set(0.25);
+    bridge.AcquireChainBindings(&now);
+    CHECK(now == first);
+
+    // The chain mover's folded constant, edited mid-epoch: same binding
+    // epoch, new bindings, and the trusted sample is still exact.
+    const size_t epoch = evaluator.GetBindingEpochDigest();
+    stage->GetAttributeAtPath(
+            SdfPath("/Asset/Rig/Movers/TxGain.inputs:defaultWeight"))
+        .Set(0.5f);
+    CHECK(evaluator.GetBindingEpochDigest() == epoch);
+    bound = bridge.AcquireChainBindings(&now);
+    CHECK(bound != nullptr && now != first);
+    CHECK(bound && digestsAgree(*bound));
+    // ...and the pre-edit bindings would have served a stale constant.
+    CHECK(!digestsAgree(before));
+
+    TfNotice::Revoke(key);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3951,6 +4111,7 @@ main(int argc, char **argv)
     TestRefusalRigNeverCountsVisited();
     TestWarmFrameStreaks();
     TestCommitDuringPreviewExcludesPlayhead();
+    TestCommitOfPreviewedPoseSkipsEvaluation();
     TestProductionTriggerPathEnqueuesAndFences();
     TestWarmedCompletionServesWithoutEvaluating();
     TestRefusalRigMemoizesUiThreadResults();
@@ -3972,6 +4133,7 @@ main(int argc, char **argv)
     TestClearWhileWarmingKeepsCacheEmpty();
     TestFencedClearSerializesAfterPausedInsert();
     TestOverlayMidWarmingServesNoStalePose();
+    TestLiveChainBindingsFollowNotices();
     if (failures == 0) {
         std::printf("testRigExecImagingFrameCache: all tests passed\n");
     } else {

@@ -746,6 +746,11 @@ RigExecWireEncodeConstants(const RigExecWireConstants &constants,
     for (double v : constants.avarConstants) {
         RigExecWirePutF64(out, v);
     }
+    // Minor 2, and last in the record on purpose: see the decode.
+    RigExecWirePutU32(out, uint32_t(constants.rotationSign.size()));
+    for (uint8_t v : constants.rotationSign) {
+        RigExecWirePutU8(out, uint8_t(v & 7u));
+    }
     return true;
 }
 
@@ -854,6 +859,24 @@ RigExecWireDecodeConstants(RigExecWireReader *reader,
     for (uint32_t i = 0; i < avars; ++i) {
         if (!reader->ReadF64(&constants->avarConstants[i])) {
             return _Fail(error, "constants");
+        }
+    }
+    // avars:rotationSign arrived at minor 2. A file written before it ends
+    // here, and the empty table is the answer that file was baked with --
+    // every axis +1. Anything present must be complete and in range.
+    constants->rotationSign.clear();
+    if (!reader->Exhausted()) {
+        uint32_t signs = 0;
+        if (!reader->ReadU32(&signs)) {
+            return _Fail(error, "constants");
+        }
+        constants->rotationSign.resize(signs);
+        for (uint32_t i = 0; i < signs; ++i) {
+            uint8_t v = 0;
+            if (!reader->ReadU8(&v) || v > 7) {
+                return _Fail(error, "constants");
+            }
+            constants->rotationSign[i] = v;
         }
     }
     return _CheckExhausted(reader, error, "constants");

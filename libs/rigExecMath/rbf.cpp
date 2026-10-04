@@ -15,22 +15,22 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 /// The ratio a pose gets when a channel it is measured on has no width at
 /// all and the driver is not sitting exactly on it. Both kernels take it to
 /// zero -- exp(-inf) and max(0, 1-inf) -- which is the same answer a
-/// zero-width branch would give by hand, without the branch. rbf.py:71-75.
+/// zero-width branch would give by hand, without the branch.
 const double kInfinite = std::numeric_limits<double>::infinity();
 
-/// the conventional default poseFalloff, and the divisor that turns a painted share
-/// into a multiple of the nearest-neighbour spacing. rbf.py:629-630.
+/// The default pose falloff, and the divisor that turns a painted share
+/// into a multiple of the nearest-neighbour spacing.
 constexpr double kDefaultFalloff = 0.3;
 
 /// The floor under that share, so a pose painted at zero still has SOME
-/// width rather than an infinite ratio. rbf.py:630.
+/// width rather than an infinite ratio.
 constexpr double kMinimumShare = 0.05;
 
 /// Poses closer than this are the same pose, for the purpose of measuring
-/// spacing. rbf.py:571, 625, 800.
+/// spacing.
 constexpr double kSameRotation = 1.0e-6;
 
-/// And the same for translations, in metres. rbf.py:601, 649, 732.
+/// And the same for translations, in metres.
 constexpr double kSameTranslation = 1.0e-9;
 
 GfQuatd
@@ -91,7 +91,7 @@ RigExecRbfCombine(double angle, double width, double gap,
     // square root. That is the float the kernels were handed before the
     // translation channel existed, and every table already shipped was
     // solved with it; sqrt(x * x) would be right to within an ulp and wrong
-    // as a promise (rbf.py:161-169).
+    // as a promise.
     if (!enableTranslation) {
         if (!enableRotation) {
             return 0.0;
@@ -129,7 +129,7 @@ RigExecRbfCombine(double angle, double width, double gap,
 GfQuatd
 RigExecRbfQuaternionFromEuler(const GfVec3d &euler)
 {
-    // rbf.py:1009-1027, term for term. Not GfRotation: see the conventions
+    // The closed form, term for term. Not GfRotation: see the conventions
     // note in rbf.h -- the composition order reverses under this codebase's
     // row-vector convention, and only the closed form is the same double.
     const double hx = euler[0] * 0.5;
@@ -146,7 +146,6 @@ RigExecRbfQuaternionFromEuler(const GfVec3d &euler)
 GfVec3d
 RigExecRbfEulerFromQuaternion(const GfQuatd &quaternion)
 {
-    // rbf.py:1130-1146.
     const double w = quaternion.GetReal();
     const GfVec3d &v = quaternion.GetImaginary();
     const double x = v[0], y = v[1], z = v[2];
@@ -168,7 +167,7 @@ RigExecRbfEulerFromQuaternion(const GfQuatd &quaternion)
 double
 RigExecRbfAngleBetween(const GfQuatd &first, const GfQuatd &second)
 {
-    // rbf.py:1080-1091. The |dot| is the short way round the double cover --
+    //. The |dot| is the short way round the double cover --
     // a quaternion and its negative are the same rotation, and without the
     // absolute value poses more than a half turn apart measure as though
     // they were close.
@@ -180,7 +179,6 @@ void
 RigExecRbfSwingTwist(const GfQuatd &quaternion, const GfVec3d &axis,
                      GfQuatd *swing, GfQuatd *twist)
 {
-    // rbf.py:1041-1077.
     const double w = quaternion.GetReal();
     const GfVec3d &v = quaternion.GetImaginary();
     const double x = v[0], y = v[1], z = v[2];
@@ -188,7 +186,7 @@ RigExecRbfSwingTwist(const GfQuatd &quaternion, const GfVec3d &axis,
     double ax = axis[0], ay = axis[1], az = axis[2];
     double length = std::sqrt(ax * ax + ay * ay + az * az);
     if (length == 0.0) {
-        length = 1.0;  // Python's `or 1.0`
+        length = 1.0;  // a zero length falls back to 1
     }
     ax /= length;
     ay /= length;
@@ -212,7 +210,7 @@ RigExecRbfSwingTwist(const GfQuatd &quaternion, const GfVec3d &axis,
 
     // swing = quaternion * twist.conjugated(). Written out rather than as
     // `quaternion * GfQuatd(...).GetConjugate()`: Gf's operator* is the same
-    // Hamilton product term for term (verified against rbf.py:1073-1076),
+    // Hamilton product term for term,
     // but it forms the imaginary part as r1*i2 + r2*i1 + cross(i1, i2),
     // which reassociates the six products into a different double.
     const double tw_w = tw[0], tw_x = -tw[1], tw_y = -tw[2], tw_z = -tw[3];
@@ -234,7 +232,7 @@ GfVec3d
 RigExecRbfSlerpEuler(const GfVec3d &first, const GfVec3d &second,
                      double amount)
 {
-    // rbf.py:1094-1127. GfSlerp would do the same job and not the same
+    //. GfSlerp would do the same job and not the same
     // doubles; this is sampled by the width fitter, so its output feeds the
     // coverage and overshoot numbers the fixture pins.
     const GfQuatd start = RigExecRbfQuaternionFromEuler(first);
@@ -267,7 +265,7 @@ RigExecRbfSlerpEuler(const GfVec3d &first, const GfVec3d &second,
     double size =
         std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2] + b[3] * b[3]);
     if (size == 0.0) {
-        size = 1.0;  // Python's `or 1.0`
+        size = 1.0;  // a zero length falls back to 1
     }
     return RigExecRbfEulerFromQuaternion(
         MakeQuat(b[0] / size, b[1] / size, b[2] / size, b[3] / size));
@@ -277,7 +275,7 @@ bool
 RigExecRbfInvert(const std::vector<std::vector<double>> &matrix,
                  std::vector<std::vector<double>> *inverse)
 {
-    // rbf.py:1149-1187, Gauss-Jordan with partial pivoting.
+    // Gauss-Jordan with partial pivoting.
     const size_t size = matrix.size();
     std::vector<std::vector<double>> work(size);
     for (size_t i = 0; i < size; ++i) {
@@ -289,8 +287,8 @@ RigExecRbfInvert(const std::vector<std::vector<double>> &matrix,
     }
 
     for (size_t column = 0; column < size; ++column) {
-        // Python's max(range(column, size), key=...) keeps the FIRST maximal
-        // row, so the comparison is strict.
+        // The FIRST maximal row wins, so the comparison is strict: the
+        // pivoting order is part of what the parity fixture pins.
         size_t pivot = column;
         double best = std::abs(work[column][column]);
         for (size_t row = column + 1; row < size; ++row) {
@@ -348,7 +346,7 @@ RigExecRbfSolver::RigExecRbfSolver(const RigExecRbfSolverDesc &desc)
     // Asked for but not given is OFF, not a crash and not a channel that
     // silently measures zero: an interpolator with no translations has
     // nothing to say about translation, and saying "every pose is equally
-    // close" would peg its weights at 1/n. rbf.py:431-436.
+    // close" would peg its weights at 1/n.
     _enableTranslation = desc.enableTranslation && !_translations.empty();
 
     // Each pose as (whole, swing, twist), split once rather than per call.
@@ -360,7 +358,7 @@ RigExecRbfSolver::RigExecRbfSolver(const RigExecRbfSolverDesc &desc)
         _parts[i] = {whole, swing, twist};
     }
 
-    // ORDER MATTERS HERE, the way it does in rbf.py:439-447: _MeasureRadii
+    // ORDER MATTERS HERE: _MeasureRadii
     // falls back on _radius when a pose has no separable neighbour, so the
     // shared radii have to be settled first.
     _radius = desc.radius > 0.0 ? desc.radius : _MeasureRadius();
@@ -381,7 +379,7 @@ RigExecRbfSolver::_Kernel(double ratio) const
     // With a radius of exactly ONE, because the ratio is already in units of
     // the pose's own falloff. Dividing by 1.0 is exact in binary floating
     // point, so what comes back is the same float the kernel produced when
-    // it was handed an angle and a radius (rbf.py:535-550).
+    // it was handed an angle and a radius.
     return RigExecRbfEvalKernel(_kernel, ratio, 1.0);
 }
 
@@ -412,10 +410,9 @@ RigExecRbfSolver::_Translation(size_t index) const
 double
 RigExecRbfSolver::Distance(const GfQuatd &quaternion, size_t index) const
 {
-    // The metric belongs to the POSE, not to the interpolator: the conventional tool measures
+    // The metric belongs to the POSE, not to the interpolator: it measures
     // a swing pose by the swing part and a twist pose by the twist part, so
     // a driver carrying both is judged on the half each pose is about.
-    // rbf.py:462-483.
     const RigExecRbfPoseType kind = index < _poseTypes.size()
                                         ? _poseTypes[index]
                                         : RigExecRbfPoseType::Whole;
@@ -434,9 +431,8 @@ double
 RigExecRbfSolver::TranslationDistance(const GfVec3d *translation,
                                       size_t index) const
 {
-    // Straight euclidean distance. the conventional tool has no per-axis weighting here and
-    // neither does this: a brow driver pushed up and one pushed sideways by
-    // the same amount are equally far from neutral. rbf.py:485-508.
+    // Straight euclidean distance, with no per-axis weighting: a brow driver pushed up and one pushed sideways by
+    // the same amount are equally far from neutral.
     if (index >= _translations.size()) {
         return 0.0;
     }
@@ -455,8 +451,8 @@ double
 RigExecRbfSolver::Ratio(const GfQuatd &quaternion, size_t index,
                         const GfVec3d *translation) const
 {
-    // The channels the conventional tool has turned off are NOT MEASURED AT ALL -- not
-    // measured and weighted zero, not measured. rbf.py:510-533.
+    // A channel that is turned off is NOT MEASURED AT ALL -- not
+    // measured and weighted zero, not measured.
     const double angle = _enableRotation ? Distance(quaternion, index) : 0.0;
     const double gap =
         _enableTranslation ? TranslationDistance(translation, index) : 0.0;
@@ -471,7 +467,7 @@ RigExecRbfSolver::_MeasureRadius() const
     // The MEAN distance from each pose to its nearest neighbour, which is
     // the width at which neighbours just meet: wider and every pose bleeds
     // into the next, narrower and there are gaps between them where nothing
-    // is driving anything. rbf.py:552-576.
+    // is driving anything.
     if (_poses.size() < 2) {
         return kPi / 2.0;
     }
@@ -515,7 +511,7 @@ RigExecRbfSolver::_MeasureTranslationRadius() const
     // it is the honest answer: a channel with no spread should not be handed
     // an invented width. Deliberately NOT _MeasureRadius's pi/2 -- half a
     // turn is a sensible guess for a joint; half a metre is not a sensible
-    // guess for a brow. rbf.py:578-606.
+    // guess for a brow.
     if (_translations.size() < 2) {
         return 0.0;
     }
@@ -558,7 +554,7 @@ RigExecRbfSolver::_MeasureRadii(const std::vector<double> &falloffs) const
     // what a shared radius cannot do: a thigh with poses at 25, 90 and 120
     // degrees has a mean spacing too wide for the close pair and too narrow
     // for the far one, and the weights overshoot 0..1 in between, which
-    // reads as a pop. rbf.py:608-631.
+    // reads as a pop.
     std::vector<double> out;
     out.reserve(_poses.size());
     for (size_t index = 0; index < _poses.size(); ++index) {
@@ -566,7 +562,7 @@ RigExecRbfSolver::_MeasureRadii(const std::vector<double> &falloffs) const
         // metric -- Distance(other, index), not Distance(this, other). A
         // twist pose's neighbours are near in twist even when they are far
         // as whole rotations, and Spacing() below measures the other way
-        // round on purpose. rbf.py:618-624 against rbf.py:789-802.
+        // round on purpose.
         double best = 0.0;
         bool found = false;
         for (size_t other = 0; other < _poses.size(); ++other) {
@@ -598,8 +594,8 @@ std::vector<double>
 RigExecRbfSolver::_MeasureTranslationRadii(
     const std::vector<double> &falloffs) const
 {
-    // The same share drives both channels -- the conventional tool paints one number per
-    // pose, not one per channel. rbf.py:633-655.
+    // The same share drives both channels: one painted number per pose,
+    // not one per channel.
     std::vector<double> out;
     out.reserve(_translations.size());
     for (size_t index = 0; index < _translations.size(); ++index) {
@@ -634,7 +630,7 @@ RigExecRbfSolver::_MeasureTranslationRadii(
 std::vector<double>
 RigExecRbfSolver::Spacing() const
 {
-    // rbf.py:789-802. THIS pose measured against every OTHER pose's metric,
+    //. THIS pose measured against every OTHER pose's metric,
     // which is the opposite direction from _MeasureRadii above.
     std::vector<double> out;
     out.reserve(_poses.size());
@@ -690,13 +686,13 @@ RigExecRbfSolver::TranslationSpacing() const
 bool
 RigExecRbfSolver::Degenerate() const
 {
-    // Not "nearly singular" -- actually coincident, under the channels the conventional tool
-    // has turned ON. That last part is the whole of it: an interpolator the conventional tool
-    // drives by TRANSLATION has identity rotations, so measuring it as a
+    // Not "nearly singular" -- actually coincident, under the channels that
+    // are turned ON. That last part is the whole of it: an interpolator
+    // driven by TRANSLATION has identity rotations, so measuring it as a
     // rotation makes every distance zero, the kernel matrix all ones and
     // rank one, and no regularisation makes it meaningful. Regularising
     // anyway "succeeds", returns weights around 1e11, and evaluates to a
-    // flat 1/n for every input. rbf.py:804-837.
+    // flat 1/n for every input.
     for (size_t index = 0; index < _poses.size(); ++index) {
         const GfQuatd &here = _parts[index][0];
         const GfVec3d *moved = _Translation(index);
@@ -747,7 +743,7 @@ RigExecRbfSolver::Solve()
     // c and 0 at the others. Since Matrix()[r][i] is phi_i(pose_r), that
     // reads W @ M.T == I, so what has to be inverted is M TRANSPOSED.
     // With one shared radius M is symmetric and the two are the same matrix,
-    // which is why this went unnoticed in the Python for as long as every
+    // which is why this went unnoticed for as long as every
     // interpolator had one. Per-pose widths make it asymmetric --
     // phi_far(near) is not phi_near(far) -- and inverting the UNTRANSPOSED
     // matrix then produces weights that are wrong AT THE POSES, which is the
@@ -756,7 +752,7 @@ RigExecRbfSolver::Solve()
     // read 1.716 of itself and -0.582 of its neighbour. On the shipped biped
     // it cost the head, the neck, both elbows, both wrists, both ankles and
     // both toes between 0.001 and 0.130 at their own poses -- small enough
-    // to read as a soft corrective rather than as a bug. rbf.py:868-920.
+    // to read as a soft corrective rather than as a bug.
     // 33 of the biped's 67 interpolators fit to per-pose widths, so this is
     // the common case here, not the exotic one.
     const std::vector<std::vector<double>> rows = Matrix();
@@ -779,7 +775,7 @@ RigExecRbfSolver::Solve()
     }
     // Poses on top of each other make a singular matrix. A nudge on the
     // diagonal separates them; regularization does the same job, and
-    // this is the fallback when it is zero. rbf.py:908-919.
+    // this is the fallback when it is zero.
     _regularizedSingular = true;
     for (size_t index = 0; index < size; ++index) {
         built[index][index] += RigExecRbfSingular;
@@ -810,7 +806,7 @@ RigExecRbfSolver::Normalize(std::vector<double> *weights) const
     }
     // The SUM rather than the sum of magnitudes: a negative weight is a real
     // instruction to lean away from a pose, and dividing by the absolute sum
-    // would quietly turn a strong lean into a weak one. rbf.py:964-987.
+    // would quietly turn a strong lean into a weak one.
     double total = 0.0;
     for (double value : *weights) {
         total += value;
@@ -834,7 +830,7 @@ RigExecRbfSolver::Evaluate(const GfVec3d &euler, const GfVec3d *translation,
 {
     out->clear();
     if (_weights.empty()) {
-        // The Python solves lazily on first evaluate (rbf.py:954-957); a
+        // The Python solves lazily on first evaluate; a
         // const method cannot, so an unsolved solver answers nothing rather
         // than answering wrongly. Callers on the per-frame path have solved
         // at build time by construction.
@@ -853,7 +849,6 @@ RigExecRbfSolver::Evaluate(const GfVec3d &euler, const GfVec3d *translation,
     Normalize(out);
     if (!allowNegativeWeights) {
         // AFTER normalisation, never before and never inside the solve.
-        // the reference implementation.
         for (double &value : *out) {
             value = std::max(0.0, value);
         }
@@ -868,7 +863,6 @@ RigExecRbfSolver::Walk(size_t first, size_t second, double amount,
     // driver actually takes. Both are needed because an interpolator may be
     // watching either, and sampling only the rotation between two
     // translation poses walks a straight line through a single point.
-    // rbf.py:693-718.
     *euler = RigExecRbfSlerpEuler(_poses[first], _poses[second], amount);
     if (_translations.empty()) {
         *translation = GfVec3d(0.0);
@@ -893,7 +887,7 @@ RigExecRbfSolver::Coverage(int steps) const
     // AT the poses, where the answer is always right. It happens with the
     // linear kernel, whose support is compact -- the left thigh had poses 25
     // to 150 degrees apart under a 30 degree radius, so the whole middle of
-    // every swing was uncovered. rbf.py:736-765.
+    // every swing was uncovered.
     const size_t size = _poses.size();
     if (size < 2) {
         return 1.0;
@@ -931,7 +925,6 @@ RigExecRbfSolver::Coverage(int steps) const
 double
 RigExecRbfSolver::Overshoot(int steps) const
 {
-    // rbf.py:767-787.
     const size_t size = _poses.size();
     if (size < 2 || _weights.empty()) {
         return 0.0;
@@ -1002,7 +995,6 @@ RigExecRbfSolver
 RigExecRbfFitWidth(const RigExecRbfSolverDesc &desc,
                    RigExecRbfFitReport *report, double floor)
 {
-    // rbf.py:223-352.
     RigExecRbfSolverDesc common = desc;
     common.radius = 0.0;
     common.translationRadius = 0.0;
@@ -1064,7 +1056,7 @@ RigExecRbfFitWidth(const RigExecRbfSolverDesc &desc,
                 // Each pose measured against its OWN neighbour, which is
                 // what a chain of unevenly spaced poses needs. The falloff
                 // handed in is 0.3 * scale, so share / 0.3 is exactly the
-                // swept scale (rbf.py:320-323).
+                // swept scale.
                 attempt.radius = 0.0;
                 attempt.translationRadius = 0.0;
                 attempt.falloffs.assign(desc.poses.size(),
@@ -1086,8 +1078,7 @@ RigExecRbfFitWidth(const RigExecRbfSolverDesc &desc,
 
             if (covered >= floor) {
                 // Least overshoot wins; a wider width (higher coverage)
-                // breaks the tie, which is Python's (over, -covered) tuple
-                // comparison at rbf.py:341-343.
+                // breaks the tie: the comparison is (over, -covered).
                 const bool better =
                     !haveBest ||
                     over < bestReport.overshoot ||

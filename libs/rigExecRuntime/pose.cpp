@@ -318,6 +318,8 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
     scratch->rotOrder.assign(slots, 0);
     scratch->posedAuthored.assign(slots, 0);
     scratch->noScaleAvars.assign(slots, 0);
+    // Empty on a minor-1 binary, which is every axis +1.
+    scratch->rotationSign.assign(slots, 0);
     for (size_t i = 0; i < slots; ++i) {
         scratch->restM[i] = _RrWireMatrix(constants.restM[i]);
         scratch->selfD[i] = _RrWireMatrix(constants.selfD[i]);
@@ -335,6 +337,8 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
             constants.posedAuthored[i] ? 1 : 0;
         scratch->noScaleAvars[i] =
             constants.noScaleAvars[i] ? 1 : 0;
+        scratch->rotationSign[i] = i < constants.rotationSign.size()
+            ? (unsigned char)(constants.rotationSign[i] & 7u) : 0;
     }
     scratch->lastRestM = scratch->restM;
     scratch->lastSelfD = scratch->selfD;

@@ -2797,11 +2797,20 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 // a volume that takes it discards the scale for free, which
                 // is what exec does with the same rig.
                 const bool noScale = B.noScaleAvars[size_t(i)] != 0;
+                // avars:rotationSign, applied to the avar exactly where
+                // computations.cpp applies it, so a mirrored limb composes
+                // the same numbers on both paths.
+                const unsigned sign = size_t(i) < B.rotationSign.size()
+                    ? B.rotationSign[size_t(i)] : 0u;
+                const double sx = RigExecRotationSignFromMask(sign, 0);
                 const GfMatrix4d avars = RigExecBakedComposeAvars(
                     a[0] * units, a[1] * units, a[2] * units,
                     noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
                     noScale ? 1.0 : a[5],
-                    a[6], a[7], a[8], a[9], B.rotOrder[size_t(i)]);
+                    a[6] * sx,
+                    a[7] * RigExecRotationSignFromMask(sign, 1),
+                    a[8] * RigExecRotationSignFromMask(sign, 2),
+                    a[9] * sx, B.rotOrder[size_t(i)]);
                 const int switchIndex =
                     B.spaceSwitchBySlot.empty()
                         ? -1 : B.spaceSwitchBySlot[size_t(i)];

@@ -1370,6 +1370,12 @@ struct RigExecBakedProgramImpl {
     /// walk straight past.
     std::vector<char> noScaleAvars;
 
+    /// Per slot, avars:rotationSign packed by RigExecRotationSignMask. A
+    /// mirrored limb declares it so the same avar value turns both sides the
+    /// same way; it multiplies the avar at compose time, never the frame,
+    /// so a slot's rest pose is untouched whatever it holds.
+    std::vector<unsigned char> rotationSign;
+
     // A RigExecPoseInterpolator reads the FINAL pose of its driver and writes
     // floats the geometry chains consume, so on the dynamic path it is a
     // phase of its own between the pose walk and the chains. Here it is a

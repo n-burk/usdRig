@@ -1901,13 +1901,13 @@ class TouchPosePanel(QtWidgets.QDialog):
         self._leadSwatch = QtWidgets.QPushButton("Lead")
         self._leadSwatch.setToolTip(
             "The colour of the region whose control was selected LAST. "
-            "the conventional kLeadSelected; the studio's file makes it green.")
+            "The studio's file makes it green.")
         self._leadSwatch.clicked.connect(lambda: self._OnColor("lead"))
         look.addWidget(self._leadSwatch)
         self._selectedSwatch = QtWidgets.QPushButton("Selected")
         self._selectedSwatch.setToolTip(
-            "The colour of every other selected region. the conventional kSelected; "
-            "the studio's file makes it a neutral grey.")
+            "The colour of every other selected region. "
+            "The studio's file makes it a neutral grey.")
         self._selectedSwatch.clicked.connect(
             lambda: self._OnColor("selected"))
         look.addWidget(self._selectedSwatch)
@@ -1937,8 +1937,7 @@ class TouchPosePanel(QtWidgets.QDialog):
         """The voice mode and its checkbox, or a checkbox that says why not.
 
         NOTHING HERE CAN STOP THE PANEL OPENING. The speech subpackage
-        lives in the shared TouchPose repo (`touchpose/scripts/touchpose/
-        voice`), and a checkout without it -- or a machine with no speech
+        lives in the shared TouchPose repo, and a checkout without it -- or a machine with no speech
         engine -- gets a disabled box whose tooltip names the reason,
         which is more use to whoever meets it than a feature that is
         simply not there. Every path out of here returns a checkbox.

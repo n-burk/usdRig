@@ -24,7 +24,7 @@ MIN_HIT = 4.0
 
 # The command buttons this panel actually implements. Anything else a
 # picker
-# carries is a script for the conventional tool, which we cannot run, and is left inert.
+# carries is a script we cannot run, and is left inert.
 IMPLEMENTED_COMMANDS = ("zero_ctrls",)
 
 
@@ -83,7 +83,7 @@ class Button(object):
         # "ik" / "fk" when this button belongs to one side of a limb's
         # IK/FK switch, else None. Baked from the opacity wiring.
         # A commandButton this panel implements itself. A picker stores a
-        # the conventional tool python script per button, which is not runnable here, so
+        # script per button, which is not runnable here, so
         # the LABEL is the binding -- `Zero Ctrls` and friends. Buttons we
         # have no action for stay inert rather than pretending.
         self.command = None
@@ -119,7 +119,7 @@ class Button(object):
         """The label that goes with the value already on the attribute.
 
         The READ side of `next_value`, and the picker needs it because the
-        labels are BAKED from the conventional tool: `attributeButton675` ships value "FK"
+        labels are BAKED at export: an IK/FK button ships value "FK"
         because L_Arm was in FK when the picker was exported, and it kept
         saying so however the rig's own `avars:ikfk` read. Measured in
         usdview on Biped_stack: with arm_l ikfk at 1.0 the reopened panel
@@ -142,7 +142,7 @@ class Button(object):
     def next_value(self, current):
         """The value a click should write, given what is there now.
 
-        An enum button cycles. the conventional enum on the IK/FK switches is
+        An enum button cycles. The enum on the IK/FK switches is
         "IK,FK" -- index 0 IK, 1 FK -- while ours is the blend weight,
         0 FK and 1 IK. `invert` carries that, so the label the animator
         reads and the number we write agree.

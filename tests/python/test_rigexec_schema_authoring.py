@@ -518,6 +518,30 @@ class BuilderDependencyTests(_ContractTestCase):
                     self.assertEqual(
                         tuple(attr.Get() for attr in attrs), floored)
 
+    def test_control_handle_exposes_strict_rotation_sign(self):
+        control = self.builder.add_control("MirroredControl")
+        set_rotation_sign = self.require_method(control, "set_rotation_sign")
+
+        set_rotation_sign(-1.0, 1.0, -1.0)
+        prim = self.stage.GetPrimAtPath(control.path)
+        sign = prim.GetAttribute("avars:rotationSign")
+        self.assertTrue(sign)
+        self.assertFalse(sign.IsCustom())
+        self.assertEqual(sign.GetTypeName(), Sdf.ValueTypeNames.Double3)
+        self.assertEqual(tuple(sign.Get()), (-1.0, 1.0, -1.0))
+
+        # The channel carries a sign and nothing else, so strict authoring
+        # takes only the two values that are one -- a magnitude or a zero
+        # would be silently reinterpreted by the evaluator, and a rig that
+        # meant something by it should hear about it here.
+        for bad in ((2.0, 1.0, 1.0), (1.0, 0.0, 1.0), (1.0, 1.0, -0.5)):
+            with self.assertRaises(ValueError):
+                set_rotation_sign(*bad)
+            self.assertEqual(tuple(sign.Get()), (-1.0, 1.0, -1.0))
+        with self.assertRaises(TypeError):
+            set_rotation_sign("x", 1.0, 1.0)
+        self.assertEqual(tuple(sign.Get()), (-1.0, 1.0, -1.0))
+
     def test_volume_weight_handle_exposes_strict_avar_spin(self):
         self._make_points()
         sphere = self.builder.add_sphere_weight(

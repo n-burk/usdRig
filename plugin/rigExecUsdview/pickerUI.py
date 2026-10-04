@@ -1109,7 +1109,7 @@ class PickerPanel(QtWidgets.QDialog):
                 modes[path] = "fk"
         self._dials = dials
 
-        # ...and the switch's own label, which is BAKED from the conventional tool and so
+        # ...and the switch's own label, which is BAKED at export and so
         # reads back whatever state the rig happened to be exported in
         # until the animator clicks it once. Same source of truth as the
         # half that is drawn, or the panel contradicts itself.

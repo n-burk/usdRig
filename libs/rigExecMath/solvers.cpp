@@ -809,9 +809,9 @@ _Affects(const RigExecConstraintAxisMask &mask, int axis)
 // magnitude down the chain was already correct (each joint's scale
 // constraint had replaced it); only the shear rode through, and it reached
 // skull_def and face_upper_def at 0.157, which is what made the head and
-// shoulders visibly deform. Maya cannot reproduce it: 111 of the 112 joints
-// in skeleton.ma carry segmentScaleCompensate, so no joint there inherits a
-// parent's scale and no joint carries shear.
+// shoulders visibly deform. The rig's authored behaviour has no shear at
+// all: its joints compensate their parent's scale, so none inherits it
+// and none carries shear.
 //
 // Masked per-block rather than per-axis because shear is not axis
 // separable: (h_xy, h_xz, h_yz) each mix two axes, so a partial scale mask

@@ -671,8 +671,8 @@ _RbfDescFrom(const py::object &poses, const py::object &translations,
     rigExec::RigExecRbfSolverDesc desc;
     desc.poses = _SeqToVec3ds(poses);
     desc.translations = _SeqToVec3ds(translations);
-    // Anything that is not "linear" is the gaussian, which is the Python's
-    // own fallback for an unknown kernel name (rbf.py:117-120).
+    // Anything that is not "linear" is the gaussian, the fallback for an
+    // unknown kernel name.
     desc.kernel = kernel == "linear" ? rigExec::RigExecRbfKernel::Linear
                                      : rigExec::RigExecRbfKernel::Gaussian;
     for (double value : _SeqToDoubles(poseTypes)) {
@@ -1405,6 +1405,12 @@ PYBIND11_MODULE(_rigexec, m) {
              "sign and are raised to 1e-4.")
         .def("set_avar_spin", &rigExec::RigExecControlHandle::SetAvarSpin,
              py::arg("degrees"))
+        .def("set_rotation_sign",
+             &rigExec::RigExecControlHandle::SetRotationSign,
+             py::arg("sx"), py::arg("sy"), py::arg("sz"),
+             "Declare a mirrored limb: per axis +1, or -1 to make the same "
+             "rotation value turn this control the way its twin turns. "
+             "Identity at rest; anything but +1/-1 is refused.")
         .def("set_channel_role", [](rigExec::RigExecControlHandle &h, std::string role) {
             h.SetChannelRole(TfToken(role));
         }, py::arg("role"));
@@ -1423,7 +1429,11 @@ PYBIND11_MODULE(_rigexec, m) {
              "Author finite local scale; magnitudes below 1e-4 keep their "
              "sign and are raised to 1e-4.")
         .def("set_avar_spin", &rigExec::RigExecJointHandle::SetAvarSpin,
-             py::arg("degrees"));
+             py::arg("degrees"))
+        .def("set_rotation_sign",
+             &rigExec::RigExecJointHandle::SetRotationSign,
+             py::arg("sx"), py::arg("sy"), py::arg("sz"),
+             "As Control.set_rotation_sign.");
 
     // Solvers.
     py::class_<rigExec::RigExecSolverHandle, RigExecHandleBase>(m, "Solver")
@@ -1779,7 +1789,7 @@ PYBIND11_MODULE(_rigexec, m) {
             return h.AddSample(name, activation);
         }, py::arg("name"), py::arg("activation") = 1.0f);
 
-    // Pose interpolators (the conventional poseInterpolator; the maths is
+    // Pose interpolators (the maths is
     // libs/rigExecMath/rbf.h). Authoring only: the solved matrix is not
     // stored, because it is a function of the poses, the radii, the kernel
     // and the regularization, every one of which is authored.
@@ -1797,7 +1807,7 @@ PYBIND11_MODULE(_rigexec, m) {
            "not bent, and its bend shapes should stay at zero.")
         .def("set_rotation", [](rigExec::RigExecPoseHandle &h,
                                 std::array<double, 4> q) {
-            // (real, imaginary), the order GfQuatf takes -- NOT the conventional tool's
+            // (real, imaginary), the order GfQuatf takes -- NOT the authored data's
             // [x, y, z, w], which the converter reorders on the way in.
             h.SetRotation(GfQuatf(float(q[0]),
                                   GfVec3f(float(q[1]), float(q[2]),
@@ -2570,8 +2580,8 @@ PYBIND11_MODULE(_rigexec, m) {
         rigExec::RigExecRbfSolver solver =
             rigExec::RigExecRbfFitWidth(desc, &report);
         // the conventional painted poseFalloff, on top of the fitted width. 0.3 is
-        // the conventional default and leaves the fit alone; the floor at 0.05 is the
-        // the reference implementation's.
+        // the conventional default and leaves the fit alone; the share is floored
+        // at 0.05.
         if (std::abs(pose_falloff - 0.3) > 1.0e-6) {
             solver.ScaleWidths(std::max(pose_falloff / 0.3, 0.05));
             solver.Solve();
@@ -2601,8 +2611,8 @@ PYBIND11_MODULE(_rigexec, m) {
 
     // The converter stores a pose as a QUATERNION (the schema's
     // rigExec:rotation) and the solver takes XYZ eulers, so the conversion has
-    // to happen somewhere. Here, rather than as a second copy of
-    // rbf.py:1130-1146 in python: the closed form is not interchangeable with
+    // to happen somewhere. Here, rather than as a second copy in Python:
+    // the closed form is not interchangeable with
     // GfRotation's decomposition at the precision the parity fixture is
     // compared at, and two spellings of it would drift.
     m.def("rbf_euler_from_quaternion", [](std::array<double, 4> q) {
@@ -2613,7 +2623,7 @@ PYBIND11_MODULE(_rigexec, m) {
        "A (real, i, j, k) quaternion as an XYZ euler in radians -- the exact\n"
        "inverse of the closed form the solver's poses are built with.");
 
-    // The gate tools/biped/verify_psd.py holds every interpolator to:
+    // The gate every interpolator is held to:
     // the kernels must still sum to at least RigExecRbfCoverageFloor
     // everywhere BETWEEN the poses. Zero there is a dead zone -- every
     // shape switches off and snaps back as the driver leaves -- and it

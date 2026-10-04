@@ -7,7 +7,7 @@ rem Why it exists: `guide:displayOpacity.connect = <dial>` compiled and
 rem changed nothing, because UsdAttribute::Get never follows a connection.
 rem The imaging bridge now does, and this asserts the DRAWN opacity from
 rem the terminal Hydra scene index -- never the authored attribute -- as
-rem tools\biped\params.py wires each limb's controls (into the session
+rem the builder wires each limb's controls (into the session
 rem layer; the file is never written) and the limb's avars:ikfk is driven
 rem on the param node, a different prim from every guide it fades. The IK
 rem guides come up with the dial and the FK guides go down against it,

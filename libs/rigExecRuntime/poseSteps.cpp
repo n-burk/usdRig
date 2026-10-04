@@ -21,6 +21,15 @@ enum _RrPropagateOutcome : uint8_t {
     _RrInvalidResult = 5,
 };
 
+// RigExecRotationSignFromMask, verbatim: bit N set negates axis N. The
+// runtime carries its own copy of the math helpers rather than reaching
+// into rigExecMath, which keeps it free of every other project header.
+double
+_RrRotationSign(unsigned mask, int axis)
+{
+    return (mask & (1u << axis)) ? -1.0 : 1.0;
+}
+
 // The split constants of the commit walk (bakedPose.cpp).
 enum : size_t {
     _RrPropagateChunkSize = 64,
@@ -574,10 +583,19 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                 const double units = a[10];
                 const bool noScale =
                     scratch->noScaleAvars[size_t(i)] != 0;
+                // avars:rotationSign, applied to the avar where the other
+                // two paths apply it (computations.cpp, bakedPose.cpp).
+                const unsigned sign =
+                    size_t(i) < scratch->rotationSign.size()
+                        ? scratch->rotationSign[size_t(i)] : 0u;
+                const double signX = _RrRotationSign(sign, 0);
                 const RrMat4d avars = _RrComposeAvars(
                     a[0] * units, a[1] * units, a[2] * units,
                     noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
-                    noScale ? 1.0 : a[5], a[6], a[7], a[8], a[9],
+                    noScale ? 1.0 : a[5], a[6] * signX,
+                    a[7] * _RrRotationSign(sign, 1),
+                    a[8] * _RrRotationSign(sign, 2),
+                    a[9] * signX,
                     program->TextOrEmpty(
                         scratch->rotOrder[size_t(i)]));
                 const int parent = meta.parent[size_t(i)];

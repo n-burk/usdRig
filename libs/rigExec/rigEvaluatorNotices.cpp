@@ -49,9 +49,11 @@ _NoticeIsAvarValuesOnly(const UsdNotice::ObjectsChanged &notice)
     static const TfToken kTimeSamples("timeSamples");
     static const TfToken kSpline("spline");
     static const TfToken kTypeName("typeName");
-    // The numeric channels only. avars:defaultSpace and
-    // avars:rotationOrder are tokens that choose how a frame is
-    // composed, which is structure, so they are not in this list.
+    // The numeric channels only. avars:defaultSpace,
+    // avars:rotationOrder and avars:rotationSign choose how a frame is
+    // composed, which is structure, so they are not in this list -- the
+    // baked program captures the sign once per slot and only a recompile
+    // can move it.
     static const TfToken kChannels[] = {
         TfToken("avars:tx"), TfToken("avars:ty"), TfToken("avars:tz"),
         TfToken("avars:sx"), TfToken("avars:sy"), TfToken("avars:sz"),

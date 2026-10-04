@@ -282,6 +282,12 @@ struct RigExecWireConstants {
     std::vector<uint8_t> noScaleAvars;
     /// providers * 11 doubles, in the avar-name order.
     std::vector<double> avarConstants;
+    /// Per provider, avars:rotationSign packed into three bits (see
+    /// RigExecRotationSignMask). Written last in the record and read only
+    /// if the section has bytes left, so a binary baked before minor 2
+    /// loads with the table empty -- every axis +1, which is what that file
+    /// was baked from.
+    std::vector<uint8_t> rotationSign;
 };
 
 bool RigExecWireEncodeSlotMeta(const RigExecWireSlotMeta &meta,

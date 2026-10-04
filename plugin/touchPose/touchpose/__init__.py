@@ -16,8 +16,8 @@ The layering, bottom up, is the whole design:
     (later) ui          the usdview panel  Qt
 
 Each layer is testable with the ones above it absent, which is what keeps
-this a plugin rather than a fork. The the conventional tool product it descends from was
-draw-overrides, an app-wide Qt event filter and DG-pull tricks, none of
+this a plugin rather than a fork. The product it descends from was
+draw overrides, an app-wide Qt event filter and host-graph tricks, none of
 which ports; what ports is the DATA (a face list, a control binding, a
 palette index per region) and the interaction.
 """

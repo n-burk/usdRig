@@ -684,6 +684,23 @@ bool RigExecSampleFrameInputsWithChainBindings(
     const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
     std::string *error = nullptr);
 
+/// Samples exactly as RigExecSampleFrameInputsWithChainBindings WITHOUT the
+/// per-call currency check (RigExecChainSampleBindingsStillCurrent).
+///
+/// For a caller that proves its bindings current another way: bound for
+/// the evaluator's present epoch digest, and dropped on every stage notice
+/// that could move a chain without moving the epoch -- an edit under a
+/// chain mover, its weight objects or its target, or any resync. The check
+/// is the price of trusting nothing, and on the full biped stack it
+/// re-probes every chain mover's inputs: MEASURED at 60.6 ms per call,
+/// paid twice on every viewport release. A caller that cannot make that
+/// promise uses the verifying entry point. UI thread only.
+bool RigExecSampleFrameInputsWithTrustedChainBindings(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
+    std::string *error = nullptr);
+
 /// One warming burst's prepared sample state: everything the per-frame
 /// sampler re-derives that a burst holds fixed, computed once.
 ///

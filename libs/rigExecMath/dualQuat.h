@@ -176,8 +176,8 @@ GfVec3d RigExecDualQuatTransformPoint(
 // A DELIBERATE DIFFERENCE: the classical dual-quaternion skinCluster ignores
 // joint scale and shear entirely (only the rigid motion of each joint
 // reaches the skin). This path does NOT ignore them. A non-uniformly scaled
-// joint therefore deforms the skin here and does not in the conventional tool; that is the
-// intended behaviour, not a bug.
+// joint therefore deforms the skin here; that is the intended behaviour,
+// not a bug.
 // Reflection and singular input: a reflected influence comes back from the
 // library decomposition with one negative scale on the pinned Z axis, so
 // its stretch is symmetric but not positive-definite, and a blend across it

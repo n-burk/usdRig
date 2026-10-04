@@ -2414,6 +2414,7 @@ def "Biped"
 
                                                                     def RigExecControl "eyeSocket_r_aim"
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, 1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -2436,6 +2437,7 @@ def "Biped"
 
                                                                     def RigExecControl "tongue_curl_r"
                                                                     {
+                                                                        double3 avars:rotationSign = (-1, -1, -1)
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
@@ -2475,6 +2477,7 @@ def "Biped"
 
                                                                             def RigExecControl "R_LoTeeth_molar"
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, -1)
                                                                                 double3 guide:offset = (-0.39900000000000013, -1.00135, 1.3101)
                                                                                 uniform token guide:planeNormal = "Y"
                                                                                 double guide:scaleX = 1.7869000000000002
@@ -2564,6 +2567,7 @@ def "Biped"
 
                                                                             def RigExecControl "R_UpTeeth_molar"
                                                                             {
+                                                                                double3 avars:rotationSign = (-1, -1, -1)
                                                                                 double3 guide:offset = (-0.14749999999999996, 0.9688500000000001, 1.0371)
                                                                                 uniform token guide:planeNormal = "Y"
                                                                                 double guide:scaleX = 1.3148

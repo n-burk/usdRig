@@ -3668,7 +3668,7 @@ TestSplineIkRest()
     // Curved chain: the degree-2 curve through rest CVs [0], [1], [N-2],
     // [N-1] interpolates only its end CVs, so the interior joints carry a
     // rest residual. That is inherent to the model (a maintained offset
-    // downstream absorbs it, as the conventional mo=1 constraints do): measure and
+    // downstream absorbs it, as offset constraints do): measure and
     // bound it, do not assert it away. With restLength = curve the ratio
     // is exactly one at rest, so the tip overshoots the curve end by the
     // chain/curve length difference along the end tangent.

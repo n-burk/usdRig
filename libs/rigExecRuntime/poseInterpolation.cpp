@@ -108,7 +108,7 @@ _RrRbfCombine(double angle, double width, double gap,
 }
 
 // The closed-form euler -> quaternion, term for term, NOT a GfRotation
-// composition (rbf.py:1009-1027).
+// composition.
 RrQuatd
 _RrRbfQuaternionFromEuler(const RrVec3d &euler)
 {

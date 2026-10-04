@@ -190,7 +190,12 @@ main(int argc, char **argv)
     std::printf("background warming enabled: %s\n",
                 RigExecBackgroundWarmingEnabled() ? "yes" : "NO");
 
-    const std::string stagePath = examplesDir + "/biped/Biped_anim.usda";
+    // RIGEXEC_BENCH_STAGE names another stage under the examples directory
+    // (e.g. biped/Biped_stack.usda, the full layered character, whose face
+    // correctives the body-only default does not carry).
+    const char *named = GetEnv("RIGEXEC_BENCH_STAGE");
+    const std::string stagePath = examplesDir + "/" +
+        std::string(named && *named ? named : "biped/Biped_anim.usda");
     const UsdStageRefPtr stage = UsdStage::Open(stagePath);
     if (!stage) {
         std::printf("FATAL: cannot open %s\n", stagePath.c_str());

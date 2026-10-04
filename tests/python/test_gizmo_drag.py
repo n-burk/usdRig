@@ -520,7 +520,7 @@ def TestSnapMissWritesNothing():
         out = gd.ApplyDrag(state, current, settings,
                            snapMode=gset.SNAP_POINT)
         _Check(target.calls == [],
-               "%s: the object does not move, the conventional tool does not fall "
+               "%s: the object does not move, and the drag does not fall "
                "back to free dragging: %s" % (label, target.calls))
         _Check(out == Gf.Vec3d(0, 0, 0),
                "%s: and nothing is reported applied: %s"
@@ -728,7 +728,7 @@ def TestRingRotate():
 
 def TestRotateAccumulatesPast180():
     """
-    the conventional tool keeps counting: walking the cursor right round the ring passes
+    The angle keeps counting: walking the cursor right round the ring passes
     180 without wrapping and returns to ~360 for a full turn.
     """
     target = FakeTarget()

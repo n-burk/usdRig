@@ -1,7 +1,7 @@
 #
 # RigExec usdview marking menu: what the gesture MEANS, with no Qt.
 #
-# A marking menu in the Maya sense: press and the menu does not appear at
+# A marking menu: press and the menu does not appear at
 # once; flick toward a compass direction and release and the command runs
 # with nothing ever drawn; hesitate and the ring fades in around the press
 # point so the same eight directions can be READ rather than remembered.
@@ -44,7 +44,7 @@ import time
 
 # --- Timings and distances --------------------------------------------
 #
-# The numbers are Maya's, near enough: it shows the ring after about a
+# The numbers are the familiar ones: it shows the ring after about a
 # sixth of a second and treats a quicker press-and-release as a click.
 # THRESHOLD_PX has to be large enough that a hand-tremor press-release
 # does not fire a random compass direction, and small enough that a

@@ -1,5 +1,4 @@
 // Radial-basis pose interpolation: solve coefficients once, then evaluate weights.
-// Ported from an unidentified Python reference; see THIRD_PARTY_NOTICES.md.
 // psd_parity.json preserves oracle hashes and regression values at 1e-6 tolerance.
 // Angles are radians, translations are meters, and input Euler order is XYZ.
 // Preserve arithmetic order: ill-conditioned inverse solves amplify rounding.
@@ -41,7 +40,7 @@ enum class RigExecRbfKernel {
 /// once and they mean different things: a neck that has twisted has not
 /// bent, and its bend shapes should stay at zero. Measuring the whole
 /// rotation instead leaks about 0.05 of every swing pose into a pure twist
-/// on the shipped biped (rbf.py:1030-1038).
+/// on the shipped biped.
 ///
 /// The metric therefore belongs to the POSE, not to the interpolator.
 enum class RigExecRbfPoseType {
@@ -51,28 +50,25 @@ enum class RigExecRbfPoseType {
 };
 
 /// Below this a matrix counts as singular and the solve is regularised.
-/// rbf.py:69.
 constexpr double RigExecRbfSingular = 1.0e-12;
 
 /// The least total kernel an interpolator may have anywhere between its
 /// poses. Below this the weights are being decided by a sum near zero, and
-/// at zero every shape switches off -- a dead zone. rbf.py:217-220.
+/// at zero every shape switches off -- a dead zone.
 constexpr double RigExecRbfCoverageFloor = 0.5;
 
 /// Below this the normalisation is refused: there is nothing meaningful to
 /// divide by, and scaling by an almost-zero divisor turns rounding into a
-/// huge weight. rbf.py:964-987.
+/// huge weight.
 constexpr double RigExecRbfNormalizeFloor = 1.0e-6;
 
 // Kernels and the metric
 
 /// A bell falling away from a pose: exp(-(distance/radius)^2).
 /// A radius of zero or less answers 1 at the pose and 0 everywhere else.
-/// rbf.py:78-91.
 double RigExecRbfGaussian(double distance, double radius);
 
 /// A straight line falling to zero at the radius: max(0, 1 - distance/radius).
-/// rbf.py:94-106.
 double RigExecRbfLinear(double distance, double radius);
 
 /// Either kernel, by enum.
@@ -93,30 +89,30 @@ double RigExecRbfEvalKernel(RigExecRbfKernel kernel, double distance,
 /// because that is the float the kernels were handed before the translation
 /// channel existed and every table already shipped was solved with it.
 /// Routing it through a square and a root would be right to within an ulp
-/// and wrong as a promise (rbf.py:161-169).
+/// and wrong as a promise.
 ///
 /// Returns infinity when a channel has no width at all and the driver is not
 /// sitting exactly on the pose; both kernels take that to zero -- exp(-inf)
 /// and max(0, 1-inf) -- which is the same answer a zero-width branch would
-/// give by hand, without the branch (rbf.py:71-75).
+/// give by hand, without the branch.
 double RigExecRbfCombine(double angle, double width, double gap,
                          double translationWidth, bool enableRotation,
                          bool enableTranslation);
 
 // Rotations
 
-/// An XYZ euler (radians) as a quaternion, reproducing rbf.py:1009-1027's
-/// closed form term for term. See the conventions note at the top of this
+/// An XYZ euler (radians) as a quaternion, by the closed form term for
+/// term. See the conventions note at the top of this
 /// file for why this is not spelled with GfRotation.
 GfQuatd RigExecRbfQuaternionFromEuler(const GfVec3d &euler);
 
 /// A quaternion as an XYZ euler, the inverse of the above and the exact
-/// arithmetic of rbf.py:1130-1146 (including the copysign branch at the
+/// closed-form arithmetic (including the copysign branch at the
 /// gimbal pole).
 GfVec3d RigExecRbfEulerFromQuaternion(const GfQuatd &quaternion);
 
 /// The angle between two quaternions, the short way round the double cover:
-/// 2 * acos(min(1, |dot|)). rbf.py:1080-1091.
+/// 2 * acos(min(1, |dot|)).
 double RigExecRbfAngleBetween(const GfQuatd &first, const GfQuatd &second);
 
 /// Split a rotation into its twist about an axis and the rest.
@@ -124,31 +120,30 @@ double RigExecRbfAngleBetween(const GfQuatd &first, const GfQuatd &second);
 /// The twist is the part of the rotation that spins about `axis`; the swing
 /// is what is left, and takes the axis itself to where it ends up. A half
 /// turn perpendicular to the axis has no twist at all and answers identity
-/// there. rbf.py:1041-1077.
+/// there.
 ///
 /// `axis` is normalised internally; a zero-length axis is treated as unit
-/// length, matching the Python's `or 1.0` guard.
+/// length, with a zero length falling back to 1.
 void RigExecRbfSwingTwist(const GfQuatd &quaternion, const GfVec3d &axis,
                           GfQuatd *swing, GfQuatd *twist);
 
 /// A rotation part way between two, as an XYZ euler -- the path a driver
-/// actually takes. rbf.py:1094-1127.
+/// actually takes.
 GfVec3d RigExecRbfSlerpEuler(const GfVec3d &first, const GfVec3d &second,
                              double amount);
 
 /// Invert a square matrix by Gauss-Jordan with partial pivoting.
 ///
-/// By hand rather than through a library for the same reason the Python is:
-/// these matrices are one row per POSE -- two to fifteen on the shipped
-/// biped -- so there is nothing to gain, and the pivoting order is part of
-/// what the fixture pins. Returns false when the matrix is singular, leaving
-/// `inverse` untouched. rbf.py:1149-1187.
+/// By hand rather than through a library: these matrices are one row per
+/// POSE -- two to fifteen on the shipped biped -- so there is nothing to
+/// gain, and the pivoting order is part of what the fixture pins. Returns false when the matrix is singular, leaving
+/// `inverse` untouched.
 bool RigExecRbfInvert(const std::vector<std::vector<double>> &matrix,
                       std::vector<std::vector<double>> *inverse);
 
 // The solver
 
-/// Everything an interpolator is built from. Defaults match the Python's.
+/// Everything an interpolator is built from.
 struct RigExecRbfSolverDesc {
     /// The authored poses, XYZ eulers in radians. One per pose.
     std::vector<GfVec3d> poses;
@@ -158,7 +153,7 @@ struct RigExecRbfSolverDesc {
     /// when `enableTranslation` is on -- and `enableTranslation` is forced
     /// off when this is empty, because an interpolator with no translations
     /// has nothing to say about translation and saying "every pose is
-    /// equally close" would peg its weights at 1/n (rbf.py:431-436).
+    /// equally close" would peg its weights at 1/n.
     std::vector<GfVec3d> translations;
 
     RigExecRbfKernel kernel = RigExecRbfKernel::Gaussian;
@@ -166,31 +161,30 @@ struct RigExecRbfSolverDesc {
     /// The rotation falloff width in radians, shared by every pose. Zero
     /// measures one from the poses themselves -- the MEAN distance to a
     /// nearest neighbour, which is the width at which neighbouring poses
-    /// just meet. rbf.py:552-576.
+    /// just meet.
     double radius = 0.0;
 
     /// The same for the translation channel, in metres. Zero measures one
     /// from the translations. It is NOT the rotation radius and must not be
     /// borrowed from it: a brow's poses are millimetres apart and a rotation
-    /// width would swallow all of them. rbf.py:578-606.
+    /// width would swallow all of them.
     double translationRadius = 0.0;
 
-    /// the conventional per-pose `poseFalloff`, one per pose, or empty for a shared
+    /// The per-pose falloff, one per pose, or empty for a shared
     /// radius. The falloff is stated RELATIVE to each pose's own closest
     /// neighbour, so with these each pose gets its own width and an unevenly
     /// spread set stops being judged by one average. 0.3 is the default
-    /// and means "just reach the neighbour". rbf.py:367-377, 608-631.
+    /// and means "just reach the neighbour".
     std::vector<double> falloffs;
 
     /// `poseType` per pose, or empty to measure whole rotations.
     std::vector<RigExecRbfPoseType> poseTypes;
 
-    /// The axis a twist pose spins about, in the driver's own frame. The conventional tool's
-    /// `driverTwistAxis`: 0 X, 1 Y, 2 Z.
+    /// The axis a twist pose spins about, in the driver's own frame:
+    /// 0 X, 1 Y, 2 Z.
     GfVec3d twistAxis{0.0, 1.0, 0.0};
 
-    /// Added to the matrix diagonal before inverting, the conventional tool's
-    /// `regularization`. Trades exactness at the poses for a calmer result
+    /// Added to the matrix diagonal before inverting. Trades exactness at the poses for a calmer result
     /// between them, and rescues a solve whose poses are so close that the
     /// matrix is singular.
     double regularization = 0.0;
@@ -226,7 +220,7 @@ public:
 
     /// How much each authored pose counts, for a driver pose.
     ///
-    /// `allowNegativeWeights` is the conventional flag, and the clamp it selects is
+    /// With `allowNegativeWeights` off, the clamp is
     /// max(0, w) applied AFTER normalisation, never before and never inside
     /// the solve. Negative weights are not a
     /// special case: they fall out of the inverse, and clamping them is what
@@ -241,12 +235,10 @@ public:
     /// away from a pose. Where |sum| < RigExecRbfNormalizeFloor there is
     /// nothing to normalise against and the weights are left alone, which is
     /// what falling away to nothing outside the poses should look like.
-    /// rbf.py:964-987.
     void Normalize(std::vector<double> *weights) const;
 
     /// How far a rotation is from one authored pose, in radians, measured
     /// the way THAT pose is measured (whole / swing / twist).
-    /// rbf.py:462-483.
     double Distance(const GfQuatd &quaternion, size_t index) const;
 
     /// Euclidean distance from a position to one authored pose, in metres.
@@ -268,7 +260,6 @@ public:
     /// channels that are turned on. Not "nearly singular" -- actually
     /// coincident. Regularising one of these anyway "succeeds", returns
     /// weights around 1e11, and evaluates to a flat 1/n forever.
-    /// rbf.py:804-837.
     bool Degenerate() const;
 
     /// Each pose's distance to its own nearest neighbour, in radians.
@@ -281,16 +272,14 @@ public:
     /// along every ordered pair. Zero is a DEAD ZONE: every shape switches
     /// off there and snaps back on as the driver leaves, which is what
     /// popping usually is and is invisible to any check made AT the poses.
-    /// rbf.py:736-765.
     double Coverage(int steps = 8) const;
 
     /// How far past 0..1 the weights reach between the poses.
-    /// rbf.py:767-787.
     double Overshoot(int steps = 8) const;
 
     /// Where the driver is part way from one pose to another: the rotation
     /// slerps and the translation lerps, which is the path a driver actually
-    /// takes. rbf.py:693-718.
+    /// takes.
     void Walk(size_t first, size_t second, double amount, GfVec3d *euler,
               GfVec3d *translation) const;
 
@@ -319,7 +308,7 @@ public:
     RigExecRbfKernel GetKernel() const { return _kernel; }
     bool GetNormalize() const { return _normalize; }
     /// True when Solve() had to fall back on the RigExecRbfSingular nudge
-    /// because the matrix was singular outright. rbf.py:908-919.
+    /// because the matrix was singular outright.
     bool GetRegularizedSingular() const { return _regularizedSingular; }
 
     /// Adopt an already-solved table: the per-pose widths and the inverted
@@ -330,8 +319,8 @@ public:
     /// constant -- so the per-frame side must be able to reconstitute an
     /// interpolator without re-deriving anything. Re-deriving would also be
     /// wrong: the widths in a shipped table may have been scaled by a painted
-    /// poseFalloff after the fit, and there is
-    /// no falloff vector that reproduces them.
+    /// pose falloff after the fit, and there is no falloff vector that
+    /// reproduces them.
     ///
     /// The desc's `radius` and `translationRadius` still carry the shared
     /// widths; these are the per-pose ones, either of which may be empty.
@@ -339,9 +328,8 @@ public:
                         const std::vector<double> &translationRadii,
                         const std::vector<std::vector<double>> &weights);
 
-    /// Rescale both channels' widths by a factor -- the "painted share"
-    /// poseFalloff carries on top of a fitted width
-    ///. Call before Solve().
+    /// Rescale both channels' widths by a factor -- the painted share a
+    /// pose falloff carries on top of a fitted width. Call before Solve().
     void ScaleWidths(double factor);
 
 private:
@@ -387,12 +375,10 @@ struct RigExecRbfFitReport {
 
 /// Choose an interpolator's falloff width by what it has to do.
 ///
-/// The width the fit solved with is not carried in the data. It exports `poseFalloff`,
-/// which its own documentation calls a share "relative to the closest other
-/// pose", and a `poseRotationFalloff` it ignores for every non-independent
-/// pose -- which is all of them on this rig. So the SHAPE of the rule is
-/// the conventional and the size is not recoverable, and one scale for the whole rig
-/// does not work because the pose layouts are not alike: the thigh has poses
+/// The width a set of poses was tuned with is not carried in the data:
+/// only a per-pose falloff, a share relative to the closest other pose,
+/// survives. So the SHAPE of the rule is known and the size is not, and
+/// one scale for the whole rig does not work because the pose layouts are not alike: the thigh has poses
 /// 25 to 150 degrees apart, the shoulder has eight poses with pairs 45
 /// apart, the index has three in a line. Narrow enough for the shoulder
 /// leaves the thigh with a hole in the middle of every swing; wide enough
@@ -410,15 +396,15 @@ struct RigExecRbfFitReport {
 /// channel is fitted the same way and separately, but by the SAME swept
 /// scale: the metric already divides each channel by its own falloff, so the
 /// shape of the pose space is fixed by the ratio between the two widths and
-/// only its overall size is free. rbf.py:223-352.
+/// only its overall size is free.
 ///
 /// Calibration, for the reader who wants the numbers: measured on the biped,
 /// summing how far past 0..1 the weights reach between every pair of poses,
 /// a fixed scale of 0.5 gives 0.81, 0.7 gives 2.88 and 1.0 gives 5.10
 ///. It falls all the way down, so there is no
 /// interior best -- which is exactly why the converter stopped using a fixed
-/// scale and calls this instead. A painted poseFalloff other than the default 0.3
-/// default is applied on top of the fitted width, as poseFalloff/0.3, by
+/// scale and calls this instead. A painted pose falloff other than the
+/// default 0.3 is applied on top of the fitted width, as falloff/0.3, by
 /// RigExecRbfSolver::ScaleWidths.
 ///
 /// \param desc the interpolator. `radius`, `translationRadius` and

@@ -1269,12 +1269,18 @@ _ChainIsFinite(float v)
 
 } // namespace frozenDetail
 
+namespace {
+
+// The pinned sampler's body. `verifyCurrency` is the per-call
+// RigExecChainSampleBindingsStillCurrent check: on for every caller that
+// cannot otherwise prove its bindings fresh, off for one that tracks their
+// currency from stage notices (see the trusted entry point below).
 bool
-RigExecSampleFrameInputsWithChainBindings(
+_SampleWithPinnedChainBindings(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
     const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
-    std::string *error)
+    std::string *error, bool verifyCurrency)
 {
     const auto fail = [&error](const std::string &why) {
         if (error) {
@@ -1289,7 +1295,8 @@ RigExecSampleFrameInputsWithChainBindings(
     // the caller rebinds. An empty pin on a chained rig fails here too, so
     // the hook cannot be skipped around -- only the bind, which names the
     // rig's actual chains, feeds this route.
-    if (!RigExecChainSampleBindingsStillCurrent(bindings, evaluator)) {
+    if (verifyCurrency &&
+        !RigExecChainSampleBindingsStillCurrent(bindings, evaluator)) {
         return fail(
             "chain bindings no longer name the evaluator's chains; rebind "
             "and retry");
@@ -1674,6 +1681,31 @@ RigExecSampleFrameInputsWithChainBindings(
 
     *out = sampled;
     return true;
+}
+} // namespace
+
+bool
+RigExecSampleFrameInputsWithChainBindings(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
+    std::string *error)
+{
+    return _SampleWithPinnedChainBindings(evaluator, time, overrides,
+                                          bindings, out, error,
+                                          /* verifyCurrency = */ true);
+}
+
+bool
+RigExecSampleFrameInputsWithTrustedChainBindings(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
+    std::string *error)
+{
+    return _SampleWithPinnedChainBindings(evaluator, time, overrides,
+                                          bindings, out, error,
+                                          /* verifyCurrency = */ false);
 }
 
 void

@@ -16,9 +16,8 @@ survived. It accumulated 0.0587 at spine_0_def, 0.2327 by spine_5_def,
 and arrived at skull_def and face_upper_def as 0.157, about nine
 degrees.
 
-Maya cannot produce this: 111 of the 112 joints in skeleton.ma carry
-segmentScaleCompensate, so no joint there inherits a parent's scale and
-no joint carries shear.
+The rig's authored behaviour cannot produce this: its joints compensate
+their parent's scale, so none inherits it and none carries shear.
 
 Three things are asserted, because fixing any one of them alone is easy
 and wrong:

@@ -69,4 +69,4 @@ relicensed under the project MIT license.
 
 The adapted attribute widgets in plugin/rigExecUsdview/volumeWeightUI.py
 retain their existing Copyright 2026 Pixar and OpenUSD license notice.
-See THIRD_PARTY_NOTICES.md for unresolved asset and RBF provenance.
+See THIRD_PARTY_NOTICES.md for unresolved asset provenance.

@@ -135,7 +135,7 @@ struct RigExecFalloffLut {
 /// otherwise the two are parallel to each other and name the points that
 /// move. The real correctives move 4.87% of a 26,276-point body (1,279 points
 /// on average), which is why the sparse case is the one worth having:
-/// tools/biped/spikes/blend_cost.py measures a dense sample at 0.37-0.38 ms
+/// A dense sample measures 0.37-0.38 ms
 /// per frame REGARDLESS of its channel weight, because the cost is reading
 /// and copying the full points array and not the accumulate loop. 169 dense
 /// correctives is ~65 ms/frame with the rig standing at rest.

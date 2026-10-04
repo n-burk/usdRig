@@ -21,7 +21,7 @@ namespace rigExec {
 /// Magic bytes "REXB" as a little-endian u32.
 inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 
-/// The container version this code writes: major 3, minor 1.
+/// The container version this code writes: major 3, minor 2.
 /// Encoded (minor << 16) | major; the reader requires the major and
 /// tolerates the minor.
 ///
@@ -40,7 +40,12 @@ inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 /// constraint flags, which is what those files were baked from. A minor-0
 /// reader rejects a minor-1 file that carries constraints or geometry
 /// revisions.
-inline constexpr uint32_t RigExecBinaryVersion = 0x00010003u;
+///
+/// MINOR 2 appends the avars:rotationSign table to the Constants record.
+/// It is last in that record and read only when bytes remain, so a minor-1
+/// file loads with the table empty, which is every axis +1 -- exactly what
+/// it was baked from.
+inline constexpr uint32_t RigExecBinaryVersion = 0x00020003u;
 inline constexpr uint32_t RigExecBinaryMajor(uint32_t version)
 {
     return version & 0xffffu;

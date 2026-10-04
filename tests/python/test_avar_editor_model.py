@@ -96,8 +96,9 @@ def TestDiscovery(stage):
     others = [c for c in channels if c.kind == model.KIND_OTHER]
     _Check(_Names(others) == ["avars:rotationOrder",
                               "avars:unitScaleFactor"], _Names(others))
-    _Check(hidden == ["avars:defaultSpace", "avars:oddMatrix"],
-           "matrix avars are reported, not edited: %s" % hidden)
+    _Check(hidden == ["avars:defaultSpace", "avars:oddMatrix",
+                      "avars:rotationSign"],
+           "non-scalar avars are reported, not edited: %s" % hidden)
     # Kinds, units, families.
     by = {c.name: c for c in channels}
     _Check(by["avars:tx"].kind == model.KIND_TRANSLATE

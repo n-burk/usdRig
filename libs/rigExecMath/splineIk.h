@@ -1,5 +1,5 @@
 // RigExec spline-IK spine kernel.
-// A control-driven counterpart of the conventional ikSplineSolver as the
+// A control-driven spline IK solver as the
 // squarebit biped uses it for the spine and neck. Three control frames
 // (root, mid, end)
 // shape an open degree-2 B-spline with four CVs; the joint chain is laid
@@ -26,7 +26,7 @@
 //     Y and Z handles. Every input and output frame is in one common space
 //     (in practice the chain parent's space; see the rigid-motion note in
 //     RigExecSolveSplineIk).
-//   * The curve is the open degree-2 B-spline with four CVs P0..P3 and the conventional tool
+//   * The curve is the open degree-2 B-spline with four CVs P0..P3 and the
 //     knots [0,0,1,2,2] (full clamped vector [0,0,0,1,2,2,2]), parameter
 //     u in [0,2], two spans. Inserting the knot u=1 to multiplicity two
 //     adds the point (P1+P2)/2 (alpha = (1-0)/(2-0) = 1/2), so each span is
@@ -37,7 +37,7 @@
 //     P2, which is why the interior joints of a chain whose rest CVs are
 //     joint positions do not land exactly on their rest origins (the
 //     rest-residual the tests measure; a caller absorbs it with a
-//     maintained offset the way the conventional mo=1 constraints do).
+//     maintained offset, as offset constraints do).
 //   * Arc length is integrated with 8-point Gauss-Legendre quadrature on 32
 //     sub-intervals per span (the speed |C'(u)| of a quadratic is smooth,
 //     so this is accurate to roughly 1e-14 relative); the inverse (param at
@@ -70,7 +70,7 @@
 //   Twist.  roll is the root control's twist about the rest chain axis
 //     (cv3 - cv0 at rest) relative to its rest frame, by swing-twist
 //     decomposition of the rest->pose rotation; twist is the end control's
-//     twist about the same axis minus roll. the conventional linear twistType.
+//     twist about the same axis minus roll: a linear twist.
 //   Squash.  s_x = 1, s_y = s_z = 1 - w_i * preserveVolume * (ratio - 1).
 //     Linear thinning, exactly as specified, no clamp: ratio < 1 thickens.
 //     Reference weights: spine [0.1429, 0.2857, 0.4286, 0.5, 0.3571,
@@ -189,7 +189,7 @@ struct RigExecSplineIkParams {
     double midFollowWeight = 0.5;
 
     /// Additive roll and twist (radians) on top of what the controls
-    /// contribute: the conventional ikHandle roll / twist attributes.
+    /// contribute: the chain's roll / twist.
     double roll = 0.0;
     double twist = 0.0;
 
@@ -204,7 +204,7 @@ struct RigExecSplineIkParams {
     /// other once the floor exceeds their sum over the chord), and the
     /// mid control's follow point, the twist and the volume ratio are
     /// unaffected because they read the control frames, not the CVs.
-    /// The conventional ikSpline has no floor at all; this is the requested
+    /// A plain spline IK has no floor at all; this is the requested
     /// departure. Not clamped to [0, 1].
     double minLengthRatio = 0.0;
 

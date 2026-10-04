@@ -380,8 +380,7 @@ def TestStateColors():
     Hover is per-region; lead and selected come from the `.touch` file.
     What is asserted here is that the lift keeps the hue and raises the
     value -- a lead that stopped being green, or a selected that stopped
-    being neutral, would no longer agree with the conventional tool the data
-    came from.
+    being neutral, would no longer agree with the data.
     """
     stage = _Stage()
     model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
@@ -405,7 +404,7 @@ def TestStateColors():
            "and lead is the brighter of the two: %.3f vs %.3f"
            % (lead[1], selected[1]))
     _Check(lead[1] > lead[0] and lead[1] > lead[2],
-           "...and is still GREEN, as the conventional kLeadSelected is: %s" % (lead,))
+           "...and is still GREEN: %s" % (lead,))
     _Check(max(selected) - min(selected) < 1e-6,
            "selected is still NEUTRAL: %s" % (selected,))
     _Check(min(selected) > model.selected_color[0],
@@ -797,7 +796,7 @@ def TestColorSets():
 
     `touchpose:color` is per region and is what edit mode draws every
     region in at once; `touchpose:palette[touchpose:hilight]` is the six
-    -colour highlight ramp the conventional tool's shape draws the ONE hovered region
+    -colour highlight ramp the ONE hovered region is drawn
     in. The port only ever used the first, so this asserts both arrive
     and that they are genuinely different answers.
     """

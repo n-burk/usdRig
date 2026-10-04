@@ -239,7 +239,7 @@ _ReadGroupMask(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
 
 } // namespace evaluatorDetail
 
-// Pose interpolators (the conventional poseInterpolator)
+// Pose interpolators
 
 bool
 RigExecRigEvaluator::_CompilePoseInterpolators(
@@ -268,7 +268,7 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
 
     // A driver has to be something that PUBLISHES A FRAME, because a frame is
     // the only thing this phase can read. A RigExecControl qualifies exactly
-    // as a RigExecJoint does -- the conventional drivers are hidden joints, but a
+    // as a RigExecJoint does -- the drivers are hidden joints, but a
     // control has a local rotation just as a joint does -- so the set is both.
     std::set<SdfPath> providers(joints.begin(), joints.end());
     providers.insert(controls.begin(), controls.end());
@@ -465,7 +465,7 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
         }
 
         // The shared widths stay at zero and the PER-POSE ones are adopted: a
-        // shipped table's widths carry a painted poseFalloff that no falloff
+        // shipped table's widths carry a painted pose falloff that no falloff
         // vector reproduces, so they are data, not something to re-derive
         // (rbf.h SetSolvedTable). The inverted matrix is the one thing that IS
         // re-derived, because it is a pure function of everything above and
@@ -513,7 +513,7 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
     // the head of the geometry chains).
     // WHAT THIS PHASE MUST RUN AFTER: the complete pose walk. Not the pose
     // SEED -- the full pose, every constraint included, and the driver
-    // constraints in particular. the conventional pose drivers are hidden joints
+    // constraints in particular. The pose drivers are hidden joints
     // orient-constrained to the bone that carries everything, so that the
     // parent subtracts the twist back out and the driver's local rotation is
     // the swing alone; run this before that constraint and every driver reads
@@ -608,7 +608,7 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
         const GfQuatd delta = (restLocal.GetInverse() * local).GetNormalized();
 
         // Through the euler, not around it: rbf_evaluate -- which is what
-        // tools/biped/verify_psd.py computes its expected weights with --
+        // the verification gate computes its expected weights with --
         // takes an euler and converts it back inside Evaluate. Taking the same
         // route makes the gate's numbers and the engine's the same
         // floating-point values and not merely the same rotation.

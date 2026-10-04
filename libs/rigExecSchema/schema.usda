@@ -378,6 +378,31 @@ class "RigExecXformable" (
     double avars:unitScaleFactor = 1 (
         doc = "Multiplier converting translation avars into local distance units before the selected default and parent transforms. Rotations and scales are unaffected."
     )
+    double3 avars:rotationSign = (1, 1, 1) (
+        doc = """Per-axis sign applied to rx, ry and rz -- and to rspin,
+        which is an X rotation -- before they are composed. Each component
+        carries a sign and nothing else: a magnitude is discarded, and
+        anything that is not negative, including zero, selects +1. Zero
+        would otherwise erase an axis, so it resolves to the unmirrored
+        answer rather than a collapsed one.
+
+        This is how a MIRRORED limb is declared: the same rotation value
+        moves both sides symmetrically. A mirror expressed as a negative
+        scale cannot survive into a rest frame here -- it would make the frame
+        left-handed and every joint, driver and bind below it would have
+        to be rebuilt to match -- so the mirror is declared on the avars
+        instead, where it belongs: it says which of this control's axes
+        already point the mirrored way and which answer backwards.
+
+        Identity at rest, and that is the point. A sign changes nothing
+        when the avars are zero, so declaring it cannot move the rest
+        pose, the skin, or anything constrained to this control. Only
+        what the animator types changes meaning.
+
+        Applied to the avar, not to the frame, so the control's own posed
+        frame mirrors too and a manipulator turns with the limb rather
+        than against it."""
+    )
     matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         doc = """Selected parent's posed local-to-world space. Falls back to
         the nearest namespace provider's computePointFrame; identity when
@@ -2172,8 +2197,8 @@ class RigExecBlendSample "RigExecBlendSample" (
         A dense sample's full points array is read and copied off the stage once
         per sample per frame whether its channel sits at 0 or at 1, measured at
         0.37-0.38 ms per target per frame on a 26,276-point body -- so 169
-        correctives cost ~65 ms/frame with the rig standing at rest
-        (tools/biped/spikes/blend_cost.py). The real correctives move 4.87% of
+        correctives cost ~65 ms/frame with the rig standing at rest.
+        The real correctives move 4.87% of
         the mesh, 1,279 points on average, so the sparse form is not an
         optimization of the dense one; it is the difference between a rig that
         runs and a rig that does not.
@@ -2194,20 +2219,20 @@ class RigExecPoseInterpolator "RigExecPoseInterpolator" (
 
     WHY A DRIVER JOINT AND NOT THE CONTROL THE ANIMATOR MOVES. A corrective
     wants to fire on one piece of a limb's motion and not another -- a wrist
-    that twists should not trigger the shape for a wrist that bends. the conventional tool
+    that twists should not trigger the shape for a wrist that bends. The rig
     builds that split out of the HIERARCHY rather than out of maths: it parks
     a hidden joint under the bone that already carries the twist and
     orient-constrains it to the bone that carries everything, so the parent
     subtracts the twist back out and the driver's LOCAL rotation is the swing
     alone. Point it the other way and the
     same subtraction yields the twist. This port keeps those joints --
-    shoulder_?_driver, wristSwing_?_driver and the rest, authored by
-    build_biped_rigexec.add_pose_drivers -- so the weights come out of the
-    same arithmetic the conventional tool used rather than something that resembles it.
+    shoulder_?_driver, wristSwing_?_driver and the rest --
+    so the weights come out of the rig's own arithmetic rather than
+    something that resembles it.
 
     The maths is a radial basis function and lives in libs/rigExecMath/rbf.h,
-    natively ported and pinned against
-    it at 3.41e-11 over 13,400 evaluations (tests/fixtures/psd_parity.json).
+    pinned at 3.41e-11 over 13,400 evaluations by the parity fixture
+    (tests/fixtures/psd_parity.json).
     The solve is a per-interpolator CONSTANT -- invert the matrix of every
     pose's kernel value at every other pose -- so it happens once and only the
     kernel row is per-frame. Nothing on this prim is that inverted matrix,
@@ -2257,8 +2282,7 @@ class RigExecPoseInterpolator "RigExecPoseInterpolator" (
     )
     uniform token rigExec:kernel = "gaussian" (
         allowedTokens = ["gaussian", "linear"]
-        doc = """How a pose's weight falls away with distance. The conventional tool's
-        interpolation attribute: 0 is linear, 1 is gaussian. On the shipped biped 16 interpolators
+        doc = """How a pose's weight falls away with distance. On the shipped biped 16 interpolators
         are gaussian and 53 linear.
 
         Gaussian never quite reaches zero, so a little of every pose survives
@@ -2295,7 +2319,7 @@ class RigExecPoseInterpolator "RigExecPoseInterpolator" (
         negative weight is a real instruction. Where the sum is smaller than
         1e-6 there is nothing to divide by and the weights are left alone,
         which is what falling away to nothing outside the poses should look
-        like (rbf.py:964-987)."""
+        like."""
     )
     float rigExec:regularization = 0 (
         doc = """regularization, added to the matrix diagonal before
@@ -2349,8 +2373,7 @@ class RigExecPose "RigExecPose" (
         driver usually carries both at once and they mean different things: a
         neck that has twisted has not bent, and its bend shapes should stay at
         zero. Measuring the whole rotation instead leaks about 0.05 of every
-        swing pose into a pure twist on the shipped biped
-        (rbf.py:1030-1038)."""
+        swing pose into a pure twist on the shipped biped."""
     )
     quatf rigExec:rotation = (1, 0, 0, 0) (
         doc = """Where the driver stands in this pose: its LOCAL rotation
@@ -2369,7 +2392,7 @@ class RigExecPose "RigExecPose" (
 
         Measured against this port's own drivers it lands at 0.00 degrees on
         the elbow, the knee and the toe and 1.64 on the shoulder;
-        tools/biped/verify_psd.py prints the angle per pose, which is the
+        The verification gate prints the angle per pose, which is the
         fidelity number."""
     )
     float3 rigExec:translation = (0, 0, 0) (
@@ -2377,18 +2400,15 @@ class RigExecPose "RigExecPose" (
         driver's own frame. Read only when the interpolator has
         rigExec:enableTranslation on; an interpolator with no authored
         translations has nothing to say about translation, and saying every
-        pose is equally close would peg its weights at 1/n
-        (rbf.py:431-436)."""
+        pose is equally close would peg its weights at 1/n."""
     )
     float rigExec:rotationRadius = 0 (
         doc = """How far in RADIANS the driver may stray before this pose's
         kernel has fallen away -- one falloff width, this pose's own.
 
-        FITTED, NOT EXPORTED. the conventional tool does not write out the width it solves
-        with: it writes rigExec:falloff, which its own documentation calls a
-        share relative to the closest other pose, and a poseRotationFalloff it
-        ignores for every non-independent pose -- which is all of them on this
-        rig. So the shape of the rule is preserved and the size is not
+        FITTED, NOT EXPORTED. The width a set of poses was tuned with is not
+        in the data; rigExec:falloff, a share relative to the closest other
+        pose, is. So the shape of the rule is preserved and the size is not
         recoverable, and one scale for the whole rig does not work because the
         pose layouts are not alike: the thigh has poses 25 to 150 degrees
         apart, the shoulder eight with pairs 45 apart, the index three in a
@@ -2413,7 +2433,7 @@ class RigExecPose "RigExecPose" (
         every one of them. Fitted by the same swept scale, because the metric
         already divides each channel by its own width -- the shape of the pose
         space is fixed by the RATIO of the two and only its overall size is
-        free (rbf.py:223-352)."""
+        free."""
     )
     float rigExec:falloff = 0.3 (
         doc = """poseFalloff, kept as provenance and as the editable
@@ -2449,7 +2469,7 @@ class RigExecPose "RigExecPose" (
         Measured: driving this rig with those absolute values reaches the
         authored quaternion to 45.4 degrees on the shoulder and 10.0 on the
         wrist; driving it with (pose - neutral) reaches 1.64 and 0.00. So the
-        subtraction happens once, in tools/biped/build_psd.py, and what is
+        subtraction happens once, at build time, and what is
         stored is what an editor can set directly."""
     )
     bool inputs:enabled = true (

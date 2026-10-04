@@ -45,6 +45,19 @@ three translation avars before composition, converting them to local distance
 units. It does not change rotation, scale, or default/rest translation. Volume
 weights retain rigid placement and use their `inputs:scale*` shape channels.
 
+`avars:rotationSign` multiplies `avars:rx/ry/rz` -- and `avars:rspin`, which
+is an X rotation -- by a per-axis +1 or -1 before they are composed. It
+declares a MIRRORED control: two limbs built as reflections of each other
+answer the same typed rotation by turning into each other rather than the
+same absolute way, which is the convention an animator means by "behaviour
+mirroring". Each component carries only a sign; a magnitude is discarded and
+anything that is not negative -- including zero, which would otherwise erase
+an axis -- selects +1. Because it multiplies the avar and never the frame,
+it is the identity at rest: declaring it cannot move the rest pose, the
+skin, or anything constrained to the control. A manipulator reads and writes
+the EFFECTIVE angle, so the control turns the way it was dragged and the
+signed value is what reaches the stage.
+
 With all new channels at their schema defaults, the formula reduces to the
 previous `A * R * inverse(Rp) * parentPosed` behavior. Editing a default pose
 does not edit the rest frame. Solver-owned joint poses remain authoritative.

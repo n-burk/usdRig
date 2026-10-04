@@ -882,8 +882,14 @@ class RigExecUsdviewContainer(PluginContainer):
                 buffer = (ctypes.c_double * len(values))(*values)
                 return entry(buffer, len(values)) == 0
 
-            def End(self):
-                entry = self._Entry("RigExecImaging_EndPreview")
+            def End(self, publish=True):
+                # Without the republish when a commit authors next (see
+                # gizmoPreview.End); a library predating that entry point
+                # takes the plain end, which is correct and evaluates twice.
+                entry = None if publish else self._Entry(
+                    "RigExecImaging_EndPreviewWithoutPublish")
+                if entry is None:
+                    entry = self._Entry("RigExecImaging_EndPreview")
                 if entry is None:
                     return False
                 ended = entry() == 0

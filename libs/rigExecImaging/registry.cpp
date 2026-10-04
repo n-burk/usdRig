@@ -747,6 +747,26 @@ RigExecImagingRegistry::_LegacyActivate(
     return true;
 }
 
+
+bool
+RigExecImagingRegistry::_AdoptBridgeChainBindings(RigSession *session)
+{
+    uint64_t generation = 0;
+    const RigExecChainSampleBindings *live =
+        session->bridge->AcquireChainBindings(&generation);
+    if (!live) {
+        session->chainBindingsValid = false;
+        return false;
+    }
+    if (!session->chainBindingsValid ||
+        session->chainBindingsGeneration != generation) {
+        session->chainBindings = *live;
+        session->chainBindingsGeneration = generation;
+    }
+    session->chainBindingsValid = true;
+    return true;
+}
+
 void
 RigExecImagingRegistry::_RefreshFrozenSnapshot(RigSession *session)
 {
@@ -757,21 +777,11 @@ RigExecImagingRegistry::_RefreshFrozenSnapshot(RigSession *session)
     const RigExecBakedProgram *program = evaluator.GetBakedProgram();
     const uint64_t epoch = evaluator.GetBindingEpochDigest();
     const uint64_t serial = evaluator.GetStageEditSerial();
-    // The pins, rebound when only they moved. A constant edited mid-epoch
-    // moves no digest, so the comparison is by value, not by key.
-    const auto refreshPins = [&]() {
-        if (session->chainBindingsValid &&
-            RigExecChainSampleBindingsStillCurrent(session->chainBindings,
-                                                   evaluator)) {
-            return;
-        }
-        session->chainBindingsValid = false;
-        RigExecChainSampleBindings rebound;
-        if (RigExecBindChainSampleInputs(evaluator, &rebound)) {
-            session->chainBindings = std::move(rebound);
-            session->chainBindingsValid = true;
-        }
-    };
+    // The pins: the bridge's, which its notice tracking keeps current (a
+    // constant edited mid-epoch moves no digest, but its notice drops them).
+    // Re-verifying a private copy after every edit re-probed every chain
+    // mover -- MEASURED at 60 ms on the full biped stack, on every commit.
+    const auto refreshPins = [&]() { _AdoptBridgeChainBindings(session); };
     if (session->frozenValid && session->frozenProgram == program &&
         session->frozenEpoch == epoch) {
         // Still serial, same program and epoch, valid pins: no notice
@@ -877,15 +887,16 @@ RigExecImagingRegistry::_PrepareWarmBurst(RigSession *session)
     const std::vector<RigExecValueOverride> overrides =
         session->bridge->GetInteractiveOverrides();
     // Pins current and the standing burst usable: serve it, with no
-    // rebuild. The burst embeds its own pins copy, so the session's
-    // re-verified bindings need no second check. Include the stage serial:
+    // rebuild. The burst embeds its own pins copy, built from the bindings
+    // generation it records, so a rebind moves it. Include the stage serial:
     // routed value edits can leave the epoch unchanged while invalidating
     // the burst's memoized static input values and attribute queries.
     const bool pinsCurrent =
         session->burstProgram == program &&
         session->burstEpochDigest == epochDigest &&
         session->burstSerial == serial &&
-        session->burstOverrides == overrides;
+        session->burstOverrides == overrides &&
+        session->burstChainGeneration == session->chainBindingsGeneration;
     if (pinsCurrent && session->standingBurst.usable) {
         return &session->standingBurst;
     }
@@ -924,6 +935,7 @@ RigExecImagingRegistry::_PrepareWarmBurst(RigSession *session)
     session->burstEpochDigest = epochDigest;
     session->burstSerial = serial;
     session->burstOverrides = overrides;
+    session->burstChainGeneration = session->chainBindingsGeneration;
     if (buildMs > _warmBurstPrepSliceMs) {
         // Past the slice: park unusable and mark the overrun, so this
         // tick and every tick until the pins move take the plain
@@ -1608,6 +1620,9 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
             }
         }
     }
+    for (RigSession &session : _sessions) {
+        session.settleOverrides.clear();
+    }
     if (_readRootsDirty) {
         _RefreshReadRoots();
     }
@@ -1782,17 +1797,8 @@ RigExecImagingRegistry::BuildWarmWork(
         // rebound when a mid-epoch edit moved them. A rig that cannot bind
         // takes no job: the sampler would mark its chains stale and decline
         // anyway, but declining here skips the doomed sample.
-        if (!session->chainBindingsValid ||
-            !RigExecChainSampleBindingsStillCurrent(session->chainBindings,
-                                                    evaluator)) {
-            session->chainBindingsValid = false;
-            RigExecChainSampleBindings rebound;
-            if (!RigExecBindChainSampleInputs(evaluator, &rebound)) {
-                return skip(RigExecWarmSkipReason::Unsampleable,
-                            "chain-bind");
-            }
-            session->chainBindings = std::move(rebound);
-            session->chainBindingsValid = true;
+        if (!_AdoptBridgeChainBindings(session)) {
+            return skip(RigExecWarmSkipReason::Unsampleable, "chain-bind");
         }
     }
     // No snapshot, no job -- checked BEFORE sampling on both routes (the
@@ -3240,6 +3246,7 @@ RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
             // lookup can reach; the commit trigger re-enqueues fresh.
             _CancelGenerationLocked(session.rigPath);
             session.dirty = true;
+            session.settleOverrides.clear();
         }
         time = _lastTime;
     }
@@ -3291,10 +3298,10 @@ RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
 }
 
 bool
-RigExecImagingRegistry::EndPreview()
+RigExecImagingRegistry::EndPreview(bool publish)
 {
     if (const Ptr routed = _Routed()) {
-        return routed->EndPreview();
+        return routed->EndPreview(publish);
     }
     UsdTimeCode time;
     bool hadRigOverrides = false;
@@ -3305,7 +3312,16 @@ RigExecImagingRegistry::EndPreview()
         _previewStage = UsdStageWeakPtr();
         _SetChainXformDeltas({});
         for (RigSession &session : _sessions) {
+            session.settleOverrides.clear();
             if (session.bridge) {
+                // Clean means the last publish evaluated these overrides at
+                // _lastTime, so a commit of the same values changes nothing
+                // on screen.
+                if (!publish && !session.dirty && !session.readRootsDirty &&
+                    !_readRootsDirty) {
+                    session.settleOverrides =
+                        session.bridge->GetInteractiveOverrides();
+                }
                 session.bridge->ClearInteractiveOverrides();
             }
             session.dirty = true;
@@ -3317,7 +3333,62 @@ RigExecImagingRegistry::EndPreview()
     // authors its committed values separately; when it has already done so,
     // this generation is the committed one and the artist sees no flicker,
     // and when it has not -- an aborted drag -- this is the rig going back.
-    return hadRigOverrides ? SetTime(time) : true;
+    // A caller about to commit asks for no republish: the sessions are dirty
+    // and the commit's notice evaluates them, once, from the stage.
+    return hadRigOverrides && publish ? SetTime(time) : true;
+}
+
+bool
+RigExecImagingRegistry::_NoticeSettlesPreview(
+    const RigSession &session, const UsdNotice::ObjectsChanged &notice) const
+{
+    if (!_stage || _readRootsDirty || session.readRootsDirty ||
+        !notice.GetResolvedAssetPathsResyncedPaths().empty()) {
+        return false;
+    }
+    std::set<SdfPath> stashed;
+    for (const RigExecValueOverride &entry : session.settleOverrides) {
+        if (entry.attribute.IsEmpty()) {
+            return false;
+        }
+        stashed.insert(entry.prim.AppendProperty(entry.attribute));
+    }
+    // Every edit is a value (or the spec its first value creates) on one
+    // of the withdrawn attributes.
+    const auto valueEdit = [&](const SdfPath &path) {
+        if (!stashed.count(path)) {
+            return false;
+        }
+        for (const TfToken &field : notice.GetChangedFields(path)) {
+            if (field != "default" && field != "timeSamples" &&
+                field != "spline" && field != "typeName") {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        if (!valueEdit(path)) {
+            return false;
+        }
+    }
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        if (!valueEdit(path)) {
+            return false;
+        }
+    }
+    // And the stage now answers every withdrawn value exactly, including
+    // the ones this notice did not touch.
+    for (const RigExecValueOverride &entry : session.settleOverrides) {
+        const UsdAttribute attribute = _stage->GetAttributeAtPath(
+            entry.prim.AppendProperty(entry.attribute));
+        VtValue authored;
+        if (!attribute || !attribute.Get(&authored, _lastTime) ||
+            authored != entry.value) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void
@@ -3468,12 +3539,25 @@ RigExecImagingRegistry::_OnObjectsChanged(
                 // a new asset (or a new file behind it) needs a
                 // re-activation.
                 if (affected && !session.playback) {
-                    session.dirty = true;
+                    // A commit of the pose on screen: the published
+                    // generation is already the stage's answer.
+                    const bool settled =
+                        !session.settleOverrides.empty() &&
+                        _NoticeSettlesPreview(session, notice);
+                    if (!settled) {
+                        session.settleOverrides.clear();
+                    }
+                    session.dirty = !settled;
                     session.readRootsDirty = session.readRootsDirty || _readRootsDirty;
                     // The bridge caches authored guide styling (shape, scale,
                     // colour, purpose...) across generations; an edit that
-                    // reaches the rig is the only thing that can move it.
-                    session.bridge->InvalidateGuideCaches();
+                    // reaches the rig is the only thing that can move it,
+                    // and only the entries it names are dropped.
+                    session.bridge->NoteGuideEdits(notice);
+                    // The live sampler's pinned chain bindings, on the
+                    // same footing: an edit under a chain mover moves a
+                    // chain without moving the epoch digest.
+                    session.bridge->NoteChainEdits(notice);
                     // Outcome-driven retirement (plan 2.1/2.2): the
                     // evaluator classifies this notice (patched plus
                     // paths, routed plus the paths it reads, stamp-bumped,
@@ -4840,6 +4924,12 @@ RigExecImaging_EndPreview()
 }
 
 int
+RigExecImaging_EndPreviewWithoutPublish()
+{
+    return _Legacy().EndPreview(/* publish = */ false) ? 0 : 1;
+}
+
+int
 RigExecImaging_GetAllGuideBoundsAssetSpace(double outMinMax[6])
 {
     return _AllGuideBounds(_Legacy(), outMinMax);
@@ -5035,6 +5125,13 @@ RigExecImaging_EndPreviewForStage(long long stageCacheId)
     // Ending a preview that never began is what an inactive registry does:
     // nothing to drop, success.
     return !context || context->EndPreview() ? 0 : 1;
+}
+
+int
+RigExecImaging_EndPreviewWithoutPublishForStage(long long stageCacheId)
+{
+    const RegistryPtr context = _ForStage(stageCacheId);
+    return !context || context->EndPreview(/* publish = */ false) ? 0 : 1;
 }
 
 int

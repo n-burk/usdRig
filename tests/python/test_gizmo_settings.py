@@ -3,7 +3,7 @@
 Headless test for plugin/rigExecUsdview/gizmoSettings.py: the Qt-free
 per-tool settings model behind the gizmo's Tool Settings panel.
 
-The the conventional tool defaults are asserted literally rather than read back from the
+The tool defaults are asserted literally rather than read back from the
 module, because "what the tool starts as" is the behaviour a user
 notices and the whole point of design spec section 8.2-8.4.
 

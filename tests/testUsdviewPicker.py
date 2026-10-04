@@ -328,7 +328,7 @@ def testUsdviewInputFunction(appController):
     _Check(view._modes.get(dial) != was,
            "an outside edit to %s reached the picker: still %r"
            % (dial, view._modes.get(dial)))
-    # The label is BAKED from the conventional tool, so it has to be read back off the
+    # The label is BAKED at export, so it has to be read back off the
     # attribute too or the panel contradicts the half it is drawing.
     _Check(knob.value != label,
            "and the switch label followed the rig: %r -> %r"

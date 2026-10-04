@@ -924,7 +924,7 @@ def testUsdviewInputFunction(appController):
     d.Pump()
 
     # Ctrl + an axis drag moves in the plane PERPENDICULAR to that axis
-    # (the conventional tool). The modifier is applied to the MOVES, not the press: Qt
+    # The modifier is applied to the MOVES, not the press: Qt
     # turns Ctrl+left-click into a right-button press on macOS, so "grab
     # the axis, then hold Ctrl" is the gesture that works everywhere.
     # Run twice on identical geometry, plain then Ctrl, so the assertion
@@ -1112,7 +1112,7 @@ def testUsdviewInputFunction(appController):
     _Check(not controller.undoStack.CanUndo(),
            "an aborted drag pushed nothing onto the undo stack")
 
-    # Redo aliases: Shift+Z (the conventional tool) and Ctrl+Y both redo.
+    # Redo aliases: Shift+Z and Ctrl+Y both redo.
     d.DragAxis("x")
     v1 = tx.Get(frame)
     d.Key(d.QtCore.Qt.Key_Z, d.QtCore.Qt.ControlModifier)

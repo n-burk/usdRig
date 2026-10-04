@@ -240,6 +240,8 @@ RigExecBakeConvertConstants(const RigExecBakedProgramImpl &program,
     for (char v : program.noScaleAvars) {
         constants.noScaleAvars.push_back(v ? uint8_t(1) : uint8_t(0));
     }
+    constants.rotationSign.assign(program.rotationSign.begin(),
+                                  program.rotationSign.end());
     constants.avarConstants = program.avarConstants;
     return constants;
 }

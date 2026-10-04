@@ -416,7 +416,15 @@ public:
     /// the authored rig. The application authors the committed values itself,
     /// before or after this call -- the two are independent, which is why an
     /// aborted drag is this call alone.
-    bool EndPreview();
+    ///
+    /// With \p publish false the overrides are dropped and every session is
+    /// marked dirty, but nothing is evaluated: for a COMMIT that authors
+    /// right after, whose own stage notice evaluates and publishes the
+    /// committed rig. Ending first and publishing would flash the pre-drag
+    /// pose; ending after the commit evaluated the rig twice -- once from
+    /// the notice with the overrides still standing, once here. MEASURED on
+    /// the full biped stack: two EvaluateAndPublish passes per release.
+    bool EndPreview(bool publish = true);
 
     bool IsPreviewActive() const;
 
@@ -667,6 +675,19 @@ private:
         // UI thread only: the pins hold live stage handles.
         RigExecChainSampleBindings chainBindings;
         bool chainBindingsValid = false;
+        /// The bridge's binding generation chainBindings was copied at
+        /// (RigExecImagingBridge::AcquireChainBindings): the copy refreshes
+        /// when it moves, and the standing burst rebuilds with it.
+        uint64_t chainBindingsGeneration = 0;
+        /// The overrides EndPreview(publish=false) withdrew while the
+        /// published generation still showed them, for a commit about to
+        /// author them. A notice whose every edit is one of these
+        /// attributes, after which the stage holds every one of these
+        /// values, leaves the published pose exact: the session stays
+        /// clean instead of evaluating it again. Dropped by any
+        /// evaluation and by any notice that does not settle it.
+        std::vector<RigExecValueOverride> settleOverrides;
+        uint64_t burstChainGeneration = 0;
         /// Frames a scoped retirement dirtied (plan 2.2 lane c), awaiting
         /// re-warm: the next commit/idle trigger enqueues these FIRST, so
         /// the affected-time set replaces the fixed sweep for the edit.
@@ -758,6 +779,15 @@ private:
                                                UsdTimeCode playhead);
 
     RigExecBurstSampleCache *_PrepareWarmBurst(RigSession *session);
+    /// The session's chain pins, taken from its bridge -- the bindings the
+    /// live sampler uses, kept current by the bridge's notice tracking --
+    /// and copied only when the bridge has rebound since. False, pins
+    /// marked invalid, when the rig's chains cannot be bound.
+    bool _AdoptBridgeChainBindings(RigSession *session);
+    /// Whether \p notice only authors \p session's settleOverrides and
+    /// leaves the stage holding every one of them at _lastTime. _mutex held.
+    bool _NoticeSettlesPreview(const RigSession &session,
+                               const UsdNotice::ObjectsChanged &notice) const;
 
     // Fills at most one missing range frame without publishing to Hydra.
     // Only the idle trigger calls this, on the stage-owning thread.
@@ -1060,6 +1090,9 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_BeginPreview(
 RIGEXEC_IMAGING_C_API int RigExecImaging_UpdatePreview(
     const double *values, int count);
 RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreview();
+/// EndPreview without the republish, for a commit that authors next (see
+/// RigExecImagingRegistry::EndPreview).
+RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreviewWithoutPublish();
 
 // Stage-scoped surface (docs/multistage-imaging.md).
 // Every per-stage entry point above has a ...ForStage twin taking the stage's
@@ -1124,6 +1157,8 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_BeginPreviewForStage(
 RIGEXEC_IMAGING_C_API int RigExecImaging_UpdatePreviewForStage(
     long long stageCacheId, const double *values, int count);
 RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreviewForStage(
+    long long stageCacheId);
+RIGEXEC_IMAGING_C_API int RigExecImaging_EndPreviewWithoutPublishForStage(
     long long stageCacheId);
 
 /// 1 when the stage's context has an active rig, 0 otherwise (including an

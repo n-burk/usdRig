@@ -95,7 +95,7 @@ RigExecPointFrameArray RigExecSolveTwistDistribution(
 /// Translation dropped and the axes orthonormalized first, which is what
 /// makes the result a rotation and not merely the rotation-ish upper 3x3 of
 /// a frame carried through a dozen multiplies. The same three steps
-/// tools/biped/build_psd.py:_rotation takes, in the same order, so the
+/// the pose builder takes, in the same order, so the
 /// engine's driver delta and the gate's are the same arithmetic.
 ///
 /// ROW-VECTOR, like the rest of this codebase: p' = p * M, GfMatrix4d
