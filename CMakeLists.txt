@@ -107,6 +107,7 @@ add_library(rigExec SHARED
     libs/rigExec/bakedProgram.cpp
     libs/rigExec/bakedPose.cpp
     libs/rigExec/bakedSchedule.cpp
+    libs/rigExec/bakedTrace.cpp
     libs/rigExec/bakedGeometry.cpp
     libs/rigExec/bakedWeights.cpp
     libs/rigExec/bakedVerify.cpp
@@ -819,6 +820,20 @@ foreach(_schedule serial parallel)
         "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
 
+# The baked op trace: completion order against the step graph, under both
+# executors.
+add_executable(testRigExecOpTrace tests/testRigExecOpTrace.cpp)
+target_link_libraries(testRigExecOpTrace PRIVATE rigExec)
+target_compile_definitions(testRigExecOpTrace PRIVATE ${_rigexec_schema_resource_define})
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecOpTrace_${_schedule}
+        COMMAND testRigExecOpTrace "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    set_tests_properties(testRigExecOpTrace_${_schedule} PROPERTIES
+        ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+    set_property(TEST testRigExecOpTrace_${_schedule} APPEND
+        PROPERTY ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+endforeach()
+
 add_executable(testRigExecSolverBake tests/testRigExecSolverBake.cpp)
 target_link_libraries(testRigExecSolverBake PRIVATE rigExec)
 target_compile_definitions(testRigExecSolverBake
@@ -1360,6 +1375,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRigExecBakedCone COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_cone.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecOpTracePython COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_op_trace.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecGil COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_gil.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -1507,6 +1525,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecMoverDiscovery
                          testRigExecSkippedOperations
                          testRigExecFloatCurveOp
+                         testRigExecOpTracePython
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testPoseReaderViz
                          testLayerOpinionsModel testCompositionArcsModel

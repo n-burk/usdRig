@@ -134,6 +134,7 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.chainChunkEnd = src.chainChunkEnd;
     D.clustering = src.clustering;
     D.clusterCounters.reset();
+    D.runSeqCounter.next.store(0, std::memory_order_relaxed);
     D.cones = src.cones;
     D.closedSteps = src.closedSteps;
     D.closed = src.closed;

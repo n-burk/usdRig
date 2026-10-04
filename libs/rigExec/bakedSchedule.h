@@ -179,6 +179,12 @@ void RigExecBakedBuildCones(RigExecBakedProgramImpl *program);
 void RigExecBakedComputeClosure(RigExecBakedProgramImpl *program,
                                UsdTimeCode time, bool force);
 
+/// Clears every step's run stamps (interval and runSeq) and the run
+/// sequence counter, so the op trace and the profiler replay describe no
+/// step. RigExecBakedRunSteps calls it first; a run that returns before the
+/// region calls it itself.
+void RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program);
+
 /// Runs every step of \p program, returning false when one of them gave the
 /// generation back.
 ///

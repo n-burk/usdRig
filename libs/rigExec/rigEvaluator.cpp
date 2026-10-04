@@ -329,6 +329,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
     // ones in the deferred exec prep and the dynamic walk sit under this one,
     // where a guard finds the GIL already released and does nothing.
     TF_PY_ALLOW_THREADS_IN_SCOPE();
+    _lastGenerationRanProgram = false;
     RIGEXEC_PROFILE_SCOPE_CAT(
         _profiler,
         time.IsDefault()
@@ -439,6 +440,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
         // points the walk still returns a valid pose.
         _bakedProgram.reset();
         _bakedProgramPublished = false;
+        _lastGenerationRanProgram = false;
         RigExecRigPose dynamic = _EvaluateDynamic(time, std::move(settled));
         // Keyed AFTER the walk, on the serial the next frame compares
         // against, as the failed-compile memo is.
@@ -455,6 +457,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
     // reported nothing a rebuild could inherit.
     if (ranBaked) {
         _bakedProgramPublished = true;
+        _lastGenerationRanProgram = true;
     }
     // Baked, and Dynamic running the program, publish what it answered.
     if (_evaluationMode != RigExecEvaluationMode::BakedWithParityCheck) {
@@ -690,6 +693,7 @@ RigExecRigEvaluator::SetEvaluationMode(RigExecEvaluationMode mode)
         // a mode that does not run one.)
         _bakedProgram.reset();
         _bakedProgramPublished = false;
+        _lastGenerationRanProgram = false;
     }
     // A dirty epoch is not a refusal: Evaluate builds the program once the
     // epoch has settled, which is where it can know what it would be baking.
@@ -704,6 +708,9 @@ RigExecRigEvaluator::_RebuildBakedProgram(
     // published anything.
     const bool outgoingPublished = _bakedProgramPublished;
     _bakedProgramPublished = false;
+    // The replacement has answered no generation, so the op trace and op
+    // graph accessors describe none until it runs one.
+    _lastGenerationRanProgram = false;
     if (!_ModeRunsProgram()) {
         _bakedProgram.reset();
         _RetireBakedProgram(std::move(outgoing));

@@ -2,6 +2,7 @@
 // See bakedSchedule.h for what belongs here and what belongs with a domain.
 #include "bakedSchedule.h"
 
+#include "bakedTrace.h"
 #include "parallel.h"
 #include "pathText.h"
 #include "profiler.h"
@@ -1695,6 +1696,18 @@ RunStepBody(RigExecBakedProgramImpl *B, RigExecBakedStep *step,
               "declared", step->diagnostics.size(), step->maxDiagnostics);
 }
 
+/// Stamps \p step's completion order, after its body and before anything
+/// releases its successors. Relaxed is enough: every edge between two
+/// executed steps is ordered either by one thread's program order or by the
+/// acq_rel cluster counters, and read-modify-writes of one atomic follow
+/// that happens-before order.
+void
+StampRunSeq(RigExecBakedProgramImpl *B, RigExecBakedStep *step)
+{
+    step->runSeq =
+        B->runSeqCounter.next.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
 /// The same clock RigExecProfiler::NowUs reads, in NANOseconds.
 ///
 /// The profiler's microseconds are the right unit for a trace and the wrong
@@ -1743,6 +1756,7 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
         // clock here unless a calibration or a step timing asked.
         const uint64_t beganNs = calibrating ? NowNs() : 0;
         RunStepBody(&B, &step, time);
+        StampRunSeq(&B, &step);
         if (calibrating) {
             step.measuredUs += double(NowNs() - beganNs) / 1000.0;
             ++step.measuredRuns;
@@ -1842,6 +1856,7 @@ ParallelRun::RunFrom(int start)
             const uint64_t began = profiling ? RigExecProfiler::NowUs() : 0;
             const uint64_t beganNs = measuring ? NowNs() : 0;
             RunStepBody(&B, &step, time);
+            StampRunSeq(&B, &step);
             if (measuring) {
                 // Two stores into this step's own accumulators, which no
                 // other task touches -- the same rule the interval pair
@@ -1992,6 +2007,16 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
 
 }  // namespace
 
+void
+RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program)
+{
+    for (RigExecBakedStep &step : program->steps) {
+        step.startUs = step.endUs = 0;
+        step.runSeq = 0;
+    }
+    program->runSeqCounter.next.store(0, std::memory_order_relaxed);
+}
+
 bool
 RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
                      bool force)
@@ -2002,9 +2027,7 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // epilogue would replay their previous intervals into the trace of the
     // frame that gave up -- the one frame a reader takes at face value.
     // Cleared here, once, so that neither executor has to remember it.
-    for (RigExecBakedStep &step : program->steps) {
-        step.startUs = step.endUs = 0;
-    }
+    RigExecBakedClearRunStamps(program);
     // The sources, before anything that could be skipped: they are what the
     // dirty set is computed FROM. They read nothing a step OUTSIDE this pass
     // writes -- which is not the same as reading nothing at all, and stopped
@@ -2018,6 +2041,7 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
     for (RigExecBakedStep &step : program->steps) {
         if (step.isSource) {
             RunStepBody(program, &step, time);
+            StampRunSeq(program, &step);
         }
     }
     RigExecBakedComputeClosure(program, time, force);
@@ -2467,6 +2491,20 @@ RigExecBakedScheduleRunReport(const RigExecBakedProgramImpl &B)
 
 // Profiling.
 
+namespace {
+
+/// Whether RIGEXEC_TRACE_ALL_STEPS asks the replay to keep steps shorter
+/// than a microsecond. Read once, on the replaying thread.
+bool
+TraceAllStepsRequested()
+{
+    static const bool requested =
+        TfGetenvBool("RIGEXEC_TRACE_ALL_STEPS", false);
+    return requested;
+}
+
+}  // namespace
+
 void
 RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
 {
@@ -2484,17 +2522,23 @@ RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
         return clusters[size_t(step.cluster)].runner;
     };
 
+    const bool traceAll = TraceAllStepsRequested();
     for (const RigExecBakedStep &step : B.steps) {
         // A step that did not take a whole microsecond is on nobody's
         // critical path, and a biped's graph holds several hundred of them
         // -- so recording each would cost more than the steps did and would
         // bury the events that matter under zero-length ones. The interval
-        // is still measured; what is dropped is the report of it.
-        if (step.endUs <= step.startUs) {
+        // is still measured; what is dropped is the report of it, unless
+        // RIGEXEC_TRACE_ALL_STEPS asks for every timed step that ran.
+        const bool timedRun = step.runSeq > 0 && step.startUs != 0;
+        if (step.endUs <= step.startUs && !(traceAll && timedRun)) {
             continue;
         }
-        B.profiler->RecordOn(RunnerOf(step), step.label, "step",
-                             step.startUs, step.endUs);
+        B.profiler->RecordOn(
+            RunnerOf(step), step.label, "step", step.startUs, step.endUs,
+            {{"kind", RigExecBakedStepKindName(step.kind)},
+             {"domain", RigExecBakedStepDomainName(step.kind)},
+             {"seq", std::to_string(step.runSeq)}});
     }
 
     // The clusters themselves, one span each, on the row that ran them.

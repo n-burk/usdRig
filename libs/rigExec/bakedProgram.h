@@ -16,6 +16,7 @@
 #ifndef RIGEXEC_BAKED_PROGRAM_H
 #define RIGEXEC_BAKED_PROGRAM_H
 
+#include "bakedTrace.h"
 #include "tapSet.h"
 
 #include "rigExecMath/pointFrame.h"
@@ -494,6 +495,11 @@ public:
     /// see it. RigExecBakedProgramImpl is declared in bakedProgramImpl.h,
     /// which only this library's own sources and its tests include.
     const RigExecBakedProgramImpl &GetStepGraph() const;
+
+    /// The steps the last run executed, in completion order, and the step
+    /// graph as plain records (bakedTrace.h). Observability only.
+    std::vector<RigExecOpTraceEntry> GetLastOpTrace() const;
+    std::vector<RigExecOpGraphNode> GetOpGraph() const;
 
 private:
     explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);

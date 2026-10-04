@@ -899,6 +899,57 @@ PYBIND11_MODULE(_rigexec, m) {
             "re-ran everything publishes the same numbers as one that\n"
             "skipped the right half -- so this is what makes a skipped\n"
             "cone observable, with baked_cluster_count beside it.")
+        .def("last_op_trace", [](const _Rig &r) {
+                 std::vector<py::dict> out;
+                 for (const rigExec::RigExecOpTraceEntry &entry :
+                      r.evaluator->GetLastOpTrace()) {
+                     py::dict d;
+                     d["step"] = entry.step;
+                     d["kind"] = entry.kind;
+                     d["domain"] = entry.domain;
+                     d["label"] = entry.label;
+                     d["seq"] = entry.seq;
+                     d["cluster"] = entry.cluster;
+                     out.push_back(d);
+                 }
+                 return out;
+             },
+             "The baked steps the last generation executed, in completion\n"
+             "order: dicts of step, kind, domain ('pose', 'weight' or\n"
+             "'geometry'), label, seq (1-based) and cluster. Empty when the\n"
+             "program did not answer the last generation.")
+        .def("op_graph", [](const _Rig &r) {
+                 const auto ranges =
+                     [](const std::vector<rigExec::RigExecOpSlotRange> &in) {
+                         std::vector<py::tuple> out;
+                         for (const rigExec::RigExecOpSlotRange &range : in) {
+                             out.push_back(py::make_tuple(
+                                 range.domain, range.first, range.last));
+                         }
+                         return out;
+                     };
+                 std::vector<py::dict> out;
+                 for (const rigExec::RigExecOpGraphNode &node :
+                      r.evaluator->GetOpGraph()) {
+                     py::dict d;
+                     d["step"] = node.step;
+                     d["kind"] = node.kind;
+                     d["domain"] = node.domain;
+                     d["label"] = node.label;
+                     d["preds"] = node.preds;
+                     d["succs"] = node.succs;
+                     d["cluster"] = node.cluster;
+                     d["level"] = node.level;
+                     d["reads"] = ranges(node.reads);
+                     d["writes"] = ranges(node.writes);
+                     out.push_back(d);
+                 }
+                 return out;
+             },
+             "The baked step graph in program order: dicts of step, kind,\n"
+             "domain, label, preds, succs, cluster, level, and reads/writes\n"
+             "as (slot domain, first, last) tuples, last inclusive. Empty\n"
+             "when the program did not answer the last generation.")
         .def_property_readonly("skin_topology_cache_size", [](const _Rig &r) {
                 return r.evaluator->GetSkinTopologyCacheSize();
             },

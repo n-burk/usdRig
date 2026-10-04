@@ -836,6 +836,7 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
     for (size_t k = 0; k < steps.size(); ++k) {
         steps[k].startUs = program.steps[k].startUs;
         steps[k].endUs = program.steps[k].endUs;
+        steps[k].runSeq = program.steps[k].runSeq;
     }
 }
 
@@ -855,6 +856,7 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
     for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
         B.steps[k].startUs = steps[k].startUs;
         B.steps[k].endUs = steps[k].endUs;
+        B.steps[k].runSeq = steps[k].runSeq;
     }
 }
 

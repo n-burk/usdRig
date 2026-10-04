@@ -720,6 +720,10 @@ struct RigExecBakedStep {
     /// When the profiler is on: the step's interval, replayed into it by the
     /// epilogue in step order so the trace is deterministic.
     uint64_t startUs = 0, endUs = 0;
+    /// 1-based order in which this step's body finished during the last run;
+    /// 0 if it did not run. Stamped before successors are released, so an
+    /// executed predecessor always holds a smaller value than its successor.
+    uint32_t runSeq = 0;
     /// What the step is called in the report and the trace, built once at
     /// Build so that neither costs a string per step per frame.
     std::string label;
@@ -734,6 +738,7 @@ struct RigExecBakedStep {
         counters.Clear();
         snapshots.Clear();
         bail = false;
+        runSeq = 0;
     }
 
     /// Records that this run skipped the step (§7).
@@ -755,6 +760,7 @@ struct RigExecBakedStep {
         counters.revisionsCreated = 0;
         counters.schedulesBuilt = 0;
         bail = false;
+        runSeq = 0;
     }
 };
 
@@ -1935,6 +1941,18 @@ struct RigExecBakedProgramImpl {
     /// that the region allocates nothing. An array rather than a vector
     /// because std::atomic is neither copyable nor movable.
     std::unique_ptr<RigExecBakedClusterCounter[]> clusterCounters;
+    /// Hands out each step's runSeq. Reset at the head of every run; a copy
+    /// or move starts at zero, so it does not make the program immovable.
+    struct RunSeqCounter {
+        std::atomic<uint32_t> next{0};
+        RunSeqCounter() = default;
+        RunSeqCounter(const RunSeqCounter &) {}
+        RunSeqCounter &operator=(const RunSeqCounter &) {
+            next.store(0, std::memory_order_relaxed);
+            return *this;
+        }
+    };
+    RunSeqCounter runSeqCounter;
 
     // What a run may SKIP. The sets are Build's; everything below them is the
     // last run's answer, kept so that this run's sources can be compared with
@@ -3709,6 +3727,8 @@ struct RigExecBakedRunStatistics {
     };
     struct StepTimes {
         uint64_t startUs = 0, endUs = 0;
+        /// Restored too, so the op trace describes the cone run.
+        uint32_t runSeq = 0;
     };
     std::vector<ClusterTimes> clusters;
     std::vector<StepTimes> steps;

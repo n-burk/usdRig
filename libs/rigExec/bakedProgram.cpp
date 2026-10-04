@@ -3456,6 +3456,9 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         if (B.programStamp == B.lastProgramStamp) {
             ++B.programStamp;
         }
+        // No step ran, so the last run's stamps must not answer for this
+        // one in GetLastOpTrace or the interval replay.
+        RigExecBakedClearRunStamps(&B);
         _lastBail = RigExecBakedBail::StageFrames;
         return false;
     }

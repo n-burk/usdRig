@@ -737,6 +737,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
         _RefreshAttributeEvaluationMode() && !_ModeRunsProgram()) {
         _bakedProgram.reset();
         _bakedProgramPublished = false;
+        _lastGenerationRanProgram = false;
         _bakedProgramStale = false;
     }
     // The seed, connected, and guide requests read authored values straight

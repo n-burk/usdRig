@@ -453,6 +453,11 @@ public:
         return _bakedProgram.get();
     }
 
+    /// The baked program's op trace and op graph for the last generation,
+    /// or empty when the program did not answer it (bakedTrace.h).
+    std::vector<RigExecOpTraceEntry> GetLastOpTrace() const;
+    std::vector<RigExecOpGraphNode> GetOpGraph() const;
+
     /// How many skin layouts the epoch's topology cache is holding answers
     /// for.
     ///
@@ -2272,6 +2277,8 @@ private:
     size_t _bakedProgramBuilds = 0;
     size_t _bakedProgramBuildAttempts = 0;
     size_t _bakedGenerations = 0;
+    /// Whether the last generation's region ran through _bakedProgram.
+    bool _lastGenerationRanProgram = false;
     RigExecEvaluationMode _evaluationMode = RigExecEvaluationMode::Dynamic;
     RigExecEvaluationModeSource _evaluationModeSource =
         RigExecEvaluationModeSource::Default;
