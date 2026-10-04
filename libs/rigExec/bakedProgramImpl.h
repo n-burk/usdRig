@@ -244,7 +244,12 @@ RigExecBakedClassifyInput(const UsdAttribute &attribute, UsdTimeCode time,
     }
     for (auto it = fallback.rbegin(); it != fallback.rend(); ++it) {
         T probe{};
-        if (it->Get(&probe, time)) {
+        // A keyed attribute with no default answers at every frame but not
+        // at Default, so it is probed at its first key; otherwise the input
+        // has no handle and every frame reads its fallback.
+        const bool keyed = it->GetNumTimeSamples() > 0 || it->HasSpline();
+        if (it->Get(&probe, time) ||
+            (keyed && it->Get(&probe, UsdTimeCode::EarliestTime()))) {
             *selected = *it;
             return;
         }
@@ -1007,6 +1012,11 @@ struct RigExecBakedCones {
     RigExecBakedClusterSet alwaysSteps, poseSteps;
     /// Provider slot -> the compose step that reads its avars, or -1.
     std::vector<int> avarStep;
+    /// Provider slot -> the OTHER compose steps that declare a read of its
+    /// avars: a switched group recomposing an earlier version of an
+    /// ancestor (RigExecBakedProgramImpl::SpaceSwitch::FrameVersion).
+    /// Whatever dirties avarStep dirties these too. Empty on most rigs.
+    std::vector<std::vector<int>> avarVersionSteps;
     std::vector<std::vector<int>> chainBaseSteps;
     std::vector<std::vector<int>> solverPointsSteps;
     std::vector<std::vector<int>> revisionSteps;
@@ -1847,12 +1857,31 @@ struct RigExecBakedProgramImpl {
     /// standing still. A source slot of -1 is world: it contributes
     /// identity, which pins the control at its zero pose.
     ///
-    /// The source slots must be LOWER than the target's, which is what makes
-    /// one pass over the slots enough; the bake refuses otherwise rather
-    /// than reading a frame the compose has not written yet.
+    /// Every provider frame a switch reads -- its namespace parent, each
+    /// source, its space -- is read at a VERSION bound at Build (see
+    /// FrameVersion), never as whatever the slot holds when the step runs.
     struct SpaceSwitch {
+        /// Which version of one provider frame a switch reads: the version
+        /// standing when the dynamic walk resolves this switch, with every
+        /// switch it resolves earlier applied and every other one not.
+        ///
+        /// `anchor`'s last version (identity at -1), composed UNSWITCHED
+        /// through `recompose`, top down. Empty `recompose` is the anchor's
+        /// last version as is, which is every read on a rig whose switches
+        /// do not nest; a non-empty one re-derives the pre-switch frame of a
+        /// control whose own switch resolves at or after this one.
+        struct FrameVersion {
+            int anchor = -1;
+            std::vector<int> recompose;
+        };
         int slot = -1;
         std::vector<int> sourceSlots;
+        /// Parallel to sourceSlots; unused where the slot is -1 (world).
+        std::vector<FrameVersion> sourceReads;
+        /// The namespace parent's frame `local` is divided back out of.
+        FrameVersion parentRead;
+        /// spaceSlot's frame, for the carry.
+        FrameVersion spaceRead;
         /// Parallel to sourceSlots: which part of that source's rotation
         /// reaches the target (a pole vector in its hand's space takes the
         /// twist and not the swing).
@@ -1905,10 +1934,9 @@ struct RigExecBakedProgramImpl {
     /// Per provider slot: its auto clavicle's index, or -1.
     std::vector<int> autoClavicleBySlot;
 
-    /// Set when the compose groups could not be put in dependency order:
-    /// two space switches each need the other composed first. Read by Build,
-    /// which turns it into an ordinary bake refusal -- the step builder has
-    /// no build context of its own to refuse through.
+    /// Set when the compose groups could not be put in dependency order.
+    /// With every switch read bound to its version this never happens on a
+    /// rig the compile accepted; Build refuses the program if it does.
     bool composeCycle = false;
 
     std::vector<RigExecBakedComposeGroup> composeGroups;
@@ -3204,6 +3232,18 @@ void RigExecBakedBuildGeometry(
 /// guard that keeps a future batching optimization from changing results
 /// silently. Returns false having recorded the refusal.
 bool RigExecBakedRefuseBatchedStackWrites(RigExecBakedBuildContext *ctx);
+
+/// Binds every frame read of every space switch to its version.
+///
+/// \p resolveOrder is parallel to spaceSwitches: the compile's resolution
+/// round for each (_SpaceSwitch::band), which depends on structure alone --
+/// every source of every switch -- and never on the active index. A read
+/// of slot X by a switch of round k takes X's last version unless the
+/// nearest switched control at or above X resolves in round k or later;
+/// then X is recomposed unswitched from its parent's version, because the
+/// dynamic walk reads that control before its switch is applied.
+void RigExecBakedBindSpaceSwitchVersions(
+    RigExecBakedProgramImpl *program, const std::vector<int> &resolveOrder);
 
 /// Appends the pose half of the program in program order: the compose
 /// subtrees, then one Solve and one commit per walk entry, then the

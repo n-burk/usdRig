@@ -1177,6 +1177,7 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     cones.revisionClusters.assign(B.revisionIndex.size(), {});
     cones.revisionStaticCluster.assign(B.revisionIndex.size(), -1);
     cones.avarStep.assign(B.paths.size(), -1);
+    cones.avarVersionSteps.assign(B.paths.size(), {});
     cones.chainBaseSteps.assign(B.chains.size(), {});
     cones.solverPointsSteps.assign(B.solvers.size(), {});
     cones.revisionSteps.assign(B.revisionIndex.size(), {});
@@ -1189,6 +1190,21 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             for (int slot = group.begin; slot < group.end; ++slot) {
                 cones.avarCluster[size_t(slot)] = step.cluster;
                 cones.avarStep[size_t(slot)] = index;
+            }
+            // Avars this step declares OUTSIDE its group: the slots a switch
+            // recomposes an earlier version of.
+            for (const RigExecBakedSlotRange &range : step.reads) {
+                if (range.domain != RigExecBakedSlotDomain::Avars) {
+                    continue;
+                }
+                for (uint32_t slot = range.begin / 11;
+                     slot < (range.end + 10) / 11 &&
+                     slot < cones.avarVersionSteps.size();
+                     ++slot) {
+                    if (int(slot) < group.begin || int(slot) >= group.end) {
+                        cones.avarVersionSteps[slot].push_back(index);
+                    }
+                }
             }
         }
         for (const RigExecBakedSlotRange &range : step.reads) {
@@ -1435,6 +1451,16 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         }
     } else {
         dirty.Union(cones.alwaysSteps);
+        // A provider's own compose step, and every step that recomposes an
+        // earlier version of it from the same avars and ladder.
+        const auto dirtyAvarReaders = [&](size_t slot) {
+            dirty.Set(cones.avarStep[slot]);
+            if (slot < cones.avarVersionSteps.size()) {
+                for (const int index : cones.avarVersionSteps[slot]) {
+                    dirty.Set(index);
+                }
+            }
+        };
         // Avars, per provider: eleven doubles compared, not a flag consulted.
         for (size_t i = 0; i < B.paths.size(); ++i) {
             const size_t base = i * 11;
@@ -1443,7 +1469,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 moved = B.avars[base + k] != B.lastAvars[base + k];
             }
             if (moved) {
-                dirty.Set(cones.avarStep[i]);
+                dirtyAvarReaders(i);
             }
         }
         // The transforms the prologue read off the stage for the plain
@@ -1454,7 +1480,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // the one every reader of that frame hangs off.
         for (size_t k = 0; k < B.xformSlots.size(); ++k) {
             if (B.xformBase[k] != B.lastXformBase[k]) {
-                dirty.Set(cones.avarStep[size_t(B.xformSlots[k])]);
+                dirtyAvarReaders(size_t(B.xformSlots[k]));
             }
         }
         // The provider ladder, where the prologue recomposed it and found a
@@ -1463,7 +1489,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // declares the write every reader of that frame -- and of the
         // rest -> pose matrices beside it -- hangs off.
         for (const int slot : B.ladderMovedSlots) {
-            dirty.Set(cones.avarStep[size_t(slot)]);
+            dirtyAvarReaders(size_t(slot));
         }
         // A constraint's own authored tables, which the prologue re-reads
         // at the frame's time. Compared by value, values and diagnostic

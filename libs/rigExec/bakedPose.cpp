@@ -1280,7 +1280,99 @@ constexpr size_t kPropagateSplitThreshold = 64;
 /// Descendants staged per PropagateChunk of a split commit.
 constexpr size_t kPropagateChunkSize = 64;
 
+/// What a switched slot's compose reads besides its own avars and its
+/// namespace parent's anchor (which the group lists in parentSlots): the
+/// PosedM slots read at their last version, and the slots whose avars an
+/// earlier version is recomposed from.
+void
+_SwitchVersionReads(const RigExecBakedProgramImpl::SpaceSwitch &sw,
+                    std::vector<int> *posed, std::vector<int> *avars)
+{
+    const auto add =
+        [&](const RigExecBakedProgramImpl::SpaceSwitch::FrameVersion &read) {
+            if (read.anchor >= 0) {
+                posed->push_back(read.anchor);
+            }
+            avars->insert(avars->end(), read.recompose.begin(),
+                          read.recompose.end());
+        };
+    for (size_t k = 0; k < sw.sourceSlots.size(); ++k) {
+        if (sw.sourceSlots[k] >= 0 && k < sw.sourceReads.size()) {
+            add(sw.sourceReads[k]);
+        }
+    }
+    if (sw.spaceSlot >= 0) {
+        add(sw.spaceRead);
+    }
+    avars->insert(avars->end(), sw.parentRead.recompose.begin(),
+                  sw.parentRead.recompose.end());
+}
+
+/// The PosedM slot a slot's compose inherits from: its namespace parent, or
+/// for a switched slot the anchor of the parent version it reads.
+int
+_ComposeParentRead(const RigExecBakedProgramImpl &B, int slot)
+{
+    const int switchIndex =
+        B.spaceSwitchBySlot.empty() ? -1 : B.spaceSwitchBySlot[size_t(slot)];
+    return switchIndex >= 0
+        ? B.spaceSwitches[size_t(switchIndex)].parentRead.anchor
+        : B.parent[size_t(slot)];
+}
+
 }  // namespace
+
+void
+RigExecBakedBindSpaceSwitchVersions(RigExecBakedProgramImpl *program,
+                                    const std::vector<int> &resolveOrder)
+{
+    RigExecBakedProgramImpl &B = *program;
+    using FrameVersion = RigExecBakedProgramImpl::SpaceSwitch::FrameVersion;
+    const auto nearestSwitched = [&B](int slot) {
+        for (; slot >= 0; slot = B.parent[size_t(slot)]) {
+            if (B.spaceSwitchBySlot[size_t(slot)] >= 0) {
+                return slot;
+            }
+        }
+        return -1;
+    };
+    // The dynamic walk resolves round k from a seed holding the answers of
+    // rounds below k and nothing else, so a slot whose nearest switched
+    // control at or above it resolves in round k or later is read as exec
+    // composes it without that switch: unswitched, from its parent's
+    // version, up to the first slot whose last version already stands.
+    const auto bind = [&](int slot, int round) {
+        FrameVersion read;
+        int at = slot;
+        while (at >= 0 &&
+               B.slotKind[size_t(at)] == RigExecBakedSlotKind::FirstFramePose) {
+            const int above = nearestSwitched(at);
+            if (above < 0 ||
+                resolveOrder[size_t(B.spaceSwitchBySlot[size_t(above)])] <
+                    round) {
+                break;
+            }
+            read.recompose.push_back(at);
+            at = B.parent[size_t(at)];
+        }
+        read.anchor = at;
+        std::reverse(read.recompose.begin(), read.recompose.end());
+        return read;
+    };
+    for (size_t s = 0; s < B.spaceSwitches.size(); ++s) {
+        RigExecBakedProgramImpl::SpaceSwitch &sw = B.spaceSwitches[s];
+        const int round = resolveOrder[s];
+        sw.parentRead = bind(B.parent[size_t(sw.slot)], round);
+        sw.sourceReads.assign(sw.sourceSlots.size(), FrameVersion());
+        for (size_t k = 0; k < sw.sourceSlots.size(); ++k) {
+            if (sw.sourceSlots[k] >= 0) {
+                sw.sourceReads[k] = bind(sw.sourceSlots[k], round);
+            }
+        }
+        sw.spaceRead = sw.spaceSlot >= 0 ? bind(sw.spaceSlot, round)
+                                         : FrameVersion();
+    }
+}
 
 bool
 RigExecBakedRefuseBatchedStackWrites(RigExecBakedBuildContext *ctx)
@@ -1395,7 +1487,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 group.end = k + 1 < starts.size() ? starts[k + 1] : N;
             }
             for (int slot = group.begin; slot < group.end; ++slot) {
-                const int parent = B.parent[size_t(slot)];
+                const int parent = _ComposeParentRead(B, slot);
                 if (parent >= 0 && parent < group.begin) {
                     group.parentSlots.push_back(parent);
                 }
@@ -1467,9 +1559,13 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 // The space is read exactly like a source, so it orders the
                 // groups exactly like one: leave it out and a switch could
                 // read its master's frame from the group before that group
-                // had composed it.
-                std::vector<int> reads = sw.sourceSlots;
-                reads.push_back(sw.spaceSlot);
+                // had composed it. Only LAST versions order anything: an
+                // earlier version is recomposed from avars inside this
+                // step, which is what keeps a switch nested under a control
+                // that switches into this one's subtree from closing a
+                // cycle.
+                std::vector<int> reads, recomposed;
+                _SwitchVersionReads(sw, &reads, &recomposed);
                 for (const int source : reads) {
                     if (source < 0) continue;
                     const int owner = groupOfSlot[size_t(source)];
@@ -1496,10 +1592,10 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             };
             for (size_t g = 0; g < B.composeGroups.size(); ++g) visit(g);
             if (cyclic) {
-                // Two spaces that each need the other composed first. The
-                // compile refuses a switch cycle between CONTROLS; this is
-                // the same thing reached through namespace, and the honest
-                // answer is the dynamic path.
+                // Unreachable on a rig the compile accepted: every last
+                // version a group reads belongs to a control resolved in an
+                // earlier round, or to an ancestor in its own round. Build
+                // refuses the program rather than run an unsorted one.
                 B.composeCycle = true;
             } else {
                 emission = order;
@@ -1555,8 +1651,22 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             if (switchIndex < 0) continue;
             const RigExecBakedProgramImpl::SpaceSwitch &sw =
                 B.spaceSwitches[size_t(switchIndex)];
-            std::vector<int> reads = sw.sourceSlots;
-            reads.push_back(sw.spaceSlot);
+            std::vector<int> reads, recomposed;
+            _SwitchVersionReads(sw, &reads, &recomposed);
+            // An earlier version recomposed here reads those slots' avars,
+            // declared so that moving one dirties this step as well as the
+            // group that composes the slot's last version
+            // (RigExecBakedCones::avarVersionSteps).
+            std::sort(recomposed.begin(), recomposed.end());
+            recomposed.erase(
+                std::unique(recomposed.begin(), recomposed.end()),
+                recomposed.end());
+            for (const int at : recomposed) {
+                if (at < group.begin || at >= group.end) {
+                    step.reads.push_back(RigExecBakedRange(
+                        RigExecBakedSlotDomain::Avars, at * 11, at * 11 + 11));
+                }
+            }
             for (const int source : reads) {
                 // OUTSIDE the group in EITHER direction. A source above the
                 // group is as real a read as one below it -- emission is in
@@ -2993,6 +3103,81 @@ RefreshSolverRests(RigExecBakedProgramImpl &B,
     }
 }
 
+/// Slot \p i's avars as one matrix, the way computations.cpp composes them.
+GfMatrix4d
+_ComposeAvarsOf(const RigExecBakedProgramImpl &B, int i)
+{
+    const double *a = &B.avars[size_t(i) * 11];
+    const double units = a[10];
+    // A volume weight's placement is RIGID: its shape is
+    // inputs:scaleX/Y/Z's alone, so the transform-scale avars are read and
+    // discarded here rather than zeroed at bake -- exec never binds them at
+    // all, and a captured zero would be walked straight past by an override
+    // or an animated channel. The authored-posed:space branch reads no avar
+    // at all, so a volume that takes it discards the scale for free, which
+    // is what exec does with the same rig.
+    const bool noScale = B.noScaleAvars[size_t(i)] != 0;
+    // avars:rotationSign, applied to the avar exactly where computations.cpp
+    // applies it, so a mirrored limb composes the same numbers on both paths.
+    const unsigned sign =
+        size_t(i) < B.rotationSign.size() ? B.rotationSign[size_t(i)] : 0u;
+    const double sx = RigExecRotationSignFromMask(sign, 0);
+    return RigExecBakedComposeAvars(
+        a[0] * units, a[1] * units, a[2] * units,
+        noScale ? 1.0 : a[3], noScale ? 1.0 : a[4], noScale ? 1.0 : a[5],
+        a[6] * sx,
+        a[7] * RigExecRotationSignFromMask(sign, 1),
+        a[8] * RigExecRotationSignFromMask(sign, 2),
+        a[9] * sx, B.rotOrder[size_t(i)]);
+}
+
+/// The ordinary compose of slot \p i against \p parentPosed, which is what
+/// exec answers for a provider no switch has replaced.
+RigExecPointFrame
+_ComposeUnswitched(const RigExecBakedProgramImpl &B, int i,
+                   const GfMatrix4d &parentPosed)
+{
+    if (B.posedAuthored[size_t(i)]) {
+        // A non-identity authored posed:space is the pose: exec returns its
+        // frame and reads neither the avars nor the parent.
+        return RigExecFrameFromMatrix(B.posedAuthoredM[size_t(i)]);
+    }
+    return RigExecFrameFromMatrix(_ComposeAvarsOf(B, i) * B.selfD[size_t(i)] *
+                                  B.parentDinv[size_t(i)] * parentPosed);
+}
+
+/// _SpaceFromFrame: an unusable frame selects the NaN sentinel, so the
+/// failure survives into every descendant instead of being scrubbed into a
+/// plausible identity.
+GfMatrix4d
+_SpaceOfFrame(const RigExecPointFrame &frame)
+{
+    GfMatrix4d space(1.0);
+    if (!frame.IsValid() || frame.IsDegenerate() ||
+        !RigExecPointsToMatrix(RigExecIdentityLandmarks(), frame.points,
+                               &space)) {
+        space = GfMatrix4d(1.0);
+        space[3][0] = std::numeric_limits<double>::quiet_NaN();
+    }
+    return space;
+}
+
+/// The frame a switch reads at its bound version. Recomposes into locals
+/// only: the slots on the way keep their last versions for every other
+/// reader.
+GfMatrix4d
+_ReadFrameVersion(
+    const RigExecBakedProgramImpl &B,
+    const RigExecBakedProgramImpl::SpaceSwitch::FrameVersion &read)
+{
+    GfMatrix4d posed =
+        read.anchor >= 0 ? B.posedM[size_t(read.anchor)] : GfMatrix4d(1.0);
+    for (const int slot : read.recompose) {
+        posed = _SpaceOfFrame(_ComposeUnswitched(B, slot, posed));
+    }
+    return posed;
+}
+
 }  // namespace
 
 void
@@ -3025,179 +3210,148 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 // does the same nothing writes it.
                 continue;
             }
-            if (B.posedAuthored[size_t(i)]) {
+            const int switchIndex =
+                B.spaceSwitchBySlot.empty()
+                    ? -1 : B.spaceSwitchBySlot[size_t(i)];
+            if (switchIndex < 0) {
+                const int parent = B.parent[size_t(i)];
+                B.base[size_t(i)] = _ComposeUnswitched(
+                    B, i,
+                    parent >= 0 ? B.posedM[size_t(parent)] : GfMatrix4d(1.0));
+            } else if (B.posedAuthored[size_t(i)]) {
                 // A non-identity authored posed:space is the pose: exec
                 // returns its frame and reads neither the avars nor the
                 // parent, so neither does this.
                 B.base[size_t(i)] =
                     RigExecFrameFromMatrix(B.posedAuthoredM[size_t(i)]);
             } else {
-                const double *a = &B.avars[size_t(i) * 11];
-                const double units = a[10];
-                // A volume weight's placement is RIGID: its shape is
-                // inputs:scaleX/Y/Z's alone, so the transform-scale avars
-                // are read and discarded here rather than zeroed at bake --
-                // exec never binds them at all, and a captured zero would be
-                // walked straight past by an override or an animated
-                // channel. The suppression belongs to THIS branch only: the
-                // authored-posed:space branch above reads no avar at all, so
-                // a volume that takes it discards the scale for free, which
-                // is what exec does with the same rig.
-                const bool noScale = B.noScaleAvars[size_t(i)] != 0;
-                // avars:rotationSign, applied to the avar exactly where
-                // computations.cpp applies it, so a mirrored limb composes
-                // the same numbers on both paths.
-                const unsigned sign = size_t(i) < B.rotationSign.size()
-                    ? B.rotationSign[size_t(i)] : 0u;
-                const double sx = RigExecRotationSignFromMask(sign, 0);
-                const GfMatrix4d avars = RigExecBakedComposeAvars(
-                    a[0] * units, a[1] * units, a[2] * units,
-                    noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
-                    noScale ? 1.0 : a[5],
-                    a[6] * sx,
-                    a[7] * RigExecRotationSignFromMask(sign, 1),
-                    a[8] * RigExecRotationSignFromMask(sign, 2),
-                    a[9] * sx, B.rotOrder[size_t(i)]);
-                const int switchIndex =
-                    B.spaceSwitchBySlot.empty()
-                        ? -1 : B.spaceSwitchBySlot[size_t(i)];
-                if (switchIndex >= 0) {
-                    // A switched slot composes against the SELECTED source's
-                    // pair of spaces instead of its namespace parent's. Both
-                    // halves come from one source, so at rest they cancel
-                    // and no space moves the rig standing still.
-                    const RigExecBakedProgramImpl::SpaceSwitch &sw =
-                        B.spaceSwitches[size_t(switchIndex)];
-                    // `local` is avars * default:space, and it is reached the
-                    // long way round -- compose the UNSWITCHED world, then
-                    // divide the namespace parent back out -- rather than as
-                    // `avars * selfD`, which is the same quantity in exact
-                    // arithmetic and NOT the same in doubles. The dynamic
-                    // path can only reach it this way (it reads frames, not
-                    // the ladder), the two answers are compared bit for bit
-                    // by the parity mode, and 4e-15 of disagreement here
-                    // propagates to every descendant of a switched control.
-                    const GfMatrix4d parentPosed =
-                        B.parent[size_t(i)] >= 0
-                            ? B.posedM[size_t(B.parent[size_t(i)])]
-                            : GfMatrix4d(1.0);
-                    const GfMatrix4d parentDefault =
-                        B.parent[size_t(i)] >= 0
-                            ? B.defaultRoundTrip[size_t(B.parent[size_t(i)])]
-                            : GfMatrix4d(1.0);
-                    const GfMatrix4d unswitched =
-                        RigExecBakedRoundTrip(avars * B.selfD[size_t(i)] *
-                                              B.parentDinv[size_t(i)] *
-                                              parentPosed);
-                    const GfMatrix4d local =
-                        unswitched * parentPosed.GetInverse() * parentDefault;
-                    const GfMatrix4d localInverse = local.GetInverse();
-                    const int count = int(sw.sourceSlots.size());
-                    // Read here rather than in a prologue: the index is one
-                    // double, the step already holds the reader, and a
-                    // prologue copy would be a second place for an override
-                    // to fail to reach.
-                    double active = rd(sw.activeInput);
-                    if (!std::isfinite(active)) active = 0.0;
-                    active = GfClamp(active, 0.0, double(count - 1));
-                    const int lower = int(std::floor(active));
-                    const int upper = std::min(lower + 1, count - 1);
-                    const double blend = active - double(lower);
-                    // rigExec:space. `local` above composes over the
-                    // target's DEFAULT ancestors, so a master's motion
-                    // reaches a switched control only inside the source's
-                    // motion -- and a twist or swing filter drops that
-                    // carry along with the part it was asked to drop.
-                    // Strip the master map off before the filter and put it
-                    // back after, so the filter only sees the source's own
-                    // master-free motion. Identity when no space is named.
-                    // The branches below must be UNTOUCHED when no space is
-                    // named, not multiplied by an identity: `local *
-                    // identity * localInverse` is identity in exact
-                    // arithmetic and a few ulps off it in doubles, and that
-                    // difference reaches verify_binary as a failure.
-                    const bool hasCarry = sw.spaceSlot >= 0;
-                    GfMatrix4d carry(1.0), carryInverse(1.0);
-                    if (hasCarry) {
-                        carry = B.defaultRoundTrip[size_t(sw.spaceSlot)]
-                                    .GetInverse() *
-                                B.posedM[size_t(sw.spaceSlot)];
-                        carryInverse = carry.GetInverse();
-                    }
-                    const auto rawDeltaOf = [&](int index) {
-                        const int slot = sw.sourceSlots[size_t(index)];
-                        if (slot < 0) {
-                            // World: the source never moves, so the only
-                            // motion left is the space's own carry -- and
-                            // with no space named there is none, which is
-                            // the pin-to-zero-pose this branch has always
-                            // meant.
-                            return hasCarry ? local * carry * localInverse
-                                            : GfMatrix4d(1.0);
-                        }
-                        // defaultRoundTrip, not selfD: the ladder's own
-                        // parent link is the ROUND TRIPPED default (see
-                        // parentDinv in RigExecBakedComposeLadder), which is
-                        // what exec's computeDefaultFrame hands back, and a
-                        // space source has to be read the same way its
-                        // namespace parent would be or the two paths
-                        // disagree in the last few digits on every
-                        // descendant.
-                        // Filtered while the motion is still measured
-                        // against the SOURCE's rest, because the twist axis
-                        // is the source's. See the dynamic path, which does
-                        // the same thing in the same order.
-                        const GfMatrix4d sourceDefault =
-                            B.defaultRoundTrip[size_t(slot)];
-                        const RigExecRotationFilter filter =
-                            sw.filters.empty()
-                                ? RigExecRotationFilter::All
-                                : sw.filters[size_t(index)];
-                        const GfVec3d axis =
-                            sourceDefault.TransformDir(sw.twistAxis);
-                        const GfMatrix4d moved =
-                            sourceDefault.GetInverse() *
-                            B.posedM[size_t(slot)];
-                        const GfMatrix4d motion =
-                            hasCarry
-                                ? RigExecFilterSpaceRotation(
-                                      moved * carryInverse, axis, filter) *
-                                      carry
-                                : RigExecFilterSpaceRotation(moved, axis,
-                                                             filter);
-                        return local * motion * localInverse;
-                    };
-                    // An `orient` source turns the control with the space
-                    // and keeps it where its namespace parent carries it.
-                    const auto deltaOf = [&](int index) {
-                        const GfMatrix4d d = rawDeltaOf(index);
-                        if (sw.filters.empty() ||
-                            sw.filters[size_t(index)] !=
-                                RigExecRotationFilter::Orient) {
-                            return d;
-                        }
-                        return RigExecOrientSpaceDelta(d, local, localInverse,
-                                                       unswitched);
-                    };
-                    GfMatrix4d delta = deltaOf(lower);
-                    if (upper != lower && blend > 0.0) {
-                        delta = RigExecBlendTransforms(delta, deltaOf(upper),
-                                                       blend);
-                    }
-                    delta = RigExecMaskTransform(delta, sw.affectTranslation,
-                                                 sw.affectRotation,
-                                                 sw.affectScale);
-                    B.base[size_t(i)] =
-                        RigExecFrameFromMatrix(delta * local);
-                } else {
+                const GfMatrix4d avars = _ComposeAvarsOf(B, i);
+                // A switched slot composes against the SELECTED source's
+                // pair of spaces instead of its namespace parent's. Both
+                // halves come from one source, so at rest they cancel
+                // and no space moves the rig standing still.
+                const RigExecBakedProgramImpl::SpaceSwitch &sw =
+                    B.spaceSwitches[size_t(switchIndex)];
+                // `local` is avars * default:space, and it is reached the
+                // long way round -- compose the UNSWITCHED world, then
+                // divide the namespace parent back out -- rather than as
+                // `avars * selfD`, which is the same quantity in exact
+                // arithmetic and NOT the same in doubles. The dynamic
+                // path can only reach it this way (it reads frames, not
+                // the ladder), the two answers are compared bit for bit
+                // by the parity mode, and 4e-15 of disagreement here
+                // propagates to every descendant of a switched control.
+                // The parent at the version the dynamic walk reads it
+                // at: before its own switch when that resolves in this
+                // switch's round or later (FrameVersion).
                 const GfMatrix4d parentPosed =
+                    _ReadFrameVersion(B, sw.parentRead);
+                const GfMatrix4d parentDefault =
                     B.parent[size_t(i)] >= 0
-                        ? B.posedM[size_t(B.parent[size_t(i)])]
+                        ? B.defaultRoundTrip[size_t(B.parent[size_t(i)])]
                         : GfMatrix4d(1.0);
-                B.base[size_t(i)] = RigExecFrameFromMatrix(
-                    avars * B.selfD[size_t(i)] * B.parentDinv[size_t(i)] *
-                    parentPosed);
+                const GfMatrix4d unswitched =
+                    RigExecBakedRoundTrip(avars * B.selfD[size_t(i)] *
+                                          B.parentDinv[size_t(i)] *
+                                          parentPosed);
+                const GfMatrix4d local =
+                    unswitched * parentPosed.GetInverse() * parentDefault;
+                const GfMatrix4d localInverse = local.GetInverse();
+                const int count = int(sw.sourceSlots.size());
+                // Read here rather than in a prologue: the index is one
+                // double, the step already holds the reader, and a
+                // prologue copy would be a second place for an override
+                // to fail to reach.
+                double active = rd(sw.activeInput);
+                if (!std::isfinite(active)) active = 0.0;
+                active = GfClamp(active, 0.0, double(count - 1));
+                const int lower = int(std::floor(active));
+                const int upper = std::min(lower + 1, count - 1);
+                const double blend = active - double(lower);
+                // rigExec:space. `local` above composes over the
+                // target's DEFAULT ancestors, so a master's motion
+                // reaches a switched control only inside the source's
+                // motion -- and a twist or swing filter drops that
+                // carry along with the part it was asked to drop.
+                // Strip the master map off before the filter and put it
+                // back after, so the filter only sees the source's own
+                // master-free motion. Identity when no space is named.
+                // The branches below must be UNTOUCHED when no space is
+                // named, not multiplied by an identity: `local *
+                // identity * localInverse` is identity in exact
+                // arithmetic and a few ulps off it in doubles, and that
+                // difference reaches verify_binary as a failure.
+                const bool hasCarry = sw.spaceSlot >= 0;
+                GfMatrix4d carry(1.0), carryInverse(1.0);
+                if (hasCarry) {
+                    carry = B.defaultRoundTrip[size_t(sw.spaceSlot)]
+                                .GetInverse() *
+                            _ReadFrameVersion(B, sw.spaceRead);
+                    carryInverse = carry.GetInverse();
                 }
+                const auto rawDeltaOf = [&](int index) {
+                    const int slot = sw.sourceSlots[size_t(index)];
+                    if (slot < 0) {
+                        // World: the source never moves, so the only
+                        // motion left is the space's own carry -- and
+                        // with no space named there is none, which is
+                        // the pin-to-zero-pose this branch has always
+                        // meant.
+                        return hasCarry ? local * carry * localInverse
+                                        : GfMatrix4d(1.0);
+                    }
+                    // defaultRoundTrip, not selfD: the ladder's own
+                    // parent link is the ROUND TRIPPED default (see
+                    // parentDinv in RigExecBakedComposeLadder), which is
+                    // what exec's computeDefaultFrame hands back, and a
+                    // space source has to be read the same way its
+                    // namespace parent would be or the two paths
+                    // disagree in the last few digits on every
+                    // descendant.
+                    // Filtered while the motion is still measured
+                    // against the SOURCE's rest, because the twist axis
+                    // is the source's. See the dynamic path, which does
+                    // the same thing in the same order.
+                    const GfMatrix4d sourceDefault =
+                        B.defaultRoundTrip[size_t(slot)];
+                    const RigExecRotationFilter filter =
+                        sw.filters.empty()
+                            ? RigExecRotationFilter::All
+                            : sw.filters[size_t(index)];
+                    const GfVec3d axis =
+                        sourceDefault.TransformDir(sw.twistAxis);
+                    const GfMatrix4d moved =
+                        sourceDefault.GetInverse() *
+                        _ReadFrameVersion(
+                            B, sw.sourceReads[size_t(index)]);
+                    const GfMatrix4d motion =
+                        hasCarry
+                            ? RigExecFilterSpaceRotation(
+                                  moved * carryInverse, axis, filter) *
+                                  carry
+                            : RigExecFilterSpaceRotation(moved, axis,
+                                                         filter);
+                    return local * motion * localInverse;
+                };
+                const auto deltaOf = [&](int index) {
+                    const GfMatrix4d d = rawDeltaOf(index);
+                    if (sw.filters.empty() ||
+                        sw.filters[size_t(index)] != RigExecRotationFilter::Orient) {
+                        return d;
+                    }
+                    return RigExecOrientSpaceDelta(d, local, localInverse,
+                                                   unswitched);
+                };
+                GfMatrix4d delta = deltaOf(lower);
+                if (upper != lower && blend > 0.0) {
+                    delta = RigExecBlendTransforms(delta, deltaOf(upper),
+                                                   blend);
+                }
+                delta = RigExecMaskTransform(delta, sw.affectTranslation,
+                                             sw.affectRotation,
+                                             sw.affectScale);
+                B.base[size_t(i)] =
+                    RigExecFrameFromMatrix(delta * local);
             }
             // An auto clavicle on this slot: the composed (and switched)
             // frame translated before any descendant reads it, as the
@@ -3233,18 +3387,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     restUpper, restLower);
             }
             B.fin[size_t(i)] = B.base[size_t(i)];
-            // _SpaceFromFrame: an unusable frame selects the NaN sentinel, so
-            // the failure survives into every descendant instead of being
-            // scrubbed into a plausible identity.
-            GfMatrix4d space(1.0);
-            if (!B.base[size_t(i)].IsValid() ||
-                B.base[size_t(i)].IsDegenerate() ||
-                !RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                       B.base[size_t(i)].points, &space)) {
-                space = GfMatrix4d(1.0);
-                space[3][0] = std::numeric_limits<double>::quiet_NaN();
-            }
-            B.posedM[size_t(i)] = space;
+            B.posedM[size_t(i)] = _SpaceOfFrame(B.base[size_t(i)]);
         }
         return;
     }

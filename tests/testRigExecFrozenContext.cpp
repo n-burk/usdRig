@@ -554,6 +554,126 @@ CheckSameReadings(const char *what, const RigExecRigPose &a,
     CHECK(why.empty());
 }
 
+// Space switches nested under switched controls: S (in Other's space) sits
+// under P, and P is switched into C's space with C under S, so S resolves
+// first and reads P BEFORE P's switch. The baked program binds that read to
+// P's pre-switch version; a warming job runs the same steps from the frozen
+// snapshot, so it must match live baked and the dynamic walk bit for bit --
+// at an unrun frame, and under a drag of an index.
+UsdStageRefPtr
+MakeNestedSpaceSwitchRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&stage](const char *path, double x) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        GfMatrix4d rest(1.0);
+        rest.SetTranslateOnly(GfVec3d(x, 100.0, 0.0));
+        prim.GetAttribute(TfToken("rest:space")).Set(rest);
+        return prim;
+    };
+    const UsdPrim other = control("/Asset/Rig/Other", 50.0);
+    const UsdPrim p = control("/Asset/Rig/P", 0.0);
+    const UsdPrim s = control("/Asset/Rig/P/S", 10.0);
+    const UsdPrim c = control("/Asset/Rig/P/S/C", 15.0);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const double pActive[4] = {0.0, 1.0, 0.5, 0.0};
+    const double sActive[4] = {0.5, 0.0, 1.0, 0.5};
+    const auto spaces = [&stage](const char *name, const UsdPrim &target,
+                                 const UsdPrim &source,
+                                 const double (&keys)[4]) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
+            TfToken("RigExecSpaceSwitch"));
+        prim.CreateRelationship(TfToken("rigExec:target"))
+            .SetTargets({target.GetPath()});
+        // The rig root is not a provider: it is spelled "world".
+        prim.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({source.GetPath(), SdfPath("/Asset/Rig")});
+        UsdAttribute active = prim.CreateAttribute(
+            TfToken("inputs:activeSpace"), SdfValueTypeNames->Double);
+        for (int t = 0; t < 4; ++t) {
+            active.Set(keys[t], UsdTimeCode(double(t + 1)));
+        }
+    };
+    spaces("sSpaces", s, other, sActive);
+    spaces("pSpaces", p, c, pActive);
+    UsdAttribute tx = other.GetAttribute(TfToken("avars:tx"));
+    UsdAttribute rz = p.GetAttribute(TfToken("avars:rz"));
+    for (int t = 1; t <= 4; ++t) {
+        tx.Set(10.0 * double(t), UsdTimeCode(double(t)));
+        rz.Set(7.5 * double(t) - 12.0, UsdTimeCode(double(t)));
+    }
+    return stage;
+}
+
+void
+TestNestedSpaceSwitchesWarmBitIdentical()
+{
+    UsdStageRefPtr stage = MakeNestedSpaceSwitchRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    CHECK(evaluator.GetBakedProgram() != nullptr);
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("nested space switches freeze refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    RigExecFrameInputs at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
+                                   &at3, &error));
+    bool ran = false;
+    const RigExecRigPose warmed3 =
+        RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, &ran);
+    CHECK(ran);
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live3.valid);
+    CheckPosesBitIdentical("nested switches warmed frame 3", live3, warmed3);
+    CheckPosesBitIdentical("nested switches walk frame 3",
+                           walk.Evaluate(UsdTimeCode(3.0)), warmed3);
+
+    // A held drag of P's index: the warmed pose, live baked and the walk
+    // agree under it.
+    RigExecValueOverride drag;
+    drag.prim = SdfPath("/Asset/Rig/Movers/pSpaces");
+    drag.attribute = TfToken("inputs:activeSpace");
+    drag.value = VtValue(0.25);
+    evaluator.SetInteractiveOverrides({drag});
+    walk.SetInteractiveOverrides({drag});
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs dragged;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(4.0), {drag},
+                                   &dragged, &error));
+    const RigExecRigPose warmedDragged =
+        RunWarmingJob(&evaluator, rig, frozen, dragged, &scheduler, &ran);
+    CHECK(ran);
+    const RigExecRigPose liveDragged = evaluator.Evaluate(UsdTimeCode(4.0));
+    CHECK(liveDragged.valid);
+    CheckPosesBitIdentical("nested switches warmed under a drag",
+                           liveDragged, warmedDragged);
+    CheckPosesBitIdentical("nested switches walk under a drag",
+                           walk.Evaluate(UsdTimeCode(4.0)), warmedDragged);
+    evaluator.SetInteractiveOverrides({});
+    walk.SetInteractiveOverrides({});
+}
+
 // A warming job's pose is bit-identical to live evaluation of the same
 // inputs: freeze after frame 2, warm frame 3 (an unrun time, with genuinely
 // different inputs), and diff against live at 3 from the same history. Then
@@ -3905,6 +4025,7 @@ main(int argc, char **argv)
     TestSamplerMatchesLiveReads();
     TestDigestMovesWithControls();
     TestProductionRunnerIsBitIdenticalToLive();
+    TestNestedSpaceSwitchesWarmBitIdentical();
     TestChainedRigWarmsBitIdentical();
     TestPhasedReadsWarmBitIdentical();
     TestBlinkDragWarmsAsReleased();

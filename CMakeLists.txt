@@ -1007,6 +1007,10 @@ target_link_libraries(testRigExecFrameCacheSparsity PRIVATE rigExec)
 target_compile_definitions(testRigExecFrameCacheSparsity PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecFrameCacheSparsity COMMAND testRigExecFrameCacheSparsity)
+# One step per cluster, so that a switched group and the provider it
+# recomposes land in different clusters (TestRecomposedVersionSeedsSparseReuse).
+set_tests_properties(testRigExecFrameCacheSparsity PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
 
 add_executable(testRigExecFrameCacheCones_Verify tests/testRigExecFrameCacheCones_Verify.cpp)
 target_link_libraries(testRigExecFrameCacheCones_Verify PRIVATE rigExec)
@@ -1363,6 +1367,20 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRigExecLiveOperationGraph COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_live_operation_graph.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # Switches nested under switched controls: bakeable, and the program,
+    # the walk and the drag path agree bit for bit; a switch reading under
+    # its own target is refused.
+    add_test(NAME testRigExecSpaceSwitchVersions COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_space_switch_versions.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    # Again with every frame's cone checked against the whole program, one
+    # step per cluster: a recomposed version reads avars a cone must reach.
+    add_test(NAME testRigExecSpaceSwitchVersionsCones
+        COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_space_switch_versions.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     add_test(NAME testRigExecBake COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_bake.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -1517,6 +1535,8 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecBake testRigExecInverse
                          testRigExecPsdNumeric testRigExecSpaceSwitch
                          testRigExecLiveOperationGraph
+                         testRigExecSpaceSwitchVersions
+                         testRigExecSpaceSwitchVersionsCones
                          testRestLocal testRestMigration
                          testInterveningXform testRigExecEpochConstants
                          testRigExecBakedAvarPatch testRigExecWireMover
@@ -1547,6 +1567,8 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
             "RIGEXEC_USD_INSTALL=${RIGEXEC_TEST_USD_DIR}")
     endforeach()
+    set_property(TEST testRigExecSpaceSwitchVersionsCones APPEND PROPERTY
+        ENVIRONMENT "RIGEXEC_BAKED_VERIFY_CONES=1" "RIGEXEC_BAKED_GRAIN_US=0")
     rigexec_add_digest_gate_test(testRigExecStageEdits
         ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_stage_edits.py"

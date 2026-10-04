@@ -326,7 +326,7 @@ python docs/render_media.py --page space_switch
 - Put the index on the control the animator already selects, through `rigExec:activeSpaceAttribute` — an `avars:space` channel keys, shows in the avar editor and undoes like any other avar.
 - `inputs:sourceWeights` has no meaning here — the index is the selector — and authoring it is a compile error rather than a silent no-op.
 - A pole vector that should follow a hand's twist but not its swing takes `rigExec:rotationFilters = ["all", "twist"]` with `rigExec:twistAxis` along the forearm.
-- Two switches that each need the other composed first are a cycle and refuse to compile; a switch that reads a space below it in namespace is fine.
+- A source or `rigExec:space` under the switch's own target, with no other switched control in between, moves with the answer it feeds: that is a cycle and refuses to compile, as do two switches that each need the other composed first. A source under another switched control is fine, even one nested inside this switch's target: the nested switch resolves first.
 
 ## See also
 

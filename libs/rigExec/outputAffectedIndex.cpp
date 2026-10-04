@@ -101,24 +101,27 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
             }
         }
     };
-    const auto admitOne = [&](const RigExecControlId &control, int seed) {
-        if (seed >= 0 && size_t(seed) < _clusterCount) {
-            admit(control, std::vector<int>{seed});
-        } else if (!control.empty()) {
-            _universe.insert(control);
-            _seeds.emplace(control, std::vector<int>());
-        }
-    };
     const std::vector<int> noSeeds;
     const auto tableAt =
         [&](const std::vector<std::vector<int>> &table,
             size_t i) -> const std::vector<int> & {
         return i < table.size() ? table[i] : noSeeds;
     };
-    const auto composeCluster = [&](size_t slot) {
-        return slot < program.cones.avarCluster.size()
-            ? program.cones.avarCluster[slot]
-            : -1;
+    // The compose cluster that reads a provider's avars, and the clusters
+    // of the switched groups that recompose an earlier version of it.
+    const auto composeClusters = [&](size_t slot) {
+        std::vector<int> seeds;
+        if (slot < program.cones.avarCluster.size()) {
+            seeds.push_back(program.cones.avarCluster[slot]);
+        }
+        if (slot < program.cones.avarVersionSteps.size()) {
+            for (const int step : program.cones.avarVersionSteps[slot]) {
+                if (step >= 0 && size_t(step) < program.steps.size()) {
+                    seeds.push_back(program.steps[size_t(step)].cluster);
+                }
+            }
+        }
+        return seeds;
     };
     // Every provider slot the compose pass reads: the path the sampler names
     // a source by, mapped to the cluster whose cone a moved avar dirties
@@ -127,8 +130,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     const size_t slots =
         std::min(program.paths.size(), program.cones.avarCluster.size());
     for (size_t slot = 0; slot < slots; ++slot) {
-        admitOne(RigExecControlIdForPath(program.paths[slot]),
-                 program.cones.avarCluster[slot]);
+        admit(RigExecControlIdForPath(program.paths[slot]),
+              composeClusters(slot));
     }
     // Patchable avar properties: the exact paths a value patch names, each
     // mapped to its provider's compose cluster. The binding slot is a FLAT
@@ -137,12 +140,11 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
     // provider-sized compose table mis-maps low channels to the wrong
     // provider and strands the rest seedless.
     for (const auto &kv : program.patchableAvars) {
-        int cluster = -1;
-        if (kv.second < program.avarConstantBindings.size()) {
-            cluster = composeCluster(
-                program.avarConstantBindings[kv.second].slot / 11);
-        }
-        admitOne(RigExecControlIdForPath(kv.first), cluster);
+        admit(RigExecControlIdForPath(kv.first),
+              kv.second < program.avarConstantBindings.size()
+                  ? composeClusters(
+                        program.avarConstantBindings[kv.second].slot / 11)
+                  : noSeeds);
     }
     // Varying avar bindings: the head of each binding's walk -- the avar
     // property the sampler names the sample by -- mapped to its
@@ -151,8 +153,8 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
         if (!binding.input.head) {
             continue;
         }
-        admitOne(RigExecControlIdForPath(binding.input.head.GetPath()),
-                 composeCluster(binding.slot / 11));
+        admit(RigExecControlIdForPath(binding.input.head.GetPath()),
+              composeClusters(binding.slot / 11));
     }
     // Chains: the target path reaches the clusters reading its base points.
     for (size_t c = 0; c < program.chains.size(); ++c) {
@@ -516,6 +518,20 @@ _IndexSeeds(const RigExecBakedProgramImpl &program)
             const int cluster = program.cones.avarCluster[provider];
             if (cluster >= 0 && size_t(cluster) < clusters) {
                 add(binding.input.overrideIndex, cluster);
+            }
+            // And every switched group recomposing an earlier version of
+            // the provider from the same avars.
+            if (provider < program.cones.avarVersionSteps.size()) {
+                for (const int step :
+                     program.cones.avarVersionSteps[provider]) {
+                    if (step < 0 || size_t(step) >= program.steps.size()) {
+                        continue;
+                    }
+                    const int reader = program.steps[size_t(step)].cluster;
+                    if (reader >= 0 && size_t(reader) < clusters) {
+                        add(binding.input.overrideIndex, reader);
+                    }
+                }
             }
         }
     }

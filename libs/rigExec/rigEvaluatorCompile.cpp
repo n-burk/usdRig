@@ -3644,11 +3644,26 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                             "depends on a control whose space depends on it");
             }
             state[i] = 1;
+            // A source or space under the switch's own target moves with the
+            // answer it is an input to: a cycle of one switch, refused like
+            // any other so that every evaluator agrees there is no answer.
+            const auto underOwnTarget = [&](const SdfPath &read) {
+                if (read.IsEmpty() || switchedAncestor(read) != int(i)) {
+                    return false;
+                }
+                return !fail(collected[i].switchPath.GetString() +
+                             " is part of a space-switch cycle: it reads " +
+                             read.GetString() +
+                             ", which lies under its own target " +
+                             collected[i].target.GetString());
+            };
+            if (underOwnTarget(collected[i].spacePath)) return false;
             int here = 0;
             for (const auto &source : collected[i].sources) {
                 if (source.path.IsEmpty()) continue;
+                if (underOwnTarget(source.path)) return false;
                 const int producer = switchedAncestor(source.path);
-                if (producer < 0 || size_t(producer) == i) continue;
+                if (producer < 0) continue;
                 if (!visit(size_t(producer))) return false;
                 here = std::max(here, band[size_t(producer)] + 1);
             }

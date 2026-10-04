@@ -318,13 +318,10 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         chainTargets.insert(target);
     }
     // A space switch replaces a provider's parent with one the ladder does
-    // not know about. The compose handles that in one line (see
-    // RigExecBakedProgramImpl::SpaceSwitch), but only while the source it
-    // reads has ALREADY been composed this pass -- slots run in namespace
-    // DFS pre-order, so that means a strictly lower slot. A rig that wants
-    // otherwise needs the compose partitioned differently, which is a
-    // scheduler change rather than a compose one, so it is refused here and
-    // takes the dynamic path: correct and slower, never fast and wrong.
+    // not know about. The compose reads every frame it needs at a version
+    // bound at Build (RigExecBakedProgramImpl::SpaceSwitch::FrameVersion)
+    // and the compose groups are emitted in dependency order, so all it
+    // needs here is a slot for the target and for each source.
     for (const RigExecRigEvaluator::_SpaceSwitch &sw : E._spaceSwitches) {
         if (!E._firstFramePoseFrames.count(sw.target)) {
             say("space switch on a provider with no slot", sw.target);
@@ -2971,6 +2968,8 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // one value that moves -- the active index -- so that keying a space
     // dirties the compose step that reads it and nothing else.
     B.spaceSwitchBySlot.assign(B.paths.size(), -1);
+    // Parallel to B.spaceSwitches: the compile's resolution round.
+    std::vector<int> switchResolveOrder;
     for (const RigExecRigEvaluator::_SpaceSwitch &sw : E._spaceSwitches) {
         RigExecBakedProgramImpl::SpaceSwitch out;
         out.slot = slotOf(sw.target);
@@ -3017,7 +3016,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
         B.spaceSwitchBySlot[size_t(out.slot)] = int(B.spaceSwitches.size());
         B.spaceSwitches.push_back(std::move(out));
+        switchResolveOrder.push_back(sw.band);
     }
+    // Once every switched slot is known: which version of each frame a
+    // switch reads depends on which controls above it are switched.
+    RigExecBakedBindSpaceSwitchVersions(&B, switchResolveOrder);
 
     // ---- auto clavicles ----------------------------------------------------
     //
@@ -3193,8 +3196,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     graphPhases.Next("Bake.the_step_graph.pose_steps");
     RigExecBakedBuildPoseSteps(&B);
     if (B.composeCycle) {
+        // A guard, not a path: the compile refuses every switch cycle, and
+        // versioned switch reads leave none for the groups to close. An
+        // unsorted program would read frames no step has written yet.
         refuse("space switches form a compose cycle: two of them each need "
                "the other's space composed first", E._rigPath);
+        return nullptr;
     }
     // Between the two halves, which is where a weight object belongs in
     // program order: its placement comes from the pose walk and its packet is

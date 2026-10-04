@@ -9,6 +9,7 @@
 // stage notices through it.
 #include "rigExec/frameCacheSparsity.h"
 #include "rigExec/bakedSchedule.h"
+#include "rigExec/frozenContext.h"
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/notice.h"
@@ -1298,6 +1299,221 @@ TestPlannerExecutorParity()
     CHECK(SetIs(held.clusters, {2, 3, 4}));
 }
 
+namespace {
+
+// The nested space-switch rig of testRigExecFrozenContext: S sits under P
+// and is switched into [Other, world]; P is switched into [C, world] with C
+// under S. S resolves first and recomposes P's pre-switch frame from P's
+// avars, so S's compose step reads P's avars outside its own group.
+UsdStageRefPtr
+MakeNestedSpaceSwitchRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&stage](const char *path, double x) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        GfMatrix4d rest(1.0);
+        rest.SetTranslateOnly(GfVec3d(x, 100.0, 0.0));
+        prim.GetAttribute(TfToken("rest:space")).Set(rest);
+        return prim;
+    };
+    const UsdPrim other = control("/Asset/Rig/Other", 50.0);
+    const UsdPrim p = control("/Asset/Rig/P", 0.0);
+    const UsdPrim s = control("/Asset/Rig/P/S", 10.0);
+    const UsdPrim c = control("/Asset/Rig/P/S/C", 15.0);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const double pActive[4] = {0.0, 1.0, 0.5, 0.0};
+    const double sActive[4] = {0.5, 0.0, 1.0, 0.5};
+    const auto spaces = [&stage](const char *name, const UsdPrim &target,
+                                 const UsdPrim &source,
+                                 const double (&keys)[4]) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
+            TfToken("RigExecSpaceSwitch"));
+        prim.CreateRelationship(TfToken("rigExec:target"))
+            .SetTargets({target.GetPath()});
+        prim.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({source.GetPath(), SdfPath("/Asset/Rig")});
+        UsdAttribute active = prim.CreateAttribute(
+            TfToken("inputs:activeSpace"), SdfValueTypeNames->Double);
+        for (int t = 0; t < 4; ++t) {
+            active.Set(keys[t], UsdTimeCode(double(t + 1)));
+        }
+    };
+    spaces("sSpaces", s, other, sActive);
+    spaces("pSpaces", p, c, pActive);
+    UsdAttribute tx = other.GetAttribute(TfToken("avars:tx"));
+    UsdAttribute rz = p.GetAttribute(TfToken("avars:rz"));
+    for (int t = 1; t <= 4; ++t) {
+        tx.Set(10.0 * double(t), UsdTimeCode(double(t)));
+        rz.Set(7.5 * double(t) - 12.0, UsdTimeCode(double(t)));
+    }
+    return stage;
+}
+
+}  // namespace
+
+// A switched group that recomposes an earlier version of a provider reads
+// that provider's avars, not its posed frame, so its cluster lies outside
+// the provider's compose cone. The index seeds it through avarVersionSteps
+// for the provider's control, its varying avar, and an override on that
+// avar. A partial cone re-run planned from those seeds, after a drag or a
+// key edit of P's rz, is bit-identical to live; after the key edit, a run of
+// P's compose cone alone is not.
+void
+TestRecomposedVersionSeedsSparseReuse()
+{
+    UsdStageRefPtr stage = MakeNestedSpaceSwitchRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    const UsdTimeCode time(1.0);
+    const RigExecRigPose basePose = evaluator.Evaluate(time);
+    CHECK(basePose.valid);
+    const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
+    CHECK(baked != nullptr);
+    if (!baked) {
+        return;
+    }
+    const RigExecBakedProgramImpl &program = baked->GetStepGraph();
+    const auto slotOf = [&program](const char *path) {
+        const auto it = std::find(program.paths.begin(), program.paths.end(),
+                                  SdfPath(path));
+        return it == program.paths.end()
+            ? size_t(-1)
+            : size_t(it - program.paths.begin());
+    };
+    const size_t pSlot = slotOf("/Asset/Rig/P");
+    const size_t sSlot = slotOf("/Asset/Rig/P/S");
+    CHECK(pSlot < program.cones.avarCluster.size());
+    CHECK(sSlot < program.cones.avarCluster.size());
+    if (pSlot >= program.cones.avarCluster.size() ||
+        sSlot >= program.cones.avarCluster.size()) {
+        return;
+    }
+    const int pCluster = program.cones.avarCluster[pSlot];
+    const int sCluster = program.cones.avarCluster[sSlot];
+    // Distinct only at one step per cluster (RIGEXEC_BAKED_GRAIN_US=0, set
+    // by the test registration).
+    CHECK(pCluster >= 0 && sCluster >= 0 && pCluster != sCluster);
+    if (pCluster == sCluster) {
+        return;
+    }
+    // S's group reads P's avars to recompose P's pre-switch frame.
+    CHECK(pSlot < program.cones.avarVersionSteps.size());
+    bool sReadsP = false;
+    if (pSlot < program.cones.avarVersionSteps.size()) {
+        for (const int step : program.cones.avarVersionSteps[pSlot]) {
+            sReadsP = sReadsP || (step >= 0 &&
+                                  size_t(step) < program.steps.size() &&
+                                  program.steps[size_t(step)].cluster ==
+                                      sCluster);
+        }
+    }
+    CHECK(sReadsP);
+
+    const uint64_t epoch = uint64_t(evaluator.GetBindingEpochDigest());
+    RigExecOutputAffectedIndex index;
+    index.Build(program, epoch);
+    // Without the version seeds, P's compose cone misses S.
+    CHECK(!index.ConeOf(pCluster).Test(sCluster));
+    for (const char *id : {"/Asset/Rig/P", "/Asset/Rig/P.avars:rz"}) {
+        CHECK(index.IsKnownControl(id));
+        const std::vector<int> seeds = index.SeedsForControl(id);
+        CHECK(std::find(seeds.begin(), seeds.end(), pCluster) !=
+              seeds.end());
+        CHECK(std::find(seeds.begin(), seeds.end(), sCluster) !=
+              seeds.end());
+        CHECK(index.AffectedByControls({id}).Test(sCluster));
+    }
+    RigExecValueOverride drag;
+    drag.prim = SdfPath("/Asset/Rig/P");
+    drag.attribute = TfToken("avars:rz");
+    drag.value = VtValue(40.0);
+    const std::vector<int> dragSeeds = RigExecOverrideSeeds(program, drag);
+    CHECK(std::find(dragSeeds.begin(), dragSeeds.end(), sCluster) !=
+          dragSeeds.end());
+    // The bridge's override admission.
+    index.MapControl(RigExecControlIdForOverride(drag), dragSeeds);
+
+    // Retained base: the live frame as authored, with its slots.
+    std::string error;
+    std::shared_ptr<const void> slots;
+    size_t slotBytes = 0;
+    CHECK(RigExecCapturePartialSlots(program, &slots, &slotBytes));
+    RigExecFrameInputs baseInputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, time, {}, &baseInputs,
+                                   &error));
+    const RigExecRetainedFrameState retained = RigExecCaptureRetainedState(
+        baseInputs, {}, epoch, program.clustering.clusters.size());
+    if (!slots) {
+        return;
+    }
+    // Plans a re-run from the retained base, runs it and a run of P's
+    // compose cone alone, and compares both with live.
+    const auto rerun = [&](const char *what,
+                           const std::vector<RigExecValueOverride> &held,
+                           bool versionsMatter) {
+        evaluator.SetInteractiveOverrides(held);
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        CHECK(uint64_t(evaluator.GetBindingEpochDigest()) == epoch);
+        RigExecFrameInputs fresh;
+        CHECK(RigExecSampleFrameInputs(evaluator, time, held, &fresh,
+                                       &error));
+        const RigExecSparsePlan plan = RigExecPlanSparseReuse(
+            index, nullptr, retained, epoch, fresh, held);
+        CHECK(plan.verdict == RigExecSparseVerdict::Partial);
+        CHECK(plan.clusters.Test(sCluster));
+        const RigExecRigPose live = evaluator.Evaluate(time);
+        CHECK(live.valid);
+        if (!frozen) {
+            return;
+        }
+        const auto mismatches = [&live](const RigExecRigPose &pose) {
+            RigExecRigPose diff;
+            RigExecComparePoses(live, pose, &diff);
+            return diff.bakedParityMismatches;
+        };
+        const RigExecPartialRunResult partial = RigExecRunPartialCone(
+            *frozen, fresh, slots, basePose, plan.clusters, 0);
+        CHECK(partial.completed);
+        CHECK(partial.pose.valid);
+        if (mismatches(partial.pose) != 0) {
+            std::printf("FAIL %s: the planned re-run differs from live\n",
+                        what);
+            CHECK(false);
+        }
+        if (!versionsMatter) {
+            return;
+        }
+        // Without the version seeds the plan is P's compose cone, which
+        // leaves S's frame from the retained base.
+        const RigExecBakedClusterSet &withoutVersions =
+            index.ConeOf(pCluster);
+        CHECK(!withoutVersions.Test(sCluster));
+        const RigExecPartialRunResult stale = RigExecRunPartialCone(
+            *frozen, fresh, slots, basePose, withoutVersions, 0);
+        CHECK(stale.completed);
+        CHECK(mismatches(stale.pose) > 0);
+    };
+    // A held drag: the standing-override closure runs every override
+    // step's cluster, S's switch index among them, so the seeds are
+    // checked above and the re-run only has to match.
+    rerun("drag of P.avars:rz", {drag}, false);
+    // A key edit: P's sampled rz moves with nothing held, and only the
+    // version seeds bring S's group into the plan.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/P"))
+        .GetAttribute(TfToken("avars:rz"))
+        .Set(40.0, time);
+    rerun("key edit of P.avars:rz", {}, true);
+    evaluator.SetInteractiveOverrides({});
+}
+
 int
 main()
 {
@@ -1323,6 +1539,7 @@ main()
     TestNoticeAdapterRealNotice();
     TestOverrideSeeds();
     TestPlannerExecutorParity();
+    TestRecomposedVersionSeedsSparseReuse();
     if (failures == 0) {
         std::printf("PASS testRigExecFrameCacheSparsity\n");
     } else {
