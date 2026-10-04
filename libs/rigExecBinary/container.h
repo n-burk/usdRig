@@ -25,9 +25,9 @@ inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 /// Encoded (minor << 16) | major; the reader requires the major and
 /// tolerates the minor.
 ///
-/// MAJOR 3 uses the current geometry and frame record layouts: the curvenet
-/// binding, revision, weight and adjuster fields are gone, revision ops 10
-/// and 11 are reserved, and Wrinkle is op 15. Re-export earlier files;
+/// MAJOR 3 uses the current geometry and frame record layouts: fields that
+/// earlier majors carried for a removed mover family are gone, revision ops
+/// 10 and 11 are reserved, and Wrinkle is op 15. Re-export earlier files;
 /// incompatible records must not be misread.
 ///
 /// MINOR 1 on that major adds the optional PoseNumeric, SpaceSwitch and
