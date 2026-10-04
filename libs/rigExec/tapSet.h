@@ -156,6 +156,10 @@ public:
         const RigExecValueAddress &publicAddress,
         const SdfPath &privateProvider);
 
+    /// How many taps stand. Tap ids are dense from zero, so the live
+    /// operation graph enumerates every address through this.
+    size_t GetTapCount() const { return _addresses.size(); }
+
     /// The public canonical address of a tap.
     const RigExecValueAddress &GetAddress(RigExecTapId tap) const {
         static const RigExecValueAddress empty;

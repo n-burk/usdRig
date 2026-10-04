@@ -610,7 +610,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
             const RigExecMoverParameters parameters = [&]() {
                 RIGEXEC_PROFILE_SCOPE_CAT(
                     _profiler,
-                    "Assemble " + revision.moverPath.GetName(), "geometry");
+                    "Assemble " + revision.moverPath.GetString() + " " +
+                    target.GetString(), "geometry");
                 return RigExecAssembleParameters(moverPrim, revision.op,
                                                  revision.binding, values,
                                                  time);

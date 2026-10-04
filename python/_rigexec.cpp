@@ -20,6 +20,7 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/rbf.h"
@@ -1066,7 +1067,154 @@ PYBIND11_MODULE(_rigexec, m) {
             }
             return out;
         }, "Every recorded scope in completion order, with the index of the\n"
-           "thread that ran it. Use profile_summary for totals.");
+           "thread that ran it. Use profile_summary for totals.")
+        .def("baked_steps", [](const _Rig &r) {
+            // The standing baked program's step graph, in program order: one
+            // dict per step with its structure (kind, label, preds/succs,
+            // reads/writes, cluster, level) and its last run's output
+            // (diagnostics, counters, bail, interval). Empty when no program
+            // stands -- the generation is dynamic. A graph visualizer reads
+            // this once per epoch for structure and once per generation for
+            // which steps fired (end_us != 0 with profiling enabled) and
+            // what each one said.
+            std::vector<py::dict> out;
+            const rigExec::RigExecBakedProgram *program =
+                r.evaluator->GetBakedProgram();
+            if (!program) {
+                return out;
+            }
+            const rigExec::RigExecBakedProgramImpl &B =
+                program->GetStepGraph();
+            for (size_t i = 0; i < B.steps.size(); ++i) {
+                const rigExec::RigExecBakedStep &s = B.steps[i];
+                py::dict d;
+                d["index"] = i;
+                d["kind"] =
+                    rigExec::RigExecBakedStepKindName(s.kind);
+                d["label"] = s.label;
+                d["part"] = s.part;
+                d["object"] = s.object;
+                d["preds"] = s.preds;
+                d["succs"] = s.succs;
+                py::list reads, writes;
+                for (const rigExec::RigExecBakedSlotRange &range : s.reads) {
+                    py::dict rd;
+                    rd["domain"] = rigExec::RigExecBakedSlotDomainName(
+                        range.domain);
+                    rd["begin"] = range.begin;
+                    rd["end"] = range.end;
+                    reads.append(rd);
+                }
+                for (const rigExec::RigExecBakedSlotRange &range : s.writes) {
+                    py::dict rd;
+                    rd["domain"] = rigExec::RigExecBakedSlotDomainName(
+                        range.domain);
+                    rd["begin"] = range.begin;
+                    rd["end"] = range.end;
+                    writes.append(rd);
+                }
+                d["reads"] = reads;
+                d["writes"] = writes;
+                d["cluster"] = s.cluster;
+                d["level"] = s.level;
+                d["cost_us"] = s.cost;
+                d["size_units"] = s.sizeUnits;
+                d["is_source"] = s.isSource;
+                d["external_reads"] = s.externalReads;
+                d["varying_inputs"] = s.varyingInputs;
+                d["resolved_input_reads"] = s.resolvedInputReads;
+                d["override_inputs"] = s.overrideInputs;
+                d["diagnostics"] = s.diagnostics;
+                d["revisions_executed"] = s.counters.revisionsExecuted;
+                d["revisions_created"] = s.counters.revisionsCreated;
+                d["schedules_built"] = s.counters.schedulesBuilt;
+                d["chains_built"] = s.counters.chainsBuilt;
+                d["revisions_built"] = s.counters.revisionsBuilt;
+                d["bail"] = s.bail;
+                d["start_us"] = s.startUs;
+                d["end_us"] = s.endUs;
+                d["measured_us"] = s.measuredUs;
+                d["measured_runs"] = s.measuredRuns;
+                out.push_back(d);
+            }
+            return out;
+        }, "The standing baked program's step graph in program order.")
+        .def("baked_clusters", [](const _Rig &r) {
+            // The standing program's cluster partition: the unit one task
+            // runs back to back on one thread. Empty without a program.
+            std::vector<py::dict> out;
+            const rigExec::RigExecBakedProgram *program =
+                r.evaluator->GetBakedProgram();
+            if (!program) {
+                return out;
+            }
+            const rigExec::RigExecBakedProgramImpl &B =
+                program->GetStepGraph();
+            for (size_t i = 0; i < B.clustering.clusters.size(); ++i) {
+                const rigExec::RigExecBakedCluster &c =
+                    B.clustering.clusters[i];
+                py::dict d;
+                d["index"] = i;
+                d["members"] = c.members;
+                d["preds"] = c.preds;
+                d["succs"] = c.succs;
+                d["cost_us"] = c.cost;
+                d["level"] = c.level;
+                out.push_back(d);
+            }
+            return out;
+        }, "The standing baked program's clusters in id order.")
+        .def("operation_graph", [](const _Rig &r) {
+            // The compiled epoch as one graph: every live operation as a
+            // node (id, domain, kind, label, profile scope, level, order,
+            // details, lists) and every derived dependency as an edge
+            // (src, dst, kind). See liveOperationGraph.h for the id scheme
+            // and edge kinds. Empty before the first Compile.
+            const rigExec::RigExecLiveOperationGraph graph =
+                r.evaluator->DescribeLiveOperations();
+            py::list nodes, edges;
+            for (const rigExec::RigExecLiveOpNode &n : graph.nodes) {
+                py::dict d;
+                d["id"] = n.id;
+                d["domain"] = n.domain;
+                d["kind"] = n.kind;
+                d["label"] = n.label;
+                d["profile"] = n.profile;
+                d["level"] = n.level;
+                d["order"] = n.order;
+                py::dict details;
+                for (const auto &kv : n.details) {
+                    details[py::str(kv.first)] = py::str(kv.second);
+                }
+                d["details"] = details;
+                py::dict lists;
+                for (const auto &kv : n.lists) {
+                    py::list items;
+                    for (const std::string &v : kv.second) {
+                        items.append(v);
+                    }
+                    lists[py::str(kv.first)] = items;
+                }
+                d["lists"] = lists;
+                nodes.append(d);
+            }
+            for (const rigExec::RigExecLiveOpEdge &e : graph.edges) {
+                py::dict d;
+                d["src"] = e.src;
+                d["dst"] = e.dst;
+                d["kind"] = e.kind;
+                edges.append(d);
+            }
+            py::dict out;
+            out["nodes"] = nodes;
+            out["edges"] = edges;
+            return out;
+        }, "The compiled epoch as one operation graph: a dict with nodes\n"
+           "(id, domain, kind, label, profile, level, order, details,\n"
+           "lists) and edges (src, dst, kind). See liveOperationGraph.h.")
+        .def_property_readonly("baked_generation_count", [](const _Rig &r) {
+            return r.evaluator->GetBakedGenerationCount();
+        }, "How many generations the baked program has answered.");
 
 
     py::class_<rigExec::RigExecRigPose>(m, "Pose",

@@ -99,6 +99,7 @@ add_library(rigExec SHARED
     libs/rigExec/rigEvaluatorGeometry.cpp
     libs/rigExec/rigEvaluatorGeometryEvaluation.cpp
     libs/rigExec/rigEvaluatorInputs.cpp
+    libs/rigExec/rigEvaluatorLiveGraph.cpp
     libs/rigExec/rigEvaluatorNotices.cpp
     libs/rigExec/rigEvaluatorPose.cpp
     libs/rigExec/rigEvaluatorProperties.cpp
@@ -1344,6 +1345,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRigExecSpaceSwitch COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_space_switch.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecLiveOperationGraph COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_live_operation_graph.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecBake COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_bake.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -1494,6 +1498,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecFkControlSpacePython
                          testRigExecBake testRigExecInverse
                          testRigExecPsdNumeric testRigExecSpaceSwitch
+                         testRigExecLiveOperationGraph
                          testRestLocal testRestMigration
                          testInterveningXform testRigExecEpochConstants
                          testRigExecBakedAvarPatch testRigExecWireMover

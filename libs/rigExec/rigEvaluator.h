@@ -10,6 +10,7 @@
 #define RIGEXEC_RIG_EVALUATOR_H
 
 #include "bakedProgram.h"
+#include "liveOperationGraph.h"
 #include "moverGraph.h"
 #include "profiler.h"
 #include "solverKernels.h"
@@ -633,6 +634,18 @@ public:
     ///
     /// Diagnostic access only -- evaluation order itself comes from the
     /// interleaved pose steps, and this is read back from them.
+    /// The compiled epoch as one operation graph: every solver batch and
+    /// solver, frame constraint, geometry chain and revision, property
+    /// chain and revision, exec tap, provider value, space switch and
+    /// pose interpolator, with every dependency the compile derived.
+    ///
+    /// Diagnostic access for the graph visualizer and the compile-accounting
+    /// suite; evaluation itself never reads it. Ids are stable within the
+    /// epoch (see liveOperationGraph.h) and each node names the profiler
+    /// scope that fires it, so a generation's profile events attribute
+    /// straight onto the structure. Empty before the first Compile.
+    RigExecLiveOperationGraph DescribeLiveOperations() const;
+
     const std::map<SdfPath, std::vector<SdfPath>> &GetFrameChains() const
     {
         return _frameChains;
