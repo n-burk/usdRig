@@ -2082,6 +2082,251 @@ TestSolverInputReadPhaseFollowsAConstraintAbove()
                     {1, 3, 5});
 }
 
+/// Constraint B reads a control constraint A moves: B's source is the
+/// control itself, or (\p child) a namespace child the move propagates to.
+/// A third constraint D, at the bottom of the stack, writes the same target
+/// as one of the two and so delays it into a later Kahn level. The mover
+/// chain also orders every constraint pair today; this fixture pins the
+/// values the explicit constraint -> constraint edges must keep on their own
+/// once that chain is removed.
+///   \p aBelowB: D moves Ctl, A moves Ctl again, B reads after A.
+///   otherwise:  D moves OutB, B moves it again reading Ctl, A moves Ctl.
+std::string
+ConstraintReadsConstraintText(bool aBelowB, bool child)
+{
+    const auto position = [](const char *name, const char *moves,
+                             const char *source) {
+        return std::string(
+                   "            def RigExecPositionConstraint \"") +
+               name + "\" (\n"
+               "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+               "            )\n"
+               "            {\n"
+               "                float inputs:defaultWeight = 1\n"
+               "                rel rigExec:sources = <" + source + ">\n"
+               "                rel rigExec:moves = <" + moves + ">\n"
+               "            }\n";
+    };
+    const char *ctl = "/Asset/Rig/Controls/Ctl";
+    const char *read = child ? "/Asset/Rig/Controls/Ctl/Child"
+                             : "/Asset/Rig/Controls/Ctl";
+    const char *srcA = "/Asset/Rig/Controls/SrcA";
+    const char *srcD = "/Asset/Rig/Controls/SrcD";
+    const char *outB = "/Asset/Rig/Controls/OutB";
+    std::string text = Head(
+        "            def RigExecControl \"Ctl\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 0, 0) + "\n"
+        "\n"
+        "                def RigExecControl \"Child\"\n"
+        "                {\n"
+        "                    matrix4d rest:space = " + Rest(2, 0, 0) + "\n"
+        "                }\n"
+        "            }\n"
+        "            def RigExecControl \"SrcA\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(10, 0, 0) + "\n"
+        "            }\n"
+        "            def RigExecControl \"SrcD\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 0, 7) + "\n"
+        "            }\n"
+        "            def RigExecControl \"OutB\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 5, 0) + "\n"
+        "            }\n");
+    // Definition order is top to bottom; the stack runs bottom first.
+    const std::string a = position("A", ctl, srcA);
+    const std::string b = position("B", outB, read);
+    const std::string d = aBelowB ? position("D", ctl, srcD)
+                                  : position("D", outB, srcD);
+    text +=
+        "\n"
+        "        def Scope \"Movers\"\n"
+        "        {\n" +
+        (aBelowB ? b + a + d : a + b + d) +
+        "        }\n"
+        "    }\n"
+        "}\n";
+    return text;
+}
+
+void
+TestConstraintReadsAConstraintInStackOrder()
+{
+    for (const bool aBelowB : {true, false}) {
+        for (const bool child : {false, true}) {
+            const std::string what =
+                std::string(aBelowB ? "A below B" : "A above B") +
+                (child ? ", B reads Ctl's child" : ", B reads Ctl");
+            const std::string text =
+                ConstraintReadsConstraintText(aBelowB, child);
+            const UsdStageRefPtr stage = OpenText(text);
+            CHECK(stage);
+            if (!stage) continue;
+            const RigExecRigPose pose =
+                Evaluate(what.c_str(), stage, 1.0, nullptr);
+            if (!pose.valid) continue;
+            const auto ctl =
+                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/Ctl"));
+            const auto out =
+                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/OutB"));
+            CHECK(ctl != pose.controlFrames.end());
+            CHECK(out != pose.controlFrames.end());
+            if (ctl == pose.controlFrames.end() ||
+                out == pose.controlFrames.end()) {
+                continue;
+            }
+            // A writes Ctl last either way.
+            const GfVec3d ctlFinal(10, 0, 0);
+            // B reads Ctl at B's place in the stack: after A when A is below
+            // it, the rest frame otherwise; the child rides 2 along x.
+            const GfVec3d ctlRead = aBelowB ? ctlFinal : GfVec3d(0, 0, 0);
+            const GfVec3d expected =
+                ctlRead + (child ? GfVec3d(2, 0, 0) : GfVec3d(0));
+            CHECK(Near(ctl->second.Origin(), ctlFinal, 1e-6));
+            CHECK(Near(out->second.Origin(), expected, 1e-6));
+            if (!Near(out->second.Origin(), expected, 1e-6)) {
+                const GfVec3d o = out->second.Origin();
+                std::printf("    %s: OutB at (%g, %g, %g)\n", what.c_str(),
+                            o[0], o[1], o[2]);
+            }
+            CheckTextParity(what.c_str(), text, {1});
+        }
+    }
+}
+
+/// Constraint B reads beneath a solver-bound joint, the Knee, which an FK
+/// chain at the bottom of the stack writes. Constraint A moves \p aMoves:
+/// the Knee's parent, the Hip, or the Knee itself. B's source is the Ankle,
+/// a provider under the Knee, or (\p xformSource) Tip, a native Xform under
+/// it. E and D, at the bottom of the movers, move A's target first, which
+/// delays A past B in the Kahn order unless an A -> B edge holds B back;
+/// one delaying constraint does not separate them. As above, the mover
+/// chain also orders A before B today; the values pin which writers reach
+/// B's source once that chain is removed.
+/// Mover stack: KneeFK, E, D, A, B.
+std::string
+ConstraintReadsUnderASolvedJointText(const char *aMoves, bool xformSource)
+{
+    const auto position = [](const char *name, const std::string &moves,
+                             const char *source) {
+        return std::string(
+                   "            def RigExecPositionConstraint \"") +
+               name + "\" (\n"
+               "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+               "            )\n"
+               "            {\n"
+               "                float inputs:defaultWeight = 1\n"
+               "                rel rigExec:sources = <" + source + ">\n"
+               "                rel rigExec:moves = <" + moves + ">\n"
+               "            }\n";
+    };
+    const std::string moved = std::string("/Asset/Rig/Joints/") + aMoves;
+    const char *read = xformSource ? "/Asset/Rig/Joints/Hip/Knee/Tip"
+                                   : "/Asset/Rig/Joints/Hip/Knee/Ankle";
+    std::string text = Head(
+        "            def RigExecControl \"SrcA\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(10, 0, 0) + "\n"
+        "            }\n"
+        "            def RigExecControl \"SrcD\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 0, 7) + "\n"
+        "            }\n"
+        "            def RigExecControl \"SrcE\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 6, 6) + "\n"
+        "            }\n"
+        "            def RigExecControl \"OutB\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(0, 5, 0) + "\n"
+        "            }\n"
+        "            def RigExecControl \"FkKnee\"\n"
+        "            {\n"
+        "                matrix4d rest:space = " + Rest(4, 1, 0) + "\n"
+        "            }\n");
+    const std::string ankle = "                    def RigExecJoint \"Ankle\"";
+    text.insert(text.find(ankle),
+                "                    def Xform \"Tip\"\n"
+                "                    {\n"
+                "                        double3 xformOp:translate = "
+                "(0, 3, 0)\n"
+                "                        uniform token[] xformOpOrder = "
+                "[\"xformOp:translate\"]\n"
+                "                    }\n");
+    const std::string partition =
+        "        uniform token rigExec:partition = \"Asset\"\n";
+    text.replace(text.find(partition), partition.size(),
+                 partition +
+                 "        reorder nameChildren = [\"Controls\", "
+                 "\"Joints\", \"Movers\", \"Solvers\"]\n");
+    text +=
+        "\n"
+        "        def Scope \"Solvers\"\n"
+        "        {\n" +
+        Chain("KneeFK", "</Asset/Rig/Controls/FkKnee>",
+              "</Asset/Rig/Joints/Hip/Knee>") +
+        "        }\n"
+        "\n"
+        "        def Scope \"Movers\"\n"
+        "        {\n" +
+        position("B", "/Asset/Rig/Controls/OutB", read) +
+        position("A", moved, "/Asset/Rig/Controls/SrcA") +
+        position("D", moved, "/Asset/Rig/Controls/SrcD") +
+        position("E", moved, "/Asset/Rig/Controls/SrcE") +
+        "        }\n"
+        "    }\n"
+        "}\n";
+    return text;
+}
+
+void
+TestConstraintReadsUnderASolvedJoint()
+{
+    for (const char *aMoves : {"Hip", "Hip/Knee"}) {
+        for (const bool xformSource : {false, true}) {
+            const std::string what =
+                std::string("A moves ") + aMoves +
+                (xformSource ? ", B reads Tip" : ", B reads Ankle");
+            const std::string text =
+                ConstraintReadsUnderASolvedJointText(aMoves, xformSource);
+            const UsdStageRefPtr stage = OpenText(text);
+            CHECK(stage);
+            if (!stage) continue;
+            const RigExecRigPose pose =
+                Evaluate(what.c_str(), stage, 1.0, nullptr);
+            if (!pose.valid) continue;
+            const auto out =
+                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/OutB"));
+            CHECK(out != pose.controlFrames.end());
+            if (out == pose.controlFrames.end()) continue;
+            // The FK chain puts the Knee at its control, (4, 1, 0); A then
+            // moves the Hip from (0, 8, 0) to (10, 0, 0), or the Knee to
+            // (10, 0, 0). Tip's stage frame is (0, 3, 0).
+            const bool hip = std::string(aMoves) == "Hip";
+            GfVec3d expected;
+            if (hip) {
+                // The Knee stops A's move: the Ankle stays on the solved
+                // Knee, while the native Tip rides the Hip's delta.
+                expected = xformSource ? GfVec3d(10, -5, 0)
+                                       : GfVec3d(8, 1, 0);
+            } else {
+                // A's own write to the solved Knee reaches both.
+                expected = xformSource ? GfVec3d(6, 2, 0)
+                                       : GfVec3d(14, 0, 0);
+            }
+            CHECK(Near(out->second.Origin(), expected, 1e-6));
+            if (!Near(out->second.Origin(), expected, 1e-6)) {
+                const GfVec3d o = out->second.Origin();
+                std::printf("    %s: OutB at (%g, %g, %g)\n", what.c_str(),
+                            o[0], o[1], o[2]);
+            }
+            CheckTextParity(what.c_str(), text, {1});
+        }
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2116,6 +2361,8 @@ main(int argc, char **argv)
     TestAggregateContradictionIsRejected();
     TestUnrelatedLimbsShareALevel();
     TestSolverInputReadPhaseFollowsAConstraintAbove();
+    TestConstraintReadsAConstraintInStackOrder();
+    TestConstraintReadsUnderASolvedJoint();
 
     // The baked half. Every fixture below stacks and carries no solver-named
     // read phase, so every one of them bakes: the SSA ladder gives each

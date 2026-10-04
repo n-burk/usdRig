@@ -3045,11 +3045,61 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // below it. See the comment there for why the cross product this
     // replaces had to be turned inside out.
     std::map<SdfPath, std::vector<SdfPath>> constraintsByTarget;
+    // Constraint -> constraint frame edges. A frame constraint writes its
+    // target's final frame and, through commitConstraintFrames, every
+    // namespace descendant up to an independently solved joint; a native
+    // Xform source rides its closest revised provider ancestor with no such
+    // stop. Pose-domain writers by target, as mover indices.
+    std::map<SdfPath, std::vector<size_t>> constraintFrameWriters;
+    for (size_t i = 0; i < newFrameConstraints.size(); ++i) {
+        const _FrameConstraint &constraint = newFrameConstraints[i];
+        if (!constraint.pointsTarget.IsEmpty()) continue;
+        for (const SdfPath &target : constraint.targets) {
+            constraintFrameWriters[target].push_back(i);
+        }
+    }
+    // The constraints whose commit can reach \p path: writers of the path
+    // and of each namespace ancestor, the walk ending AFTER the first
+    // solver-bound joint (its own writers count; nothing above it propagates
+    // through it). \p throughJoints drops that stop, for a native source.
+    // Authored parent:space also stops propagation, but per frame, so the
+    // compile keeps the edge. Memoized; a pure function of the binding.
+    std::map<std::pair<SdfPath, bool>, std::vector<size_t>>
+        constraintWritersReaching;
+    const auto writersReaching =
+        [&](const SdfPath &path,
+            bool throughJoints) -> const std::vector<size_t> & {
+        const auto key = std::make_pair(path, throughJoints);
+        const auto found = constraintWritersReaching.find(key);
+        if (found != constraintWritersReaching.end()) {
+            return found->second;
+        }
+        std::vector<size_t> writers;
+        for (SdfPath p = path;
+             !p.IsEmpty() && p != SdfPath::AbsoluteRootPath();
+             p = p.GetParentPath()) {
+            const auto it = constraintFrameWriters.find(p);
+            if (it != constraintFrameWriters.end()) {
+                writers.insert(writers.end(), it->second.begin(),
+                               it->second.end());
+            }
+            if (!throughJoints && newJointBinding.count(p)) break;
+        }
+        return constraintWritersReaching.emplace(key, std::move(writers))
+            .first->second;
+    };
     for (size_t i = 0; i < newFrameConstraints.size(); ++i) {
         const _FrameConstraint &constraint = newFrameConstraints[i];
         const SdfPath &path = constraint.moverPath;
         constraintIndices[path] = i;
         auto &dependencies = poseDependencies[path];
+        // Adjacent constraints in mover order. Every frame read has an
+        // explicit edge below, so this edge carries no data; its remaining
+        // effects are that a loop closed only by mover order (a follower at
+        // the bottom of the stack reading a joint whose solver waits on a
+        // constraint above it) is rejected as a pose dependency cycle, and
+        // that unrelated constraints serialize, which holds the biped at 17
+        // solver levels where the explicit edges alone give 6.
         if (i > 0) {
             dependencies.insert(newFrameConstraints[i - 1].moverPath);
         }
@@ -3064,7 +3114,28 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         // the unconditional edge it always had.
         const bool positional = poseStackOrdinal.count(path) > 0;
         const int here = stackOrdinalOf(path);
-        auto dependOnFrame = [&](const SdfPath &input) {
+        // Constraint writers of what this one reads, each ordered once, by
+        // the same positional rule as a solver writer. A geometry-domain
+        // constraint has no ordinal and keeps the place its mover index gives
+        // it: after every earlier frame writer of what it reads, before every
+        // later one.
+        std::set<size_t> orderedWriters;
+        const auto orderAgainst = [&](const std::vector<size_t> &writers) {
+            for (const size_t w : writers) {
+                if (w == i || !orderedWriters.insert(w).second) continue;
+                const SdfPath &writer = newFrameConstraints[w].moverPath;
+                const bool above = positional
+                    ? stackOrdinalOf(writer) > here
+                    : w > i;
+                if (above) {
+                    poseReverseEdges.emplace_back(writer, path);
+                } else {
+                    dependencies.insert(writer);
+                }
+            }
+        };
+        auto dependOnFrame = [&](const SdfPath &input,
+                                 bool nativeSource = false) {
             for (const SdfPath &provider : poseProviderClosure(input)) {
                 const auto owner = newJointBinding.find(provider);
                 if (owner != newJointBinding.end()) {
@@ -3076,15 +3147,33 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         dependencies.insert(writer);
                     }
                 }
+                orderAgainst(writersReaching(provider, false));
+            }
+            if (nativeSource) {
+                orderAgainst(writersReaching(input, true));
             }
         };
+        const auto dependOnSource = [&](const _FrameSourceBinding &source) {
+            dependOnFrame(source.sourcePath, !source.xformPath.IsEmpty());
+        };
         for (const SdfPath &target : constraint.targets) dependOnFrame(target);
-        for (const auto &source : constraint.sources) dependOnFrame(source.sourcePath);
-        dependOnFrame(constraint.worldUpObject.sourcePath);
+        for (const auto &source : constraint.sources) dependOnSource(source);
+        dependOnSource(constraint.worldUpObject);
         dependOnFrame(constraint.spacePath);
-        dependOnFrame(constraint.effector.sourcePath);
+        dependOnSource(constraint.effector);
         dependOnFrame(constraint.weightObject);
-        for (const auto &pole : constraint.poleObjects) dependOnFrame(pole.sourcePath);
+        for (const auto &pole : constraint.poleObjects) dependOnSource(pole);
+        // Geometry-domain constraints on one points target keep their mover
+        // order between them.
+        if (!constraint.pointsTarget.IsEmpty()) {
+            for (size_t w = i; w-- > 0;) {
+                if (newFrameConstraints[w].pointsTarget ==
+                    constraint.pointsTarget) {
+                    dependencies.insert(newFrameConstraints[w].moverPath);
+                    break;
+                }
+            }
+        }
         // A geometry-domain constraint revises points, not the frame a solver
         // reads, so no solver can inherit one: this `continue` is the same
         // exclusion the cross product below used to get from skipping the
@@ -3265,10 +3354,9 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // no joint and no data flow therefore share a Kahn level and evaluate
     // concurrently, and the baked cone schedule -- built from this same graph
     // -- keeps its width. testRigExecSolverStacking's
-    // TestUnrelatedLimbsShareALevel pins it, and the biped measures WIDER
-    // than before this change (24 solvers over 6 dependency levels rather
-    // than 17, because the frame-inheritance edges that used to make a solver
-    // wait on a constraint above it are now directional).
+    // TestUnrelatedLimbsShareALevel pins it. The biped's 24 solvers span 17
+    // dependency levels while the mover chain serializes its constraints;
+    // the directional edges alone would allow 6.
     std::map<SdfPath, std::vector<SdfPath>> jointWriterChain;
     /// solver -> (joint -> the step that wrote the joint just before it), the
     /// compile-side half of "the incoming frame is the solver's rest".
