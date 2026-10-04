@@ -427,36 +427,48 @@ public:
         // double while the math movers compute in float, so a float input
         // connected to (or standing on) a control's avar reads its value
         // cast, instead of failing and falling back to a default.
-        if (std::is_same<T, float>::value && attribute &&
-            attribute.GetTypeName() == SdfValueTypeNames->Double) {
-            double wide = 0.0;
-            if (!GetAttribute<double>(attribute, time, &wide)) {
-                return false;
+        // Compile-time gated: a non-float instantiation asks no type
+        // question of the attribute at all.
+        if constexpr (std::is_same<T, float>::value) {
+            if (attribute &&
+                attribute.GetTypeName() == SdfValueTypeNames->Double) {
+                double wide = 0.0;
+                if (!GetAttribute<double>(attribute, time, &wide)) {
+                    return false;
+                }
+                return _CoerceFromDouble(wide, out);
             }
-            return _CoerceFromDouble(wide, out);
         }
         // An input that cannot change until the stage does answers from the
         // cache -- but only after the in-memory value for this exact property
         // has been ruled out, because a property chain result outranks the
         // authored value the cache holds.
-        if (attribute && !_values.count(attribute.GetPath())) {
-            if (_cache) {
-                bool handled = false;
-                const bool got = _cache->Read(
-                    attribute, attribute.GetPath(), time, out, &handled);
-                if (handled) {
-                    return got;
+        // While no overlay is published there is nothing to rule out, so the
+        // read skips the path hash; the path itself is spelled once, because
+        // the cache lookup below used to spell it a second time.
+        if (attribute) {
+            const bool checkOverlay = !_values.empty();
+            const SdfPath attrPath =
+                (checkOverlay || _cache) ? attribute.GetPath() : SdfPath();
+            if (!checkOverlay || !_values.count(attrPath)) {
+                if (_cache) {
+                    bool handled = false;
+                    const bool got = _cache->Read(
+                        attribute, attrPath, time, out, &handled);
+                    if (handled) {
+                        return got;
+                    }
                 }
-            }
-            // The cache refused it: a connection to follow, or a value that
-            // varies with time -- which is every avar, so the refused reads
-            // are exactly the ones that recur every frame. MEASURED
-            // 2026-09-13, biped: ~11 600 scalar reads per frame, and an
-            // unconnected one still reaches the walk below, which allocates
-            // a std::set and a std::vector to discover there is no single
-            // connection to follow. Same answer, no allocation.
-            if (!attribute.HasAuthoredConnections()) {
-                return attribute.Get(out, time);
+                // The cache refused it: a connection to follow, or a value
+                // that varies with time -- which is every avar, so the
+                // refused reads are exactly the ones that recur every frame.
+                // MEASURED 2026-09-13, biped: ~11 600 scalar reads per frame,
+                // and an unconnected one still reaches the walk below, which
+                // allocates a std::set and a std::vector to discover there is
+                // no single connection to follow. Same answer, no allocation.
+                if (!attribute.HasAuthoredConnections()) {
+                    return attribute.Get(out, time);
+                }
             }
         }
         std::set<SdfPath> visiting;
@@ -467,13 +479,14 @@ public:
                 return true;
             }
             // A float connection chain may end on a double (an avar).
-            if (std::is_same<T, float>::value &&
-                a.GetTypeName() == SdfValueTypeNames->Double) {
-                double wide = 0.0;
-                if (!GetAttribute<double>(a, time, &wide)) {
-                    return false;
+            if constexpr (std::is_same<T, float>::value) {
+                if (a.GetTypeName() == SdfValueTypeNames->Double) {
+                    double wide = 0.0;
+                    if (!GetAttribute<double>(a, time, &wide)) {
+                        return false;
+                    }
+                    return _CoerceFromDouble(wide, out);
                 }
-                return _CoerceFromDouble(wide, out);
             }
             fallback.push_back(a);
             SdfPathVector connections;

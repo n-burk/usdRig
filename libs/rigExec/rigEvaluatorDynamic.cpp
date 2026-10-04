@@ -30,6 +30,56 @@ namespace rigExec {
 
 using namespace evaluatorDetail;
 
+namespace {
+
+// Attribute names and values the pose walk reads per constraint per frame,
+// interned once. A per-frame TfToken construction takes the token registry
+// lock, so the walk spells each of these once rather than per call.
+const TfToken _kDynEnabled("inputs:enabled");
+const TfToken _kDynDefaultWeight("inputs:defaultWeight");
+const TfToken _kDynSourceWeights("inputs:sourceWeights");
+const TfToken _kDynTranslationOffsets("inputs:translationOffsets");
+const TfToken _kDynRotationOffsets("inputs:rotationOffsets");
+const TfToken _kDynPoleVectorWeights("inputs:poleVectorWeights");
+const TfToken _kDynPoleVector("inputs:poleVector");
+const TfToken _kDynTwistDegrees("inputs:twistDegrees");
+const TfToken _kDynAimVector("inputs:aimVector");
+const TfToken _kDynUpVector("inputs:upVector");
+const TfToken _kDynRotationOffset("inputs:rotationOffset");
+const TfToken _kDynWorldUpVector("inputs:worldUpVector");
+const TfToken _kDynRotationOrder("rigExec:rotationOrder");
+const TfToken _kDynOrientationMode("rigExec:orientationMode");
+const TfToken _kDynSolverMode("rigExec:solverMode");
+const TfToken _kDynPoleVectorMode("rigExec:poleVectorMode");
+const TfToken _kDynEvaluationMode("rigExec:evaluationMode");
+const TfToken _kDynAimAxis("rigExec:aimAxis");
+const TfToken _kDynWorldUpType("rigExec:worldUpType");
+const TfToken _kDynSources("rigExec:sources");
+const TfToken _kDynComputeDriverPoints("rigExec:computeDriverPoints");
+const TfToken _kDynComputeRestDriverPoints("rigExec:computeRestDriverPoints");
+const TfToken _kDynXyz("XYZ");
+const TfToken _kDynAimX("aimX");
+const TfToken _kDynPreserve("preserve");
+const TfToken _kDynRotatePlane("rotatePlane");
+const TfToken _kDynSingleChain("singleChain");
+const TfToken _kDynVector("vector");
+const TfToken _kDynObject("object");
+const TfToken _kDynNeverTs("neverTS");
+const TfToken _kDynAlwaysTs("alwaysTS");
+const TfToken _kDynAutoDetect("autoDetect");
+const TfToken _kDynAxisX("x");
+const TfToken _kDynAxisY("y");
+const TfToken _kDynAxisZ("z");
+const TfToken _kDynWorldUpNone("none");
+const TfToken _kDynWorldUpSceneUp("sceneUp");
+const TfToken _kDynWorldUpObjectUp("objectUp");
+const TfToken _kDynWorldUpObjectRotationUp("objectRotationUp");
+const TfToken _kDynParentConstraint("RigExecParentConstraint");
+const TfToken _kDynSingleChainIkConstraint("RigExecSingleChainIkConstraint");
+const TfToken _kDynParentSpace("parent:space");
+
+} // namespace
+
 RigExecRigPose
 RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                       std::vector<std::string> diagnostics)
@@ -152,10 +202,10 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         livePacket.points.assign(live.begin(), live.end());
         restPacket.points.assign(rest.begin(), rest.end());
         baseOverrides.push_back(RigExecValueOverride{
-            ribbonPath, TfToken("rigExec:computeDriverPoints"), TfToken(),
+            ribbonPath, _kDynComputeDriverPoints, TfToken(),
             VtValue(livePacket)});
         baseOverrides.push_back(RigExecValueOverride{
-            ribbonPath, TfToken("rigExec:computeRestDriverPoints"), TfToken(),
+            ribbonPath, _kDynComputeRestDriverPoints, TfToken(),
             VtValue(restPacket)});
     }
 
@@ -659,13 +709,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         return false;
     };
 
-    auto readWeights = [&](const UsdPrim &prim, const char *name,
+    auto readWeights = [&](const UsdPrim &prim, const TfToken &name,
                            size_t count, std::vector<double> *weights) {
         return _ReadConstraintSourceWeights(prim, name, count, time,
                                             &pose.diagnostics, weights);
     };
 
-    auto readOffsets = [&](const UsdPrim &prim, const char *name,
+    auto readOffsets = [&](const UsdPrim &prim, const TfToken &name,
                            size_t count, std::vector<GfVec3d> *offsets) {
         return _ReadConstraintSourceOffsets(prim, name, count, time,
                                             &pose.diagnostics, offsets);
@@ -675,16 +725,16 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                             const UsdPrim &prim,
                             std::vector<RigExecConstraintSource> *sources) {
         std::vector<double> weights;
-        if (!readWeights(prim, "inputs:sourceWeights",
+        if (!readWeights(prim, _kDynSourceWeights,
                          constraint.sources.size(), &weights)) {
             return false;
         }
         std::vector<GfVec3d> translationOffsets, rotationOffsets;
-        if (constraint.schemaType == "RigExecParentConstraint") {
-            if (!readOffsets(prim, "inputs:translationOffsets",
+        if (constraint.schemaType == _kDynParentConstraint) {
+            if (!readOffsets(prim, _kDynTranslationOffsets,
                              constraint.sources.size(),
                              &translationOffsets) ||
-                !readOffsets(prim, "inputs:rotationOffsets",
+                !readOffsets(prim, _kDynRotationOffsets,
                              constraint.sources.size(), &rotationOffsets)) {
                 return false;
             }
@@ -766,8 +816,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         const UsdPrim prim = _stage->GetPrimAtPath(path);
         bool inherits = true;
         bool stageConstant = true;
-        for (const char *name : {"parent:space"}) {
-            const UsdAttribute attribute = prim.GetAttribute(TfToken(name));
+        for (const TfToken *name : {&_kDynParentSpace}) {
+            const UsdAttribute attribute = prim.GetAttribute(*name);
             SdfPathVector connections;
             // HasAuthoredConnections first: see _AuthoredConnections.
             // `inherits = false; break;` rather than an early return, so the
@@ -1308,6 +1358,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     if (lastSolverStep == nullptr) {
         launchSnapshot();
     }
+    // The scene-up direction, resolved at most once per generation: every
+    // sceneUp aim used to read stage metadata for itself, and metadata
+    // cannot change mid-generation.
+    GfVec3d sceneUpDirection(0, 1, 0);
+    bool sceneUpDirectionRead = false;
     for (const _PoseStep &step : _poseSteps) {
         if (step.solverBatch) {
             _SolverBatch &batch = _solverBatches[step.index];
@@ -1559,7 +1614,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             continue;
         }
         const bool enabled = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:enabled", true, time);
+            _resolvedInputs, prim, _kDynEnabled, true, time);
         if (!enabled) {
             for (const SdfPath &target : constraint.targets) {
                 recordFrame(target, constraint.moverPath);
@@ -1585,7 +1640,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             weight = resolvedWeight[0];
         } else if (constraint.weightObject.IsEmpty()) {
             weight = _ResolvedRead(
-                _resolvedInputs, prim, "inputs:defaultWeight", 1.0f, time);
+                _resolvedInputs, prim, _kDynDefaultWeight, 1.0f, time);
             if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
                 pose.diagnostics.push_back(
                     constraint.moverPath.GetString() +
@@ -1622,7 +1677,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         const double solveWeight =
             constraint.pointsTarget.IsEmpty() ? weight : 1.0;
 
-        if (constraint.schemaType == "RigExecSingleChainIkConstraint") {
+        if (constraint.schemaType == _kDynSingleChainIkConstraint) {
             std::vector<RigExecPointFrame> chain;
             chain.reserve(constraint.ikChain.size());
             bool inputsValid = true;
@@ -1648,35 +1703,35 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
 
             RigExecSingleChainIkParams params;
-            TfToken orientationMode("aimX");
-            if (auto a = prim.GetAttribute(TfToken("rigExec:orientationMode")))
+            TfToken orientationMode = _kDynAimX;
+            if (auto a = prim.GetAttribute(_kDynOrientationMode))
                 a.Get(&orientationMode);
-            params.preserveJointOrientation = orientationMode == "preserve";
-            TfToken solverMode("rotatePlane");
+            params.preserveJointOrientation = orientationMode == _kDynPreserve;
+            TfToken solverMode = _kDynRotatePlane;
             if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:solverMode"))) {
+                    prim.GetAttribute(_kDynSolverMode)) {
                 a.Get(&solverMode);
             }
-            params.mode = solverMode == "singleChain"
+            params.mode = solverMode == _kDynSingleChain
                 ? RigExecSingleChainIkMode::SingleChain
                 : RigExecSingleChainIkMode::RotatePlane;
-            TfToken poleMode("vector");
+            TfToken poleMode = _kDynVector;
             if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:poleVectorMode"))) {
+                    prim.GetAttribute(_kDynPoleVectorMode)) {
                 a.Get(&poleMode);
             }
             params.weight = weight;
             if (params.mode == RigExecSingleChainIkMode::RotatePlane) {
                 params.pole = _ResolvedRead(
-                    _resolvedInputs, prim, "inputs:poleVector",
+                    _resolvedInputs, prim, _kDynPoleVector,
                     GfVec3d(0, 1, 0), time);
                 params.twistDegrees = _ResolvedRead(
-                    _resolvedInputs, prim, "inputs:twistDegrees", 0.0,
+                    _resolvedInputs, prim, _kDynTwistDegrees, 0.0,
                     time);
             }
             if (inputsValid &&
                 params.mode == RigExecSingleChainIkMode::RotatePlane &&
-                poleMode == "object") {
+                poleMode == _kDynObject) {
                 if (constraint.poleObjects.empty()) {
                     pose.diagnostics.push_back(
                         constraint.moverPath.GetString() +
@@ -1686,7 +1741,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 }
                 std::vector<double> poleWeights;
                 if (inputsValid &&
-                    !readWeights(prim, "inputs:poleVectorWeights",
+                    !readWeights(prim, _kDynPoleVectorWeights,
                                  constraint.poleObjects.size(), &poleWeights)) {
                     inputsValid = false;
                 }
@@ -1721,15 +1776,15 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 }
             }
 
-            TfToken evaluationMode("neverTS");
+            TfToken evaluationMode = _kDynNeverTs;
             if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("rigExec:evaluationMode"))) {
+                    prim.GetAttribute(_kDynEvaluationMode)) {
                 a.Get(&evaluationMode);
             }
             std::vector<RigExecPointFrame> solveChain = chain;
             const bool useAnimatedTs =
-                evaluationMode == "alwaysTS" ||
-                (evaluationMode == "autoDetect" &&
+                evaluationMode == _kDynAlwaysTs ||
+                (evaluationMode == _kDynAutoDetect &&
                  _IkUsesAnimatedTs(constraint.ikChain));
             if (inputsValid && !useAnimatedTs) {
                 std::vector<RigExecPointFrame> rest;
@@ -1840,9 +1895,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 solveHandler ? solveHandler->maskGroup : _ChannelGroup::None,
                 time);
         }
-        TfToken orderToken("XYZ");
+        TfToken orderToken = _kDynXyz;
         if (const UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:rotationOrder"))) {
+                prim.GetAttribute(_kDynRotationOrder)) {
             a.Get(&orderToken);
         }
         const RigExecEulerOrder order =
@@ -1984,60 +2039,64 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 target /= total;
                 RigExecAimConstraintParams params;
                 const UsdAttribute aimVectorAttr =
-                    prim.GetAttribute(TfToken("inputs:aimVector"));
+                    prim.GetAttribute(_kDynAimVector);
                 params.localAimVector = _ResolvedRead(
-                    _resolvedInputs, prim, "inputs:aimVector",
+                    _resolvedInputs, prim, _kDynAimVector,
                     GfVec3d(1, 0, 0), time);
                 // Existing assets author aimAxis but predate aimVector. Keep
                 // that authored meaning until they opt into the vector form.
                 if (!aimVectorAttr ||
                     !aimVectorAttr.HasAuthoredValueOpinion()) {
-                    TfToken axis("x");
+                    TfToken axis = _kDynAxisX;
                     if (const UsdAttribute a = prim.GetAttribute(
-                            TfToken("rigExec:aimAxis"))) {
+                            _kDynAimAxis)) {
                         a.Get(&axis);
                     }
                     params.localAimVector =
-                        axis == "y" ? GfVec3d(0, 1, 0)
-                                    : axis == "z" ? GfVec3d(0, 0, 1)
+                        axis == _kDynAxisY ? GfVec3d(0, 1, 0)
+                                    : axis == _kDynAxisZ ? GfVec3d(0, 0, 1)
                                                   : GfVec3d(1, 0, 0);
                 }
                 params.localUpVector = _ResolvedRead(
-                    _resolvedInputs, prim, "inputs:upVector",
+                    _resolvedInputs, prim, _kDynUpVector,
                     GfVec3d(0, 1, 0), time);
                 params.rotationOffsetDegrees = _ResolvedRead(
-                    _resolvedInputs, prim, "inputs:rotationOffset",
+                    _resolvedInputs, prim, _kDynRotationOffset,
                     GfVec3d(0), time);
                 params.affectRotation = affect;
                 params.rotationOrder = order;
                 params.weight = solveWeight;
 
-                TfToken worldUpType("none");
+                TfToken worldUpType = _kDynWorldUpNone;
                 if (const UsdAttribute a = prim.GetAttribute(
-                        TfToken("rigExec:worldUpType"))) {
+                        _kDynWorldUpType)) {
                     a.Get(&worldUpType);
                 }
                 SdfPathVector authoredSources;
                 if (const UsdRelationship rel = prim.GetRelationship(
-                        TfToken("rigExec:sources"))) {
+                        _kDynSources)) {
                     rel.GetTargets(&authoredSources);
                 }
                 // The legacy aimTarget/aimAxis contract preserves input up.
                 // FBX WorldUpType=None is the distinct minimum-swing mode.
                 params.preserveInputUp = authoredSources.empty();
                 const GfVec3d authoredWorldUp = _ResolvedRead(
-                    _resolvedInputs, prim, "inputs:worldUpVector",
+                    _resolvedInputs, prim, _kDynWorldUpVector,
                     GfVec3d(0, 1, 0), time);
-                if (worldUpType == "sceneUp") {
-                    const std::string up =
-                        UsdGeomGetStageUpAxis(_stage).GetString();
-                    params.worldUpDirection =
-                        (up == "Z" || up == "z")
-                            ? GfVec3d(0, 0, 1)
-                            : GfVec3d(0, 1, 0);
-                } else if (worldUpType == "vector") {
+                if (worldUpType == _kDynWorldUpSceneUp) {
+                    if (!sceneUpDirectionRead) {
+                        const std::string up =
+                            UsdGeomGetStageUpAxis(_stage).GetString();
+                        sceneUpDirection =
+                            (up == "Z" || up == "z")
+                                ? GfVec3d(0, 0, 1)
+                                : GfVec3d(0, 1, 0);
+                        sceneUpDirectionRead = true;
+                    }
+                    params.worldUpDirection = sceneUpDirection;
+                } else if (worldUpType == _kDynVector) {
                     params.worldUpDirection = authoredWorldUp;
-                } else if (worldUpType == "objectUp") {
+                } else if (worldUpType == _kDynWorldUpObjectUp) {
                     // FBX ObjectUp without a reference object uses the
                     // world origin as the object point.
                     if (constraint.worldUpObject.sourcePath.IsEmpty()) {
@@ -2056,7 +2115,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                 upObject.Origin() - inputFrame.Origin();
                         }
                     }
-                } else if (worldUpType == "objectRotationUp") {
+                } else if (worldUpType == _kDynWorldUpObjectRotationUp) {
                     // With no object, FBX applies WorldUpVector directly in
                     // world space rather than treating a missing binding as
                     // a failed constraint.

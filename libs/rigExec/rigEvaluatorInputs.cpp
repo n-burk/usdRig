@@ -192,21 +192,36 @@ _GetMoverExecutionOrder(const UsdPrim &rig)
     return _GetPoseStackOrder(rig);
 }
 
+namespace {
+
+// Type names the predicates below compare against, interned once at load:
+// they are asked per weight object per frame, and token comparison is a
+// pointer comparison while literal comparison is not.
+const TfToken _kSphereWeightType("RigExecSphereWeight");
+const TfToken _kPlaneWeightType("RigExecPlaneWeight");
+const TfToken _kCurveWeightType("RigExecCurveWeight");
+const TfToken _kJointType("RigExecJoint");
+const TfToken _kControlType("RigExecControl");
+const TfToken _kStaticWeightType("RigExecStaticWeight");
+const TfToken _kDynamicWeightType("RigExecDynamicWeight");
+const TfToken _kCombineWeightType("RigExecCombineWeight");
+
+} // namespace
+
 /// True for the schema types that GENERATE a weight field from a placed
 /// volume, as opposed to storing or modulating one.
 bool
 _IsVolumeWeightType(const TfToken &typeName)
 {
-    return typeName == "RigExecSphereWeight" ||
-           typeName == "RigExecPlaneWeight" ||
-           typeName == "RigExecCurveWeight";
+    return typeName == _kSphereWeightType || typeName == _kPlaneWeightType ||
+           typeName == _kCurveWeightType;
 }
 
 // Types whose frames participate in namespace-based pose dependencies.
 bool
 _IsFrameProviderType(const TfToken &type)
 {
-    return type == "RigExecJoint" || type == "RigExecControl" ||
+    return type == _kJointType || type == _kControlType ||
            _IsVolumeWeightType(type);
 }
 
@@ -226,10 +241,9 @@ _IsFrameProvider(const UsdPrim &prim)
 bool
 _IsWeightObjectType(const TfToken &typeName)
 {
-    return typeName == "RigExecStaticWeight" ||
-           typeName == "RigExecDynamicWeight" ||
-           typeName == "RigExecCombineWeight" ||
-           _IsVolumeWeightType(typeName);
+    return typeName == _kStaticWeightType ||
+           typeName == _kDynamicWeightType ||
+           typeName == _kCombineWeightType || _IsVolumeWeightType(typeName);
 }
 
 bool

@@ -51,6 +51,24 @@ _ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
     return value;
 }
 
+// The same read through an already-interned name, for the per-frame call
+// sites that hold one. Interning takes the token registry lock, so a name
+// read every frame is a file-scope constant rather than spelled per call.
+template <class T>
+T
+_ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
+              const TfToken &name, T fallback, UsdTimeCode time)
+{
+    T value = fallback;
+    if (!prim) {
+        return value;
+    }
+    if (const UsdAttribute a = prim.GetAttribute(name)) {
+        resolved.GetAttribute(a, time, &value);
+    }
+    return value;
+}
+
 // Read epoch structure at Default; generation overrides do not apply.
 template <class T>
 T
@@ -61,6 +79,21 @@ _ReadAttribute(const UsdPrim &prim, const char *name, T fallback)
         return value;
     }
     if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+        a.Get(&value);
+    }
+    return value;
+}
+
+// The same epoch read through an already-interned name.
+template <class T>
+T
+_ReadAttribute(const UsdPrim &prim, const TfToken &name, T fallback)
+{
+    T value = fallback;
+    if (!prim) {
+        return value;
+    }
+    if (const UsdAttribute a = prim.GetAttribute(name)) {
         a.Get(&value);
     }
     return value;

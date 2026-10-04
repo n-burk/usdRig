@@ -3067,6 +3067,17 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
 // part of a frame that calls the evaluator's own private routines; everything
 // it produces reaches the two halves through the program.
 
+namespace {
+
+// The per-source constraint tables Run reads every frame, interned once at
+// load: interning takes the token registry's lock.
+const TfToken kSourceWeights("inputs:sourceWeights");
+const TfToken kTranslationOffsets("inputs:translationOffsets");
+const TfToken kRotationOffsets("inputs:rotationOffsets");
+const TfToken kPoleVectorWeights("inputs:poleVectorWeights");
+
+} // namespace
+
 bool
 RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
 {
@@ -3174,7 +3185,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                  B.constraintArrays) {
             arrays.diagnostics.clear();
             arrays.ok = RigExecRigEvaluator::_ReadConstraintSourceWeights(
-                arrays.prim, "inputs:sourceWeights", arrays.sourceCount, time,
+                arrays.prim, kSourceWeights, arrays.sourceCount, time,
                 &arrays.diagnostics, &arrays.weights);
             // The dynamic walk stops at the first table it cannot use, so
             // the offsets are not read when the weights were malformed --
@@ -3184,11 +3195,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                 arrays.ok =
                     arrays.ok &&
                     RigExecRigEvaluator::_ReadConstraintSourceOffsets(
-                        arrays.prim, "inputs:translationOffsets",
+                        arrays.prim, kTranslationOffsets,
                         arrays.sourceCount, time, &arrays.diagnostics,
                         &arrays.translationOffsets) &&
                     RigExecRigEvaluator::_ReadConstraintSourceOffsets(
-                        arrays.prim, "inputs:rotationOffsets",
+                        arrays.prim, kRotationOffsets,
                         arrays.sourceCount, time, &arrays.diagnostics,
                         &arrays.rotationOffsets);
             } else {
@@ -3201,7 +3212,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                 arrays.poleDiagnostics.clear();
                 arrays.poleOk =
                     RigExecRigEvaluator::_ReadConstraintSourceWeights(
-                        arrays.prim, "inputs:poleVectorWeights",
+                        arrays.prim, kPoleVectorWeights,
                         arrays.poleCount, time, &arrays.poleDiagnostics,
                         &arrays.poleWeights);
             }

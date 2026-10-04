@@ -78,6 +78,69 @@ _IsEnabled(const UsdPrim &mover, UsdTimeCode time)
     return enabled;
 }
 
+// Attribute names, values, and weight types the weight oracle reads per
+// weight object per frame, interned once. A per-frame TfToken construction
+// takes the token registry lock.
+const TfToken _kGeoInputWeights("rigExec:inputWeights");
+const TfToken _kGeoCombineMode("rigExec:combineMode");
+const TfToken _kGeoPlaneAxis("rigExec:planeAxis");
+const TfToken _kGeoPlaneBounds("rigExec:planeBounds");
+const TfToken _kGeoRangePolicy("rigExec:rangePolicy");
+const TfToken _kGeoRepresentation("rigExec:representation");
+const TfToken _kGeoDefaultWeight("rigExec:defaultWeight");
+const TfToken _kGeoOperation("rigExec:operation");
+const TfToken _kGeoBaseWeight("rigExec:baseWeight");
+const TfToken _kGeoWeightTarget("rigExec:weightTarget");
+const TfToken _kGeoIndices("rigExec:indices");
+const TfToken _kGeoValues("rigExec:values");
+const TfToken _kGeoSampleSource("rigExec:sampleSource");
+const TfToken _kGeoCurve("rigExec:curve");
+const TfToken _kGeoStrength("inputs:strength");
+const TfToken _kGeoInvert("inputs:invert");
+const TfToken _kGeoFalloffMin("inputs:falloffMin");
+const TfToken _kGeoFalloffMax("inputs:falloffMax");
+const TfToken _kGeoExtentU("inputs:extentU");
+const TfToken _kGeoExtentV("inputs:extentV");
+const TfToken _kGeoScaleX("inputs:scaleX");
+const TfToken _kGeoScaleY("inputs:scaleY");
+const TfToken _kGeoScaleZ("inputs:scaleZ");
+const TfToken _kGeoScaleXPos("inputs:scaleXPos");
+const TfToken _kGeoScaleYPos("inputs:scaleYPos");
+const TfToken _kGeoScaleZPos("inputs:scaleZPos");
+const TfToken _kGeoScaleXNeg("inputs:scaleXNeg");
+const TfToken _kGeoScaleYNeg("inputs:scaleYNeg");
+const TfToken _kGeoScaleZNeg("inputs:scaleZNeg");
+const TfToken _kGeoDriver("inputs:driver");
+const TfToken _kGeoScale("inputs:scale");
+const TfToken _kGeoBias("inputs:bias");
+const TfToken _kGeoMultiply("multiply");
+const TfToken _kGeoAdd("add");
+const TfToken _kGeoSubtract("subtract");
+const TfToken _kGeoMax("max");
+const TfToken _kGeoMin("min");
+const TfToken _kGeoAverage("average");
+const TfToken _kGeoOverlay("overlay");
+const TfToken _kGeoAxisX("x");
+const TfToken _kGeoAxisY("y");
+const TfToken _kGeoAxisZ("z");
+const TfToken _kGeoUnbounded("unbounded");
+const TfToken _kGeoBounded("bounded");
+const TfToken _kGeoConstant("constant");
+const TfToken _kGeoStrict("strict");
+const TfToken _kGeoClamp("clamp");
+const TfToken _kGeoDense("dense");
+const TfToken _kGeoSparse("sparse");
+const TfToken _kGeoCombineWeight("RigExecCombineWeight");
+const TfToken _kGeoPlaneWeight("RigExecPlaneWeight");
+const TfToken _kGeoSphereWeight("RigExecSphereWeight");
+const TfToken _kGeoCurveWeight("RigExecCurveWeight");
+const TfToken _kGeoDynamicWeight("RigExecDynamicWeight");
+const TfToken _kGeoWeightObject("rigExec:weightObject");
+const TfToken _kGeoPoints("points");
+// The mover envelope default, in the inputs: namespace -- distinct from a
+// weight object's rigExec:defaultWeight above.
+const TfToken _kGeoInputsDefaultWeight("inputs:defaultWeight");
+
 } // namespace
 
 namespace evaluatorDetail {
@@ -150,7 +213,7 @@ _ResolveGeometryInput(const UsdStageRefPtr &stage, const SdfPath &target)
     if (target.IsPrimPath()) {
         const UsdPrim prim = stage->GetPrimAtPath(target);
         if (prim && prim.IsA<UsdGeomPointBased>()) {
-            return target.AppendProperty(TfToken("points"));
+            return target.AppendProperty(_kGeoPoints);
         }
     }
     return target;
@@ -160,12 +223,12 @@ _ResolveGeometryInput(const UsdStageRefPtr &stage, const SdfPath &target)
 
 bool
 RigExecRigEvaluator::_ReadTargetPoints(
-    const UsdPrim &prim, const char *relationshipName, UsdTimeCode time,
+    const UsdPrim &prim, const TfToken &relationshipName, UsdTimeCode time,
     std::vector<GfVec3f> *points) const
 {
     points->clear();
     SdfPathVector targets;
-    if (UsdRelationship rel = prim.GetRelationship(TfToken(relationshipName))) {
+    if (UsdRelationship rel = prim.GetRelationship(relationshipName)) {
         rel.GetTargets(&targets);
     }
     if (targets.size() != 1) {
@@ -193,31 +256,31 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     const TfToken typeName = prim.GetTypeName();
 
     // The composed field folds its inputs; it measures nothing itself.
-    if (typeName == "RigExecCombineWeight") {
+    if (typeName == _kGeoCombineWeight) {
         SdfPathVector inputs;
         if (UsdRelationship rel =
-                prim.GetRelationship(TfToken("rigExec:inputWeights"))) {
+                prim.GetRelationship(_kGeoInputWeights)) {
             rel.GetTargets(&inputs);
         }
-        TfToken modeName("multiply");
+        TfToken modeName = _kGeoMultiply;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:combineMode"))) {
+                prim.GetAttribute(_kGeoCombineMode)) {
             a.Get(&modeName, time);
         }
         RigExecWeightCombine mode;
-        if (modeName == "multiply") {
+        if (modeName == _kGeoMultiply) {
             mode = RigExecWeightCombine::Multiply;
-        } else if (modeName == "add") {
+        } else if (modeName == _kGeoAdd) {
             mode = RigExecWeightCombine::Add;
-        } else if (modeName == "subtract") {
+        } else if (modeName == _kGeoSubtract) {
             mode = RigExecWeightCombine::Subtract;
-        } else if (modeName == "max") {
+        } else if (modeName == _kGeoMax) {
             mode = RigExecWeightCombine::Max;
-        } else if (modeName == "min") {
+        } else if (modeName == _kGeoMin) {
             mode = RigExecWeightCombine::Min;
-        } else if (modeName == "average") {
+        } else if (modeName == _kGeoAverage) {
             mode = RigExecWeightCombine::Average;
-        } else if (modeName == "overlay") {
+        } else if (modeName == _kGeoOverlay) {
             mode = RigExecWeightCombine::Overlay;
         } else {
             *error = who() + ": unknown rigExec:combineMode " +
@@ -242,9 +305,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
             return false;
         }
         const float strength = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:strength", 1.0f, time);
+            _resolvedInputs, prim, _kGeoStrength, 1.0f, time);
         const float invert = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:invert", 0.0f, time);
+            _resolvedInputs, prim, _kGeoInvert, 0.0f, time);
         for (float &w : *weights) {
             w = (w + (1.0f - 2.0f * w) * invert) * strength;
         }
@@ -293,9 +356,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     } else {
         // An explicit sampleSource wins over the weighted domain, which
         // is how one mesh is weighted by another mesh's shape.
-        if (!_ReadTargetPoints(prim, "rigExec:sampleSource", time,
+        if (!_ReadTargetPoints(prim, _kGeoSampleSource, time,
                                &samplePoints) &&
-            !_ReadTargetPoints(prim, "rigExec:weightTarget", time,
+            !_ReadTargetPoints(prim, _kGeoWeightTarget, time,
                                &samplePoints)) {
             *error = who() + ": could not read the points to sample";
             return false;
@@ -307,23 +370,24 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     }
 
     RigExecFalloffParams params;
-    auto readFloat = [this, &prim, time](const char *name, float fallback) {
+    auto readFloat = [this, &prim, time](const TfToken &name, float fallback) {
         return _ResolvedRead(
             _resolvedInputs, prim, name, fallback, time);
     };
-    params.falloffMin = readFloat("inputs:falloffMin", 0.0f);
-    params.falloffMax = readFloat("inputs:falloffMax", 1.0f);
-    params.invert = readFloat("inputs:invert", 0.0f);
-    params.strength = readFloat("inputs:strength", 1.0f);
+    params.falloffMin = readFloat(_kGeoFalloffMin, 0.0f);
+    params.falloffMax = readFloat(_kGeoFalloffMax, 1.0f);
+    params.invert = readFloat(_kGeoInvert, 0.0f);
+    params.strength = readFloat(_kGeoStrength, 1.0f);
     params.curve = _BakeFalloffLut(prim);
 
-    if (typeName == "RigExecPlaneWeight") {
-        TfToken axis("y");
-        if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:planeAxis"))) {
+    if (typeName == _kGeoPlaneWeight) {
+        TfToken axis = _kGeoAxisY;
+        if (UsdAttribute a = prim.GetAttribute(_kGeoPlaneAxis)) {
             a.Get(&axis, time);
         }
         const int axisIndex =
-            axis == "x" ? 0 : (axis == "y" ? 1 : (axis == "z" ? 2 : -1));
+            axis == _kGeoAxisX ? 0
+            : (axis == _kGeoAxisY ? 1 : (axis == _kGeoAxisZ ? 2 : -1));
         if (axisIndex < 0) {
             *error = who() + ": unknown rigExec:planeAxis " + axis.GetString();
             return false;
@@ -332,16 +396,16 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
         // _BuildPlaneWeightPacket exactly, including reading the extents
         // only in the bounded arm -- the two paths have to agree value
         // for value or the parity harness fires.
-        TfToken boundsMode("unbounded");
+        TfToken boundsMode = _kGeoUnbounded;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:planeBounds"))) {
+                prim.GetAttribute(_kGeoPlaneBounds)) {
             a.Get(&boundsMode, time);
         }
         RigExecPlaneBounds extent;
         const RigExecPlaneBounds *extentPtr = nullptr;
-        if (boundsMode == "bounded") {
-            extent.extentU = readFloat("inputs:extentU", 1.0f);
-            extent.extentV = readFloat("inputs:extentV", 1.0f);
+        if (boundsMode == _kGeoBounded) {
+            extent.extentU = readFloat(_kGeoExtentU, 1.0f);
+            extent.extentV = readFloat(_kGeoExtentV, 1.0f);
             for (const float e : {extent.extentU, extent.extentV}) {
                 if (!std::isfinite(e) || e <= 0.0f) {
                     *error = who() +
@@ -351,7 +415,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
                 }
             }
             extentPtr = &extent;
-        } else if (boundsMode != "unbounded") {
+        } else if (boundsMode != _kGeoUnbounded) {
             *error = who() + ": unknown rigExec:planeBounds " +
                      boundsMode.GetString();
             return false;
@@ -363,9 +427,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
 
     // Sphere and curve both take the per-axis divisors, folded into the
     // matrix so the hot loop stays one transform.
-    const float sx = readFloat("inputs:scaleX", 1.0f);
-    const float sy = readFloat("inputs:scaleY", 1.0f);
-    const float sz = readFloat("inputs:scaleZ", 1.0f);
+    const float sx = readFloat(_kGeoScaleX, 1.0f);
+    const float sy = readFloat(_kGeoScaleY, 1.0f);
+    const float sz = readFloat(_kGeoScaleZ, 1.0f);
     for (float s : {sx, sy, sz}) {
         if (!std::isfinite(s) || s <= 0.0f) {
             *error = who() + ": inputs:scaleX/Y/Z must be finite and positive";
@@ -377,15 +441,15 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
                             1.0 / double(sz)));
     worldToLocal = worldToLocal * divide;
 
-    if (typeName == "RigExecSphereWeight") {
+    if (typeName == _kGeoSphereWeight) {
         const GfVec3f positiveScales(
-            readFloat("inputs:scaleXPos", 1.0f),
-            readFloat("inputs:scaleYPos", 1.0f),
-            readFloat("inputs:scaleZPos", 1.0f));
+            readFloat(_kGeoScaleXPos, 1.0f),
+            readFloat(_kGeoScaleYPos, 1.0f),
+            readFloat(_kGeoScaleZPos, 1.0f));
         const GfVec3f negativeScales(
-            readFloat("inputs:scaleXNeg", 1.0f),
-            readFloat("inputs:scaleYNeg", 1.0f),
-            readFloat("inputs:scaleZNeg", 1.0f));
+            readFloat(_kGeoScaleXNeg, 1.0f),
+            readFloat(_kGeoScaleYNeg, 1.0f),
+            readFloat(_kGeoScaleZNeg, 1.0f));
         for (int axis = 0; axis < 3; ++axis) {
             if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
                 !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) {
@@ -397,9 +461,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
                                  positiveScales, negativeScales);
         return true;
     }
-    if (typeName == "RigExecCurveWeight") {
+    if (typeName == _kGeoCurveWeight) {
         std::vector<GfVec3f> curvePoints;
-        if (!_ReadTargetPoints(prim, "rigExec:curve", time, &curvePoints) ||
+        if (!_ReadTargetPoints(prim, _kGeoCurve, time, &curvePoints) ||
             curvePoints.empty()) {
             *error = who() + ": rigExec:curve must name exactly one points source";
             return false;
@@ -437,15 +501,15 @@ RigExecRigEvaluator::_ResolveWeights(
                  " on " + weightPrimPath.GetString();
         return false;
     }
-    if (_IsVolumeWeightType(typeName) || typeName == "RigExecCombineWeight") {
+    if (_IsVolumeWeightType(typeName) || typeName == _kGeoCombineWeight) {
         std::vector<float> resolved;
         if (!_ResolveVolumeWeights(prim, count, time, &resolved, error,
                                    currentPoints)) {
             return false;
         }
-        TfToken volumePolicy("clamp");
+        TfToken volumePolicy = _kGeoClamp;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:rangePolicy"))) {
+                prim.GetAttribute(_kGeoRangePolicy)) {
             a.Get(&volumePolicy, time);
         }
         for (float &w : resolved) {
@@ -454,7 +518,7 @@ RigExecRigEvaluator::_ResolveWeights(
                 return false;
             }
             if (w < 0.0f || w > 1.0f) {
-                if (volumePolicy != "clamp") {
+                if (volumePolicy != _kGeoClamp) {
                     *error = "strict range violation on " +
                              weightPrimPath.GetString();
                     return false;
@@ -466,30 +530,30 @@ RigExecRigEvaluator::_ResolveWeights(
         return true;
     }
 
-    TfToken representation("constant");
+    TfToken representation = _kGeoConstant;
     if (UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:representation"))) {
+            _kGeoRepresentation)) {
         a.Get(&representation, time);
     }
     const float defaultWeight = _ResolvedRead(
-        _resolvedInputs, prim, "rigExec:defaultWeight", 0.0f, time);
-    TfToken rangePolicy("strict");
-    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:rangePolicy"))) {
+        _resolvedInputs, prim, _kGeoDefaultWeight, 0.0f, time);
+    TfToken rangePolicy = _kGeoStrict;
+    if (UsdAttribute a = prim.GetAttribute(_kGeoRangePolicy)) {
         a.Get(&rangePolicy, time);
     }
-    if (rangePolicy != "strict" && rangePolicy != "clamp") {
+    if (rangePolicy != _kGeoStrict && rangePolicy != _kGeoClamp) {
         *error = "unknown rangePolicy on " + weightPrimPath.GetString();
         return false;
     }
 
-    const bool isDynamic = prim.GetTypeName() == "RigExecDynamicWeight";
+    const bool isDynamic = typeName == _kGeoDynamicWeight;
     if (isDynamic) {
-        TfToken operation("multiply");
+        TfToken operation = _kGeoMultiply;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:operation"))) {
+                prim.GetAttribute(_kGeoOperation)) {
             a.Get(&operation, time);
         }
-        if (operation != "multiply") {
+        if (operation != _kGeoMultiply) {
             *error = "unknown dynamic-weight operation on " +
                      weightPrimPath.GetString();
             return false;
@@ -499,7 +563,7 @@ RigExecRigEvaluator::_ResolveWeights(
         std::vector<float> base(count, 1.0f);
         SdfPathVector baseTargets;
         if (UsdRelationship rel =
-                prim.GetRelationship(TfToken("rigExec:baseWeight"))) {
+                prim.GetRelationship(_kGeoBaseWeight)) {
             rel.GetTargets(&baseTargets);
         }
         if (baseTargets.size() > 1) {
@@ -510,7 +574,7 @@ RigExecRigEvaluator::_ResolveWeights(
         if (baseTargets.empty()) {
             // Without a base, only constant representation is legal and
             // b_i = 1 everywhere (spec §4.1).
-            if (representation != "constant") {
+            if (representation != _kGeoConstant) {
                 *error = "no-base dynamic weight must be constant on " +
                          weightPrimPath.GetString();
                 return false;
@@ -529,7 +593,7 @@ RigExecRigEvaluator::_ResolveWeights(
                 [this, &time](const UsdPrim &p) -> SdfPath {
                 SdfPathVector t;
                 if (UsdRelationship rel = p.GetRelationship(
-                        TfToken("rigExec:weightTarget"))) {
+                        _kGeoWeightTarget)) {
                     rel.GetTargets(&t);
                 }
                 return t.size() == 1 ? _ResolveGeometryInput(_stage, t[0])
@@ -542,9 +606,9 @@ RigExecRigEvaluator::_ResolveWeights(
                          weightPrimPath.GetString();
                 return false;
             }
-            TfToken baseRepresentation("constant");
+            TfToken baseRepresentation = _kGeoConstant;
             if (UsdAttribute a = basePrim.GetAttribute(
-                    TfToken("rigExec:representation"))) {
+                    _kGeoRepresentation)) {
                 a.Get(&baseRepresentation, time);
             }
             if (baseRepresentation != representation) {
@@ -552,19 +616,19 @@ RigExecRigEvaluator::_ResolveWeights(
                          weightPrimPath.GetString();
                 return false;
             }
-            if (representation == "sparse") {
+            if (representation == _kGeoSparse) {
                 // The dynamic descriptor's sparse support is inherited
                 // from the base; a dynamic prim that authors its own
                 // support must match the base exactly (spec §4.1).
                 VtIntArray mine;
                 if (UsdAttribute a =
-                        prim.GetAttribute(TfToken("rigExec:indices"))) {
+                        prim.GetAttribute(_kGeoIndices)) {
                     a.Get(&mine, time);
                 }
                 if (!mine.empty()) {
                     VtIntArray theirs;
                     if (UsdAttribute a = basePrim.GetAttribute(
-                            TfToken("rigExec:indices"))) {
+                            _kGeoIndices)) {
                         a.Get(&theirs, time);
                     }
                     const std::set<int> mySupport(mine.begin(), mine.end());
@@ -587,11 +651,11 @@ RigExecRigEvaluator::_ResolveWeights(
             }
         }
         const float driver = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:driver", 1.0f, time);
+            _resolvedInputs, prim, _kGeoDriver, 1.0f, time);
         const float scale = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:scale", 1.0f, time);
+            _resolvedInputs, prim, _kGeoScale, 1.0f, time);
         const float bias = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:bias", 0.0f, time);
+            _resolvedInputs, prim, _kGeoBias, 0.0f, time);
         for (size_t i = 0; i < count; ++i) {
             float r = (base[i] * driver) * scale + bias;
             if (!std::isfinite(r)) {
@@ -600,7 +664,7 @@ RigExecRigEvaluator::_ResolveWeights(
                 return false;
             }
             if (r < 0.0f || r > 1.0f) {
-                if (rangePolicy == "clamp") {
+                if (rangePolicy == _kGeoClamp) {
                     r = std::min(std::max(r, 0.0f), 1.0f);
                 } else {
                     *error = "strict range violation on " +
@@ -615,31 +679,31 @@ RigExecRigEvaluator::_ResolveWeights(
 
     // Static weights are time-invariant by contract: reject time samples
     // and value connections on every field (spec §4.1).
-    static const TfToken staticFields[] = {
-        TfToken("rigExec:values"), TfToken("rigExec:indices"),
-        TfToken("rigExec:defaultWeight"), TfToken("rigExec:representation"),
-        TfToken("rigExec:rangePolicy")};
-    for (const TfToken &field : staticFields) {
-        const UsdAttribute a = prim.GetAttribute(field);
+    const TfToken *const staticFields[] = {
+        &_kGeoValues, &_kGeoIndices,
+        &_kGeoDefaultWeight, &_kGeoRepresentation,
+        &_kGeoRangePolicy};
+    for (const TfToken *field : staticFields) {
+        const UsdAttribute a = prim.GetAttribute(*field);
         if (a && (a.GetNumTimeSamples() > 0 || a.HasAuthoredConnections())) {
-            *error = "static weight field " + field.GetString() +
+            *error = "static weight field " + field->GetString() +
                      " has time samples or connections on " +
                      weightPrimPath.GetString();
             return false;
         }
     }
     VtFloatArray values;
-    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:values"))) {
+    if (UsdAttribute a = prim.GetAttribute(_kGeoValues)) {
         a.Get(&values, time);
     }
-    if (representation == "constant") {
+    if (representation == _kGeoConstant) {
         if (!values.empty()) {
             *error = "constant weight must not author values on " +
                      weightPrimPath.GetString();
             return false;
         }
         weights->assign(count, defaultWeight);
-    } else if (representation == "dense") {
+    } else if (representation == _kGeoDense) {
         if (values.size() != count) {
             *error = "dense weight cardinality mismatch on " +
                      weightPrimPath.GetString();
@@ -652,9 +716,9 @@ RigExecRigEvaluator::_ResolveWeights(
             return false;
         }
         weights->assign(values.begin(), values.end());
-    } else if (representation == "sparse") {
+    } else if (representation == _kGeoSparse) {
         VtIntArray indices;
-        if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:indices"))) {
+        if (UsdAttribute a = prim.GetAttribute(_kGeoIndices)) {
             a.Get(&indices, time);
         }
         if (indices.size() != values.size()) {
@@ -687,13 +751,13 @@ RigExecRigEvaluator::_ResolveWeights(
 
     for (float w : *weights) {
         if (!std::isfinite(w) ||
-            (rangePolicy == "strict" && (w < 0.0f || w > 1.0f))) {
+            (rangePolicy == _kGeoStrict && (w < 0.0f || w > 1.0f))) {
             *error = "weight range violation on " +
                      weightPrimPath.GetString();
             return false;
         }
     }
-    if (rangePolicy == "clamp") {
+    if (rangePolicy == _kGeoClamp) {
         for (float &w : *weights) {
             w = std::min(std::max(w, 0.0f), 1.0f);
         }
@@ -742,7 +806,7 @@ RigExecRigEvaluator::_EvaluateChain(
         std::vector<float> envelope(points.size(), 1.0f);
         SdfPathVector weightObjects;
         if (const UsdRelationship rel =
-                prim.GetRelationship(TfToken("rigExec:weightObject"))) {
+                prim.GetRelationship(_kGeoWeightObject)) {
             rel.GetTargets(&weightObjects);
         }
         if (!weightObjects.empty()) {
@@ -758,7 +822,7 @@ RigExecRigEvaluator::_EvaluateChain(
             }
         } else {
             const float scalar = _ResolvedRead(
-                _resolvedInputs, prim, "inputs:defaultWeight", 1.0f, time);
+                _resolvedInputs, prim, _kGeoInputsDefaultWeight, 1.0f, time);
             if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
                 diagnostics->push_back(
                     "MoverFailed " + mover->moverPath.GetString() +
