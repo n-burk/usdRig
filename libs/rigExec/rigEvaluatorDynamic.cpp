@@ -155,18 +155,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     _resolvedInputs.Clear();
     _chainSnapshots.Clear();
 
-    // Interactive overrides are applied on BOTH sides of the property chains,
-    // because an override can be either end of one and the two ends want
-    // opposite orderings.
-    // Here, before the chains: an override on a value a chain READS -- a
-    // control avar feeding a math mover -- has to be the value the chain
-    // computes from, or dragging that control would move everything except
-    // what the mover drives. _resolvedInputs is the route those reads take,
-    // and it was cleared one line ago, so this has to come after the clear.
-    // Again after them: an override on a property a chain WRITES has to beat
-    // the chain's own result. Which of the two situations a given override is
-    // in is not knowable here, and applying it twice means it does not have
-    // to be.
+    // Interactive overrides are applied once, before the property chains,
+    // and after the clear above. One on a value a chain READS -- a control
+    // avar feeding a math mover -- is the value the chain computes from.
+    // One on a property a chain WRITES is that chain's base: the chain
+    // revises it as it would the value authored there and publishes its own
+    // result in the override's place, so every reader sees during the drag
+    // what it sees once the value is authored (_EvaluatePropertyChains).
     if (!_interactiveOverrides.empty()) {
         _ApplyInteractiveOverrides(
             _interactiveOverrides, &baseOverrides, &_resolvedInputs);
@@ -180,16 +175,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // carries it to the static reads exec never touches (packet
         // assembly, CPU oracle). _EvaluatePropertyChains writes both routes
         // for every published chain, so no re-sync loop is needed here.
-    }
-
-    // The second of the two applications described above: after the chains,
-    // before any copy of baseOverrides. A held drag outranks what the rig
-    // would have computed for the property it is holding, and nothing is
-    // authored either way -- see SetInteractiveOverrides.
-    if (!_interactiveOverrides.empty()) {
-        _ApplyInteractiveOverrides(
-            _interactiveOverrides, &baseOverrides, &_resolvedInputs,
-            &pose.movedProperties);
     }
 
     for (const auto &[ribbonPath, pointsPath] : _ribbonDriverPoints) {
@@ -1819,7 +1804,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             _SolverBatch &batch = _solverBatches[step.index];
             RIGEXEC_PROFILE_SCOPE_CAT(
                 _profiler,
-                "SolverBatch L" + std::to_string(batch.level), "pose");
+                "SolverBatch L" + std::to_string(batch.level) + " B" +
+                std::to_string(step.index), "pose");
             std::map<SdfPath, RigExecPointFrame> candidates;
             // The request this solver's aggregate comes from. A follower's
             // leader evaluated it at the leader's step, just before this one.
@@ -2054,7 +2040,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler,
             constraint.schemaType.GetString() + " " +
-                constraint.moverPath.GetName(),
+                constraint.moverPath.GetString(),
             "pose");
         for (const SdfPath &target : constraint.targets) {
             if (!refreshPoseProvider(target)) return pose;
@@ -2914,8 +2900,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
 
     // Property-domain results are published directly into
-    // pose.movedProperties by _EvaluatePropertyChains (and amended by the
-    // post-chain interactive-override pass), so no separate copy is needed.
+    // pose.movedProperties by _EvaluatePropertyChains, so no separate copy
+    // is needed.
     // They share the map with the point chains below; a consumer distinguishes
     // them by the type the VtValue holds, not by which mover domain produced
     // them.

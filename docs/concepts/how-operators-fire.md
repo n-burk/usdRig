@@ -181,14 +181,19 @@ choose and is ignored. An input that math movers revise itself reads its
 own chain's result, and a phase declared on it is refused as ambiguous.
 
 A drag on the reading input, or on a property along its connection, is what
-that reader gets. A drag on the revised property itself replaces its final
-value only: `base` and checkpoint readers, a checkpoint at the last revision
-included, keep reading the chain computed from the authored value. The
-`.rigexec` runtime's `SetAvar` drags an avar the same way, with two gaps
-that remain for now: it refuses a drag on an avar that math movers revise,
-and a plugin mover applies the payload its bake assembled for the frame,
-so a drag that reaches an input the plugin reads does not move that
-mover's output.
+that reader gets. A drag on the revised property itself edits its base: the
+math movers revise the dragged value as they would the value authored, so
+every reader sees during the drag what it sees once the drag is authored.
+`base` readers read the dragged value, checkpoint readers the chain as of
+their step, and `final` readers, like every other reader of the property,
+the chain's result. A clamped `blink` authored at 0.2 and dragged to 1.4
+reads 1.4 at its base and 1.0 at `final`, during the drag and after it is
+released. A drag that is not finite skips the chain, as an authored one
+does, and readers see the dragged value. The `.rigexec` runtime's `SetAvar`
+drags an avar the same way, an avar math movers revise included, and takes
+finite values only. One gap remains for now: a plugin mover applies the
+payload its bake assembled for the frame, so a drag that reaches an input
+the plugin reads does not move that mover's output.
 [Example 16](../../examples/16_ConnectionReadPhases.usda) reads one dial
 three ways, with math movers and with mover envelopes.
 

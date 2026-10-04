@@ -120,16 +120,17 @@ public:
 
     // Persistent TRS avar overrides, placed on every Execute as the program
     // places interactive overrides. Angles are degrees. Only compiled
-    // control slots with TRS poses are supported. The override is what
-    // every read whose connection walk passes the avar meets there, the
-    // avar's own binding and any reader downstream of it alike; a reader
-    // that reads a chain at a phase stands aside when the override is on
-    // it or on a hop of its connection, as in the USD evaluators.
-    // Two gaps against the USD evaluators remain for now: an avar math
-    // movers revise (a property-mover output) is refused until what a drag
-    // on one means is settled, and a plugin mover applies the payload its
-    // bake assembled for the frame, so a drag that reaches an input the
-    // plugin reads does not reach that mover's output.
+    // control slots with TRS poses and finite values are supported. The
+    // override is what every read whose connection walk passes the avar
+    // meets there, the avar's own binding and any reader downstream of it
+    // alike; a reader that reads a chain at a phase stands aside when the
+    // override is on it or on a hop of its connection, as in the USD
+    // evaluators. On an avar math movers revise, the override is the
+    // chain's base: the movers revise it as they would the value authored,
+    // so every reader plays what a file baked with that value plays.
+    // One gap against the USD evaluators remains for now: a plugin mover
+    // applies the payload its bake assembled for the frame, so a drag that
+    // reaches an input the plugin reads does not reach that mover's output.
     bool SetAvar(const std::string &propertyPath, double value,
                  std::string *error);
     void ClearAvars();

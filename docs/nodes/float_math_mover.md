@@ -174,6 +174,7 @@ python docs/render_media.py --page float_math_mover
 - Same-target math movers run in mover-stack order — the reversed namespace walk — so the LAST sibling listed executes FIRST. `reorder nameChildren` is how the example puts remap before clamp.
 - `remap` only normalizes: `(v − min) / (max − min)`, with a zero-width range returning 0 rather than dividing. Chain a `clamp` after it whenever the incoming channel can overshoot.
 - A connection to a property these movers revise reads its base, the authored value before any of them. Declare `rigExecReadPhase = "final"` on the connected input to read their result, or a prim path to read it as that prim's movers left it. The phase is read on every connected attribute under the rig root, whatever operator it belongs to; see [Connected inputs](../concepts/how-operators-fire.md#connected-inputs) and example 16.
+- Dragging the revised property itself edits its base: the movers revise the dragged value as they would the authored one, so a channel clamped to [0, 1] and dragged to 1.4 shows 1.0, during the drag and after it is released.
 
 ## See also
 

@@ -298,8 +298,7 @@ void
 _ApplyInteractiveOverrides(
     const std::vector<RigExecValueOverride> &interactive,
     std::vector<RigExecValueOverride> *overrides,
-    RigExecResolvedInputs *resolved,
-    std::map<SdfPath, VtValue> *publishedProperties)
+    RigExecResolvedInputs *resolved)
 {
     for (const RigExecValueOverride &o : interactive) {
         if (overrides) {
@@ -319,21 +318,6 @@ _ApplyInteractiveOverrides(
         // look for one.
         if (resolved && !o.attribute.IsEmpty()) {
             resolved->SetProperty(o.prim.AppendProperty(o.attribute), o.value);
-        }
-        // A property a chain WRITES is also PUBLISHED, and the generation
-        // Hydra draws has to carry the same value exec was given -- otherwise
-        // the viewport shows the chain's arithmetic while every exec consumer
-        // sees the held one, which is the disagreement between the two
-        // delivery routes that this function exists to prevent.
-        // Only an entry that is already there is replaced. Inventing one would
-        // publish an avar as a moved property of the generation, and an avar
-        // is an input, not a result.
-        if (publishedProperties && !o.attribute.IsEmpty()) {
-            const auto it = publishedProperties->find(
-                o.prim.AppendProperty(o.attribute));
-            if (it != publishedProperties->end()) {
-                it->second = o.value;
-            }
         }
     }
 }
@@ -605,11 +589,10 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
 
 void
 RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
-    RigExecResolvedInputs *resolved,
-    std::map<SdfPath, VtValue> *published) const
+    RigExecResolvedInputs *resolved) const
 {
     _ApplyInteractiveOverrides(_interactiveOverrides, /* overrides = */
-                               nullptr, resolved, published);
+                               nullptr, resolved);
 }
 
 } // namespace rigExec

@@ -2956,8 +2956,8 @@ TestConstraintAndAvarReadersReplay(const std::string &examplesDir)
 // stand the reader aside and pose with the drag; so does the runtime,
 // whose SetAvar places the drag as an interactive override, and every
 // frame the step graph pools hold matches the baked program under the
-// same drag bit for bit. An avar a math mover revises stays refused: its
-// value is the chain's to compute.
+// same drag bit for bit. A drag on the avar a math mover revises is that
+// chain's base (TestSetAvarOnChainTarget).
 static void
 TestSetAvarOnPhasedReader()
 {
@@ -2990,9 +2990,6 @@ TestSetAvarOnPhasedReader()
         return;
     }
     reader->SetRunMaskForTesting(0x7u);
-    CHECK(!reader->SetAvar("/Asset/Rig/Controls/Lift.avars:tx", 2.0,
-                           &error));
-    CHECK(error.find("property-mover output") != std::string::npos);
     const double drag = 5.5;
     CHECK(reader->SetAvar("/Asset/Rig/Controls/Lift.avars:ty", drag,
                           &error));
@@ -3490,6 +3487,265 @@ TestSetAvarOnChainInput()
                     "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
 }
 
+// The blink on a control avar: Dial.avars:tx authored at 0.2 (or
+// \p authored), revised by Offset (add 0.1) and then Clamp ([0, 1]), and
+// read by other controls' avars undeclared (its base), at Offset's
+// checkpoint and at `final` (no record: the walk reads the dial's result),
+// and by readout chains inside the chain loop, undeclared and `final`.
+static UsdStageRefPtr
+_DialTargetStage(double authored)
+{
+    const UsdStageRefPtr stage = _ChainBaseStage();
+    const auto control = [&](const char *name) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        return prim;
+    };
+    const UsdAttribute tx = control("Dial").CreateAttribute(
+        TfToken("avars:tx"), SdfValueTypeNames->Double);
+    tx.Set(authored);
+    const UsdPrim clamp =
+        _MathMover(stage, "Clamp", "RigExecFloatMathMover", "clamp", tx);
+    _SetInput(clamp, "inputs:min", SdfValueTypeNames->Float, 0.0f);
+    _SetInput(clamp, "inputs:max", SdfValueTypeNames->Float, 1.0f);
+    const UsdPrim offset = _MathMover(stage, "Clamp/Offset",
+                                      "RigExecFloatMathMover", "add", tx);
+    _SetInput(offset, "inputs:value", SdfValueTypeNames->Float, 0.1f);
+    const auto read = [&](const UsdAttribute &input, const char *phase) {
+        input.SetConnections({tx.GetPath()});
+        if (phase) {
+            input.SetMetadata(TfToken("rigExecReadPhase"),
+                              std::string(phase));
+        }
+    };
+    read(control("BaseReader")
+             .CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double),
+         nullptr);
+    read(control("CheckReader")
+             .CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double),
+         "/Asset/Rig/Movers/Clamp/Offset");
+    read(control("FinalReader")
+             .CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double),
+         "final");
+    for (const char *name : {"Base", "Final"}) {
+        const UsdAttribute channel =
+            _Channel(stage, "Readouts", name, SdfValueTypeNames->Float);
+        channel.Set(0.0f);
+        const UsdPrim mover =
+            _MathMover(stage, std::string("Readouts/") + name,
+                       "RigExecFloatMathMover", "add", channel);
+        read(mover.CreateAttribute(TfToken("inputs:value"),
+                                   SdfValueTypeNames->Float),
+             std::string(name) == "Final" ? "final" : nullptr);
+    }
+    return stage;
+}
+
+// One played frame: the version pools, the property results and the
+// diagnostics.
+struct _PlayedPose {
+    std::vector<RrPointFrame> fin, base;
+    std::vector<RigExecRuntimePropertyValue> properties;
+    std::vector<std::string> diagnostics;
+};
+
+static _PlayedPose
+_Played(const RigExecRuntimeReader &reader)
+{
+    return {reader.GetFinFrames(), reader.GetBaseFrames(),
+            reader.GetPropertyResultsForTesting(), reader.GetDiagnostics()};
+}
+
+// The first thing \p a and \p b disagree on, or empty when they agree bit
+// for bit.
+static std::string
+_PlayedDiffer(const _PlayedPose &a, const _PlayedPose &b)
+{
+    const auto samePool = [](const std::vector<RrPointFrame> &x,
+                             const std::vector<RrPointFrame> &y) {
+        if (x.size() != y.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < x.size(); ++i) {
+            if (x[i].flags != y[i].flags ||
+                std::memcmp(x[i].points.data(), y[i].points.data(),
+                            sizeof(x[i].points)) != 0) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!samePool(a.fin, b.fin)) {
+        return "fin pool";
+    }
+    if (!samePool(a.base, b.base)) {
+        return "base pool";
+    }
+    if (a.properties.size() != b.properties.size()) {
+        return "property count";
+    }
+    for (size_t i = 0; i < a.properties.size(); ++i) {
+        if (a.properties[i].path != b.properties[i].path ||
+            !_SameBits(a.properties[i].value, b.properties[i].value)) {
+            return "property " + a.properties[i].path;
+        }
+    }
+    if (a.diagnostics != b.diagnostics) {
+        return "diagnostics";
+    }
+    return std::string();
+}
+
+// SetAvar on an avar math movers revise is an edit of the chain's base, as
+// an interactive override on it is in the USD evaluators. Dragged to 1.4,
+// the dial's base readers read 1.4, Offset's checkpoint 1.5 and the final
+// readers and the dial itself 1.0. At frames 1 and 4 every version-pool
+// frame equals the baked program's under the same override (which the
+// parity check holds to the dynamic evaluator), and the played pose --
+// pools, property results and diagnostics -- equals bit for bit what a
+// file baked with 1.4 authored on the dial plays. The same holds as the
+// held drag moves to 1.5 (the final holds at 1.0) and then to 0.5 without
+// being cleared. Cleared, the drag plays the original file again.
+static void
+TestSetAvarOnChainTarget()
+{
+    const char *const name = "set avar on a chain target";
+    const SdfPath rigPath("/Asset/Rig");
+    const std::string dialTx = "/Asset/Rig/Controls/Dial.avars:tx";
+    const std::vector<double> frames = {1.0, 4.0};
+    const double drag = 1.4;
+    const auto bake = [&](const UsdStageRefPtr &stage,
+                          std::vector<uint8_t> *bytes) {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.frames = frames;
+        RigExecBakeResult result;
+        std::string error;
+        const bool ok = RigExecBakeToBinary(evaluator, opts, &result, &error);
+        if (!ok) {
+            std::printf("%s: bake: %s\n", name, error.c_str());
+        }
+        *bytes = std::move(result.bytes);
+        return ok;
+    };
+    const auto play = [&](RigExecRuntimeReader &reader, double frame,
+                          _PlayedPose *out) {
+        std::string error;
+        if (!reader.SetFrame(frame, &error) || !reader.Execute(&error)) {
+            std::printf("%s frame %.17g: %s\n", name, frame, error.c_str());
+            return false;
+        }
+        *out = _Played(reader);
+        return true;
+    };
+
+    const UsdStageRefPtr stage = _DialTargetStage(0.2);
+    std::vector<uint8_t> original;
+    CHECK(bake(stage, &original));
+    std::string error;
+    std::unique_ptr<RigExecRuntimeReader> reader = RigExecRuntimeReader::Open(
+        original.data(), original.size(), &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        return;
+    }
+    reader->SetCrossCheckForTesting(true);
+    std::vector<_PlayedPose> undragged(frames.size());
+    for (size_t f = 0; f < frames.size(); ++f) {
+        CHECK(play(*reader, frames[f], &undragged[f]));
+    }
+
+    // The drag, then moved without being cleared: 1.4 -> 1.5 leaves the
+    // clamped final on 1.0 while the base and checkpoint readers move, and
+    // 1.5 -> 0.5 moves every reader.
+    struct HeldDrag {
+        double drag, final, checkpoint;
+    };
+    const HeldDrag held[] = {
+        {drag, 1.0, 1.5}, {1.5, 1.0, 1.6}, {0.5, 0.6, 0.6}};
+    RigExecRigEvaluator program(stage, rigPath);
+    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    for (const HeldDrag &h : held) {
+        char what[64];
+        std::snprintf(what, sizeof(what), "chain target dragged to %.9g",
+                      h.drag);
+        CHECK(reader->SetAvar(dialTx, h.drag, &error));
+        program.SetInteractiveOverrides({RigExecValueOverride{
+            SdfPath("/Asset/Rig/Controls/Dial"), TfToken(),
+            TfToken("avars:tx"), VtValue(h.drag)}});
+        std::vector<_PlayedPose> dragged(frames.size());
+        for (size_t f = 0; f < frames.size(); ++f) {
+            const RigExecRigPose pose =
+                program.Evaluate(UsdTimeCode(frames[f]));
+            CHECK(pose.valid && pose.bakedParityMismatches == 0);
+            const RigExecBakedProgram *baked = program.GetBakedProgram();
+            CHECK(baked);
+            if (!pose.valid || !baked ||
+                !play(*reader, frames[f], &dragged[f])) {
+                CHECK(false);
+                return;
+            }
+            CHECK(_SamePools(what, frames[f], *reader, baked->GetStepGraph()));
+            CHECK(!_PlayedDiffer(undragged[f], dragged[f]).empty());
+            const auto ty = [&](const char *control) {
+                const auto found = pose.controlFrames.find(
+                    SdfPath(std::string("/Asset/Rig/Controls/") + control));
+                return found == pose.controlFrames.end()
+                           ? std::nan("")
+                           : found->second.points[0][1];
+            };
+            const auto dial =
+                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/Dial"));
+            CHECK(dial != pose.controlFrames.end() &&
+                  std::abs(dial->second.points[0][0] - h.final) < 1e-6);
+            CHECK(ty("BaseReader") == h.drag);
+            CHECK(std::abs(ty("FinalReader") - h.final) < 1e-6);
+            CHECK(std::abs(ty("CheckReader") - h.checkpoint) < 1e-6);
+        }
+
+        // Released: the held value authored on the dial and baked again.
+        stage->GetAttributeAtPath(SdfPath(dialTx)).Set(h.drag);
+        std::vector<uint8_t> authored;
+        CHECK(bake(stage, &authored));
+        stage->GetAttributeAtPath(SdfPath(dialTx)).Set(0.2);
+        std::unique_ptr<RigExecRuntimeReader> released =
+            RigExecRuntimeReader::Open(authored.data(), authored.size(),
+                                       &error);
+        CHECK(released);
+        if (!released) {
+            std::printf("%s: open released: %s\n", name, error.c_str());
+            return;
+        }
+        released->SetCrossCheckForTesting(true);
+        for (size_t f = 0; f < frames.size(); ++f) {
+            _PlayedPose played;
+            CHECK(play(*released, frames[f], &played));
+            const std::string why = _PlayedDiffer(dragged[f], played);
+            if (!why.empty()) {
+                std::printf("%s, frame %.17g: the drag and the release "
+                            "differ (%s)\n",
+                            what, frames[f], why.c_str());
+            }
+            CHECK(why.empty());
+        }
+    }
+
+    // Cleared: the original file's poses again.
+    reader->ClearAvars();
+    for (size_t f = 0; f < frames.size(); ++f) {
+        _PlayedPose played;
+        CHECK(play(*reader, frames[f], &played));
+        CHECK(_PlayedDiffer(undragged[f], played).empty());
+    }
+    std::printf("%s: checked\n", name);
+}
+
 // Open refuses a Computed section whose registered reads do not bind the
 // runtime's tables exactly, each with its own text: two avar bindings
 // headed by one attribute, a table field bound twice, a uid given twice,
@@ -3725,6 +3981,7 @@ main(int argc, char **argv)
     TestSetAvarOnHop();
     TestSetAvarOnLadderInput();
     TestSetAvarOnChainInput();
+    TestSetAvarOnChainTarget();
     TestRegisteredReadRefusals();
     bool sawBaking = false;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {

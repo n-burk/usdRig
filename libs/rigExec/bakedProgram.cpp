@@ -3408,14 +3408,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         B.resolvedInputs->Clear();
         B.runSnapshots.Clear();
         B.chainSnapshots->Clear();
-        // Interactive overrides are applied on BOTH sides of the property
-        // chains, for the reason _EvaluateDynamic gives at the same two
-        // points: an override can be either end of a chain and the two ends
-        // want opposite orderings, and which end a given one is at is not
-        // knowable here.
-        const bool dragging = !B.interactiveOverrides->empty();
-        if (dragging) {
-            E._ApplyInteractiveOverridesToResolved(B.resolvedInputs, nullptr);
+        // Interactive overrides are applied before the property chains, as
+        // _EvaluateDynamic applies them: a drag on a chain's target is its
+        // base, and the chain publishes its own result in the drag's place.
+        if (!B.interactiveOverrides->empty()) {
+            E._ApplyInteractiveOverridesToResolved(B.resolvedInputs);
         }
         if (B.hasPropertyChains) {
             RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "PropertyChains",
@@ -3429,10 +3426,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
             for (const auto &[path, value] : B.propertyResults) {
                 B.resolvedInputs->SetProperty(path, value);
             }
-        }
-        if (dragging) {
-            E._ApplyInteractiveOverridesToResolved(B.resolvedInputs,
-                                                   &B.propertyResults);
         }
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunSolverSources(&B, time);

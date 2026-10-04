@@ -172,7 +172,9 @@ struct PropertyRevision {
 /// dependency order (_propertyChainOrder).
 struct PropertyChain {
     /// Slot id of the target; the chain's base is its raw value, read with
-    /// the chain's type (a missing or mistyped value skips the chain).
+    /// the chain's type (a missing or mistyped value skips the chain). A
+    /// standing interactive override on the target
+    /// (RigExecRuntimeReader::SetAvar) stands in for that value.
     uint32_t target = 0;
     PropertyValueType valueType = PropertyValueType::Float;
     std::vector<PropertyRevision> revisions;

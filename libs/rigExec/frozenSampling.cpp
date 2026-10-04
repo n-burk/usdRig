@@ -325,7 +325,7 @@ _SampleConstraintBindings(
     });
 }
 
-// The resolved-placement half of _ApplyInteractiveOverridesToResolved: every
+// _ApplyInteractiveOverridesToResolved over the job's overrides: every
 // attribute override stands in the given inputs. The `overrides` out-param
 // of the live routine feeds exec only; the baked path never reads it.
 void
@@ -1336,12 +1336,11 @@ _SampleWithPinnedChainBindings(
 
     // The chain-sampling hook, in the live prologue's own order: the
     // chains evaluate into the refreshed inputs over the already-placed
-    // pre-chain overrides, and the overrides are placed again after, so
-    // one standing on a chain target replaces its result -- and the
-    // transported per-target results, which the frozen prologue publishes
-    // as its property results, are replaced alike. On decline (a weight
-    // object) the refreshed inputs stay override-only and chain-resolved
-    // bindings mark viaChain below, declining the vector downstream.
+    // overrides, a drag on a chain target being that chain's base, and the
+    // per-target results travel with the vector for the frozen prologue to
+    // publish as its property results. On decline (a weight object) the
+    // refreshed inputs stay override-only and chain-resolved bindings mark
+    // viaChain below, declining the vector downstream.
     const RigExecResolvedInputs *chainFresh = nullptr;
     if (!bindings.chains.empty()) {
         RigExecResolvedInputs hooked = refreshed;
@@ -1350,17 +1349,6 @@ _SampleWithPinnedChainBindings(
         std::string hookError;
         if (RigExecEvaluateChainsForTime(bindings, time, &hooked, &results,
                                          &hookDiagnostics, &hookError)) {
-            _PlaceOverridesIntoResolved(overrides, &hooked);
-            for (const RigExecValueOverride &o : overrides) {
-                if (o.attribute.IsEmpty()) {
-                    continue;
-                }
-                const auto found = results.find(
-                    o.prim.AppendProperty(o.attribute));
-                if (found != results.end()) {
-                    found->second = o.value;
-                }
-            }
             refreshed = std::move(hooked);
             sampled.chainResults = std::move(results);
             sampled.chainDiagnostics = std::move(hookDiagnostics);
@@ -1867,17 +1855,6 @@ RigExecSampleFrameInputsWithBurstCache(
         if (RigExecEvaluateChainsForTime(cache->bindings, time, &hooked,
                                          &results, &hookDiagnostics,
                                          &hookError)) {
-            _PlaceOverridesIntoResolved(overrides, &hooked);
-            for (const RigExecValueOverride &o : overrides) {
-                if (o.attribute.IsEmpty()) {
-                    continue;
-                }
-                const auto found = results.find(
-                    o.prim.AppendProperty(o.attribute));
-                if (found != results.end()) {
-                    found->second = o.value;
-                }
-            }
             refreshed = std::move(hooked);
             sampled.chainResults = std::move(results);
             sampled.chainDiagnostics = std::move(hookDiagnostics);

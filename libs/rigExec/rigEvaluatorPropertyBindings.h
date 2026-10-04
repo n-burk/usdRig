@@ -88,13 +88,12 @@ struct RigExecPropertyChainBindings
         // the value after `applied` revisions, cast to the consumer's own
         // type -- unless an interactive override stands on one of its
         // `hops`, which the overlay walk then meets instead. An override on
-        // the target is what a `final` reader gets.
+        // the target is the chain's base, so it is the value after none.
         struct Phased {
             SdfPath consumer;
             SdfValueTypeName consumerType;
             size_t applied = 0;
             SdfPathVector hops;
-            bool final = false;
         };
         std::vector<Phased> phased;
 

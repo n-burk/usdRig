@@ -64,10 +64,9 @@ struct RigExecMoverRecord {
 /// `hops` is the consumer followed by every attribute its connection walk
 /// passes before the target. An interactive override on any of them is
 /// what the overlay walk meets first, so the record publishes nothing
-/// while one stands. An override on the target replaces the chain's final
-/// value only: a `final` record reads it, and every other record -- a
-/// checkpoint at the last revision too -- reads the chain's own history
-/// from the authored base.
+/// while one stands. An override on the target is the chain's base: the
+/// revisions run from it, and every record reads the chain's history from
+/// there, as it would with that value authored on the target.
 struct RigExecPhasedConnection {
     SdfPath consumer;
     SdfValueTypeName consumerType;
@@ -484,9 +483,11 @@ public:
     /// reaches a consumer and they must not disagree: as an exec override
     /// for everything exec computes, and through _resolvedInputs for the
     /// property chains and the CPU oracle that exec never runs. An override
-    /// replaces any earlier one on the same key rather than joining it, and
-    /// outranks a property chain's result, which is the manipulator's edit
-    /// winning over the rig's own arithmetic for as long as it is held.
+    /// replaces any earlier one on the same key rather than joining it. One
+    /// on a property math movers revise is that property's base: the chain
+    /// revises it as it would the value authored there and publishes its
+    /// own result, so every reader sees while the drag is held what it sees
+    /// once the value is authored, in every evaluator.
     ///
     /// Setting them does not evaluate; the caller decides when to publish.
     void SetInteractiveOverrides(std::vector<RigExecValueOverride> overrides);
@@ -548,8 +549,8 @@ public:
     }
 
     /// Whether the last compile has a property chain revising \p attribute.
-    /// An override on such a property replaces the chain's final value,
-    /// while an authored value is the base the chain revises.
+    /// An override on such a property and a value authored there are both
+    /// the base the chain revises.
     bool IsPropertyChainTarget(const SdfPath &attribute) const {
         return _propertyChains.count(attribute) > 0;
     }
@@ -868,16 +869,14 @@ private:
         UsdGeomXformCache &xformCache,
         RigExecRigPose &pose);
 
-    /// Applies the standing interactive overrides to \p resolved, replacing
-    /// matching entries of \p published when one is given -- the same two
-    /// applications _EvaluateDynamic performs around the property chains.
+    /// Applies the standing interactive overrides to \p resolved -- the
+    /// application _EvaluateDynamic performs before the property chains.
     ///
     /// The baked program runs the chains itself and needs the overrides at
-    /// exactly those two points; it calls this rather than carrying a second
-    /// copy of the ordering rule, because a second copy is a second answer.
+    /// exactly that point; it calls this rather than carrying a second copy
+    /// of the ordering rule, because a second copy is a second answer.
     void _ApplyInteractiveOverridesToResolved(
-        RigExecResolvedInputs *resolved,
-        std::map<SdfPath, VtValue> *published) const;
+        RigExecResolvedInputs *resolved) const;
 
     /// Builds the baked program for the current epoch, or drops it. No-op
     /// unless the mode asks for one and the epoch is settled.
@@ -1957,7 +1956,11 @@ private:
     /// Fills \p results with the final value per target and appends one
     /// attribute override per target to \p overrides, so a consuming
     /// computation reads the revised value with nothing authored anywhere.
-    /// Diagnostics record pass-throughs and failures (spec §6.6).
+    /// The interactive overrides are always in _resolvedInputs on entry, and
+    /// also in \p overrides when the caller placed them there for exec (the
+    /// dynamic path). One on a target is that chain's base, and the chain's
+    /// result replaces it wherever it was placed. Diagnostics record
+    /// pass-throughs and failures (spec §6.6).
     void _EvaluatePropertyChains(
         UsdTimeCode time,
         std::map<SdfPath, VtValue> *results,

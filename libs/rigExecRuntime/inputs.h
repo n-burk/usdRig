@@ -121,35 +121,22 @@ bool RrInputsPublished(const RrProgram *program, uint32_t path);
 
 /// RigExecResolvedInputs::Get<T> at attribute \p path: the value the
 /// resolved inputs hold there this run (a standing interactive override or
-/// a property-chain result, ranked by RrOverrideOutranksResult), when it
-/// is exactly \p tag. \p out is written only on a hit. Every walk's hop and
-/// every geometry scalar read meets this overlay.
+/// a property-chain result; at a dragged chain target, the result), when
+/// it is exactly \p tag. \p out is written only on a hit. Every walk's hop
+/// and every geometry scalar read meets this overlay.
 bool RrInputsOverlay(const RrProgram *program, uint32_t path,
                      v4::InputTag tag, v4::RigExecWireValue *out);
 
-/// The runtime's rule for an interactive override on a property-chain
-/// target (a slot whose InputSlot::chain >= 0). Every site that meets such
-/// an override asks one of these three, so a change of rule stays here.
-/// Until the semantics of a target drag are settled the runtime refuses
-/// one (the USD evaluators let it replace the chain's final value):
-/// - RrTargetDragAccepted: whether SetAvar may place an override on
-///   \p slot; false for a chain target.
-/// - RrChainBase: the value property chain \p chain starts from this run,
-///   its target's own typed value (\p tag); false when that read fails.
-///   No override stands on a target, so none is consulted.
-/// - RrOverrideOutranksResult: whether an override standing at attribute
-///   \p path answers there before a chain result published at the same
-///   attribute, as the program's post-chain placement of its overrides
-///   makes it. With target drags refused the two never meet at one
-///   attribute: an override on a phased reader's consumer stands the
-///   reader aside, so it publishes nothing there.
-/// A rule that accepts target drags also decides what a phased reader of
-/// a dragged chain publishes; the chain run (properties.cpp) publishes the
-/// chain's own history today, and the wire carries no `final` flag.
-bool RrTargetDragAccepted(const RrProgram *program, uint32_t slot);
+/// The value property chain \p chain starts from this run, in the chain's
+/// type \p tag: an interactive override standing on its target, which is
+/// an edit of the target's base exactly as in the USD evaluators, else the
+/// target's own typed value; false when neither is there. The chain run
+/// (properties.cpp) revises it and publishes its own result at the target,
+/// which the overlay answers in the override's place, and each phased
+/// reader reads the chain's history from it, so every reader sees during a
+/// drag what it sees once the dragged value is authored and rebaked.
 bool RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
                  v4::RigExecWireValue *base);
-bool RrOverrideOutranksResult(const RrProgram *program, uint32_t path);
 
 /// \p input as the program resolves it in its mode, tagged with the read's
 /// tag: Baked is RigExecBakedRead (bakedProgramImpl.h), Resolved is

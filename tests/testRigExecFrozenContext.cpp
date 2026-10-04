@@ -37,7 +37,9 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -495,6 +497,63 @@ CheckPosesBitIdentical(const char *what, const RigExecRigPose &live,
     CHECK(diff.diagnostics.empty());
 }
 
+// Whether every reader of \p a reads what it reads in \p b: each moved
+// property (a float or double by its bits), control frame and joint frame,
+// and the diagnostics. Unlike CheckPosesBitIdentical it leaves the work
+// counters out, which differ between a held drag and its release.
+static void
+CheckSameReadings(const char *what, const RigExecRigPose &a,
+                  const RigExecRigPose &b)
+{
+    const auto sameValue = [](const VtValue &x, const VtValue &y) {
+        if (x.IsHolding<float>() && y.IsHolding<float>()) {
+            const float p = x.UncheckedGet<float>();
+            const float q = y.UncheckedGet<float>();
+            return std::memcmp(&p, &q, sizeof(p)) == 0;
+        }
+        if (x.IsHolding<double>() && y.IsHolding<double>()) {
+            const double p = x.UncheckedGet<double>();
+            const double q = y.UncheckedGet<double>();
+            return std::memcmp(&p, &q, sizeof(p)) == 0;
+        }
+        return x == y;
+    };
+    std::string why;
+    if (!a.valid || !b.valid) {
+        why = "an invalid pose";
+    } else if (a.movedProperties.size() != b.movedProperties.size()) {
+        why = "moved property count";
+    } else if (a.controlFrames != b.controlFrames) {
+        why = "control frames";
+    } else if (a.jointFramesFinal != b.jointFramesFinal) {
+        why = "joint frames";
+    } else {
+        // Less the mover graph's work line, a work counter too.
+        const auto lines = [](const RigExecRigPose &pose) {
+            std::vector<std::string> out;
+            for (const std::string &line : pose.diagnostics) {
+                if (line.rfind("mover graph: ", 0) != 0) {
+                    out.push_back(line);
+                }
+            }
+            return out;
+        };
+        if (lines(a) != lines(b)) {
+            why = "diagnostics";
+        }
+    }
+    for (auto i = a.movedProperties.begin(), j = b.movedProperties.begin();
+         why.empty() && i != a.movedProperties.end(); ++i, ++j) {
+        if (i->first != j->first || !sameValue(i->second, j->second)) {
+            why = "moved property " + i->first.GetString();
+        }
+    }
+    if (!why.empty()) {
+        std::printf("FAIL %s: the readings differ (%s)\n", what, why.c_str());
+    }
+    CHECK(why.empty());
+}
+
 // A warming job's pose is bit-identical to live evaluation of the same
 // inputs: freeze after frame 2, warm frame 3 (an unrun time, with genuinely
 // different inputs), and diff against live at 3 from the same history. Then
@@ -564,8 +623,7 @@ TestProductionRunnerIsBitIdenticalToLive()
 // carries the revised value with no stale mark, the per-target results
 // travel with the vector, and the warmed poses match live with zero
 // parity mismatches -- including under a drag on the chain's target (the
-// post-chain replacement) and on the mover's own factor input (a pre-chain
-// read).
+// chain's base) and on the mover's own factor input (a pre-chain read).
 void
 TestChainedRigWarmsBitIdentical()
 {
@@ -649,8 +707,8 @@ TestChainedRigWarmsBitIdentical()
     CHECK(live4.valid);
     CheckPosesBitIdentical("warmed chained frame 4", live4, warmed4);
 
-    // A drag on the chain's target replaces the chain's result; a drag on
-    // the mover's factor input is read pre-chain. Both warm bit-identical.
+    // A drag on the chain's target is the chain's base; a drag on the
+    // mover's factor input is read pre-chain. Both warm bit-identical.
     for (int arm = 0; arm < 2; ++arm) {
         RigExecValueOverride drag;
         if (arm == 0) {
@@ -687,9 +745,10 @@ TestChainedRigWarmsBitIdentical()
 // hop (a record of every revision) and a checkpoint at the last revision.
 // The hook publishes each record on its reader as live does, the warmed
 // poses match live bit for bit, and so they do under each drag rule: on a
-// reader's own input, on the hop, and on the target, whose drag every
-// final reader reads while the base readers keep the authored value and
-// the checkpoint the chain's computed one.
+// reader's own input, on the hop, and on the target, whose drag is the
+// chain's base -- the base readers read it, the checkpoint and the final
+// readers the chain revised from it -- and reads, warmed and live, what
+// the drag authored at that frame reads.
 UsdStageRefPtr
 MakePhasedChainedRig()
 {
@@ -799,6 +858,8 @@ TestPhasedReadsWarmBitIdentical()
         return RigExecValueOverride{SdfPath(prim), TfToken(),
                                     TfToken(attribute), value};
     };
+    // TxGain multiplies by 1.5 at frame 3: 3.25 revises to 4.875 exactly.
+    const float draggedFinal = 4.875f;
     const Drag drags[] = {
         {"drag on a reader's input",
          at("/Asset/Rig/Movers/Readouts/base", "inputs:value",
@@ -810,8 +871,9 @@ TestPhasedReadsWarmBitIdentical()
          float(authored), 0.25f, final, 0.25f, final},
         {"drag on the target",
          at("/Asset/Rig/AlongX", "avars:tx", VtValue(3.25)),
-         float(authored), float(authored), 3.25f, 3.25f, final},
+         3.25f, 3.25f, draggedFinal, draggedFinal, draggedFinal},
     };
+    RigExecRigPose liveOnTarget;
     for (const Drag &drag : drags) {
         evaluator.SetInteractiveOverrides({drag.override});
         CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
@@ -839,8 +901,28 @@ TestPhasedReadsWarmBitIdentical()
                         double(_ReadoutOf(live, "lastCheckpoint")));
         }
         CHECK(read);
+        if (drag.override.prim == SdfPath("/Asset/Rig/AlongX")) {
+            liveOnTarget = live;
+        }
         evaluator.SetInteractiveOverrides({});
     }
+
+    // Released: 3.25 authored at frame 3 reads, live and warmed (frozen
+    // after frame 2, as above), what the drag on the target read.
+    stage->GetAttributeAtPath(txPath).Set(3.25, UsdTimeCode(3.0));
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs released3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {},
+                                   &released3, &error));
+    const RigExecRigPose warmedReleased = RunWarmingJob(
+        &evaluator, rig, frozen, released3, &scheduler, nullptr);
+    const RigExecRigPose liveReleased = evaluator.Evaluate(UsdTimeCode(3.0));
+    CheckPosesBitIdentical("released target drag", liveReleased,
+                           warmedReleased);
+    CheckSameReadings("released target drag against the drag", liveOnTarget,
+                      liveReleased);
+    stage->GetAttributeAtPath(txPath).Set(authored, UsdTimeCode(3.0));
 
     // A rewire that keeps every record's consumer, type and position but
     // lengthens a walk -- finalViaHop now reads through a relay outside
@@ -870,6 +952,239 @@ TestPhasedReadsWarmBitIdentical()
     CHECK(hops == 3);
     CHECK(evaluator.GetPhasedConnections().size() == 4);
     CHECK(!RigExecChainSampleBindingsStillCurrent(bound, evaluator));
+}
+
+struct _BlinkRigOptions {
+    // The channel authored at 0.2; false leaves it without a value.
+    bool authored = true;
+    // The lid control reading it.
+    bool lid = true;
+    // A Gain doubling the channel before the clamp, read at its checkpoint
+    // by a third readout chain and, with the lid, by the lid's tz.
+    bool gain = false;
+};
+
+// The blink on the tiny rig: a float channel authored at 0.2 and clamped to
+// [0, 1], read undeclared and at `final` by readout chains and by a lid
+// control's avars (tx at the base, ty at `final`).
+UsdStageRefPtr
+MakeBlinkRig(const _BlinkRigOptions &options = _BlinkRigOptions())
+{
+    UsdStageRefPtr stage = MakeTinyRig();
+    const UsdAttribute blink =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Channels/Face"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:blink"),
+                             SdfValueTypeNames->Float);
+    if (options.authored) {
+        blink.Set(0.2f);
+    }
+    const auto mover = [&](const std::string &path, const char *operation,
+                           const SdfPath &target) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath("/Asset/Rig/Movers/" + path),
+                              TfToken("RigExecFloatMathMover"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken(operation));
+        prim.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        return prim;
+    };
+    const UsdPrim clamp = mover("ClampBlink", "clamp", blink.GetPath());
+    clamp.CreateAttribute(TfToken("inputs:min"), SdfValueTypeNames->Float)
+        .Set(0.0f);
+    clamp.CreateAttribute(TfToken("inputs:max"), SdfValueTypeNames->Float)
+        .Set(1.0f);
+    // A nested mover revises before its parent: Gain, then the clamp.
+    const char *const gainPath = "/Asset/Rig/Movers/ClampBlink/Gain";
+    if (options.gain) {
+        mover("ClampBlink/Gain", "multiply", blink.GetPath())
+            .CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float)
+            .Set(2.0f);
+    }
+    const UsdPrim channels = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Channels/Readouts"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Readouts"), TfToken("Scope"));
+    std::vector<std::pair<const char *, const char *>> readouts = {
+        {"blinkBase", nullptr}, {"blinkFinal", "final"}};
+    if (options.gain) {
+        readouts.emplace_back("blinkCheckpoint", gainPath);
+    }
+    for (const auto &[name, phase] : readouts) {
+        const UsdAttribute target = channels.CreateAttribute(
+            TfToken(std::string("rigExec:") + name), SdfValueTypeNames->Float);
+        target.Set(0.0f);
+        const UsdAttribute value =
+            mover(std::string("Readouts/") + name, "add", target.GetPath())
+                .CreateAttribute(TfToken("inputs:value"),
+                                 SdfValueTypeNames->Float);
+        value.SetConnections({blink.GetPath()});
+        if (phase) {
+            value.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+        }
+    }
+    if (options.lid) {
+        const UsdPrim lid = stage->DefinePrim(SdfPath("/Asset/Rig/Lid"),
+                                              TfToken("RigExecControl"));
+        lid.GetAttribute(TfToken("avars:tx"))
+            .SetConnections({blink.GetPath()});
+        const UsdAttribute ty = lid.GetAttribute(TfToken("avars:ty"));
+        ty.SetConnections({blink.GetPath()});
+        ty.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+        if (options.gain) {
+            const UsdAttribute tz = lid.GetAttribute(TfToken("avars:tz"));
+            tz.SetConnections({blink.GetPath()});
+            tz.SetMetadata(TfToken("rigExecReadPhase"), std::string(gainPath));
+        }
+    }
+    return stage;
+}
+
+// The blink dragged to 1.4 warms bit-identically to live, with the base
+// readers on 1.4 and the final readers on 1.0; authored at 1.4 and
+// released, it warms bit-identically again and reads, live, exactly what
+// the drag read.
+void
+TestBlinkDragWarmsAsReleased()
+{
+    UsdStageRefPtr stage = MakeBlinkRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetSkippedOperations().empty());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    RigExecBackgroundScheduler scheduler;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+
+    const SdfPath blink("/Asset/Rig/Channels/Face.rigExec:blink");
+    const RigExecValueOverride drag{blink.GetPrimPath(), TfToken(),
+                                    blink.GetNameToken(), VtValue(1.4f)};
+    evaluator.SetInteractiveOverrides({drag});
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs dragged3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {drag},
+                                   &dragged3, &error));
+    CHECK(!dragged3.HasChainResolvedInputs());
+    const RigExecRigPose warmed = RunWarmingJob(&evaluator, rig, frozen,
+                                                dragged3, &scheduler, nullptr);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+    CheckPosesBitIdentical("blink drag", live, warmed);
+    CHECK(_ReadoutOf(live, "blinkBase") == 1.4f);
+    CHECK(_ReadoutOf(live, "blinkFinal") == 1.0f);
+    const auto lid = live.controlFrames.find(SdfPath("/Asset/Rig/Lid"));
+    CHECK(lid != live.controlFrames.end() &&
+          lid->second.points[0] == GfVec3d(double(1.4f), 1.0, 0.0));
+    evaluator.SetInteractiveOverrides({});
+
+    // Frozen after frame 2 again, so the warmed and the live frame 3 share
+    // a history.
+    stage->GetAttributeAtPath(blink).Set(1.4f);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs released3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {},
+                                   &released3, &error));
+    const RigExecRigPose warmedReleased = RunWarmingJob(
+        &evaluator, rig, frozen, released3, &scheduler, nullptr);
+    const RigExecRigPose liveReleased = evaluator.Evaluate(UsdTimeCode(3.0));
+    CheckPosesBitIdentical("blink released", liveReleased, warmedReleased);
+    CheckSameReadings("blink released against the drag", live, liveReleased);
+}
+
+// The frozen sampler's own copy of the base rule, at its edges, each warmed
+// bit-identically to live at frame 3 (frozen after frame 2): with nothing
+// authored a drag of 0.5 is the base, so the chain runs and its result
+// travels with the vector; a NaN drag skips the chain with the line an
+// authored NaN prints, and nothing travels; with a Gain before the clamp,
+// a drag of 0.75 reads 0.75 at the base, 1.5 at Gain's checkpoint and 1.0
+// at `final`; and a double drag of 1.4 reads what the float 1.4 reads.
+void
+TestBlinkDragEdgesWarmBitIdentical()
+{
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath blink("/Asset/Rig/Channels/Face.rigExec:blink");
+    struct Warmed {
+        RigExecRigPose live;
+        RigExecFrameInputs inputs;
+    };
+    const auto warm = [&](const char *what, const _BlinkRigOptions &options,
+                          const VtValue &value) {
+        Warmed out;
+        UsdStageRefPtr stage = MakeBlinkRig(options);
+        RigExecRigEvaluator evaluator(stage, rig);
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        CHECK(evaluator.GetSkippedOperations().empty());
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+        RigExecBackgroundScheduler scheduler;
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        const RigExecValueOverride drag{blink.GetPrimPath(), TfToken(),
+                                        blink.GetNameToken(), value};
+        evaluator.SetInteractiveOverrides({drag});
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {drag},
+                                       &out.inputs, &error));
+        CHECK(!out.inputs.HasChainResolvedInputs());
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, rig, frozen, out.inputs, &scheduler, nullptr);
+        out.live = evaluator.Evaluate(UsdTimeCode(3.0));
+        CHECK(out.live.valid);
+        CheckPosesBitIdentical(what, out.live, warmed);
+        return out;
+    };
+    const auto lidAt = [](const RigExecRigPose &pose) {
+        const auto lid = pose.controlFrames.find(SdfPath("/Asset/Rig/Lid"));
+        return lid == pose.controlFrames.end()
+                   ? GfVec3d(-1.0)
+                   : GfVec3d(lid->second.points[0]);
+    };
+
+    _BlinkRigOptions unauthored;
+    unauthored.authored = false;
+    const Warmed drawn = warm("blink drag, nothing authored", unauthored,
+                              VtValue(0.5f));
+    CHECK(_ReadoutOf(drawn.live, "blinkBase") == 0.5f);
+    CHECK(_ReadoutOf(drawn.live, "blinkFinal") == 0.5f);
+    CHECK(lidAt(drawn.live) == GfVec3d(0.5, 0.5, 0.0));
+    const auto carried = drawn.inputs.chainResults.find(blink);
+    CHECK(carried != drawn.inputs.chainResults.end() &&
+          carried->second == VtValue(0.5f));
+
+    _BlinkRigOptions noLid;
+    noLid.lid = false;
+    const Warmed skipped = warm("blink NaN drag", noLid,
+                                VtValue(std::nanf("")));
+    CHECK(skipped.live.movedProperties.count(blink) == 0);
+    CHECK(skipped.inputs.chainResults.count(blink) == 0);
+    CHECK(std::count(skipped.live.diagnostics.begin(),
+                     skipped.live.diagnostics.end(),
+                     "property chain " + blink.GetString() +
+                         ": authored base is not finite; chain skipped") ==
+          1);
+
+    _BlinkRigOptions gained;
+    gained.gain = true;
+    const Warmed checkpoint = warm("blink drag, Gain then clamp", gained,
+                                   VtValue(0.75f));
+    CHECK(_ReadoutOf(checkpoint.live, "blinkBase") == 0.75f);
+    CHECK(_ReadoutOf(checkpoint.live, "blinkCheckpoint") == 1.5f);
+    CHECK(_ReadoutOf(checkpoint.live, "blinkFinal") == 1.0f);
+    CHECK(lidAt(checkpoint.live) == GfVec3d(0.75, 1.0, 1.5));
+
+    const Warmed asFloat =
+        warm("blink float drag", _BlinkRigOptions(), VtValue(1.4f));
+    const Warmed asDouble =
+        warm("blink double drag", _BlinkRigOptions(), VtValue(1.4));
+    CheckSameReadings("blink double drag against the float drag",
+                      asFloat.live, asDouble.live);
 }
 
 // A chain binding a weight object declines at every layer: the hook names
@@ -3592,6 +3907,8 @@ main(int argc, char **argv)
     TestProductionRunnerIsBitIdenticalToLive();
     TestChainedRigWarmsBitIdentical();
     TestPhasedReadsWarmBitIdentical();
+    TestBlinkDragWarmsAsReleased();
+    TestBlinkDragEdgesWarmBitIdentical();
     TestChainHookDeclinesWeightObjects();
     TestSessionBindingsMatchFreshBind();
     TestBurstCacheMatchesPinnedSampling();

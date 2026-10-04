@@ -47,8 +47,10 @@ _RrFloatValue(float f)
 }
 
 // The overlay's value at \p path: whichever of a standing override and a
-// published chain result holds the attribute (RrOverrideOutranksResult
-// ranks them when both do), when it is exactly \p tag.
+// published chain result holds the attribute, when it is exactly \p tag.
+// Both hold one only at a dragged chain target, whose result answers: the
+// drag is the base it was computed from (RrChainBase). A phased reader
+// with an override on its consumer stands aside and publishes nothing.
 bool
 _RrOverlay(const RrProgram &program, uint32_t path, v4::InputTag tag,
            v4::RigExecWireValue *out)
@@ -70,8 +72,7 @@ _RrOverlay(const RrProgram &program, uint32_t path, v4::InputTag tag,
             result = &found->second;
         }
     }
-    if (standing &&
-        (!result || RrOverrideOutranksResult(&program, path))) {
+    if (standing && !result) {
         if (standing->tag != tag) {
             return false;
         }
@@ -1185,17 +1186,6 @@ RrInputsOverlay(const RrProgram *program, uint32_t path, v4::InputTag tag,
     return _RrOverlay(*program, path, tag, out);
 }
 
-// The target-drag rule (inputs.h). A change of rule is made in these three
-// functions and in what a phased reader of a dragged chain publishes.
-
-bool
-RrTargetDragAccepted(const RrProgram *program, uint32_t slot)
-{
-    const std::vector<v4::InputSlot> &slots =
-        program->inputState.computed->inputs;
-    return slot < slots.size() && slots[slot].chain < 0;
-}
-
 bool
 RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
             v4::RigExecWireValue *base)
@@ -1203,17 +1193,28 @@ RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
     const RrInputState &state = program->inputState;
     const RigExecWireComputed &computed = *state.computed;
     const uint32_t target = computed.propertyChains[chain].target;
+    // A drag on the target stands in for its value, in the chain's type
+    // (RigExecPhasedConsumerValue: a double narrows to a float); a drag of
+    // another type is no base.
+    if (!state.overrides.empty()) {
+        const auto held = state.overrides.find(computed.inputs[target].name);
+        if (held != state.overrides.end()) {
+            if (held->second.tag == tag) {
+                *base = held->second;
+                return true;
+            }
+            if (tag == v4::InputTag::Float &&
+                held->second.tag == v4::InputTag::Double) {
+                *base = _RrFloatValue(
+                    static_cast<float>(_RrWireDouble(held->second)));
+                return true;
+            }
+        }
+    }
     if (!state.slotHasValue[target] || computed.inputs[target].type != tag) {
         return false;
     }
     *base = computed.values[state.slotValue[target]];
-    return true;
-}
-
-bool
-RrOverrideOutranksResult(const RrProgram *, uint32_t)
-{
-    // The program places its overrides again after the chains publish.
     return true;
 }
 

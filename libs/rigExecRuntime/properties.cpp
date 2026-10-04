@@ -670,8 +670,8 @@ RrRunPropertyChains(RrProgram *program,
     for (size_t c = 0; c < computed->propertyChains.size(); ++c) {
         const v4::PropertyChain &chain = computed->propertyChains[c];
         const RrPropertyScratch::Chain &plan = scratch->chains[c];
-        // The base, as the target-drag rule gives it; a missing value, or
-        // one of another type, fails that read.
+        // The base: a drag on the target, else its own value; a missing
+        // value, or one of another type, fails that read.
         v4::RigExecWireValue base;
         if (!RrChainBase(program, c, plan.baseTag, &base)) {
             poseDiagnostics->push_back("property chain " + plan.target +

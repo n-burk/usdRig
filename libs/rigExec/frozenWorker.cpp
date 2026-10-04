@@ -157,10 +157,10 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         return found == index.end() ? nullptr : &inputs.values[found->second];
     };
 
-    // Chains, between the two override placements, as on the live path:
-    // the sampler evaluated the hook for the job's time on the UI thread,
-    // and the per-target results travel with the vector. The worker
-    // publishes them where the live prologue publishes the chains it ran.
+    // Chains, after the override placement, as on the live path: the
+    // sampler evaluated the hook for the job's time on the UI thread, and
+    // the per-target results travel with the vector. The worker publishes
+    // them where the live prologue publishes the chains it ran.
     // A chainless snapshot with transported results is a stale vector from
     // another epoch and declines.
     if (!B.hasPropertyChains && !inputs.chainResults.empty()) {
@@ -170,11 +170,12 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     B.resolvedInputs->Clear();
     B.runSnapshots.Clear();
     B.chainSnapshots->Clear();
-    // Pre- and post-chain override placement, replicated from
+    // The override placement, replicated from
     // _ApplyInteractiveOverridesToResolved: every attribute override stands
-    // in the resolved inputs, and one standing on a chain result replaces
-    // it. The resolved inputs are unread on the worker (patched constants),
-    // but the placement keeps the private state shape-identical.
+    // in the resolved inputs, and a chain result at a dragged target takes
+    // its place there, the drag being the base it was computed from. The
+    // resolved inputs are unread on the worker (patched constants), but the
+    // placement keeps the private state shape-identical.
     for (const RigExecValueOverride &o : inputs.overrides) {
         if (o.attribute.IsEmpty()) {
             continue;
@@ -185,17 +186,6 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     for (const auto &[target, value] : inputs.chainResults) {
         B.propertyResults[target] = value;
         B.resolvedInputs->SetProperty(target, value);
-    }
-    for (const RigExecValueOverride &o : inputs.overrides) {
-        if (o.attribute.IsEmpty()) {
-            continue;
-        }
-        const SdfPath path = o.prim.AppendProperty(o.attribute);
-        B.resolvedInputs->SetProperty(path, o.value);
-        const auto found = B.propertyResults.find(path);
-        if (found != B.propertyResults.end()) {
-            found->second = o.value;
-        }
     }
 
     // RunInputs (bakedPose.cpp:2099): ladders recompose from stage reads, so

@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <map>
@@ -4041,10 +4042,8 @@ TestDefaultReadPhaseAndHeadWins()
 // Interactive overrides against phased readers, the same in every
 // evaluator. One on a reader's own input, or on a hop its walk passes
 // before the target, stands the reader aside: the overlay walk meets the
-// override first. One on the target replaces the chain's final value for
-// every `final` reader of it, recorded or not, while base and checkpoint
-// readers -- a checkpoint at the last revision too -- read the chain's own
-// history from the authored base.
+// override first. One on the target is the chain's base: base readers read
+// it, and the checkpoint and final readers the chain revised from it.
 static void
 TestPhasedReadDragRules()
 {
@@ -4080,23 +4079,535 @@ TestPhasedReadDragRules()
             "drag on FinalHop", evaluator.Evaluate(time),
             {0.45f, 0.6f, 0.45f, 0.6f, 0.375f, 0.375f, 0.9f, 0.6f}));
 
-        // The target: every final reader reads the drag, the base and the
-        // checkpoint readers the chain's history.
+        // The target: its base is the drag, 0.25, which Gain doubles to 0.5
+        // and Limit leaves there, so the checkpoints and every final reader
+        // read 0.5 and the dial publishes it.
         evaluator.SetInteractiveOverrides(
             {drag("/Asset/Rig/Channels/Dial", "rigExec:amount", 0.25f)});
         const RigExecRigPose onTarget = evaluator.Evaluate(time);
         CHECK(_PhaseReadoutsAre(
             "drag on the dial", onTarget,
-            {0.45f, 0.25f, 0.45f, 0.25f, 0.25f, 0.45f, 0.9f, 0.6f}));
+            {0.25f, 0.5f, 0.25f, 0.5f, 0.5f, 0.25f, 0.5f, 0.5f}));
         const auto dial = onTarget.movedProperties.find(
             SdfPath("/Asset/Rig/Channels/Dial.rigExec:amount"));
         CHECK(dial != onTarget.movedProperties.end() &&
-              dial->second == VtValue(0.25f));
+              dial->second == VtValue(0.5f));
 
         // Lifted: the chain's own values again.
         evaluator.SetInteractiveOverrides({});
         CHECK(_PhaseReadoutsAre("after the drags", evaluator.Evaluate(time),
                                 undragged));
+    }
+}
+
+// A float or double by its bits (signed zeros and NaN payloads included),
+// any other value by ==.
+static bool
+_SameValueBits(const VtValue &a, const VtValue &b)
+{
+    if (a.IsHolding<float>() && b.IsHolding<float>()) {
+        const float x = a.UncheckedGet<float>(), y = b.UncheckedGet<float>();
+        return std::memcmp(&x, &y, sizeof(x)) == 0;
+    }
+    if (a.IsHolding<double>() && b.IsHolding<double>()) {
+        const double x = a.UncheckedGet<double>();
+        const double y = b.UncheckedGet<double>();
+        return std::memcmp(&x, &y, sizeof(x)) == 0;
+    }
+    return a == b;
+}
+
+// The first reading \p a and \p b disagree on, or empty when every reader
+// reads the same: each moved property, control frame, joint frame and
+// provider transform bit for bit, and the diagnostics in order. The work
+// counters are left out.
+static std::string
+_ReadingsDiffer(const RigExecRigPose &a, const RigExecRigPose &b)
+{
+    if (!a.valid || !b.valid) {
+        return "an invalid pose";
+    }
+    const auto sameFrame = [](const RigExecPointFrame &x,
+                              const RigExecPointFrame &y) {
+        return x.flags == y.flags &&
+               std::memcmp(x.points.data(), y.points.data(),
+                           sizeof(x.points)) == 0;
+    };
+    const auto sameMatrix = [](const GfMatrix4d &x, const GfMatrix4d &y) {
+        return std::memcmp(x.GetArray(), y.GetArray(), 16 * sizeof(double)) ==
+               0;
+    };
+    std::string why;
+    const auto compare = [&why](const auto &x, const auto &y,
+                                const char *what, auto same) {
+        if (!why.empty()) {
+            return;
+        }
+        if (x.size() != y.size()) {
+            why = std::string(what) + " count";
+            return;
+        }
+        for (auto i = x.begin(), j = y.begin(); i != x.end(); ++i, ++j) {
+            if (i->first != j->first || !same(i->second, j->second)) {
+                why = std::string(what) + " at " + i->first.GetString();
+                return;
+            }
+        }
+    };
+    compare(a.movedProperties, b.movedProperties, "moved property",
+            _SameValueBits);
+    compare(a.controlFrames, b.controlFrames, "control frame", sameFrame);
+    compare(a.jointFramesFinal, b.jointFramesFinal, "joint frame", sameFrame);
+    compare(a.providerXforms, b.providerXforms, "provider transform",
+            sameMatrix);
+    // The mover graph's work line counts what this generation ran, which
+    // a held drag and its release need not share.
+    const auto lines = [](const RigExecRigPose &pose) {
+        std::vector<std::string> out;
+        for (const std::string &line : pose.diagnostics) {
+            if (line.rfind("mover graph: ", 0) != 0) {
+                out.push_back(line);
+            }
+        }
+        return out;
+    };
+    const std::vector<std::string> x = lines(a), y = lines(b);
+    if (why.empty() && x != y) {
+        size_t k = 0;
+        while (k < x.size() && k < y.size() && x[k] == y[k]) {
+            ++k;
+        }
+        why = "diagnostic " + std::to_string(k) + ": '" +
+              (k < x.size() ? x[k] : "") + "' against '" +
+              (k < y.size() ? y[k] : "") + "'";
+    }
+    return why;
+}
+
+static bool
+_SameReadings(const std::string &what, const RigExecRigPose &a,
+              const RigExecRigPose &b)
+{
+    const std::string why = _ReadingsDiffer(a, b);
+    if (!why.empty()) {
+        std::printf("  %s: the readings differ (%s)\n", what.c_str(),
+                    why.c_str());
+    }
+    return why.empty();
+}
+
+static const char *
+_ModeName(RigExecEvaluationMode mode)
+{
+    return mode == RigExecEvaluationMode::Dynamic  ? "dynamic"
+           : mode == RigExecEvaluationMode::Baked ? "baked"
+                                                  : "parity";
+}
+
+// _PhaseRig plus readers outside the readout chains: a control's avars
+// reading the dial undeclared, at `final` and at Gain's checkpoint (all
+// records: a double reading a float chain), and a matrix mover's envelope
+// reading it at `final` with no record, through the overlay walk to the
+// dial's published value.
+static UsdStageRefPtr
+_TargetDragRig()
+{
+    const UsdStageRefPtr stage = _PhaseRig();
+    const SdfPath dial("/Asset/Rig/Channels/Dial.rigExec:amount");
+    const auto control = [&](const char *path) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        return prim;
+    };
+    const UsdPrim gauge = control("/Asset/Rig/Controls/Gauge");
+    const auto avar = [&](const char *name, const char *phase) {
+        const UsdAttribute a = gauge.CreateAttribute(
+            TfToken(name), SdfValueTypeNames->Double);
+        a.SetConnections({dial});
+        if (phase) {
+            a.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+        }
+    };
+    avar("avars:tx", nullptr);
+    avar("avars:ty", "final");
+    avar("avars:tz", "/Asset/Rig/Movers/Limit/Gain");
+    const UsdPrim lever = control("/Asset/Rig/Controls/Lever");
+    lever.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+        .Set(2.0);
+    const UsdPrim card =
+        stage->DefinePrim(SdfPath("/Asset/Geom/Card"), TfToken("Points"));
+    card.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(1, 0, 0)});
+    const UsdPrim lift = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Lift"), TfToken("RigExecMatrixMover"));
+    CHECK(lift.ApplyAPI(TfToken("RigExecMoverAPI")));
+    lift.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({card.GetPath().AppendProperty(TfToken("points"))});
+    lift.CreateRelationship(TfToken("rigExec:transform"))
+        .SetTargets({lever.GetPath()});
+    const UsdAttribute weight = lift.CreateAttribute(
+        TfToken("inputs:defaultWeight"), SdfValueTypeNames->Float);
+    weight.SetConnections({dial});
+    weight.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+    return stage;
+}
+
+// A drag on a property-chain target is an edit of its base, the same in
+// every evaluator: every reader -- the readout chains reading the dial
+// inside the chain loop undeclared, at `base`, at `final` and at both
+// checkpoints, directly and through hops; the control's avars; the matrix
+// mover's envelope -- reads during the drag exactly what it reads once the
+// drag is authored and released, bit for bit, and what a fresh evaluator
+// of the authored stage reads. The drags are 0.25, inside Limit's clamp;
+// 0.4, which Gain lifts past it; and 1.4 and 1.5, past it at the base. A
+// second run under a held drag republishes the same readings, and lifting
+// the drag gives back the authored ones. A held drag moved from value to
+// value without being lifted, as each mouse sample moves it, reads at each
+// step what an evaluator dragged straight to that value reads: 0.4 -> 1.4
+// and 1.4 -> 1.5 leave the clamped final where it was while the base
+// readers and Gain's checkpoint move.
+static void
+TestTargetDragEqualsRelease()
+{
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath dial("/Asset/Rig/Channels/Dial.rigExec:amount");
+    const SdfPath gauge("/Asset/Rig/Controls/Gauge");
+    const UsdTimeCode time(1.0);
+    const auto dragTo = [&](float value) {
+        return std::vector<RigExecValueOverride>{RigExecValueOverride{
+            dial.GetPrimPath(), TfToken(), dial.GetNameToken(),
+            VtValue(value)}};
+    };
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked,
+          RigExecEvaluationMode::BakedWithParityCheck}) {
+        // Each drag as an evaluator that ran the authored rig first reads it.
+        std::map<float, RigExecRigPose> draggedTo;
+        for (const float value : {0.25f, 0.4f, 1.4f, 1.5f}) {
+            char label[64];
+            std::snprintf(label, sizeof(label), "%s drag %.9g",
+                          _ModeName(mode), double(value));
+            const UsdStageRefPtr stage = _TargetDragRig();
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            evaluator.SetEvaluationMode(mode);
+            std::vector<std::string> errors;
+            CHECK(evaluator.Compile(&errors));
+            CHECK(evaluator.GetSkippedOperations().empty());
+            const RigExecRigPose authored = evaluator.Evaluate(time);
+            CHECK(authored.valid);
+
+            const size_t bakedBefore = evaluator.GetBakedGenerationCount();
+            evaluator.SetInteractiveOverrides(dragTo(value));
+            const RigExecRigPose dragged = evaluator.Evaluate(time);
+            CHECK(dragged.valid && dragged.bakedParityMismatches == 0);
+            if (mode != RigExecEvaluationMode::Dynamic) {
+                // The program answered the drag, not a dynamic fallback.
+                CHECK(evaluator.GetBakedGenerationCount() > bakedBefore);
+            }
+            draggedTo[value] = dragged;
+            CHECK(!_ReadingsDiffer(authored, dragged).empty());
+            const float gain = value * 2.0f;
+            const float final = std::min(gain, 0.6f);
+            CHECK(_PhaseReadoutsAre(
+                label, dragged,
+                {value, final, value, final, final, value, gain, final}));
+            const auto published = dragged.movedProperties.find(dial);
+            CHECK(published != dragged.movedProperties.end() &&
+                  published->second == VtValue(final));
+            const auto frame = dragged.controlFrames.find(gauge);
+            CHECK(frame != dragged.controlFrames.end() &&
+                  frame->second.points[0] ==
+                      GfVec3d(double(value), double(final), double(gain)));
+            CHECK(_SameReadings(std::string(label) + ", held", dragged,
+                                evaluator.Evaluate(time)));
+
+            evaluator.ClearInteractiveOverrides();
+            CHECK(_SameReadings(std::string(label) + ", lifted", authored,
+                                evaluator.Evaluate(time)));
+
+            stage->GetAttributeAtPath(dial).Set(value);
+            const RigExecRigPose released = evaluator.Evaluate(time);
+            CHECK(released.bakedParityMismatches == 0);
+            CHECK(_SameReadings(std::string(label) + ", released", dragged,
+                                released));
+            RigExecRigEvaluator fresh(stage, rigPath);
+            fresh.SetEvaluationMode(mode);
+            CHECK(fresh.Compile(nullptr));
+            const RigExecRigPose rebuilt = fresh.Evaluate(time);
+            CHECK(rebuilt.bakedParityMismatches == 0);
+            CHECK(_SameReadings(std::string(label) + ", fresh", dragged,
+                                rebuilt));
+        }
+
+        const UsdStageRefPtr stage = _TargetDragRig();
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(mode);
+        CHECK(evaluator.Compile(nullptr));
+        CHECK(evaluator.Evaluate(time).valid);
+        for (const float value : {0.25f, 0.4f, 1.4f, 1.5f, 0.25f}) {
+            char label[64];
+            std::snprintf(label, sizeof(label), "%s drag moved to %.9g",
+                          _ModeName(mode), double(value));
+            const size_t bakedBefore = evaluator.GetBakedGenerationCount();
+            evaluator.SetInteractiveOverrides(dragTo(value));
+            const RigExecRigPose moved = evaluator.Evaluate(time);
+            CHECK(moved.valid && moved.bakedParityMismatches == 0);
+            if (mode != RigExecEvaluationMode::Dynamic) {
+                CHECK(evaluator.GetBakedGenerationCount() > bakedBefore);
+            }
+            CHECK(_SameReadings(label, draggedTo[value], moved));
+        }
+    }
+}
+
+// The blink: a float channel authored at 0.2 and clamped to [0, 1], read
+// undeclared and at `final` by readout chains and, when \p lid, by a lid
+// control's avars (tx at the base, ty at `final`). \p authored false
+// leaves the channel without a value; \p clampEnabled false authors the
+// clamp disabled, so every revision passes through.
+static UsdStageRefPtr
+_BlinkRig(bool lid, bool authored = true, bool clampEnabled = true)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdAttribute blink =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Channels/Face"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("rigExec:blink"),
+                             SdfValueTypeNames->Float);
+    if (authored) {
+        blink.Set(0.2f);
+    }
+    const auto mover = [&](const std::string &path, const char *operation,
+                           const SdfPath &target) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/" + path),
+            TfToken("RigExecFloatMathMover"));
+        CHECK(prim.ApplyAPI(TfToken("RigExecMoverAPI")));
+        prim.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token)
+            .Set(TfToken(operation));
+        prim.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({target});
+        return prim;
+    };
+    const UsdPrim clamp = mover("ClampBlink", "clamp", blink.GetPath());
+    clamp.CreateAttribute(TfToken("inputs:min"), SdfValueTypeNames->Float)
+        .Set(0.0f);
+    clamp.CreateAttribute(TfToken("inputs:max"), SdfValueTypeNames->Float)
+        .Set(1.0f);
+    if (!clampEnabled) {
+        clamp.CreateAttribute(TfToken("inputs:enabled"),
+                              SdfValueTypeNames->Bool)
+            .Set(false);
+    }
+    const UsdPrim readouts = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Channels/Readouts"), TfToken("Scope"));
+    for (const char *name : {"base", "final"}) {
+        const UsdAttribute channel = readouts.CreateAttribute(
+            TfToken(std::string("rigExec:") + name),
+            SdfValueTypeNames->Float);
+        channel.Set(0.0f);
+        const UsdAttribute input =
+            mover(std::string("Readouts/") + name, "add", channel.GetPath())
+                .CreateAttribute(TfToken("inputs:value"),
+                                 SdfValueTypeNames->Float);
+        input.SetConnections({blink.GetPath()});
+        if (std::string(name) == "final") {
+            input.SetMetadata(TfToken("rigExecReadPhase"),
+                              std::string("final"));
+        }
+    }
+    if (lid) {
+        const UsdPrim control = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Controls/Lid"), TfToken("RigExecControl"));
+        control
+            .CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        control.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+            .SetConnections({blink.GetPath()});
+        const UsdAttribute ty = control.CreateAttribute(
+            TfToken("avars:ty"), SdfValueTypeNames->Double);
+        ty.SetConnections({blink.GetPath()});
+        ty.SetMetadata(TfToken("rigExecReadPhase"), std::string("final"));
+    }
+    return stage;
+}
+
+static float
+_BlinkReadout(const RigExecRigPose &pose, const char *name)
+{
+    const auto it = pose.movedProperties.find(SdfPath(
+        std::string("/Asset/Rig/Channels/Readouts.rigExec:") + name));
+    return it != pose.movedProperties.end() && it->second.IsHolding<float>()
+               ? it->second.UncheckedGet<float>()
+               : -1.0f;
+}
+
+// The blink, dragged: one drag in every evaluator against the stage with
+// the dragged value authored, bit for bit, with the readings the case
+// expects while dragged. Dragged to 1.4, the base readers read 1.4 and the
+// final readers 1.0; with the clamp disabled every revision passes
+// through, so both read 1.4; with no authored value the drag is still a
+// base, so the chain runs from it; and a drag that is not finite skips the
+// chain with the line an authored one prints, leaving every reader on the
+// dragged value. A held drag moved without being lifted reads at each step
+// what a drag placed straight at that value reads: 1.4 -> 1.5 leaves the
+// clamped final on 1.0 while the base readers move, and 1.5 -> 0.5 moves
+// both. A double drag on the float blink is the float base it narrows to.
+static void
+TestBlinkDragEqualsRelease()
+{
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath blink("/Asset/Rig/Channels/Face.rigExec:blink");
+    const SdfPath lid("/Asset/Rig/Controls/Lid");
+    const UsdTimeCode time(1.0);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    struct Case {
+        const char *what;
+        bool lid, authored, clampEnabled;
+        float drag;
+        float base, final;  // the readouts while dragged; NaN: unchecked
+    };
+    const Case cases[] = {
+        {"blink 1.4", true, true, true, 1.4f, 1.4f, 1.0f},
+        {"blink 1.4, clamp disabled", true, true, false, 1.4f, 1.4f, 1.4f},
+        {"blink 0.5, nothing authored", true, false, true, 0.5f, 0.5f, 0.5f},
+        // The readouts cannot add a NaN and pass through, keeping 0.
+        {"blink NaN", false, true, true, nan, 0.0f, 0.0f},
+    };
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked,
+          RigExecEvaluationMode::BakedWithParityCheck}) {
+        for (const Case &c : cases) {
+            const std::string label =
+                std::string(_ModeName(mode)) + " " + c.what;
+            const UsdStageRefPtr stage =
+                _BlinkRig(c.lid, c.authored, c.clampEnabled);
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            evaluator.SetEvaluationMode(mode);
+            CHECK(evaluator.Compile(nullptr));
+            CHECK(evaluator.GetSkippedOperations().empty());
+            const RigExecRigPose authored = evaluator.Evaluate(time);
+            const size_t bakedBefore = evaluator.GetBakedGenerationCount();
+            evaluator.SetInteractiveOverrides({RigExecValueOverride{
+                blink.GetPrimPath(), TfToken(), blink.GetNameToken(),
+                VtValue(c.drag)}});
+            const RigExecRigPose dragged = evaluator.Evaluate(time);
+            CHECK(dragged.valid && dragged.bakedParityMismatches == 0);
+            if (mode != RigExecEvaluationMode::Dynamic) {
+                // The program answered the drag, not a dynamic fallback.
+                CHECK(evaluator.GetBakedGenerationCount() > bakedBefore);
+            }
+            const bool read = _BlinkReadout(dragged, "base") == c.base &&
+                              _BlinkReadout(dragged, "final") == c.final;
+            if (!read) {
+                std::printf("  %s: base reads %.9g, final %.9g\n",
+                            label.c_str(),
+                            double(_BlinkReadout(dragged, "base")),
+                            double(_BlinkReadout(dragged, "final")));
+            }
+            CHECK(read);
+            const auto published = dragged.movedProperties.find(blink);
+            if (std::isfinite(c.drag)) {
+                CHECK(published != dragged.movedProperties.end() &&
+                      published->second == VtValue(c.final));
+            } else {
+                CHECK(published == dragged.movedProperties.end());
+                CHECK(std::count(dragged.diagnostics.begin(),
+                                 dragged.diagnostics.end(),
+                                 "property chain " + blink.GetString() +
+                                     ": authored base is not finite; chain "
+                                     "skipped") == 1);
+            }
+            if (c.lid) {
+                const auto frame = dragged.controlFrames.find(lid);
+                CHECK(frame != dragged.controlFrames.end() &&
+                      frame->second.points[0][0] == double(c.base) &&
+                      frame->second.points[0][1] == double(c.final));
+            }
+            CHECK(_SameReadings(label + ", held", dragged,
+                                evaluator.Evaluate(time)));
+            evaluator.ClearInteractiveOverrides();
+            CHECK(_SameReadings(label + ", lifted", authored,
+                                evaluator.Evaluate(time)));
+
+            stage->GetAttributeAtPath(blink).Set(c.drag);
+            const RigExecRigPose released = evaluator.Evaluate(time);
+            CHECK(released.bakedParityMismatches == 0);
+            CHECK(_SameReadings(label + ", released", dragged, released));
+            RigExecRigEvaluator fresh(stage, rigPath);
+            fresh.SetEvaluationMode(mode);
+            CHECK(fresh.Compile(nullptr));
+            CHECK(_SameReadings(label + ", fresh", dragged,
+                                fresh.Evaluate(time)));
+        }
+
+        // The authored, clamped blink with its lid, run once undragged and
+        // then dragged to \p value.
+        const auto draggedStraight = [&](const VtValue &value) {
+            const UsdStageRefPtr stage = _BlinkRig(true);
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            evaluator.SetEvaluationMode(mode);
+            CHECK(evaluator.Compile(nullptr));
+            CHECK(evaluator.Evaluate(time).valid);
+            const size_t bakedBefore = evaluator.GetBakedGenerationCount();
+            evaluator.SetInteractiveOverrides({RigExecValueOverride{
+                blink.GetPrimPath(), TfToken(), blink.GetNameToken(),
+                value}});
+            const RigExecRigPose pose = evaluator.Evaluate(time);
+            CHECK(pose.valid && pose.bakedParityMismatches == 0);
+            if (mode != RigExecEvaluationMode::Dynamic) {
+                CHECK(evaluator.GetBakedGenerationCount() > bakedBefore);
+            }
+            return pose;
+        };
+        {
+            const UsdStageRefPtr stage = _BlinkRig(true);
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            evaluator.SetEvaluationMode(mode);
+            CHECK(evaluator.Compile(nullptr));
+            CHECK(evaluator.Evaluate(time).valid);
+            const struct {
+                float drag, base, final;
+            } steps[] = {{1.4f, 1.4f, 1.0f}, {1.5f, 1.5f, 1.0f},
+                         {0.5f, 0.5f, 0.5f}};
+            for (const auto &step : steps) {
+                char label[64];
+                std::snprintf(label, sizeof(label), "%s blink moved to %.9g",
+                              _ModeName(mode), double(step.drag));
+                const size_t bakedBefore = evaluator.GetBakedGenerationCount();
+                evaluator.SetInteractiveOverrides({RigExecValueOverride{
+                    blink.GetPrimPath(), TfToken(), blink.GetNameToken(),
+                    VtValue(step.drag)}});
+                const RigExecRigPose moved = evaluator.Evaluate(time);
+                CHECK(moved.valid && moved.bakedParityMismatches == 0);
+                if (mode != RigExecEvaluationMode::Dynamic) {
+                    CHECK(evaluator.GetBakedGenerationCount() > bakedBefore);
+                }
+                const bool read =
+                    _BlinkReadout(moved, "base") == step.base &&
+                    _BlinkReadout(moved, "final") == step.final;
+                if (!read) {
+                    std::printf("  %s: base reads %.9g, final %.9g\n", label,
+                                double(_BlinkReadout(moved, "base")),
+                                double(_BlinkReadout(moved, "final")));
+                }
+                CHECK(read);
+                CHECK(_SameReadings(label, draggedStraight(VtValue(step.drag)),
+                                    moved));
+            }
+        }
+        CHECK(_SameReadings(std::string(_ModeName(mode)) +
+                                " blink dragged by a double",
+                            draggedStraight(VtValue(1.4f)),
+                            draggedStraight(VtValue(1.4))));
     }
 }
 
@@ -5282,6 +5793,8 @@ main(int argc, char **argv)
     TestConnectionReadPhaseOnSolverInput(examplesDir);
     TestDefaultReadPhaseAndHeadWins();
     TestPhasedReadDragRules();
+    TestTargetDragEqualsRelease();
+    TestBlinkDragEqualsRelease();
     TestConnectionReadPhaseOnConstraintAndAvar(examplesDir);
     TestUndeclaredSkipsCompileCleanly();
     TestConstraintRewireIsStructural(examplesDir);

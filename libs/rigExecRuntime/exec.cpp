@@ -91,19 +91,10 @@ RigExecRuntimeReader::SetAvar(const std::string &path, double value,
         if (error) *error = "expected a finite TRS avar on a compiled pose slot: " + path;
         return false;
     }
-    // A drag on a property-chain target follows the target-drag rule
-    // (RrTargetDragAccepted), which refuses it until what such a drag
-    // means is settled; the USD evaluators accept it. Any other avar takes
-    // the override as an interactive override: every read whose walk
-    // passes it reads it, and a phased reader whose consumer or hop it is
-    // stands aside, as in the USD evaluators.
-    if (!RrTargetDragAccepted(&_program, found->second)) {
-        if (error) {
-            *error = "cannot override a captured property-mover output: " +
-                     path;
-        }
-        return false;
-    }
+    // An interactive override, as in the USD evaluators: every read whose
+    // walk passes the avar reads it, and a phased reader whose consumer or
+    // hop it is stands aside. On an avar math movers revise it is the
+    // chain's base (RrChainBase), and the chain's result answers there.
     _avarOverrides[found->second] = value;
     return true;
 }

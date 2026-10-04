@@ -150,8 +150,9 @@ struct RigExecFrameInputs {
     /// -- and a chain target read as pose content agree. Outputs, not
     /// inputs: excluded from the digest (a pure function of digest-covered
     /// values, like the revision packets). Empty for a rig with no chains,
-    /// and empty for a chain that skipped (no authored base), exactly as on
-    /// the live path.
+    /// and empty for a chain that skipped (no base: nothing authored and no
+    /// drag on the target, or a non-finite one), exactly as on the live
+    /// path.
     std::map<SdfPath, VtValue> chainResults;
     /// The standing overrides the vector was sampled under, verbatim from
     /// the caller's list. The worker replicates override placement from
@@ -614,9 +615,10 @@ bool RigExecChainSampleBindingsStillCurrent(
 /// Evaluates every bound chain at \p time into caller-owned state: the
 /// property-chain prologue for one sampling call, run on the UI thread.
 ///
-/// \p resolved carries the job's pre-chain overrides in -- nothing else, so
-/// what it holds on entry is what the job overrides, which decides the
-/// phased readers as on the live path -- and every chain output out,
+/// \p resolved carries the job's overrides in -- nothing else, so what it
+/// holds on entry is what the job overrides, which decides each dragged
+/// target's base and the phased readers as on the live path, and is the
+/// only placement the overrides get -- and every chain output out,
 /// published per target as each chain runs so a later chain reads the
 /// revised value; \p results, when given, receives the final value per
 /// target and each published phased reader's value; \p diagnostics, when

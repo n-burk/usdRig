@@ -1031,13 +1031,14 @@ TestCommitOfPreviewedPoseSkipsEvaluation()
     registry.Deactivate();
 }
 
-// SETTLE, declined. A drag on a property a chain revises stands in for the
-// chain's final value, while the committed value is the base the chain
-// revises: the same number is a different pose, so the commit evaluates.
+// SETTLE, on a property a chain revises. A drag there is the chain's base,
+// as the committed value is, so the previewed pose is already the stage's
+// answer: the commit evaluates nothing, and the kept generation matches a
+// fresh evaluation of the edited stage.
 void
-TestCommitOfAChainTargetEvaluates()
+TestCommitOfAChainTargetSettles()
 {
-    std::printf("progress: TestCommitOfAChainTargetEvaluates\n");
+    std::printf("progress: TestCommitOfAChainTargetSettles\n");
     std::fflush(stdout);
     SetEnv("RIGEXEC_FRAME_CACHE", "on");
     UsdStageRefPtr stage = MakeTinyRig();
@@ -1067,19 +1068,34 @@ TestCommitOfAChainTargetEvaluates()
     const size_t pulls = registry.GetSessionEvaluationCount(rig);
     CHECK(registry.EndPreview(/* publish = */ false));
     tx.Set(sample, UsdTimeCode(2.0));
-    CHECK(registry.GetSessionEvaluationCount(rig) == pulls + 1);
-    const _GenerationGeometry committed =
-        _CaptureGeometry(registry.GetStore()->Get());
-    CHECK(!_SameGeometry(previewed, committed));
+    CHECK(registry.GetSessionEvaluationCount(rig) == pulls);
+    CHECK(_SameGeometry(previewed,
+                        _CaptureGeometry(registry.GetStore()->Get())));
     {
         RigExecImagingBridge fresh(stage, rig);
         CHECK(fresh.Compile());
         CHECK(fresh.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
-        CHECK(_SameGeometry(committed,
+        CHECK(_SameGeometry(previewed,
                             _CaptureGeometry(fresh.GetStore()->Get())));
     }
     registry.ClearFrameCache(rig);
     registry.Deactivate();
+    // The chain revised the drag: the previewed pose is the doubled sample
+    // authored on a rig without the chain.
+    tx.Set(2.0 * sample, UsdTimeCode(2.0));
+    stage->RemovePrim(gain.GetPath());
+    RigExecImagingBridge unrevised(stage, rig);
+    CHECK(unrevised.Compile());
+    CHECK(unrevised.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+    // The points only: the chain's own result is a moved value only the
+    // chained rig publishes.
+    _GenerationGeometry previewedPoints = previewed;
+    _GenerationGeometry unrevisedPoints =
+        _CaptureGeometry(unrevised.GetStore()->Get());
+    previewedPoints.movedFloats.clear();
+    unrevisedPoints.movedFloats.clear();
+    CHECK(!previewedPoints.points.empty());
+    CHECK(_SameGeometry(previewedPoints, unrevisedPoints));
 }
 
 // PRODUCTION. The C-API trigger path -- no injected runner -- enqueues real
@@ -4162,7 +4178,7 @@ main(int argc, char **argv)
     TestWarmFrameStreaks();
     TestCommitDuringPreviewExcludesPlayhead();
     TestCommitOfPreviewedPoseSkipsEvaluation();
-    TestCommitOfAChainTargetEvaluates();
+    TestCommitOfAChainTargetSettles();
     TestProductionTriggerPathEnqueuesAndFences();
     TestWarmedCompletionServesWithoutEvaluating();
     TestRefusalRigMemoizesUiThreadResults();

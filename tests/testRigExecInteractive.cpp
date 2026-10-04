@@ -611,12 +611,13 @@ static void TestInteractiveOverrides()
     CHECK(pointX(pose, &x) && std::abs(x - 1.0f) < 1e-6f);
     CHECK(exported() == authored);
 
-    // 4. An override on the property a chain WRITES outranks the chain: the
-    //    held value is what the generation carries, not 21 and not 51.
+    // 4. An override on the property a chain WRITES is the chain's base: the
+    //    chain revises the held value as it would the same value authored,
+    //    so the generation carries (5*10)+1 = 51, not 21 and not 5.
     evaluator.SetInteractiveOverrides({RigExecValueOverride{
         dial.GetPrimPath(), TfToken(), dial.GetNameToken(), VtValue(5.0f)}});
     pose = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(dialValue(pose, &value) && std::abs(value - 5.0f) < 1e-6f);
+    CHECK(dialValue(pose, &value) && std::abs(value - 51.0f) < 1e-6f);
     CHECK(exported() == authored);
 
     // 5. Two overrides at once, on both kinds of consumer.

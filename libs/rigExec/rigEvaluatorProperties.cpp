@@ -295,8 +295,7 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 bound.phased.push_back(
                     RigExecPropertyChainBindings::Chain::Phased{
                         connection.consumer, connection.consumerType,
-                        connection.applied, connection.hops,
-                        connection.final});
+                        connection.applied, connection.hops});
             }
         }
         return bound;
@@ -402,6 +401,23 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 path.GetPrimPath(), TfToken(), path.GetNameToken(), value});
         }
     };
+    // A chain's result at its target. A drag on the target was placed for
+    // exec before the chains as the base the result was computed from, and
+    // the result takes its place there, as it does in the resolved inputs.
+    const auto publishTarget = [&](const SdfPath &path, const VtValue &value) {
+        if (overrides && overridden.count(path)) {
+            const SdfPath prim = path.GetPrimPath();
+            const TfToken &name = path.GetNameToken();
+            overrides->erase(
+                std::remove_if(overrides->begin(), overrides->end(),
+                               [&](const RigExecValueOverride &o) {
+                                   return o.prim == prim &&
+                                          o.attribute == name;
+                               }),
+                overrides->end());
+        }
+        publish(path, value);
+    };
 
     for (RigExecPropertyChainBindings::Chain &chain :
              _propertyChainBindings->chains) {
@@ -425,8 +441,9 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
             dirty = bindings.chains[chain.upstream[k]].changedThisRun;
         }
         // What the chain publishes also turns on overrides its inputs do
-        // not reach: one on the target, which stands for the final value,
-        // and one on a phased reader's hops, which stands it aside.
+        // not reach: one on the target, which is its base, and one on a
+        // phased reader's hops, which stands it aside. Lifting one on the
+        // target reruns the chain from the authored base.
         if (!dirty) {
             dirty = overrideMoved.count(target) != 0;
             for (size_t k = 0; !dirty && k < chain.phased.size(); ++k) {
@@ -444,7 +461,7 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 diag(line);
             }
             if (chain.published) {
-                publish(target, chain.lastValue);
+                publishTarget(target, chain.lastValue);
             }
             for (size_t k = 0; k < chain.lastPhased.size(); ++k) {
                 if (!chain.lastPhased[k].IsEmpty()) {
@@ -455,9 +472,17 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         }
         const size_t diagnosticsBefore =
             diagnostics ? diagnostics->size() : 0;
-        _resolvedInputs.ClearProperty(target);
-        // What each phased reader publishes this run, empty where it stands
-        // aside; a reader standing aside keeps its override in place.
+        // A drag on the target is this run's base. The target is not
+        // cleared: until the chain publishes, the drag stays where it was
+        // placed, so a skipped chain leaves every reader on the held value,
+        // as a skipped chain leaves them on that value authored.
+        const auto dragged = overridden.find(target);
+        const VtValue *const dragBase =
+            dragged != overridden.end() ? &dragged->second : nullptr;
+        // What the target and each phased reader publish this run, empty
+        // where nothing is; a reader standing aside keeps its override in
+        // place.
+        VtValue targetPublished;
         std::vector<VtValue> phasedPublished(chain.phased.size());
         for (const auto &phased : chain.phased) {
             if (!readerOverridden(phased)) {
@@ -466,12 +491,13 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         }
         struct _Remember {
             RigExecPropertyChainBindings::Chain &chain;
-            RigExecResolvedInputs &resolved;
+            const VtValue &targetPublished;
             const std::vector<VtValue> &phasedPublished;
             std::vector<std::string> *diagnostics;
             size_t before;
             ~_Remember() {
-                const VtValue *now = resolved.Find(chain.targetPath);
+                const VtValue *now =
+                    targetPublished.IsEmpty() ? nullptr : &targetPublished;
                 const bool published = now != nullptr;
                 // A phased consumer can move while the final value does not
                 // (a clamp at the end of the chain), and a chain downstream
@@ -497,7 +523,7 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 }
                 chain.cached = true;
             }
-        } remember{chain, _resolvedInputs, phasedPublished, diagnostics,
+        } remember{chain, targetPublished, phasedPublished, diagnostics,
                    diagnosticsBefore};
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "PropertyChain " + target.GetString(), "property");
@@ -507,14 +533,27 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         // iteration reads the mover's own authored state and applies it to
         // the preceding revision -- the base being the target's AUTHORED
         // value, exactly as a point chain's base is the target's authored
-        // points.
+        // points, or the value a drag holds on the target, which stands in
+        // for it. A drag of another value type (float and double convert)
+        // is no base, and the chain runs as though none stood.
         auto runChain = [&](auto value, auto apply) {
             using ValueT = decltype(value);
-            if (!chain.targetQuery.Get(&value, time)) {
+            bool haveBase = false;
+            if (dragBase) {
+                const VtValue held =
+                    RigExecPhasedConsumerValue(*dragBase, valueType);
+                if (held.IsHolding<ValueT>()) {
+                    value = held.UncheckedGet<ValueT>();
+                    haveBase = true;
+                }
+            }
+            if (!haveBase && !chain.targetQuery.Get(&value, time)) {
                 diag("property chain " + target.GetString() +
                      ": target has no authored value; chain skipped");
                 return false;
             }
+            // The same line for a held base as for an authored one: it is
+            // what the generation says once the drag is authored.
             if (!_IsFinite(value)) {
                 diag("property chain " + target.GetString() +
                      ": authored base is not finite; chain skipped");
@@ -588,16 +627,9 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
             }
             // Publish immediately, not after every chain has run. Dependency
             // ordering guarantees that any later chain which consumes this
-            // property reads the revised value. An interactive override on
-            // the target replaces that final value for every reader of it,
-            // here as after the chains; the revisions still run from the
-            // authored base, whose history the base and checkpoint readers
-            // read.
-            const auto targetOverride = overridden.find(target);
-            const VtValue finalValue = targetOverride != overridden.end()
-                                           ? targetOverride->second
-                                           : VtValue(value);
-            publish(target, finalValue);
+            // property reads the revised value.
+            targetPublished = VtValue(value);
+            publishTarget(target, targetPublished);
             if (!chain.phased.empty()) {
                 history.push_back(value);
                 for (size_t k = 0; k < chain.phased.size(); ++k) {
@@ -605,13 +637,10 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                     if (readerOverridden(phased)) {
                         continue;
                     }
-                    const VtValue read =
-                        phased.final
-                            ? finalValue
-                            : VtValue(history[std::min(phased.applied,
-                                                       revisions.size())]);
-                    phasedPublished[k] =
-                        RigExecPhasedConsumerValue(read, phased.consumerType);
+                    phasedPublished[k] = RigExecPhasedConsumerValue(
+                        VtValue(history[std::min(phased.applied,
+                                                 revisions.size())]),
+                        phased.consumerType);
                     publish(phased.consumer, phasedPublished[k]);
                 }
             }

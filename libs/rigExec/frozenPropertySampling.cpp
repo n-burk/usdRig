@@ -482,9 +482,9 @@ RigExecEvaluateChainsForTime(
     };
 
     // The job's overrides, as they stand before any chain publishes: one on
-    // a target is the chain's final value for every reader of it, and a
-    // phased reader with one on a hop stands aside for the overlay walk --
-    // the live path's rules (_EvaluatePropertyChains).
+    // a target is the chain's base, and a phased reader with one on a hop
+    // stands aside for the overlay walk -- the live path's rules
+    // (_EvaluatePropertyChains).
     std::vector<std::vector<char>> standAside(bindings.chains.size());
     std::vector<VtValue> targetOverrides(bindings.chains.size());
     for (size_t c = 0; c < bindings.chains.size(); ++c) {
@@ -511,7 +511,8 @@ RigExecEvaluateChainsForTime(
                  ": target attribute disappeared; chain skipped");
             continue;
         }
-        resolved->ClearProperty(target);
+        // The target is not cleared: a drag on it stays placed until the
+        // chain publishes, as on the live path.
         for (size_t k = 0; k < chain.phased.size(); ++k) {
             if (!standAside[c][k]) {
                 resolved->ClearProperty(chain.phased[k].consumer);
@@ -522,10 +523,19 @@ RigExecEvaluateChainsForTime(
         // One shared revision loop over the three value domains, as on the
         // live path: each iteration reads the mover's own authored state
         // and applies it to the preceding revision, from the target's
-        // AUTHORED base value.
+        // AUTHORED base value or the drag standing in for it.
         auto runChain = [&](auto value, auto apply) {
             using ValueT = decltype(value);
-            if (!chain.targetQuery.Get(&value, time)) {
+            bool haveBase = false;
+            if (!targetOverrides[c].IsEmpty()) {
+                const VtValue held =
+                    RigExecPhasedConsumerValue(targetOverrides[c], valueType);
+                if (held.IsHolding<ValueT>()) {
+                    value = held.UncheckedGet<ValueT>();
+                    haveBase = true;
+                }
+            }
+            if (!haveBase && !chain.targetQuery.Get(&value, time)) {
                 diag("property chain " + target.GetString() +
                      ": target has no authored value; chain skipped");
                 return true;
@@ -591,9 +601,7 @@ RigExecEvaluateChainsForTime(
                 }
                 value = next;
             }
-            const VtValue finalValue = targetOverrides[c].IsEmpty()
-                                           ? VtValue(value)
-                                           : targetOverrides[c];
+            const VtValue finalValue(value);
             if (results) {
                 (*results)[target] = finalValue;
             }
@@ -606,10 +614,8 @@ RigExecEvaluateChainsForTime(
                         continue;
                     }
                     const VtValue read = RigExecPhasedConsumerValue(
-                        phased.final
-                            ? finalValue
-                            : VtValue(history[std::min(
-                                  phased.applied, chain.revisions.size())]),
+                        VtValue(history[std::min(phased.applied,
+                                                 chain.revisions.size())]),
                         phased.consumerType);
                     if (results) {
                         (*results)[phased.consumer] = read;

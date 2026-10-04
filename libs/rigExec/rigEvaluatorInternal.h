@@ -324,8 +324,7 @@ void
 _ApplyInteractiveOverrides(
     const std::vector<RigExecValueOverride> &interactive,
     std::vector<RigExecValueOverride> *overrides,
-    RigExecResolvedInputs *resolved,
-    std::map<SdfPath, VtValue> *publishedProperties = nullptr);
+    RigExecResolvedInputs *resolved);
 
 } // namespace evaluatorDetail
 

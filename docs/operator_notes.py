@@ -2649,6 +2649,12 @@ and it drives nothing, the blendshape does all the work.""",
             "the rig root, whatever operator it belongs to; see "
             "[Connected inputs](../concepts/how-operators-fire.md#connected-inputs) "
             "and example 16.",
+            # rigEvaluatorProperties.cpp, _EvaluatePropertyChains: a drag on
+            # the target is the chain's base, in every evaluator.
+            "Dragging the revised property itself edits its base: the movers "
+            "revise the dragged value as they would the authored one, so a "
+            "channel clamped to [0, 1] and dragged to 1.4 shows 1.0, during "
+            "the drag and after it is released.",
         ],
         "see_also": [
             ("blend_input", "Blend Input"),
