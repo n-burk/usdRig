@@ -62,6 +62,159 @@ Precedes(const std::vector<rigExec::RigExecOpTraceEntry> &trace, size_t a,
     return seqA != 0 && seqB != 0 && seqA < seqB;
 }
 
+/// The 1-based completion sequence of program step \p step in \p trace, 0
+/// when it did not run.
+inline uint32_t
+TraceSeqOf(const std::vector<rigExec::RigExecOpTraceEntry> &trace,
+           size_t step)
+{
+    for (const rigExec::RigExecOpTraceEntry &entry : trace) {
+        if (entry.step == step) {
+            return entry.seq;
+        }
+    }
+    return 0;
+}
+
+/// The program indices of the graph nodes whose kind and label contain the
+/// given substrings, in program order; an empty substring matches everything.
+inline std::vector<size_t>
+FindOpGraphSteps(const std::vector<rigExec::RigExecOpGraphNode> &graph,
+                 const std::string &kind, const std::string &label = "")
+{
+    std::vector<size_t> out;
+    for (const rigExec::RigExecOpGraphNode &node : graph) {
+        if (node.kind.find(kind) != std::string::npos &&
+            node.label.find(label) != std::string::npos) {
+            out.push_back(node.step);
+        }
+    }
+    return out;
+}
+
+/// Every step reachable from \p seeds along succ edges, the seeds included.
+inline std::vector<char>
+OpGraphForwardCone(const std::vector<rigExec::RigExecOpGraphNode> &graph,
+                   const std::vector<size_t> &seeds)
+{
+    std::vector<char> reached(graph.size(), 0);
+    std::vector<size_t> stack;
+    for (const size_t seed : seeds) {
+        if (seed < graph.size() && !reached[seed]) {
+            reached[seed] = 1;
+            stack.push_back(seed);
+        }
+    }
+    while (!stack.empty()) {
+        const size_t index = stack.back();
+        stack.pop_back();
+        for (const size_t succ : graph[index].succs) {
+            if (succ < graph.size() && !reached[succ]) {
+                reached[succ] = 1;
+                stack.push_back(succ);
+            }
+        }
+    }
+    return reached;
+}
+
+/// Every step that reaches one of \p seeds along succ edges, the seeds
+/// included: the steps a seed waits on.
+inline std::vector<char>
+OpGraphBackwardCone(const std::vector<rigExec::RigExecOpGraphNode> &graph,
+                    const std::vector<size_t> &seeds)
+{
+    std::vector<char> reached(graph.size(), 0);
+    std::vector<size_t> stack;
+    for (const size_t seed : seeds) {
+        if (seed < graph.size() && !reached[seed]) {
+            reached[seed] = 1;
+            stack.push_back(seed);
+        }
+    }
+    while (!stack.empty()) {
+        const size_t index = stack.back();
+        stack.pop_back();
+        for (const size_t pred : graph[index].preds) {
+            if (pred < graph.size() && !reached[pred]) {
+                reached[pred] = 1;
+                stack.push_back(pred);
+            }
+        }
+    }
+    return reached;
+}
+
+/// The cluster-grain form of OpGraphForwardCone: every step a cluster
+/// executor makes wait on the seeds, the seeds included. A cluster runs its
+/// members back to back in program order once all of its predecessors are
+/// done, so
+///   - a cluster entered through an edge from another cluster waits as a
+///     whole: every member shares its readiness;
+///   - within a seed's own cluster only the members after the seed wait;
+///     earlier members share the seed's readiness and run before it.
+/// Steps flagged in \p sources (RigExecBakedStep::isSource, one entry per
+/// step, or empty for none) run in the source pass ahead of every cluster
+/// and never wait. Unclustered steps (-1) stand alone.
+inline std::vector<char>
+OpGraphClusterForwardCone(const std::vector<rigExec::RigExecOpGraphNode> &graph,
+                          const std::vector<size_t> &seeds,
+                          const std::vector<char> &sources = {})
+{
+    // Cluster ids are non-negative; an unclustered step gets its own key.
+    const auto key = [&graph](size_t step) -> long long {
+        return graph[step].cluster >= 0 ? graph[step].cluster
+                                        : -1 - static_cast<long long>(step);
+    };
+    const auto isSource = [&sources](size_t step) {
+        return step < sources.size() && sources[step];
+    };
+    // Members in program order, which is the order a cluster runs them.
+    std::map<long long, std::vector<size_t>> members;
+    std::vector<size_t> position(graph.size(), 0);
+    for (size_t index = 0; index < graph.size(); ++index) {
+        std::vector<size_t> &list = members[key(index)];
+        position[index] = list.size();
+        list.push_back(index);
+    }
+    // Per cluster, the first member position already marked as waiting.
+    std::map<long long, size_t> waitingFrom;
+    std::vector<char> reached(graph.size(), 0);
+    std::vector<size_t> stack;
+    const auto reach = [&](long long cluster, size_t from) {
+        const std::vector<size_t> &list = members[cluster];
+        const auto it = waitingFrom.find(cluster);
+        const size_t end = it == waitingFrom.end() ? list.size() : it->second;
+        if (from >= end) {
+            return;
+        }
+        waitingFrom[cluster] = from;
+        for (size_t p = from; p < end; ++p) {
+            if (!isSource(list[p])) {
+                reached[list[p]] = 1;
+                stack.push_back(list[p]);
+            }
+        }
+    };
+    for (const size_t seed : seeds) {
+        if (seed < graph.size() && !isSource(seed)) {
+            reach(key(seed), position[seed]);
+        }
+    }
+    while (!stack.empty()) {
+        const size_t index = stack.back();
+        stack.pop_back();
+        for (const size_t succ : graph[index].succs) {
+            // A successor in the same cluster follows `index` in member
+            // order and is marked already.
+            if (succ < graph.size() && key(succ) != key(index)) {
+                reach(key(succ), 0);
+            }
+        }
+    }
+    return reached;
+}
+
 /// Every way \p trace fails to be a valid completion order over \p graph:
 /// a step listed twice or outside the graph, sequence numbers that are not
 /// exactly 1..N, and an executed predecessor that did not finish before its

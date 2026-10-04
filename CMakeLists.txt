@@ -834,6 +834,19 @@ foreach(_schedule serial parallel)
         PROPERTY ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1")
 endforeach()
 
+# The one-loop acceptance criteria on their fixtures, under both executors.
+add_executable(testRigExecOneLoopAcceptance tests/testRigExecOneLoopAcceptance.cpp)
+target_link_libraries(testRigExecOneLoopAcceptance PRIVATE rigExec)
+target_compile_definitions(testRigExecOneLoopAcceptance PRIVATE ${_rigexec_schema_resource_define})
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecOneLoopAcceptance_${_schedule}
+        COMMAND testRigExecOneLoopAcceptance "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+    set_tests_properties(testRigExecOneLoopAcceptance_${_schedule} PROPERTIES
+        ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+    set_property(TEST testRigExecOneLoopAcceptance_${_schedule} APPEND
+        PROPERTY ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=1")
+endforeach()
+
 add_executable(testRigExecSolverBake tests/testRigExecSolverBake.cpp)
 target_link_libraries(testRigExecSolverBake PRIVATE rigExec)
 target_compile_definitions(testRigExecSolverBake
