@@ -1031,6 +1031,56 @@ TestCommitOfPreviewedPoseSkipsEvaluation()
     registry.Deactivate();
 }
 
+// SETTLE, declined. A drag on a property a chain revises stands in for the
+// chain's final value, while the committed value is the base the chain
+// revises: the same number is a different pose, so the commit evaluates.
+void
+TestCommitOfAChainTargetEvaluates()
+{
+    std::printf("progress: TestCommitOfAChainTargetEvaluates\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    UsdStageRefPtr stage = MakeTinyRig();
+    const UsdPrim gain = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/TxGain"), TfToken("RigExecFloatMathMover"));
+    gain.ApplyAPI(TfToken("RigExecMoverAPI"));
+    gain.GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Rig/AlongX.avars:tx")});
+    gain.CreateAttribute(TfToken("rigExec:operation"), SdfValueTypeNames->Token)
+        .Set(TfToken("multiply"));
+    gain.CreateAttribute(TfToken("inputs:defaultWeight"),
+                         SdfValueTypeNames->Float).Set(1.0f);
+    gain.CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float)
+        .Set(2.0f);
+    const SdfPath rig("/Asset/Rig");
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rig, UsdTimeCode(2.0), &errors));
+    UsdAttribute tx =
+        stage->GetAttributeAtPath(SdfPath("/Asset/Rig/AlongX.avars:tx"));
+
+    CHECK(registry.BeginPreview("/Asset/Rig/AlongX.avars:tx") == 1);
+    const double sample = 11.0;
+    CHECK(registry.UpdatePreview(&sample, 1));
+    const _GenerationGeometry previewed =
+        _CaptureGeometry(registry.GetStore()->Get());
+    const size_t pulls = registry.GetSessionEvaluationCount(rig);
+    CHECK(registry.EndPreview(/* publish = */ false));
+    tx.Set(sample, UsdTimeCode(2.0));
+    CHECK(registry.GetSessionEvaluationCount(rig) == pulls + 1);
+    const _GenerationGeometry committed =
+        _CaptureGeometry(registry.GetStore()->Get());
+    CHECK(!_SameGeometry(previewed, committed));
+    {
+        RigExecImagingBridge fresh(stage, rig);
+        CHECK(fresh.Compile());
+        CHECK(fresh.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+        CHECK(_SameGeometry(committed,
+                            _CaptureGeometry(fresh.GetStore()->Get())));
+    }
+    registry.ClearFrameCache(rig);
+    registry.Deactivate();
+}
 
 // PRODUCTION. The C-API trigger path -- no injected runner -- enqueues real
 // jobs with sampled vectors through the production runner, which executes
@@ -4112,6 +4162,7 @@ main(int argc, char **argv)
     TestWarmFrameStreaks();
     TestCommitDuringPreviewExcludesPlayhead();
     TestCommitOfPreviewedPoseSkipsEvaluation();
+    TestCommitOfAChainTargetEvaluates();
     TestProductionTriggerPathEnqueuesAndFences();
     TestWarmedCompletionServesWithoutEvaluating();
     TestRefusalRigMemoizesUiThreadResults();

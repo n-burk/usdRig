@@ -523,6 +523,13 @@ public:
         return _phasedConnections;
     }
 
+    /// Whether the last compile has a property chain revising \p attribute.
+    /// An override on such a property replaces the chain's final value,
+    /// while an authored value is the base the chain revises.
+    bool IsPropertyChainTarget(const SdfPath &attribute) const {
+        return _propertyChains.count(attribute) > 0;
+    }
+
     /// Operations the last compile set aside -- operation prim -> the error
     /// that disqualified it. A broken operation (a mover whose target is
     /// not on this stage, a solver naming a prim that is not a joint, ...)

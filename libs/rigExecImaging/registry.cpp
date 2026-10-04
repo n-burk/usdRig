@@ -3378,12 +3378,21 @@ RigExecImagingRegistry::_NoticeSettlesPreview(
         }
     }
     // And the stage now answers every withdrawn value exactly, including
-    // the ones this notice did not touch.
+    // the ones this notice did not touch -- on attributes whose authored
+    // value is what the rig reads. A connection overrules an authored
+    // value, and a property chain revises it, while the override stood in
+    // for the connection's answer or the chain's final value.
+    if (!session.bridge) {
+        return false;
+    }
+    const RigExecRigEvaluator &evaluator = session.bridge->GetEvaluator();
     for (const RigExecValueOverride &entry : session.settleOverrides) {
         const UsdAttribute attribute = _stage->GetAttributeAtPath(
             entry.prim.AppendProperty(entry.attribute));
         VtValue authored;
-        if (!attribute || !attribute.Get(&authored, _lastTime) ||
+        if (!attribute || attribute.HasAuthoredConnections() ||
+            evaluator.IsPropertyChainTarget(attribute.GetPath()) ||
+            !attribute.Get(&authored, _lastTime) ||
             authored != entry.value) {
             return false;
         }
