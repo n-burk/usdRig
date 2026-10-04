@@ -175,6 +175,7 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
         Add(solver.minLengthRatio, RigExecWireInput::Tag::Double);
         Add(solver.twistTurns, RigExecWireInput::Tag::Double);
         Add(solver.ribbonSampleCount, RigExecWireInput::Tag::Int);
+        Add(solver.ikSpace, RigExecWireInput::Tag::Matrix4d);
     }
     // After every solver, and only for one with limb options, so a rig
     // without them keeps every uid it had.

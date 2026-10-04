@@ -2922,18 +2922,86 @@ RrGeoStorePacket(const RrProgram *program, const RrWeightPacket &packet)
     return out;
 }
 
-RrGeoWeightPacket
-RrGeoWirePacket(const RrProgram *program,
-                const RigExecWireWeightPacket &packet)
+// The cross-check (RrProgram::crossCheck) of a computed current-phase
+// packet against the frame record's: every field bit for bit, the token
+// fields as text. False with the text naming the first field that
+// differs.
+bool
+RrGeoCrossCheckPhasePacket(const RrProgram *program,
+                           const RigExecWireFrameInputs *record,
+                           size_t chain, size_t revision,
+                           const RrGeoWeightPacket &computed,
+                           RrStepOutput *output, std::string *error)
 {
-    RrGeoWeightPacket out;
-    out.representation = program->TextOrEmpty(packet.representation);
-    out.rangePolicy = program->TextOrEmpty(packet.rangePolicy);
-    out.values = packet.values;
-    out.indices.assign(packet.indices.begin(), packet.indices.end());
-    out.defaultWeight = packet.defaultWeight;
-    out.valid = packet.valid;
-    return out;
+    const std::string field = "revisionPhasePackets[" +
+                              std::to_string(chain) + "][" +
+                              std::to_string(revision) + "]";
+    const auto fail = [error](const std::string &why) {
+        if (error) {
+            *error = why;
+        }
+        return false;
+    };
+    if (!record || chain >= record->revisionPhasePackets.size() ||
+        revision >= record->revisionPhasePackets[chain].size()) {
+        return fail("cross-check: the frame record carries no " + field);
+    }
+    const RigExecWireWeightPacket &recorded =
+        record->revisionPhasePackets[chain][revision];
+    const std::string representation =
+        program->TextOrEmpty(recorded.representation);
+    if (computed.representation != representation) {
+        return fail(RrCrossCheckMismatch(field + ".representation",
+                                         computed.representation,
+                                         representation));
+    }
+    const std::string rangePolicy =
+        program->TextOrEmpty(recorded.rangePolicy);
+    if (computed.rangePolicy != rangePolicy) {
+        return fail(RrCrossCheckMismatch(field + ".rangePolicy",
+                                         computed.rangePolicy, rangePolicy));
+    }
+    if (computed.values.size() != recorded.values.size()) {
+        return fail("cross-check mismatch at " + field +
+                    ".values: computed " +
+                    std::to_string(computed.values.size()) +
+                    " value(s), recorded " +
+                    std::to_string(recorded.values.size()));
+    }
+    for (size_t i = 0; i < computed.values.size(); ++i) {
+        if (!RrSameFloatBits(computed.values[i], recorded.values[i])) {
+            return fail(RrCrossCheckMismatch(
+                field + ".values[" + std::to_string(i) + "]",
+                computed.values[i], recorded.values[i]));
+        }
+    }
+    if (computed.indices.size() != recorded.indices.size()) {
+        return fail("cross-check mismatch at " + field +
+                    ".indices: computed " +
+                    std::to_string(computed.indices.size()) +
+                    " index(es), recorded " +
+                    std::to_string(recorded.indices.size()));
+    }
+    for (size_t i = 0; i < computed.indices.size(); ++i) {
+        if (int64_t(computed.indices[i]) != int64_t(recorded.indices[i])) {
+            return fail("cross-check mismatch at " + field + ".indices[" +
+                        std::to_string(i) + "]: computed " +
+                        std::to_string(computed.indices[i]) +
+                        ", recorded " + std::to_string(recorded.indices[i]));
+        }
+    }
+    if (!RrSameFloatBits(computed.defaultWeight, recorded.defaultWeight)) {
+        return fail(RrCrossCheckMismatch(field + ".defaultWeight",
+                                         computed.defaultWeight,
+                                         recorded.defaultWeight));
+    }
+    if (computed.valid != recorded.valid) {
+        return fail("cross-check mismatch at " + field + ".valid: computed " +
+                    (computed.valid ? "true" : "false") + ", recorded " +
+                    (recorded.valid ? "true" : "false"));
+    }
+    ++output->crossChecked[RrCrossCheckPhasePacket];
+    return true;
 }
 
 std::shared_ptr<const RrGeoSkinTopology>
@@ -5123,6 +5191,14 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
     in.derived = true;
     in.diagnostics = &output.diagnostics;
     RrGeoMoverParameters parameters = RrGeoAssembleRevision(in);
+    if (program->crossCheck &&
+        !RrCrossCheckRevisionReads(program, record, chainIndex, derivedIndex,
+                                   true, &output, error)) {
+        if (error) {
+            *error = RrGeoStepLabel(program, step) + ": " + *error;
+        }
+        return false;
+    }
     const RrGeoMoverStatus status = RrGeoStatusForParameters(
         parameters, program->TextOrEmpty(wire.moverPath));
     output.counters.revisionsBuilt = 1;
@@ -5282,17 +5358,51 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
     const int id = (*program->steps)[step].object;
     RrStepOutput &output = store.stepOutputs[step];
     const bool skin = wire.op == uint8_t(RrGeoOpSkin);
-    if (wire.weightCurrentPhase && wire.weightObject >= 0 &&
-        record && chainIndex < record->revisionPhasePackets.size() &&
-        revisionIndex <
-            record->revisionPhasePackets[chainIndex].size()) {
-        // The current-phase field the bake measured; a packet that came
-        // back invalid failed its resolve, which the baked step reports
-        // with the oracle's own words -- words the wire does not carry,
-        // so a failing resolve replays its packet but not its line.
-        rev.currentPhasePacket = RrGeoWirePacket(
-            program,
-            record->revisionPhasePackets[chainIndex][revisionIndex]);
+    if (wire.weightCurrentPhase && wire.weightObject >= 0) {
+        // The oracle measures the volume against the points entering this
+        // revision and patches the exec packet with the field, leaving its
+        // rangePolicy as the exec packet had it (bakedGeometry.cpp,
+        // RevisionStatic). A failed resolve is the kernel's atomic
+        // pass-through, said with the oracle's words.
+        const size_t object = size_t(wire.weightObject);
+        if (object >= store.weightPackets.size()) {
+            if (error) {
+                *error = RrGeoStepLabel(program, step) +
+                         " measures a weight object the program does not "
+                         "hold";
+            }
+            return false;
+        }
+        rev.currentPhasePacket =
+            RrGeoStorePacket(program, store.weightPackets[object]);
+        const RrVec3f *entering = nullptr;
+        size_t enteringCount = 0;
+        RrGeoPointsBefore(chain, revisionIndex, &entering, &enteringCount);
+        const std::vector<RrVec3f> current(entering,
+                                           entering + enteringCount);
+        std::vector<float> field;
+        std::string why;
+        if (RrResolveWeightOracle(program, object, current.size(), &current,
+                                  &field, &why)) {
+            rev.currentPhasePacket.representation = "dense";
+            rev.currentPhasePacket.values = std::move(field);
+            rev.currentPhasePacket.indices.clear();
+            rev.currentPhasePacket.defaultWeight = 0.0f;
+            rev.currentPhasePacket.valid = true;
+        } else {
+            rev.currentPhasePacket = RrGeoWeightPacket();
+            output.diagnostics.push_back("current-phase weight failed: " +
+                                         why);
+        }
+        if (program->crossCheck &&
+            !RrGeoCrossCheckPhasePacket(program, record, chainIndex,
+                                        revisionIndex, rev.currentPhasePacket,
+                                        &output, error)) {
+            if (error) {
+                *error = RrGeoStepLabel(program, step) + ": " + *error;
+            }
+            return false;
+        }
     }
     RrGeoAssembleInputs in;
     in.program = program;
@@ -5312,6 +5422,14 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
         rev.parameters, program->TextOrEmpty(wire.moverPath));
     output.counters.revisionsBuilt = 1;
     rev.defaultWeight = RrGeoAssembleDefaultWeight(in);
+    if (program->crossCheck &&
+        !RrCrossCheckRevisionReads(program, record, chainIndex, revisionIndex,
+                                   false, &output, error)) {
+        if (error) {
+            *error = RrGeoStepLabel(program, step) + ": " + *error;
+        }
+        return false;
+    }
     rev.staticDirty = !rev.ran || rev.parameters != rev.lastParameters ||
                       rev.status != rev.lastStatus ||
                       rev.defaultWeight != rev.lastDefaultWeight;

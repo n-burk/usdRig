@@ -69,6 +69,15 @@ public:
     /// constructor, one frame record per CaptureFrame call.
     const RigExecWireInputTable &GetTable() const { return _table; }
 
+    /// The uid the directory gave the program input at \p input (the
+    /// address of a RigExecBakedInput<T> in the standing program), or -1
+    /// when it has none.
+    int64_t FindUid(const void *input) const
+    {
+        const auto found = _uids.find(input);
+        return found == _uids.end() ? -1 : int64_t(found->second);
+    }
+
     /// Evaluates \p frame and appends its record, or returns false with
     /// the reason: an invalid generation, a mid-loop rebuild, an
     /// unmapped record, or an unencodable value.

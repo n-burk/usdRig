@@ -21,10 +21,12 @@
 #include "rigExecMath/pointFrame.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/timeCode.h"
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,6 +40,9 @@ struct RigExecRigPose;
 /// The program's whole state, declared in bakedProgramImpl.h so that the
 /// files building and running each domain of it can name the same type.
 struct RigExecBakedProgramImpl;
+struct RigExecWeightOracleFacts;
+struct RigExecBakedEnvelopeObject;
+struct RigExecBakedPropertyChainDesc;
 
 /// Which path RigExecRigEvaluator::Evaluate takes.
 ///
@@ -267,6 +272,26 @@ public:
     /// it whenever the epoch or the scene changes underneath.
     static std::unique_ptr<RigExecBakedProgram> Build(
         RigExecRigEvaluator *evaluator, std::vector<std::string> *reasons);
+
+    /// Bake-time facts for a port of the evaluator's weight oracle, the
+    /// envelope objects no WeightPacket step bakes, and the property
+    /// chains. Members only because the evaluator's friendship reaches
+    /// this class; called as RigExecBakedDescribeWeightOracle,
+    /// RigExecBakedComposeEnvelopeObjects and
+    /// RigExecBakedDescribePropertyChains (bakedProgramImpl.h), which
+    /// document them.
+    static void DescribeWeightOracle(const RigExecRigEvaluator &evaluator,
+                                     const SdfPath &path, UsdTimeCode time,
+                                     RigExecWeightOracleFacts *facts);
+    static bool ComposeEnvelopeObjects(
+        const RigExecRigEvaluator &evaluator,
+        const RigExecBakedProgramImpl &program,
+        std::vector<RigExecBakedEnvelopeObject> *objects,
+        std::map<SdfPath, int> *index, std::string *error);
+    static bool DescribePropertyChains(
+        const RigExecRigEvaluator &evaluator,
+        std::vector<RigExecBakedPropertyChainDesc> *chains,
+        std::string *error);
 
     /// Runs the whole program at \p time and publishes into \p pose.
     ///

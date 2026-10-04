@@ -467,6 +467,8 @@ RrProgram::SolverInput(size_t solver, int field) const
         return s.minLengthRatio;
     case RrSolverTwistTurns:
         return s.twistTurns;
+    case RrSolverIkSpace:
+        return s.ikSpace;
     default:
         break;
     }

@@ -412,6 +412,7 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
             wire.ikParams.preferredBendRadians;
         state.upperLengthBase = wire.upperLengthBase;
         state.lowerLengthBase = wire.lowerLengthBase;
+        state.spaceRest = _RrWireLandmarks(wire.spaceRest);
         state.splineRest.cvs = _RrWireLandmarks(wire.splineRest.cvs);
         state.splineRest.rootControl =
             RrWireToFrame(wire.splineRest.rootControl);
@@ -442,11 +443,6 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
     scratch->constraintHaveWeight.assign(poses.constraints.size(), 0);
     scratch->weightScratch.assign(poses.constraints.size(), {});
     scratch->weightError.assign(poses.constraints.size(), {});
-    for (size_t o = 0; o < program->geometry->weightObjects.size();
-         ++o) {
-        scratch->weightIndex.emplace(
-            program->geometry->weightObjects[o].path, o);
-    }
     scratch->deltaValues.assign(
         program->geometry->deltaBasePaths.size(), identity);
     scratch->deltaPresent.assign(
@@ -611,9 +607,11 @@ RrProloguePose(RrProgram *program,
         store.nativeFrames[k] = frame;
         store.nativeFrameOk[k] = RrFrameUsable(frame) ? 1 : 0;
     }
-    // The captured envelopes, for the resolve arm below. Sizes were
-    // validated against the constraints at the head.
-    for (size_t k = 0; k < poses.constraints.size(); ++k) {
+    // The recorded envelopes, which only the cross-check reads: the
+    // Constraint step computes its own. Sizes were validated against the
+    // constraints at the head.
+    for (size_t k = 0; program->crossCheck && k < poses.constraints.size();
+         ++k) {
         scratch->constraintHaveWeight[k] =
             k < record.constraintHaveWeight.size() &&
                     record.constraintHaveWeight[k]

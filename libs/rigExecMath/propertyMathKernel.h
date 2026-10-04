@@ -1,8 +1,11 @@
-// Shared, USD-free float property math. The evaluator's float and double
-// property movers (propertyMath.cpp) and the binary runtime's property
-// chains both call these, so the two produce bit-identical results by
-// construction. A key type only needs `[0]` (input) and `[1]` (output, or
-// for tangents the in and out slopes) returning float.
+// RigExec property-domain math kernels, USD-free.
+// One copy of the arithmetic for every adapter: propertyMath.cpp
+// instantiates these templates with Gf types for the evaluators, and the
+// zero-USD runtime instantiates them with its own vector and matrix types.
+// Key, V3 and M4 only need element access (key[0], v[i], m[r][c]) and, for
+// M4, the row-vector product `base * value`; the operations, their order and
+// the float/double types of every intermediate are fixed here, so each
+// instantiation computes the same bits.
 #ifndef RIGEXEC_MATH_PROPERTY_MATH_KERNEL_H
 #define RIGEXEC_MATH_PROPERTY_MATH_KERNEL_H
 
@@ -11,21 +14,50 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstdint>
 
 namespace rigExec {
 
 /// The operation a property mover performs (schema `rigExec:operation`).
 enum class RigExecPropertyOp { Add, Multiply, Clamp, Remap, Blend, Curve };
 
-namespace propertyMathKernel {
+/// The authored inputs a float or vec3f property mover carries, with the
+/// curve keys as \p Key pairs (input, output).
+///
+/// `min`/`max` are only read by clamp and remap, `value` only by add,
+/// multiply, and blend; a mover authors all of them and the operation
+/// chooses. Per-component for the vec3f variant, which is why the schema
+/// declares float3 rather than float bounds.
+template <class T, class Key>
+struct RigExecPropertyMathKernelParams {
+    RigExecPropertyOp op = RigExecPropertyOp::Add;
+    T value{};
+    T min{};
+    T max{};
+    /// Resolved common MoverAPI envelope (spec §5): either the bound
+    /// rigExec:weightObject's one-element field or inputs:defaultWeight. The
+    /// operation's result is mixed back toward the incoming value, so weight
+    /// 0 is a no-op and weight 1 applies the operation outright. Same rule the
+    /// point-domain matrix mover follows (p' = q + w*(T q - q)).
+    float weight = 1.0f;
+    /// The curve operation's keys as (input, output) pairs sorted by input,
+    /// borrowed from the caller for the duration of one apply. Only curve
+    /// reads them, and only the float mover defines curve.
+    const Key *keys = nullptr;
+    size_t keyCount = 0;
+    /// Optional (in slope, out slope) per key, parallel to keys. With them
+    /// the curve is a cubic Hermite through the keys and extrapolates along
+    /// the first key's in slope and the last key's out slope, which is how a
+    /// driven key with fixed tangents and linear infinity evaluates.
+    const Key *tangents = nullptr;
+    size_t tangentCount = 0;
+};
 
-/// Piecewise-linear evaluation of sorted (input, output) keys with linear
-/// extrapolation past both ends along the first and last segments. One key
-/// is a constant; no keys return x unchanged.
+/// Piecewise-linear keys with linear extrapolation along the end segments.
+/// The segment search is a linear scan up to eight keys and a binary
+/// search beyond; both find the same segment.
 template <class Key>
 float
-EvaluateLinearKeys(const Key *keys, size_t keyCount, float x)
+RigExecEvaluateLinearKeysKernel(const Key *keys, size_t keyCount, float x)
 {
     if (!keys || keyCount == 0) {
         return x;
@@ -55,16 +87,16 @@ EvaluateLinearKeys(const Key *keys, size_t keyCount, float x)
     return a[1] + (x - a[0]) * (b[1] - a[1]) / span;
 }
 
-/// Cubic Hermite evaluation of sorted keys with per-key (in, out) slopes,
-/// extrapolated linearly along the end slopes. tangents may be null, which
-/// is EvaluateLinearKeys.
+/// Cubic Hermite keys with per-key (in, out) slopes, extrapolated along the
+/// end slopes; the basis is evaluated in double and the result cast to
+/// float. Null tangents are the linear keys.
 template <class Key>
 float
-EvaluateHermiteKeys(const Key *keys, const Key *tangents, size_t keyCount,
-                    float x)
+RigExecEvaluateHermiteKeysKernel(const Key *keys, const Key *tangents,
+                                 size_t keyCount, float x)
 {
     if (!tangents) {
-        return EvaluateLinearKeys(keys, keyCount, x);
+        return RigExecEvaluateLinearKeysKernel(keys, keyCount, x);
     }
     if (!keys || keyCount == 0) {
         return x;
@@ -107,7 +139,7 @@ EvaluateHermiteKeys(const Key *keys, const Key *tangents, size_t keyCount,
 /// True when the keys are finite and strictly increasing in input.
 template <class Key>
 bool
-ValidateLinearKeys(const Key *keys, size_t keyCount)
+RigExecValidateLinearKeysKernel(const Key *keys, size_t keyCount)
 {
     for (size_t i = 0; i < keyCount; ++i) {
         if (!std::isfinite(keys[i][0]) || !std::isfinite(keys[i][1])) {
@@ -120,46 +152,115 @@ ValidateLinearKeys(const Key *keys, size_t keyCount)
     return true;
 }
 
-/// One float revision: r = op(base), then base + weight*(r - base).
-/// `tangents` is used only when `tangentCount == keyCount`.
+/// One float revision: r = op(base), then RigExecBlendEnvelope(base, r,
+/// weight) with a float weight.
 template <class Key>
 float
-ApplyFloatMath(float base, RigExecPropertyOp op, float value, float min,
-               float max, float weight, const Key *keys, size_t keyCount,
-               const Key *tangents, size_t tangentCount)
+RigExecApplyFloatMathKernel(
+    float base, const RigExecPropertyMathKernelParams<float, Key> &params)
 {
     float result = base;
-    switch (op) {
+    switch (params.op) {
     case RigExecPropertyOp::Add:
-        result = base + value;
+        result = base + params.value;
         break;
     case RigExecPropertyOp::Multiply:
-        result = base * value;
+        result = base * params.value;
         break;
     case RigExecPropertyOp::Clamp:
         // Authored bounds that cross are not silently reordered: a rig with
         // max < min is a mistake, and min(max(v, lo), hi) pinning the result
         // to hi is at least a legible one.
-        result = std::min(std::max(base, min), max);
+        result = std::min(std::max(base, params.min), params.max);
         break;
     case RigExecPropertyOp::Remap: {
-        const float span = max - min;
-        result = span == 0.0f ? 0.0f : (base - min) / span;
+        const float span = params.max - params.min;
+        result = span == 0.0f ? 0.0f : (base - params.min) / span;
         break;
     }
     case RigExecPropertyOp::Blend:
-        result = value;
+        result = params.value;
         break;
     case RigExecPropertyOp::Curve:
-        result = EvaluateHermiteKeys(
-            keys, tangentCount == keyCount ? tangents : nullptr, keyCount,
-            base);
+        result = RigExecEvaluateHermiteKeysKernel(
+            params.keys,
+            params.tangentCount == params.keyCount ? params.tangents : nullptr,
+            params.keyCount, base);
         break;
     }
-    return RigExecBlendEnvelope(base, result, weight);
+    return RigExecBlendEnvelope(base, result, params.weight);
 }
 
-}  // namespace propertyMathKernel
+/// The vec3f peer, component-wise in every operation including the bounds;
+/// curve leaves the base (compile refuses curve on a vec3f mover).
+template <class V3, class Key>
+V3
+RigExecApplyVec3fMathKernel(
+    const V3 &base, const RigExecPropertyMathKernelParams<V3, Key> &params)
+{
+    V3 result = base;
+    for (size_t i = 0; i < 3; ++i) {
+        switch (params.op) {
+        case RigExecPropertyOp::Add:
+            result[i] = base[i] + params.value[i];
+            break;
+        case RigExecPropertyOp::Multiply:
+            result[i] = base[i] * params.value[i];
+            break;
+        case RigExecPropertyOp::Clamp:
+            result[i] =
+                std::min(std::max(base[i], params.min[i]), params.max[i]);
+            break;
+        case RigExecPropertyOp::Remap: {
+            const float span = params.max[i] - params.min[i];
+            result[i] = span == 0.0f ? 0.0f : (base[i] - params.min[i]) / span;
+            break;
+        }
+        case RigExecPropertyOp::Blend:
+            result[i] = params.value[i];
+            break;
+        case RigExecPropertyOp::Curve:
+            break;
+        }
+    }
+    // Every component is overwritten; the copy only avoids requiring a
+    // default constructor of V3.
+    V3 mixed = base;
+    for (size_t i = 0; i < 3; ++i) {
+        mixed[i] = RigExecBlendEnvelope(base[i], result[i], params.weight);
+    }
+    return mixed;
+}
+
+/// The matrix4d peer: multiply is `base * value` (value applied after base
+/// in the row-vector convention), blend is `value`, and the mix is
+/// per element with the weight widened to double. False for any other
+/// operation, leaving \p result untouched.
+template <class M4>
+bool
+RigExecApplyMatrixMathKernel(const M4 &base, RigExecPropertyOp op,
+                             const M4 &value, float weight, M4 *result)
+{
+    if (!result) {
+        return false;
+    }
+    if (op != RigExecPropertyOp::Multiply && op != RigExecPropertyOp::Blend) {
+        // add / clamp / remap have no matrix meaning. The schema's
+        // allowedTokens already say so, but allowedTokens is advisory in
+        // USD, so the evaluator validates against this return.
+        return false;
+    }
+    const M4 operated =
+        op == RigExecPropertyOp::Multiply ? M4(base * value) : value;
+    for (size_t r = 0; r < 4; ++r) {
+        for (size_t c = 0; c < 4; ++c) {
+            (*result)[r][c] = RigExecBlendEnvelope(
+                base[r][c], operated[r][c], double(weight));
+        }
+    }
+    return true;
+}
+
 }  // namespace rigExec
 
 #endif  // RIGEXEC_MATH_PROPERTY_MATH_KERNEL_H

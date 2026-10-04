@@ -1,0 +1,240 @@
+#usda 1.0
+(
+    doc = """Results the .rigexec runtime computes rather than replays, which
+    no example exercises: transform-constraint envelopes (a StaticWeight at
+    0.5 superseding inputs:defaultWeight 0.25, a clamped DynamicWeight driven
+    by a control avar, a DynamicWeight over a base only rigExec:baseWeight
+    reaches, and a CombineWeight with invert and strength over a
+    DynamicWeight whose driver reads a channel a float math mover clamps)
+    and a geometry-domain constraint whose weight object is a `preceding`
+    sphere following a control through a connection, with a keyed
+    inputs:falloffMax. Baked and played by verify_binary_computed_weights
+    with the record cross-check on."""
+    defaultPrim = "Asset"
+    endTimeCode = 10
+    framesPerSecond = 24
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+
+    def Xform "TargetA"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "TargetB"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "TargetC"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "TargetD"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "Source"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (10, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "PullTo"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Scope "Geom"
+    {
+        def Points "Slab"
+        {
+            point3f[] points = [(0, 0, 0), (0, 4, 0), (0, 8, 0)]
+        }
+    }
+
+    def RigExecRoot "Rig"
+    {
+        def Scope "Channels"
+        {
+            def Scope "Amount"
+            {
+                float rigExec:amount.timeSamples = {
+                    1: 0,
+                    10: 1.5,
+                }
+            }
+        }
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Dial"
+            {
+                double avars:tx.timeSamples = {
+                    1: 0,
+                    10: 1.8,
+                }
+            }
+
+            def RigExecControl "Lift"
+            {
+                double avars:ty.timeSamples = {
+                    1: 0,
+                    5: 8,
+                    10: 2,
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "Fixed"
+            {
+                uniform float rigExec:defaultWeight = 0.5
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/TargetA>
+            }
+
+            def RigExecDynamicWeight "Driven"
+            {
+                float inputs:bias = 0.125
+                prepend float inputs:driver.connect = </Asset/Rig/Controls/Dial.avars:tx>
+                float inputs:scale = 0.625
+                uniform token rigExec:rangePolicy = "clamp"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/TargetB>
+            }
+
+            def RigExecStaticWeight "Half"
+            {
+                uniform float rigExec:defaultWeight = 0.7
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/TargetC>
+            }
+
+            def RigExecDynamicWeight "Modulated"
+            {
+                prepend float inputs:driver.connect = </Asset/Rig/Controls/Dial.avars:tx>
+                float inputs:scale = 0.625
+                rel rigExec:baseWeight = </Asset/Rig/Weights/Half>
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/TargetC>
+            }
+
+            def RigExecSphereWeight "Sphere"
+            {
+                prepend double avars:ty.connect = </Asset/Rig/Controls/Lift.avars:ty>
+                float inputs:falloffMax.timeSamples = {
+                    1: 8,
+                    10: 6,
+                }
+                float inputs:falloffMin = 0
+                uniform token rigExec:falloffProfile = "linear"
+                rel rigExec:weightTarget = </Asset/Geom/Slab.points> (
+                    rigExecReadPhase = "preceding"
+                )
+            }
+
+            def RigExecStaticWeight "Quarter"
+            {
+                uniform float rigExec:defaultWeight = 0.25
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/TargetD>
+            }
+
+            def RigExecDynamicWeight "Ramp"
+            {
+                prepend float inputs:driver.connect = </Asset/Rig/Channels/Amount.rigExec:amount>
+                float inputs:scale = 0.5
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/TargetD>
+            }
+
+            def RigExecCombineWeight "Blend"
+            {
+                float inputs:invert = 0.25
+                float inputs:strength = 0.75
+                uniform token rigExec:combineMode = "max"
+                rel rigExec:inputWeights = [
+                    </Asset/Rig/Weights/Quarter>,
+                    </Asset/Rig/Weights/Ramp>,
+                ]
+                rel rigExec:weightTarget = </Asset/TargetD>
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecFloatMathMover "Limit" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:max = 0.75
+                float inputs:min = 0
+                rel rigExec:moves = </Asset/Rig/Channels/Amount.rigExec:amount>
+                uniform token rigExec:operation = "clamp"
+            }
+
+            def RigExecPositionConstraint "Fixed" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 0.25
+                rel rigExec:moves = </Asset/TargetA>
+                rel rigExec:sources = </Asset/Source>
+                rel rigExec:weightObject = </Asset/Rig/Weights/Fixed>
+            }
+
+            def RigExecPositionConstraint "Driven" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/TargetB>
+                rel rigExec:sources = </Asset/Source>
+                rel rigExec:weightObject = </Asset/Rig/Weights/Driven>
+            }
+
+            def RigExecPositionConstraint "Modulated" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/TargetC>
+                rel rigExec:sources = </Asset/Source>
+                rel rigExec:weightObject = </Asset/Rig/Weights/Modulated>
+            }
+
+            def RigExecPositionConstraint "Blend" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/TargetD>
+                rel rigExec:sources = </Asset/Source>
+                rel rigExec:weightObject = </Asset/Rig/Weights/Blend>
+            }
+
+            def RigExecPositionConstraint "Pull" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Geom/Slab.points>
+                rel rigExec:sources = </Asset/PullTo>
+                rel rigExec:weightObject = </Asset/Rig/Weights/Sphere>
+            }
+        }
+    }
+}
+

@@ -48,6 +48,9 @@ public:
     /// nothing, when fewer remain.
     bool ReadBytes(size_t count, std::vector<uint8_t> *out);
     bool Exhausted() const { return _at == _size; }
+    /// Bytes left to read: a decoder checks a count against this before
+    /// it sizes a vector, so a corrupt count cannot allocate past the file.
+    size_t Remaining() const { return _size - _at; }
 
 private:
     const uint8_t *_data = nullptr;

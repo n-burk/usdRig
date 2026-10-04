@@ -83,17 +83,11 @@ enum class RigExecBinarySection : uint32_t {
     /// Plugin movers' epoch and per-frame bytes (minor 3). Absent when the
     /// rig holds none.
     ExternalMovers = 17,
-    /// The property chains as programs (propertyChains.h). Absent means
-    /// every chain replays its recorded value, which is what every binary
-    /// written before this section does, so its absence is the old answer
-    /// and no version moves.
-    PropertyChains = 18,
-    /// RigExecAutoClavicle records. Absent means no limb root is carried,
-    /// which is what every binary written before this section does.
-    AutoClavicle = 19,
-    /// RigExecWireLimbSolver records: limb stretch, pin and segment scaling.
-    /// Absent means every solver solves as before this section existed.
-    LimbSolvers = 20,
+    /// TEMPORARY: input slots, per-frame slot values and weight oracle
+    /// facts while the runtime moves from replayed to computed results
+    /// (rigExecBinary/computed.h). Removed with the v4 container switch;
+    /// a reader that does not know it skips it.
+    Computed = 18,
 };
 
 /// Builds a .rigexec file in memory.

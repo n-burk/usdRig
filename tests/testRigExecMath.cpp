@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <vector>
 
 using namespace rigExec;
 
@@ -1708,6 +1709,178 @@ TestPropertyMath()
                                   &out));
 }
 
+// The property kernels instantiated with plain non-Gf types compute the
+// same bits as the Gf entry points the evaluators call: what the zero-USD
+// runtime relies on when it instantiates them with its own types.
+namespace {
+struct KernelVec2 {
+    float v[2];
+    float operator[](size_t i) const { return v[i]; }
+    float &operator[](size_t i) { return v[i]; }
+};
+struct KernelVec3 {
+    float v[3];
+    float operator[](size_t i) const { return v[i]; }
+    float &operator[](size_t i) { return v[i]; }
+};
+struct KernelMat4 {
+    double m[4][4];
+    const double *operator[](size_t r) const { return m[r]; }
+    double *operator[](size_t r) { return m[r]; }
+    // Each element summed left to right, as GfMatrix4d::operator*= does.
+    friend KernelMat4 operator*(const KernelMat4 &a, const KernelMat4 &b)
+    {
+        KernelMat4 out;
+        for (size_t r = 0; r < 4; ++r) {
+            for (size_t c = 0; c < 4; ++c) {
+                out.m[r][c] = a.m[r][0] * b.m[0][c] + a.m[r][1] * b.m[1][c] +
+                              a.m[r][2] * b.m[2][c] + a.m[r][3] * b.m[3][c];
+            }
+        }
+        return out;
+    }
+};
+}  // namespace
+
+static void
+TestPropertyMathKernelTypes()
+{
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const std::vector<float> scalars = {0.0f, -0.0f, 0.5f, 1.0f, -1.5f,
+                                        0.3f, 2.75f, 1e30f, -inf, inf, nan,
+                                        1e-40f};
+    const std::vector<float> weights = {-0.5f, 0.0f, 0.25f, 0.5f, 0.7f,
+                                        1.0f, 1.5f, nan};
+    const RigExecPropertyOp ops[] = {
+        RigExecPropertyOp::Add, RigExecPropertyOp::Multiply,
+        RigExecPropertyOp::Clamp, RigExecPropertyOp::Remap,
+        RigExecPropertyOp::Blend, RigExecPropertyOp::Curve};
+    // One key, a short table (linear scan) and a long one (binary search),
+    // each with and without tangents.
+    std::vector<std::vector<GfVec2f>> keySets = {
+        {GfVec2f(0.5f, 2.0f)},
+        {GfVec2f(-1.0f, 0.0f), GfVec2f(0.0f, 0.25f), GfVec2f(2.0f, 3.0f)},
+        {}};
+    for (int i = 0; i < 12; ++i) {
+        keySets[2].push_back(
+            GfVec2f(float(i) * 0.37f - 2.0f, std::sin(float(i)) * 1.3f));
+    }
+    size_t compared = 0;
+    for (const std::vector<GfVec2f> &keys : keySets) {
+        std::vector<GfVec2f> tangents;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            tangents.push_back(
+                GfVec2f(0.1f * float(i) - 0.3f, 0.7f - 0.2f * float(i)));
+        }
+        std::vector<KernelVec2> plainKeys, plainTangents;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            plainKeys.push_back(KernelVec2{{keys[i][0], keys[i][1]}});
+            plainTangents.push_back(
+                KernelVec2{{tangents[i][0], tangents[i][1]}});
+        }
+        CHECK(RigExecValidateLinearKeys(keys.data(), keys.size()) ==
+              RigExecValidateLinearKeysKernel(plainKeys.data(),
+                                              plainKeys.size()));
+        for (int withTangents = 0; withTangents < 2; ++withTangents) {
+            for (float x : scalars) {
+                for (float w : weights) {
+                    for (RigExecPropertyOp op : ops) {
+                        RigExecPropertyMathParams<float> gf;
+                        RigExecPropertyMathKernelParams<float, KernelVec2>
+                            plain;
+                        gf.op = plain.op = op;
+                        gf.value = plain.value = 0.75f;
+                        gf.min = plain.min = -0.25f;
+                        gf.max = plain.max = x == 0.3f ? -0.25f : 1.25f;
+                        gf.weight = plain.weight = w;
+                        gf.keys = keys.data();
+                        plain.keys = plainKeys.data();
+                        gf.keyCount = plain.keyCount = keys.size();
+                        if (withTangents) {
+                            gf.tangents = tangents.data();
+                            plain.tangents = plainTangents.data();
+                            gf.tangentCount = plain.tangentCount =
+                                tangents.size();
+                        }
+                        CHECK(SameBits(
+                            RigExecApplyFloatMath(x, gf),
+                            RigExecApplyFloatMathKernel(x, plain)));
+                        ++compared;
+
+                        RigExecPropertyMathParams<GfVec3f> gf3;
+                        RigExecPropertyMathKernelParams<KernelVec3,
+                                                        KernelVec2>
+                            plain3;
+                        gf3.op = plain3.op = op;
+                        gf3.value = GfVec3f(0.75f, x, -2.0f);
+                        plain3.value = KernelVec3{{0.75f, x, -2.0f}};
+                        gf3.min = GfVec3f(-0.25f, 0.0f, x);
+                        plain3.min = KernelVec3{{-0.25f, 0.0f, x}};
+                        gf3.max = GfVec3f(1.25f, 0.0f, 3.0f);
+                        plain3.max = KernelVec3{{1.25f, 0.0f, 3.0f}};
+                        gf3.weight = plain3.weight = w;
+                        const GfVec3f base3(x, 0.4f, -x);
+                        const GfVec3f a = RigExecApplyVec3fMath(base3, gf3);
+                        const KernelVec3 b = RigExecApplyVec3fMathKernel(
+                            KernelVec3{{x, 0.4f, -x}}, plain3);
+                        CHECK(SameBits(a[0], b[0]) && SameBits(a[1], b[1]) &&
+                              SameBits(a[2], b[2]));
+                    }
+                }
+                CHECK(SameBits(
+                    RigExecEvaluateHermiteKeys(
+                        keys.data(), withTangents ? tangents.data() : nullptr,
+                        keys.size(), x),
+                    RigExecEvaluateHermiteKeysKernel(
+                        plainKeys.data(),
+                        withTangents ? plainTangents.data() : nullptr,
+                        plainKeys.size(), x)));
+                CHECK(SameBits(
+                    RigExecEvaluateLinearKeys(keys.data(), keys.size(), x),
+                    RigExecEvaluateLinearKeysKernel(plainKeys.data(),
+                                                    plainKeys.size(), x)));
+            }
+        }
+    }
+    CHECK(compared > 1000);
+
+    // Matrices: every operation and weight, including the refused ones.
+    GfMatrix4d base(1.0), value(1.0);
+    base.SetRotate(GfRotation(GfVec3d(1, 2, 3).GetNormalized(), 37.0));
+    base.SetTranslateOnly(GfVec3d(1.25, -3.5, 0.1));
+    value.SetRotate(GfRotation(GfVec3d(-2, 0.5, 1).GetNormalized(), -71.0));
+    value.SetTranslateOnly(GfVec3d(-0.3, 7.0, 2.2));
+    KernelMat4 plainBase, plainValue;
+    for (size_t r = 0; r < 4; ++r) {
+        for (size_t c = 0; c < 4; ++c) {
+            plainBase.m[r][c] = base[r][c];
+            plainValue.m[r][c] = value[r][c];
+        }
+    }
+    for (float w : weights) {
+        for (RigExecPropertyOp op : ops) {
+            GfMatrix4d gfOut(2.0);
+            KernelMat4 plainOut;
+            for (size_t r = 0; r < 4; ++r) {
+                for (size_t c = 0; c < 4; ++c) {
+                    plainOut.m[r][c] = gfOut[r][c];
+                }
+            }
+            const bool gfOk =
+                RigExecApplyMatrixMath(base, op, value, w, &gfOut);
+            const bool plainOk = RigExecApplyMatrixMathKernel(
+                plainBase, op, plainValue, w, &plainOut);
+            CHECK(gfOk == plainOk);
+            for (size_t r = 0; r < 4; ++r) {
+                for (size_t c = 0; c < 4; ++c) {
+                    CHECK(SameBits(gfOut[r][c], plainOut.m[r][c]));
+                }
+            }
+        }
+    }
+}
+
 static void
 TestAvarScaleNormalization()
 {
@@ -1761,6 +1934,7 @@ main()
     TestWeightedMatrix();
     TestLinearBlendSkin();
     TestPropertyMath();
+    TestPropertyMathKernelTypes();
     TestAvarScaleNormalization();
 
     if (failures) {

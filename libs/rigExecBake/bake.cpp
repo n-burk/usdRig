@@ -3,6 +3,7 @@
 #include "rigExecBake/propertyChainsBake.h"
 #include "rigExecBake/serialize.h"
 #include "rigExecBake/capture.h"
+#include "rigExecBake/computedCapture.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/movers/moverRegistry.h"
 #include "rigExec/rigEvaluator.h"
@@ -225,6 +226,14 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     if (!capture.Valid()) {
         return Fail(captureError);
     }
+    // The Computed section's static half, from the same standing program:
+    // the slots its computed reads take and the facts the oracle needs;
+    // the chain-crossing reads carry the uids the capture gave them.
+    RigExecBakeComputedCapture computed(evaluator, capture, &writer,
+                                        &captureError);
+    if (!computed.Valid()) {
+        return Fail(captureError);
+    }
     const size_t bakedBefore = evaluator.GetBakedGenerationCount();
     std::vector<SdfPath> joints;
     _ExternalExport external;
@@ -232,7 +241,8 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     char number[32];
     for (double frame : opts.frames) {
         RigExecRigPose pose;
-        if (!capture.CaptureFrame(frame, &pose, error)) {
+        if (!capture.CaptureFrame(frame, &pose, error) ||
+            !computed.RecordFrame(frame, error)) {
             return false;
         }
         if (!pose.valid) {
@@ -438,6 +448,13 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     if (!external.Write(&writer, &externalError)) {
         return Fail(externalError);
     }
+    std::string computedError;
+    if (!RigExecWireEncodeComputed(computed.GetComputed(), &payload,
+                                   &computedError)) {
+        return Fail("cannot encode the computed section: " + computedError);
+    }
+    writer.AddSection(RigExecBinarySection::Computed, payload);
+    payload.clear();
     std::string manifest = "{\n";
     manifest += "  \"format\": 1,\n";
     manifest += "  \"rig\": " + _EscapeJson(evaluator.GetRigPath().GetString()) +

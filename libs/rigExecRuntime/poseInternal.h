@@ -4,7 +4,6 @@
 #define RIGEXEC_RUNTIME_POSE_INTERNAL_H
 
 #include "store.h"
-#include "rigExecMath/limbStretchKernel.h"
 #include <array>
 #include <cmath>
 #include <string>
@@ -189,6 +188,10 @@ void
 _RrSwingTwist(const RrQuatd &q, const RrVec3d &axis,
               RrQuatd *swing, RrQuatd *twist);
 
+// RigExecTransformFrame: every landmark carried by \p space, nothing else.
+RrPointFrame
+_RrTransformFrame(const RrPointFrame &frame, const RrMat4d &space);
+
 bool
 _RrRunConstraintStep(RrProgram *program, size_t step,
                      std::string *error);
@@ -213,11 +216,7 @@ struct RrPoseTwoBoneIkParams {
     double stretch = 1;
     double softness = 0;
     double preferredBendRadians = 0;
-    // RigExecTwoBoneIkParams' limb fields, field for field.
-    bool softDistancePolicy = false;
-    rigExec::RigExecLimbStretch limb;
-    double twistRadians = 0;
-    bool scaleSegments = false;
+    RrMat4d space = RrMat4d(1.0);
 };
 
 // RigExecSplineIkRest, field for field.
@@ -243,6 +242,8 @@ struct RrPoseSolverState {
     RrPoseTwoBoneIkParams ikParams;
     double upperLengthBase = 0;
     double lowerLengthBase = 0;
+    // rigExec:space's rest landmarks (TwoBoneIk, SplineIk).
+    std::array<RrVec3d, 4> spaceRest;
     RrPoseSplineIkRest splineRest;
     std::vector<std::array<RrVec3d, 4>> splineJointRests;
     std::array<RrVec3d, 4> twistStartRest;
@@ -287,10 +288,8 @@ struct RrPoseScratch {
     // Constraint envelope scratch, one step's own storage.
     std::vector<std::vector<float>> weightScratch;
     std::vector<std::string> weightError;
-    // Weight-object path id -> index into the geometry weight objects.
-    std::unordered_map<uint32_t, size_t> weightIndex;
-    // The captured constraint envelopes, for the resolve arm the
-    // weight packets cannot serve (masked weights, failed capture).
+    // The frame record's constraint envelopes, copied by the prologue only
+    // for the cross-check (RrProgram::crossCheck) to compare against.
     std::vector<float> constraintWeights;
     std::vector<char> constraintHaveWeight;
     // Geometry-domain constraint deltas. Conceptually framework-visible

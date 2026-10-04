@@ -15,13 +15,13 @@
 #ifndef RIGEXEC_RUNTIME_H
 #define RIGEXEC_RUNTIME_H
 
+#include "rigExecBinary/computed.h"
 #include "rigExecBinary/container.h"
 #include "rigExecBinary/external.h"
 #include "rigExecBinary/geometry.h"
 #include "rigExecBinary/inputTable.h"
 #include "rigExecBinary/pose.h"
 #include "rigExecBinary/program.h"
-#include "rigExecBinary/propertyChains.h"
 #include "rigExecRuntime/runtimeMath.h"
 #include "rigExecRuntime/store.h"
 
@@ -77,6 +77,13 @@ struct RigExecRuntimeProviderXform {
     RrMat4d base;
 };
 
+// A property chain's published value: the target's or a phased consumer's
+// attribute path plus the value.
+struct RigExecRuntimePropertyValue {
+    std::string path;
+    RrPropertyValue value;
+};
+
 // The generation's work counters, summed over steps like the epilogue.
 struct RigExecRuntimeCounters {
     uint32_t revisionsExecuted = 0;
@@ -111,12 +118,11 @@ public:
     // miss when the file carries no such frame.
     bool SetFrame(double frame, std::string *error);
 
-    // Persistent avar overrides, applied after the selected frame and
-    // before FK/geometry evaluation. Angles are degrees. Accepted: a TRS
-    // avar on a compiled control slot, and -- when the file carries its
-    // property chains -- any input those chains read (a face slider such as
-    // `avars:autoSquash`), which the chains then recompute from. Refused: a
-    // property chain's own output, which the chain writes.
+    // Persistent local TRS avar overrides, applied after the selected frame
+    // and before FK/geometry evaluation. Angles are degrees. Only compiled
+    // control slots with TRS poses are supported; property-mover outputs are refused
+    // because a chain computes them from the frame's inputs, which an
+    // override does not reach.
     bool SetAvar(const std::string &propertyPath, double value,
                  std::string *error);
     void ClearAvars();
@@ -146,6 +152,66 @@ public:
     // by default). A masked family's steps are skipped, which is how
     // one family's outputs are compared while another is still landing.
     void SetRunMaskForTesting(unsigned mask);
+
+    // Test-only cross-check of what the runtime computes against the frame
+    // record the bake also wrote, bit for bit: every property-chain result,
+    // constraint envelope and current-phase weight packet; every registered
+    // read evaluated over the slots against the value the record-driven
+    // step consumes (a read that crosses a chain against the record before
+    // its holder takes the computed value); every blend channel weight,
+    // revision default weight and connection-following mover scalar the
+    // assembly reads, where the record holds it. A mismatch fails Execute
+    // naming the record field and its index. Off by default;
+    // RIGEXEC_RUNTIME_CROSSCHECK set to anything but empty or "0" when Open
+    // runs turns it on.
+    void SetCrossCheckForTesting(bool enabled);
+    bool GetCrossCheckForTesting() const { return _program.crossCheck; }
+    // Values the cross-check compared since Open, over the Executes that
+    // succeeded, of every kind.
+    uint64_t GetCrossCheckCountForTesting() const
+    {
+        uint64_t total = 0;
+        for (uint64_t count : _crossCheckCounts) {
+            total += count;
+        }
+        return total;
+    }
+    // The same count for one kind.
+    uint64_t GetCrossCheckCountForTesting(RrCrossCheckKind kind) const
+    {
+        return _crossCheckCounts[size_t(kind)];
+    }
+    // The computed results alone: envelopes, current-phase packets,
+    // property values and chain-crossing reads.
+    uint64_t GetCrossCheckResultCountForTesting() const
+    {
+        return _crossCheckCounts[RrCrossCheckEnvelope] +
+               _crossCheckCounts[RrCrossCheckPhasePacket] +
+               _crossCheckCounts[RrCrossCheckPropertyValue] +
+               _crossCheckCounts[RrCrossCheckChainRead];
+    }
+    uint64_t GetCrossCheckEnvelopeCountForTesting() const
+    {
+        return _crossCheckCounts[RrCrossCheckEnvelope];
+    }
+    uint64_t GetCrossCheckPhasePacketCountForTesting() const
+    {
+        return _crossCheckCounts[RrCrossCheckPhasePacket];
+    }
+    uint64_t GetCrossCheckPropertyValueCountForTesting() const
+    {
+        return _crossCheckCounts[RrCrossCheckPropertyValue];
+    }
+    uint64_t GetCrossCheckChainReadCountForTesting() const
+    {
+        return _crossCheckCounts[RrCrossCheckChainRead];
+    }
+
+    // Test-only: the property chains' published values as the last
+    // Execute computed them, in path order. They are inputs to the
+    // program, not outputs of the runtime contract.
+    std::vector<RigExecRuntimePropertyValue> GetPropertyResultsForTesting()
+        const;
 
     // Final asset-space skinning deltas (rest -> posed), in path order.
     const std::vector<RigExecRuntimeJointMatrix> &GetJointMatrices() const
@@ -214,20 +280,6 @@ public:
     bool HasClusters() const { return _hasClusters; }
     bool HasSlotMeta() const { return _hasSlotMeta; }
     bool HasConstants() const { return _hasConstants; }
-    // Whether the file carries its property chains as programs, so they
-    // follow SetAvar instead of replaying their recorded values.
-    bool HasPropertyChains() const { return _hasPropertyChains; }
-
-    /// The posed frame of the control or joint at `primPath` (its last
-    /// version),
-    /// asset space, as a row-vector matrix: the three handle vectors, then
-    /// the origin, 16 numbers row-major. The frame the evaluator publishes
-    /// as the control's. False when the path names no slot.
-    bool GetControlFrame(const std::string &primPath, double out[16]) const;
-
-    // The last Execute's property-chain results, scalar ones only, by
-    // target path: what the chains published, computed or replayed.
-    std::map<std::string, double> GetPropertyResults() const;
 
 private:
     RigExecRuntimeReader() = default;
@@ -242,6 +294,8 @@ private:
     RigExecWireDomainGeometry _geometry;
     RigExecWireInputTable _inputs;
     RigExecWireExternalMovers _external;
+    // The Computed section (temporary; absent in files baked before it).
+    RigExecWireComputed _computed;
     bool _hasSteps = false;
     bool _hasPoses = false;
     bool _hasGeometry = false;
@@ -250,36 +304,12 @@ private:
     bool _hasClusters = false;
     bool _hasSlotMeta = false;
     bool _hasConstants = false;
-    bool _hasPropertyChains = false;
-    RigExecWirePropertyChains _chains;
-    // Each chain's target path id, and every path a chain input's walk
-    // visits that no chain writes (what SetAvar may set for the chains).
-    std::map<uint32_t, size_t> _chainOfTarget;
-    std::map<std::string, uint32_t> _chainInputPaths;
 
     RrProgram _program;
 
     size_t _frameIndex = 0;
     bool _frameSelected = false;
     std::map<size_t, double> _avarOverrides;
-    // Every value SetAvar accepted, by path id: what a chain input's walk
-    // reads as a live value.
-    std::map<uint32_t, double> _pathOverrides;
-
-    // Inputs a poseable bake routed to holders, by every path their walks
-    // visit: (uid, override index) pairs. A mode switch read straight off
-    // an avar (a blend weight, a space switch's active index) is set here.
-    std::map<std::string, std::vector<std::pair<uint32_t, int32_t>>>
-        _overridableInputs;
-    // Values SetAvar accepted for those inputs, and the holder values they
-    // displaced, restored when the overrides go or the frame changes.
-    std::map<std::string, double> _inputOverrides;
-    std::map<uint32_t, RrInputValue> _inputBase;
-    void _RestoreInputs();
-
-    // Computes the property chains for the selected frame into the store,
-    // and hands each result to the input holders it feeds.
-    void _RunPropertyChains();
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;
@@ -289,6 +319,7 @@ private:
     std::vector<RigExecRuntimeProviderXform> _providerXforms;
     std::vector<std::string> _diagnostics;
     RigExecRuntimeCounters _counters;
+    RrCrossCheckCounts _crossCheckCounts{};
 };
 
 }  // namespace rigExec

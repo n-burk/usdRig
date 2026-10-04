@@ -195,7 +195,8 @@ add_library(rigExecBinary STATIC
     libs/rigExecBinary/geometry.cpp
     libs/rigExecBinary/inputTable.cpp
     libs/rigExecBinary/propertyChains.cpp
-    libs/rigExecBinary/external.cpp)
+    libs/rigExecBinary/external.cpp
+    libs/rigExecBinary/computed.cpp)
 target_include_directories(rigExecBinary PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -214,7 +215,9 @@ add_library(rigExecRuntime STATIC
     libs/rigExecRuntime/poseSolvers.cpp
     libs/rigExecRuntime/poseSteps.cpp
     libs/rigExecRuntime/geometry.cpp
-    libs/rigExecRuntime/weights.cpp)
+    libs/rigExecRuntime/weights.cpp
+    libs/rigExecRuntime/inputs.cpp
+    libs/rigExecRuntime/properties.cpp)
 target_include_directories(rigExecRuntime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -234,7 +237,8 @@ add_library(rigExecBake SHARED
     libs/rigExecBake/bake.cpp
     libs/rigExecBake/serialize.cpp
     libs/rigExecBake/capture.cpp
-    libs/rigExecBake/propertyChainsBake.cpp)
+    libs/rigExecBake/propertyChainsBake.cpp
+    libs/rigExecBake/computedCapture.cpp)
 target_include_directories(rigExecBake PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -608,21 +612,45 @@ target_compile_definitions(testRigExecBinary PRIVATE
 add_test(NAME testRigExecBinary COMMAND testRigExecBinary
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
+# RIG names a stage under examples/, STAGE any other stage by full path.
+# Each MIN_* option fails the test unless the runtime's record cross-check
+# compared at least that many values of its kind: MIN_ENVELOPES constraint
+# envelopes, MIN_PHASE_PACKETS current-phase weight packets,
+# MIN_PROPERTY_VALUES property-chain values, MIN_CHAIN_READS registered
+# reads crossing a chain, MIN_REGISTERED_READS the other registered reads,
+# MIN_BLEND_WEIGHTS blend channel weights, MIN_DEFAULT_WEIGHTS geometry
+# revisions' default weights, and MIN_PATH_READS the assemblers'
+# connection-following scalar reads.
 function(rigexec_add_verify_binary_test)
-    cmake_parse_arguments(A "" "NAME;RIG;FRAMES" "" ${ARGN})
-    if (NOT DEFINED A_NAME OR NOT DEFINED A_RIG OR NOT DEFINED A_FRAMES)
-        message(FATAL_ERROR "rigexec_add_verify_binary_test: "
-                            "NAME, RIG and FRAMES are all required")
+    cmake_parse_arguments(A ""
+        "NAME;RIG;STAGE;FRAMES;MIN_ENVELOPES;MIN_PHASE_PACKETS;MIN_PROPERTY_VALUES;MIN_CHAIN_READS;MIN_REGISTERED_READS;MIN_BLEND_WEIGHTS;MIN_DEFAULT_WEIGHTS;MIN_PATH_READS"
+        "" ${ARGN})
+    if (NOT DEFINED A_NAME OR NOT DEFINED A_FRAMES OR
+            (NOT DEFINED A_RIG AND NOT DEFINED A_STAGE) OR
+            (DEFINED A_RIG AND DEFINED A_STAGE))
+        message(FATAL_ERROR "rigexec_add_verify_binary_test: NAME, FRAMES "
+                            "and one of RIG or STAGE are required")
     endif()
     if (A_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "rigexec_add_verify_binary_test: unknown "
                             "argument(s): ${A_UNPARSED_ARGUMENTS}")
     endif()
+    if (DEFINED A_RIG)
+        set(A_STAGE "${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}")
+    endif()
+    set(_expect)
+    foreach(_option IN ITEMS MIN_ENVELOPES MIN_PHASE_PACKETS
+            MIN_PROPERTY_VALUES MIN_CHAIN_READS MIN_REGISTERED_READS
+            MIN_BLEND_WEIGHTS MIN_DEFAULT_WEIGHTS MIN_PATH_READS)
+        if (DEFINED A_${_option})
+            list(APPEND _expect "-D${_option}=${A_${_option}}")
+        endif()
+    endforeach()
     set(_out "${CMAKE_CURRENT_BINARY_DIR}/verify-binary/${A_NAME}.rigexec")
     add_test(NAME verify_binary_${A_NAME} COMMAND "${CMAKE_COMMAND}"
         "-DBAKE=$<TARGET_FILE:rigExecBakeTool>" "-DPOSE=$<TARGET_FILE:rigExecPose>"
-        "-DSTAGE=${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}"
-        "-DFRAMES=${A_FRAMES}" "-DOUT=${_out}"
+        "-DSTAGE=${A_STAGE}"
+        "-DFRAMES=${A_FRAMES}" "-DOUT=${_out}" ${_expect}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/runVerifyBinary.cmake")
     set(_schema_resources
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -631,6 +659,16 @@ function(rigexec_add_verify_binary_test)
 endfunction()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/verify-binary")
+# Floors on examples whose geometry reads the cross-check compares: the
+# blend shape face's channel weights (one per channel and frame), the
+# tail's default weights and enable reads, and the biped stack's, whose
+# blend weights are mostly pose-driven (it compares 18 channels that are
+# not, so a floor of 400 fails if the pose-driven arm stops comparing).
+set(_verify_binary_floors_04_BlendShapeFace MIN_BLEND_WEIGHTS 10)
+set(_verify_binary_floors_01_FkChainTail
+    MIN_DEFAULT_WEIGHTS 20 MIN_PATH_READS 20)
+set(_verify_binary_floors_biped_Biped_stack
+    MIN_BLEND_WEIGHTS 400 MIN_DEFAULT_WEIGHTS 400 MIN_PATH_READS 500)
 foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
     string(REPLACE "|" ";" _fixture_fields "${_fixture}")
     list(GET _fixture_fields 0 _fixture_stage)
@@ -640,13 +678,45 @@ foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
     string(REPLACE "/" "_" _fixture_name "${_fixture_name}")
     if (_fixture_bakes STREQUAL "YES")
         rigexec_add_verify_binary_test(NAME ${_fixture_name}
-            RIG ${_fixture_stage} FRAMES ${_fixture_frames})
+            RIG ${_fixture_stage} FRAMES ${_fixture_frames}
+            ${_verify_binary_floors_${_fixture_name}})
     endif()
 endforeach()
 
 # The stack's binary round trip; see the parity entry above for why the
 rigexec_add_verify_binary_test(NAME biped_Biped_stack_anim
     RIG biped/Biped_stack_anim.usda FRAMES 1,50,100,150,200)
+
+# The results the runtime computes rather than replays (constraint
+# envelopes, current-phase weight fields), which no example exercises:
+# both must reach the record cross-check at every frame.
+rigexec_add_verify_binary_test(NAME computed_weights
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_weights.usda"
+    FRAMES 1,3,5,7,10 MIN_ENVELOPES 20 MIN_PHASE_PACKETS 5)
+
+# Property chains the runtime computes in the cases no example covers
+# together: envelopes on property movers, a double chain, vec3f and matrix
+# chains, the chains' diagnostics, phased consumers, and a constraint
+# weight read through a chain.
+rigexec_add_verify_binary_test(NAME computed_chains
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_chains.usda"
+    FRAMES 1,3,5,7,10 MIN_PROPERTY_VALUES 50 MIN_CHAIN_READS 5)
+
+# Two-bone IK measured in an animated rigExec:space and a keyed
+# rigExec:spaceMatrix, one with a keyed spaceMatrix alone, and a spline IK
+# whose rest is rebuilt in the moving space: the solvers' spaceMatrix is a
+# registered read the runtime both consumes and computes.
+rigexec_add_verify_binary_test(NAME computed_ik_space
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_ik_space.usda"
+    FRAMES 1,3,5,7,10 MIN_REGISTERED_READS 5)
+
+# The assemblers' connection-following scalar reads of every type (int,
+# bool, float, a float widened to double, double3, matrix4d), including a
+# float whose connection ends on a double with no value, which reads the
+# head's own value.
+rigexec_add_verify_binary_test(NAME computed_path_reads
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_path_reads.usda"
+    FRAMES 1,4,7,10 MIN_PATH_READS 52 MIN_DEFAULT_WEIGHTS 4)
 
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
 target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)

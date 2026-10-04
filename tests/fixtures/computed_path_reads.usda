@@ -1,0 +1,118 @@
+#usda 1.0
+(
+    """
+    Test fixture: the scalar mover inputs the geometry assembly reads
+    through their connections, of every type such a read can carry. A delta
+    mush reads an int, a bool and three floats: one connected to a keyed
+    double avar, and inputs:step, whose connection ends on a double that
+    holds no value, so the read falls back to the step's own authored 0.3.
+    A surface projector on the same mesh reads its ray settings (double3)
+    and a keyed shaderOffset (matrix4d), and packs three shader dials: a
+    keyed double avar, a keyed float, and a float whose connection ends on
+    the same valueless double. Baked and verified at frames 1, 4, 7 and 10
+    by verify_binary_computed_path_reads, and played by
+    testRigExecRuntimeGeometry.
+    """
+    defaultPrim = "PathReadAsset"
+    endTimeCode = 10
+    startTimeCode = 1
+    upAxis = "Y"
+)
+
+def Xform "PathReadAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PathReadAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Dial" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:amount = 0.25
+                double avars:amount.timeSamples = {
+                    1: 0.25,
+                    10: 0.75,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Dials"
+        {
+            custom float gain = 0.5
+            custom float gain.timeSamples = {
+                1: 0.5,
+                10: 0.9,
+            }
+            custom float held = 0.6
+            custom float held.connect = </PathReadAsset/Rig/Dials.unset>
+            custom double unset
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecDeltaMushMover "Mush" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                float inputs:displacement = 1
+                float inputs:displacement.timeSamples = {
+                    1: 1,
+                    10: 0.8,
+                }
+                float inputs:distanceWeight.connect = </PathReadAsset/Rig/Controls/Dial.avars:amount>
+                int inputs:iterations = 3
+                bool inputs:pinBorders = false
+                point3f[] inputs:restPoints = [(1, 0, 0), (0, 1.2, 0), (-1, 0, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+                float inputs:step = 0.3
+                float inputs:step.connect = </PathReadAsset/Rig/Dials.unset>
+                rel rigExec:moves = </PathReadAsset/Geom/Ball.points>
+            }
+
+            def RigExecSurfaceProjector "Projector" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </PathReadAsset/Geom/Ball.points>
+                double3 rigExec:rayDirection = (0, 0, 1)
+                double3 rigExec:rayOrigin = (0.1, 0.05, 0)
+                double3 rigExec:rayOrigin.timeSamples = {
+                    1: (0.1, 0.05, 0),
+                    10: (0.15, 0.1, 0),
+                }
+                double3 rigExec:rayUp = (0, 1, 0)
+                uniform token rigExec:shaderDialPrimvar = "ballDials"
+                rel rigExec:shaderDialSources = [
+                    </PathReadAsset/Rig/Controls/Dial.avars:amount>,
+                    </PathReadAsset/Rig/Dials.gain>,
+                    </PathReadAsset/Rig/Dials.held>,
+                ]
+                matrix4d rigExec:shaderOffset = ( (2, 0, 0, 0), (0, 2, 0, 0), (0, 0, 2, 0), (0, 0, 0, 1) )
+                matrix4d rigExec:shaderOffset.timeSamples = {
+                    1: ( (2, 0, 0, 0), (0, 2, 0, 0), (0, 0, 2, 0), (0, 0, 0, 1) ),
+                    10: ( (2, 0, 0, 0), (0, 2, 0, 0), (0, 0, 2, 0), (0, 0.1, 0, 1) ),
+                }
+                uniform token rigExec:shaderPrimvar = "ballProjector"
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Ball"
+        {
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4, 1, 0, 5, 2, 1, 5, 3, 2, 5, 0, 3, 5]
+            point3f[] points = [(1, 0, 0), (0, 1.2, 0), (-1, 0, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+            point3f[] points.timeSamples = {
+                1: [(1, 0, 0), (0, 1.2, 0), (-1, 0, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)],
+                10: [(1, 0, 0), (0, 1.2, 0), (-1, 0, 0), (0, -1, 0), (0.7, 0, 1.2), (0, 0, -1)],
+            }
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}

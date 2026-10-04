@@ -29,7 +29,11 @@
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -282,6 +286,7 @@ _RunFixtureAtMask(const std::string &stagePath,
         std::printf("  open diagnostic: %s\n", error.c_str());
         return false;
     }
+    runtime->SetCrossCheckForTesting(true);
     runtime->SetRunMaskForTesting(mask);
     const std::vector<char> deferred =
         mask == 0x7u ? std::vector<char>(geometry.weightObjects.size(),
@@ -406,6 +411,7 @@ _TestFixture(const std::string &name, const std::string &stagePath,
                                    result.bytes.size(), &error);
     bool siblingMissing = false;
     if (probe) {
+        probe->SetCrossCheckForTesting(true);
         probe->SetRunMaskForTesting(0x7u);
         for (double frame : frames) {
             if (!probe->SetFrame(frame, &error) ||
@@ -1192,7 +1198,9 @@ _TestSyntheticBuilders()
         return;
     }
     // Pose and geometry prologues are siblings' work; the weight walk
-    // runs under its own bit.
+    // runs under its own bit. The file carries no Computed section, which
+    // a rig with no envelope and no current-phase field does not need.
+    runtime->SetCrossCheckForTesting(true);
     runtime->SetRunMaskForTesting(0x2u);
     CHECK(runtime->SetFrame(1.0, &error));
     CHECK(runtime->Execute(&error));
@@ -1245,12 +1253,375 @@ _TestSyntheticBuilders()
                 expected.size());
 }
 
+// The read evaluator and the weight oracle over a hand-built Computed
+// section (inputs.cpp, weights.cpp): each read mode's arms, the
+// property-chain overlay, and the oracle's arithmetic and error text on
+// static, dynamic, combine and volume paths the baked fixtures do not
+// reach. Expected fields repeat the oracle's float expressions in its
+// order, with operands for which a reordering would change the bits.
+static void
+_TestComputedReadsAndOracle()
+{
+    using v4::InputTag;
+    using v4::ReadMode;
+    RigExecBinaryWriter writer;
+    std::vector<uint32_t> paths;
+    for (int i = 0; i <= 16; ++i) {
+        paths.push_back(writer.AddString("/W" + std::to_string(i)));
+    }
+    std::vector<uint32_t> slotNames;
+    for (int i = 0; i < 5; ++i) {
+        slotNames.push_back(writer.AddString("/S" + std::to_string(i) + ".v"));
+    }
+    const uint32_t tokStatic = writer.AddString("RigExecStaticWeight");
+    const uint32_t tokDynamic = writer.AddString("RigExecDynamicWeight");
+    const uint32_t tokCombine = writer.AddString("RigExecCombineWeight");
+    const uint32_t tokSphere = writer.AddString("RigExecSphereWeight");
+    const uint32_t tokConstant = writer.AddString("constant");
+    const uint32_t tokDense = writer.AddString("dense");
+    const uint32_t tokSparse = writer.AddString("sparse");
+    const uint32_t tokStrict = writer.AddString("strict");
+    const uint32_t tokClamp = writer.AddString("clamp");
+    const uint32_t tokAdd = writer.AddString("add");
+    const uint32_t tokMax = writer.AddString("max");
+    const uint32_t tokMultiply = writer.AddString("multiply");
+    const uint32_t tokSubtract = writer.AddString("subtract");
+    const uint32_t tokMin = writer.AddString("min");
+    const uint32_t tokAverage = writer.AddString("average");
+    const uint32_t tokOverlay = writer.AddString("overlay");
+    const std::vector<uint8_t> bytes = writer.Finish();
+    std::string error;
+    const std::unique_ptr<RigExecBinaryReader> strings =
+        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
+    CHECK(strings);
+    if (!strings) {
+        return;
+    }
+
+    RigExecWireComputed computed;
+    const auto value = [&](InputTag tag, uint64_t bits) {
+        v4::RigExecWireValue v;
+        v.tag = tag;
+        v.bits = bits;
+        computed.values.push_back(v);
+        return uint32_t(computed.values.size() - 1);
+    };
+    const auto floatValue = [&](float f) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &f, sizeof(bits));
+        return value(InputTag::Float, bits);
+    };
+    const auto doubleValue = [&](double d) {
+        uint64_t bits = 0;
+        std::memcpy(&bits, &d, sizeof(bits));
+        return value(InputTag::Double, bits);
+    };
+    doubleValue(0.0);
+    // Slots: s0 float 0.25, s1 double 0.7, s2 float with no value, s3 int,
+    // s4 double with no value.
+    const InputTag slotTypes[] = {InputTag::Float, InputTag::Double,
+                                  InputTag::Float, InputTag::Int,
+                                  InputTag::Double};
+    RigExecWireComputedFrame frame;
+    frame.values = {floatValue(0.25f), doubleValue(0.7), floatValue(0.0f),
+                    value(InputTag::Int, 3), doubleValue(0.0)};
+    frame.hasValue = {1, 1, 0, 1, 0};
+    for (size_t s = 0; s < 5; ++s) {
+        v4::InputSlot slot;
+        slot.name = slotNames[s];
+        slot.type = slotTypes[s];
+        slot.value = frame.values[s];
+        slot.flags = uint8_t(v4::InputSlotFlags::Listed);
+        computed.inputs.push_back(slot);
+    }
+    computed.listedInputs = 5;
+    computed.frames.push_back(frame);
+    computed.vec3fArrays.emplace_back();
+
+    const auto read = [&](float constant, ReadMode mode, uint8_t flags,
+                          std::vector<uint32_t> walk, int16_t selected = -1,
+                          int32_t overrideIndex = -1) {
+        v4::RigExecWireInput input;
+        input.tag = InputTag::Float;
+        input.mode = mode;
+        input.flags = flags;
+        input.constant = floatValue(constant);
+        input.walk = std::move(walk);
+        input.selected = selected;
+        input.overrideIndex = overrideIndex;
+        return input;
+    };
+    // A read whose one-slot walk holds \p v at the frame: the oracle reads
+    // a read's walk, and falls back to its own read-site constant, never
+    // the read's, when the walk yields nothing.
+    const auto fixed = [&](float v) {
+        v4::InputSlot slot;
+        slot.type = InputTag::Float;
+        slot.value = floatValue(v);
+        slot.flags = uint8_t(v4::InputSlotFlags::Listed) |
+                     uint8_t(v4::InputSlotFlags::HasValue);
+        computed.inputs.push_back(slot);
+        computed.listedInputs = uint32_t(computed.inputs.size());
+        computed.frames[0].values.push_back(slot.value);
+        computed.frames[0].hasValue.push_back(1);
+        return read(v, ReadMode::Resolved, 0,
+                    {uint32_t(computed.inputs.size() - 1)});
+    };
+    const auto object = [&](size_t index, uint32_t type,
+                            uint32_t representation, uint32_t rangePolicy) {
+        v4::RigExecWireWeightObject o;
+        o.path = paths[index];
+        o.type = type;
+        o.representation = representation;
+        o.rangePolicy = rangePolicy;
+        for (v4::RigExecWireInput *input :
+             {&o.defaultWeight, &o.driver, &o.scale, &o.bias, &o.strength,
+              &o.invert, &o.falloffMin, &o.falloffMax, &o.scaleXPos,
+              &o.scaleYPos, &o.scaleZPos, &o.scaleXNeg, &o.scaleYNeg,
+              &o.scaleZNeg, &o.scaleX, &o.scaleY, &o.scaleZ, &o.extentU,
+              &o.extentV}) {
+            *input = fixed(1.0f);
+        }
+        o.defaultWeight = fixed(0.0f);
+        o.bias = fixed(0.0f);
+        o.invert = fixed(0.0f);
+        o.falloffMin = fixed(0.0f);
+        return o;
+    };
+    std::vector<v4::RigExecWireWeightObject> &objects =
+        computed.weightObjects;
+    objects.push_back(object(0, tokStatic, tokConstant, tokStrict));
+    objects[0].defaultWeight = fixed(0.5f);
+    objects.push_back(object(1, tokStatic, tokDense, tokClamp));
+    objects[1].values = {0.25f, 1.5f};
+    objects.push_back(object(2, tokStatic, tokSparse, tokStrict));
+    objects[2].indices = {1, 1};
+    objects[2].values = {0.1f, 0.2f};
+    objects.push_back(object(3, tokStatic, tokSparse, tokStrict));
+    objects[3].indices = {2, 0};
+    objects[3].values = {0.2f, 0.1f};
+    objects.push_back(object(4, tokDynamic, tokSparse, tokStrict));
+    objects[4].base = 3;
+    objects[4].driver = read(1.0f, ReadMode::Resolved, 0, {1});
+    objects[4].scale = fixed(0.85f);
+    objects.push_back(object(5, tokCombine, tokDense, tokStrict));
+    objects[5].combineMode = tokAdd;
+    objects[5].inputs = {3, 4};
+    objects[5].invert = fixed(0.25f);
+    objects[5].strength = fixed(0.75f);
+    objects.push_back(object(6, tokStatic, tokConstant, tokStrict));
+    objects[6].oracleStaticError = "unknown rangePolicy on /W6";
+    objects.push_back(object(7, tokCombine, tokDense, tokStrict));
+    objects[7].combineMode = tokMax;
+    objects[7].inputs = {6};
+    objects.push_back(object(8, tokSphere, tokDense, tokClamp));
+    objects[8].samplesInFlight = true;
+    objects.push_back(object(9, tokDynamic, tokConstant, tokStrict));
+    objects[9].driver = fixed(1.5f);
+    objects.push_back(object(10, tokStatic, tokConstant, tokStrict));
+    objects[10].defaultWeight = fixed(std::nanf(""));
+    // The combine modes no stage case folds two fields with, over a
+    // constant 0.75 and object 3's sparse field (order matters for
+    // subtract and overlay).
+    objects.push_back(object(11, tokStatic, tokConstant, tokStrict));
+    objects[11].defaultWeight = fixed(0.75f);
+    const uint32_t modes[] = {tokSubtract, tokMin, tokAverage, tokOverlay,
+                              tokMultiply};
+    for (size_t m = 0; m < 5; ++m) {
+        objects.push_back(object(12 + m, tokCombine, tokDense, tokClamp));
+        objects.back().combineMode = modes[m];
+        objects.back().inputs = modes[m] == tokOverlay
+                                    ? std::vector<int32_t>{3, 11}
+                                    : std::vector<int32_t>{11, 3};
+    }
+
+    RigExecWireDomainPose poses;
+    RigExecWireDomainGeometry geometry;
+    RrProgram program;
+    program.poses = &poses;
+    program.geometry = &geometry;
+    program.strings = strings.get();
+    CHECK(RrInputsOpen(&program, &computed, &error));
+    CHECK(RrWeightSizeScratch(&program, &error));
+    CHECK(RrInputsSelectFrame(&program, 0, &error));
+    program.store.overridden.assign(4, 0);
+
+    // Reads, mode by mode.
+    const auto f = [&](const v4::RigExecWireInput &input) {
+        return RrWireValueFloat(RrReadInput(&program, input));
+    };
+    const float narrowed = static_cast<float>(0.7);
+    const uint8_t varying = uint8_t(v4::InputReadFlags::Varying);
+    const uint8_t longWay = uint8_t(v4::InputReadFlags::LongWay);
+    // Resolved: a double hop reads a double walk and casts it; else the
+    // most upstream readable hop of the read's type; else the constant.
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 1})) == narrowed);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 2})) == 0.25f);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {2})) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 4})) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {3})) == 9.0f);
+    CHECK(RrReadResolvedFloat(&program,
+                              read(9.0f, ReadMode::Baked, 0, {0, 1}),
+                              5.0f) == narrowed);
+    // The oracle's fallback, not the read's constant (a step-backed read's
+    // folded value), when the walk yields nothing: here a float head whose
+    // connection reaches a double with no value fails the double walk.
+    CHECK(RrReadResolvedFloat(&program,
+                              read(9.0f, ReadMode::Baked, 0, {0, 4}),
+                              5.0f) == 5.0f);
+    CHECK(RrReadResolvedFloat(&program, read(9.0f, ReadMode::Baked, 0, {}),
+                              5.0f) == 5.0f);
+    CHECK(RrReadResolvedFloat(&program,
+                              read(9.0f, ReadMode::Baked, 0, {0, 2}),
+                              5.0f) == 0.25f);
+    // Baked: RigExecBakedRead's four arms.
+    CHECK(f(read(9.0f, ReadMode::Baked, 0, {0})) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Baked, varying, {0}, 0)) == 0.25f);
+    CHECK(f(read(9.0f, ReadMode::Baked, varying, {2}, 0)) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Baked, varying, {0, 1}, 1)) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Baked, varying | longWay, {0, 1})) ==
+          narrowed);
+    CHECK(f(read(9.0f, ReadMode::Baked, 0, {0, 1}, -1, 2)) == 9.0f);
+    program.store.overridden[2] = 1;
+    CHECK(f(read(9.0f, ReadMode::Baked, 0, {0, 1}, -1, 2)) == narrowed);
+    program.store.overridden[2] = 0;
+    // Pinned and Raw.
+    CHECK(f(read(9.0f, ReadMode::Pinned, 0, {0})) == 0.25f);
+    CHECK(f(read(9.0f, ReadMode::Pinned, 0, {0, 1})) == narrowed);
+    CHECK(f(read(9.0f, ReadMode::Pinned, 0, {})) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Raw, 0, {1})) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Raw, 0, {0})) == 0.25f);
+
+    // The overlay: a property-chain result published at a hop answers
+    // there when it holds exactly the walk's type (GetAttribute's Get<T>).
+    std::map<uint32_t, RrPropertyValue> &overlay =
+        program.store.propertyResults;
+    const auto publish = [&](size_t slot, RrPropertyValue::Tag tag,
+                             double v) {
+        RrPropertyValue held;
+        held.tag = tag;
+        held.f32 = float(v);
+        held.f64 = v;
+        overlay[slotNames[slot]] = held;
+    };
+    publish(0, RrPropertyValue::Tag::Float, 0.125);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0})) == 0.125f);
+    // Before the double hop downstream of it.
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 1})) == 0.125f);
+    CHECK(f(read(9.0f, ReadMode::Pinned, 0, {0})) == 0.125f);
+    CHECK(f(read(9.0f, ReadMode::Raw, 0, {0})) == 0.25f);
+    CHECK(f(read(9.0f, ReadMode::Baked, 0, {0})) == 9.0f);
+    CHECK(f(read(9.0f, ReadMode::Baked, varying | longWay, {0, 1})) ==
+          0.125f);
+    // A result of another type is no answer.
+    publish(0, RrPropertyValue::Tag::Double, 0.125);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 2})) == 0.25f);
+    overlay.clear();
+    // A double hop's own double result, narrowed.
+    publish(1, RrPropertyValue::Tag::Double, 0.3);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 1})) ==
+          static_cast<float>(0.3));
+    overlay.clear();
+    // GetAttribute<float> tests its own head for a double before the
+    // overlay, so a float result at a double head is not read.
+    publish(1, RrPropertyValue::Tag::Float, 0.3);
+    CHECK(f(read(9.0f, ReadMode::Resolved, 0, {1})) == narrowed);
+    overlay.clear();
+
+    // The oracle.
+    const auto resolve = [&](size_t index, size_t count,
+                             const std::vector<RrVec3f> *current,
+                             std::vector<float> *weights) {
+        error.clear();
+        return RrResolveWeightOracle(&program, index, count, current,
+                                     weights, &error);
+    };
+    std::vector<float> w;
+    CHECK(resolve(0, 1, nullptr, &w) && w == std::vector<float>{0.5f});
+    CHECK(resolve(1, 2, nullptr, &w) &&
+          w == (std::vector<float>{0.25f, 1.0f}));
+    CHECK(!resolve(1, 3, nullptr, &w) &&
+          error == "dense weight cardinality mismatch on /W1");
+    CHECK(!resolve(2, 3, nullptr, &w) &&
+          error == "duplicate sparse index on /W2");
+    const std::vector<float> sparse = {0.1f, 0.0f, 0.2f};
+    CHECK(resolve(3, 3, nullptr, &w) && w == sparse);
+    CHECK(!resolve(3, 2, nullptr, &w) &&
+          error == "sparse index out of range on /W3");
+    std::vector<float> dynamic(3);
+    size_t reassociated = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        dynamic[i] = (sparse[i] * narrowed) * 0.85f + 0.0f;
+        const float other = sparse[i] * (narrowed * 0.85f) + 0.0f;
+        reassociated += std::memcmp(&other, &dynamic[i], sizeof(float)) != 0;
+    }
+    CHECK(reassociated == 2);
+    CHECK(resolve(4, 3, nullptr, &w) && w == dynamic);
+    // The driver through a double result published at its hop.
+    publish(1, RrPropertyValue::Tag::Double, 0.5);
+    std::vector<float> driven(3);
+    for (size_t i = 0; i < 3; ++i) {
+        driven[i] = (sparse[i] * 0.5f) * 0.85f + 0.0f;
+    }
+    CHECK(resolve(4, 3, nullptr, &w) && w == driven);
+    overlay.clear();
+    std::vector<float> combined(3);
+    for (size_t i = 0; i < 3; ++i) {
+        float acc = (0.0f + sparse[i]) + dynamic[i];
+        combined[i] = (acc + (1.0f - 2.0f * acc) * 0.25f) * 0.75f;
+    }
+    CHECK(resolve(5, 3, nullptr, &w) && w == combined);
+    {
+        std::vector<float> subtract(3), minimum(3), average(3), over(3),
+            product(3);
+        for (size_t i = 0; i < 3; ++i) {
+            subtract[i] = 0.75f - sparse[i];
+            minimum[i] = std::min(std::min(1.0f, 0.75f), sparse[i]);
+            average[i] = ((0.0f + 0.75f) + sparse[i]) * (1.0f / 2.0f);
+            over[i] = sparse[i] < 0.5f
+                          ? 2.0f * sparse[i] * 0.75f
+                          : 1.0f - 2.0f * (1.0f - sparse[i]) * (1.0f - 0.75f);
+            product[i] = (1.0f * 0.75f) * sparse[i];
+        }
+        const std::vector<float> *expected[] = {&subtract, &minimum, &average,
+                                                &over, &product};
+        for (size_t m = 0; m < 5; ++m) {
+            CHECK(resolve(12 + m, 3, nullptr, &w) && w == *expected[m]);
+        }
+    }
+    CHECK(!resolve(6, 1, nullptr, &w) &&
+          error == "unknown rangePolicy on /W6");
+    CHECK(!resolve(7, 1, nullptr, &w) &&
+          error == "unknown rangePolicy on /W6");
+    CHECK(!resolve(8, 3, nullptr, &w) &&
+          error == "/W8: no resolved placement for this volume weight");
+    program.store.weightFrames[paths[8]] = RrMat4d(1.0);
+    CHECK(!resolve(8, 3, nullptr, &w) &&
+          error == "/W8: rigExec:weightTarget reads `preceding` but no "
+                   "in-flight points were supplied");
+    const std::vector<RrVec3f> two(2, RrVec3f(0.0f));
+    CHECK(!resolve(8, 3, &two, &w) &&
+          error == "/W8: sampled point count does not match the target");
+    const std::vector<RrVec3f> three = {RrVec3f(0.0f), RrVec3f(0.5f, 0, 0),
+                                        RrVec3f(3.0f, 0, 0)};
+    CHECK(resolve(8, 3, &three, &w) && w.size() == 3);
+    CHECK(!resolve(9, 1, nullptr, &w) &&
+          error == "strict range violation on /W9");
+    CHECK(!resolve(10, 1, nullptr, &w) &&
+          error == "weight range violation on /W10");
+    CHECK(!resolve(objects.size(), 1, nullptr, &w) &&
+          error == "the computed section holds no weight object " +
+                       std::to_string(objects.size()));
+    std::printf("computed reads and oracle: checked\n");
+}
+
 int
 main(int argc, char **argv)
 {
     PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
     _TestSyntheticBuilders();
+    _TestComputedReadsAndOracle();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {

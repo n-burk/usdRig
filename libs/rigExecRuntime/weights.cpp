@@ -1,4 +1,6 @@
-// rigExecRuntime weight family (M2): WeightPacket, VolumePlacements.
+// rigExecRuntime weight family (M2): WeightPacket, VolumePlacements, and
+// the weight oracle (RrResolveWeightOracle) that constraint envelopes and
+// current-phase fields resolve through, ported near the end of this file.
 // A bit-identical port of RigExecBakedRunWeightStep
 // (libs/rigExec/bakedWeights.cpp) with its builders
 // (libs/rigExec/weightPackets.cpp, libs/rigExecMath/weightFields.cpp).
@@ -37,6 +39,22 @@
 
 namespace rigExec {
 
+// One Computed weight object's token fields as the oracle branches on
+// them, classified once at Open so no call compares text.
+struct RrWeightOracleKind {
+    enum class Type : uint8_t {
+        Static, Dynamic, Combine, Sphere, Plane, Curve, Unknown };
+    enum class Representation : uint8_t { Constant, Dense, Sparse, Other };
+    Type type = Type::Unknown;
+    Representation representation = Representation::Other;
+    bool strict = false;   ///< rigExec:rangePolicy is `strict`
+    bool clamp = false;    ///< rigExec:rangePolicy is `clamp`
+    int combineMode = -1;  ///< _RrCombineMode; -1 for an unknown mode
+    int planeAxis = -1;    ///< 0 x, 1 y, 2 z; -1 for an unknown axis
+    bool bounded = false;    ///< rigExec:planeBounds is `bounded`
+    bool unbounded = false;  ///< rigExec:planeBounds is `unbounded`
+};
+
 struct RrWeightScratch {
     // The record the lookup below was built from. Keyed by frame time:
     // Execute passes the selected record's own frame into the walk, so
@@ -49,6 +67,11 @@ struct RrWeightScratch {
     std::unordered_map<uint32_t, size_t> liveReads;
     // Chain target attribute id -> chain index, built once (epoch data).
     std::unordered_map<uint32_t, size_t> chainByTarget;
+    // Per Computed weight object, its classified tokens; empty without
+    // the section.
+    std::vector<RrWeightOracleKind> oracleKinds;
+    // The Computed points pool as RrVec3f, entry for entry.
+    std::vector<std::vector<RrVec3f>> oraclePoints;
 };
 
 bool
@@ -61,12 +84,73 @@ RrWeightSizeScratch(RrProgram *program, std::string *error)
         return false;
     }
     RrWeightScratch *scratch = new RrWeightScratch();
+    program->weights = std::shared_ptr<void>(scratch);
     const std::vector<RigExecWireChain> &chains =
         program->geometry->chains;
     for (size_t c = 0; c < chains.size(); ++c) {
         scratch->chainByTarget.emplace(chains[c].target, c);
     }
-    program->weights = std::shared_ptr<void>(scratch);
+    const RigExecWireComputed *computed = program->inputState.computed;
+    if (!computed) {
+        return true;
+    }
+    using Kind = RrWeightOracleKind;
+    scratch->oracleKinds.reserve(computed->weightObjects.size());
+    for (const v4::RigExecWireWeightObject &object :
+         computed->weightObjects) {
+        const std::string type = program->TextOrEmpty(object.type);
+        const std::string representation =
+            program->TextOrEmpty(object.representation);
+        const std::string rangePolicy =
+            program->TextOrEmpty(object.rangePolicy);
+        const std::string combineMode =
+            program->TextOrEmpty(object.combineMode);
+        // The plane tokens as the oracle reads them, not the composition's.
+        const std::string planeAxis =
+            program->TextOrEmpty(object.oraclePlaneAxis);
+        const std::string planeBounds =
+            program->TextOrEmpty(object.oraclePlaneBounds);
+        Kind kind;
+        kind.type = type == "RigExecStaticWeight"    ? Kind::Type::Static
+                    : type == "RigExecDynamicWeight" ? Kind::Type::Dynamic
+                    : type == "RigExecCombineWeight" ? Kind::Type::Combine
+                    : type == "RigExecSphereWeight"  ? Kind::Type::Sphere
+                    : type == "RigExecPlaneWeight"   ? Kind::Type::Plane
+                    : type == "RigExecCurveWeight"   ? Kind::Type::Curve
+                                                     : Kind::Type::Unknown;
+        kind.representation =
+            representation == "constant" ? Kind::Representation::Constant
+            : representation == "dense"  ? Kind::Representation::Dense
+            : representation == "sparse" ? Kind::Representation::Sparse
+                                         : Kind::Representation::Other;
+        kind.strict = rangePolicy == "strict";
+        kind.clamp = rangePolicy == "clamp";
+        // RigExecWeightCombine order, which _RrCombineMode mirrors.
+        const char *const modes[] = {"multiply", "add",     "subtract",
+                                     "max",      "min",     "average",
+                                     "overlay"};
+        for (int m = 0; m < 7; ++m) {
+            if (combineMode == modes[m]) {
+                kind.combineMode = m;
+            }
+        }
+        kind.planeAxis = planeAxis == "x"   ? 0
+                         : planeAxis == "y" ? 1
+                         : planeAxis == "z" ? 2
+                                            : -1;
+        kind.bounded = planeBounds == "bounded";
+        kind.unbounded = planeBounds == "unbounded";
+        scratch->oracleKinds.push_back(kind);
+    }
+    scratch->oraclePoints.reserve(computed->vec3fArrays.size());
+    for (const v4::RigExecWireVec3fArray &array : computed->vec3fArrays) {
+        std::vector<RrVec3f> points;
+        points.reserve(array.v.size());
+        for (const RigExecWireVec3f &p : array.v) {
+            points.push_back(RrVec3f(p[0], p[1], p[2]));
+        }
+        scratch->oraclePoints.push_back(std::move(points));
+    }
     return true;
 }
 
@@ -1366,7 +1450,385 @@ _RrRunVolumePlacements(RrProgram *program, size_t step,
     return true;
 }
 
+// The weight oracle: RigExecRigEvaluator::_ResolveWeights and
+// _ResolveVolumeWeights (rigEvaluatorGeometry.cpp), statement for
+// statement, over the Computed section. What the evaluator reads off the
+// stage arrives as follows: the object's composition and tokens from its
+// entry (tokens classified at Open), each scalar through
+// RrReadResolvedFloat with the oracle's own fallback at that read site
+// (the _ResolvedRead image), a volume's placement from store.weightFrames
+// (the VolumePlacements step's image of _volumeWeightMatrices, keyed by
+// the same path id), and the structural answers the bake recorded --
+// oracleStaticError, oraclePhaseError and the static sample and curve
+// points -- each consulted where the oracle would have computed it. Error
+// text is the oracle's, verbatim. A successful resolve leaves `weights`
+// holding the field; after a failure its contents are unspecified, and no
+// caller reads them.
+
+bool _RrOracle(const RrProgram *program, const RrWeightScratch &scratch,
+               size_t object, size_t count,
+               const std::vector<RrVec3f> *current,
+               std::vector<float> *weights, std::string *error);
+
+// _ResolveVolumeWeights: a combine folds its inputs; a volume measures the
+// samples about its rigid placement.
+bool
+_RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
+                size_t object, size_t count,
+                const std::vector<RrVec3f> *current,
+                std::vector<float> *weights, std::string *error)
+{
+    using Kind = RrWeightOracleKind;
+    const RigExecWireComputed &computed = *program->inputState.computed;
+    const v4::RigExecWireWeightObject &wire = computed.weightObjects[object];
+    const Kind &kind = scratch.oracleKinds[object];
+    const auto who = [&]() { return program->TextOrEmpty(wire.path); };
+    const auto read = [&](const v4::RigExecWireInput &input, float fallback) {
+        return RrReadResolvedFloat(program, input, fallback);
+    };
+
+    if (kind.type == Kind::Type::Combine) {
+        if (kind.combineMode < 0) {
+            *error = who() + ": unknown rigExec:combineMode " +
+                     program->TextOrEmpty(wire.combineMode);
+            return false;
+        }
+        // Authored order: subtract and overlay depend on it.
+        std::vector<std::vector<float>> fields;
+        fields.reserve(wire.inputs.size());
+        for (int32_t input : wire.inputs) {
+            std::vector<float> field;
+            if (!_RrOracle(program, scratch, size_t(input), count, current,
+                           &field, error)) {
+                return false;
+            }
+            fields.push_back(std::move(field));
+        }
+        if (!_RrCombineWeightFields(_RrCombineMode(kind.combineMode), fields,
+                                    count, weights)) {
+            *error = who() + ": combine inputs disagree on element count";
+            return false;
+        }
+        const float strength = read(wire.strength, 1.0f);
+        const float invert = read(wire.invert, 0.0f);
+        for (float &w : *weights) {
+            w = (w + (1.0f - 2.0f * w) * invert) * strength;
+        }
+        return true;
+    }
+
+    // The placement, scale and shear removed.
+    const auto placed = program->store.weightFrames.find(wire.path);
+    if (placed == program->store.weightFrames.end()) {
+        *error = who() + ": no resolved placement for this volume weight";
+        return false;
+    }
+    const RrMat4d rigid = _RrRemoveScaleShear(placed->second);
+    const double det = rigid.GetDeterminant();
+    if (!std::isfinite(det) || std::abs(det) < 1e-12) {
+        *error = who() + ": degenerate volume placement";
+        return false;
+    }
+    RrMat4d worldToLocal = rigid.GetInverse();
+
+    // Which points the distance function measures.
+    if (!wire.oraclePhaseError.empty()) {
+        *error = wire.oraclePhaseError;
+        return false;
+    }
+    const std::vector<RrVec3f> *samples = nullptr;
+    if (wire.samplesInFlight) {
+        if (!current) {
+            *error = who() +
+                     ": rigExec:weightTarget reads `preceding` but no "
+                     "in-flight points were supplied";
+            return false;
+        }
+        samples = current;
+    } else {
+        if (wire.oracleSamples < 0 ||
+            size_t(wire.oracleSamples) >= scratch.oraclePoints.size()) {
+            *error = who() + ": could not read the points to sample";
+            return false;
+        }
+        samples = &scratch.oraclePoints[size_t(wire.oracleSamples)];
+    }
+    if (samples->size() != count) {
+        *error = who() + ": sampled point count does not match the target";
+        return false;
+    }
+
+    const float falloffMin = read(wire.falloffMin, 0.0f);
+    const float falloffMax = read(wire.falloffMax, 1.0f);
+    const float invert = read(wire.invert, 0.0f);
+    const float strength = read(wire.strength, 1.0f);
+    const std::vector<float> &curve = wire.falloffCurve;
+
+    if (kind.type == Kind::Type::Plane) {
+        if (kind.planeAxis < 0) {
+            *error = who() + ": unknown rigExec:planeAxis " +
+                     program->TextOrEmpty(wire.oraclePlaneAxis);
+            return false;
+        }
+        // The extents are read only in the bounded arm.
+        bool bounded = false;
+        float extentU = 1.0f;
+        float extentV = 1.0f;
+        if (kind.bounded) {
+            extentU = read(wire.extentU, 1.0f);
+            extentV = read(wire.extentV, 1.0f);
+            for (const float e : {extentU, extentV}) {
+                if (!std::isfinite(e) || e <= 0.0f) {
+                    *error = who() +
+                             ": inputs:extentU/V must be finite and positive "
+                             "when rigExec:planeBounds is `bounded`";
+                    return false;
+                }
+            }
+            bounded = true;
+        } else if (!kind.unbounded) {
+            *error = who() + ": unknown rigExec:planeBounds " +
+                     program->TextOrEmpty(wire.oraclePlaneBounds);
+            return false;
+        }
+        _RrPlaneWeightField(*samples, worldToLocal, kind.planeAxis,
+                            falloffMin, falloffMax, invert, strength, curve,
+                            weights, bounded, extentU, extentV);
+        return true;
+    }
+
+    // Sphere and curve fold the per-axis divisors into the matrix.
+    const float sx = read(wire.scaleX, 1.0f);
+    const float sy = read(wire.scaleY, 1.0f);
+    const float sz = read(wire.scaleZ, 1.0f);
+    for (float s : {sx, sy, sz}) {
+        if (!std::isfinite(s) || s <= 0.0f) {
+            *error = who() + ": inputs:scaleX/Y/Z must be finite and positive";
+            return false;
+        }
+    }
+    worldToLocal = _RrApplyAxisScales(worldToLocal, RrVec3f(sx, sy, sz));
+
+    if (kind.type == Kind::Type::Sphere) {
+        const RrVec3f positiveScales(read(wire.scaleXPos, 1.0f),
+                                     read(wire.scaleYPos, 1.0f),
+                                     read(wire.scaleZPos, 1.0f));
+        const RrVec3f negativeScales(read(wire.scaleXNeg, 1.0f),
+                                     read(wire.scaleYNeg, 1.0f),
+                                     read(wire.scaleZNeg, 1.0f));
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(positiveScales[axis]) ||
+                positiveScales[axis] <= 0 ||
+                !std::isfinite(negativeScales[axis]) ||
+                negativeScales[axis] <= 0) {
+                *error = who() +
+                         ": signed axis scales must be finite and positive";
+                return false;
+            }
+        }
+        _RrSphereWeightField(*samples, worldToLocal, falloffMin, falloffMax,
+                             invert, strength, curve, weights, positiveScales,
+                             negativeScales);
+        return true;
+    }
+    if (kind.type == Kind::Type::Curve) {
+        if (wire.oracleCurve < 0 ||
+            size_t(wire.oracleCurve) >= scratch.oraclePoints.size()) {
+            *error =
+                who() + ": rigExec:curve must name exactly one points source";
+            return false;
+        }
+        _RrCurveWeightField(*samples,
+                            scratch.oraclePoints[size_t(wire.oracleCurve)],
+                            worldToLocal, falloffMin, falloffMax, invert,
+                            strength, curve, weights);
+        return true;
+    }
+    // Defensive, as in the oracle: _RrOracle hands only combine and volume
+    // types to this function.
+    *error = who() + ": not a volumetric weight object";
+    return false;
+}
+
+// _ResolveWeights.
+bool
+_RrOracle(const RrProgram *program, const RrWeightScratch &scratch,
+          size_t object, size_t count, const std::vector<RrVec3f> *current,
+          std::vector<float> *weights, std::string *error)
+{
+    using Kind = RrWeightOracleKind;
+    weights->assign(count, 1.0f);
+    const RigExecWireComputed &computed = *program->inputState.computed;
+    const v4::RigExecWireWeightObject &wire = computed.weightObjects[object];
+    const Kind &kind = scratch.oracleKinds[object];
+    const auto who = [&]() { return program->TextOrEmpty(wire.path); };
+    const auto read = [&](const v4::RigExecWireInput &input, float fallback) {
+        return RrReadResolvedFloat(program, input, fallback);
+    };
+
+    // The structural failures (a missing prim, an unknown type, combine
+    // mode or range policy, the dynamic descriptor checks, a static field
+    // with samples or connections) precede every read and every recursion
+    // of this object.
+    if (!wire.oracleStaticError.empty()) {
+        *error = wire.oracleStaticError;
+        return false;
+    }
+    // The bake records an unknown type as a static error; this guards an
+    // entry whose type token and facts disagree.
+    if (kind.type == Kind::Type::Unknown) {
+        *error = "unknown weight object type " +
+                 program->TextOrEmpty(wire.type) + " on " + who();
+        return false;
+    }
+
+    if (kind.type == Kind::Type::Combine || kind.type == Kind::Type::Sphere ||
+        kind.type == Kind::Type::Plane || kind.type == Kind::Type::Curve) {
+        // Resolved in place: the oracle's separate vector only keeps a
+        // failure out of *weights, which no caller reads after one.
+        if (!_RrOracleVolume(program, scratch, object, count, current,
+                             weights, error)) {
+            return false;
+        }
+        // Anything but clamp is strict here.
+        for (float &w : *weights) {
+            if (!std::isfinite(w)) {
+                *error = "non-finite weight on " + who();
+                return false;
+            }
+            if (w < 0.0f || w > 1.0f) {
+                if (!kind.clamp) {
+                    *error = "strict range violation on " + who();
+                    return false;
+                }
+                w = std::min(std::max(w, 0.0f), 1.0f);
+            }
+        }
+        return true;
+    }
+
+    const float defaultWeight = read(wire.defaultWeight, 0.0f);
+    if (!kind.strict && !kind.clamp) {
+        *error = "unknown rangePolicy on " + who();
+        return false;
+    }
+
+    if (kind.type == Kind::Type::Dynamic) {
+        // Base field first (forwarding the in-flight points), then
+        // r_i = (b_i * d) * s + a.
+        std::vector<float> base(count, 1.0f);
+        if (wire.base >= 0 &&
+            !_RrOracle(program, scratch, size_t(wire.base), count, current,
+                       &base, error)) {
+            return false;
+        }
+        const float driver = read(wire.driver, 1.0f);
+        const float scale = read(wire.scale, 1.0f);
+        const float bias = read(wire.bias, 0.0f);
+        for (size_t i = 0; i < count; ++i) {
+            float r = (base[i] * driver) * scale + bias;
+            if (!std::isfinite(r)) {
+                *error = "non-finite dynamic weight on " + who();
+                return false;
+            }
+            if (r < 0.0f || r > 1.0f) {
+                if (kind.clamp) {
+                    r = std::min(std::max(r, 0.0f), 1.0f);
+                } else {
+                    *error = "strict range violation on " + who();
+                    return false;
+                }
+            }
+            (*weights)[i] = r;
+        }
+        return true;
+    }
+
+    // Static: the authored table.
+    const std::vector<float> &values = wire.values;
+    if (kind.representation == Kind::Representation::Constant) {
+        if (!values.empty()) {
+            *error = "constant weight must not author values on " + who();
+            return false;
+        }
+        weights->assign(count, defaultWeight);
+    } else if (kind.representation == Kind::Representation::Dense) {
+        if (values.size() != count) {
+            *error = "dense weight cardinality mismatch on " + who();
+            return false;
+        }
+        if (defaultWeight != 0.0f) {
+            *error = "dense weight requires canonical defaultWeight 0 on " +
+                     who();
+            return false;
+        }
+        weights->assign(values.begin(), values.end());
+    } else if (kind.representation == Kind::Representation::Sparse) {
+        const std::vector<int32_t> &indices = wire.indices;
+        if (indices.size() != values.size()) {
+            *error = "sparse index/value size mismatch on " + who();
+            return false;
+        }
+        weights->assign(count, defaultWeight);
+        // Pair order: each index is range-checked, then checked unseen.
+        std::vector<char> seen(count, 0);
+        for (size_t i = 0; i < indices.size(); ++i) {
+            if (indices[i] < 0 || static_cast<size_t>(indices[i]) >= count) {
+                *error = "sparse index out of range on " + who();
+                return false;
+            }
+            if (seen[size_t(indices[i])]) {
+                *error = "duplicate sparse index on " + who();
+                return false;
+            }
+            seen[size_t(indices[i])] = 1;
+            (*weights)[size_t(indices[i])] = values[i];
+        }
+    } else {
+        *error = "unknown weight representation on " + who();
+        return false;
+    }
+    for (float w : *weights) {
+        if (!std::isfinite(w) || (kind.strict && (w < 0.0f || w > 1.0f))) {
+            *error = "weight range violation on " + who();
+            return false;
+        }
+    }
+    if (kind.clamp) {
+        for (float &w : *weights) {
+            w = std::min(std::max(w, 0.0f), 1.0f);
+        }
+    }
+    return true;
+}
+
 }  // namespace
+
+bool
+RrResolveWeightOracle(const RrProgram *program, size_t object, size_t count,
+                      const std::vector<RrVec3f> *current,
+                      std::vector<float> *weights, std::string *error)
+{
+    std::string unused;
+    std::string *why = error ? error : &unused;
+    if (!weights) {
+        *why = "no weight field to resolve into";
+        return false;
+    }
+    const RrWeightScratch *scratch =
+        program ? _RrScratch(program) : nullptr;
+    // A wire violation, not an oracle answer: Open checked every index the
+    // pose and geometry tables hand in, and the section keeps each entry's
+    // composition below the entry itself.
+    if (!scratch || !program->inputState.computed ||
+        object >= program->inputState.computed->weightObjects.size() ||
+        object >= scratch->oracleKinds.size()) {
+        *why = "the computed section holds no weight object " +
+               std::to_string(object);
+        return false;
+    }
+    return _RrOracle(program, *scratch, object, count, current, weights, why);
+}
 
 bool
 RrRunWeightStep(RrProgram *program, size_t step, double time,

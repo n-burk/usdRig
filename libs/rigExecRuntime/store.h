@@ -15,6 +15,7 @@
 #include "rigExecBinary/inputTable.h"
 #include "rigExecBinary/pose.h"
 #include "rigExecBinary/program.h"
+#include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/values.h"
 #include "rigExecMath/autoClavicleKernel.h"
 
@@ -56,7 +57,8 @@ enum RrSolverField : int {
     RrSolverMinLengthRatio = 10,
     RrSolverTwistTurns = 11,
     RrSolverRibbonSampleCount = 12,
-    RrSolverFieldCount = 13,
+    RrSolverIkSpace = 13,
+    RrSolverFieldCount = 14,
 };
 
 enum RrConstraintField : int {
@@ -176,7 +178,16 @@ struct RrStore {
     std::vector<char> ribbonVarying, ribbonDirty;
     std::vector<RrCommitScratch> commits;
     std::vector<RrConstraintArraysLive> arrays;
-    std::map<uint32_t, RrPropertyValue> propertyResults, lastPropertyResults;
+    // The property chains' results this run (properties.cpp), keyed by the
+    // attribute path id they are published at: chain targets and phased
+    // consumers. Every read of such an attribute sees them.
+    std::map<uint32_t, RrPropertyValue> propertyResults;
+    // The same results by publish entry (one per attribute a chain or a
+    // phased consumer publishes at), with whether this run published it;
+    // an unpublished entry holds a zero value. The closure compares them
+    // with the last run's.
+    std::vector<RrPropertyValue> propertyValues, lastPropertyValues;
+    std::vector<char> propertyPublished, lastPropertyPublished;
     std::vector<char> chainHaveBase, chainBaseDirty, lastHaveBase;
     std::vector<std::vector<RrVec3f>> chainBases;
     std::vector<char> derivedHaveBase;
@@ -293,6 +304,7 @@ struct RrProgram {
     std::shared_ptr<void> pose;
     std::shared_ptr<void> geo;
     std::shared_ptr<void> weights;
+    std::shared_ptr<void> properties;
 
     // Test-only family mask: bit 0 pose, 1 weights, 2 geometry. All set
     // outside tests; a masked family's steps are skipped, which is how
@@ -303,6 +315,18 @@ struct RrProgram {
     // ahead of the program lines on the first Execute, then drained.
     // Empty for binaries baked before the key existed.
     std::vector<std::string> compileDiagnostics;
+
+    // The input slots and their values this run (inputs.h).
+    RrInputState inputState;
+
+    // Test-only: a step that computes what the frame record also carries
+    // (constraint envelopes, current-phase weight packets, the reads a
+    // revision's assembly consumes) compares the two bit for bit, fails
+    // naming the field and index on a mismatch, and counts each comparison
+    // in its RrStepOutput::crossChecked. Execute compares the property
+    // chains' results and the registered and mover-scalar reads the same
+    // way.
+    bool crossCheck = false;
 
     bool GetText(uint32_t id, std::string *out) const
     {
@@ -403,9 +427,70 @@ struct RrProgram {
 bool RrPoseSizeScratch(RrProgram *program, std::string *error);
 bool RrGeometrySizeScratch(RrProgram *program, std::string *error);
 bool RrWeightSizeScratch(RrProgram *program, std::string *error);
+/// Classifies the Computed section's property chains and sizes the
+/// publish entries; checks that each chain read's uid routes to an input
+/// that reads the long way. Refuses a rig with property chains and no
+/// section. Runs after the uid routing and the holders are set up.
+bool RrPropertySizeScratch(RrProgram *program, std::string *error);
+
+/// The property chains (RigExecRigEvaluator::_EvaluatePropertyChains,
+/// rigEvaluatorProperties.cpp) over this run's slot values, in dependency
+/// order, before every prologue: each published result lands in
+/// RrStore::propertyResults at once, so a later chain or any read crossing
+/// the target sees it. Diagnostics are appended to \p poseDiagnostics in
+/// chain order. False only when the section and the classified chains
+/// disagree.
+bool RrRunPropertyChains(RrProgram *program,
+                         std::vector<std::string> *poseDiagnostics);
+
+/// Cross-check (RrProgram::crossCheck): this run's property results
+/// against \p record's, path set, tag and bits. False naming the field,
+/// e.g. "propertyValues[/Rig/Channels/Dial.rigExec:amount]"; otherwise adds
+/// the number of values compared to \p compared.
+bool RrCrossCheckPropertyResults(const RrProgram *program,
+                                 const RigExecWireFrameInputs &record,
+                                 uint64_t *compared, std::string *error);
+
+/// The program's registered reads that cross a property-chain target (the
+/// Computed section's chainReads), after the chains and before every
+/// prologue: each is evaluated by RrReadInput over this run's slot values
+/// and chain results and handed to its uid's holder, which is what the
+/// consuming step reads. Under RrProgram::crossCheck each is first compared
+/// bit for bit with the value \p record holds for that uid, when it holds
+/// one; a mismatch fails naming the field, e.g. "values[uid 12,
+/// /Rig/Movers/Follow.inputs:defaultWeight]", otherwise the number compared
+/// is added to \p compared.
+bool RrRunChainReads(RrProgram *program, const RigExecWireFrameInputs &record,
+                     uint64_t *compared, std::string *error);
+
+/// Cross-check (RrProgram::crossCheck), after the chain-read hand-off and
+/// before every prologue: each registered read the chain hand-off does not
+/// cover, evaluated by RrReadInput, against what the record-driven steps
+/// consume for it -- its holder or constant, or for an avar binding the
+/// avar table's value -- wherever that is this frame's value (a read
+/// made per run only at the frames \p record holds its uid); and each
+/// connection-following mover scalar against the value \p record holds
+/// under its head's path, where a forced live read put one. A mismatch
+/// fails naming the field, e.g. "registered reads: ... at solvers[0].bend
+/// (uid 3, /Rig/Solvers/Ik.rigExec:preferredBendRadians)"; otherwise
+/// each comparison is added to \p counts under its kind.
+bool RrCrossCheckReads(const RrProgram *program,
+                       const RigExecWireFrameInputs &record,
+                       RrCrossCheckCounts *counts, std::string *error);
+
+/// Cross-check of the reads geometry chain \p chain's revision \p revision
+/// (derived target \p revision when \p derived) consumed from \p record
+/// this run: its blend channel weights where no pose weight drives the
+/// channel and, for a chain revision, its inputs:defaultWeight, each
+/// evaluated by RrReadInput. Counted in \p output; false naming the field.
+bool RrCrossCheckRevisionReads(const RrProgram *program,
+                               const RigExecWireFrameInputs *record,
+                               size_t chain, size_t revision, bool derived,
+                               RrStepOutput *output, std::string *error);
 
 // Prologues. `poseDiagnostics` carries lines published straight into
-// the generation (property chains); false names the failure.
+// the generation, after the property chains' own; false names the
+// failure.
 bool RrProloguePose(RrProgram *program,
                     const RigExecWireFrameInputs &record,
                     std::vector<std::string> *poseDiagnostics,
@@ -423,6 +508,18 @@ bool RrRunGeometryStep(RrProgram *program, size_t step, double time,
 bool RrRunWeightStep(RrProgram *program, size_t step, double time,
                      std::string *error);
 void RrSkipGeometryStep(RrProgram *program, size_t step);
+
+/// RigExecRigEvaluator::_ResolveWeights (rigEvaluatorGeometry.cpp) over the
+/// Computed section's weight objects: the field a constraint envelope
+/// (count 1) and a current-phase revision (count = the entering points,
+/// passed as \p current) copy, as the baked program does
+/// (bakedWeights.cpp). \p object indexes the section's weight objects.
+/// False with the oracle's own error text, checked in the oracle's order;
+/// \p weights is then unspecified. Pure: reads slot values, the run's
+/// property-chain results, the weight placements and static tables only.
+bool RrResolveWeightOracle(const RrProgram *program, size_t object,
+                           size_t count, const std::vector<RrVec3f> *current,
+                           std::vector<float> *weights, std::string *error);
 
 // Executor and epilogue (framework).
 void RrComputeClosure(RrProgram *program, double time, bool force);

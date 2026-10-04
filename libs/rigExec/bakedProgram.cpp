@@ -25,6 +25,7 @@
 #include "movers/moverRegistry.h"
 #include "parallel.h"
 #include "rigEvaluator.h"
+#include "rigEvaluatorInternal.h"
 #include "types.h"
 
 #include "rigExecMath/pointFrame.h"
@@ -2171,6 +2172,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     for (const auto &[target, revisions] : E._propertyChains) {
         ctx.chainTargets.insert(target);
     }
+    B.chainTargets = ctx.chainTargets;
     // Each ribbon's driver-points attribute, resolved once by the compiler.
     // Restated here because bakedPose.cpp cannot name the evaluator's
     // private map, and re-deriving the resolution (a prim target becomes its
@@ -3686,6 +3688,479 @@ const RigExecBakedProgramImpl &
 RigExecBakedProgram::GetStepGraph() const
 {
     return *_impl;
+}
+
+UsdTimeCode
+RigExecBakedProbeTime(const UsdStageRefPtr &stage)
+{
+    return _ProbeTime(stage);
+}
+
+// The structural half of RigExecRigEvaluator::_ResolveWeights and
+// _ResolveVolumeWeights (rigEvaluatorGeometry.cpp), statement for
+// statement: the same reads, the same fallbacks, the same error text. What
+// depends on a run -- placement, counts, scalar values, recursion into the
+// objects this one composes -- is left to the port.
+void
+RigExecBakedProgram::DescribeWeightOracle(
+    const RigExecRigEvaluator &evaluator, const SdfPath &path,
+    UsdTimeCode time, RigExecWeightOracleFacts *facts)
+{
+    const RigExecRigEvaluator &E = evaluator;
+    *facts = RigExecWeightOracleFacts();
+    const UsdPrim prim = E._stage->GetPrimAtPath(path);
+    if (!prim) {
+        facts->staticError = "missing weight object " + path.GetString();
+        return;
+    }
+    const TfToken typeName = prim.GetTypeName();
+    if (!evaluatorDetail::_IsWeightObjectType(typeName)) {
+        facts->staticError = "unknown weight object type " +
+                             typeName.GetString() + " on " +
+                             path.GetString();
+        return;
+    }
+    const auto readToken = [&](const char *name, const char *fallback) {
+        TfToken value(fallback);
+        if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+            a.Get(&value, time);
+        }
+        return value;
+    };
+    const std::string who = prim.GetPath().GetAsString();
+    if (typeName == TfToken("RigExecCombineWeight")) {
+        const TfToken mode = readToken("rigExec:combineMode", "multiply");
+        if (mode != "multiply" && mode != "add" && mode != "subtract" &&
+            mode != "max" && mode != "min" && mode != "average" &&
+            mode != "overlay") {
+            facts->staticError =
+                who + ": unknown rigExec:combineMode " + mode.GetString();
+        }
+        return;
+    }
+    if (evaluatorDetail::_IsVolumeWeightType(typeName)) {
+        bool inFlight = false;
+        std::string why;
+        if (!evaluatorDetail::_VolumeWeightSamplesInFlight(prim, &inFlight,
+                                                           &why)) {
+            facts->phaseError = who + ": " + why;
+            return;
+        }
+        facts->samplesInFlight = inFlight;
+        // What the facts below hold at `time` only, while the oracle reads
+        // it at every evaluation time.
+        const auto noteAnimated = [&](const UsdAttribute &a) {
+            if (facts->timeVarying.IsEmpty() && a &&
+                (a.ValueMightBeTimeVarying() || a.GetNumTimeSamples() > 0)) {
+                facts->timeVarying = a.GetPath();
+            }
+        };
+        // The attribute _ReadTargetPoints reads through a relationship.
+        const auto pointsSource = [&](const char *relationship) {
+            SdfPathVector targets;
+            if (const UsdRelationship rel =
+                    prim.GetRelationship(TfToken(relationship))) {
+                rel.GetTargets(&targets);
+            }
+            return targets.size() == 1
+                       ? E._stage->GetAttributeAtPath(
+                             evaluatorDetail::_ResolveGeometryInput(
+                                 E._stage, targets[0]))
+                       : UsdAttribute();
+        };
+        if (!inFlight) {
+            const bool fromSampleSource =
+                E._ReadTargetPoints(prim, TfToken("rigExec:sampleSource"),
+                                    time, &facts->samples);
+            facts->haveSamples =
+                fromSampleSource ||
+                E._ReadTargetPoints(prim, TfToken("rigExec:weightTarget"),
+                                    time, &facts->samples);
+            if (!facts->haveSamples) {
+                facts->samples.clear();
+            }
+            noteAnimated(pointsSource("rigExec:sampleSource"));
+            if (!fromSampleSource) {
+                noteAnimated(pointsSource("rigExec:weightTarget"));
+            }
+        }
+        if (typeName == TfToken("RigExecCurveWeight")) {
+            facts->haveCurve =
+                E._ReadTargetPoints(prim, TfToken("rigExec:curve"), time,
+                                    &facts->curve) &&
+                !facts->curve.empty();
+            if (!facts->haveCurve) {
+                facts->curve.clear();
+            }
+            noteAnimated(pointsSource("rigExec:curve"));
+        }
+        if (typeName == TfToken("RigExecPlaneWeight")) {
+            facts->planeAxis = readToken("rigExec:planeAxis", "y");
+            facts->planeBounds = readToken("rigExec:planeBounds", "unbounded");
+            noteAnimated(prim.GetAttribute(TfToken("rigExec:planeAxis")));
+            noteAnimated(prim.GetAttribute(TfToken("rigExec:planeBounds")));
+        }
+        return;
+    }
+
+    const TfToken representation =
+        readToken("rigExec:representation", "constant");
+    const TfToken rangePolicy = readToken("rigExec:rangePolicy", "strict");
+    if (rangePolicy != "strict" && rangePolicy != "clamp") {
+        facts->staticError = "unknown rangePolicy on " + path.GetString();
+        return;
+    }
+    if (typeName == TfToken("RigExecDynamicWeight")) {
+        if (readToken("rigExec:operation", "multiply") != "multiply") {
+            facts->staticError =
+                "unknown dynamic-weight operation on " + path.GetString();
+            return;
+        }
+        SdfPathVector baseTargets;
+        if (const UsdRelationship rel =
+                prim.GetRelationship(TfToken("rigExec:baseWeight"))) {
+            rel.GetTargets(&baseTargets);
+        }
+        if (baseTargets.size() > 1) {
+            facts->staticError =
+                "rigExec:baseWeight must have at most one target on " +
+                path.GetString();
+            return;
+        }
+        if (baseTargets.empty()) {
+            if (representation != "constant") {
+                facts->staticError =
+                    "no-base dynamic weight must be constant on " +
+                    path.GetString();
+            }
+            return;
+        }
+        const UsdPrim basePrim = E._stage->GetPrimAtPath(baseTargets[0]);
+        if (!basePrim) {
+            facts->staticError =
+                "missing base weight object on " + path.GetString();
+            return;
+        }
+        const auto canonicalWeightTarget = [&](const UsdPrim &p) {
+            SdfPathVector t;
+            if (const UsdRelationship rel =
+                    p.GetRelationship(TfToken("rigExec:weightTarget"))) {
+                rel.GetTargets(&t);
+            }
+            return t.size() == 1
+                       ? evaluatorDetail::_ResolveGeometryInput(E._stage,
+                                                                t[0])
+                       : SdfPath();
+        };
+        if (canonicalWeightTarget(prim) != canonicalWeightTarget(basePrim) ||
+            canonicalWeightTarget(prim).IsEmpty()) {
+            facts->staticError =
+                "dynamic/base weight target mismatch on " + path.GetString();
+            return;
+        }
+        TfToken baseRepresentation("constant");
+        if (const UsdAttribute a =
+                basePrim.GetAttribute(TfToken("rigExec:representation"))) {
+            a.Get(&baseRepresentation, time);
+        }
+        if (baseRepresentation != representation) {
+            facts->staticError = "dynamic/base representation mismatch on " +
+                                 path.GetString();
+            return;
+        }
+        if (representation == "sparse") {
+            VtIntArray mine;
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:indices"))) {
+                a.Get(&mine, time);
+            }
+            if (!mine.empty()) {
+                VtIntArray theirs;
+                if (const UsdAttribute a =
+                        basePrim.GetAttribute(TfToken("rigExec:indices"))) {
+                    a.Get(&theirs, time);
+                }
+                const std::set<int> mySupport(mine.begin(), mine.end());
+                const std::set<int> baseSupport(theirs.begin(),
+                                                theirs.end());
+                if (mySupport != baseSupport) {
+                    facts->staticError =
+                        "dynamic/base sparse support mismatch on " +
+                        path.GetString();
+                }
+            }
+        }
+        return;
+    }
+    for (const char *field :
+         {"rigExec:values", "rigExec:indices", "rigExec:defaultWeight",
+          "rigExec:representation", "rigExec:rangePolicy"}) {
+        const UsdAttribute a = prim.GetAttribute(TfToken(field));
+        if (a && (a.GetNumTimeSamples() > 0 || a.HasAuthoredConnections())) {
+            facts->staticError = std::string("static weight field ") + field +
+                                 " has time samples or connections on " +
+                                 path.GetString();
+            return;
+        }
+    }
+}
+
+bool
+RigExecBakedProgram::ComposeEnvelopeObjects(
+    const RigExecRigEvaluator &evaluator,
+    const RigExecBakedProgramImpl &program,
+    std::vector<RigExecBakedEnvelopeObject> *objects,
+    std::map<SdfPath, int> *index, std::string *error)
+{
+    const RigExecRigEvaluator &E = evaluator;
+    const RigExecBakedProgramImpl &B = program;
+    objects->clear();
+    index->clear();
+    const int stepBacked = int(B.weightObjects.size());
+    std::string failure;
+    const auto refuse = [&](const std::string &what, const SdfPath &where) {
+        if (failure.empty()) {
+            failure = what + ": " + where.GetString();
+        }
+        return -1;
+    };
+    // Depth first and entered on the way out, like
+    // RigExecBakedBakeWeightObject: -1 in `index` marks an object under way.
+    std::function<int(const SdfPath &)> compose =
+        [&](const SdfPath &path) -> int {
+        if (!failure.empty()) {
+            return -1;
+        }
+        const auto baked = B.weightIndex.find(path);
+        if (baked != B.weightIndex.end() && baked->second >= 0) {
+            return baked->second;
+        }
+        const auto seen = index->find(path);
+        if (seen != index->end()) {
+            return seen->second < 0
+                       ? refuse("weight object composition contains a cycle",
+                                path)
+                       : seen->second;
+        }
+        const UsdPrim prim = B.stage->GetPrimAtPath(path);
+        if (!prim) {
+            return refuse("weight object prim is missing", path);
+        }
+        const TfToken type = prim.GetTypeName();
+        if (!evaluatorDetail::_IsWeightObjectType(type)) {
+            return refuse("not a weight object type", path);
+        }
+        if (evaluatorDetail::_IsVolumeWeightType(type)) {
+            return refuse("a volume weight cannot be an envelope", path);
+        }
+        (*index)[path] = -1;
+        RigExecBakedEnvelopeObject object;
+        object.path = path;
+        object.type = type;
+        const SdfPathVector bases = _Targets(prim, "rigExec:baseWeight");
+        if (type == TfToken("RigExecDynamicWeight") && bases.size() > 1) {
+            return refuse("more than one rigExec:baseWeight target", path);
+        }
+        if (!bases.empty()) {
+            object.base = compose(bases[0]);
+        }
+        for (const SdfPath &input : _Targets(prim, "rigExec:inputWeights")) {
+            const int composed = compose(input);
+            if (composed >= 0) {
+                object.inputs.push_back(composed);
+            }
+        }
+        if (!failure.empty()) {
+            return -1;
+        }
+        object.representation =
+            _ReadToken(prim, "rigExec:representation", "constant");
+        object.rangePolicy = _ReadToken(prim, "rigExec:rangePolicy", "strict");
+        object.combineMode = _ReadToken(prim, "rigExec:combineMode", "");
+        if (type == TfToken("RigExecCombineWeight")) {
+            const TfToken &mode = object.combineMode;
+            if (mode != "multiply" && mode != "add" && mode != "subtract" &&
+                mode != "max" && mode != "min" && mode != "average" &&
+                mode != "overlay") {
+                return refuse("unknown rigExec:combineMode", path);
+            }
+        } else if (object.rangePolicy != "strict" &&
+                   object.rangePolicy != "clamp") {
+            return refuse("unknown rigExec:rangePolicy", path);
+        }
+        if (const UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:values"))) {
+            VtFloatArray values;
+            a.Get(&values);
+            object.values.assign(values.begin(), values.end());
+        }
+        if (const UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:indices"))) {
+            VtIntArray indices;
+            a.Get(&indices);
+            object.indices.assign(indices.begin(), indices.end());
+        }
+        const auto read = [&](const char *name, float fallback) {
+            RigExecBakedEnvelopeObject::Read r;
+            r.head = prim.GetAttribute(TfToken(name));
+            r.fallback = fallback;
+            return r;
+        };
+        // The oracle's fallbacks (rigEvaluatorGeometry.cpp _ResolveWeights).
+        object.defaultWeight = read("rigExec:defaultWeight", 0.0f);
+        object.driver = read("inputs:driver", 1.0f);
+        object.scale = read("inputs:scale", 1.0f);
+        object.bias = read("inputs:bias", 0.0f);
+        object.strength = read("inputs:strength", 1.0f);
+        object.invert = read("inputs:invert", 0.0f);
+        const int composedIndex = stepBacked + int(objects->size());
+        (*index)[path] = composedIndex;
+        objects->push_back(std::move(object));
+        return composedIndex;
+    };
+    for (const RigExecBakedProgramImpl::Constraint &c : B.constraints) {
+        if (!c.weightObject.IsEmpty() && c.pointsTarget.IsEmpty()) {
+            compose(c.weightObject);
+        }
+    }
+    for (const SdfPath &target : E._propertyChainOrder) {
+        const auto chain = E._propertyChains.find(target);
+        if (chain == E._propertyChains.end()) {
+            continue;
+        }
+        for (const RigExecRigEvaluator::_PropertyRevision &revision :
+             chain->second) {
+            const SdfPathVector weightObjects =
+                _Targets(B.stage->GetPrimAtPath(revision.moverPath),
+                         "rigExec:weightObject");
+            if (!weightObjects.empty()) {
+                compose(weightObjects[0]);
+            }
+        }
+    }
+    if (!failure.empty()) {
+        if (error) {
+            *error = failure;
+        }
+        return false;
+    }
+    return true;
+}
+
+// _CompilePropertyChains' results as _EvaluatePropertyChains binds them:
+// the chain list, each revision's mover inputs (_BindInput), operation
+// (_ReadOperation) and weight object, and the phased connections.
+bool
+RigExecBakedProgram::DescribePropertyChains(
+    const RigExecRigEvaluator &evaluator,
+    std::vector<RigExecBakedPropertyChainDesc> *chains, std::string *error)
+{
+    using Desc = RigExecBakedPropertyChainDesc;
+    const RigExecRigEvaluator &E = evaluator;
+    chains->clear();
+    const auto fail = [&](const std::string &what) {
+        if (error) {
+            *error = what;
+        }
+        return false;
+    };
+    // The runChain arm and RigExecPhasedConsumerValue compare type names.
+    const auto valueType = [](const SdfValueTypeName &type) {
+        return type == SdfValueTypeNames->Float      ? Desc::ValueType::Float
+               : type == SdfValueTypeNames->Double   ? Desc::ValueType::Double
+               : type == SdfValueTypeNames->Matrix4d ? Desc::ValueType::Matrix4d
+                                                     : Desc::ValueType::Vec3f;
+    };
+    const TfToken enabledName("inputs:enabled");
+    const TfToken defaultWeightName("inputs:defaultWeight");
+    const TfToken operationName("rigExec:operation");
+    const TfToken valueName("inputs:value");
+    const TfToken minName("inputs:min");
+    const TfToken maxName("inputs:max");
+    const TfToken keysName("inputs:keys");
+    const TfToken tangentsName("inputs:tangents");
+    for (const SdfPath &orderedTarget : E._propertyChainOrder) {
+        const auto found = E._propertyChains.find(orderedTarget);
+        if (found == E._propertyChains.end()) {
+            continue;
+        }
+        Desc chain;
+        chain.target = found->first;
+        chain.targetAttr = E._stage->GetAttributeAtPath(chain.target);
+        if (!chain.targetAttr) {
+            return fail("property chain " + chain.target.GetString() +
+                        ": target attribute disappeared");
+        }
+        chain.valueType = valueType(chain.targetAttr.GetTypeName());
+        const bool floatArm = chain.valueType == Desc::ValueType::Float ||
+                              chain.valueType == Desc::ValueType::Double;
+        for (const RigExecRigEvaluator::_PropertyRevision &revision :
+             found->second) {
+            Desc::Revision r;
+            r.mover = revision.moverPath;
+            const UsdPrim mover = E._stage->GetPrimAtPath(r.mover);
+            if (!mover) {
+                return fail("property mover " + r.mover.GetString() +
+                            " is missing");
+            }
+            const SdfPathVector weightObjects =
+                _Targets(mover, "rigExec:weightObject");
+            if (!weightObjects.empty()) {
+                r.weightObject = weightObjects[0];
+            }
+            r.enabled = mover.GetAttribute(enabledName);
+            r.defaultWeight = mover.GetAttribute(defaultWeightName);
+            r.value = mover.GetAttribute(valueName);
+            r.minimum = mover.GetAttribute(minName);
+            r.maximum = mover.GetAttribute(maxName);
+            TfToken operation;
+            if (const UsdAttribute a = mover.GetAttribute(operationName)) {
+                a.Get(&operation);
+            }
+            r.opValid = RigExecParsePropertyOp(operation, &r.op);
+            if (floatArm && r.opValid && r.op == RigExecPropertyOp::Curve) {
+                const UsdAttribute keys = mover.GetAttribute(keysName);
+                const UsdAttribute tangents = mover.GetAttribute(tangentsName);
+                for (const UsdAttribute &a : {keys, tangents}) {
+                    if (RigExecBakedAnimatedOrConnected(a)) {
+                        return fail("property mover " + r.mover.GetString() +
+                                    " reads " + a.GetPath().GetString() +
+                                    ", which is animated or connected; a "
+                                    "baked curve holds its keys at one time "
+                                    "only");
+                    }
+                }
+                VtArray<GfVec2f> values;
+                if (keys && keys.Get(&values)) {
+                    r.keys.assign(values.begin(), values.end());
+                }
+                r.hasTangentsAttr = bool(tangents);
+                values.clear();
+                if (tangents && tangents.Get(&values)) {
+                    r.tangents.assign(values.begin(), values.end());
+                }
+            }
+            chain.revisions.push_back(std::move(r));
+        }
+        for (const RigExecPhasedConnection &connection :
+             E._phasedConnections) {
+            if (connection.target != chain.target) {
+                continue;
+            }
+            Desc::Phased phased;
+            phased.consumer = connection.consumer;
+            const Desc::ValueType consumer =
+                valueType(connection.consumerType);
+            phased.consumerType = consumer == Desc::ValueType::Float ||
+                                          consumer == Desc::ValueType::Double
+                                      ? consumer
+                                      : chain.valueType;
+            phased.applied = connection.applied;
+            chain.phased.push_back(std::move(phased));
+        }
+        chains->push_back(std::move(chain));
+    }
+    return true;
 }
 
 }  // namespace rigExec

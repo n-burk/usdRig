@@ -790,6 +790,57 @@ _VerifyWeightFields(
     }
 }
 
+// Constraint-revised transforms: the baked pose's providerXforms and
+// providerBaseXforms pair against the runtime's, path for path, both
+// matrices bit for bit.
+void
+_VerifyProviderXforms(
+    const std::map<SdfPath, GfMatrix4d> &baked,
+    const std::map<SdfPath, GfMatrix4d> &bakedBases,
+    const std::vector<rigExec::RigExecRuntimeProviderXform> &rt,
+    std::vector<std::string> *diffs)
+{
+    std::map<std::string, const rigExec::RigExecRuntimeProviderXform *>
+        byPath;
+    for (const auto &revised : rt) {
+        byPath[revised.path] = &revised;
+    }
+    if (baked.size() != byPath.size()) {
+        _VerifyPush(diffs, "provider-xform count baked " +
+                                std::to_string(baked.size()) + " binary " +
+                                std::to_string(byPath.size()));
+    }
+    const auto same = [](const GfMatrix4d &a, const rigExec::RrMat4d &b) {
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (a[r][c] != b[r][c]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    for (const auto &[path, matrix] : baked) {
+        const auto found = byPath.find(path.GetString());
+        if (found == byPath.end()) {
+            _VerifyPush(diffs, "provider xform " + path.GetString() +
+                                    " missing from the binary");
+            continue;
+        }
+        if (!same(matrix, found->second->matrix)) {
+            _VerifyPush(diffs, "provider xform " + path.GetString() +
+                                    " differs");
+            continue;
+        }
+        const auto base = bakedBases.find(path);
+        if (base == bakedBases.end() ||
+            !same(base->second, found->second->base)) {
+            _VerifyPush(diffs, "provider base xform " + path.GetString() +
+                                    " differs");
+        }
+    }
+}
+
 void
 _VerifyDiagnostics(const std::vector<std::string> &baked,
                    const std::vector<std::string> &rt,
@@ -918,6 +969,8 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
                              &diffs);
         _VerifyWeightFields(pose.weightFields, reader->GetWeightFields(),
                              &diffs);
+        _VerifyProviderXforms(pose.providerXforms, pose.providerBaseXforms,
+                              reader->GetProviderXforms(), &diffs);
         std::vector<std::string> expectedDiagnostics = pose.diagnostics;
         if (!seedAttached) {
             seedAttached = true;
@@ -939,11 +992,12 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
             ++matched;
             std::printf("  frame %g: binary==baked (%zu joints, "
                         "%zu moved, %zu weight frames, %zu fields, "
-                        "%zu diagnostics)\n",
+                        "%zu provider xforms, %zu diagnostics)\n",
                         t, reader->GetJointMatrices().size(),
                         reader->GetPoints().size(),
                         reader->GetWeightFrames().size(),
                         reader->GetWeightFields().size(),
+                        reader->GetProviderXforms().size(),
                         reader->GetDiagnostics().size());
         } else {
             std::printf("  frame %g: MISMATCH (%zu differences)\n", t,
@@ -977,6 +1031,28 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     }
     std::printf("  verify-binary: %zu of %zu frame(s) match\n", matched,
                 frames.size());
+    if (reader->GetCrossCheckForTesting()) {
+        const auto count = [&](rigExec::RrCrossCheckKind kind) {
+            return static_cast<unsigned long long>(
+                reader->GetCrossCheckCountForTesting(kind));
+        };
+        std::printf("  cross-check: %llu computed value(s) matched the "
+                    "frame records (%llu envelope(s), %llu current-phase "
+                    "packet(s), %llu property value(s), %llu chain "
+                    "read(s), %llu registered read(s), %llu blend "
+                    "weight(s), %llu default weight(s), %llu path "
+                    "read(s))\n",
+                    static_cast<unsigned long long>(
+                        reader->GetCrossCheckCountForTesting()),
+                    count(rigExec::RrCrossCheckEnvelope),
+                    count(rigExec::RrCrossCheckPhasePacket),
+                    count(rigExec::RrCrossCheckPropertyValue),
+                    count(rigExec::RrCrossCheckChainRead),
+                    count(rigExec::RrCrossCheckRegisteredRead),
+                    count(rigExec::RrCrossCheckBlendWeight),
+                    count(rigExec::RrCrossCheckDefaultWeight),
+                    count(rigExec::RrCrossCheckPathRead));
+    }
     if (skippedScalars > 0) {
         std::printf("  note: %zu scalar moved propert%s skipped "
                     "(outside the runtime output contract)\n",

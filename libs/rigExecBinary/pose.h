@@ -42,6 +42,18 @@ struct RigExecWireInput {
     uint32_t head = 0;
 };
 
+/// An unbound Matrix4d input holding the identity.
+inline RigExecWireInput
+RigExecWireIdentityMatrixInput()
+{
+    RigExecWireInput input;
+    input.tag = RigExecWireInput::Tag::Matrix4d;
+    for (size_t i = 0; i < 4; ++i) {
+        input.matrix[i * 4 + i] = 1.0;
+    }
+    return input;
+}
+
 /// One provider slot's rest/default ladder. Xform-derived slots carry a
 /// default one, exactly as the program holds.
 struct RigExecWireLadder {
@@ -170,6 +182,16 @@ struct RigExecWireSolver {
     RigExecWireInput softness;
     double upperLengthBase = 0;
     double lowerLengthBase = 0;
+    /// rigExec:spaceMatrix, the explicit factor of the space a TwoBoneIk
+    /// measures its chain in, and rigExec:space: the provider slot whose
+    /// rest -> pose map composes ahead of it (-1: none), that slot's rest
+    /// landmarks and the bound `fin` version. Memory only on the solver
+    /// record: a trailing block after every pose table carries them, so a
+    /// binary that ends before it decodes with the identity and no space.
+    RigExecWireInput ikSpace = RigExecWireIdentityMatrixInput();
+    int32_t spaceSlot = -1;
+    std::array<RigExecWireVec3d, 4> spaceRest{};
+    uint32_t spaceRead = 0;
     // BlendPointFrames
     int32_t inA = -1;
     int32_t inB = -1;
@@ -230,6 +252,10 @@ struct RigExecWireConstraint {
     uint32_t path = 0;
     uint32_t type = 0;
     uint32_t weightObject = 0;
+    /// The envelope's entry in the Computed section's weight objects (a
+    /// weight object and no points target), else -1. Memory only: the
+    /// pose section does not encode it; RigExecWireApplyComputed fills it.
+    int32_t weightObjectIndex = -1;
     int32_t target = -1;
     std::vector<int32_t> targetSlots;
     std::vector<uint8_t> snapshotTargets;

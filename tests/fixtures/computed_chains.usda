@@ -1,0 +1,288 @@
+#usda 1.0
+(
+    doc = """Property chains the .rigexec runtime computes rather than replays,
+    in the cases no example covers together: a float chain whose revisions
+    multiply by a control's double avar through a connection, apply a
+    Hermite curve with tangents, blend under a StaticWeight envelope, add
+    under a clamped DynamicWeight envelope driven by another avar, pass
+    through disabled and with an out-of-range inputs:defaultWeight, and
+    clamp; its result feeds a constraint's inputs:defaultWeight. Beside it
+    a double chain (computed in float), a vec3f and a matrix chain, a chain
+    whose target has no authored value, and three phased consumers: the
+    float chain's base, the float chain after its curve revision, and the
+    double chain's base read into a float input."""
+    defaultPrim = "Asset"
+    endTimeCode = 10
+    framesPerSecond = 24
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+
+    def Xform "Target"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "Source"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (10, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "Dial"
+            {
+                double avars:tx.timeSamples = {
+                    1: 0.25,
+                    10: 1.8,
+                }
+                double avars:ty.timeSamples = {
+                    1: 0,
+                    10: 3,
+                }
+            }
+        }
+
+        def Scope "Channels"
+        {
+            def Scope "Dial"
+            {
+                float rigExec:amount.timeSamples = {
+                    1: 0.1,
+                    5: 0.45,
+                    10: 0.2,
+                }
+            }
+
+            def Scope "Wide"
+            {
+                double rigExec:level.timeSamples = {
+                    1: 0.5,
+                    10: 2.5,
+                }
+            }
+
+            def Scope "Vec"
+            {
+                float3 rigExec:offset = (0, 3, 0)
+            }
+
+            def Scope "Space"
+            {
+                matrix4d rigExec:local = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+
+            def Scope "Missing"
+            {
+                float rigExec:none
+            }
+
+            def Scope "Readouts"
+            {
+                float rigExec:base = 0
+                float rigExec:early = 0
+                float rigExec:narrow = 0
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "Half"
+            {
+                uniform float rigExec:defaultWeight = 0.5
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/Rig/Channels/Dial.rigExec:amount>
+            }
+
+            def RigExecDynamicWeight "Ramp"
+            {
+                prepend float inputs:driver.connect = </Asset/Rig/Controls/Dial.avars:ty>
+                float inputs:scale = 0.5
+                uniform token rigExec:rangePolicy = "clamp"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </Asset/Rig/Channels/Dial.rigExec:amount>
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # Applied bottom to top: Gain first, Limit last.
+            def Scope "Dial"
+            {
+                def RigExecFloatMathMover "Limit" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:max = 0.6
+                    float inputs:min = 0
+                    rel rigExec:moves = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "Over" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1.5
+                    float inputs:value = 100
+                    rel rigExec:moves = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "Off" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    bool inputs:enabled = 0
+                    float inputs:value = 100
+                    rel rigExec:moves = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "Nudge" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 0.05
+                    rel rigExec:moves = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    uniform token rigExec:operation = "add"
+                    rel rigExec:weightObject = </Asset/Rig/Weights/Ramp>
+                }
+
+                def RigExecFloatMathMover "Fade" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value = 0.3
+                    rel rigExec:moves = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    uniform token rigExec:operation = "blend"
+                    rel rigExec:weightObject = </Asset/Rig/Weights/Half>
+                }
+
+                def RigExecFloatMathMover "Shape" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float2[] inputs:keys = [(0, 0), (0.5, 0.8), (2, 1.2)]
+                    float2[] inputs:tangents = [(1.5, 1.5), (0.6, 0.6), (0.1, 0.1)]
+                    rel rigExec:moves = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    uniform token rigExec:operation = "curve"
+                }
+
+                def RigExecFloatMathMover "Gain" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    prepend float inputs:value.connect = </Asset/Rig/Controls/Dial.avars:tx>
+                    rel rigExec:moves = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    uniform token rigExec:operation = "multiply"
+                }
+            }
+
+            def RigExecFloatMathMover "Scale" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:value = 1.25
+                rel rigExec:moves = </Asset/Rig/Channels/Wide.rigExec:level>
+                uniform token rigExec:operation = "multiply"
+            }
+
+            def RigExecVec3fMathMover "Bound" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float3 inputs:max = (1, 4.5, 1)
+                float3 inputs:min = (-1, -1, -1)
+                rel rigExec:moves = </Asset/Rig/Channels/Vec.rigExec:offset>
+                uniform token rigExec:operation = "clamp"
+            }
+
+            def RigExecVec3fMathMover "Lift" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float3 inputs:value = (0, 2, 0)
+                rel rigExec:moves = </Asset/Rig/Channels/Vec.rigExec:offset>
+                uniform token rigExec:operation = "add"
+            }
+
+            def RigExecMatrixMathMover "Offset" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 0.5
+                matrix4d inputs:value = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
+                rel rigExec:moves = </Asset/Rig/Channels/Space.rigExec:local>
+                uniform token rigExec:operation = "multiply"
+            }
+
+            def RigExecFloatMathMover "Unset" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:value = 1
+                rel rigExec:moves = </Asset/Rig/Channels/Missing.rigExec:none>
+                uniform token rigExec:operation = "add"
+            }
+
+            def Scope "Readouts"
+            {
+                def RigExecFloatMathMover "Base" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value (
+                        rigExecReadPhase = "base"
+                    )
+                    float inputs:value.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:moves = </Asset/Rig/Channels/Readouts.rigExec:base>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "Early" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value (
+                        rigExecReadPhase = "/Asset/Rig/Movers/Dial/Shape"
+                    )
+                    float inputs:value.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:moves = </Asset/Rig/Channels/Readouts.rigExec:early>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "Narrow" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value (
+                        rigExecReadPhase = "base"
+                    )
+                    float inputs:value.connect = </Asset/Rig/Channels/Wide.rigExec:level>
+                    rel rigExec:moves = </Asset/Rig/Channels/Readouts.rigExec:narrow>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            def RigExecPositionConstraint "Follow" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                prepend float inputs:defaultWeight.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
+                rel rigExec:moves = </Asset/Target>
+                rel rigExec:sources = </Asset/Source>
+            }
+        }
+    }
+}

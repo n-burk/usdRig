@@ -338,12 +338,35 @@ struct RrStepCounters {
     void Clear() { *this = RrStepCounters(); }
 };
 
+// What a cross-check comparison compared (RrProgram::crossCheck): computed
+// results (constraint envelopes, current-phase weight packets, property
+// values) and computed reads (registered reads that cross a chain, every
+// other registered read, blend channel weights, revision default weights,
+// connection-following mover scalars).
+enum RrCrossCheckKind : size_t {
+    RrCrossCheckEnvelope = 0,
+    RrCrossCheckPhasePacket,
+    RrCrossCheckPropertyValue,
+    RrCrossCheckChainRead,
+    RrCrossCheckRegisteredRead,
+    RrCrossCheckBlendWeight,
+    RrCrossCheckDefaultWeight,
+    RrCrossCheckPathRead,
+    RrCrossCheckKindCount,
+};
+
+using RrCrossCheckCounts = std::array<uint64_t, RrCrossCheckKindCount>;
+
 // One step's run output: diagnostics, counters, phased records, bail.
 struct RrStepOutput {
     std::vector<std::string> diagnostics;
     RrStepCounters counters;
     RrSnapshots snapshots;
     bool bail = false;
+    /// Values this run compared against the frame record, per kind.
+    /// Execute zeroes every step's counts before the walk, so a skipped
+    /// step reports none, and sums them after.
+    RrCrossCheckCounts crossChecked{};
 
     void BeginRun()
     {

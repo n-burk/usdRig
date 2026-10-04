@@ -2,6 +2,7 @@
 #include "rigExecBake/serialize.h"
 #include "rigExec/bakedProgramImpl.h"
 
+#include <algorithm>
 #include <type_traits>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -643,6 +644,14 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         out.softness = _ToInput(solver.softness, writer);
         out.upperLengthBase = solver.upperLengthBase;
         out.lowerLengthBase = solver.lowerLengthBase;
+        // Memory only on the solver record: the pose section's trailing
+        // solver-space block carries these.
+        out.ikSpace = _ToInput(solver.ikSpace, writer);
+        out.spaceSlot = int32_t(solver.spaceSlot);
+        for (size_t i = 0; i < 4; ++i) {
+            out.spaceRest[i] = _ToVec3d(solver.spaceRest[i]);
+        }
+        out.spaceRead = uint32_t(std::max(solver.spaceRead, 0));
         out.inA = int32_t(solver.inA);
         out.inB = int32_t(solver.inB);
         out.blendWeight = _ToInput(solver.blendWeight, writer);

@@ -96,9 +96,12 @@ RrComputeClosure(RrProgram *program, double time, bool force)
     // stamp never moves; a rig that can look up a phased read still runs
     // everything every run, for the same emptied-store reason.
     const bool full = force || program->poses->phasedReads;
+    // Equal to comparing the published maps: each entry is one attribute,
+    // and an unpublished entry holds the same zero value every run.
     const bool chainResultsMoved =
         !full && store.everRan && program->poses->hasPropertyChains &&
-        store.propertyResults != store.lastPropertyResults;
+        (store.propertyPublished != store.lastPropertyPublished ||
+         store.propertyValues != store.lastPropertyValues);
     if (full) {
         for (size_t c = 0; c < count; ++c) {
             _RrSet(&dirty, c);
@@ -265,7 +268,8 @@ RrComputeClosure(RrProgram *program, double time, bool force)
         arrays.lastPoleWeights = arrays.poleWeights;
         arrays.lastPoleDiagnostics = arrays.poleDiagnostics;
     }
-    store.lastPropertyResults = store.propertyResults;
+    store.lastPropertyValues = store.propertyValues;
+    store.lastPropertyPublished = store.propertyPublished;
     store.lastOverridden = store.overridden;
     for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
         store.lastHaveBase[c] = store.chainHaveBase[c];

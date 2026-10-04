@@ -832,6 +832,15 @@ RigExecWireEncodeDomainPose(const RigExecWireDomainPose &pose,
     for (const RigExecWireConstraint &constraint : pose.constraints) {
         RigExecWirePutU8(out, constraint.flags);
     }
+    // The solvers' measuring space (rigExec:spaceMatrix and rigExec:space),
+    // a third trailing block: a binary that ends before it decodes with the
+    // identity and no space slot on every solver.
+    for (const RigExecWireSolver &solver : pose.solvers) {
+        _PutInput(out, solver.ikSpace);
+        RigExecWirePutI32(out, solver.spaceSlot);
+        _PutLandmarkSet(out, solver.spaceRest);
+        RigExecWirePutU32(out, solver.spaceRead);
+    }
     return true;
 }
 
@@ -1268,6 +1277,20 @@ RigExecWireDecodeDomainPose(RigExecWireReader *reader,
         for (RigExecWireConstraint &constraint : pose->constraints) {
             if (!reader->ReadU8(&constraint.flags) ||
                 (constraint.flags & ~RigExecWireConstraintKnownFlags)) {
+                return _Fail(error);
+            }
+        }
+    }
+    // The optional trailing solver-space block: absent means the identity
+    // spaceMatrix and no space slot.
+    if (!reader->Exhausted()) {
+        for (RigExecWireSolver &solver : pose->solvers) {
+            if (!_ReadInput(reader, &solver.ikSpace) ||
+                solver.ikSpace.tag != RigExecWireInput::Tag::Matrix4d ||
+                !reader->ReadI32(&solver.spaceSlot) ||
+                solver.spaceSlot < -1 ||
+                !_ReadLandmarkSet(reader, &solver.spaceRest) ||
+                !reader->ReadU32(&solver.spaceRead)) {
                 return _Fail(error);
             }
         }

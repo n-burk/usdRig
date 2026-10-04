@@ -1,7 +1,9 @@
 // rigExecRuntime frame driver (M2 framework).
 // SetFrame loads a baked frame's sparse values into the holders;
-// Execute runs prologues, the region and the epilogue, then assembles
-// the outputs. Failures name the step and keep the previous outputs.
+// Execute runs the property chains and hands the registered reads that
+// cross them to their holders, then the prologues, the region and the
+// epilogue, then assembles the outputs. Failures name the step and keep
+// the previous outputs.
 #include "rigExecRuntime/runtime.h"
 
 #include "rigExecMath/propertyMathKernel.h"
@@ -162,6 +164,12 @@ RigExecRuntimeReader::SetRunMaskForTesting(unsigned mask)
     _program.runMask = mask;
 }
 
+void
+RigExecRuntimeReader::SetCrossCheckForTesting(bool enabled)
+{
+    _program.crossCheck = enabled;
+}
+
 std::vector<RigExecRuntimeJointMatrix>
 RigExecRuntimeReader::GetJointRestMatrices() const
 {
@@ -192,6 +200,18 @@ RigExecRuntimeReader::GetJointPoseMatrices() const
             out.push_back({delta.path, rest->matrix * delta.matrix});
         }
     }
+    return out;
+}
+
+std::vector<RigExecRuntimePropertyValue>
+RigExecRuntimeReader::GetPropertyResultsForTesting() const
+{
+    std::vector<RigExecRuntimePropertyValue> out;
+    out.reserve(_program.store.propertyResults.size());
+    for (const auto &entry : _program.store.propertyResults) {
+        out.push_back({_program.TextOrEmpty(entry.first), entry.second});
+    }
+    _SortByPath(&out);
     return out;
 }
 
@@ -268,28 +288,42 @@ RigExecRuntimeReader::Execute(std::string *error)
     const RigExecWireFrameInputs &record = _inputs.frames[_frameIndex];
     const double time = record.frame;
     program.frameIndex = _frameIndex;
+    // The slot values every computed read sees this run.
+    if (!RrInputsSelectFrame(&program, _frameIndex, error)) {
+        return false;
+    }
+    for (RrStepOutput &output : store.stepOutputs) {
+        output.crossChecked.fill(0);
+    }
+    RrCrossCheckCounts checked{};
 
-    // The property chains' published values, straight from the record.
-    if (record.propertyPaths.size() != record.propertyValues.size()) {
+    // The property chains run first, as the baked prologue runs them: their
+    // lines open the generation and their results are what every later
+    // read of a chain target sees.
+    std::vector<std::string> poseDiagnostics;
+    if (!RrRunPropertyChains(&program, &poseDiagnostics)) {
         if (error) {
-            *error = "frame record pairs no values with its properties";
+            *error = "the property chains disagree with the computed section";
         }
         return false;
     }
-    store.propertyResults.clear();
-    for (size_t i = 0; i < record.propertyPaths.size(); ++i) {
-        const RigExecWirePropertyValue &wire = record.propertyValues[i];
-        RrPropertyValue value;
-        value.tag = RrPropertyValue::Tag(wire.tag);
-        value.f32 = wire.f32;
-        value.f64 = wire.f64;
-        for (size_t r = 0; r < 4; ++r) {
-            for (size_t c = 0; c < 4; ++c) {
-                value.matrix[r][c] = wire.matrix[r * 4 + c];
-            }
-        }
-        value.vec = RrVec3f(wire.vec[0], wire.vec[1], wire.vec[2]);
-        store.propertyResults[record.propertyPaths[i]] = value;
+    if (program.crossCheck &&
+        !RrCrossCheckPropertyResults(
+            &program, record, &checked[RrCrossCheckPropertyValue], error)) {
+        return false;
+    }
+    // A registered read whose walk crosses a chain target takes what the
+    // chains just computed, in place of the value SetFrame replayed.
+    if (!RrRunChainReads(&program, record, &checked[RrCrossCheckChainRead],
+                         error)) {
+        return false;
+    }
+    // Every other registered read and the assembly's connection-following
+    // scalars, evaluated over the slots, against what the record-driven
+    // steps consume.
+    if (program.crossCheck && !RrCrossCheckReads(&program, record, &checked,
+                                                 error)) {
+        return false;
     }
     // The chains the file carries as programs replace their recorded
     // values with ones computed from this run's inputs.
@@ -302,7 +336,6 @@ RigExecRuntimeReader::Execute(std::string *error)
     // override returns to the baked pose on the very next evaluation.
     store.avars = _constants.avarConstants;
 
-    std::vector<std::string> poseDiagnostics;
     if ((program.runMask & 0x1u) != 0 &&
         !RrProloguePose(&program, record, &poseDiagnostics, error)) {
         return false;
@@ -349,12 +382,16 @@ RigExecRuntimeReader::Execute(std::string *error)
     RrPublishGeometry(&program, record, &poseDiagnostics);
 
     RigExecRuntimeCounters counters;
-    for (const RrStepOutput &output : store.stepOutputs) {
+    for (size_t s = 0; s < store.stepOutputs.size(); ++s) {
+        const RrStepOutput &output = store.stepOutputs[s];
         counters.revisionsExecuted += output.counters.revisionsExecuted;
         counters.revisionsCreated += output.counters.revisionsCreated;
         counters.schedulesBuilt += output.counters.schedulesBuilt;
         counters.chainsBuilt += output.counters.chainsBuilt;
         counters.revisionsBuilt += output.counters.revisionsBuilt;
+        for (size_t kind = 0; kind < RrCrossCheckKindCount; ++kind) {
+            checked[kind] += output.crossChecked[kind];
+        }
     }
     poseDiagnostics.push_back(
         "mover graph: " + std::to_string(counters.chainsBuilt) +
@@ -461,6 +498,9 @@ RigExecRuntimeReader::Execute(std::string *error)
     _providerXforms = std::move(providerXforms);
     _diagnostics = std::move(poseDiagnostics);
     _counters = counters;
+    for (size_t kind = 0; kind < RrCrossCheckKindCount; ++kind) {
+        _crossCheckCounts[kind] += checked[kind];
+    }
     return true;
 }
 

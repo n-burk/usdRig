@@ -1506,18 +1506,21 @@ struct RrMat4d {
         return inverse;
     }
 
+    // GfMatrix4d::Transform: the row vector (vec, 1) times the matrix,
+    // projected back by GfProject, which scales by 1 / w and by one when
+    // w is zero.
     RrVec3d Transform(const RrVec3d &vec) const
     {
-        double w = vec[0] * _mtx[0][3] + vec[1] * _mtx[1][3] +
-                   vec[2] * _mtx[2][3] + _mtx[3][3];
-        RrVec3d transformed(
-            vec[0] * _mtx[0][0] + vec[1] * _mtx[1][0] +
-                vec[2] * _mtx[2][0] + _mtx[3][0],
-            vec[0] * _mtx[0][1] + vec[1] * _mtx[1][1] +
-                vec[2] * _mtx[2][1] + _mtx[3][1],
-            vec[0] * _mtx[0][2] + vec[1] * _mtx[1][2] +
-                vec[2] * _mtx[2][2] + _mtx[3][2]);
-        return transformed / w;
+        const double x = vec[0] * _mtx[0][0] + vec[1] * _mtx[1][0] +
+                         vec[2] * _mtx[2][0] + _mtx[3][0];
+        const double y = vec[0] * _mtx[0][1] + vec[1] * _mtx[1][1] +
+                         vec[2] * _mtx[2][1] + _mtx[3][1];
+        const double z = vec[0] * _mtx[0][2] + vec[1] * _mtx[1][2] +
+                         vec[2] * _mtx[2][2] + _mtx[3][2];
+        const double w = vec[0] * _mtx[0][3] + vec[1] * _mtx[1][3] +
+                         vec[2] * _mtx[2][3] + _mtx[3][3];
+        const double inv = (w != 0.0) ? 1.0 / w : 1.0;
+        return RrVec3d(inv * x, inv * y, inv * z);
     }
 
     RrVec3d TransformDir(const RrVec3d &vec) const

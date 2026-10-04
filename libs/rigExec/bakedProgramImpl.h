@@ -26,6 +26,7 @@
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/propertyMath.h"
 #include "rigExecMath/rbf.h"
 #include "rigExecMath/singleChainIk.h"
 #include "rigExecMath/solvers.h"
@@ -2635,6 +2636,10 @@ struct RigExecBakedProgramImpl {
     std::vector<char> overridden;
     /// Property path -> the inputs reading it, for the placeable case.
     std::map<SdfPath, std::vector<int>> overridableInputs;
+    /// Every property a chain writes: RigExecBakedBuildContext::chainTargets
+    /// as Build classified the inputs against it, kept so a bake can
+    /// recompute each input's walk the same way.
+    std::set<SdfPath> chainTargets;
     /// Prims whose reads already route through the generation's resolved
     /// inputs (property-chain movers, geometry movers), so an override on
     /// any of their properties reaches them with nothing else to do.
@@ -3361,6 +3366,156 @@ RigExecWeightPacket RigExecBakedWeightPacket(
     const RigExecBakedProgramImpl &program,
     RigExecBakedProgramImpl::WeightObject *object,
     const std::vector<RigExecWeightPacket> &packets, UsdTimeCode time);
+
+/// The numeric time Build probes input selections at: the stage's start
+/// time code when it authors a time-code range, else 0. Never Default.
+UsdTimeCode RigExecBakedProbeTime(const UsdStageRefPtr &stage);
+
+/// What a port of RigExecRigEvaluator::_ResolveWeights needs beyond a
+/// weight object's composition and its scalar reads: the answers the oracle
+/// takes from the stage alone. Read at one time.
+struct RigExecWeightOracleFacts {
+    /// _VolumeWeightSamplesInFlight: a volume whose rigExec:weightTarget
+    /// reads `preceding`.
+    bool samplesInFlight = false;
+    /// A volume not in flight: _ReadTargetPoints of rigExec:sampleSource,
+    /// else of rigExec:weightTarget. False when neither reads.
+    bool haveSamples = false;
+    std::vector<GfVec3f> samples;
+    /// A curve volume: _ReadTargetPoints of rigExec:curve, non-empty.
+    bool haveCurve = false;
+    std::vector<GfVec3f> curve;
+    /// A plane volume's rigExec:planeAxis and rigExec:planeBounds as the
+    /// oracle reads them: Get at the time, the fallback only when the
+    /// attribute is absent. Empty for every other type.
+    TfToken planeAxis, planeBounds;
+    /// The first attribute whose answer these facts hold at one time while
+    /// the oracle reads it at every evaluation time -- the points a volume
+    /// not in flight samples, a curve volume's curve points, a plane's axis
+    /// and bounds -- when it is animated (time samples, or a value that
+    /// might vary); empty otherwise.
+    SdfPath timeVarying;
+    /// The oracle's whole error text when the read-phase check fails.
+    std::string phaseError;
+    /// The oracle's whole error text for the object's first structural
+    /// failure: an unknown type, combine mode or range policy, a dynamic
+    /// weight's operation, base, target, representation or sparse-support
+    /// rule, or a static field carrying time samples or connections. Each
+    /// precedes every per-run read of the object, so the port reports it
+    /// on entering the object.
+    std::string staticError;
+};
+
+/// Fills \p facts for the weight object at \p path, reading the stage as
+/// the oracle does at \p time.
+inline void
+RigExecBakedDescribeWeightOracle(const RigExecRigEvaluator &evaluator,
+                                 const SdfPath &path, UsdTimeCode time,
+                                 RigExecWeightOracleFacts *facts)
+{
+    RigExecBakedProgram::DescribeWeightOracle(evaluator, path, time, facts);
+}
+
+/// A weight object the oracle reaches that no WeightPacket step bakes: a
+/// constraint's or a property mover's envelope, or an object one composes
+/// (the constraint step's envelope arm, bakedPose.cpp). Composed as
+/// RigExecBakedBakeWeightObject composes, and registered nowhere: the
+/// oracle reads its scalars through the
+/// generation's resolved inputs (_ResolvedRead), so each read is kept as
+/// the attribute that walk starts from plus the oracle's fallback.
+struct RigExecBakedEnvelopeObject {
+    struct Read {
+        UsdAttribute head;  ///< invalid when the prim has no such attribute
+        float fallback = 0.0f;
+    };
+    SdfPath path;
+    TfToken type, representation, rangePolicy, combineMode;
+    std::vector<float> values;
+    std::vector<int> indices;
+    /// rigExec:baseWeight's first target and rigExec:inputWeights in
+    /// authored order, as indices into the oracle's table: below
+    /// program.weightObjects.size() a step-backed object, else
+    /// weightObjects.size() plus an index into the envelope list.
+    int base = -1;
+    std::vector<int> inputs;
+    Read defaultWeight, driver, scale, bias, strength, invert;
+};
+
+/// Composes every weight object a constraint envelope (a weight object and
+/// no points target) or a property mover's rigExec:weightObject[0] reaches
+/// through rigExec:baseWeight and rigExec:inputWeights that \p program
+/// does not already bake, depth first, so the list is in dependency order.
+/// \p index maps each composed path to its oracle-table index. False with
+/// the reason on what the oracle could not resolve structurally -- a
+/// missing prim, a type that is no weight object or is volumetric, an
+/// unknown token, a second base, a cycle -- which Compile rejects first.
+inline bool
+RigExecBakedComposeEnvelopeObjects(
+    const RigExecRigEvaluator &evaluator,
+    const RigExecBakedProgramImpl &program,
+    std::vector<RigExecBakedEnvelopeObject> *objects,
+    std::map<SdfPath, int> *index, std::string *error)
+{
+    return RigExecBakedProgram::ComposeEnvelopeObjects(
+        evaluator, program, objects, index, error);
+}
+
+/// One of the evaluator's property chains as a bake states it: the
+/// target, which runChain arm its type selects, and per revision what
+/// _EvaluatePropertyChains binds and reads on the mover
+/// (rigEvaluatorProperties.cpp). The reads stay attributes; the bake turns
+/// each into a walk.
+struct RigExecBakedPropertyChainDesc {
+    /// The runChain arm: the target's type name is float, double or
+    /// matrix4d, else the GfVec3f-backed arm.
+    enum class ValueType : uint8_t { Float = 0, Double, Matrix4d, Vec3f };
+    struct Revision {
+        SdfPath mover;
+        /// rigExec:operation as _ReadOperation reads it (the attribute's
+        /// own value at Default), parsed; false when it does not parse.
+        bool opValid = false;
+        RigExecPropertyOp op = RigExecPropertyOp::Add;
+        /// The inputs _BindInput binds; invalid when the mover has none.
+        UsdAttribute enabled, defaultWeight, value, minimum, maximum;
+        /// rigExec:weightObject's first target; empty when it has none.
+        SdfPath weightObject;
+        /// inputs:keys and inputs:tangents at Default, read only for a
+        /// float or double chain whose operation is curve (the only arm
+        /// that reads them).
+        std::vector<GfVec2f> keys;
+        bool hasTangentsAttr = false;
+        std::vector<GfVec2f> tangents;
+    };
+    /// A RigExecPhasedConnection on this chain.
+    struct Phased {
+        SdfPath consumer;
+        /// Float or Double when the consumer has that type name, else the
+        /// chain's own type: RigExecPhasedConsumerValue converts between
+        /// float and double and passes every other value through.
+        ValueType consumerType = ValueType::Float;
+        size_t applied = 0;
+    };
+    SdfPath target;
+    UsdAttribute targetAttr;
+    ValueType valueType = ValueType::Float;
+    std::vector<Revision> revisions;
+    std::vector<Phased> phased;
+};
+
+/// Restates every property chain of \p evaluator's standing compile, in
+/// _propertyChainOrder, with its phased connections in
+/// _phasedConnections order. False with the reason when a chain cannot be
+/// stated for a file read at one time: a curve revision whose keys or
+/// tangents are animated or connected, or (refused by Compile first) a
+/// missing target or mover.
+inline bool
+RigExecBakedDescribePropertyChains(
+    const RigExecRigEvaluator &evaluator,
+    std::vector<RigExecBakedPropertyChainDesc> *chains, std::string *error)
+{
+    return RigExecBakedProgram::DescribePropertyChains(evaluator, chains,
+                                                       error);
+}
 
 /// Records, per pose step, which of its baked inputs a run can move.
 ///

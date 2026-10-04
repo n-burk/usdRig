@@ -171,18 +171,6 @@ _RrAffects(const _RrConstraintAxisMask &mask, int axis)
     return axis == 0 ? mask.x : axis == 1 ? mask.y : mask.z;
 }
 
-/// Every landmark carried by the space, nothing else: the twin of
-/// RigExecTransformFrame.
-RrPointFrame
-_RrTransformFrame(const RrPointFrame &frame, const RrMat4d &space)
-{
-    RrPointFrame out = frame;
-    for (RrVec3d &p : out.points) {
-        p = space.Transform(p);
-    }
-    return out;
-}
-
 // Shear belongs to the same linear block as scale; a constraint governing
 // all three scale axes governs it too. The twin of _BlendGovernedShear in
 // libs/rigExecMath/solvers.cpp -- see the reasoning there. Without it an
@@ -1563,103 +1551,6 @@ _RrPrepareRestDerivedIkChain(
 
 // The Constraint step (bakedPose.cpp).
 
-// RigExecWeightPacket::ResolveAll (types.cpp), over an RrWeightPacket.
-bool
-_RrResolveWeightPacketAll(const RrProgram *program,
-                          const RrWeightPacket &packet, size_t count,
-                          std::vector<float> *resolved)
-{
-    if (!resolved || !packet.valid) {
-        return false;
-    }
-    if (packet.rangePolicy != 0 &&
-        !program->TokenEquals(packet.rangePolicy, "strict") &&
-        !program->TokenEquals(packet.rangePolicy, "clamp")) {
-        return false;
-    }
-    const bool isConstant =
-        program->TokenEquals(packet.representation, "constant");
-    const bool isDense =
-        program->TokenEquals(packet.representation, "dense");
-    const bool isSparse =
-        program->TokenEquals(packet.representation, "sparse");
-    if (isConstant) {
-        if (!packet.values.empty() || !packet.indices.empty()) {
-            return false;
-        }
-    } else if (isDense) {
-        if (!packet.indices.empty() || packet.values.size() != count) {
-            return false;
-        }
-    } else if (isSparse) {
-        if (packet.indices.size() != packet.values.size()) {
-            return false;
-        }
-        for (size_t i = 0; i < packet.indices.size(); ++i) {
-            if (packet.indices[i] < 0 ||
-                size_t(packet.indices[i]) >= count ||
-                (i > 0 &&
-                 packet.indices[i] <= packet.indices[i - 1])) {
-                return false;
-            }
-        }
-    } else {
-        return false;
-    }
-
-    const auto usable = [](float v) {
-        return std::isfinite(v) && v >= 0.0f && v <= 1.0f;
-    };
-
-    if (isConstant) {
-        if (!usable(packet.defaultWeight)) {
-            return false;
-        }
-        resolved->assign(count, packet.defaultWeight);
-        return true;
-    }
-
-    if (isDense) {
-        for (size_t i = 0; i < count; ++i) {
-            if (!usable(packet.values[i])) {
-                return false;
-            }
-        }
-        resolved->assign(packet.values.begin(),
-                         packet.values.begin() + count);
-        return true;
-    }
-
-    if (packet.indices.size() < count && !usable(packet.defaultWeight)) {
-        return false;
-    }
-    for (const float value : packet.values) {
-        if (!usable(value)) {
-            return false;
-        }
-    }
-    std::vector<float> valuesOut(count, packet.defaultWeight);
-    for (size_t i = 0; i < packet.indices.size(); ++i) {
-        valuesOut[size_t(packet.indices[i])] = packet.values[i];
-    }
-    resolved->swap(valuesOut);
-    return true;
-}
-
-// Whether the wire weight object names a type the oracle understands
-// (_IsWeightObjectType: static, dynamic, combine, and the
-// three volumetric kinds).
-bool
-_RrIsWeightObjectType(const RrProgram *program, uint32_t type)
-{
-    return program->TokenEquals(type, "RigExecStaticWeight") ||
-           program->TokenEquals(type, "RigExecDynamicWeight") ||
-           program->TokenEquals(type, "RigExecCombineWeight") ||
-           program->TokenEquals(type, "RigExecSphereWeight") ||
-           program->TokenEquals(type, "RigExecPlaneWeight") ||
-           program->TokenEquals(type, "RigExecCurveWeight");
-}
-
 // RigExecApplyRevisedAncestorDelta (rigEvaluator.cpp): the native
 // source rides the delta of the deepest revised ancestor above it.
 // Provider paths are never the root, where slash-counting and
@@ -1807,57 +1698,58 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         return finish();
     }
     // The envelope, in the dynamic path's THREE exclusive arms. The
-    // oracle call resolves into this constraint's own scratch; the
-    // runtime answers it from the weight packets the weights family
-    // resolved, falling back to the captured envelope when the
-    // weights family is masked out of the run.
+    // first resolves the weight object through the oracle into this
+    // constraint's own scratch, with the oracle's error on failure
+    // (bakedPose.cpp, the Constraint step). A geometry-domain constraint
+    // (points target) resolves none and keeps 1.0: its weight applies
+    // per point on the revision its delta feeds.
     double weight = 1.0;
     if (c.weightObject != 0 && c.pointsTarget == 0) {
         std::vector<float> &envelope = scratch->weightScratch[ci];
         std::string &envelopeError = scratch->weightError[ci];
         envelope.clear();
         envelopeError.clear();
-        envelope.assign(1, 1.0f);
-        bool resolved = false;
-        const auto found = scratch->weightIndex.find(c.weightObject);
-        if (found != scratch->weightIndex.end() &&
-            found->second < store.weightPackets.size() &&
-            !store.weightPackets.empty()) {
-            envelope.clear();
-            resolved = _RrResolveWeightPacketAll(
-                program, store.weightPackets[found->second], 1,
-                &envelope);
-        }
-        if (!resolved && scratch->constraintHaveWeight[ci]) {
-            envelope.assign(
-                1, scratch->constraintWeights[ci]);
-            resolved = true;
-        }
-        if (!resolved || envelope.size() != 1) {
-            const std::string wpath =
-                program->TextOrEmpty(c.weightObject);
-            if (found == scratch->weightIndex.end()) {
-                envelopeError = "missing weight object " + wpath;
-            } else {
-                const uint32_t type =
-                    program->geometry
-                        ->weightObjects[found->second]
-                        .type;
-                if (!_RrIsWeightObjectType(program, type)) {
-                    envelopeError = "unknown weight object type " +
-                                    program->TextOrEmpty(type) + " on " +
-                                    wpath;
-                } else {
-                    envelopeError =
-                        "could not resolve weights on " + wpath;
-                }
+        if (c.weightObjectIndex < 0) {
+            if (error) {
+                *error = _RrStepHead(program, step) +
+                         " resolves an envelope with no weight object";
             }
+            return false;
+        }
+        if (!RrResolveWeightOracle(program, size_t(c.weightObjectIndex), 1,
+                                   nullptr, &envelope, &envelopeError) ||
+            envelope.size() != 1) {
             output.diagnostics.push_back(
                 cpath + ": " + envelopeError +
                 "; constraint passed through");
             return finish();
         }
         weight = envelope[0];
+        if (program->crossCheck) {
+            // The record's envelope is the program's own resolve at this
+            // frame, which a successful resolve here must equal.
+            const std::string field = "[" + std::to_string(ci) + "]";
+            if (!scratch->constraintHaveWeight[ci]) {
+                if (error) {
+                    *error = _RrStepHead(program, step) +
+                             ": cross-check mismatch at "
+                             "constraintHaveWeight" +
+                             field + ": computed 1, recorded 0";
+                }
+                return false;
+            }
+            if (!RrSameFloatBits(envelope[0],
+                                 scratch->constraintWeights[ci])) {
+                if (error) {
+                    *error = _RrStepHead(program, step) + ": " +
+                             RrCrossCheckMismatch(
+                                 "constraintWeights" + field, envelope[0],
+                                 scratch->constraintWeights[ci]);
+                }
+                return false;
+            }
+            ++output.crossChecked[RrCrossCheckEnvelope];
+        }
     } else if (c.weightObject == 0) {
         weight = double(program->ReadConstraint(ci,
                                                 RrConstraintDefaultWeight)
