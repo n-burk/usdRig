@@ -132,3 +132,27 @@ HTML and local sizzle material are ignored by Git.
 The standalone backends support a subset of the authoring/runtime surface.
 Check their guides before integration. Changes to OpenUSD versions or binary
 formats require explicit compatibility testing.
+
+## OpenExec usage
+
+RigExec uses [OpenExec](https://openusd.org/release/intro_to_openexec.html),
+the execution system in OpenUSD 26.08, from an unmodified installation; its
+[system design](https://openusd.org/dev/api/page__execution__system__design.html)
+describes the parts named here.
+
+- **Schema computations.** `libs/rigExec` registers computations for its
+  schemas with `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA`: provider frames and
+  matrices (`computePointFrame`, `computeRestFrame`, `computeMatrix`), solver
+  outputs (`computePointFrameArray`), weight packets, and mover parameters.
+- **Requests and overrides.** The dynamic evaluator reads those values through
+  `ExecUsdSystem` requests keyed by `ExecUsdValueKey`, and applies interactive
+  edits as `ExecUsdValueOverride` values.
+- **Mover graph.** Mover revision chains are built as an in-memory
+  `VdfNetwork` from the authored relationships, scheduled and run by the Vdf
+  pull-based executor (`libs/rigExec/moverGraph.cpp`).
+- **Standalone adapter.** The experimental `libs/rigExecStandalone` implements
+  the Esf scene interfaces over its own scene database.
+
+The baked program and the `.rigexec` runtime evaluate frames without calling
+OpenExec, and the runtime links no USD library. Other upstream and published
+sources are listed in the [method references](docs/references.md).
