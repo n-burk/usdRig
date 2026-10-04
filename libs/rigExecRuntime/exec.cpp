@@ -198,6 +198,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     RrStore &store = program.store;
     const RigExecWireFrameInputs &record = _inputs.frames[_frameIndex];
     const double time = record.frame;
+    program.frameIndex = _frameIndex;
 
     // The property chains' published values, straight from the record.
     if (record.propertyPaths.size() != record.propertyValues.size()) {
@@ -264,6 +265,21 @@ RigExecRuntimeReader::Execute(std::string *error)
         std::to_string(counters.revisionsExecuted) + " executed, " +
         std::to_string(counters.schedulesBuilt) +
         " schedule(s) built");
+
+    // A plugin mover this runtime has no kernel for is a no-op, said on
+    // every frame it is one, beside the lines of the step it sat in.
+    for (const auto &[slot, index] : program.externalIndex) {
+        const RrProgram::ExternalRevision &state = program.externals[index];
+        if (state.state) {
+            continue;
+        }
+        const RigExecWireRevision &wire =
+            _geometry.chains[slot.first].revisions[slot.second];
+        poseDiagnostics.push_back(
+            "warning: " + program.TextOrEmpty(wire.moverPath) + " is a " +
+            state.type + ", which this runtime has no kernel for; its "
+            "points pass through");
+    }
 
     // The compile notices a fresh evaluator seeds its first generation
     // with (inert movers, purpose warnings): manifest order, ahead of

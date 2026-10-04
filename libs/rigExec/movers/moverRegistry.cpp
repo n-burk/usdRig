@@ -97,6 +97,14 @@ RigExecRegisterMoverHandler(RigExecMoverHandler handler, std::string *error)
             handler.hasScalarOracle = false;
         }
     }
+    if ((handler.encodeExternal || handler.runtimeKernel.prepare ||
+         handler.runtimeKernel.apply) &&
+        (!external || (handler.runtimeKernel.prepare != nullptr) !=
+                          (handler.runtimeKernel.apply != nullptr))) {
+        return fail(std::string(handler.schemaType) +
+            ": .rigexec export and playback callbacks belong to external "
+            "movers, and a playback kernel needs both prepare and apply");
+    }
     _Registry &registry = _GetRegistry();
     std::lock_guard<std::mutex> lock(registry.mutex);
     for (const _Entry &entry : registry.rows) {

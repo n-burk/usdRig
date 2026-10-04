@@ -3,6 +3,7 @@
 #include "rigExec/frozenContext.h"
 #include "rigExecBake/bake.h"
 #include "rigExecRigging/rigBuilder.h"
+#include "rigExecRuntime/runtime.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
@@ -25,6 +26,7 @@ using namespace rigExec;
 namespace {
 
 const SdfPath kRig("/Rig"), kTarget("/Rig/Body.points");
+const SdfPath kReference("/Rig/Reference.points"), kControl("/Rig/Ctl");
 const VtVec3fArray kBase{GfVec3f(-2, 0, 0), GfVec3f(1, 2, 3), GfVec3f(0)};
 
 void Compile(RigExecRigEvaluator *evaluator)
@@ -176,8 +178,217 @@ void TestEvaluation()
     options.frames = {1.0};
     RigExecBakeResult output;
     error.clear();
-    CHECK(!RigExecBakeToBinary(baked, options, &output, &error));
-    CHECK(!error.empty());
+    CHECK(RigExecBakeToBinary(baked, options, &output, &error));
+    CHECK(!output.bytes.empty());
+}
+
+// A plugin mover on /Rig/Body that also reads /Rig/Reference at `final`,
+// after a matrix mover lifted it by /Rig/Ctl's animated avars:ty.
+UsdStageRefPtr MakeExportRig(const char *moverType)
+{
+    const auto stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1);
+    stage->SetEndTimeCode(3);
+    RigExecRigBuilder::Create(stage, kRig);
+    CHECK(UsdGeomPoints::Define(stage, kTarget.GetPrimPath())
+              .CreatePointsAttr().Set(kBase));
+    CHECK(UsdGeomPoints::Define(stage, kReference.GetPrimPath())
+              .CreatePointsAttr().Set(VtVec3fArray{GfVec3f(0)}));
+    const UsdPrim control =
+        stage->DefinePrim(kControl, TfToken("RigExecControl"));
+    const UsdAttribute ty = control.GetAttribute(TfToken("avars:ty"));
+    CHECK(ty.Set(0.0, UsdTimeCode(1)) && ty.Set(2.0, UsdTimeCode(3)));
+    const UsdPrim lift = stage->DefinePrim(SdfPath("/Rig/Lift"),
+                                           TfToken("RigExecMatrixMover"));
+    CHECK(lift.AddAppliedSchema(TfToken("RigExecMoverAPI")));
+    CHECK(lift.CreateRelationship(TfToken("rigExec:moves"), false)
+              .SetTargets({kReference}));
+    CHECK(lift.CreateRelationship(TfToken("rigExec:transform"), false)
+              .SetTargets({kControl}));
+    const UsdPrim mover =
+        stage->DefinePrim(SdfPath("/Rig/External"), TfToken(moverType));
+    CHECK(mover.AddAppliedSchema(TfToken("RigExecMoverAPI")));
+    CHECK(mover.CreateRelationship(TfToken("rigExec:moves"), false)
+              .SetTargets({kTarget}));
+    const UsdRelationship reference =
+        mover.CreateRelationship(TfToken("rigExec:reference"), false);
+    CHECK(reference.SetTargets({kReference}));
+    CHECK(reference.SetMetadata(TfToken(RigExecReadPhaseMetadataName),
+                                std::string("final")));
+    const UsdAttribute gain = mover.CreateAttribute(
+        TfToken("inputs:gain"), SdfValueTypeNames->Float);
+    CHECK(gain.Set(0.5f, UsdTimeCode(1)) && gain.Set(1.5f, UsdTimeCode(3)));
+    CHECK(mover.CreateAttribute(TfToken("inputs:defaultWeight"),
+                                SdfValueTypeNames->Float, false)
+              .Set(0.5f));
+    return stage;
+}
+
+const std::vector<RrVec3f> &Points(const RigExecRuntimeReader &reader,
+                                   const SdfPath &path)
+{
+    for (const RigExecRuntimePoints &moved : reader.GetPoints()) {
+        if (moved.path == path.GetString()) return moved.points;
+    }
+    throw std::runtime_error("playback published no " + path.GetString());
+}
+
+// Playback is held to the baked program bit for bit, as every runtime
+// family is.
+void CheckSame(const std::vector<RrVec3f> &played, const VtVec3fArray &baked,
+               const std::string &what)
+{
+    if (played.size() != baked.size()) {
+        throw std::runtime_error(what + ": point count differs");
+    }
+    for (size_t i = 0; i < played.size(); ++i) {
+        for (size_t a = 0; a < 3; ++a) {
+            if (played[i][a] != baked[i][a]) {
+                throw std::runtime_error(
+                    what + ": point " + std::to_string(i) + " is " +
+                    std::to_string(played[i][a]) + ", baked " +
+                    std::to_string(baked[i][a]));
+            }
+        }
+    }
+}
+
+// The fixture's arithmetic at envelope 0.5: y rises by half the reference's
+// lift and z by half of gain * x^2.
+void CheckDeformed(const std::vector<RrVec3f> &played, float lift, float gain,
+                   const std::string &what)
+{
+    if (played.size() != kBase.size()) {
+        throw std::runtime_error(what + ": point count differs");
+    }
+    for (size_t i = 0; i < played.size(); ++i) {
+        const GfVec3f &base = kBase[i];
+        const GfVec3f expected(base[0], base[1] + 0.5f * lift,
+                               base[2] + 0.5f * gain * base[0] * base[0]);
+        for (size_t a = 0; a < 3; ++a) {
+            if (std::abs(played[i][a] - expected[a]) > 1e-5f) {
+                throw std::runtime_error(what + ": point " +
+                                         std::to_string(i) + " is off");
+            }
+        }
+    }
+}
+
+bool Mentions(const std::vector<std::string> &lines, const std::string &text)
+{
+    for (const std::string &line : lines) {
+        if (line.find(text) != std::string::npos) return true;
+    }
+    return false;
+}
+
+void TestExport()
+{
+    const std::string type = "ExternalQuadraticMover";
+    const auto stage = MakeExportRig(type.c_str());
+    RigExecRigEvaluator baked(stage, kRig);
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts options;
+    options.frames = {1.0, 2.0, 3.0};
+    RigExecBakeResult result;
+    std::string error;
+    if (!RigExecBakeToBinary(baked, options, &result, &error)) {
+        throw std::runtime_error("export failed: " + error);
+    }
+
+    // Played through the plugin's kernel: what the baked program evaluated.
+    auto reader = RigExecRuntimeReader::Open(result.bytes.data(),
+                                             result.bytes.size(), &error);
+    if (!reader) throw std::runtime_error("open failed: " + error);
+    CHECK(reader->GetExternalMoverTypes() == std::vector<std::string>{type});
+    CHECK(reader->GetMissingExternalKernels() ==
+          std::vector<std::string>{type});
+    const RigExecMoverHandler *handler =
+        RigExecFindMoverHandler(TfToken(type));
+    CHECK(handler && handler->runtimeKernel.IsSet());
+    CHECK(reader->SetExternalKernel(type, handler->runtimeKernel, &error));
+    CHECK(reader->GetMissingExternalKernels().empty());
+    for (double frame : options.frames) {
+        CHECK(reader->SetFrame(frame, &error));
+        if (!reader->Execute(&error)) {
+            throw std::runtime_error("playback failed: " + error);
+        }
+        CHECK(!Mentions(reader->GetDiagnostics(), "no kernel"));
+        const RigExecRigPose pose = baked.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid);
+        for (const SdfPath &path : {kTarget, kReference}) {
+            CheckSame(Points(*reader, path),
+                      pose.movedProperties.at(path).Get<VtVec3fArray>(),
+                      path.GetString() + " at frame " +
+                          std::to_string(frame));
+        }
+        // Both sides agreeing is not enough: they must agree on the
+        // deformation, reference included (ty and gain are linear keys).
+        CheckDeformed(Points(*reader, kTarget), float(frame - 1.0),
+                      0.5f * float(frame), "playback arithmetic");
+    }
+
+    // Posed: the phased reference is playback's own evaluation, so a posed
+    // control moves the plugin mover with it.
+    CHECK(reader->SetFrame(2.0, &error));
+    CHECK(reader->SetAvar(kControl.GetString() + ".avars:ty", 5.0, &error));
+    CHECK(reader->Execute(&error));
+    baked.SetInteractiveOverrides({RigExecValueOverride{
+        kControl, TfToken(), TfToken("avars:ty"), VtValue(5.0)}});
+    const RigExecRigPose posed = baked.Evaluate(UsdTimeCode(2.0));
+    baked.ClearInteractiveOverrides();
+    CHECK(posed.valid);
+    CheckSame(Points(*reader, kTarget),
+              posed.movedProperties.at(kTarget).Get<VtVec3fArray>(),
+              "posed playback");
+    // The exported frame bytes hold the unposed lift of 1; the kernel must
+    // have used playback's lift of 5.
+    CheckDeformed(Points(*reader, kTarget), 5.0f, 1.0f, "posed arithmetic");
+    reader->ClearAvars();
+
+    // Without the kernel the mover is a no-op, and every frame says so.
+    auto bare = RigExecRuntimeReader::Open(result.bytes.data(),
+                                           result.bytes.size(), &error);
+    CHECK(bare);
+    CHECK(bare->SetFrame(3.0, &error) && bare->Execute(&error));
+    CHECK(Mentions(bare->GetDiagnostics(),
+                   "warning: /Rig/External is a " + type +
+                       ", which this runtime has no kernel for"));
+    const std::vector<RrVec3f> &passed = Points(*bare, kTarget);
+    CHECK(passed.size() == kBase.size());
+    for (size_t i = 0; i < passed.size(); ++i) {
+        for (size_t a = 0; a < 3; ++a) {
+            CHECK(passed[i][a] == kBase[i][a]);
+        }
+    }
+    CheckSame(Points(*bare, kReference),
+              baked.Evaluate(UsdTimeCode(3.0))
+                  .movedProperties.at(kReference)
+                  .Get<VtVec3fArray>(),
+              "reference beside a missing kernel");
+
+    // A kernel that cannot read the epoch bytes leaves it passing through.
+    RigExecExternalKernel refusing = handler->runtimeKernel;
+    refusing.prepare = [](const uint8_t *, size_t, std::string *why)
+        -> std::shared_ptr<const void> {
+        if (why) *why = "refused";
+        return nullptr;
+    };
+    CHECK(!bare->SetExternalKernel(type, refusing, &error));
+    CHECK(error.find("refused") != std::string::npos);
+    CHECK(bare->GetMissingExternalKernels() ==
+          std::vector<std::string>{type});
+    CHECK(!bare->SetExternalKernel("NoSuchMover", handler->runtimeKernel,
+                                   &error));
+
+    // A plugin that never adopted export refuses it, naming the mover.
+    const auto unexportable = MakeExportRig("ExternalUnexportableMover");
+    RigExecRigEvaluator refused(unexportable, kRig);
+    refused.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    error.clear();
+    CHECK(!RigExecBakeToBinary(refused, options, &result, &error));
+    CHECK(error.find("/Rig/External") != std::string::npos &&
+          error.find("no .rigexec encoding") != std::string::npos);
 }
 
 void TestIncompatiblePlugin()
@@ -221,9 +432,10 @@ int main(int argc, char **argv)
         PlugRegistry::GetInstance().RegisterPlugins(argv[1]);
         TestRegistration(argv[2]);
         TestEvaluation();
+        TestExport();
         TestIncompatiblePlugin();
         std::cout << "External mover loading, registration, dynamic/baked parity, "
-                     "invalidation, envelopes and export guards passed\n";
+                     "invalidation, envelopes, export and playback passed\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

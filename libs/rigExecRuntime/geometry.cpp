@@ -65,6 +65,7 @@ enum RrGeoOp {
     RrGeoOpRecomputeExtent = 13,
     RrGeoOpDeltaMush = 14,
     RrGeoOpWrinkle = 15,
+    RrGeoOpExternal = 16,
     RrGeoOpSurfaceProjector = 17,
     RrGeoOpShaderDials = 18,
 };
@@ -87,6 +88,7 @@ RrGeoOpName(int op)
     case RrGeoOpEmitGuidePoints: return "EmitGuidePoints";
     case RrGeoOpRecomputeNormals: return "RecomputeNormals";
     case RrGeoOpRecomputeExtent: return "RecomputeExtent";
+    case RrGeoOpExternal: return "External";
     case RrGeoOpSurfaceProjector: return "SurfaceProjector";
     case RrGeoOpShaderDials: return "ShaderDials";
     default: return nullptr;
@@ -112,6 +114,7 @@ RrGeoKindToken(int op)
     case RrGeoOpEmitGuidePoints: return "emitGuidePoints";
     case RrGeoOpRecomputeNormals: return "recomputeNormals";
     case RrGeoOpRecomputeExtent: return "recomputeExtent";
+    case RrGeoOpExternal: return "external";
     case RrGeoOpSurfaceProjector: return "surfaceProjector";
     case RrGeoOpShaderDials: return "shaderDials";
     default: return nullptr;
@@ -457,6 +460,17 @@ struct RrGeoMoverParameters {
     int skinElementSize = 0;
     std::string skinningMethod;
     std::shared_ptr<const RrGeoSkinTopology> skinTopology;
+    // A plugin mover: its playback state, this frame's bytes (null when the
+    // export's assembly failed on the frame), and the points its binding
+    // reads at a declared phase, as this run evaluated them.
+    const RrProgram::ExternalRevision *external = nullptr;
+    // The prepared state the packet was assembled under, so installing a
+    // kernel re-runs a revision whose bytes did not move.
+    const void *externalState = nullptr;
+    const std::vector<uint8_t> *externalFrame = nullptr;
+    std::vector<std::string> externalPhasedPaths;
+    std::vector<uint8_t> externalPhasedHave;
+    std::vector<std::vector<RrVec3f>> externalPhased;
 
     RrGeoMoverParameters()
     {
@@ -491,7 +505,13 @@ struct RrGeoMoverParameters {
                skinWeights == o.skinWeights &&
                skinTopology == o.skinTopology &&
                skinElementSize == o.skinElementSize &&
-               skinningMethod == o.skinningMethod;
+               skinningMethod == o.skinningMethod &&
+               external == o.external &&
+               externalState == o.externalState &&
+               externalFrame == o.externalFrame &&
+               externalPhasedPaths == o.externalPhasedPaths &&
+               externalPhasedHave == o.externalPhasedHave &&
+               externalPhased == o.externalPhased;
     }
     bool operator!=(const RrGeoMoverParameters &o) const
     {
@@ -2497,12 +2517,67 @@ RrGeoCarryWireCurves(std::vector<RrVec3f> *rest, std::vector<RrVec3f> *posed,
     }
 }
 
+// A plugin mover through the kernel the host installed. With none it is a
+// no-op -- Execute names it -- and the preceding points stand.
+bool
+RrGeoApplyExternal(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts)
+{
+    if (!p.external || !p.external->state) {
+        return true;
+    }
+    if (!p.externalFrame) {
+        return false;
+    }
+    std::vector<float> xyz(pts->size() * 3);
+    for (size_t i = 0; i < pts->size(); ++i) {
+        for (size_t a = 0; a < 3; ++a) {
+            xyz[i * 3 + a] = (*pts)[i][a];
+        }
+    }
+    std::vector<std::vector<float>> phasedXyz(p.externalPhased.size());
+    std::vector<RigExecExternalPhasedPoints> phased(p.externalPhased.size());
+    for (size_t k = 0; k < phased.size(); ++k) {
+        phased[k].path = p.externalPhasedPaths[k].c_str();
+        if (!p.externalPhasedHave[k]) {
+            continue;
+        }
+        const std::vector<RrVec3f> &points = p.externalPhased[k];
+        phasedXyz[k].resize(points.size() * 3);
+        for (size_t i = 0; i < points.size(); ++i) {
+            for (size_t a = 0; a < 3; ++a) {
+                phasedXyz[k][i * 3 + a] = points[i][a];
+            }
+        }
+        phased[k].xyz = phasedXyz[k].data();
+        phased[k].count = points.size();
+    }
+    const std::vector<uint8_t> &frame = *p.externalFrame;
+    if (!p.external->kernel.apply(p.external->state.get(), frame.data(),
+                                  frame.size(), phased.data(), phased.size(),
+                                  xyz.data(), pts->size())) {
+        return false;
+    }
+    // The same atomic check the stage-side host makes: a non-finite
+    // candidate fails the mover rather than publishing.
+    for (const float value : xyz) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < pts->size(); ++i) {
+        (*pts)[i] = RrVec3f(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]);
+    }
+    return true;
+}
+
 bool
 RrGeoApplyRevisionKernel(
     int op, const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
     std::unordered_map<uint64_t, RrGeoWireBasisEntry> *wireCache)
 {
     switch (op) {
+    case RrGeoOpExternal:
+        return RrGeoApplyExternal(p, pts);
     case RrGeoOpMatrix:
         return RrGeoApplyMatrixKernel(p, pts);
     case RrGeoOpSkin:
@@ -3922,6 +3997,51 @@ RrGeoAssembleDerived(const RrGeoAssembleInputs &in,
         (recomputeExtent || !params->topologyCounts.empty());
 }
 
+// A plugin mover's packet: its playback state, the frame bytes the export
+// recorded for the selected frame, and its phased point inputs out of this
+// run's snapshots. No kernel here makes it a valid no-op; no bytes on this
+// frame -- the export's assembly failed -- leave it invalid, as it was.
+void
+RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
+                      RrGeoMoverParameters *params)
+{
+    RrProgram &program = *in.program;
+    const auto found = program.externalIndex.find(
+        std::make_pair(uint32_t(in.chain), uint32_t(in.revision)));
+    if (in.derived || !program.external ||
+        found == program.externalIndex.end()) {
+        return;
+    }
+    const RrProgram::ExternalRevision &state =
+        program.externals[found->second];
+    params->external = &state;
+    params->externalState = state.state.get();
+    if (!state.state) {
+        params->valid = true;
+        return;
+    }
+    const uint32_t blob =
+        program.external->frames[program.frameIndex][found->second];
+    if (blob == RigExecWireExternalNoFrame) {
+        return;
+    }
+    params->externalFrame = &program.external->blobs[blob];
+    const RigExecWireRevisionBinding &binding = in.wire->binding;
+    for (size_t i = 0;
+         i < binding.phaseInputs.size() && i < binding.phases.size(); ++i) {
+        const uint32_t path = binding.phaseInputs[i];
+        const RrSnapshotValue *overlay =
+            RrGeoPhaseOverlay(in.program, in.scratch, binding, path);
+        const bool have =
+            overlay && overlay->tag == RrSnapshotValue::Tag::Points;
+        params->externalPhasedPaths.push_back(program.TextOrEmpty(path));
+        params->externalPhasedHave.push_back(have ? 1 : 0);
+        params->externalPhased.push_back(have ? overlay->points
+                                              : std::vector<RrVec3f>());
+    }
+    params->valid = true;
+}
+
 // The revision's packet. Chain revisions assemble against the authored
 // base; derived ones against the chain's final points.
 RrGeoMoverParameters
@@ -4080,6 +4200,9 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         break;
     case RrGeoOpRecomputeExtent:
         RrGeoAssembleDerived(in, base, true, &params);
+        break;
+    case RrGeoOpExternal:
+        RrGeoAssembleExternal(in, &params);
         break;
     default:
         break;

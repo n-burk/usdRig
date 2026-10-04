@@ -454,7 +454,7 @@ _ReadRevision(RigExecWireReader *reader, RigExecWireRevision *revision)
         !reader->ReadU32(&revision->target) ||
         !reader->ReadU32(&revision->moverPrim) ||
         !reader->ReadU8(&revision->op) || revision->op > 18 ||
-        revision->op == 10 || revision->op == 11 || revision->op == 16 ||
+        revision->op == 10 || revision->op == 11 ||
         !_ReadBinding(reader, &revision->binding) ||
         !reader->ReadU32(&count)) {
         return false;

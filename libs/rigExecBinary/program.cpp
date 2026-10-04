@@ -232,6 +232,17 @@ RigExecWireReader::ReadU8(uint8_t *out)
 }
 
 bool
+RigExecWireReader::ReadBytes(size_t count, std::vector<uint8_t> *out)
+{
+    if (count > _size - _at) {
+        return false;
+    }
+    out->insert(out->end(), _data + _at, _data + _at + count);
+    _at += count;
+    return true;
+}
+
+bool
 RigExecWireReader::ReadU32(uint32_t *out)
 {
     if (_at + 4 > _size) {

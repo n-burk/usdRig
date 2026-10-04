@@ -1,6 +1,10 @@
 include_guard(GLOBAL)
 include(CMakeParseArguments)
 
+# Must equal RigExecMoverPluginApiVersion in rigExec/movers/moverRegistry.h:
+# the loader refuses a library whose metadata names another version.
+set(RIGEXEC_MOVER_PLUGIN_API_VERSION 2)
+
 # Available both inside the usdRig build and from find_package(rigExec).
 function(rigexec_add_mover_plugin name)
     cmake_parse_arguments(P "NO_INSTALL" "PLUGIN_ROOT" "SOURCES;LIBRARIES" ${ARGN})
@@ -31,7 +35,7 @@ function(rigexec_add_mover_plugin name)
     set_property(TARGET ${name} PROPERTY RIGEXEC_PLUGIN_RESOURCE_DIR "${_resources}")
     file(WRITE "${_plugin_root}/plugInfo.json"
         "{\"Includes\": [\"*/resources/\", \"*/*/resources/\"]}\n")
-    set(_metadata "{\"Plugins\": [{\"Type\": \"library\", \"Name\": \"${name}\", \"Root\": \".\", \"ResourcePath\": \".\", \"LibraryPath\": \"@LIBRARY@\", \"Info\": {\"RigExecMoverPlugin\": 1}}]}\n")
+    set(_metadata "{\"Plugins\": [{\"Type\": \"library\", \"Name\": \"${name}\", \"Root\": \".\", \"ResourcePath\": \".\", \"LibraryPath\": \"@LIBRARY@\", \"Info\": {\"RigExecMoverPlugin\": ${RIGEXEC_MOVER_PLUGIN_API_VERSION}}}]}\n")
     string(REPLACE "@LIBRARY@" "$<TARGET_FILE:${name}>" _build_metadata "${_metadata}")
     file(GENERATE OUTPUT "${_resources}/plugInfo.json" CONTENT "${_build_metadata}")
 

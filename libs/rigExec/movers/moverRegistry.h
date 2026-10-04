@@ -3,6 +3,7 @@
 #define RIGEXEC_MOVERS_MOVER_REGISTRY_H
 
 #include "../moverGraph.h"
+#include "rigExecBinary/external.h"
 
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
@@ -173,12 +174,30 @@ struct RigExecMoverHandler {
     /// revision. The library and payload types must remain loaded.
     bool (*applyExternal)(
         const VtValue &data, std::vector<GfVec3f> *points) = nullptr;
+
+    /// .rigexec export, optional: a rig holding a mover without it does not
+    /// export. Splits a payload assembleExternal produced into the bytes
+    /// runtimeKernel reads back (see rigExecBinary/external.h). \p epoch
+    /// must come out identical on every baked frame -- the export fails
+    /// otherwise -- and is written once; \p frame is written per frame.
+    /// Points the binding reads at a declared phase (binding.phases) reach
+    /// the kernel as playback evaluates them, so a posed playback moves
+    /// them; the frame bytes may still carry what the export read, for a
+    /// phase playback holds no value at.
+    bool (*encodeExternal)(
+        const VtValue &data, const RigExecRevisionBinding &binding,
+        std::vector<uint8_t> *epoch, std::vector<uint8_t> *frame) = nullptr;
+    /// The playback half of encodeExternal, USD-free. A host that opens a
+    /// .rigexec file installs it into the runtime; a runtime without it
+    /// passes this mover's points through with a warning.
+    RigExecExternalKernel runtimeKernel;
 };
 
 /// External libraries identify this contract with
 /// Info.RigExecMoverPlugin in their OpenUSD plugInfo.json. Plugins must also
 /// use the same compiler, USD build, and RigExec SDK as the host.
-inline constexpr int RigExecMoverPluginApiVersion = 1;
+/// Version 2 added encodeExternal and runtimeKernel to the handler.
+inline constexpr int RigExecMoverPluginApiVersion = 2;
 
 /// Registers one mover, retaining an immutable copy and its schema name.
 /// Duplicate schema names and incomplete external callbacks are rejected.

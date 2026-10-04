@@ -192,7 +192,8 @@ add_library(rigExecBinary STATIC
     libs/rigExecBinary/program.cpp
     libs/rigExecBinary/pose.cpp
     libs/rigExecBinary/geometry.cpp
-    libs/rigExecBinary/inputTable.cpp)
+    libs/rigExecBinary/inputTable.cpp
+    libs/rigExecBinary/external.cpp)
 target_include_directories(rigExecBinary PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -217,6 +218,9 @@ target_include_directories(rigExecRuntime PUBLIC
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExecRuntime PUBLIC rigExecBinary)
 set_target_properties(rigExecRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Installed names, so a mover plugin's tests can export and replay its rigs
+# the same way inside this build and against an installed SDK.
+add_library(rigExec::rigExecRuntime ALIAS rigExecRuntime)
 if (MSVC)
     target_compile_options(rigExecRuntime PRIVATE /fp:precise)
 else ()
@@ -234,6 +238,7 @@ target_include_directories(rigExecBake PUBLIC
 target_link_libraries(rigExecBake PUBLIC
     rigExec
     rigExecBinary)
+add_library(rigExec::rigExecBake ALIAS rigExecBake)
 
 add_executable(rigExecBakeTool tools/rigExecBake.cpp)
 set_target_properties(rigExecBakeTool PROPERTIES OUTPUT_NAME rigExecBake)
@@ -275,7 +280,7 @@ set(_rigexec_imaging_resource_define
 add_subdirectory(tests/externalMovers)
 add_executable(testRigExecExternalMovers tests/testRigExecExternalMovers.cpp)
 target_link_libraries(testRigExecExternalMovers PRIVATE
-    rigExec rigExecRigging rigExecBake usd usdGeom plug)
+    rigExec rigExecRigging rigExecBake rigExecRuntime usd usdGeom plug)
 add_dependencies(testRigExecExternalMovers testExternalMover)
 add_test(NAME testRigExecExternalMovers COMMAND testRigExecExternalMovers
     "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
@@ -1446,14 +1451,14 @@ endforeach()
 # Install
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake
+install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${RIGEXEC_INSTALL_LIBDIR}")
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
-foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake)
+foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING

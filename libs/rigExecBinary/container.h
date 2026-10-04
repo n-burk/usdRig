@@ -21,7 +21,7 @@ namespace rigExec {
 /// Magic bytes "REXB" as a little-endian u32.
 inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 
-/// The container version this code writes: major 3, minor 2.
+/// The container version this code writes: major 3, minor 3.
 /// Encoded (minor << 16) | major; the reader requires the major and
 /// tolerates the minor.
 ///
@@ -45,7 +45,11 @@ inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 /// It is last in that record and read only when bytes remain, so a minor-1
 /// file loads with the table empty, which is every axis +1 -- exactly what
 /// it was baked from.
-inline constexpr uint32_t RigExecBinaryVersion = 0x00020003u;
+///
+/// MINOR 3 admits revision op 16 (a plugin mover) with the ExternalMovers
+/// section that carries its bytes (rigExecBinary/external.h). A file with
+/// no plugin mover is what minor 2 wrote; an earlier reader rejects op 16.
+inline constexpr uint32_t RigExecBinaryVersion = 0x00030003u;
 inline constexpr uint32_t RigExecBinaryMajor(uint32_t version)
 {
     return version & 0xffffu;
@@ -76,6 +80,9 @@ enum class RigExecBinarySection : uint32_t {
     /// every input an override can reach, and the loader has to route by
     /// the same widened rule or the uids drift apart. See capture.h.
     InputPolicy = 16,
+    /// Plugin movers' epoch and per-frame bytes (minor 3). Absent when the
+    /// rig holds none.
+    ExternalMovers = 17,
 };
 
 /// Builds a .rigexec file in memory.

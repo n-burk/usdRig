@@ -1,6 +1,6 @@
 ---
 title: External mover plugins
-summary: Build and register point movers from a separate repository for dynamic and baked evaluation.
+summary: Build and register point movers from a separate repository for dynamic, baked and .rigexec playback.
 order: 50
 ---
 
@@ -11,8 +11,10 @@ callback and a points computation; no changes to RigExec's built-in mover list
 are required.
 
 Use the same compiler, architecture, build configuration, OpenUSD installation,
-and RigExec SDK as the host. Plugin API version 1 identifies the callback
+and RigExec SDK as the host. Plugin API version 2 identifies the callback
 contract; it does not provide binary compatibility across different SDK builds.
+Version 2 added the `.rigexec` export and playback callbacks below, so a library
+built for version 1 must be rebuilt.
 
 ## Build a mover repository
 
@@ -193,6 +195,88 @@ The generic validator checks the native `UsdGeomPointBased` `point3f[]` target
 and the handler's single-target rule before the custom validator runs. Mover
 ordering and envelopes follow the same rules as built-in geometry movers.
 
+## Export and play back a plugin mover
+
+A `.rigexec` file is played by a runtime that has no stage, so it cannot call
+`assembleExternal`. Two optional handler fields let a rig holding the mover
+export and replay:
+
+- `encodeExternal` runs at export, once per baked frame, on the payload
+  `assembleExternal` produced. It splits the payload into epoch bytes, which
+  must be identical on every frame and are written once, and frame bytes,
+  which are written per frame (identical frames share storage).
+- `runtimeKernel` is the playback half, declared in
+  `rigExecBinary/external.h` without any USD types. `prepare` decodes a
+  revision's epoch bytes once per opened file; `apply` revises the preceding
+  points in place from that state, the frame's bytes, and the points the
+  binding reads at a declared phase.
+
+The bytes are the plugin's own format; RigExec stores them without reading
+them. Start the epoch bytes with a format tag so `prepare` can refuse bytes it
+does not understand. Points named in `binding.phases` reach `apply` as playback
+evaluated them, so a playback posed through `SetAvar` moves them; frame bytes
+can still carry the value the export read, for a phase playback holds no value
+at. Everything else in the payload replays as the export captured it on that
+frame, the same way property-mover results do. The runtime applies `inputs:enabled` and the envelope, and fails the mover
+for that frame when `apply` returns false or produces a non-finite point.
+
+Extending the offset mover above:
+
+```cpp
+#include <cstring>
+
+bool Encode(const VtValue &data, const RigExecRevisionBinding &,
+            std::vector<uint8_t> *epoch, std::vector<uint8_t> *frame)
+{
+    if (!data.IsHolding<GfVec3f>()) return false;
+    epoch->assign({'O', 'F', 'F', '1'});
+    frame->resize(sizeof(GfVec3f));
+    std::memcpy(frame->data(), data.UncheckedGet<GfVec3f>().data(),
+                frame->size());
+    return true;
+}
+
+std::shared_ptr<const void> Prepare(const uint8_t *epoch, size_t size,
+                                    std::string *error)
+{
+    if (size != 4 || std::memcmp(epoch, "OFF1", 4) != 0) {
+        if (error) *error = "not an OFF1 epoch";
+        return nullptr;
+    }
+    return std::make_shared<int>(1);
+}
+
+bool Play(const void *, const uint8_t *frame, size_t frameSize,
+          const RigExecExternalPhasedPoints *, size_t,
+          float *xyz, size_t count)
+{
+    float offset[3];
+    if (frameSize != sizeof(offset)) return false;
+    std::memcpy(offset, frame, sizeof(offset));
+    for (size_t i = 0; i < count * 3; ++i) xyz[i] += offset[i % 3];
+    return true;
+}
+
+// In MakeHandler():
+//     handler.encodeExternal = Encode;
+//     handler.runtimeKernel.prepare = Prepare;
+//     handler.runtimeKernel.apply = Play;
+```
+
+Export fails, naming the mover, when its plugin provides no `encodeExternal`
+or encodes different epoch bytes on two frames. A frame on which assembly
+failed exports as a failed frame, and playback fails the mover there too.
+
+A host that opens a `.rigexec` file installs kernels with
+`RigExecRuntimeReader::SetExternalKernel(type, kernel)`, by the type name the
+plugin registered. `GetExternalMoverTypes()` lists the types a file holds and
+`GetMissingExternalKernels()` the ones still without a prepared kernel. The
+usdview playback path installs `runtimeKernel` from every loaded plugin. A mover
+whose type has no kernel in the runtime is a no-op: its points pass through
+unchanged, and every `Execute` adds a `warning:` line naming the mover to the
+reader's diagnostics. A runtime built without USD carries a kernel only if it
+links one in; RigExec itself ships none.
+
 ## Discovery and supported evaluation
 
 For an independent build, add `mover-build/usd/rigExecMoverPlugins` to
@@ -204,20 +288,26 @@ Windows and colons on Linux/macOS. Keep the host's existing schema and imaging
 plugin paths as well.
 
 The generated `plugInfo.json` marks the library with
-`"Info": {"RigExecMoverPlugin": 1}`. RigExec loads discoverable mover libraries
+`"Info": {"RigExecMoverPlugin": 2}`. RigExec loads discoverable mover libraries
 on the first unknown handler lookup. Hosts can call
 `RigExecLoadMoverPlugins(&diagnostics)` explicitly to inspect version or load
 errors. After adding search locations with
 `PlugRegistry::GetInstance().RegisterPlugins(path)`, call the loader again to
 discover those additional libraries.
 
-External point callbacks work in stage-backed dynamic and baked evaluation.
-Frozen evaluation and background frame-cache warming reject rigs containing
-external movers, and `.rigexec` binary export rejects them. Use live evaluation
-for those rigs. Independent property-mover callbacks, frozen payload snapshots,
-and binary plugin serialization are not part of this API.
+External point callbacks work in stage-backed dynamic and baked evaluation,
+and in `.rigexec` export and playback for plugins that provide the callbacks
+above. Frozen evaluation and background frame-cache warming reject rigs
+containing external movers; use live evaluation for those rigs. Independent
+property-mover callbacks and frozen payload snapshots are not part of this API.
+
+A plugin's tests can export and replay its rigs by linking
+`rigExec::rigExecBake` and `rigExec::rigExecRuntime`, which are available both
+inside the usdRig build and from an installed SDK.
 
 When integrating a mover, verify dynamic/baked parity, animated and connected
 inputs, override updates, envelope weights, disabled behavior, and failure
-pass-through. Also check that an unavailable library or incompatible plugin
-version produces a diagnostic instead of a successful deformation.
+pass-through. If it exports, check that playback matches the baked program on
+every exported frame and with a posed `SetAvar`. Also check that an unavailable
+library or incompatible plugin version produces a diagnostic instead of a
+successful deformation.

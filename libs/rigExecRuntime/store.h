@@ -10,6 +10,7 @@
 #define RIGEXEC_RUNTIME_STORE_H
 
 #include "rigExecBinary/container.h"
+#include "rigExecBinary/external.h"
 #include "rigExecBinary/geometry.h"
 #include "rigExecBinary/inputTable.h"
 #include "rigExecBinary/pose.h"
@@ -229,6 +230,23 @@ struct RrProgram {
     const RigExecWireDomainGeometry *geometry = nullptr;
     const RigExecWireInputTable *inputs = nullptr;
     const RigExecBinaryReader *strings = nullptr;
+    /// The ExternalMovers section, or null when the file has no plugin
+    /// mover.
+    const RigExecWireExternalMovers *external = nullptr;
+    /// The InputTable frame Execute is running, which also selects each
+    /// plugin mover's frame bytes.
+    size_t frameIndex = 0;
+
+    /// One plugin revision's playback state, in ExternalMovers order. No
+    /// prepared state means no kernel here: the revision passes through.
+    struct ExternalRevision {
+        std::string type;
+        RigExecExternalKernel kernel;
+        std::shared_ptr<const void> state;
+    };
+    std::vector<ExternalRevision> externals;
+    /// (chain, revision) -> index into `externals`.
+    std::map<std::pair<uint32_t, uint32_t>, size_t> externalIndex;
 
     RrStore store;
 
