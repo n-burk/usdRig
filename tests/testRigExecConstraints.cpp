@@ -1697,6 +1697,83 @@ TestGeometryConstraintDenseEnvelopeSupersedesScalar()
           pose.movedPropertiesCpu.end());
 }
 
+// A geometry-domain constraint writes only its own per-mover delta, which
+// the revision chains consume after the pose walk in mover order. Two on ONE
+// points target therefore share no data in the walk and are not ordered
+// against each other, nor against a third on another target; both deltas
+// still reach the points. Checked both ways round, by reordering the Movers
+// scope.
+static void
+TestGeometryConstraintsOnOneTargetShareALevel()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    for (const char *name : {"M", "N"}) {
+        const UsdPrim mesh = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Geom/") + name), TfToken("Mesh"));
+        mesh.CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray)
+            .Set(VtVec3fArray{{0, 0, 0}, {1, 0, 0}, {2, 0, 0}});
+    }
+    MakeXform(stage, SdfPath("/Asset/Source"), Matrix(GfVec3d(0, 10, 0)));
+    MakeXform(stage, SdfPath("/Asset/Source2"), Matrix(GfVec3d(5, 0, 0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const SdfPath m("/Asset/Geom/M.points");
+    const SdfPath n("/Asset/Geom/N.points");
+    const auto position = [&](const char *name, const SdfPath &target,
+                              const char *source) {
+        const UsdPrim prim = MakeConstraint(
+            stage, name, "RigExecPositionConstraint", {target});
+        prim.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath(source)});
+        prim.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    };
+    position("PosA", m, "/Asset/Source");
+    position("PosB", m, "/Asset/Source2");
+    position("PosC", n, "/Asset/Source");
+    const SdfPath posA("/Asset/Rig/Movers/PosA");
+    const SdfPath posB("/Asset/Rig/Movers/PosB");
+    const SdfPath posC("/Asset/Rig/Movers/PosC");
+    const UsdPrim movers = stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"));
+
+    for (const bool reordered : {false, true}) {
+        if (reordered) {
+            movers.SetChildrenReorder(
+                {TfToken("PosB"), TfToken("PosA"), TfToken("PosC")});
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const std::map<SdfPath, size_t> levels =
+            evaluator.GetPoseStepLevels();
+        CHECK(levels.count(posA) && levels.count(posB) && levels.count(posC));
+        if (!levels.count(posA) || !levels.count(posB) ||
+            !levels.count(posC)) {
+            continue;
+        }
+        CHECK(levels.at(posA) == levels.at(posB));
+        CHECK(levels.at(posC) == levels.at(posA));
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        // Both translations reach M; only one reaches N.
+        const auto moved = [&pose](const SdfPath &target) {
+            const auto it = pose.movedProperties.find(target);
+            return it != pose.movedProperties.end() &&
+                           it->second.IsHolding<VtVec3fArray>()
+                       ? it->second.UncheckedGet<VtVec3fArray>()
+                       : VtVec3fArray();
+        };
+        const VtVec3fArray onM = moved(m);
+        const VtVec3fArray onN = moved(n);
+        CHECK(onM.size() == 3 && onN.size() == 3);
+        if (onM.size() == 3 && onN.size() == 3) {
+            CHECK(Near(GfVec3d(onM[1]), GfVec3d(6, 10, 0)));
+            CHECK(Near(GfVec3d(onN[1]), GfVec3d(1, 10, 0)));
+        }
+    }
+}
+
 // The design's defining property: the target spelling picks WHERE the answer
 // lands, not what it is.
 // It is EXACT at full envelope, which is the case the design is really about
@@ -3376,6 +3453,101 @@ TestConnectedParentSpaceSolverInputs()
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
 }
 
+// A reader of a constrained provider P under a connected provider Q sees
+// Q's revision at the reader's stack position, whatever else happens to read
+// Q. Q's default:space is connected to R (through Relay's parent:space). C
+// moves P at the bottom of the stack; C5 moves R above it; E reads P and E2
+// reads a native Xform under Q, both above C5. F reads Q too and sits below E
+// in the stack, so in mover order it would refresh Q before E ran. Giving F a
+// deeper dependency (a chain of three constraints) moves it to a later Kahn
+// level than E; E's and E2's answers must not change with it. Dynamic only:
+// a connected posed space is not bakeable.
+static void
+TestConnectedAncestorRefreshIgnoresUnrelatedReaders()
+{
+    const auto run = [](bool delayF) {
+        const auto stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/PTarget"), Matrix(GfVec3d(0, 3, 0)));
+        MakeXform(stage, SdfPath("/Asset/RTarget"),
+                  Matrix(GfVec3d(10, 0, 0)));
+        MakeXform(stage, SdfPath("/Asset/DTarget"), Matrix(GfVec3d(0, 0, 5)));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const auto control = [&](const char *path, double x) {
+            const UsdPrim prim = stage->DefinePrim(
+                SdfPath(path), TfToken("RigExecControl"));
+            prim.GetAttribute(TfToken("rest:tx")).Set(x);
+            prim.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+            return prim;
+        };
+        const UsdPrim r = control("/Asset/Rig/Controls/R", 0);
+        const UsdPrim relay = control("/Asset/Rig/Controls/R/Relay", 0);
+        const UsdPrim q = control("/Asset/Rig/Controls/Q", 0);
+        q.GetAttribute(TfToken("default:space"))
+            .SetConnections({relay.GetPath().AppendProperty(
+                TfToken("parent:space"))});
+        const UsdPrim p = control("/Asset/Rig/Controls/Q/P", 1);
+        MakeXform(stage, SdfPath("/Asset/Rig/Controls/Q/Native"),
+                  Matrix(GfVec3d(0, 0, 2)));
+        const UsdPrim t = control("/Asset/Rig/Controls/T", 0);
+        const UsdPrim t2 = control("/Asset/Rig/Controls/T2", 0);
+        const UsdPrim u = control("/Asset/Rig/Controls/U", 0);
+        const UsdPrim d1 = control("/Asset/Rig/Controls/D1", 0);
+        const UsdPrim d2 = control("/Asset/Rig/Controls/D2", 0);
+        const UsdPrim d3 = control("/Asset/Rig/Controls/D3", 0);
+        const auto position = [&](const char *name, const UsdPrim &target,
+                                  const SdfPathVector &sources) {
+            MakeConstraint(stage, name, "RigExecPositionConstraint",
+                           {target.GetPath()})
+                .GetRelationship(TfToken("rigExec:sources"))
+                .SetTargets(sources);
+        };
+        position("C", p, {SdfPath("/Asset/PTarget")});
+        position("C5", r, {SdfPath("/Asset/RTarget")});
+        position("C6", d1, {SdfPath("/Asset/DTarget")});
+        position("C7", d2, {d1.GetPath()});
+        position("C8", d3, {d2.GetPath()});
+        position("F", u, delayF ? SdfPathVector{q.GetPath(), d3.GetPath()}
+                                : SdfPathVector{q.GetPath()});
+        position("E", t, {p.GetPath()});
+        position("E2", t2, {SdfPath("/Asset/Rig/Controls/Q/Native")});
+        // Top first; the bottom sibling runs first in the stack.
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+            .SetChildrenReorder({TfToken("E2"), TfToken("E"), TfToken("F"),
+                                 TfToken("C8"), TfToken("C7"), TfToken("C6"),
+                                 TfToken("C5"), TfToken("C")});
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const std::map<SdfPath, size_t> levels =
+            evaluator.GetPoseStepLevels();
+        const SdfPath fPath("/Asset/Rig/Movers/F");
+        const SdfPath ePath("/Asset/Rig/Movers/E");
+        CHECK(levels.count(fPath) && levels.count(ePath));
+        if (delayF && levels.count(fPath) && levels.count(ePath)) {
+            // The shape under test: F runs at a later level than E.
+            CHECK(levels.at(fPath) > levels.at(ePath));
+        }
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        const auto origin = [&pose](const UsdPrim &prim) {
+            const auto it = pose.controlFrames.find(prim.GetPath());
+            CHECK(it != pose.controlFrames.end());
+            return it != pose.controlFrames.end() ? it->second.Origin()
+                                                  : GfVec3d(-1e9);
+        };
+        return std::make_pair(origin(t), origin(t2));
+    };
+    const auto delayed = run(true);
+    const auto direct = run(false);
+    // C places P at (0, 3, 0) under Q at the origin; C5 then moves Q by +10
+    // in x through R, and P rides it. The native source rides the same delta.
+    CHECK(Near(direct.first, GfVec3d(10, 3, 0)));
+    CHECK(Near(direct.second, GfVec3d(10, 0, 2)));
+    CHECK(Near(delayed.first, direct.first));
+    CHECK(Near(delayed.second, direct.second));
+}
+
 static void
 TestConnectedRefreshAfterInterveningWrite()
 {
@@ -4607,6 +4779,7 @@ main()
     TestMeshAndXformTargetsAgree();
     TestGeometryDomainTargetCompiles();
     TestGeometryConstraintDenseEnvelopeSupersedesScalar();
+    TestGeometryConstraintsOnOneTargetShareALevel();
     TestTransformAndGeometrySpellingsAgree();
     TestGeometryEnvelopeIsChordLerp();
     TestDomainsOnOnePrimDoNotCompete();
@@ -4636,6 +4809,7 @@ main()
     TestConnectedParentSpaceSolverInputs();
     TestConnectedRefreshAfterInterveningWrite();
     TestConnectedInteractiveBranches();
+    TestConnectedAncestorRefreshIgnoresUnrelatedReaders();
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();
     TestAuthoredPosedSpaceBakesAndAnimatedOneFollows();

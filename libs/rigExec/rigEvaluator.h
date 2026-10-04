@@ -630,6 +630,11 @@ public:
         return levels;
     }
 
+    /// Pose step path -> its Kahn level in the compiled pose schedule, for
+    /// aggregate solvers and frame constraints alike. Two steps in one level
+    /// have no dependency path between them. Diagnostic access only.
+    std::map<SdfPath, size_t> GetPoseStepLevels() const;
+
     /// Transform provider -> the pose steps that write it, in the order the
     /// pose walk runs them: the aggregate solvers that name it on
     /// rigExec:joints and the frame constraints that move it, INTERLEAVED in
@@ -1326,11 +1331,14 @@ private:
     /// _solverInputIndexAbsent, and released by the build.
     struct _SolverInputIndexInputs;
     std::unique_ptr<_SolverInputIndexInputs> _solverInputIndexInputs;
-    /// Interleaves dependency-ready aggregate batches with the authored
-    /// constraint walk. Frame inputs to solvers consume the current pose.
+    /// The pose schedule: aggregate batches and frame constraints, one Kahn
+    /// level after another, each level in pose stack ordinal order. Frame
+    /// inputs to solvers consume the current pose. `level` is the step's
+    /// Kahn level; steps in one level have no dependency between them.
     struct _PoseStep {
         bool solverBatch = false;
         size_t index = 0;
+        size_t level = 0;
     };
     std::vector<_PoseStep> _poseSteps;
     /// Seed only transform providers before solving; geometry/aggregate taps

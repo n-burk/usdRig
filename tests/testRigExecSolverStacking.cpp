@@ -21,6 +21,7 @@
 // is a layer opinion, and authoring it the way a rigger does is the only way
 // the test exercises what a rigger would hit.
 // argv[1] = path to the examples directory (for the schema plugin).
+#include "rigExecOpTrace.h"
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -37,6 +38,7 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <cstdio>
@@ -1773,9 +1775,10 @@ TestAggregateContradictionIsRejected()
 ///
 /// The fixture is two independent limbs, each a two-solver stack over its own
 /// three joints with its own controls and its own constraint. Nothing is
-/// shared. Every solver of the left limb must therefore sit in the same
+/// shared. Every step of the left limb must therefore sit in the same
 /// dependency level as its opposite number on the right, and the whole rig
-/// must use no more levels than one limb alone does.
+/// must use no more levels than one limb alone does -- with the constraints
+/// above the solvers and with them below, feeding the solvers.
 void
 TestUnrelatedLimbsShareALevel()
 {
@@ -1860,7 +1863,7 @@ TestUnrelatedLimbsShareALevel()
             "[\"origin\", \"scale\"]\n"
             "            }\n";
     };
-    const auto build = [&](bool bothLimbs) {
+    const auto build = [&](bool bothLimbs, bool solversLast) {
         std::string controls = limb("L");
         std::string jointText = joints("L");
         std::string solverText = solvers("L");
@@ -1871,18 +1874,21 @@ TestUnrelatedLimbsShareALevel()
             solverText += solvers("R");
             moverText += aim("R");
         }
-        // Solvers at the BOTTOM of the rig, the classic "solve, then
-        // revise" shape: every solver runs before every constraint, so the
-        // constraint chain -- one serial chain over the movers, as it has
-        // always been -- cannot stagger them, and what is left in the solver
-        // levels is the per-joint stacking and nothing else.
+        // solversLast: Solvers at the BOTTOM of the rig, the classic
+        // "solve, then revise" shape, where every solver runs before every
+        // constraint. Otherwise Movers sit at the bottom and each aim FEEDS
+        // its own limb's solvers, so the solver levels also show that the
+        // two aims are not ordered against each other.
         std::string text = Head(controls, jointText);
         const std::string partition =
             "        uniform token rigExec:partition = \"Asset\"\n";
         text.replace(text.find(partition), partition.size(),
                      partition +
-                     "        reorder nameChildren = [\"Controls\", "
-                     "\"Joints\", \"Movers\", \"Solvers\"]\n");
+                     (solversLast
+                          ? "        reorder nameChildren = [\"Controls\", "
+                            "\"Joints\", \"Movers\", \"Solvers\"]\n"
+                          : "        reorder nameChildren = [\"Controls\", "
+                            "\"Joints\", \"Solvers\", \"Movers\"]\n"));
         return
             text +
             "\n"
@@ -1896,57 +1902,84 @@ TestUnrelatedLimbsShareALevel()
             "    }\n"
             "}\n";
     };
-    // Head() always emits the Hip/Knee/Ankle chain of its own; the limbs
-    // above are appended beside it and nothing names it, so it is inert.
-    const UsdStageRefPtr one = OpenText(build(false));
-    const UsdStageRefPtr two = OpenText(build(true));
-    CHECK(one && two);
-    if (!one || !two) return;
-
+    // Pose step levels (solvers and constraints) and solver levels.
+    struct Levels {
+        std::map<SdfPath, size_t> steps, solvers;
+    };
     const auto levelsOf = [](const UsdStageRefPtr &stage,
-                             const char *what) {
+                             const std::string &what) {
+        Levels levels;
+        if (!stage) {
+            ++failures;
+            return levels;
+        }
         RigExecRigEvaluator evaluator(stage, kRigPath);
         evaluator.cpuParityMode = true;
         std::vector<std::string> errors;
-        std::map<SdfPath, size_t> levels;
         if (!evaluator.Compile(&errors)) {
             ++failures;
             std::printf("FAIL %s: the parallel fixture does not compile\n",
-                        what);
+                        what.c_str());
             for (const std::string &error : errors) {
                 std::printf("    %s\n", error.c_str());
             }
             return levels;
         }
         CHECK(evaluator.Evaluate(UsdTimeCode(5.0)).valid);
-        levels = evaluator.GetSolverBatchLevels();
+        levels.steps = evaluator.GetPoseStepLevels();
+        levels.solvers = evaluator.GetSolverBatchLevels();
         return levels;
     };
-    const std::map<SdfPath, size_t> single = levelsOf(one, "one limb");
-    const std::map<SdfPath, size_t> pair = levelsOf(two, "two limbs");
-    if (single.empty() || pair.empty()) return;
-
-    CHECK(single.size() == 2);
-    CHECK(pair.size() == 4);
-    // The second limb adds SOLVERS, never LEVELS: it is independent, so it
-    // runs beside the first and not after it.
     const auto distinct = [](const std::map<SdfPath, size_t> &levels) {
         std::set<size_t> seen;
-        for (const auto &[solver, level] : levels) seen.insert(level);
+        for (const auto &[step, level] : levels) seen.insert(level);
         return seen.size();
     };
-    CHECK(distinct(single) == distinct(pair));
-    // ... and each solver sits in exactly its opposite number's level.
-    for (const char *name : {"IK", "FK"}) {
-        const auto left = pair.find(
-            SdfPath(std::string("/Asset/Rig/Solvers/L") + name));
-        const auto right = pair.find(
-            SdfPath(std::string("/Asset/Rig/Solvers/R") + name));
-        CHECK(left != pair.end() && right != pair.end());
-        if (left == pair.end() || right == pair.end()) continue;
-        CHECK(left->second == right->second);
-        const auto alone = single.find(left->first);
-        CHECK(alone != single.end() && alone->second == left->second);
+    for (const bool solversLast : {true, false}) {
+        const std::string order =
+            solversLast ? "solvers last" : "movers last";
+        // Head() always emits the Hip/Knee/Ankle chain of its own; the limbs
+        // above are appended beside it and nothing names it, so it is inert.
+        const Levels single =
+            levelsOf(OpenText(build(false, solversLast)),
+                     "one limb, " + order);
+        const Levels pair =
+            levelsOf(OpenText(build(true, solversLast)),
+                     "two limbs, " + order);
+        if (single.steps.empty() || pair.steps.empty()) continue;
+
+        CHECK(single.solvers.size() == 2);
+        CHECK(pair.solvers.size() == 4);
+        CHECK(single.steps.size() == 3);
+        CHECK(pair.steps.size() == 6);
+        // The second limb adds STEPS, never LEVELS: it is independent, so it
+        // runs beside the first and not after it.
+        CHECK(distinct(single.solvers) == distinct(pair.solvers));
+        CHECK(distinct(single.steps) == distinct(pair.steps));
+        // ... and each step sits in exactly its opposite number's level.
+        for (const char *name :
+             {"Solvers/IK", "Solvers/FK", "Movers/Aim"}) {
+            const std::string text(name);
+            const std::string scope = text.substr(0, text.find('/') + 1);
+            const std::string leaf = text.substr(text.find('/') + 1);
+            const SdfPath leftPath("/Asset/Rig/" + scope + "L" + leaf);
+            const SdfPath rightPath("/Asset/Rig/" + scope + "R" + leaf);
+            const auto left = pair.steps.find(leftPath);
+            const auto right = pair.steps.find(rightPath);
+            CHECK(left != pair.steps.end() && right != pair.steps.end());
+            if (left == pair.steps.end() || right == pair.steps.end()) {
+                continue;
+            }
+            CHECK(left->second == right->second);
+            const auto alone = single.steps.find(leftPath);
+            CHECK(alone != single.steps.end() &&
+                  alone->second == left->second);
+            if (left->second != right->second) {
+                std::printf("    %s: %s at level %zu, %s at %zu\n",
+                            order.c_str(), leftPath.GetText(), left->second,
+                            rightPath.GetText(), right->second);
+            }
+        }
     }
 }
 
@@ -2085,10 +2118,9 @@ TestSolverInputReadPhaseFollowsAConstraintAbove()
 /// Constraint B reads a control constraint A moves: B's source is the
 /// control itself, or (\p child) a namespace child the move propagates to.
 /// A third constraint D, at the bottom of the stack, writes the same target
-/// as one of the two and so delays it into a later Kahn level. The mover
-/// chain also orders every constraint pair today; this fixture pins the
-/// values the explicit constraint -> constraint edges must keep on their own
-/// once that chain is removed.
+/// as one of the two and so delays it into a later Kahn level. Mover order
+/// adds no edge between constraints, so the constraint -> constraint frame
+/// edges alone put B after A or before it; the values pin which.
 ///   \p aBelowB: D moves Ctl, A moves Ctl again, B reads after A.
 ///   otherwise:  D moves OutB, B moves it again reading Ctl, A moves Ctl.
 std::string
@@ -2202,9 +2234,8 @@ TestConstraintReadsAConstraintInStackOrder()
 /// a provider under the Knee, or (\p xformSource) Tip, a native Xform under
 /// it. E and D, at the bottom of the movers, move A's target first, which
 /// delays A past B in the Kahn order unless an A -> B edge holds B back;
-/// one delaying constraint does not separate them. As above, the mover
-/// chain also orders A before B today; the values pin which writers reach
-/// B's source once that chain is removed.
+/// one delaying constraint does not separate them. As above, only the frame
+/// edges order A against B; the values pin which writers reach B's source.
 /// Mover stack: KneeFK, E, D, A, B.
 std::string
 ConstraintReadsUnderASolvedJointText(const char *aMoves, bool xformSource)
@@ -2327,6 +2358,258 @@ TestConstraintReadsUnderASolvedJoint()
     }
 }
 
+/// Two limbs, each an FK chain with an aim constraint on its knee and a
+/// position constraint that pins a Tip control to that knee. The aims share
+/// no frame with each other, nor do the tips; each tip reads the frame its
+/// own limb's aim writes. Movers are defined LTip, RTip, LAim, RAim, so the
+/// stack runs RAim, LAim, RTip, LTip and every adjacent pair in it crosses
+/// from one limb to the other.
+std::string
+IndependentConstraintsText()
+{
+    const auto controls = [](const char *side, int degrees) {
+        const std::string s(side);
+        return FkControls((s + "Fk").c_str(), degrees) +
+               "            def RigExecControl \"" + s + "Pole\"\n"
+               "            {\n"
+               "                matrix4d rest:space = " + Rest(4, 12, 3) +
+               "\n"
+               "            }\n"
+               "            def RigExecControl \"" + s + "Tip\"\n"
+               "            {\n"
+               "                matrix4d rest:space = " + Rest(0, 0, 0) +
+               "\n"
+               "            }\n";
+    };
+    const auto joints = [](const char *side) {
+        const std::string s(side);
+        return
+            "            def RigExecJoint \"" + s + "Hip\"\n"
+            "            {\n"
+            "                matrix4d rest:space = " + Rest(0, 8, 0) + "\n"
+            "\n"
+            "                def RigExecJoint \"Knee\"\n"
+            "                {\n"
+            "                    matrix4d rest:space = " + Rest(4, 0, 0) +
+            "\n"
+            "\n"
+            "                    def RigExecJoint \"Ankle\"\n"
+            "                    {\n"
+            "                        matrix4d rest:space = " + Rest(4, 0, 0) +
+            "\n"
+            "                    }\n"
+            "                }\n"
+            "            }\n";
+    };
+    const auto chain = [](const char *side) {
+        const std::string s(side);
+        return Chain((s + "FK").c_str(),
+                     "</Asset/Rig/Controls/" + s + "FkHip>, "
+                     "</Asset/Rig/Controls/" + s + "FkHip/Knee>, "
+                     "</Asset/Rig/Controls/" + s + "FkHip/Knee/Ankle>",
+                     "</Asset/Rig/Joints/" + s + "Hip>, "
+                     "</Asset/Rig/Joints/" + s + "Hip/Knee>, "
+                     "</Asset/Rig/Joints/" + s + "Hip/Knee/Ankle>");
+    };
+    const auto aim = [](const char *side) {
+        const std::string s(side);
+        return
+            "            def RigExecAimConstraint \"" + s + "Aim\" (\n"
+            "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+            "            )\n"
+            "            {\n"
+            "                float inputs:defaultWeight = 1\n"
+            "                uniform token rigExec:aimAxis = \"x\"\n"
+            "                rel rigExec:aimTarget = "
+            "</Asset/Rig/Controls/" + s + "Pole>\n"
+            "                rel rigExec:moves = "
+            "</Asset/Rig/Joints/" + s + "Hip/Knee>\n"
+            "                uniform token[] rigExec:preserve = "
+            "[\"origin\", \"scale\"]\n"
+            "            }\n";
+    };
+    const auto tip = [](const char *side) {
+        const std::string s(side);
+        return
+            "            def RigExecPositionConstraint \"" + s + "Tip\" (\n"
+            "                prepend apiSchemas = [\"RigExecMoverAPI\"]\n"
+            "            )\n"
+            "            {\n"
+            "                float inputs:defaultWeight = 1\n"
+            "                rel rigExec:sources = "
+            "</Asset/Rig/Joints/" + s + "Hip/Knee>\n"
+            "                rel rigExec:moves = "
+            "</Asset/Rig/Controls/" + s + "Tip>\n"
+            "            }\n";
+    };
+    std::string text = Head(controls("L", 30) + controls("R", -20),
+                            joints("L") + joints("R"));
+    const std::string partition =
+        "        uniform token rigExec:partition = \"Asset\"\n";
+    text.replace(text.find(partition), partition.size(),
+                 partition +
+                 "        reorder nameChildren = [\"Controls\", "
+                 "\"Joints\", \"Movers\", \"Solvers\"]\n");
+    text +=
+        "\n"
+        "        def Scope \"Solvers\"\n"
+        "        {\n" + chain("L") + chain("R") +
+        "        }\n"
+        "\n"
+        "        def Scope \"Movers\"\n"
+        "        {\n" + tip("L") + tip("R") + aim("L") + aim("R") +
+        "        }\n"
+        "    }\n"
+        "}\n";
+    return text;
+}
+
+/// Constraints are parallelized opportunistically: only the frames they read
+/// and write order them, never their place in the mover stack alone.
+///
+/// In the pose schedule the two aims share a Kahn level, as do the two tips,
+/// and each tip sits in a later level than its own limb's aim. In the baked
+/// op graph no step of one limb's constraints reaches a step of the other's,
+/// while each tip stays downstream of its own aim; both paths publish the
+/// same pose, with each tip on its own knee.
+void
+TestIndependentConstraintsShareALevel()
+{
+    const std::string text = IndependentConstraintsText();
+    const SdfPath lAim("/Asset/Rig/Movers/LAim");
+    const SdfPath rAim("/Asset/Rig/Movers/RAim");
+    const SdfPath lTip("/Asset/Rig/Movers/LTip");
+    const SdfPath rTip("/Asset/Rig/Movers/RTip");
+
+    // The dynamic pose schedule.
+    {
+        const UsdStageRefPtr stage = OpenText(text);
+        CHECK(stage);
+        if (!stage) return;
+        RigExecRigEvaluator evaluator(stage, kRigPath);
+        evaluator.cpuParityMode = true;
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            ++failures;
+            std::printf("FAIL independent constraints: the fixture does not "
+                        "compile\n");
+            for (const std::string &error : errors) {
+                std::printf("    %s\n", error.c_str());
+            }
+            return;
+        }
+        const std::map<SdfPath, size_t> levels =
+            evaluator.GetPoseStepLevels();
+        for (const SdfPath &step : {lAim, rAim, lTip, rTip}) {
+            CHECK(levels.count(step) == 1);
+        }
+        if (levels.count(lAim) && levels.count(rAim) && levels.count(lTip) &&
+            levels.count(rTip)) {
+            CHECK(levels.at(lAim) == levels.at(rAim));
+            CHECK(levels.at(lTip) == levels.at(rTip));
+            CHECK(levels.at(lTip) > levels.at(lAim));
+            CHECK(levels.at(rTip) > levels.at(rAim));
+        }
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(5.0));
+        CHECK(pose.valid);
+        for (const char *side : {"L", "R"}) {
+            const std::string s(side);
+            const auto knee = pose.jointFramesFinal.find(
+                SdfPath("/Asset/Rig/Joints/" + s + "Hip/Knee"));
+            const auto tipFrame = pose.controlFrames.find(
+                SdfPath("/Asset/Rig/Controls/" + s + "Tip"));
+            CHECK(knee != pose.jointFramesFinal.end());
+            CHECK(tipFrame != pose.controlFrames.end());
+            if (knee == pose.jointFramesFinal.end() ||
+                tipFrame == pose.controlFrames.end()) {
+                continue;
+            }
+            CHECK(Near(tipFrame->second.Origin(), knee->second.Origin(),
+                       1e-6));
+        }
+        // The limbs curl differently, so each tip found its own knee.
+        const auto lTipFrame =
+            pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/LTip"));
+        const auto rTipFrame =
+            pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/RTip"));
+        if (lTipFrame != pose.controlFrames.end() &&
+            rTipFrame != pose.controlFrames.end()) {
+            CHECK(!Near(lTipFrame->second.Origin(),
+                        rTipFrame->second.Origin(), 1e-3));
+        }
+    }
+
+    // The baked op graph.
+    {
+        const UsdStageRefPtr stage = OpenText(text);
+        CHECK(stage);
+        if (!stage) return;
+        RigExecRigEvaluator evaluator(stage, kRigPath);
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            ++failures;
+            return;
+        }
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        std::vector<std::string> reasons;
+        CHECK(evaluator.IsBakeable(&reasons));
+        CHECK(evaluator.Evaluate(UsdTimeCode(5.0)).valid);
+        CHECK(evaluator.GetBakedGenerationCount() == 1);
+        const std::vector<RigExecOpGraphNode> graph = evaluator.GetOpGraph();
+        CHECK(!graph.empty());
+        if (graph.empty()) return;
+        // Every step a mover owns (its Constraint step and its commit
+        // steps), and its Constraint step alone.
+        const auto stepsOf = [&graph](const SdfPath &mover) {
+            return rigExecTest::FindOpGraphSteps(graph, "",
+                                                 mover.GetString());
+        };
+        const auto constraintOf = [&graph](const SdfPath &mover) {
+            const std::vector<size_t> steps = rigExecTest::FindOpGraphSteps(
+                graph, "Constraint", mover.GetString());
+            return steps.size() == 1 ? steps[0] : SIZE_MAX;
+        };
+        for (const SdfPath &mover : {lAim, rAim, lTip, rTip}) {
+            CHECK(constraintOf(mover) != SIZE_MAX);
+        }
+        if (constraintOf(lAim) == SIZE_MAX || constraintOf(rAim) == SIZE_MAX ||
+            constraintOf(lTip) == SIZE_MAX || constraintOf(rTip) == SIZE_MAX) {
+            return;
+        }
+        // No path, either way round, between one limb's constraints and the
+        // other's.
+        const auto reaches = [&](const std::vector<SdfPath> &from,
+                                 const std::vector<SdfPath> &to) {
+            std::vector<size_t> seeds;
+            for (const SdfPath &mover : from) {
+                const std::vector<size_t> steps = stepsOf(mover);
+                seeds.insert(seeds.end(), steps.begin(), steps.end());
+            }
+            const std::vector<char> cone =
+                rigExecTest::OpGraphForwardCone(graph, seeds);
+            for (const SdfPath &mover : to) {
+                for (const size_t step : stepsOf(mover)) {
+                    if (cone[step]) return true;
+                }
+            }
+            return false;
+        };
+        CHECK(!reaches({lAim, lTip}, {rAim, rTip}));
+        CHECK(!reaches({rAim, rTip}, {lAim, lTip}));
+        // The pair that shares a frame stays ordered.
+        CHECK(reaches({lAim}, {lTip}));
+        CHECK(reaches({rAim}, {rTip}));
+        CHECK(!reaches({lTip}, {lAim}));
+        CHECK(!reaches({rTip}, {rAim}));
+        CHECK(graph[constraintOf(lAim)].level ==
+              graph[constraintOf(rAim)].level);
+        CHECK(graph[constraintOf(lTip)].level ==
+              graph[constraintOf(rTip)].level);
+    }
+
+    CheckTextParity("independent constraints", text, {1, 3, 5});
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2363,6 +2646,7 @@ main(int argc, char **argv)
     TestSolverInputReadPhaseFollowsAConstraintAbove();
     TestConstraintReadsAConstraintInStackOrder();
     TestConstraintReadsUnderASolvedJoint();
+    TestIndependentConstraintsShareALevel();
 
     // The baked half. Every fixture below stacks and carries no solver-named
     // read phase, so every one of them bakes: the SSA ladder gives each

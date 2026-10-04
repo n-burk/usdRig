@@ -36,13 +36,16 @@ envelope.
 
 ## How it works
 
-Every source-blending constraint runs in the pose phase, in the
-composed order of the `Movers` namespace, so it revises a provider that
-earlier solvers and constraints have already posed. Each evaluation it
-resolves the current frame of every `rigExec:sources` target, reads
-`inputs:sourceWeights` raw off the attribute at that frame's time, and
-accumulates `sum(origin * weight) / sum(weight)` — the weights are
-normalized, so they are ratios, not percentages. `inputs:translationOffset`
+Every source-blending constraint runs in the pose phase at its place
+in the rig's pose stack, so it revises a provider that the solvers and
+constraints below it have already posed. Constraints are ordered only by
+the frames they read and write — the stack decides which version a read
+sees — so constraints on unrelated providers may run in parallel. Each
+evaluation it resolves the current frame of every `rigExec:sources`
+target, reads `inputs:sourceWeights` raw off the attribute at that
+frame's time, and accumulates `sum(origin * weight) / sum(weight)` — the
+weights are normalized, so they are ratios, not percentages.
+`inputs:translationOffset`
 is added to that blended point, the `inputs:affectTranslation*` mask selects
 which axes are claimed, and the common `RigExecMoverAPI` envelope
 (`inputs:defaultWeight`, or a bound `rigExec:weightObject`) lerps the result

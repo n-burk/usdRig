@@ -701,11 +701,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
     }
 
-    // 2. Pose-domain FBX-style constraints, applied in the single composed
-    // mover walk. A global walk is essential for SingleChainIK: all joints in
-    // its write set must be solved and committed atomically, while ordinary
-    // one-provider constraints still chain in exactly the same order as every
-    // points/property revision.
+    // 2. Pose-domain FBX-style constraints, applied as steps of the pose
+    // schedule. A constraint is one step, which SingleChainIK needs: all
+    // joints in its write set are solved and committed atomically. The
+    // schedule orders constraints only by the frames they read and write;
+    // this walk runs its steps one at a time, in schedule order.
     std::map<SdfPath, RigExecPointFrame> baseFrames;
     std::vector<RigExecPointFrame> finalFrames(_providerPaths.size());
     std::vector<char> finalLive(_providerPaths.size(), 0);
@@ -868,17 +868,30 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     auto resolveBinding = [&](const _FrameSourceBinding &binding,
                               RigExecPointFrame *out) {
         if (!refreshPoseProvider(binding.sourcePath)) return false;
-        // Constraint relationships have implicit `preceding` semantics: the
-        // single composed mover walk is the authority, so a later constraint
-        // observes every earlier revision of the provider while a reference to
-        // a provider written later still sees its current (normally base)
-        // value. This is deterministic and cannot create an evaluation cycle.
+        // A source read is positional: Compile orders this constraint after
+        // every writer of the source that sits below it in the pose stack and
+        // before every writer above it, so the frame standing here is the
+        // version at this constraint's stack position. This cannot create an
+        // evaluation cycle.
         if (const auto revised = _providerIndex.find(binding.sourcePath);
             revised != _providerIndex.end() && finalLive[revised->second]) {
             *out = finalFrames[revised->second];
             return out->IsValid();
         }
         if (!binding.xformPath.IsEmpty()) {
+            // A native source rides its provider ancestors' revisions, so a
+            // connected ancestor is refreshed from its own inputs first.
+            if (!_connectedPoseTaps.empty()) {
+                for (SdfPath ancestor = binding.xformPath.GetParentPath();
+                     !ancestor.IsEmpty() &&
+                     ancestor != SdfPath::AbsoluteRootPath();
+                     ancestor = ancestor.GetParentPath()) {
+                    if (_poseProviderInputs.count(ancestor) &&
+                        !refreshPoseProvider(ancestor)) {
+                        return false;
+                    }
+                }
+            }
             return _ResolveNativeXformSource(
                 assetRoot, &constraintXformCache, binding.xformPath,
                 enumerateProviderFrames, out);
@@ -1348,8 +1361,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             const SdfPath path = pending.back().first;
             const bool ready = pending.back().second;
             pending.pop_back();
+            // A solver-bound joint blocks propagation, so its inputs are not
+            // walked. A constrained provider's inputs are: a connected
+            // ancestor must still deliver its revision to it.
             if (path.IsEmpty() || complete.count(path) ||
-                _jointSolverBinding.count(path) || constrainedProviders.count(path)) continue;
+                _jointSolverBinding.count(path)) continue;
             const auto provider = _providerIndex.find(path);
             if (provider != _providerIndex.end() && refreshComplete[provider->second]) continue;
             const auto dependencies = _poseProviderInputs.find(path);
@@ -1368,6 +1384,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
             active.erase(path);
             complete.insert(path);
+            // A constraint has written this provider; re-evaluating its own
+            // tap would discard that revision.
+            if (constrainedProviders.count(path)) continue;
             const auto taps = _connectedPoseTaps.find(path);
             if (taps == _connectedPoseTaps.end()) {
                 if (provider != _providerIndex.end()) refreshComplete[provider->second] = 1;

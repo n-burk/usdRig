@@ -213,7 +213,9 @@ usdview draws each joint as a guide sphere with a cone to every nested
 child.""",
         "how_it_works": """The compiler builds one chain per joint out of every step that
 writes it — the solvers that name it and the constraints that move it — in the
-rig's hierarchical order, and the pose phase runs that chain. A solver
+rig's hierarchical order, and the pose phase runs that chain. Steps
+of different chains are ordered only where one reads a frame the other
+writes, so unrelated joints may be posed in parallel. A solver
 extracts the joint's element from its frame array and REPLACES whatever stood
 there, measuring the joint from the frame the preceding steps left; a
 constraint reads that same incoming frame and writes a revised one over it. A
@@ -236,9 +238,11 @@ prim, which is the joint as of when the walk finished with it.""",
             # rigEvaluator.cpp:5478 pushes each constraint onto a per-target LIST,
             # so the count is unbounded; in examples/biped/Biped.usda 27 of the
             # 252 joints carry more than one (22 with two, 5 with three).
-            # Ordering is the mover stack (constraints are collected in
-            # _GetMoverExecutionOrder order, rigEvaluator.cpp:149-163 / 3543 /
-            # 5290) and sequenced at rigEvaluator.cpp:6156-6158.
+            # Ordering is the pose stack ordinal (_GetPoseStackOrder): the
+            # per-joint writer chain orders a joint's writers, and a frame
+            # read orders a reader against the writers of that frame;
+            # nothing else orders two constraints
+            # (rigEvaluatorCompile.cpp, SolverSchedule.ConstraintDeps).
             ("(revised by)", "Any number of pose constraints name this joint on "
              "`rigExec:moves`. They occupy the SAME hierarchical stack as the "
              "solvers: one above a solver revises its output, one below feeds "
@@ -893,13 +897,16 @@ named by `rigExec:moves`. Rotation and scale are untouched — this operator
 owns the translation channel only. It is how a prop is pinned between two
 hands, how a hip rides between two feet, and — with an animated weight
 array — how either of those hands off to the other.""",
-        "how_it_works": """Every source-blending constraint runs in the pose phase, in the
-composed order of the `Movers` namespace, so it revises a provider that
-earlier solvers and constraints have already posed. Each evaluation it
-resolves the current frame of every `rigExec:sources` target, reads
-`inputs:sourceWeights` raw off the attribute at that frame's time, and
-accumulates `sum(origin * weight) / sum(weight)` — the weights are
-normalized, so they are ratios, not percentages. `inputs:translationOffset`
+        "how_it_works": """Every source-blending constraint runs in the pose phase at its place
+in the rig's pose stack, so it revises a provider that the solvers and
+constraints below it have already posed. Constraints are ordered only by
+the frames they read and write — the stack decides which version a read
+sees — so constraints on unrelated providers may run in parallel. Each
+evaluation it resolves the current frame of every `rigExec:sources`
+target, reads `inputs:sourceWeights` raw off the attribute at that
+frame's time, and accumulates `sum(origin * weight) / sum(weight)` — the
+weights are normalized, so they are ratios, not percentages.
+`inputs:translationOffset`
 is added to that blended point, the `inputs:affectTranslation*` mask selects
 which axes are claimed, and the common `RigExecMoverAPI` envelope
 (`inputs:defaultWeight`, or a bound `rigExec:weightObject`) lerps the result
@@ -982,7 +989,7 @@ scale, and shear pass through untouched. That split is the whole point —
 a panel bolted to a post can turn with a distant handle without drifting
 off the post. Per-axis masks and a degrees offset shape which part of the
 source orientation is actually copied.""",
-        "how_it_works": """It runs in the pose phase, on the single composed mover walk, after the
+        "how_it_works": """It runs in the pose phase at its place in the pose stack, once the
 constrained provider's incoming frame is known. The kernel decomposes
 that incoming frame, converts each source's orientation to Euler degrees
 in `rigExec:rotationOrder`, and accumulates weighted *shortest* per-axis

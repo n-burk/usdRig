@@ -4,29 +4,22 @@ follower is -- and the compiler has to say WHICH.
 The shape under test is the conventional per-limb param node: a control under
 <rig>/Controls, parent-constrained from the limb's end joint, whose scalar
 `avars:ikfk` is what the limb's blend solver reads through
-`inputs:weight.connect`. Authored on the biped it was rejected with a
-"pose dependency cycle among:" followed by sixty constraints and four
-solvers, and that list was read as a prim-granular false cycle -- the
-blend reading the param control, the control written by a constraint that
-reads the ankle, the ankle written by the blend. Bisecting it showed the
-scalar read was never an edge at all: retargeting the constraint at a
-fresh control nothing reads, or disconnecting the weight, changed nothing.
+`inputs:weight.connect`. The scalar read is not a pose edge: the constraint
+writes the control's frame, not its avars.
 
-What actually closed the loop is the Movers STACK. Its namespace executes
-bottom-up (rigEvaluator.cpp, _GetMoverExecutionOrder), constraints keep
-that authored order, and a chain the builder appends lands at the bottom
--- so the follower ran FIRST, before the reverse-foot constraints the leg
-IK's effector sits under. Follower waits on the blend, the blend on the
-IK, the IK on the foot constraint, and the foot constraint, by stack
-order, on the follower. The arms never cycled because nothing constrained
-sits above their effector. The same rig with the follower chain at the top
-of the stack compiles and tracks to 0.000000 cm.
+Constraints are ordered only by the frames they read and write, never by
+their place in the Movers stack alone. A chain the builder appends lands at
+the bottom of the stack, so the follower sits below the reverse-foot
+constraint the leg IK's effector sits under; the two share no frame, so
+nothing orders them, and the follower runs after the blend it reads. The
+follower waits on the blend, the blend on the IK, the IK on the foot
+constraint -- a chain, not a loop.
 
 So this asserts three things on a minimal leg with a reverse foot:
 
-  1. the follower at the BOTTOM of the stack is reported as a cycle, and
-     the report names the loop -- follower, blend, IK, foot constraint --
-     and NOT the unrelated step downstream of it;
+  1. the follower at the BOTTOM of the stack compiles with no pose cycle,
+     and its pose matches the follower-on-top arrangement at ikfk 0 and 1,
+     dynamic and baked;
   2. the follower at the TOP compiles, the blend still reads the scalar
      the constraint's target carries, and the param control tracks the
      ankle in FK and in IK;
@@ -44,8 +37,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_rigexec_python import _setup_environment  # noqa: E402
 
 RIG = "/Rig"
-FOLLOWER = RIG + "/Movers/param_follow/params_to_ankle"
-FOOT_CONSTRAINT = RIG + "/Movers/foot/pivot_from_bank"
 TAIL_CONSTRAINT = RIG + "/Movers/tail/tail_from_ankle"
 EFFECTOR_CONSTRAINT = RIG + "/Movers/foot/foot_from_ankle"
 BLEND = RIG + "/Solvers/IkFk"
@@ -75,7 +66,8 @@ def _build(rigexec, Usd, Sdf, follower_on_top, effector_constrained):
 
     Chains are created in the order tail, foot, param_follow, which is the
     order the biped's builder produces them, so param_follow is the BOTTOM
-    of the stack -- first to execute -- unless `follower_on_top` moves it.
+    of the stack -- first in stack order -- unless `follower_on_top` moves
+    it.
 
     The SCOPES are ordered the way the shipped biped orders them (Joints,
     Movers, Controls, Solvers), and under the unified pose stack that is
@@ -194,6 +186,46 @@ def _cycle_report(rig):
     return (reasons.pop() if reasons else None), skipped
 
 
+def _pose_values(pose):
+    """Every joint frame (final, and base where published) and control
+    frame of a pose, by path, as flat tuples."""
+    values = {}
+    for path in pose.joint_paths():
+        values["final " + path] = tuple(
+            pose.joint_frame(path, True).to_matrix4())
+        try:
+            values["base " + path] = tuple(
+                pose.joint_frame(path, False).to_matrix4())
+        except KeyError:
+            pass
+    for path in pose.control_paths():
+        values["control " + path] = tuple(
+            pose.control_frame(path).to_matrix4())
+    return values
+
+
+def _poses_by_dial(rig, stage, mode):
+    """The rig's pose values at ikfk 0 and 1 in the given evaluation
+    mode."""
+    rig.evaluation_mode = mode
+    dial = stage.GetPrimAtPath(PARAMS).GetAttribute("avars:ikfk")
+    out = {}
+    for value in (0.0, 1.0):
+        dial.Set(value)
+        pose = rig.evaluate(1.0)
+        assert pose.valid, "%s, ikfk = %g: invalid pose" % (mode, value)
+        if mode == "baked":
+            assert rig.op_graph(), (
+                "ikfk = %g: the baked program did not answer" % value)
+        gap = _distance(_origin(pose.joint_frame(ANKLE)),
+                        _origin(pose.control_frame(PARAMS)))
+        assert gap < 1e-6, (
+            "%s, ikfk = %g: the param control sits %.6f from the ankle"
+            % (mode, value, gap))
+        out[value] = _pose_values(pose)
+    return out
+
+
 def _loop_part(message):
     """The named loop, without the parenthetical that counts the rest."""
     line = next(l for l in message.splitlines()
@@ -210,32 +242,34 @@ def main():
 
     rigexec.load_schema_plugin(plugin_dir)
 
-    # --- 1. follower at the bottom of the stack: a cycle, named -----------
-    stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=False,
-                        effector_constrained=False)
-    message, skipped = _cycle_report(rig)
-    assert message and "pose dependency cycle" in message, message
-    for member in (FOLLOWER, BLEND, IK, FOOT_CONSTRAINT):
-        assert member in message, "%s missing from: %s" % (member, message)
-    assert FK not in message, "the FK chain has no wait: %s" % message
-    loop = _loop_part(message)
-    assert " -> " in loop, "the report walks the loop: %s" % message
-    assert TAIL_CONSTRAINT not in loop, (
-        "the tail constraint waits on the loop but is not on it: %s"
-        % message)
-    assert "1 further pose step waits on the loop" in message, message
-    # And the loop's members, exactly, are what was set aside: the tail
-    # constraint waits on the loop but is not on it, so it keeps running.
-    if skipped:
-        assert TAIL_CONSTRAINT not in skipped, (
-            "the tail constraint was set aside too: %s" % sorted(skipped))
-        assert FK not in skipped, (
-            "the FK chain was set aside: %s" % sorted(skipped))
-        for member in (FOLLOWER, BLEND, IK, FOOT_CONSTRAINT):
-            assert member in skipped, (
-                "%s kept running on an order nobody chose: %s"
-                % (member, sorted(skipped)))
-    print("bottom of the stack: %s" % loop.strip())
+    # --- 1. follower at the bottom of the stack: compiles, same pose -----
+    bottom_stage, bottom = _build(rigexec, Usd, Sdf, follower_on_top=False,
+                                  effector_constrained=False)
+    message, skipped = _cycle_report(bottom)
+    assert message is None, (
+        "the follower at the bottom of the stack: %s" % message)
+    assert not skipped, "operations set aside: %s" % sorted(skipped)
+    top_stage, top = _build(rigexec, Usd, Sdf, follower_on_top=True,
+                            effector_constrained=False)
+    message, skipped = _cycle_report(top)
+    assert message is None and not skipped, message
+    assert bottom.is_bakeable() and top.is_bakeable(), (
+        bottom.bakeability_reasons(), top.bakeability_reasons())
+    for mode in ("dynamic", "baked"):
+        below = _poses_by_dial(bottom, bottom_stage, mode)
+        above = _poses_by_dial(top, top_stage, mode)
+        for value in (0.0, 1.0):
+            assert below[value].keys() == above[value].keys(), (
+                "%s, ikfk = %g: different frames published" % (mode, value))
+            for key, frame in below[value].items():
+                worst = max(abs(p - q)
+                            for p, q in zip(frame, above[value][key]))
+                assert worst < 1e-6, (
+                    "%s, ikfk = %g: %s differs by %g between the follower "
+                    "at the bottom and at the top" % (mode, value, key,
+                                                      worst))
+    print("bottom of the stack: compiles; dynamic and baked poses match "
+          "the follower on top at ikfk 0 and 1")
 
     # --- 2. follower at the top: compiles, reads the scalar, tracks -------
     stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=True,
@@ -265,16 +299,31 @@ def main():
           "moved %.4f between the two" % (gaps[0.0], gaps[1.0], moved))
 
     # --- 3. a genuine loop fails in either order, and is named ------------
+    follower = RIG + "/Movers/param_follow/params_to_ankle"
     for on_top in (False, True):
         stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=on_top,
                             effector_constrained=True)
-        message, _skipped = _cycle_report(rig)
+        message, skipped = _cycle_report(rig)
         assert message and "pose dependency cycle" in message, (
             "an effector constrained from its own IK's joint compiled "
             "(follower on top: %s)" % on_top)
         loop = _loop_part(message)
+        assert " -> " in loop, "the report walks the loop: %s" % message
         for member in (EFFECTOR_CONSTRAINT, BLEND, IK):
             assert member in loop, "%s missing from: %s" % (member, message)
+        assert TAIL_CONSTRAINT not in loop, (
+            "the tail constraint waits on the loop but is not on it: %s"
+            % message)
+        assert FK not in message, "the FK chain has no wait: %s" % message
+        assert "2 further pose steps wait on the loop" in message, message
+        # The loop's members, exactly, are what was set aside: the tail
+        # constraint and the follower wait on the loop but are not on it,
+        # so they keep running.
+        assert set(skipped) == {EFFECTOR_CONSTRAINT, IK, BLEND}, (
+            "set aside: %s" % sorted(skipped))
+        for kept in (TAIL_CONSTRAINT, follower, FK):
+            assert kept not in skipped, (
+                "%s was set aside: %s" % (kept, sorted(skipped)))
     print("genuine loop: rejected in both orders; %s" % loop.strip())
     print("OK")
 

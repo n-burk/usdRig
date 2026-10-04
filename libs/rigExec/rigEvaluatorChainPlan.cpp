@@ -32,6 +32,23 @@ RigExecRigEvaluator::GetChainLevelTargets(size_t level) const
                                        : std::vector<SdfPath>();
 }
 
+std::map<SdfPath, size_t>
+RigExecRigEvaluator::GetPoseStepLevels() const
+{
+    std::map<SdfPath, size_t> levels;
+    for (const _PoseStep &step : _poseSteps) {
+        if (step.solverBatch) {
+            for (const auto &[solver, tap] :
+                 _solverBatches[step.index].solvers) {
+                levels[solver] = step.level;
+            }
+        } else {
+            levels[_frameConstraints[step.index].moverPath] = step.level;
+        }
+    }
+    return levels;
+}
+
 bool
 RigExecRigEvaluator::IsChainLevelParallel(size_t level) const
 {

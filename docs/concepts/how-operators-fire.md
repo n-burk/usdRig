@@ -68,9 +68,13 @@ is why a rig whose constraints all sit above its solvers is unchanged by any of
 this. Put `Solvers` near the bottom of the rig root to get the classic
 "solve, then revise" shape — that is what every shipped example authors.
 
-Steps that share no joint and no data are independent: overlapping writes
-serialise, disjoint chains stay parallel. Nothing about that changes the
-answer, only how fast it arrives.
+The stack is an order of *versions*, not a queue. Steps run in that order only
+where they touch the same data: two writers of one joint, or a step and the
+writer of a frame it reads. Constraints are ordered only by the frames they read
+and write — stack order decides which version a positional read sees — so
+constraints, like solvers, that share no joint and no data are independent and
+may run in parallel. Nothing about that changes the answer, only how fast it
+arrives.
 
 ## Read phases: which version a mover sees
 

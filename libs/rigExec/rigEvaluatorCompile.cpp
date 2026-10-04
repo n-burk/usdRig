@@ -3093,25 +3093,18 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         const SdfPath &path = constraint.moverPath;
         constraintIndices[path] = i;
         auto &dependencies = poseDependencies[path];
-        // Adjacent constraints in mover order. Every frame read has an
-        // explicit edge below, so this edge carries no data; its remaining
-        // effects are that a loop closed only by mover order (a follower at
-        // the bottom of the stack reading a joint whose solver waits on a
-        // constraint above it) is rejected as a pose dependency cycle, and
-        // that unrelated constraints serialize, which holds the biped at 17
-        // solver levels where the explicit edges alone give 6.
-        if (i > 0) {
-            dependencies.insert(newFrameConstraints[i - 1].moverPath);
-        }
-        // Every writer of the frame, not just the last one -- and now
-        // DIRECTIONALLY (spec §4.2). A frame read is POSITIONAL: the
+        // A constraint is ordered only by the frames it reads and writes:
+        // the edges below, plus the per-joint writer chain built after the
+        // frame-inheritance walk. Mover order adds no edge of its own, so
+        // constraints that share no frame share a Kahn level and may run
+        // concurrently.
+        // Every writer of the frame, not just the last one, DIRECTIONALLY
+        // (spec §4.2). A frame read is POSITIONAL: the
         // constraint reads the version standing at its own place in the
         // unified pose stack. A writer BELOW it must therefore run first, and
         // a writer ABOVE it must wait, or which version was read is undefined
         // and the schedule decides it by accident. A missed edge here does not
         // fail loudly; it silently reads the wrong version.
-        // A geometry-domain constraint carries no stack position, so it keeps
-        // the unconditional edge it always had.
         const bool positional = poseStackOrdinal.count(path) > 0;
         const int here = stackOrdinalOf(path);
         // Constraint writers of what this one reads, each ordered once, by
@@ -3159,21 +3152,14 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         for (const SdfPath &target : constraint.targets) dependOnFrame(target);
         for (const auto &source : constraint.sources) dependOnSource(source);
         dependOnSource(constraint.worldUpObject);
-        dependOnFrame(constraint.spacePath);
+        // rigExec:space is read from the seed (compose) table, never from a
+        // version the walk writes, so it orders nothing.
         dependOnSource(constraint.effector);
         dependOnFrame(constraint.weightObject);
         for (const auto &pole : constraint.poleObjects) dependOnSource(pole);
-        // Geometry-domain constraints on one points target keep their mover
-        // order between them.
-        if (!constraint.pointsTarget.IsEmpty()) {
-            for (size_t w = i; w-- > 0;) {
-                if (newFrameConstraints[w].pointsTarget ==
-                    constraint.pointsTarget) {
-                    dependencies.insert(newFrameConstraints[w].moverPath);
-                    break;
-                }
-            }
-        }
+        // Geometry-domain constraints write only their own per-mover delta,
+        // which the revision chains consume after the walk in mover order,
+        // so two on one points target need no edge between them.
         // A geometry-domain constraint revises points, not the frame a solver
         // reads, so no solver can inherit one: this `continue` is the same
         // exclusion the cross product below used to get from skipping the
@@ -3348,15 +3334,13 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // here can close a loop.
     // WIDTH. The hierarchical order is never turned into a global serial
     // chain: an edge is only ever inserted between two steps that write the
-    // SAME joint, and the only other edges in poseDependencies are the real
-    // data-flow ones (a reader and a writer of what it reads) and the mover
-    // chain that has always serialized the constraints. Two limbs that share
-    // no joint and no data flow therefore share a Kahn level and evaluate
-    // concurrently, and the baked cone schedule -- built from this same graph
-    // -- keeps its width. testRigExecSolverStacking's
-    // TestUnrelatedLimbsShareALevel pins it. The biped's 24 solvers span 17
-    // dependency levels while the mover chain serializes its constraints;
-    // the directional edges alone would allow 6.
+    // SAME joint, and every other edge in poseDependencies is a real data-flow
+    // one (a reader and a writer of what it reads). Steps -- solvers and
+    // constraints alike -- that share no joint and no data flow therefore
+    // share a Kahn level and may evaluate concurrently.
+    // testRigExecSolverStacking's TestUnrelatedLimbsShareALevel and
+    // TestIndependentConstraintsShareALevel pin it; the biped's 24 solvers
+    // span 6 dependency levels.
     std::map<SdfPath, std::vector<SdfPath>> jointWriterChain;
     /// solver -> (joint -> the step that wrote the joint just before it), the
     /// compile-side half of "the incoming frame is the solver's rest".
@@ -4210,12 +4194,22 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         // phases this change collapses, and it is this one sort.
         // A producer carries no ordinal and sorts first: it publishes an
         // aggregate and writes no joint, so nothing can observe where in the
-        // level it landed.
+        // level it landed. Geometry-domain constraints carry none either and
+        // sort by mover index, which keeps their diagnostics in mover order.
+        const auto moverIndexOf = [&constraintIndices](const SdfPath &path) {
+            const auto it = constraintIndices.find(path);
+            return it == constraintIndices.end()
+                ? std::numeric_limits<size_t>::max() : it->second;
+        };
         std::sort(readyPose.begin(), readyPose.end(),
-                  [&stackOrdinalOf](const SdfPath &a, const SdfPath &b) {
+                  [&stackOrdinalOf, &moverIndexOf](const SdfPath &a,
+                                                   const SdfPath &b) {
                       const int oa = stackOrdinalOf(a);
                       const int ob = stackOrdinalOf(b);
-                      return oa != ob ? oa < ob : a < b;
+                      if (oa != ob) return oa < ob;
+                      const size_t ia = moverIndexOf(a);
+                      const size_t ib = moverIndexOf(b);
+                      return ia != ib ? ia < ib : a < b;
                   });
         for (const SdfPath &path : readyPose) {
             const auto constraintStep = constraintIndices.find(path);
@@ -4223,7 +4217,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 // A constraint ends the run: nothing after it may share a
                 // request built before it ran.
                 closeRequest();
-                newPoseSteps.push_back({false, constraintStep->second});
+                newPoseSteps.push_back(
+                    {false, constraintStep->second, poseLevel});
                 continue;
             }
             if (!requiredSolvers.count(path)) continue;
@@ -4309,7 +4304,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                     openMembers.push_back(std::move(facts));
                 }
             }
-            newPoseSteps.push_back({true, batchIndex});
+            newPoseSteps.push_back({true, batchIndex, poseLevel});
             newSolverBatches.push_back(std::move(batch));
         }
         // The level ends the run as well.
@@ -4387,9 +4382,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             }
         } else {
             // In dependency order: each step waits on the next, the last on
-            // the first. A constraint's wait on its predecessor in the
-            // mover stack shows up here as an ordinary edge, which is how
-            // "this follower is authored below what it needs" reads.
+            // the first.
             size_t waiting = 0;
             for (const auto &[path, pending] : pendingPose) {
                 if (pending) ++waiting;
