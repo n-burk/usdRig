@@ -18,6 +18,7 @@
                         "bases": [
                             "RigExecSourceConstraint"
                         ],
+                        "nodeGraphIcon": "icons/aim_constraint.png",
                         "schemaIdentifier": "RigExecAimConstraint",
                         "schemaKind": "concreteTyped"
                     },
@@ -26,6 +27,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/blend_input.png",
                         "schemaIdentifier": "RigExecBlendInput",
                         "schemaKind": "concreteTyped"
                     },
@@ -34,6 +36,7 @@
                         "bases": [
                             "UsdGeomBoundable"
                         ],
+                        "nodeGraphIcon": "icons/blend_point_frames.png",
                         "schemaIdentifier": "RigExecBlendPointFrames",
                         "schemaKind": "concreteTyped"
                     },
@@ -42,6 +45,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/blend_sample.png",
                         "schemaIdentifier": "RigExecBlendSample",
                         "schemaKind": "concreteTyped"
                     },
@@ -50,6 +54,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/blendshape_mover.png",
                         "schemaIdentifier": "RigExecBlendShapeMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -58,6 +63,7 @@
                         "bases": [
                             "RigExecWeightObject"
                         ],
+                        "nodeGraphIcon": "icons/combine_weight.png",
                         "schemaIdentifier": "RigExecCombineWeight",
                         "schemaKind": "concreteTyped"
                     },
@@ -74,6 +80,7 @@
                         "bases": [
                             "RigExecXformable"
                         ],
+                        "nodeGraphIcon": "icons/control.png",
                         "schemaIdentifier": "RigExecControl",
                         "schemaKind": "concreteTyped"
                     },
@@ -90,6 +97,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/curve_mover.png",
                         "schemaIdentifier": "RigExecCurveMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -98,6 +106,7 @@
                         "bases": [
                             "RigExecVolumeWeight"
                         ],
+                        "nodeGraphIcon": "icons/curve_weight.png",
                         "schemaIdentifier": "RigExecCurveWeight",
                         "schemaKind": "concreteTyped"
                     },
@@ -114,6 +123,7 @@
                         "bases": [
                             "RigExecWeightObject"
                         ],
+                        "nodeGraphIcon": "icons/dynamic_weight.png",
                         "schemaIdentifier": "RigExecDynamicWeight",
                         "schemaKind": "concreteTyped"
                     },
@@ -122,6 +132,7 @@
                         "bases": [
                             "UsdGeomBoundable"
                         ],
+                        "nodeGraphIcon": "icons/fk_chain.png",
                         "schemaIdentifier": "RigExecFkChain",
                         "schemaKind": "concreteTyped"
                     },
@@ -130,6 +141,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/float_math_mover.png",
                         "schemaIdentifier": "RigExecFloatMathMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -138,6 +150,7 @@
                         "bases": [
                             "RigExecXformable"
                         ],
+                        "nodeGraphIcon": "icons/joint.png",
                         "schemaIdentifier": "RigExecJoint",
                         "schemaKind": "concreteTyped"
                     },
@@ -146,6 +159,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/lattice_mover.png",
                         "schemaIdentifier": "RigExecLatticeMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -154,6 +168,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/matrix_math_mover.png",
                         "schemaIdentifier": "RigExecMatrixMathMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -162,6 +177,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/matrix_mover.png",
                         "schemaIdentifier": "RigExecMatrixMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -178,6 +194,7 @@
                         "bases": [
                             "RigExecSourceConstraint"
                         ],
+                        "nodeGraphIcon": "icons/parent_constraint.png",
                         "schemaIdentifier": "RigExecParentConstraint",
                         "schemaKind": "concreteTyped"
                     },
@@ -186,6 +203,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/picker.png",
                         "schemaIdentifier": "RigExecPicker",
                         "schemaKind": "concreteTyped"
                     },
@@ -194,6 +212,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/picker_button.png",
                         "schemaIdentifier": "RigExecPickerButton",
                         "schemaKind": "concreteTyped"
                     },
@@ -202,6 +221,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/picker_panel.png",
                         "schemaIdentifier": "RigExecPickerPanel",
                         "schemaKind": "concreteTyped"
                     },
@@ -210,6 +230,7 @@
                         "bases": [
                             "RigExecVolumeWeight"
                         ],
+                        "nodeGraphIcon": "icons/plane_weight.png",
                         "schemaIdentifier": "RigExecPlaneWeight",
                         "schemaKind": "concreteTyped"
                     },
@@ -218,6 +239,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/pose.png",
                         "schemaIdentifier": "RigExecPose",
                         "schemaKind": "concreteTyped"
                     },
@@ -226,6 +248,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/pose_interpolator.png",
                         "schemaIdentifier": "RigExecPoseInterpolator",
                         "schemaKind": "concreteTyped"
                     },
@@ -234,6 +257,7 @@
                         "bases": [
                             "RigExecSourceConstraint"
                         ],
+                        "nodeGraphIcon": "icons/position_constraint.png",
                         "schemaIdentifier": "RigExecPositionConstraint",
                         "schemaKind": "concreteTyped"
                     },
@@ -242,6 +266,7 @@
                         "bases": [
                             "UsdGeomBoundable"
                         ],
+                        "nodeGraphIcon": "icons/ribbon.png",
                         "schemaIdentifier": "RigExecRibbon",
                         "schemaKind": "concreteTyped"
                     },
@@ -250,6 +275,7 @@
                         "bases": [
                             "UsdGeomImageable"
                         ],
+                        "nodeGraphIcon": "icons/rig_root.png",
                         "schemaIdentifier": "RigExecRoot",
                         "schemaKind": "concreteTyped"
                     },
@@ -258,6 +284,7 @@
                         "bases": [
                             "RigExecSourceConstraint"
                         ],
+                        "nodeGraphIcon": "icons/rotation_constraint.png",
                         "schemaIdentifier": "RigExecRotationConstraint",
                         "schemaKind": "concreteTyped"
                     },
@@ -266,6 +293,7 @@
                         "bases": [
                             "RigExecSourceConstraint"
                         ],
+                        "nodeGraphIcon": "icons/scale_constraint.png",
                         "schemaIdentifier": "RigExecScaleConstraint",
                         "schemaKind": "concreteTyped"
                     },
@@ -274,6 +302,7 @@
                         "bases": [
                             "RigExecConstraint"
                         ],
+                        "nodeGraphIcon": "icons/single_chain_ik_constraint.png",
                         "schemaIdentifier": "RigExecSingleChainIkConstraint",
                         "schemaKind": "concreteTyped"
                     },
@@ -282,6 +311,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/skin_mover.png",
                         "schemaIdentifier": "RigExecSkinMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -290,6 +320,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/smooth_mover.png",
                         "schemaIdentifier": "RigExecSmoothMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -314,6 +345,7 @@
                         "bases": [
                             "RigExecVolumeWeight"
                         ],
+                        "nodeGraphIcon": "icons/sphere_weight.png",
                         "schemaIdentifier": "RigExecSphereWeight",
                         "schemaKind": "concreteTyped"
                     },
@@ -322,6 +354,7 @@
                         "bases": [
                             "UsdGeomBoundable"
                         ],
+                        "nodeGraphIcon": "icons/spline_ik.png",
                         "schemaIdentifier": "RigExecSplineIk",
                         "schemaKind": "concreteTyped"
                     },
@@ -330,6 +363,7 @@
                         "bases": [
                             "RigExecWeightObject"
                         ],
+                        "nodeGraphIcon": "icons/static_weight.png",
                         "schemaIdentifier": "RigExecStaticWeight",
                         "schemaKind": "concreteTyped"
                     },
@@ -338,6 +372,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/surface_mover.png",
                         "schemaIdentifier": "RigExecSurfaceMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -362,6 +397,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/touch_region.png",
                         "schemaIdentifier": "RigExecTouchRegion",
                         "schemaKind": "concreteTyped"
                     },
@@ -370,6 +406,7 @@
                         "bases": [
                             "UsdGeomScope"
                         ],
+                        "nodeGraphIcon": "icons/touch_regions.png",
                         "schemaIdentifier": "RigExecTouchRegions",
                         "schemaKind": "concreteTyped"
                     },
@@ -378,6 +415,7 @@
                         "bases": [
                             "UsdGeomBoundable"
                         ],
+                        "nodeGraphIcon": "icons/twist_distribution.png",
                         "schemaIdentifier": "RigExecTwistDistribution",
                         "schemaKind": "concreteTyped"
                     },
@@ -386,6 +424,7 @@
                         "bases": [
                             "UsdGeomBoundable"
                         ],
+                        "nodeGraphIcon": "icons/two_bone_ik.png",
                         "schemaIdentifier": "RigExecTwoBoneIk",
                         "schemaKind": "concreteTyped"
                     },
@@ -394,6 +433,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/vec3f_math_mover.png",
                         "schemaIdentifier": "RigExecVec3fMathMover",
                         "schemaKind": "concreteTyped"
                     },
@@ -402,6 +442,7 @@
                         "bases": [
                             "UsdTyped"
                         ],
+                        "nodeGraphIcon": "icons/volume_correct_mover.png",
                         "schemaIdentifier": "RigExecVolumeCorrectMover",
                         "schemaKind": "concreteTyped"
                     },

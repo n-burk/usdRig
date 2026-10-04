@@ -12,9 +12,10 @@ This module provides the single interface for creating NodeModel objects
 from USD prims, using the appropriate NodeLibrary to gather port information.
 """
 
+import os
 from typing import List, Optional
 
-from pxr import Usd, UsdUI
+from pxr import Plug, Usd, UsdUI
 
 from ._schema_pin_names import (
     get_api_schema_pin_groups,
@@ -26,6 +27,10 @@ from ._schema_pin_names import (
 from .models import NodeModel
 from .nodeLibraries import NodeLibrary
 from .pinUtils import split_direction_hint
+
+# Prim type name -> the icon its schema plugin declares ("" when none). Plugin
+# metadata is fixed once a plugin is registered, so each type is asked once.
+_SCHEMA_ICONS = {}
 
 _SUPPRESSED_PRIM_TYPES = frozenset(
     {
@@ -248,24 +253,63 @@ class NodeFactory:
 
     @staticmethod
     def _apply_icon_from_prim(node: NodeModel, prim: Usd.Prim) -> None:
-        """Set the node's title-bar icon from ``ui:nodegraph:node:icon``.
+        """Set the node's title-bar icon.
 
-        The attribute is read by name rather than through
-        ``UsdUI.NodeGraphNodeAPI.GetIconAttr`` on purpose: the two return the
-        same attribute, but the name works whether or not the prim actually
-        applies the API schema, and an authored opinion is what the editor
-        should honour.
+        An authored ``ui:nodegraph:node:icon`` wins. It is read by name rather
+        than through ``UsdUI.NodeGraphNodeAPI.GetIconAttr`` on purpose: the
+        two return the same attribute, but the name works whether or not the
+        prim actually applies the API schema. Without an opinion, the icon the
+        prim's schema type declares (``_schema_icon``) is used, so a rig that
+        authors no icons still shows its node types.
         """
         try:
             icon_attr = prim.GetAttribute("ui:nodegraph:node:icon")
             if icon_attr.IsValid() and icon_attr.HasAuthoredValue():
                 icon_path = NodeFactory._resolve_icon_asset(icon_attr)
-                if icon_path:
-                    # Writes through to the C++ NodeData.titleIconPath the icon
-                    # renderer reads (see NodeModel._icon_path).
-                    node._icon_path = icon_path
+            else:
+                icon_path = NodeFactory._schema_icon(prim.GetTypeName())
+            if icon_path:
+                # Writes through to the C++ NodeData.titleIconPath the icon
+                # renderer reads (see NodeModel._icon_path).
+                node._icon_path = icon_path
         except Exception:
             pass
+
+    @staticmethod
+    def _schema_icon(type_name: str) -> str:
+        """Absolute path of the icon a prim type's schema plugin declares, or "".
+
+        A plugin declares it in its plugInfo.json type entry as
+        ``nodeGraphIcon``, a path relative to the plugin's resources;
+        usdGenSchema writes a class's ``customData`` ``extraPlugInfo`` there.
+        The nearest declaring type wins, so a subtype without art of its own
+        shows its base type's. A declared file that does not exist declares
+        nothing.
+        """
+        if not type_name:
+            return ""
+        cached = _SCHEMA_ICONS.get(type_name)
+        if cached is not None:
+            return cached
+        icon = ""
+        tf_type = Usd.SchemaRegistry.GetTypeFromSchemaTypeName(type_name)
+        if not tf_type.isUnknown:
+            registry = Plug.Registry()
+            for candidate in tf_type.GetAllAncestorTypes():
+                plugin = registry.GetPluginForType(candidate)
+                if not plugin:
+                    continue
+                relative = plugin.GetMetadataForType(candidate).get(
+                    "nodeGraphIcon")
+                if not relative:
+                    continue
+                path = os.path.normpath(
+                    os.path.join(plugin.resourcePath, str(relative)))
+                if os.path.isfile(path):
+                    icon = path
+                    break
+        _SCHEMA_ICONS[type_name] = icon
+        return icon
 
     @staticmethod
     def _resolve_icon_asset(icon_attr: Usd.Attribute) -> str:

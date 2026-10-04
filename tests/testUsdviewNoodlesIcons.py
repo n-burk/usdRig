@@ -19,6 +19,11 @@ What broke, and what this pins down:
   * a missing icon file must degrade to the default silently -- not raise, not
     stop the frame, and not leave a working-directory-relative path behind.
 
+  * a prim that authors no icon shows the one its schema type declares
+    (``nodeGraphIcon`` in the schema plugin's plugInfo), so a rig that never
+    authored icons -- the biped -- still shows its node types; an authored
+    icon still wins over the type's.
+
 The pixel check is what makes this end to end: the title area is grabbed with
 the authored icon and again with the icon cleared, and the two must differ. A
 path that reaches C++ but never reaches the GPU would pass every other
@@ -36,6 +41,9 @@ import os
 ICONED = "/World/Iconed"
 MISSING = "/World/MissingIcon"
 NO_ICON = "/World/NoIcon"
+TYPED_DEFAULT = "/World/TypedDefault"
+TYPED_AUTHORED = "/World/TypedAuthored"
+ALL = (ICONED, MISSING, NO_ICON, TYPED_DEFAULT, TYPED_AUTHORED)
 
 
 def _pump(app, n=20):
@@ -88,10 +96,10 @@ def testUsdviewInputFunction(appController):
     stage = appController._dataModel.stage
     layerDir = os.path.dirname(stage.GetRootLayer().realPath)
 
-    # --- 1. the three prims become nodes --------------------------------
+    # --- 1. the prims become nodes --------------------------------------
     selection = appController._dataModel.selection
     selection.clearPrims()
-    for path in (ICONED, MISSING, NO_ICON):
+    for path in ALL:
         prim = stage.GetPrimAtPath(Sdf.Path(path))
         _Check(bool(prim) and prim.IsValid(), "the fixture has no %s" % path)
         selection.addPrim(prim)
@@ -100,7 +108,7 @@ def testUsdviewInputFunction(appController):
     view.addNodesFromPrimTreeSelection()
     _pump(app, 40)
 
-    for path in (ICONED, MISSING, NO_ICON):
+    for path in ALL:
         _Check(path in view.nodes,
                "%s did not become a node: %s" % (path, sorted(view.nodes)))
 
@@ -147,6 +155,26 @@ def testUsdviewInputFunction(appController):
     _Check(view.nodes[NO_ICON].titleIconPath == "",
            "%s authors no icon but carries %r"
            % (NO_ICON, view.nodes[NO_ICON].titleIconPath))
+
+    # --- 3b. a rig type with no opinion shows its schema's icon --------
+    typedPath = view.nodes[TYPED_DEFAULT].titleIconPath
+    _Check(bool(typedPath),
+           "%s is a RigExecControl with no icon opinion; its type declares "
+           "one, but the node kept none" % TYPED_DEFAULT)
+    _Check(os.path.isabs(typedPath) and os.path.isfile(typedPath),
+           "the type icon is not an existing absolute file: %r" % typedPath)
+    _Check(os.path.basename(typedPath) == "control.png",
+           "a RigExecControl resolved to %r" % typedPath)
+    _Check("rigExecSchema" in typedPath.replace("\\", "/"),
+           "the type icon %r is not the schema plugin's own copy" % typedPath)
+    _Check(not QtGui.QImage(typedPath).isNull(),
+           "the type icon is not a loadable image: %r" % typedPath)
+
+    # An authored icon wins over the type's: a joint that authors the
+    # control icon shows the control icon, from this layer.
+    _Check(_sameFile(view.nodes[TYPED_AUTHORED].titleIconPath, expected),
+           "%s authors the control icon but shows %r"
+           % (TYPED_AUTHORED, view.nodes[TYPED_AUTHORED].titleIconPath))
 
     # --- 4. the icons are actually drawn --------------------------------
     node = view.nodes[ICONED]
@@ -216,6 +244,8 @@ def testUsdviewInputFunction(appController):
     view.close()
     _pump(app, 20)
     print("RIGEXEC_NOODLES_ICONS_OK %s -> %s, missing icon anchored to %s and "
-          "fell back, %d/%d title pixels changed when the icon was cleared"
+          "fell back, %s -> type icon %s, %d/%d title pixels changed when the "
+          "icon was cleared"
           % (ICONED, os.path.basename(iconPath),
-             os.path.basename(missingPath), different, samples))
+             os.path.basename(missingPath), TYPED_DEFAULT,
+             os.path.basename(typedPath), different, samples))

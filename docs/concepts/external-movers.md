@@ -195,6 +195,28 @@ The generic validator checks the native `UsdGeomPointBased` `point3f[]` target
 and the handler's single-target rule before the custom validator runs. Mover
 ordering and envelopes follow the same rules as built-in geometry movers.
 
+A plugin schema can give its types a node-editor icon. Declare it on the class
+and ship the image in the schema plugin's resources; the usdNoodles editor shows
+it on every prim of that type, or of a type derived from it, that authors no
+`ui:nodegraph:node:icon`. An authored icon still wins.
+
+```usda
+class MySampleOffsetMover "MySampleOffsetMover" (
+    inherits = </Typed>
+    customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/sample_offset_mover.png"
+        }
+    }
+)
+{
+}
+```
+
+`usdGenSchema` copies `extraPlugInfo` into the type's `plugInfo.json` entry, and
+`nodeGraphIcon` is a path relative to that plugin's resources directory. The
+RigExec schema declares its own node types' icons the same way.
+
 ## Export and play back a plugin mover
 
 A `.rigexec` file is played by a runtime that has no stage, so it cannot call

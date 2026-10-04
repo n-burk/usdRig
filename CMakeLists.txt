@@ -1499,10 +1499,28 @@ configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/generatedSchema.usda"
     "${_rigexec_schema_resources}/generatedSchema.usda" COPYONLY)
 
+# The node-graph icons the plugInfo type entries name (a class's
+# extraPlugInfo nodeGraphIcon, relative to these resources): exactly those,
+# so the plugin ships no art it does not declare.
+file(STRINGS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/plugInfo.json"
+    _rigexec_icon_lines REGEX "\"nodeGraphIcon\"")
+set(_rigexec_schema_icons "")
+foreach(_rigexec_icon_line IN LISTS _rigexec_icon_lines)
+    string(REGEX REPLACE ".*\"nodeGraphIcon\": \"icons/([^\"]+)\".*" "\\1"
+        _rigexec_icon "${_rigexec_icon_line}")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/icons/${_rigexec_icon}"
+        "${_rigexec_schema_resources}/icons/${_rigexec_icon}" COPYONLY)
+    list(APPEND _rigexec_schema_icons
+        "${CMAKE_CURRENT_SOURCE_DIR}/icons/${_rigexec_icon}")
+endforeach()
+
 install(FILES
         "${_rigexec_schema_pluginfo}"
         "${_rigexec_schema_resources}/generatedSchema.usda"
     DESTINATION "${RIGEXEC_INSTALL_PLUGINDIR}/rigExecSchema/resources")
+install(FILES ${_rigexec_schema_icons}
+    DESTINATION "${RIGEXEC_INSTALL_PLUGINDIR}/rigExecSchema/resources/icons")
 
 install(DIRECTORY plugin/rigExecUsdview/
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview"

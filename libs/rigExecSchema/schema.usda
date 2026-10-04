@@ -95,6 +95,9 @@ class "RigExecMoverAPI" (
 class RigExecRoot "RigExecRoot" (
     inherits = </Imageable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/rig_root.png"
+        }
         string className = "Root"
     }
     doc = """Character root: partition and namespace root for control,
@@ -159,6 +162,9 @@ class RigExecRoot "RigExecRoot" (
 class RigExecControl "RigExecControl" (
     inherits = </RigExecXformable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/control.png"
+        }
         string className = "Control"
     }
     doc = """An animator-facing RigExecXformable: animation is authored
@@ -421,6 +427,9 @@ class "RigExecXformable" (
 class RigExecJoint "RigExecJoint" (
     inherits = </RigExecXformable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/joint.png"
+        }
         string className = "Joint"
     }
     doc = """The joint of an armature-based rig, mirroring OpenExec's
@@ -479,6 +488,9 @@ class RigExecJoint "RigExecJoint" (
 class RigExecFkChain "RigExecFkChain" (
     inherits = </Boundable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/fk_chain.png"
+        }
         string className = "FkChain"
     }
     doc = """Applies control frames/offsets to a rest hierarchy. Publishes
@@ -626,6 +638,9 @@ class RigExecFkChain "RigExecFkChain" (
 class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     inherits = </Boundable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/two_bone_ik.png"
+        }
         string className = "TwoBoneIk"
     }
     doc = """Analytic two-bone IK with pole, stretch, softness, and preferred
@@ -735,6 +750,9 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
 class RigExecBlendPointFrames "RigExecBlendPointFrames" (
     inherits = </Boundable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/blend_point_frames.png"
+        }
         string className = "BlendPointFrames"
     }
     doc = """IK/FK or general frame blend of two aggregate providers.
@@ -790,6 +808,9 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
 class RigExecTwistDistribution "RigExecTwistDistribution" (
     inherits = </Boundable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/twist_distribution.png"
+        }
         string className = "TwistDistribution"
     }
     doc = """Distributes unwrapped twist over N frames between start and end
@@ -856,6 +877,9 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
 class RigExecRibbon "RigExecRibbon" (
     inherits = </Boundable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/ribbon.png"
+        }
         string className = "Ribbon"
     }
     doc = """Samples a native UsdGeomBasisCurves.points driver, constructs
@@ -918,6 +942,9 @@ class RigExecRibbon "RigExecRibbon" (
 class RigExecSplineIk "RigExecSplineIk" (
     inherits = </Boundable>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/spline_ik.png"
+        }
         string className = "SplineIk"
     }
     doc = """Control-driven spline IK for a spine or neck: the counterpart of
@@ -1168,6 +1195,9 @@ class "RigExecSourceConstraint" (
 class RigExecAimConstraint "RigExecAimConstraint" (
     inherits = </RigExecSourceConstraint>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/aim_constraint.png"
+        }
         string className = "AimConstraint"
     }
     doc = """FBX-style aim constraint. It rotates each transform named by
@@ -1228,6 +1258,9 @@ class RigExecAimConstraint "RigExecAimConstraint" (
 class RigExecPositionConstraint "RigExecPositionConstraint" (
     inherits = </RigExecSourceConstraint>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/position_constraint.png"
+        }
         string className = "PositionConstraint"
     }
     doc = """FBX-style position constraint. It blends the ordered source
@@ -1242,6 +1275,9 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
 class RigExecRotationConstraint "RigExecRotationConstraint" (
     inherits = </RigExecSourceConstraint>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/rotation_constraint.png"
+        }
         string className = "RotationConstraint"
     }
     doc = """FBX-style rotation constraint. It blends the ordered source
@@ -1257,6 +1293,9 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
 class RigExecScaleConstraint "RigExecScaleConstraint" (
     inherits = </RigExecSourceConstraint>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/scale_constraint.png"
+        }
         string className = "ScaleConstraint"
     }
     doc = """FBX-style scale constraint. It blends the ordered source scales,
@@ -1280,6 +1319,9 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
 class RigExecParentConstraint "RigExecParentConstraint" (
     inherits = </RigExecSourceConstraint>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/parent_constraint.png"
+        }
         string className = "ParentConstraint"
     }
     doc = """FBX-style parent constraint. Translation and rotation are
@@ -1319,6 +1361,9 @@ class RigExecParentConstraint "RigExecParentConstraint" (
 class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     inherits = </RigExecConstraint>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/single_chain_ik_constraint.png"
+        }
         string className = "SingleChainIkConstraint"
     }
     doc = """FBX-style single-chain IK constraint. The first and end joints
@@ -1482,6 +1527,9 @@ class RigExecSpaceSwitch "RigExecSpaceSwitch" (
 class RigExecFloatMathMover "RigExecFloatMathMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/float_math_mover.png"
+        }
         string className = "FloatMathMover"
     }
     doc = """Statically typed add, multiply, clamp, remap, blend, or curve
@@ -1546,6 +1594,9 @@ class "RigExecWeightObject" (
 class RigExecStaticWeight "RigExecStaticWeight" (
     inherits = </RigExecWeightObject>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/static_weight.png"
+        }
         string className = "StaticWeight"
     }
     doc = """Time-invariant constant, dense, or sparse authored weight field;
@@ -1561,6 +1612,9 @@ class RigExecStaticWeight "RigExecStaticWeight" (
 class RigExecDynamicWeight "RigExecDynamicWeight" (
     inherits = </RigExecWeightObject>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/dynamic_weight.png"
+        }
         string className = "DynamicWeight"
     }
     doc = """Epoch-shape-stable weight field recomputed from statically
@@ -1753,6 +1807,9 @@ class "RigExecVolumeWeight" (
 class RigExecSphereWeight "RigExecSphereWeight" (
     inherits = </RigExecVolumeWeight>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/sphere_weight.png"
+        }
         string className = "SphereWeight"
     }
     doc = """Radial falloff about the volume's placed origin:
@@ -1796,6 +1853,9 @@ class RigExecSphereWeight "RigExecSphereWeight" (
 class RigExecPlaneWeight "RigExecPlaneWeight" (
     inherits = </RigExecVolumeWeight>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/plane_weight.png"
+        }
         string className = "PlaneWeight"
     }
     doc = """Gradient across a plane: d is the SIGNED local coordinate
@@ -1874,6 +1934,9 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
 class RigExecCurveWeight "RigExecCurveWeight" (
     inherits = </RigExecVolumeWeight>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/curve_weight.png"
+        }
         string className = "CurveWeight"
     }
     doc = """Tubular falloff about a curve: d is the distance to the
@@ -1903,6 +1966,9 @@ class RigExecCurveWeight "RigExecCurveWeight" (
 class RigExecCombineWeight "RigExecCombineWeight" (
     inherits = </RigExecWeightObject>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/combine_weight.png"
+        }
         string className = "CombineWeight"
     }
     doc = """Folds an ordered list of weight objects into one field
@@ -1959,6 +2025,9 @@ class RigExecCombineWeight "RigExecCombineWeight" (
 class RigExecMatrixMover "RigExecMatrixMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/matrix_mover.png"
+        }
         string className = "MatrixMover"
     }
     doc = """Moves the preceding value through one declared target-local
@@ -2091,6 +2160,9 @@ class RigExecMatrixMover "RigExecMatrixMover" (
 class RigExecSkinMover "RigExecSkinMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/skin_mover.png"
+        }
         string className = "SkinMover"
     }
     doc = """Multi-influence skinning of an exact native point3f[] points
@@ -2143,6 +2215,9 @@ class RigExecSkinMover "RigExecSkinMover" (
 class RigExecBlendShapeMover "RigExecBlendShapeMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/blendshape_mover.png"
+        }
         string className = "BlendShapeMover"
     }
     doc = """Applies independently composed blend inputs and native
@@ -2161,6 +2236,9 @@ class RigExecBlendShapeMover "RigExecBlendShapeMover" (
 class RigExecBlendInput "RigExecBlendInput" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/blend_input.png"
+        }
         string className = "BlendInput"
     }
     doc = """One independently composable blend channel with an authored or
@@ -2174,6 +2252,9 @@ class RigExecBlendInput "RigExecBlendInput" (
 class RigExecBlendSample "RigExecBlendSample" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/blend_sample.png"
+        }
         string className = "BlendSample"
     }
     doc = """One target or in-between activation, related EITHER to an exact
@@ -2212,6 +2293,9 @@ class RigExecBlendSample "RigExecBlendSample" (
 class RigExecPoseInterpolator "RigExecPoseInterpolator" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/pose_interpolator.png"
+        }
         string className = "PoseInterpolator"
     }
     doc = """A pose interpolator: one driver joint in, one weight per
@@ -2348,6 +2432,9 @@ class RigExecPoseInterpolator "RigExecPoseInterpolator" (
 class RigExecPose "RigExecPose" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/pose.png"
+        }
         string className = "Pose"
     }
     doc = """One authored pose of a RigExecPoseInterpolator, and the float it
@@ -2493,6 +2580,9 @@ class RigExecPose "RigExecPose" (
 class RigExecCurveMover "RigExecCurveMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/curve_mover.png"
+        }
         string className = "CurveMover"
     }
     doc = """Reads standard basis-curve properties for wire, spline-IK,
@@ -2634,6 +2724,9 @@ class RigExecCurveMover "RigExecCurveMover" (
 class RigExecVec3fMathMover "RigExecVec3fMathMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/vec3f_math_mover.png"
+        }
         string className = "Vec3fMathMover"
     }
     doc = """Statically typed add, multiply, clamp, remap, or blend over an
@@ -2655,6 +2748,9 @@ class RigExecVec3fMathMover "RigExecVec3fMathMover" (
 class RigExecMatrixMathMover "RigExecMatrixMathMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/matrix_math_mover.png"
+        }
         string className = "MatrixMathMover"
     }
     doc = """Statically typed multiply or blend over an exact matrix4d
@@ -2675,6 +2771,9 @@ class RigExecMatrixMathMover "RigExecMatrixMathMover" (
 class RigExecLatticeMover "RigExecLatticeMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/lattice_mover.png"
+        }
         string className = "LatticeMover"
     }
     doc = """Reads cage points from a native mesh/points prim and writes
@@ -2694,6 +2793,9 @@ class RigExecLatticeMover "RigExecLatticeMover" (
 class RigExecSurfaceMover "RigExecSurfaceMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/surface_mover.png"
+        }
         string className = "SurfaceMover"
     }
     doc = """Reads standard mesh properties for attachment/projection/
@@ -2944,6 +3046,9 @@ class RigExecWrinkleMover "RigExecWrinkleMover" (
 class RigExecSmoothMover "RigExecSmoothMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/smooth_mover.png"
+        }
         string className = "SmoothMover"
     }
     doc = """Moves exactly one exact native UsdGeomPointBased points
@@ -2959,6 +3064,9 @@ class RigExecSmoothMover "RigExecSmoothMover" (
 class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/volume_correct_mover.png"
+        }
         string className = "VolumeCorrectMover"
     }
     doc = """Moves exactly one exact native UsdGeomPointBased points
@@ -2989,6 +3097,9 @@ class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
 class RigExecPicker "RigExecPicker" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/picker.png"
+        }
         string className = "Picker"
     }
     doc = """A character's control picker: one tab in the picker panel,
@@ -3021,6 +3132,9 @@ class RigExecPicker "RigExecPicker" (
 class RigExecPickerPanel "RigExecPickerPanel" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/picker_panel.png"
+        }
         string className = "PickerPanel"
     }
     doc = """One sub-tab of a RigExecPicker: Body, Face, and so on. Holds
@@ -3046,6 +3160,9 @@ class RigExecPickerPanel "RigExecPickerPanel" (
 class RigExecPickerButton "RigExecPickerButton" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/picker_button.png"
+        }
         string className = "PickerButton"
     }
     doc = """One button. Selects the prims in rigExec:picker:controls, or
@@ -3186,6 +3303,9 @@ class RigExecPickerButton "RigExecPickerButton" (
 class RigExecTouchRegions "RigExecTouchRegions" (
     inherits = </Scope>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/touch_regions.png"
+        }
         string className = "TouchRegions"
     }
     doc = """A mesh's touch regions: the shared palette, and one
@@ -3287,6 +3407,9 @@ class RigExecTouchOverlay "RigExecTouchOverlay" (
 class RigExecTouchRegion "RigExecTouchRegion" (
     inherits = </Typed>
     customData = {
+        dictionary extraPlugInfo = {
+            string nodeGraphIcon = "icons/touch_region.png"
+        }
         string className = "TouchRegion"
     }
     doc = """One named touch set: the faces it owns and the control a
