@@ -23,6 +23,15 @@ The OpenUSD Gf-derived math in `libs/rigExecRuntime/runtimeMath.h` and the
 adapted widgets in `plugin/rigExecUsdview/volumeWeightUI.py` also retain
 OpenUSD license terms and their Pixar notices.
 
+`thirdparty/flatbuffers` holds unmodified C++ runtime headers of
+[Google FlatBuffers](https://github.com/google/flatbuffers) 25.12.19 (tag
+`v25.12.19`, commit `7e163021e59cca4f8e1e35a7c828b5c6b7915953`) under the
+Apache License 2.0 ([license](thirdparty/flatbuffers/LICENSE)). The generated
+headers in `libs/rigExecBinary/generated` are `flatc` output from RigExec
+schemas. FlatBuffers is not relicensed under MIT, and its license accompanies
+source and binary distributions that contain it, including builds that
+compile it in.
+
 The native noodles dependency is pinned at
 `ff5d473f10e8c37ceaf0da11ea7cb80805bc8314`. Its copied GLSL shaders retain
 Meta's [MIT license](plugin/usdNoodles/NOODLES_LICENSE.txt). The Poppins

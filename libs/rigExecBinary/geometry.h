@@ -14,13 +14,6 @@
 
 namespace rigExec {
 
-/// A resolved read phase: the kind plus the prim AtPrim names (0 else).
-struct RigExecWireReadPhase {
-    /// Base/Preceding/Final/AtPrim, in RigExecReadPhaseKind order.
-    uint8_t kind = 0;
-    uint32_t prim = 0;
-};
-
 struct RigExecWireBlendSampleBinding {
     uint32_t sample = 0;
     uint32_t points = 0;

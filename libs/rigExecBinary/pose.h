@@ -112,14 +112,6 @@ struct RigExecWirePoseInterpolator {
     std::vector<RigExecWireInput> valueInputs;
 };
 
-struct RigExecWireTwoBoneIkParams {
-    double upperLength = 1;
-    double lowerLength = 1;
-    double stretch = 1;
-    double softness = 0;
-    double preferredBendRadians = 0;
-};
-
 struct RigExecWireSplineIkRest {
     std::array<RigExecWireVec3d, 4> cvs{};
     RigExecWireFrame rootControl;
@@ -129,15 +121,6 @@ struct RigExecWireSplineIkRest {
     std::vector<double> segmentLengths;
     double restArcLength = 0;
     std::vector<double> volumeWeights;
-};
-
-struct RigExecWireSplineIkParams {
-    double preserveVolume = 1;
-    double midFollowWeight = 0.5;
-    double roll = 0;
-    double twist = 0;
-    double minLengthRatio = 0;
-    bool aimRootTangent = false;
 };
 
 /// One solver's epoch description. Per-frame scratch (outputs, fallback
@@ -329,21 +312,6 @@ struct RigExecWireWalkStep {
     int32_t index = 0;
     std::vector<int32_t> batchSolvers;
     std::vector<std::pair<int32_t, int32_t>> propagate;
-};
-
-struct RigExecWireConstraintSource {
-    RigExecWireFrame frame;
-    double normalizedWeight = 1;
-    RigExecWireVec3d translationOffset{};
-    RigExecWireVec3d rotationOffsetDegrees{};
-};
-
-/// One slot above a native Xformable source, and the versions live where
-/// the commit runs.
-struct RigExecWireAncestorRead {
-    int32_t slot = -1;
-    uint32_t fin = 0;
-    uint32_t base = 0;
 };
 
 /// One commit's epoch decisions: merge shape, propagation pairs, and every

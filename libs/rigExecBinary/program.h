@@ -12,6 +12,8 @@
 #ifndef RIGEXEC_BINARY_PROGRAM_H
 #define RIGEXEC_BINARY_PROGRAM_H
 
+#include "rigExecBinary/wireTypes.h"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -58,19 +60,7 @@ private:
     size_t _at = 0;
 };
 
-// Wire math (mirrors GfVec3d/GfVec3f/GfMatrix4d/RigExecPointFrame fieldwise).
-
-using RigExecWireVec3d = std::array<double, 3>;
-using RigExecWireVec3f = std::array<float, 3>;
-using RigExecWireVec2f = std::array<float, 2>;
-using RigExecWireVec3i = std::array<int32_t, 3>;
-/// Row-major, m[r][c] at [r * 4 + c].
-using RigExecWireMatrix4d = std::array<double, 16>;
-
-struct RigExecWireFrame {
-    std::array<RigExecWireVec3d, 4> points{};
-    uint32_t flags = 0;
-};
+// Wire math codecs (the types are in rigExecBinary/wireTypes.h).
 
 void RigExecWirePutVec3d(std::vector<uint8_t> *out,
                          const RigExecWireVec3d &value);

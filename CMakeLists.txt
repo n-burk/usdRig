@@ -188,6 +188,15 @@ target_link_libraries(rigExecImaging PUBLIC
 target_link_libraries(rigExecImaging PRIVATE rigExecRuntime)
 target_compile_definitions(rigExecImaging PRIVATE RIGEXEC_IMAGING_EXPORTS)
 
+# The vendored FlatBuffers C++ runtime headers (Apache-2.0, unmodified; see
+# thirdparty/flatbuffers/README.md). The generated headers under
+# libs/rigExecBinary/generated static_assert this exact version.
+add_library(rigExecFlatBuffers INTERFACE)
+target_include_directories(rigExecFlatBuffers INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/flatbuffers/include>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+add_library(rigExec::rigExecFlatBuffers ALIAS rigExecFlatBuffers)
+
 add_library(rigExecBinary STATIC
     libs/rigExecBinary/container.cpp
     libs/rigExecBinary/program.cpp
@@ -196,10 +205,12 @@ add_library(rigExecBinary STATIC
     libs/rigExecBinary/inputTable.cpp
     libs/rigExecBinary/propertyChains.cpp
     libs/rigExecBinary/external.cpp
-    libs/rigExecBinary/computed.cpp)
+    libs/rigExecBinary/computed.cpp
+    libs/rigExecBinary/format.cpp)
 target_include_directories(rigExecBinary PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecBinary PUBLIC rigExecFlatBuffers)
 set_target_properties(rigExecBinary PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(rigExecRuntime STATIC
@@ -226,10 +237,14 @@ set_target_properties(rigExecRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Installed names, so a mover plugin's tests can export and replay its rigs
 # the same way inside this build and against an installed SDK.
 add_library(rigExec::rigExecRuntime ALIAS rigExecRuntime)
+# -ffp-contract=off repeats the global option so the runtime's own flags
+# name everything its bitwise operation order needs; other builds of these
+# sources (the Godot extension) copy this list.
 if (MSVC)
     target_compile_options(rigExecRuntime PRIVATE /fp:precise)
 else ()
-    target_compile_options(rigExecRuntime PRIVATE -fno-fast-math)
+    target_compile_options(rigExecRuntime PRIVATE -fno-fast-math
+        -ffp-contract=off)
 endif ()
 
 # rigExecBake: .rigexec baking from a compiled evaluator (M1).
@@ -601,6 +616,12 @@ target_compile_definitions(testRigExecRuntimeGeometry PRIVATE
     RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME testRigExecRuntimeGeometry COMMAND testRigExecRuntimeGeometry
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# The single-FlatBuffer format on hand-built files: bit exactness, the
+# refusals before and in verification, determinism, validation rules.
+add_executable(testRigExecFormat tests/testRigExecFormat.cpp)
+target_link_libraries(testRigExecFormat PRIVATE rigExecBinary)
+add_test(NAME testRigExecFormat COMMAND testRigExecFormat)
 
 add_executable(testRigExecBinary tests/testRigExecBinary.cpp)
 target_link_libraries(testRigExecBinary PRIVATE rigExecBake)
@@ -1561,7 +1582,7 @@ endforeach()
 # Install
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime
+install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecFlatBuffers rigExecBinary rigExecBake rigExecRuntime
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
@@ -1576,6 +1597,10 @@ foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging
             PATTERN "__pycache__" EXCLUDE
             PATTERN "*.h")
 endforeach()
+# The FlatBuffers runtime headers the generated rigExecBinary headers
+# include; their license installs with the others below.
+install(DIRECTORY thirdparty/flatbuffers/include/flatbuffers
+    DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}")
 
 set(_rigexec_schema_resources
     "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -1686,3 +1711,5 @@ install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md
     DESTINATION "share/rigExec")
 install(FILES plugin/usdNoodles/LICENSE.txt
     DESTINATION "share/rigExec/licenses" RENAME OpenUSD-LICENSE.txt)
+install(FILES thirdparty/flatbuffers/LICENSE
+    DESTINATION "share/rigExec/licenses" RENAME FlatBuffers-LICENSE.txt)
