@@ -904,6 +904,8 @@ RigExecPartialSlots::Capture(const RigExecBakedProgramImpl &program)
     aggregates = program.aggregates;
     deltaValues = program.deltaValues;
     deltaPresent = program.deltaPresent;
+    frameMatrix = program.frameMatrix;
+    frameMatrixValid = program.frameMatrixValid;
     volumePlacementKeys = program.volumePlacementKeys;
     // Volume slots only, in slot order: the table is provider-sized and
     // almost every slot of a large rig is not a volume.
@@ -930,6 +932,8 @@ RigExecPartialSlots::Capture(const RigExecBakedProgramImpl &program)
         commits[c].outcome = program.commits[c].outcome;
         commits[c].sources = program.commits[c].sources;
         commits[c].abandoned = program.commits[c].abandoned;
+        commits[c].recordAfter = program.commits[c].recordAfter;
+        commits[c].recordEveryTarget = program.commits[c].recordEveryTarget;
     }
     steps.resize(program.steps.size());
     for (size_t k = 0; k < program.steps.size(); ++k) {
@@ -949,6 +953,8 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
     if (solvers.size() != B.solvers.size() ||
         commits.size() != B.commits.size() ||
         steps.size() != B.steps.size() ||
+        frameMatrix.size() != B.frameRecords.size() ||
+        frameMatrixValid.size() != B.frameRecords.size() ||
         B.volumePlacement.size() < B.noScaleAvars.size()) {
         return false;
     }
@@ -969,6 +975,8 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
     B.aggregates = aggregates;
     B.deltaValues = deltaValues;
     B.deltaPresent = deltaPresent;
+    B.frameMatrix = frameMatrix;
+    B.frameMatrixValid = frameMatrixValid;
     B.volumePlacementKeys = volumePlacementKeys;
     for (size_t i = 0, v = 0; i < B.noScaleAvars.size(); ++i) {
         if (B.noScaleAvars[i]) {
@@ -989,6 +997,8 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
         B.commits[c].outcome = commits[c].outcome;
         B.commits[c].sources = commits[c].sources;
         B.commits[c].abandoned = commits[c].abandoned;
+        B.commits[c].recordAfter = commits[c].recordAfter;
+        B.commits[c].recordEveryTarget = commits[c].recordEveryTarget;
     }
     for (size_t k = 0; k < B.steps.size(); ++k) {
         B.steps[k].diagnostics = steps[k].diagnostics;
@@ -1018,6 +1028,8 @@ RigExecPartialSlots::Bytes() const
     total += deltaValues.size() * sizeof(GfMatrix4d);
     total += deltaPresent.size() * sizeof(char);
     total += volumePlacement.size() * sizeof(GfMatrix4d);
+    total += frameMatrix.size() * sizeof(GfMatrix4d);
+    total += frameMatrixValid.size() * sizeof(char);
     for (const SolverSlots &solver : solvers) {
         total += solver.outFrames.size() * sizeof(RigExecPointFrame);
         total += solver.outPresent.size() * sizeof(char);

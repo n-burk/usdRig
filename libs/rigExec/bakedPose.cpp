@@ -1279,6 +1279,140 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     B.base.resize(baseNext);
 }
 
+/// Builds `frameRecords` and every AtPrim reader's lists of them, before any
+/// commit step exists: records are named by (provider, constraint) and need
+/// no version. A record is a target a constraint's exit records
+/// (`snapshotTargets`, the compile's named pairs), kept only when some
+/// reader's list holds it. A list is RigExecChainSnapshots::Lookup's AtPrim
+/// rule stated statically: the provider's records whose constraint is the
+/// phase's prim or under it, newest first in walk order.
+void
+EnumerateFrameRecords(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    std::vector<RigExecBakedFrameRecord> all;
+    for (size_t w = 0; w < B.walkSteps.size(); ++w) {
+        const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
+        if (walk.solverBatch) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::Constraint &constraint =
+            B.constraints[size_t(walk.index)];
+        if (!constraint.snapshotAfter) {
+            continue;
+        }
+        for (size_t k = 0; k < constraint.targetSlots.size(); ++k) {
+            if (k < constraint.snapshotTargets.size() &&
+                constraint.snapshotTargets[k] &&
+                constraint.targetSlots[k] >= 0) {
+                RigExecBakedFrameRecord record;
+                record.slot = constraint.targetSlots[k];
+                record.commit = int(w);
+                record.target = int(k);
+                record.mover = constraint.path;
+                all.push_back(std::move(record));
+            }
+        }
+    }
+    std::vector<char> used(all.size(), 0);
+    const auto listFor = [&all, &used](int slot, const SdfPath &prim,
+                                       std::vector<int> *out) {
+        out->clear();
+        if (slot < 0) {
+            return;
+        }
+        for (size_t r = all.size(); r-- > 0;) {
+            if (all[r].slot == slot &&
+                (all[r].mover == prim || all[r].mover.HasPrefix(prim))) {
+                out->push_back(int(r));
+                used[r] = 1;
+            }
+        }
+    };
+    const auto bindReader =
+        [&listFor](RigExecBakedProgramImpl::GeomRevision *revision) {
+        revision->transformRecords.clear();
+        revision->influenceRecords.clear();
+        const RigExecReadPhase &phase = revision->binding.transformPhase;
+        if (phase.kind != RigExecReadPhaseKind::AtPrim) {
+            return;
+        }
+        listFor(revision->transformSlot, phase.prim,
+                &revision->transformRecords);
+        // The fold substitutes an influence entry only where the binding
+        // names one, as the walk's fold does.
+        revision->influenceRecords.resize(revision->influenceSlots.size());
+        for (size_t k = 0; k < revision->influenceSlots.size() &&
+                           k < revision->binding.influences.size();
+             ++k) {
+            listFor(revision->influenceSlots[k], phase.prim,
+                    &revision->influenceRecords[k]);
+        }
+    };
+    for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            bindReader(&revision);
+        }
+        for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            bindReader(&derived.revision);
+        }
+    }
+    std::vector<int> renumbered(all.size(), -1);
+    B.frameRecords.clear();
+    for (size_t r = 0; r < all.size(); ++r) {
+        if (used[r]) {
+            renumbered[r] = int(B.frameRecords.size());
+            B.frameRecords.push_back(std::move(all[r]));
+        }
+    }
+    const auto renumber = [&renumbered](std::vector<int> *records) {
+        for (int &record : *records) {
+            record = renumbered[size_t(record)];
+        }
+    };
+    for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            renumber(&revision.transformRecords);
+            for (std::vector<int> &records : revision.influenceRecords) {
+                renumber(&records);
+            }
+        }
+        for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            renumber(&derived.revision.transformRecords);
+            for (std::vector<int> &records :
+                     derived.revision.influenceRecords) {
+                renumber(&records);
+            }
+        }
+    }
+    B.frameMatrix.assign(B.frameRecords.size(), GfMatrix4d(1.0));
+    B.frameMatrixValid.assign(B.frameRecords.size(), 0);
+}
+
+/// Binds each record to the `fin` entry its constraint left the provider
+/// in, once BindPoseVersions has handed the entries out: the commit's own
+/// version of the slot where it declares one -- whether it revised it or
+/// carried the one it found -- else the version it read, which is where a
+/// geometry-domain constraint leaves its target.
+void
+BindFrameRecordVersions(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (RigExecBakedFrameRecord &record : B.frameRecords) {
+        const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
+        const auto found = std::lower_bound(commit.slots.begin(),
+                                            commit.slots.end(), record.slot);
+        record.version =
+            found != commit.slots.end() && *found == record.slot
+                ? commit.slotWrites[size_t(found - commit.slots.begin())]
+                : commit.targetReads[size_t(record.target)];
+    }
+}
+
 /// A commit split into delta / staging / apply once its descendant list is
 /// this long. Below it the three phases run as one step: the split buys
 /// parallelism inside one propagation and costs two more steps, which is a
@@ -1701,6 +1835,29 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     }
 
     B.commits.resize(B.walkSteps.size());
+    EnumerateFrameRecords(&B);
+    // One FrameMatrix step per record, right after its commit's last step.
+    // It reads the provider's frame -- an edge from the latest writer of the
+    // slot so far, which is this commit or the producer of the version it
+    // read -- and the commit's exit flags, which its first step writes
+    // (CommitTable).
+    size_t nextRecord = 0;
+    const auto addFrameRecordSteps = [&B, &nextRecord](size_t w) {
+        for (; nextRecord < B.frameRecords.size() &&
+               size_t(B.frameRecords[nextRecord].commit) == w;
+             ++nextRecord) {
+            const RigExecBakedFrameRecord &record =
+                B.frameRecords[nextRecord];
+            RigExecBakedStep &step = AddStep(
+                &B, RigExecBakedStepKind::FrameMatrix, int(nextRecord));
+            step.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, record.slot));
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::CommitTable, record.commit));
+            step.writes.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::FrameMatrix, int(nextRecord)));
+        }
+    };
     std::set<size_t> levels;
     // Where the next split commit's staging pairs start. The scratch behind
     // them is per commit, but the SLOT IDS are handed out once for the whole
@@ -2024,6 +2181,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                     RigExecBakedSlotDomain::Snapshots,
                     int(B.steps.size()) - 1));
             }
+            addFrameRecordSteps(w);
             continue;
         }
         {
@@ -2079,11 +2237,13 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                                     int(B.steps.size()) - 1));
             }
         }
+        addFrameRecordSteps(w);
     }
     B.solverOverrideRounds = levels.size();
     // Before the matrices, which read the LAST version of a slot: the table
     // that says which entry that is comes out of this sweep.
     BindPoseVersions(&B);
+    BindFrameRecordVersions(&B);
 
     // The dynamic path answers these from a second exec request, whose
     // per-provider override is the FINAL frame rather than the mid-walk one
@@ -2754,7 +2914,9 @@ StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
 /// matrix as it stood immediately AFTER one constraint. Mirrors the dynamic
 /// walk's recordFrame, including which frames it declines to record; the
 /// Snapshot membership it tests per call was decided at bake, so a rig
-/// that declares no phase pays one branch per constraint.
+/// that declares no phase pays one branch per constraint. No step reads
+/// these records: the fold reads the FrameMatrix steps' (same gates,
+/// RigExecBakedEvalFrameRecord), and tests hold the two to each other.
 void
 RecordFrame(const RigExecBakedProgramImpl &B,
             const RigExecBakedProgramImpl::Constraint &constraint,
@@ -3175,6 +3337,29 @@ _ReadFrameVersion(
 }
 
 }  // namespace
+
+bool
+RigExecBakedEvalFrameRecord(const RigExecBakedProgramImpl &B,
+                            const RigExecBakedFrameRecord &record,
+                            GfMatrix4d *matrix)
+{
+    *matrix = GfMatrix4d(1.0);
+    // The exit gates the walk's recordFrame calls sit behind: set by the
+    // commit's constraint step on every run, per exit.
+    const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
+    if (!commit.recordAfter ||
+        (record.target > 0 && !commit.recordEveryTarget)) {
+        return false;
+    }
+    const RigExecPointFrame &frame = B.fin[size_t(record.version)];
+    if (!frame.IsValid()) {
+        return false;
+    }
+    const RigExecPointFrame &rest = B.restFrames[size_t(record.slot)];
+    const std::array<GfVec3d, 4> landmarks =
+        rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
+    return RigExecPointsToMatrix(landmarks, frame.points, matrix);
+}
 
 void
 RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
@@ -4314,6 +4499,18 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             B.baseMatrix[slot] = matrix;
         }
+        return;
+    }
+
+    case RigExecBakedStepKind::FrameMatrix: {
+        // Both fields every run, so a reader never sees a valid byte from
+        // another run beside this run's matrix.
+        const size_t record = size_t(step->object);
+        GfMatrix4d matrix(1.0);
+        const bool valid =
+            RigExecBakedEvalFrameRecord(B, B.frameRecords[record], &matrix);
+        B.frameMatrix[record] = matrix;
+        B.frameMatrixValid[record] = valid ? 1 : 0;
         return;
     }
 

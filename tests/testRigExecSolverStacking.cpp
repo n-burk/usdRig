@@ -21,6 +21,7 @@
 // is a layer opinion, and authoring it the way a rigger does is the only way
 // the test exercises what a rigger would hit.
 // argv[1] = path to the examples directory (for the schema plugin).
+#include "rigExecFrameRecordCheck.h"
 #include "rigExecOpTrace.h"
 #include "rigExecPoseCompare.h"
 
@@ -1612,6 +1613,60 @@ TestReadPhasesOverTheUnifiedStack()
     CHECK(!Near(GfVec3d(fedMovers), GfVec3d(fedFinal), 1e-4));
 }
 
+/// The AtPrim(Movers) probe held to the run's phased-read store, baked, in
+/// both rig orders. Movers holds the constraint, while the IK writing the
+/// same knee sits in Solvers, so the probe's list is KneeMove's record alone
+/// whether the record lands after the IK's write or before it.
+void
+TestAtPrimMoversRecordsMatchTheStore()
+{
+    for (const bool solversLast : {true, false}) {
+        const std::string what = solversLast
+                                     ? "AtPrim(Movers) records, solvers last"
+                                     : "AtPrim(Movers) records, movers first";
+        RigSpec spec = Stacked();
+        spec.fk = false;
+        spec.kneeMove = true;
+        spec.probePhase = "/Asset/Rig/Movers";
+        if (solversLast) spec.rigOrder = SolversLast();
+        const UsdStageRefPtr stage = MakeStage(spec);
+        CHECK(stage);
+        if (!stage) return;
+        RigExecRigEvaluator evaluator(stage, kRigPath);
+        evaluator.SetEvaluationMode(
+            RigExecEvaluationMode::BakedWithParityCheck);
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        std::vector<std::string> reasons;
+        CHECK(evaluator.IsBakeable(&reasons));
+        for (const std::string &reason : reasons) {
+            std::printf("    %s: %s\n", what.c_str(), reason.c_str());
+        }
+        for (const double frame : {1.0, 5.0}) {
+            const std::string where =
+                what + " frame " + std::to_string(int(frame));
+            const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(frame));
+            CHECK(pose.valid);
+            CHECK(pose.bakedParityMismatches == 0);
+            CHECK(rigExecTest::CheckFrameRecords(&failures, where,
+                                                 evaluator) == 1);
+        }
+        CHECK(evaluator.GetBakedGenerationCount() == 2);
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) continue;
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+        const RigExecBakedProgramImpl::GeomRevision *probe =
+            rigExecTest::FindRevision(B,
+                                      SdfPath("/Asset/Rig/Movers/KneeProbe"));
+        CHECK(probe != nullptr);
+        if (probe) {
+            CHECK(rigExecTest::RecordMovers(B, probe->transformRecords) ==
+                  std::vector<SdfPath>{SdfPath("/Asset/Rig/Movers/KneeMove")});
+        }
+    }
+}
+
 /// A PRODUCER carries no stack position, and the classic blend still works.
 ///
 /// FK and IK are defined ABOVE the blend that reads their aggregates, so the
@@ -2677,6 +2732,7 @@ main(int argc, char **argv)
     TestConstraintAboveASolverRevisesIt();
     TestFkChainComposesOverTheIncomingFrame();
     TestReadPhasesOverTheUnifiedStack();
+    TestAtPrimMoversRecordsMatchTheStore();
     TestProducersCarryNoStackPosition();
     TestAggregateContradictionIsRejected();
     TestAggregateReadIsHistoryIndependent();

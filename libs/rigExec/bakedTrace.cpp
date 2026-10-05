@@ -23,6 +23,7 @@ RigExecBakedStepDomainName(RigExecBakedStepKind kind)
     case RigExecBakedStepKind::ProviderMatrix:
     case RigExecBakedStepKind::SnapshotFinals:
     case RigExecBakedStepKind::PoseInterpolator:
+    case RigExecBakedStepKind::FrameMatrix:
         return "pose";
     case RigExecBakedStepKind::VolumePlacements:
     case RigExecBakedStepKind::WeightPacket:

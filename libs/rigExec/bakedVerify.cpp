@@ -535,6 +535,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     deltaValues = program.deltaValues;
     deltaPresent = program.deltaPresent;
     volumePlacement = program.volumePlacement;
+    frameMatrix = program.frameMatrix;
+    frameMatrixValid = program.frameMatrixValid;
     avarsDisturbed = program.avarsDisturbed;
 
     solvers.resize(program.solvers.size());
@@ -553,6 +555,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
         commits[c].outcome = program.commits[c].outcome;
         commits[c].sources = program.commits[c].sources;
         commits[c].abandoned = program.commits[c].abandoned;
+        commits[c].recordAfter = program.commits[c].recordAfter;
+        commits[c].recordEveryTarget = program.commits[c].recordEveryTarget;
     }
     chains.resize(program.chains.size());
     for (size_t c = 0; c < program.chains.size(); ++c) {
@@ -605,6 +609,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.deltaValues = deltaValues;
     B.deltaPresent = deltaPresent;
     B.volumePlacement = volumePlacement;
+    B.frameMatrix = frameMatrix;
+    B.frameMatrixValid = frameMatrixValid;
     B.avarsDisturbed = avarsDisturbed;
     // Run-local by construction: the prologue empties it, so a second run
     // over one frame has to start with it empty too or every record lands in
@@ -625,6 +631,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
         B.commits[c].outcome = commits[c].outcome;
         B.commits[c].sources = commits[c].sources;
         B.commits[c].abandoned = commits[c].abandoned;
+        B.commits[c].recordAfter = commits[c].recordAfter;
+        B.commits[c].recordEveryTarget = commits[c].recordEveryTarget;
     }
     for (size_t c = 0; c < B.chains.size() && c < chains.size(); ++c) {
         RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
@@ -698,6 +706,12 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     // placement from the last run.
     CompareVector(differences, &count, "volumePlacement", volumePlacement,
                   program.volumePlacement);
+    // What an AtPrim transform phase reads: a cone that skipped a
+    // FrameMatrix step kept the record it would write again.
+    CompareVector(differences, &count, "frameMatrix", frameMatrix,
+                  program.frameMatrix);
+    CompareVector(differences, &count, "frameMatrixValid", frameMatrixValid,
+                  program.frameMatrixValid);
     for (size_t s = 0; s < program.solvers.size() && s < solvers.size(); ++s) {
         const std::string where =
             "solver " + program.solvers[s].path.GetString();
@@ -757,6 +771,11 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                       commits[c].sources, program.commits[c].sources);
         CompareValue(differences, &count, where + " abandoned",
                      commits[c].abandoned, program.commits[c].abandoned);
+        CompareValue(differences, &count, where + " recordAfter",
+                     commits[c].recordAfter, program.commits[c].recordAfter);
+        CompareValue(differences, &count, where + " recordEveryTarget",
+                     commits[c].recordEveryTarget,
+                     program.commits[c].recordEveryTarget);
     }
     for (size_t c = 0; c < program.chains.size() && c < chains.size(); ++c) {
         const RigExecBakedProgramImpl::GeomChain &chain = program.chains[c];

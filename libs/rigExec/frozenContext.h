@@ -911,6 +911,7 @@ struct RigExecPartialSlots {
         std::vector<uint8_t> outcome;
         std::vector<RigExecConstraintSource> sources;
         bool abandoned = true;
+        bool recordAfter = true, recordEveryTarget = true;
     };
     std::vector<CommitSlots> commits;
     struct StepSlots {
@@ -921,6 +922,10 @@ struct RigExecPartialSlots {
     std::vector<StepSlots> steps;
     /// The program's volumePlacement at its volume slots, in slot order.
     std::vector<GfMatrix4d> volumePlacement;
+    /// What each FrameMatrix step left: an AtPrim reader whose record the
+    /// re-run skips reads it.
+    std::vector<GfMatrix4d> frameMatrix;
+    std::vector<char> frameMatrixValid;
     RigExecVolumePlacementKeys volumePlacementKeys =
         RigExecVolumePlacementKeys::None;
     void Capture(const RigExecBakedProgramImpl &program);

@@ -673,11 +673,11 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     }
 
     // A read phase that names a SOLVER checkpoint -- the joint as one writer
-    // of its stack left it -- has no baked equivalent: the phased-read store
-    // is written by RecordFrame, which is per CONSTRAINT and keys off
-    // constraint.snapshotAfter / snapshotTargets. A solver-named phase would
-    // silently find no record and read a different value, which is exactly
-    // the divergence this program refuses to have.
+    // of its stack left it -- has no baked equivalent: the frame records an
+    // AtPrim phase reads (RigExecBakedFrameRecord) are per CONSTRAINT and
+    // key off constraint.snapshotAfter / snapshotTargets. A solver-named
+    // phase would silently find no record and read a different value, which
+    // is exactly the divergence this program refuses to have.
     // "Is an aggregate solver" is _solverDependencies membership: every
     // discovered solver is seeded as a key there and every value is also a
     // key, so the map's key set IS the solver set. (The evaluator's own

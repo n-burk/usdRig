@@ -509,6 +509,13 @@ rigexec_add_example_parity_test(NAME volume_placements
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/volume_placements.usda"
     FRAMES 1,5,10 GUIDES)
 
+# AtPrim read phases on rigExec:transform, read through frame records. No
+# verify_binary entry: the .rigexec runtime does not read FrameMatrix steps
+# yet.
+rigexec_add_example_parity_test(NAME frame_record_fallbacks
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/frame_record_fallbacks.usda"
+    FRAMES 1,4,8 GUIDES)
+
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.h.in"
                "${CMAKE_CURRENT_BINARY_DIR}/tests/rigExecExampleFixtures.h"
                @ONLY)
@@ -1022,7 +1029,12 @@ foreach(_entry testRigExecVolumeWeightsBakedParity
 endforeach()
 
 # Phased point reads bound to chain versions, held to the run's store as the
-# reader sees it (captured in the serial schedule) and to the dynamic walk.
+# reader sees it (captured in the serial schedule) and to the dynamic walk,
+# and AtPrim transform phases read through frame records
+# (tests/fixtures/frame_record_fallbacks.usda at frames 1, 4 and 8 and under
+# a drag), held to the store and to the dynamic walk. CONE_VERIFY re-runs the
+# cases under the cone verifier in both schedules; a rig with phased reads
+# still runs whole, so no step is skipped there yet.
 add_executable(testRigExecPhaseBindings tests/testRigExecPhaseBindings.cpp)
 target_link_libraries(testRigExecPhaseBindings PRIVATE rigExec)
 target_compile_definitions(testRigExecPhaseBindings PRIVATE ${_rigexec_schema_resource_define})

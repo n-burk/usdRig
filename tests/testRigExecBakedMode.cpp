@@ -8,6 +8,7 @@
 // argv[1] = path to the examples directory (containing biped/Biped.usda).
 // The codeless schema plugin is expected at
 // <examples>/../plugin/rigExecSchema/resources.
+#include "rigExecFrameRecordCheck.h"
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -2342,6 +2343,42 @@ TestAReadPhaseOnTheTransformIsExact()
     CHECK(atPrim != base);
 }
 
+// The same AtPrim read held to the run's phased-read store: Slide's list is
+// A's record alone, and it answers exactly what the store does at the end of
+// every run.
+static void
+TestAPoseWalkReadPhaseMatchesTheStore()
+{
+    const SdfPath rigPath("/Asset/Rig");
+    RigExecRigEvaluator rig(MakeAPoseWalkReadPhaseRig("atPrim"), rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    for (double frame = 1; frame <= 4; ++frame) {
+        const std::string where =
+            "pose-walk records frame " + std::to_string(int(frame));
+        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid);
+        CHECK(pose.bakedParityMismatches == 0);
+        CHECK(rigExecTest::CheckFrameRecords(&failures, where, rig) == 1);
+    }
+    CHECK(rig.GetBakedGenerationCount() == 4);
+    const RigExecBakedProgram *program = rig.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const RigExecBakedProgramImpl::GeomRevision *slide =
+        rigExecTest::FindRevision(B,
+                                  SdfPath("/Asset/Rig/Movers/Geometry/Slide"));
+    CHECK(slide != nullptr);
+    if (slide) {
+        CHECK(rigExecTest::RecordMovers(B, slide->transformRecords) ==
+              std::vector<SdfPath>{SdfPath("/Asset/Rig/Movers/Constrain/A")});
+    }
+}
+
 static void
 TestEveryExampleStage(const std::string &examplesDir)
 {
@@ -3072,6 +3109,7 @@ main(int argc, char **argv)
     // A read phase naming a point in the pose walk, which no shipped rig
     // authors and no other suite builds.
     TestAReadPhaseOnTheTransformIsExact();
+    TestAPoseWalkReadPhaseMatchesTheStore();
     // The mirrored-limb rotation sign, in the compose and in the program.
     TestRotationSignNegatesTheAvar();
     TestRotationSignBakesExactly();

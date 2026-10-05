@@ -4495,6 +4495,65 @@ TestProjectorSpacesMatchDynamic(const std::string &examplesDir)
     }
 }
 
+// tests/fixtures/frame_record_fallbacks.usda, frozen: AtPrim read phases on
+// rigExec:transform resolve through the worker's own FrameMatrix records. A
+// warming job at frames 4 (C2 disabled, so its record is X as C1 left it)
+// and 8 matches live baked and the dynamic walk bit for bit, and the frozen
+// program carries the live one's records.
+void
+TestFrameRecordFallbacksFreeze(const std::string &examplesDir)
+{
+    const char *label = "frame record fallbacks";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/frame_record_fallbacks.usda";
+    const SdfPath rig("/RecordAsset/Rig");
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::vector<std::string> errors;
+    std::string error;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(walk.Evaluate(UsdTimeCode(1.0)).valid);
+
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {4.0, 8.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", label,
+                        error.c_str());
+            ++failures;
+            return;
+        }
+        CHECK(frozen->program.frameRecords.size() == 3);
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == before + 1);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid);
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        CheckPosesBitIdentical((where + " warmed").c_str(), dynamic, warmed);
+        CheckPosesBitIdentical((where + " baked").c_str(), dynamic, live);
+    }
+}
+
 // tests/fixtures/volume_placements.usda, frozen. As shipped, StripSmooth's
 // field is current-phase (SphereA reads its weightTarget at `preceding`),
 // which the freeze refuses by name. With SphereA's read phase set to `base`
@@ -4655,6 +4714,7 @@ main(int argc, char **argv)
         TestUnresolvableTargetDeclinesSampling(argv[1]);
         TestProjectorSpacesMatchDynamic(argv[1]);
         TestVolumePlacementsFixtureFreezes(argv[1]);
+        TestFrameRecordFallbacksFreeze(argv[1]);
     } else {
         std::printf("skipping the biped (no examples directory given)\n");
     }

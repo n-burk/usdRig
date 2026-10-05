@@ -65,6 +65,7 @@ RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain)
     case RigExecBakedSlotDomain::WeightFrames: return "WeightFrames";
     case RigExecBakedSlotDomain::PoseWeight: return "PoseWeight";
     case RigExecBakedSlotDomain::Snapshots: return "Snapshots";
+    case RigExecBakedSlotDomain::FrameMatrix: return "FrameMatrix";
     }
     return "unknown";
 }
@@ -91,6 +92,7 @@ RigExecBakedStepKindName(RigExecBakedStepKind kind)
     case RigExecBakedStepKind::RevisionFuse: return "RevisionFuse";
     case RigExecBakedStepKind::ChainStatus: return "ChainStatus";
     case RigExecBakedStepKind::Derived: return "Derived";
+    case RigExecBakedStepKind::FrameMatrix: return "FrameMatrix";
     }
     return "unknown";
 }
@@ -140,6 +142,7 @@ RigExecBakedScheduleReportRequested()
 //                    of the propagation
 //   CommitApply      candidate slots + propagation pairs
 //   ProviderMatrix   one matrix; the whole step is its fixed term
+//   FrameMatrix      one matrix, like ProviderMatrix
 //   SnapshotFinals   provider slots
 //   InfluenceFold    influences -- NOT vertices; the fold is O(joints)
 //   RevisionStatic   the target's vertices (ResolveAll of the envelope)
@@ -176,7 +179,7 @@ struct StepCostConstants {
 };
 
 constexpr size_t kStepKindCount =
-    size_t(RigExecBakedStepKind::Derived) + 1;
+    size_t(RigExecBakedStepKind::FrameMatrix) + 1;
 
 // Indexed by RigExecBakedStepKind, in the enum's order. Deliberately a
 // deduced-extent array with the assertion below it: a std::array with a
@@ -201,6 +204,7 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0000, 0.594000},   // RevisionFuse      1
     {0.0000, 0.000336},   // ChainStatus       1 -- see below
     {0.0000, 0.003744},   // Derived           1
+    {0.0000, 0.051952},   // FrameMatrix       unfitted -- ProviderMatrix's row
 };
 static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
               "rigExec: every baked step kind needs a cost row");
@@ -419,6 +423,7 @@ StepSize(const RigExecBakedProgramImpl &B, LazyGeometrySizes &geometry,
     case RigExecBakedStepKind::PropagateChunk:
         return WrittenSlots(step, RigExecBakedSlotDomain::CommitStaging);
     case RigExecBakedStepKind::ProviderMatrix:
+    case RigExecBakedStepKind::FrameMatrix:
     case RigExecBakedStepKind::RevisionFuse:
         return 1;
     case RigExecBakedStepKind::SnapshotFinals:
@@ -1171,6 +1176,7 @@ ValidatePoseVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
     std::vector<int> commitFirst(B.commits.size(), -1),
         commitLast(B.commits.size(), -1);
     std::vector<int> solveStep(B.solvers.size(), -1);
+    std::vector<int> frameRecordStep(B.frameRecords.size(), -1);
     const auto record = [&](RigExecBakedSlotDomain domain, uint32_t entry,
                             int step, int slot) {
         std::vector<int> &writer = domain == kFin ? finWriter : baseWriter;
@@ -1193,6 +1199,23 @@ ValidatePoseVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
     };
     for (int index = 0; index < int(B.steps.size()); ++index) {
         const RigExecBakedStep &step = B.steps[size_t(index)];
+        // A FrameMatrix step indexes the record table with no "no object"
+        // value, so a negative object is out of range like a too-large one.
+        if (step.kind == RigExecBakedStepKind::FrameMatrix) {
+            if (step.object < 0 ||
+                size_t(step.object) >= B.frameRecords.size()) {
+                out->Add(NameStep(B, index) + " names frame record " +
+                         std::to_string(step.object) + " of " +
+                         std::to_string(B.frameRecords.size()));
+            } else if (frameRecordStep[size_t(step.object)] >= 0) {
+                out->Add(NameStep(B, index) +
+                         " evaluates the same frame record as " +
+                         NameStep(B, frameRecordStep[size_t(step.object)]));
+            } else {
+                frameRecordStep[size_t(step.object)] = index;
+            }
+            continue;
+        }
         if (step.object < 0) {
             continue;
         }
@@ -1335,11 +1358,53 @@ ValidatePoseVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
             }
         }
     }
+    // A frame record reads the version its constraint left the provider in,
+    // which is usually not the slot's last, and its constraint's exit flags,
+    // which the commit's first step writes.
+    for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+        const RigExecBakedFrameRecord &frameRecord = B.frameRecords[r];
+        const int reader = frameRecordStep[r];
+        if (reader < 0) {
+            out->Add("frame record " + std::to_string(r) + " of " +
+                     (frameRecord.slot >= 0 && size_t(frameRecord.slot) < n
+                          ? B.paths[size_t(frameRecord.slot)].GetString()
+                          : std::string("slot ") +
+                                std::to_string(frameRecord.slot)) +
+                     " after " + frameRecord.mover.GetString() +
+                     " has no FrameMatrix step");
+            continue;
+        }
+        if (frameRecord.commit < 0 ||
+            size_t(frameRecord.commit) >= B.commits.size()) {
+            out->Add(NameStep(B, reader) + " names commit " +
+                     std::to_string(frameRecord.commit) + " of " +
+                     std::to_string(B.commits.size()));
+            continue;
+        }
+        check(kFin, frameRecord.version, reader, -1);
+        const int slot = frameRecord.version < finSlot.size()
+                             ? finSlot[frameRecord.version]
+                             : -1;
+        if (slot >= 0 && slot != frameRecord.slot) {
+            out->Add(NameStep(B, reader) + " is bound to PoseFin version " +
+                     std::to_string(frameRecord.version) + " of " +
+                     B.paths[size_t(slot)].GetString() +
+                     ", not of the provider it records");
+        }
+        const int head = commitFirst[size_t(frameRecord.commit)];
+        if (head < 0 || head >= reader) {
+            out->Add(NameStep(B, reader) + " reads the exit of commit " +
+                     std::to_string(frameRecord.commit) + ", which " +
+                     (head < 0 ? std::string("no step writes")
+                               : NameStep(B, head) + " writes at or after it"));
+        }
+    }
     // Every other pose reader reads the slot's last version.
     for (int index = 0; index < int(B.steps.size()); ++index) {
         const RigExecBakedStep &step = B.steps[size_t(index)];
         if (step.kind == RigExecBakedStepKind::ComposeSubtree ||
             step.kind == RigExecBakedStepKind::Solve ||
+            step.kind == RigExecBakedStepKind::FrameMatrix ||
             IsCommitStep(step.kind)) {
             continue;
         }
@@ -2977,6 +3042,21 @@ StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step,
                (step.part ? " final" : " base");
     case RigExecBakedStepKind::SnapshotFinals:
         return "every provider";
+    case RigExecBakedStepKind::FrameMatrix: {
+        // Range-checked: the validator names a step whose record is out of
+        // the table.
+        if (step.object < 0 ||
+            size_t(step.object) >= B.frameRecords.size()) {
+            return "record " + std::to_string(step.object);
+        }
+        const RigExecBakedFrameRecord &record =
+            B.frameRecords[size_t(step.object)];
+        const std::string provider =
+            record.slot >= 0 && size_t(record.slot) < B.paths.size()
+                ? text(B.paths[size_t(record.slot)])
+                : "slot " + std::to_string(record.slot);
+        return provider + " after " + text(record.mover);
+    }
     case RigExecBakedStepKind::PoseInterpolator:
         return text(B.poseInterpolators[size_t(step.object)].path);
     case RigExecBakedStepKind::VolumePlacements:

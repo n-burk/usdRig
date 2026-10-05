@@ -8,9 +8,13 @@
 // store's answer is captured beside the binding's, because the store at the
 // end of the run holds records the reader never saw. Each generation also
 // runs in BakedWithParityCheck, so the baked answer is held to the dynamic
-// walk's bit for bit.
+// walk's bit for bit. An AtPrim read phase on a transform resolves through
+// RigExecBakedFrameRecord lists the same way, held to the store at the end of
+// the run, where every pose record is already made.
 //
 // argv[1] = path to the examples directory.
+#include "rigExecFrameRecordCheck.h"
+
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
 #include "rigExec/rigEvaluator.h"
@@ -893,6 +897,449 @@ TestBlendSamplesBindToVersions()
     }
 }
 
+// AtPrim read phases on rigExec:transform, resolved through frame records
+// (tests/fixtures/frame_record_fallbacks.usda): three constraints revise one
+// joint, and five matrix movers read it at C1, at the Group holding C1 and
+// C2, at C2, at the Constrain scope and at `base`.
+
+const SdfPath kRecordRig("/RecordAsset/Rig");
+const SdfPath kRecordJoint("/RecordAsset/Rig/Joints/X");
+const SdfPath kRecordC1("/RecordAsset/Rig/Movers/Constrain/Group/C1");
+const SdfPath kRecordC2("/RecordAsset/Rig/Movers/Constrain/Group/C2");
+const SdfPath kRecordC3("/RecordAsset/Rig/Movers/Constrain/C3");
+const SdfPath kRecordDial("/RecordAsset/Rig/Controls/Dial");
+
+SdfPath
+RecordReader(const char *name)
+{
+    return SdfPath("/RecordAsset/Rig/Movers/Geometry").AppendChild(
+        TfToken(name));
+}
+
+SdfPath
+RecordPoints(const char *name)
+{
+    return SdfPath("/RecordAsset/Geom")
+        .AppendChild(TfToken(name))
+        .AppendProperty(TfToken("points"));
+}
+
+using rigExecTest::FindRevision;
+using rigExecTest::FirstValidRecord;
+using rigExecTest::RecordMovers;
+
+/// Holds every AtPrim transform reader of \p evaluator's program to the
+/// run's store at the end of the run. Returns the readers a record answered.
+size_t
+CheckFrameRecords(const std::string &where,
+                  const RigExecRigEvaluator &evaluator)
+{
+    return rigExecTest::CheckFrameRecords(&failures, where, evaluator);
+}
+
+/// The FrameMatrix step of each record: one, after every step of its
+/// commit, reading the provider and the commit's table; and \p reader's
+/// fold waits for each of its records.
+void
+CheckFrameRecordSteps(const std::string &where,
+                      const RigExecBakedProgramImpl &B, const SdfPath &reader)
+{
+    std::vector<int> stepOf(B.frameRecords.size(), -1);
+    std::vector<int> commitLast(B.commits.size(), -1);
+    for (size_t s = 0; s < B.steps.size(); ++s) {
+        const RigExecBakedStep &step = B.steps[s];
+        switch (step.kind) {
+        case RigExecBakedStepKind::SolverCommit:
+        case RigExecBakedStepKind::Constraint:
+        case RigExecBakedStepKind::CommitDelta:
+        case RigExecBakedStepKind::PropagateChunk:
+        case RigExecBakedStepKind::CommitApply:
+            commitLast[size_t(step.object)] = int(s);
+            break;
+        case RigExecBakedStepKind::FrameMatrix:
+            CHECK_AT(where, size_t(step.object) < stepOf.size());
+            if (size_t(step.object) < stepOf.size()) {
+                CHECK_AT(where, stepOf[size_t(step.object)] < 0);
+                stepOf[size_t(step.object)] = int(s);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+        const RigExecBakedFrameRecord &record = B.frameRecords[r];
+        const std::string at = where + " record after " +
+                               record.mover.GetString();
+        CHECK_AT(at, stepOf[r] >= 0);
+        if (stepOf[r] < 0) {
+            continue;
+        }
+        const RigExecBakedStep &step = B.steps[size_t(stepOf[r])];
+        CHECK_AT(at, stepOf[r] > commitLast[size_t(record.commit)]);
+        CHECK_AT(at, std::find(step.reads.begin(), step.reads.end(),
+                               RigExecBakedOne(
+                                   RigExecBakedSlotDomain::PoseFin,
+                                   record.slot)) != step.reads.end());
+        CHECK_AT(at, std::find(step.reads.begin(), step.reads.end(),
+                               RigExecBakedOne(
+                                   RigExecBakedSlotDomain::CommitTable,
+                                   record.commit)) != step.reads.end());
+        // The provider is the constraint's candidate, so the record reads
+        // the version its write-back produces.
+        const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
+        const auto found = std::find(commit.slots.begin(), commit.slots.end(),
+                                     record.slot);
+        CHECK_AT(at, found != commit.slots.end());
+        if (found != commit.slots.end()) {
+            CHECK_AT(at, record.version ==
+                             commit.slotWrites[size_t(
+                                 found - commit.slots.begin())]);
+        }
+    }
+    const RigExecBakedProgramImpl::GeomRevision *revision =
+        FindRevision(B, reader);
+    CHECK_AT(where, revision != nullptr);
+    if (!revision) {
+        return;
+    }
+    int fold = -1;
+    for (size_t s = 0; s < B.steps.size(); ++s) {
+        const RigExecBakedStep &step = B.steps[s];
+        if (step.kind == RigExecBakedStepKind::InfluenceFold &&
+            B.chains[size_t(B.revisionIndex[size_t(step.object)].first)]
+                    .revisions[size_t(
+                        B.revisionIndex[size_t(step.object)].second)]
+                    .moverPath == reader) {
+            fold = int(s);
+        }
+    }
+    CHECK_AT(where, fold >= 0);
+    if (fold < 0) {
+        return;
+    }
+    const std::vector<int> &preds = B.steps[size_t(fold)].preds;
+    for (const int record : revision->transformRecords) {
+        CHECK_AT(where + " fold waits for record " + std::to_string(record),
+                 std::find(preds.begin(), preds.end(),
+                           stepOf[size_t(record)]) != preds.end());
+    }
+    std::string error;
+    CHECK_AT(where, RigExecBakedValidateStepGraph(B, &error));
+    if (!error.empty()) {
+        std::printf("  %s\n", error.c_str());
+    }
+}
+
+bool
+Near(const VtVec3fArray &a, const VtVec3fArray &b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if ((GfVec3d(a[i]) - GfVec3d(b[i])).GetLength() > 1e-5) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Each reader's points at one evaluation.
+struct RecordReads {
+    VtVec3fArray r1, r2, r4, r5, rb;
+};
+
+RecordReads
+ReadRecordPoints(const RigExecRigPose &pose, bool withR1)
+{
+    RecordReads out;
+    if (withR1) {
+        out.r1 = Moved(pose, RecordPoints("P1"));
+    }
+    out.r2 = Moved(pose, RecordPoints("P2"));
+    out.r4 = Moved(pose, RecordPoints("P4"));
+    out.r5 = Moved(pose, RecordPoints("P5"));
+    out.rb = Moved(pose, RecordPoints("PB"));
+    return out;
+}
+
+// The lists are the store's: only pairs some reader names are recorded, and
+// an AtPrim(P) list holds every named record of the provider at or under P,
+// newest first. So R2's list at Group holds C1's record only while R1 names
+// it, and R5's at Constrain holds all three, newest (C3) first. C2's
+// disabled exit at frame 4 records X as C1 left it, which moves R2 and R4
+// onto R1. Every record of a catalogued provider is valid in an authored rig
+// (see RigExecBakedEvalFrameRecord's gates, held by TestFrameRecordGates), so
+// the variant without R1 reads the same values through a shorter list.
+void
+TestFrameRecordsMatchTheStore(const std::string &examples)
+{
+    const std::string path =
+        examples + "/../tests/fixtures/frame_record_fallbacks.usda";
+    std::map<double, RecordReads> withR1Reads;
+    for (const bool withR1 : {true, false}) {
+        const std::string label =
+            withR1 ? "frame records" : "frame records without R1";
+        const UsdStageRefPtr stage = UsdStage::Open(path);
+        CHECK_AT(label, stage);
+        if (!stage) {
+            return;
+        }
+        stage->SetEditTarget(stage->GetSessionLayer());
+        if (!withR1) {
+            CHECK_AT(label,
+                     stage->GetPrimAtPath(RecordReader("R1")).SetActive(false));
+        }
+        auto evaluator = MakeEvaluator(
+            stage, kRecordRig, RigExecEvaluationMode::BakedWithParityCheck);
+        if (!evaluator) {
+            return;
+        }
+        Tally tally;
+        bool structureChecked = false;
+        for (const double frame : {1.0, 4.0, 8.0}) {
+            const std::string where =
+                label + " frame " + std::to_string(int(frame));
+            const RigExecRigPose pose = EvaluateCaptured(
+                where, evaluator.get(), UsdTimeCode(frame), &tally);
+            // R1, R2, R4 and R5 all answer from a record; RB reads `base`.
+            CHECK_AT(where,
+                     CheckFrameRecords(where, *evaluator) == (withR1 ? 4 : 3));
+            const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+            if (!program) {
+                CHECK_AT(where, !"the rig bakes");
+                return;
+            }
+            const RigExecBakedProgramImpl &B = program->GetStepGraph();
+            if (!structureChecked) {
+                structureChecked = true;
+                CHECK_AT(where, B.frameRecords.size() == (withR1 ? 3u : 2u));
+                const auto list = [&](const char *reader) {
+                    const auto *revision = FindRevision(B, RecordReader(reader));
+                    CHECK_AT(where + " " + reader, revision != nullptr);
+                    return revision
+                               ? RecordMovers(B, revision->transformRecords)
+                               : std::vector<SdfPath>{SdfPath("/missing")};
+                };
+                if (withR1) {
+                    CHECK_AT(where, list("R1") ==
+                                        std::vector<SdfPath>{kRecordC1});
+                    CHECK_AT(where, list("R2") ==
+                                        (std::vector<SdfPath>{kRecordC2,
+                                                              kRecordC1}));
+                    CHECK_AT(where, list("R5") ==
+                                        (std::vector<SdfPath>{
+                                            kRecordC3, kRecordC2, kRecordC1}));
+                } else {
+                    CHECK_AT(where, list("R2") ==
+                                        std::vector<SdfPath>{kRecordC2});
+                    CHECK_AT(where, list("R5") ==
+                                        (std::vector<SdfPath>{kRecordC3,
+                                                              kRecordC2}));
+                }
+                CHECK_AT(where, list("R4") ==
+                                    std::vector<SdfPath>{kRecordC2});
+                CHECK_AT(where, list("RB").empty());
+                for (const RigExecBakedFrameRecord &record : B.frameRecords) {
+                    CHECK_AT(where, B.paths[size_t(record.slot)] ==
+                                        kRecordJoint);
+                    CHECK_AT(where, record.target == 0);
+                }
+                CheckFrameRecordSteps(where, B, RecordReader("R2"));
+            }
+            for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+                CHECK_AT(where, B.frameMatrixValid[r] == 1);
+            }
+            const RecordReads reads = ReadRecordPoints(pose, withR1);
+            CHECK_AT(where, Near(reads.r2, reads.r4));
+            CHECK_AT(where, !Near(reads.r5, reads.r2));
+            CHECK_AT(where, !Near(reads.r5, reads.rb));
+            if (withR1) {
+                CHECK_AT(where, !Near(reads.r1, reads.rb));
+                // C2 rotates X except where it is disabled, and its disabled
+                // exit records X as C1 left it.
+                CHECK_AT(where, Near(reads.r2, reads.r1) == (frame == 4.0));
+                withR1Reads[frame] = reads;
+            } else {
+                const RecordReads &named = withR1Reads[frame];
+                CHECK_AT(where, reads.r2 == named.r2);
+                CHECK_AT(where, reads.r4 == named.r4);
+                CHECK_AT(where, reads.r5 == named.r5);
+                CHECK_AT(where, reads.rb == named.rb);
+            }
+        }
+        // Dial weights R2 alone: the drag moves R2's points and no other
+        // reader's, and the release restores them. A rig with phased reads
+        // still runs whole on every run (`full` in
+        // RigExecBakedComputeClosure), so every constraint and FrameMatrix
+        // step re-runs here too; which steps a cone leaves clean is not
+        // checked until that gate goes.
+        const RecordReads before = ReadRecordPoints(
+            evaluator->Evaluate(UsdTimeCode(8.0)), withR1);
+        evaluator->SetInteractiveOverrides({RigExecValueOverride{
+            kRecordDial, TfToken(), TfToken("avars:amount"), VtValue(0.5)}});
+        const RigExecRigPose dragged = EvaluateCaptured(
+            label + " dragged", evaluator.get(), UsdTimeCode(8.0), &tally);
+        CHECK_AT(label + " dragged", CheckFrameRecords(label + " dragged",
+                                                       *evaluator) ==
+                                         (withR1 ? 4 : 3));
+        const RecordReads moved = ReadRecordPoints(dragged, withR1);
+        CHECK_AT(label + " dragged", !Near(moved.r2, before.r2));
+        CHECK_AT(label + " dragged", moved.r4 == before.r4);
+        CHECK_AT(label + " dragged", moved.r5 == before.r5);
+        evaluator->ClearInteractiveOverrides();
+        const RigExecRigPose released = EvaluateCaptured(
+            label + " released", evaluator.get(), UsdTimeCode(8.0), &tally);
+        CHECK_AT(label + " released",
+                 ReadRecordPoints(released, withR1).r2 == before.r2);
+    }
+}
+
+// The fold reads the FrameMatrix records it declares, not the run's store:
+// C3's record rebound to C1's version of X moves R5 onto R1, while the store,
+// still filled by the walk's recorder, answers C3's matrix for R5. The
+// validator accepts the rebinding (a version of the record's own slot,
+// written before the step), so only the fold's source decides R5. Plain
+// Baked, since the dynamic walk is not rebound.
+void
+TestTheFoldReadsItsRecords(const std::string &examples)
+{
+    const std::string where = "fold reads its records";
+    const UsdStageRefPtr stage = UsdStage::Open(
+        examples + "/../tests/fixtures/frame_record_fallbacks.usda");
+    CHECK_AT(where, stage);
+    if (!stage) {
+        return;
+    }
+    auto evaluator =
+        MakeEvaluator(stage, kRecordRig, RigExecEvaluationMode::Baked);
+    if (!evaluator) {
+        return;
+    }
+    const RigExecRigPose first = evaluator->Evaluate(UsdTimeCode(8.0));
+    CHECK_AT(where, first.valid);
+    const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+    CHECK_AT(where, program != nullptr);
+    if (!program) {
+        return;
+    }
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(program->GetStepGraph());
+    CHECK_AT(where, RecordMovers(B, {0, 1, 2}) ==
+                        (std::vector<SdfPath>{kRecordC1, kRecordC2,
+                                              kRecordC3}));
+    const RigExecBakedProgramImpl::GeomRevision *r5 =
+        FindRevision(B, RecordReader("R5"));
+    CHECK_AT(where, r5 != nullptr);
+    if (B.frameRecords.size() != 3 || !r5) {
+        return;
+    }
+    const RecordReads before = ReadRecordPoints(first, true);
+    const GfMatrix4d afterC1 = B.frameMatrix[0];
+    const GfMatrix4d afterC3 = B.frameMatrix[2];
+    CHECK_AT(where, afterC1 != afterC3);
+    CHECK_AT(where, before.r5 != before.r1);
+
+    // Another frame first, so frame 8 is a fresh run.
+    CHECK_AT(where, evaluator->Evaluate(UsdTimeCode(1.0)).valid);
+    const uint32_t bound = B.frameRecords[2].version;
+    B.frameRecords[2].version = B.frameRecords[0].version;
+    std::string error;
+    CHECK_AT(where, RigExecBakedValidateStepGraph(B, &error));
+    if (!error.empty()) {
+        std::printf("  %s\n", error.c_str());
+    }
+    const size_t generations = evaluator->GetBakedGenerationCount();
+    const RigExecRigPose rebound = evaluator->Evaluate(UsdTimeCode(8.0));
+    CHECK_AT(where, rebound.valid);
+    CHECK_AT(where, evaluator->GetBakedGenerationCount() == generations + 1);
+    CHECK_AT(where, evaluator->GetBakedProgram() == program);
+    const RecordReads reads = ReadRecordPoints(rebound, true);
+    CHECK_AT(where, B.frameMatrix[2] == afterC1);
+    CHECK_AT(where, reads.r5 == reads.r1);
+    CHECK_AT(where, reads.r1 == before.r1);
+    CHECK_AT(where, reads.r2 == before.r2);
+    const VtValue *stored = B.runSnapshots.Lookup(
+        kRecordJoint, r5->binding.transformPhase, r5->moverPath);
+    CHECK_AT(where, stored && stored->IsHolding<GfMatrix4d>() &&
+                        stored->UncheckedGet<GfMatrix4d>() == afterC3);
+
+    B.frameRecords[2].version = bound;
+    CHECK_AT(where, evaluator->Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK_AT(where,
+             ReadRecordPoints(evaluator->Evaluate(UsdTimeCode(8.0)), true)
+                     .r5 == before.r5);
+}
+
+// RigExecBakedEvalFrameRecord's gates on a hand-built program, including
+// the two exits no authored rig reaches with a catalogued transform
+// provider: a geometry-domain constraint's (recordAfter false), whose target
+// is a PointBased prim no matrix mover may read, and a non-IK constraint
+// with several targets (recordEveryTarget false past its first), which the
+// validation refuses.
+void
+TestFrameRecordGates()
+{
+    RigExecBakedProgramImpl B;
+    B.paths = {SdfPath("/A")};
+    RigExecPointFrame rest;
+    rest.points = {GfVec3d(0, 1, 0), GfVec3d(1, 1, 0), GfVec3d(0, 2, 0),
+                   GfVec3d(0, 1, 1)};
+    B.restFrames = {rest};
+    RigExecPointFrame posed;
+    posed.points = {GfVec3d(2, 0, 0), GfVec3d(2, 1, 0), GfVec3d(1, 0, 0),
+                    GfVec3d(2, 0, 2)};
+    RigExecPointFrame invalid = posed;
+    invalid.flags = 0;
+    B.fin = {posed, invalid};
+    B.commits.resize(1);
+    RigExecBakedFrameRecord record;
+    record.slot = 0;
+    record.commit = 0;
+    record.target = 0;
+    record.version = 0;
+
+    GfMatrix4d expected(1.0);
+    CHECK(RigExecPointsToMatrix(rest.points, posed.points, &expected));
+    GfMatrix4d matrix(0.0);
+    CHECK(RigExecBakedEvalFrameRecord(B, record, &matrix));
+    CHECK(matrix == expected);
+
+    // Every exit but the ordinary one records every target; past it only
+    // targets[0] is recorded.
+    B.commits[0].recordEveryTarget = false;
+    CHECK(RigExecBakedEvalFrameRecord(B, record, &matrix));
+    record.target = 1;
+    CHECK(!RigExecBakedEvalFrameRecord(B, record, &matrix));
+    B.commits[0].recordEveryTarget = true;
+    CHECK(RigExecBakedEvalFrameRecord(B, record, &matrix));
+    record.target = 0;
+
+    // A geometry-domain constraint with its sources records nothing.
+    B.commits[0].recordAfter = false;
+    CHECK(!RigExecBakedEvalFrameRecord(B, record, &matrix));
+    CHECK(matrix == GfMatrix4d(1.0));
+    B.commits[0].recordAfter = true;
+
+    // An unusable frame is not recorded.
+    record.version = 1;
+    CHECK(!RigExecBakedEvalFrameRecord(B, record, &matrix));
+    record.version = 0;
+
+    // A rest without a valid frame measures from the identity landmarks; a
+    // valid but singular one does not decompose.
+    B.restFrames[0].flags = 0;
+    CHECK(RigExecBakedEvalFrameRecord(B, record, &matrix));
+    GfMatrix4d fromIdentity(1.0);
+    CHECK(RigExecPointsToMatrix(RigExecIdentityLandmarks(), posed.points,
+                                &fromIdentity));
+    CHECK(matrix == fromIdentity);
+    B.restFrames[0] = rest;
+    B.restFrames[0].points[3] = B.restFrames[0].points[0];
+    CHECK(!RigExecBakedEvalFrameRecord(B, record, &matrix));
+}
+
 std::string
 DefaultResourceDir()
 {
@@ -926,6 +1373,9 @@ main(int argc, char **argv)
     TestPrecedingOnTheOwnChainReadsTheBase(examples);
     TestAChainWithoutABaseFallsThrough(examples);
     TestBlendSamplesBindToVersions();
+    TestFrameRecordsMatchTheStore(examples);
+    TestTheFoldReadsItsRecords(examples);
+    TestFrameRecordGates();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

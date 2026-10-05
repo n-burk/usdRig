@@ -2867,6 +2867,110 @@ TestTheValidatorRejectsALaterPoseVersion()
     }
 }
 
+/// Frame records on frame_record_fallbacks (three constraints on one joint,
+/// AtPrim matrix-mover readers), each edited to break one rule the validator
+/// owns: a record bound to a later commit's version of its provider, a fold
+/// reading a record no step evaluates, a record with no FrameMatrix
+/// step, and a FrameMatrix step naming a negative record. Each case restores what it broke, and the restored program must
+/// pass again.
+void
+TestTheValidatorRejectsABadFrameRecord(const std::string &fixtures)
+{
+    BuiltProgram built = Build(fixtures + "/frame_record_fallbacks.usda");
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    TestTheValidatorAcceptsTheProgram(built, "frame_record_fallbacks");
+    const auto passes = [&](const char *what) {
+        std::string restored;
+        if (!RigExecBakedValidateStepGraph(B, &restored)) {
+            ++failures;
+            std::printf("FAIL %s: rejected after the restore: %s\n", what,
+                        restored.c_str());
+        }
+    };
+    // The records in walk order: C1, C2, C3.
+    CHECK(B.frameRecords.size() == 3);
+    if (B.frameRecords.size() != 3) {
+        return;
+    }
+    {
+        // C1's record bound to the version C3's commit writes.
+        RigExecBakedFrameRecord &first = B.frameRecords.front();
+        const RigExecBakedFrameRecord &last = B.frameRecords.back();
+        const uint32_t bound = first.version;
+        first.version = last.version;
+        ExpectRejected(
+            B, "a frame record bound to a later commit's version",
+            {"(FrameMatrix /RecordAsset/Rig/Joints/X after "
+             "/RecordAsset/Rig/Movers/Constrain/Group/C1) is bound to "
+             "PoseFin version " + std::to_string(last.version) +
+                 " of /RecordAsset/Rig/Joints/X",
+             "(Constraint /RecordAsset/Rig/Movers/Constrain/C3) writes at or "
+             "after it"});
+        first.version = bound;
+        passes("a frame record bound to a later commit's version");
+    }
+    {
+        // A fold reading one record past the table.
+        RigExecBakedStep *fold = nullptr;
+        for (RigExecBakedStep &step : B.steps) {
+            if (step.kind == RigExecBakedStepKind::InfluenceFold) {
+                for (const RigExecBakedSlotRange &read : step.reads) {
+                    if (read.domain == RigExecBakedSlotDomain::FrameMatrix) {
+                        fold = &step;
+                    }
+                }
+            }
+        }
+        CHECK(fold != nullptr);
+        if (fold) {
+            const int unwritten = int(B.frameRecords.size());
+            fold->reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::FrameMatrix, unwritten));
+            ExpectRejected(B, "a fold reading a record no step evaluates",
+                           {"(InfluenceFold /RecordAsset/Rig/Movers/Geometry/",
+                            "reads FrameMatrix[" + std::to_string(unwritten),
+                            "which no step writes"});
+            fold->reads.pop_back();
+            passes("a fold reading a record no step evaluates");
+        }
+    }
+    {
+        // A record no FrameMatrix step evaluates.
+        B.frameRecords.push_back(B.frameRecords.front());
+        ExpectRejected(B, "a frame record with no step",
+                       {"frame record 3 of /RecordAsset/Rig/Joints/X after "
+                        "/RecordAsset/Rig/Movers/Constrain/Group/C1 has no "
+                        "FrameMatrix step"});
+        B.frameRecords.pop_back();
+        passes("a frame record with no step");
+    }
+    {
+        // A FrameMatrix step naming a negative record.
+        RigExecBakedStep *first = nullptr;
+        for (RigExecBakedStep &step : B.steps) {
+            if (step.kind == RigExecBakedStepKind::FrameMatrix &&
+                step.object == 0) {
+                first = &step;
+            }
+        }
+        CHECK(first != nullptr);
+        if (first) {
+            first->object = -1;
+            ExpectRejected(B, "a FrameMatrix step naming record -1",
+                           {"(FrameMatrix /RecordAsset/Rig/Joints/X after "
+                            "/RecordAsset/Rig/Movers/Constrain/Group/C1) "
+                            "names frame record -1 of 3"});
+            first->object = 0;
+            passes("a FrameMatrix step naming record -1");
+        }
+    }
+}
+
 /// Two root controls switched into each other's space: each compose group
 /// reads the other's last version, so no emission order is valid and Build
 /// must refuse the program. The compile rejects every such rig before a
@@ -3386,6 +3490,7 @@ main(int argc, char **argv)
     TestAPlacementReadNeedsItsVolumesStep();
     TestTheValidatorRejectsALaterPoseVersion();
     TestTheValidatorRejectsAnUnboundPointVersion();
+    TestTheValidatorRejectsABadFrameRecord(examplesDir + "/../tests/fixtures");
     {
         // The chain fixtures: one revision per chain (Biped, spider_legs),
         // three on one chain (stacked_revisions), many stacked chains

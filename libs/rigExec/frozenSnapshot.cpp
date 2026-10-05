@@ -100,6 +100,9 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.baseLast = src.baseLast;
     D.propertyResults = src.propertyResults;
     D.runSnapshots = src.runSnapshots;
+    D.frameRecords = src.frameRecords;
+    D.frameMatrix = src.frameMatrix;
+    D.frameMatrixValid = src.frameMatrixValid;
     D.phasedReads = src.phasedReads;
     D.finalMatrix = src.finalMatrix;
     D.baseMatrix = src.baseMatrix;
@@ -325,10 +328,10 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
             }
             // Read phases, snapshot-recording revisions and snapshot readers
             // all run frozen: a point phase resolves through its binding
-            // over the worker's own chains, the transform phase out of the
-            // store this run's own steps fill in program order, and the
-            // static assembly builds the same per-revision overlay live
-            // builds. (Blend-sample phases keep their own refusal above.)
+            // over the worker's own chains, an AtPrim transform phase out
+            // of the worker's own FrameMatrix records, and the static
+            // assembly builds the same per-revision overlay live builds.
+            // (Blend-sample phases keep their own refusal above.)
             if (revision.weightCurrentPhase) {
                 return fail("revision " +
                             revision.moverPath.GetString() +

@@ -466,12 +466,16 @@ enum class RigExecBakedSlotDomain : uint8_t {
     WeightFrames,        ///< where one volume weight is placed, by provider slot
     PoseWeight,          ///< poseWeights[k]: one pose interpolator's weights
     Snapshots,           ///< the phased-read records one step made
+    /// frameMatrix[k] and frameMatrixValid[k]: one RigExecBakedFrameRecord.
+    /// Appended after Snapshots, so every earlier enumerator keeps its
+    /// exported value.
+    FrameMatrix,
 };
 /// Derived from the last enumerator rather than written out: an array
 /// indexed by domain is how the edge sweep is written, and a count that
 /// drifted from the enum is an out-of-bounds write with no symptom at Build.
 inline constexpr size_t RigExecBakedSlotDomainCount =
-    size_t(RigExecBakedSlotDomain::Snapshots) + 1;
+    size_t(RigExecBakedSlotDomain::FrameMatrix) + 1;
 
 /// A slot id: the domain in the top 8 bits, the index in the low 24.
 using RigExecBakedSlot = uint32_t;
@@ -556,6 +560,27 @@ struct RigExecBakedPointsBinding {
     int id = -1;
 };
 
+/// One provider frame as one constraint of its stack left it, for an AtPrim
+/// read phase on a transform that names that constraint. A record exists
+/// only for a pair (provider, constraint) the compile named
+/// (`_chainPlan.snapshots`), exactly as the walk records only named pairs;
+/// its FrameMatrix step writes the matrix and a valid byte that is 0
+/// exactly where the walk declines to record (RigExecBakedEvalFrameRecord).
+struct RigExecBakedFrameRecord {
+    /// The provider slot.
+    int slot = -1;
+    /// The writer: an index into `commits` / `walkSteps`.
+    int commit = -1;
+    /// The provider's position in the constraint's `targetSlots`.
+    int target = -1;
+    /// The `fin` entry the record reads: the commit's own version of the
+    /// slot where it declares one, else the version it read. Bound after
+    /// BindPoseVersions.
+    uint32_t version = 0;
+    /// The constraint, which the read phase names.
+    SdfPath mover;
+};
+
 /// Test-only: what the run's phased-read store answered for one point
 /// binding, taken by the reader beside its own resolution of the binding
 /// (RigExecBakedProgramTesting::CapturePointReads).
@@ -621,6 +646,9 @@ enum class RigExecBakedStepKind {
     RevisionFuse,     ///< one revision's applied decision and chain dirty bit
     ChainStatus,      ///< one chain's status sweep and published points
     Derived,          ///< one derived target maintained from a chain
+    /// One RigExecBakedFrameRecord. A pose step; appended after Derived so
+    /// every earlier enumerator keeps its exported value.
+    FrameMatrix,
 };
 
 /// The name of \p kind, for the schedule report.
@@ -689,6 +717,7 @@ struct RigExecBakedStep {
     ///     RevisionChunk/RevisionFuse                index into revisionIndex
     ///   ChainStatus                                 index into chains
     ///   Derived                                     index into derivedIndex
+    ///   FrameMatrix                                 index into frameRecords
     int object = -1;
     /// The part of it, by kind: the vertex chunk of a RevisionChunk, the
     /// propagation-pair chunk of a PropagateChunk, 1 for a final-phase
@@ -1556,10 +1585,19 @@ struct RigExecBakedProgramImpl {
     /// This run's phased-read store: what each chain held at each point of
     /// the walk, and what each provider's matrix was after each constraint
     /// that named it. Run-local by design (see `chainSnapshots` above); the
-    /// evaluator's holds the previous generation's dynamic records. Only an
-    /// AtPrim transform phase looks it up: point reads resolve through their
-    /// Build-time bindings (RigExecBakedPointsBinding).
+    /// evaluator's holds the previous generation's dynamic records. No step
+    /// looks it up: point reads resolve through their Build-time bindings
+    /// (RigExecBakedPointsBinding) and an AtPrim transform phase through
+    /// `frameRecords`. Still filled, so tests can hold both to it.
     RigExecChainSnapshots runSnapshots;
+
+    /// Every record an AtPrim transform phase can read, in walk order (by
+    /// `commit`, then `target`), and what each one's FrameMatrix step wrote
+    /// this run. Kept across runs like deltaValues: a step the cone skipped
+    /// left the record it would write again.
+    std::vector<RigExecBakedFrameRecord> frameRecords;
+    std::vector<GfMatrix4d> frameMatrix;
+    std::vector<char> frameMatrixValid;
 
     /// The number of RigExecBakedPointsBinding ids handed out at Build.
     int pointBindingCount = 0;
@@ -2347,6 +2385,13 @@ struct RigExecBakedProgramImpl {
         bool readsSnapshots = false;
         /// One per `binding.phases` entry, in the map's order.
         std::vector<RigExecBakedPointsBinding> pointBindings;
+        /// For an AtPrim `binding.transformPhase` only: the `frameRecords`
+        /// of the transform provider whose constraint is the phase's prim
+        /// or under it, newest first. The fold takes the first valid one,
+        /// and otherwise keeps the dense-table matrix. `influenceRecords`
+        /// is the same per `influenceSlots` entry.
+        std::vector<int> transformRecords;
+        std::vector<std::vector<int>> influenceRecords;
         /// This node is new to the rig's geometry state and its creation has
         /// not been reported yet. Cleared by AdoptGeometryStateFrom for a
         /// node the outgoing program already held, which is the same
@@ -3381,6 +3426,15 @@ void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
+/// The matrix \p record holds this run, rest -> the recorded frame, into
+/// \p matrix. False exactly where the walk records nothing: the commit's
+/// exit records no frame (`recordAfter`), or records targets[0] alone
+/// (`recordEveryTarget`) and this is another target, or the frame is
+/// unusable or does not decompose. \p matrix is written either way.
+bool RigExecBakedEvalFrameRecord(const RigExecBakedProgramImpl &program,
+                                 const RigExecBakedFrameRecord &record,
+                                 GfMatrix4d *matrix);
+
 /// The points \p binding resolves to this run: its first candidate whose
 /// chain read a base, as `*points` / `*count`. False for the tail, and then
 /// the reader reads the resolved input. Valid until the candidate's chain
@@ -3864,6 +3918,7 @@ struct RigExecBakedRunShadow {
         std::vector<uint8_t> outcome;
         std::vector<RigExecConstraintSource> sources;
         bool abandoned = true;
+        bool recordAfter = true, recordEveryTarget = true;
     };
 
     std::vector<double> avars;
@@ -3879,6 +3934,8 @@ struct RigExecBakedRunShadow {
     std::vector<GfMatrix4d> deltaValues;
     std::vector<char> deltaPresent;
     std::vector<GfMatrix4d> volumePlacement;
+    std::vector<GfMatrix4d> frameMatrix;
+    std::vector<char> frameMatrixValid;
     bool avarsDisturbed = false;
 };
 
