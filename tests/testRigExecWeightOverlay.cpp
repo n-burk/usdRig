@@ -1766,8 +1766,8 @@ TestUntappedVolumeSourceBakesWithTheWalksKeys(const std::string &examplesDir)
     CHECK(!walkFrames.count(outsidePath));
 
     // The scenario: the outside volume holds a volume slot the walk does not
-    // place. The VolumePlacements step fills every volume slot, and the live
-    // program publishes only the placed ones.
+    // place. One VolumePlacements step per volume slot fills every volume
+    // slot, and the live program publishes only the placed ones.
     RigExecRigEvaluator baked(stage, SdfPath("/SweepAsset/Rig"));
     baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;

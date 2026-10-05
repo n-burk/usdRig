@@ -603,8 +603,8 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         // walk at all. Its weight is per point and resolves after the solve,
         // on the revision its delta feeds, where the placement is the same
         // one every other mover's packet uses. So no placement is read
-        // mid-walk, and the one VolumePlacements step after the walk is
-        // what every reader sees.
+        // mid-walk, and the per-volume VolumePlacements steps after the walk
+        // are what every reader sees.
         sayUnbakedWeights(constraint.weightObject);
         if (constraint.targets.empty()) {
             say("constraint names no target", constraint.moverPath);
@@ -3647,10 +3647,10 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         _lastBail = RigExecBakedBail::Publish;
         return false;  // the dynamic fallback needs exec
     }
-    // Where every volume the walk places ended up, as the VolumePlacements
-    // step left it. A run whose cone skipped the step is a run in which no
-    // volume's final frame moved, so the placements it kept are this
-    // generation's.
+    // Where every volume the walk places ended up: each slot's placement is
+    // as its own VolumePlacements step left it. A slot whose step the cone
+    // skipped kept a placement whose final frame did not move, so it is
+    // this generation's.
     RigExecBakedPublishVolumePlacements(B, &pose->weightFrames);
     RigExecBakedPublishGeometry(&B, pose);
 

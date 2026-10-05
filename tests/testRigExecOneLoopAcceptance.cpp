@@ -290,7 +290,7 @@ FindChain(const std::vector<RigExecOpGraphNode> &graph)
     c.armFkSolve = OneStep(graph, "Solve", "/ArmFK");
     c.armIkSolve = OneStep(graph, "Solve", "/ArmIK");
     c.skinFuse = OneStep(graph, "RevisionFuse", "/ArmSmooth/ArmSkin");
-    c.volumePlacements = OneStep(graph, "VolumePlacements", "");
+    c.volumePlacements = OneStep(graph, "VolumePlacements", "/FingerVolume");
     c.volumePacket = OneStep(graph, "WeightPacket", "/FingerVolume");
     // The smooth's own steps: the label is a prefix of the skin's, so take
     // the one that is not the skin's.
@@ -612,12 +612,23 @@ TestPrecedingWeight(const std::string &fixturesDir)
     CHECK(preds.count(c.skinFuse) == 1);
     CHECK(preds.count(c.volumePlacements) == 1);
     CHECK(preds.count(c.volumePacket) == 1);
-    bool readsWeightFrames = false, readsPacket = false;
+    // It reads the one placement its field's volume has: the slot the
+    // FingerVolume placement step writes, and no other.
+    size_t weightFramesReads = 0;
+    bool readsPacket = false, readsOwnPlacement = false;
     for (const RigExecOpSlotRange &range : smooth.reads) {
-        readsWeightFrames |= range.domain == "WeightFrames";
+        if (range.domain == "WeightFrames") {
+            ++weightFramesReads;
+            for (const RigExecOpSlotRange &write :
+                     graph[c.volumePlacements].writes) {
+                readsOwnPlacement |= write.domain == "WeightFrames" &&
+                                     write.first == range.first &&
+                                     write.last == range.last;
+            }
+        }
         readsPacket |= range.domain == "WeightPacket";
     }
-    CHECK(readsWeightFrames && readsPacket);
+    CHECK(weightFramesReads == 1 && readsOwnPlacement && readsPacket);
     // No weight-domain step depends on the skin revision: nothing in the
     // weight domain is downstream of geometry today (S4).
     const std::vector<char> afterSkin =
@@ -852,8 +863,12 @@ TestCycle(const std::string &fixturesDir)
     Report("(e) op graph", rigExecTest::CheckOpGraphIsAcyclic(graph));
     CHECK(rigExecTest::FindOpGraphSteps(graph, "Solve").empty());
     CHECK(rigExecTest::FindOpGraphSteps(graph, "Constraint").empty());
+    // One placement step per volume, and the rig has one: EndVolume.
     CHECK(rigExecTest::FindOpGraphSteps(graph, "VolumePlacements").size() ==
           1);
+    CHECK(rigExecTest::FindOpGraphSteps(graph, "VolumePlacements",
+                                        "/EndVolume")
+              .size() == 1);
     CHECK(rigExecTest::FindOpGraphSteps(graph, "RevisionFuse", "/EndCarry")
               .size() == 1);
 

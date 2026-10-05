@@ -2635,6 +2635,88 @@ TestTheValidatorRejectsAMalformedGraph()
     }
 }
 
+/// One VolumePlacements step per volume slot (part 1), each writing its own
+/// WeightFrames slot, and a current-phase assemble reading the placements of
+/// its field's volumes: the reader hangs off exactly those steps, and a read
+/// of a placement no step writes is refused. The validated programs carry no
+/// pose table, so their placement steps read nothing; the label case names
+/// the slots' paths and is not validated.
+void
+TestAPlacementReadNeedsItsVolumesStep()
+{
+    using D = RigExecBakedSlotDomain;
+    const auto build = [](RigExecBakedProgramImpl *B,
+                          std::vector<RigExecBakedSlotRange> placementReads,
+                          bool withPaths) {
+        if (withPaths) {
+            B->paths = {SdfPath("/Rig/Joint"), SdfPath("/Rig/Joint/SphereA"),
+                        SdfPath("/Rig/SphereB")};
+        }
+        B->chains.resize(1);
+        B->chains[0].revisions.resize(1);
+        B->chains[0].revisions[0].moverPath = SdfPath("/Rig/Movers/Smooth");
+        B->chains[0].revisions[0].weightCurrentPhase = true;
+        B->revisionIndex = {{0, 0}};
+        B->revisionFuseStep = {3};
+        for (const int slot : {1, 2}) {
+            RigExecBakedStep step;
+            step.kind = RigExecBakedStepKind::VolumePlacements;
+            step.object = slot;
+            step.part = 1;
+            if (withPaths) {
+                step.reads = {RigExecBakedOne(D::PoseFin, slot)};
+            }
+            step.writes = {RigExecBakedOne(D::WeightFrames, slot)};
+            B->steps.push_back(std::move(step));
+        }
+        RigExecBakedStep assemble;
+        assemble.kind = RigExecBakedStepKind::RevisionStatic;
+        assemble.object = 0;
+        assemble.reads = std::move(placementReads);
+        assemble.writes = {RigExecBakedOne(D::RevisionPacket, 0)};
+        B->steps.push_back(std::move(assemble));
+        RigExecBakedStep fuse;
+        fuse.kind = RigExecBakedStepKind::RevisionFuse;
+        fuse.object = 0;
+        fuse.reads = {RigExecBakedOne(D::RevisionPacket, 0)};
+        fuse.writes = {RigExecBakedOne(D::RevisionDone, 0)};
+        B->steps.push_back(std::move(fuse));
+        ScheduleByHand(B);
+    };
+    {
+        RigExecBakedProgramImpl B;
+        build(&B, {RigExecBakedOne(D::WeightFrames, 2)}, true);
+        CHECK(B.steps[0].label == "VolumePlacements /Rig/Joint/SphereA");
+        CHECK(B.steps[1].label == "VolumePlacements /Rig/SphereB");
+    }
+    {
+        RigExecBakedProgramImpl B;
+        build(&B, {RigExecBakedOne(D::WeightFrames, 2)}, false);
+        std::string error;
+        CHECK(RigExecBakedValidateStepGraph(B, &error));
+        CHECK(error.empty());
+        // Its own volume's step only: SphereA's placement is not an edge.
+        CHECK(B.steps[2].preds == std::vector<int>{1});
+    }
+    {
+        RigExecBakedProgramImpl B;
+        build(&B, {RigExecBakedOne(D::WeightFrames, 1),
+                   RigExecBakedOne(D::WeightFrames, 2)}, false);
+        std::string error;
+        CHECK(RigExecBakedValidateStepGraph(B, &error));
+        CHECK(error.empty());
+        CHECK((B.steps[2].preds == std::vector<int>{0, 1}));
+    }
+    {
+        RigExecBakedProgramImpl B;
+        build(&B, {RigExecBakedOne(D::WeightFrames, 1),
+                   RigExecBakedOne(D::WeightFrames, 3)}, false);
+        ExpectRejected(B, "a placement read with no placement step",
+                       {"step 2 (RevisionStatic /Rig/Movers/Smooth) reads "
+                        "WeightFrames[3], which no step writes"});
+    }
+}
+
 /// Pose bindings on stacked_solvers (FK solve, its commit, IK solve, its
 /// commit, then the matrices), each edited to name a version that is written
 /// later, twice or never. Every pose slot's first writer is its compose, so
@@ -3301,6 +3383,7 @@ main(int argc, char **argv)
         }
     }
     TestTheValidatorRejectsAMalformedGraph();
+    TestAPlacementReadNeedsItsVolumesStep();
     TestTheValidatorRejectsALaterPoseVersion();
     TestTheValidatorRejectsAnUnboundPointVersion();
     {

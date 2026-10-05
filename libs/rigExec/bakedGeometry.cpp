@@ -19,6 +19,7 @@
 #include "rigExecMath/simdKernels.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/gf/vec3f.h"
@@ -782,6 +783,60 @@ PartitionAtBuild(const ProviderLevels &levels,
     }
 }
 
+/// Declares WeightFrames[slot] for every volume in weight object \p object's
+/// composition closure (its baseWeight and inputWeights, recursively): the
+/// placements the oracle reads when it resolves that object. A closure
+/// member outside the table, or a volume slot that has no placement step,
+/// should be unreachable; it falls back to every volume slot.
+void
+DeclarePlacementReads(const RigExecBakedProgramImpl &B, int object,
+                      std::vector<RigExecBakedSlotRange> *reads)
+{
+    std::vector<char> seen(B.weightObjects.size(), 0);
+    std::vector<int> stack{object};
+    std::vector<int> slots;
+    bool complete = true;
+    while (!stack.empty()) {
+        const int o = stack.back();
+        stack.pop_back();
+        if (o < 0 || size_t(o) >= B.weightObjects.size()) {
+            complete = false;
+            continue;
+        }
+        if (seen[size_t(o)]) {
+            continue;
+        }
+        seen[size_t(o)] = 1;
+        const RigExecBakedProgramImpl::WeightObject &weight =
+            B.weightObjects[size_t(o)];
+        if (weight.providerSlot >= 0) {
+            if (size_t(weight.providerSlot) < B.noScaleAvars.size() &&
+                B.noScaleAvars[size_t(weight.providerSlot)]) {
+                slots.push_back(weight.providerSlot);
+            } else {
+                complete = false;
+            }
+        }
+        if (weight.base >= 0) {
+            stack.push_back(weight.base);
+        }
+        stack.insert(stack.end(), weight.inputs.begin(), weight.inputs.end());
+    }
+    if (!TF_VERIFY(complete, "a weight object's closure is outside the "
+                             "program's volume table")) {
+        slots.clear();
+        for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
+            if (B.noScaleAvars[i]) {
+                slots.push_back(int(i));
+            }
+        }
+    }
+    for (const int slot : slots) {
+        reads->push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::WeightFrames, slot));
+    }
+}
+
 }  // namespace
 
 void
@@ -902,12 +957,12 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     // A current-phase field is measured against the points
                     // ENTERING this revision, so the assemble reads that
                     // version exactly as a chunk does. The oracle places
-                    // the volume from the program's volumePlacement table,
-                    // which the VolumePlacements step writes (WeightFrames),
-                    // so it waits for that step too.
+                    // each volume of the field from the program's
+                    // volumePlacement table, so it waits for the
+                    // VolumePlacements step of each of those volumes.
                     assemble.maxDiagnostics += 1;
-                    assemble.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::WeightFrames, 0));
+                    DeclarePlacementReads(B, revision.weightObject,
+                                          &assemble.reads);
                     DeclarePointVersionRead(B, entering, &assemble.reads);
                 }
                 if (revision.driverFramesSolver >= 0) {

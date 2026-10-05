@@ -428,9 +428,9 @@ StepSize(const RigExecBakedProgramImpl &B, LazyGeometrySizes &geometry,
         return double(std::max<size_t>(
             B.poseInterpolators[object].poseSlots.size(), 1));
     case RigExecBakedStepKind::VolumePlacements:
-        // One decomposition per volume, and there are never many.
-        return WrittenSlots(step, RigExecBakedSlotDomain::WeightFrames) *
-               double(std::max<size_t>(step.reads.size(), 1));
+        // One decomposition: the step places one volume; the fitted row is
+        // per volume.
+        return 1;
     case RigExecBakedStepKind::WeightPacket: {
         // The ELEMENTS the packet carries, which is what every one of the
         // builders costs per unit: a painted table's values, a volume's
@@ -2980,6 +2980,12 @@ StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step,
     case RigExecBakedStepKind::PoseInterpolator:
         return text(B.poseInterpolators[size_t(step.object)].path);
     case RigExecBakedStepKind::VolumePlacements:
+        // part 1 is the per-volume form Build emits; a hand-built whole-map
+        // step (part -1) has no slot to name.
+        if (step.part == 1 && step.object >= 0 &&
+            size_t(step.object) < B.paths.size()) {
+            return text(B.paths[size_t(step.object)]);
+        }
         return "every volume weight";
     case RigExecBakedStepKind::WeightPacket:
         return text(B.weightObjects[size_t(step.object)].path);

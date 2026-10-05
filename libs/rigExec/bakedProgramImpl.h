@@ -463,7 +463,7 @@ enum class RigExecBakedSlotDomain : uint8_t {
     ChainPoints,         ///< the chain's published points
     DerivedOut,          ///< one derived target's output
     WeightPacket,        ///< one weight object's packet for this frame
-    WeightFrames,        ///< where every volume weight is placed, as one slot
+    WeightFrames,        ///< where one volume weight is placed, by provider slot
     PoseWeight,          ///< poseWeights[k]: one pose interpolator's weights
     Snapshots,           ///< the phased-read records one step made
 };
@@ -578,7 +578,7 @@ enum class RigExecBakedStepKind {
     ProviderMatrix,   ///< one provider's rest -> final or rest -> base matrix
     SnapshotFinals,   ///< every provider's final matrix, for a phased read
     PoseInterpolator, ///< one pose interpolator's weights, from the final pose
-    VolumePlacements, ///< every volume weight's placement, from the walk
+    VolumePlacements, ///< one volume weight's placement, from the walk
     WeightPacket,     ///< one weight object's packet, built once per frame
     InfluenceFold,    ///< one revision's influence table
     RevisionStatic,   ///< one revision's packet, status and executed decision
@@ -648,7 +648,7 @@ struct RigExecBakedStep {
     ///   ProviderMatrix                              provider slot
     ///   SnapshotFinals                              unused
     ///   PoseInterpolator                            index into poseInterpolators
-    ///   VolumePlacements                            unused
+    ///   VolumePlacements                            provider slot (part 1)
     ///   WeightPacket                                index into weightObjects
     ///   InfluenceFold/RevisionStatic/
     ///     RevisionChunk/RevisionFuse                index into revisionIndex
@@ -656,8 +656,10 @@ struct RigExecBakedStep {
     ///   Derived                                     index into derivedIndex
     int object = -1;
     /// The part of it, by kind: the vertex chunk of a RevisionChunk, the
-    /// propagation-pair chunk of a PropagateChunk, and 1 for a final-phase
-    /// ProviderMatrix against 0 for a base-phase one. -1 where unused.
+    /// propagation-pair chunk of a PropagateChunk, 1 for a final-phase
+    /// ProviderMatrix against 0 for a base-phase one, and 1 for the
+    /// per-volume VolumePlacements form (the whole-map form, -1, is no
+    /// longer emitted but keeps its wire meaning). -1 where unused.
     int part = -1;
 
     /// Sorted, deduplicated. Writes are an upper bound (see above).
@@ -2629,13 +2631,13 @@ struct RigExecBakedProgramImpl {
                        const std::vector<GfVec3f> *)> resolveWeights;
 
     /// Per provider slot, where the volume at that slot is placed: the
-    /// VolumePlacements step's output (WeightFrames), read by the oracle and
-    /// by pose.weightFrames. The live and frozen steps both fill every
-    /// noScaleAvars slot; the live oracle reads only the placedVolumes
+    /// output of that slot's VolumePlacements step (WeightFrames[slot]), read
+    /// by the oracle and by pose.weightFrames. Every noScaleAvars slot has
+    /// a live and a frozen step; the live oracle reads only the placedVolumes
     /// slots, and each publication reads the slots volumePlacementKeys
     /// names. Non-volume slots stay identity and are never read. Kept across
     /// runs like deltaValues, and carried by a frozen clone and
-    /// RigExecPartialSlots: a cone that skipped the step left the placement
+    /// RigExecPartialSlots: a cone that skipped a step left the placement
     /// it would compute again.
     std::vector<GfMatrix4d> volumePlacement;
     /// Per provider slot: 1 where the dynamic walk places this volume (a key
@@ -2647,10 +2649,10 @@ struct RigExecBakedProgramImpl {
     /// The slots pose.weightFrames publishes: the key set of the placements
     /// this job and the jobs it restored state from have written. The live
     /// program is always Placed. A frozen job differs: _RunFrozen starts at
-    /// None, so a whole frozen run that skips VolumePlacements publishes no
-    /// volume; a partial cone takes the value RigExecPartialSlots restores
-    /// (Placed from a live capture); the frozen VolumePlacements step sets
-    /// Every, its own key set.
+    /// None, so a whole frozen run that skips every VolumePlacements step
+    /// publishes no volume; a partial cone takes the value
+    /// RigExecPartialSlots restores (Placed from a live capture); any frozen
+    /// VolumePlacements step sets Every.
     RigExecVolumePlacementKeys volumePlacementKeys =
         RigExecVolumePlacementKeys::Placed;
     /// Weight objects whose field is measured against the points AS THEY
@@ -3330,9 +3332,10 @@ void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
-/// Appends the placement step, if the epoch has any volume weight at all,
-/// then one WeightPacket step per weight object in the table's dependency
-/// order -- all of it between the pose half and the geometry half.
+/// Appends one VolumePlacements step per volume provider slot (object =
+/// slot, part 1), then one WeightPacket step per weight object in the
+/// table's dependency order -- all of it between the pose half and the
+/// geometry half.
 void RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program);
 
 /// Runs one WeightPacket step, under the same rule as the other two.

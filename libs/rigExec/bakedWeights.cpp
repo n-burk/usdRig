@@ -30,7 +30,7 @@
 //     measured against the in-flight points.
 //   * pose.weightFrames is the FINAL-frame placement, the table the oracle
 //     reads. One function places a volume, RigExecVolumePlacement, for the
-//     dynamic walk's refresh and this program's VolumePlacements step alike.
+//     dynamic walk's refresh and this program's VolumePlacements steps alike.
 // So packets place against the BASE frame and the oracle against the FINAL
 // one. The two genuinely differ for a volume some constraint revises,
 // and reproducing BOTH is the contract: parity is with the dynamic path as
@@ -441,41 +441,31 @@ void
 RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
-    // Where every volume weight ended up, as one step and one slot: the
-    // program's slot-indexed volumePlacement table. It exists for two
-    // readers. pose.weightFrames is one (the epilogue publishes it); the
-    // other is the ORACLE, handed the table as a RigExecVolumePlacementView,
-    // which is what a constraint's envelope and a current-phase field
-    // resolve through. The geometry walk runs after every pose commit, so
-    // one placement at the end of the pose half is what every reader sees
-    // -- and making it a step is what orders those readers against it
-    // instead of leaving it somewhere in the epilogue where a parallel
-    // schedule could have read the table already. The step reads every
-    // volume slot because both bodies place them all.
-    bool anyVolume = false;
-    for (const RigExecBakedProgramImpl::WeightObject &weight :
-             B.weightObjects) {
-        anyVolume = anyVolume || weight.providerSlot >= 0;
-    }
-    for (size_t i = 0; i < B.noScaleAvars.size() && !anyVolume; ++i) {
-        // A volume bound to no mover still has a placement and still
-        // publishes a weightFrames entry, so the provider table decides this
-        // and not the weight-object table.
-        anyVolume = B.noScaleAvars[i] != 0;
-    }
-    if (anyVolume) {
+    // Where each volume weight ended up: one step per volume slot, writing
+    // that slot of the program's volumePlacement table (WeightFrames[slot]).
+    // The table has two readers. pose.weightFrames is one (the epilogue
+    // publishes it); the other is the ORACLE, handed the table as a
+    // RigExecVolumePlacementView, which a current-phase field resolves
+    // through and which declares WeightFrames for exactly the volumes of its
+    // object's closure. The geometry walk runs after every pose commit, so a
+    // placement from the slot's last pose version is what every reader
+    // sees. Every volume slot gets a step, bound to a mover or not: an
+    // unbound volume still publishes a weightFrames entry.
+    // part = 1 marks the per-volume form (object = provider slot); the
+    // whole-map form (object 0, part -1) is no longer emitted.
+    for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
+        if (B.noScaleAvars[i] == 0) {
+            continue;
+        }
         RigExecBakedStep step;
         step.kind = RigExecBakedStepKind::VolumePlacements;
-        step.object = 0;
+        step.object = int(i);
+        step.part = 1;
         step.maxDiagnostics = 0;
-        for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
-            if (B.noScaleAvars[i] != 0) {
-                step.reads.push_back(RigExecBakedOne(
-                    RigExecBakedSlotDomain::PoseFin, int(i)));
-            }
-        }
+        step.reads.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, int(i)));
         step.writes.push_back(
-            RigExecBakedOne(RigExecBakedSlotDomain::WeightFrames, 0));
+            RigExecBakedOne(RigExecBakedSlotDomain::WeightFrames, int(i)));
         B.steps.push_back(std::move(step));
     }
     // The slot storage, sized once. A consumer holds a pointer into it for
@@ -518,15 +508,12 @@ RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
 {
     RigExecBakedProgramImpl &B = *program;
     if (step->kind == RigExecBakedStepKind::VolumePlacements) {
-        // Every volume slot, from the frame the walk ended with, as the
-        // dynamic refresh places it. Live readers mask by placedVolumes and
-        // leave volumePlacementKeys at Placed.
-        for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
-            if (B.noScaleAvars[i]) {
-                B.volumePlacement[i] =
-                    RigExecVolumePlacement(B.fin[size_t(B.finLast[i])]);
-            }
-        }
+        // This step's volume slot, from the frame the walk ended with, as
+        // the dynamic refresh places it. Live readers mask by placedVolumes
+        // and leave volumePlacementKeys at Placed.
+        const size_t slot = size_t(step->object);
+        B.volumePlacement[slot] =
+            RigExecVolumePlacement(B.fin[size_t(B.finLast[slot])]);
         return;
     }
     RigExecBakedProgramImpl::WeightObject &weight =

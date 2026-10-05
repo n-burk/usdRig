@@ -501,6 +501,14 @@ rigexec_add_example_parity_test(NAME projector_spaces
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/projector_spaces.usda"
     FRAMES 1,4,7,10 GUIDES)
 
+# Two volumes with one placement step each, one of them placed differently
+# at base (a mover's packet) and at final (pose.weightFrames, a
+# current-phase field) because a constraint revises its joint after the
+# solver.
+rigexec_add_example_parity_test(NAME volume_placements
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/volume_placements.usda"
+    FRAMES 1,5,10 GUIDES)
+
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.h.in"
                "${CMAKE_CURRENT_BINARY_DIR}/tests/rigExecExampleFixtures.h"
                @ONLY)
@@ -837,6 +845,12 @@ endforeach()
 rigexec_add_verify_binary_test(NAME projector_spaces
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/projector_spaces.usda"
     FRAMES 1,4,7,10)
+
+# One VolumePlacements step per volume (part 1), each writing its own
+# WeightFrames slot, and a current-phase field reading both placements.
+rigexec_add_verify_binary_test(NAME volume_placements
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/volume_placements.usda"
+    FRAMES 1,5,10)
 
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
 target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)

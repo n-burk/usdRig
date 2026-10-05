@@ -10,18 +10,22 @@
 // argv[1] = path to the examples directory; the codeless schema plugin is
 // expected at <examples>/../plugin/rigExecSchema/resources.
 #include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedTrace.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 #include "rigExec/weightPackets.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecPoseCompare.h"
 #include <limits>
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/errorMark.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/usd/sdf/types.h"
@@ -31,7 +35,10 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xform.h"
 
+#include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1666,6 +1673,306 @@ def Xform "Asset"
     }
 }
 
+// The step of \p kind labelled exactly "<kind> <path>", or SIZE_MAX with a
+// failure when there is not exactly one.
+static size_t
+OneOpGraphStep(const std::vector<RigExecOpGraphNode> &graph,
+               const std::string &kind, const SdfPath &path)
+{
+    const std::string label = kind + " " + path.GetString();
+    size_t found = SIZE_MAX, count = 0;
+    for (const RigExecOpGraphNode &node : graph) {
+        if (node.kind == kind && node.label == label) {
+            found = node.step;
+            ++count;
+        }
+    }
+    if (count != 1) {
+        std::printf("FAIL: expected one step labelled %s, found %zu\n",
+                    label.c_str(), count);
+        ++failures;
+        return SIZE_MAX;
+    }
+    return found;
+}
+
+// volume_placements.usda's StripSmooth measures Both (max of SphereA and
+// SphereB) against the current phase, so its RevisionStatic reads exactly
+// the WeightFrames slots of SphereA's and SphereB's placement steps, waits
+// on both steps, and neither reads nor waits on the placement of any volume
+// in \p outside. The program is built under an error mark: a closure the
+// build cannot resolve falls back to every volume slot through a TF_VERIFY,
+// which would declare the same reads on a rig whose volumes are all in the
+// closure.
+static void
+CheckPlacementReads(const UsdStageRefPtr &stage, const std::string &label,
+                    const std::vector<SdfPath> &outside)
+{
+    const SdfPath rig("/PlacementAsset/Rig");
+    const SdfPath smooth("/PlacementAsset/Rig/GeometryMovers/StripSmooth");
+    RigExecRigEvaluator E(stage, rig);
+    E.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    TfErrorMark mark;
+    const bool compiled = E.Compile(&errors);
+    const bool valid = compiled && E.Evaluate(UsdTimeCode(1.0)).valid;
+    if (!compiled || !valid || E.GetBakedGenerationCount() != 1) {
+        std::printf("FAIL %s: no baked generation (compiled %d, valid %d)\n",
+                    label.c_str(), int(compiled), int(valid));
+        for (const std::string &e : errors) {
+            std::printf("  compile error: %s\n", e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    if (!mark.IsClean()) {
+        for (const TfError &error : mark) {
+            std::printf("FAIL %s: build posted: %s\n", label.c_str(),
+                        error.GetCommentary().c_str());
+        }
+        ++failures;
+        mark.Clear();
+    }
+    const std::vector<RigExecOpGraphNode> graph = E.GetOpGraph();
+    const size_t smoothStatic = OneOpGraphStep(graph, "RevisionStatic", smooth);
+    const size_t placeA = OneOpGraphStep(
+        graph, "VolumePlacements",
+        SdfPath("/PlacementAsset/Rig/Joints/A/SphereA"));
+    const size_t placeB = OneOpGraphStep(
+        graph, "VolumePlacements",
+        SdfPath("/PlacementAsset/Rig/Joints/B/SphereB"));
+    std::vector<size_t> placeOutside;
+    for (const SdfPath &volume : outside) {
+        placeOutside.push_back(
+            OneOpGraphStep(graph, "VolumePlacements", volume));
+    }
+    if (smoothStatic == SIZE_MAX || placeA == SIZE_MAX ||
+        placeB == SIZE_MAX) {
+        return;
+    }
+    using Range = std::pair<uint32_t, uint32_t>;
+    const auto placementsOf = [](const std::vector<RigExecOpSlotRange> &rs) {
+        std::set<Range> out;
+        for (const RigExecOpSlotRange &r : rs) {
+            if (r.domain == "WeightFrames") {
+                out.insert({r.first, r.last});
+            }
+        }
+        return out;
+    };
+    std::set<Range> expected = placementsOf(graph[placeA].writes);
+    const std::set<Range> writesB = placementsOf(graph[placeB].writes);
+    CHECK(expected.size() == 1 && writesB.size() == 1);
+    expected.insert(writesB.begin(), writesB.end());
+    CHECK(expected.size() == 2);
+    const RigExecOpGraphNode &reader = graph[smoothStatic];
+    const std::set<Range> read = placementsOf(reader.reads);
+    if (read != expected) {
+        std::printf("FAIL %s: StripSmooth's RevisionStatic reads %zu "
+                    "WeightFrames range(s), not exactly SphereA's and "
+                    "SphereB's\n", label.c_str(), read.size());
+        ++failures;
+    }
+    const std::set<size_t> preds(reader.preds.begin(), reader.preds.end());
+    CHECK(preds.count(placeA) == 1);
+    CHECK(preds.count(placeB) == 1);
+    for (const size_t place : placeOutside) {
+        if (place == SIZE_MAX) {
+            continue;
+        }
+        const std::set<Range> writes = placementsOf(graph[place].writes);
+        CHECK(writes.size() == 1);
+        for (const Range &w : writes) {
+            CHECK(!read.count(w));
+        }
+        CHECK(!preds.count(place));
+    }
+}
+
+// tests/fixtures/volume_placements.usda: two volumes with one placement step
+// each. SphereB rides B, which BAim revises after BFK, so its final
+// placement (pose.weightFrames, the oracle) differs from its base placement
+// (BSkin's packet). A and B are driven by separate solvers in separate
+// hierarchies, so a drag on one control re-runs its own volume's placement
+// step and not the other's.
+static void
+TestVolumePlacementsAreIndependent(const std::string &examplesDir)
+{
+    const char *label = "volume placements";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/volume_placements.usda";
+    const SdfPath rig("/PlacementAsset/Rig");
+    const SdfPath sphereA("/PlacementAsset/Rig/Joints/A/SphereA");
+    const SdfPath sphereB("/PlacementAsset/Rig/Joints/B/SphereB");
+    const SdfPath aCtl("/PlacementAsset/Rig/Controls/ACtl");
+    const SdfPath bCtl("/PlacementAsset/Rig/Controls/BCtl");
+    const SdfPath smooth("/PlacementAsset/Rig/GeometryMovers/StripSmooth");
+    const SdfPath skin = smooth.AppendChild(TfToken("BSkin"));
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    // The same rig with BAim disabled: B's final frame equals its base.
+    const UsdStageRefPtr unaimedStage = UsdStage::Open(stagePath);
+    CHECK(stage && unaimedStage);
+    if (!stage || !unaimedStage) {
+        return;
+    }
+    unaimedStage->SetEditTarget(unaimedStage->GetSessionLayer());
+    const UsdPrim aim = unaimedStage->GetPrimAtPath(
+        SdfPath("/PlacementAsset/Rig/BFollow/BAim"));
+    CHECK(aim && aim.GetAttribute(TfToken("inputs:enabled")).Set(false));
+
+    std::vector<std::string> errors;
+    const auto open = [&](const UsdStageRefPtr &s,
+                          RigExecEvaluationMode mode) {
+        auto E = std::make_unique<RigExecRigEvaluator>(s, rig);
+        if (!E->Compile(&errors)) {
+            for (const std::string &e : errors) {
+                std::printf("FAIL %s: compile error: %s\n", label, e.c_str());
+            }
+            ++failures;
+            return std::unique_ptr<RigExecRigEvaluator>();
+        }
+        E->SetEvaluationMode(mode);
+        E->SetPublishWeightFields(true);
+        return E;
+    };
+    const auto baked = open(stage, RigExecEvaluationMode::Baked);
+    const auto walk = open(stage, RigExecEvaluationMode::Dynamic);
+    const auto unaimed = open(unaimedStage, RigExecEvaluationMode::Dynamic);
+    if (!baked || !walk || !unaimed) {
+        return;
+    }
+    CHECK(baked->IsBakeable());
+    baked->SetProfilingEnabled(true);
+
+    const auto frameOf = [](const RigExecRigPose &pose, const SdfPath &path) {
+        const auto found = pose.weightFrames.find(path);
+        return found == pose.weightFrames.end() ? GfMatrix4d(0.0)
+                                                : found->second;
+    };
+    for (const double frame : {1.0, 5.0, 10.0}) {
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        const size_t before = baked->GetBakedGenerationCount();
+        const RigExecRigPose live = baked->Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose dynamic = walk->Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose base = unaimed->Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid && base.valid);
+        CHECK(baked->GetBakedGenerationCount() == before + 1);
+        rigExecTest::CompareEveryMap(&failures, where, dynamic, live);
+        CHECK(live.weightFrames.size() == 2);
+        // weightFrames is the FINAL placement: the aim moves SphereB's and
+        // leaves SphereA's alone.
+        CHECK(frameOf(live, sphereB) != frameOf(base, sphereB));
+        CHECK(frameOf(live, sphereA) == frameOf(base, sphereA));
+        // BSkin's packet is placed at SphereB's BASE frame, which the aim
+        // does not revise: the same field with and without it.
+        const auto field = live.weightFields.find(sphereB);
+        const auto baseField = base.weightFields.find(sphereB);
+        CHECK(field != live.weightFields.end() &&
+              baseField != base.weightFields.end());
+        if (field != live.weightFields.end() &&
+            baseField != base.weightFields.end()) {
+            CHECK(field->second.weights == baseField->second.weights);
+            bool reaches = false;
+            for (const float w : field->second.weights) {
+                reaches = reaches || w > 0.0f;
+            }
+            CHECK(reaches);
+        }
+    }
+
+    // Drags at frame 5, after a repeat of it. Each control reaches its own
+    // volume's placement step and not the other's; the current-phase field
+    // (StripSmooth) reads both placements and re-runs either way.
+    CHECK(baked->Evaluate(UsdTimeCode(5.0)).valid);
+    const RigExecRigPose still = walk->Evaluate(UsdTimeCode(5.0));
+    struct Drag {
+        SdfPath control, placed, kept;
+        double rz;
+    };
+    for (const Drag &drag : {Drag{aCtl, sphereA, sphereB, 50.0},
+                             Drag{bCtl, sphereB, sphereA, -40.0}}) {
+        const std::string where =
+            std::string(label) + " drag " + drag.control.GetName();
+        const std::vector<RigExecValueOverride> overrides{
+            RigExecValueOverride{drag.control, TfToken(),
+                                 TfToken("avars:rz"), VtValue(drag.rz)}};
+        baked->SetInteractiveOverrides(overrides);
+        walk->SetInteractiveOverrides(overrides);
+        baked->ClearProfile();
+        const size_t before = baked->GetBakedGenerationCount();
+        const RigExecRigPose live = baked->Evaluate(UsdTimeCode(5.0));
+        const RigExecRigPose dynamic = walk->Evaluate(UsdTimeCode(5.0));
+        CHECK(live.valid && dynamic.valid);
+        CHECK(baked->GetBakedGenerationCount() == before + 1);
+        rigExecTest::CompareEveryMap(&failures, where, dynamic, live);
+        // The drag moved its own volume and nothing of the other.
+        CHECK(frameOf(live, drag.placed) != frameOf(still, drag.placed));
+        CHECK(frameOf(live, drag.kept) == frameOf(still, drag.kept));
+        const std::vector<RigExecOpTraceEntry> trace = baked->GetLastOpTrace();
+        // Exact labels: StripSmooth's is a prefix of BSkin's.
+        const auto ran = [&trace](const std::string &kind,
+                                  const SdfPath &path) {
+            size_t count = 0;
+            for (const RigExecOpTraceEntry &entry : trace) {
+                count += entry.label == kind + " " + path.GetString();
+            }
+            return count;
+        };
+        CHECK(ran("VolumePlacements", drag.placed) == 1);
+        CHECK(ran("VolumePlacements", drag.kept) == 0);
+        CHECK(ran("RevisionStatic", smooth) == 1);
+        // BSkin's steps run on every frame: its packet's step reads a pose
+        // frame and so is always dirty (externalReads), and the cone is
+        // structural. Whether the skin re-deformed is the value decision of
+        // its assemble, and only a drag that reaches SphereB's base or B
+        // makes it.
+        bool skinExecuted = true, smoothExecuted = false;
+        const RigExecBakedProgramImpl &B =
+            baked->GetBakedProgram()->GetStepGraph();
+        for (const auto &chain : B.chains) {
+            for (const auto &revision : chain.revisions) {
+                if (revision.moverPath == skin) {
+                    skinExecuted = revision.executed;
+                } else if (revision.moverPath == smooth) {
+                    smoothExecuted = revision.executed;
+                }
+            }
+        }
+        CHECK(skinExecuted == (drag.control == bCtl));
+        CHECK(smoothExecuted);
+        std::printf("  %s: %zu step(s) ran, %zu revision(s) executed, "
+                    "BSkin %s\n",
+                    where.c_str(), trace.size(),
+                    size_t(live.moverGraphRevisionsExecuted),
+                    skinExecuted ? "re-deformed" : "kept");
+        baked->ClearInteractiveOverrides();
+        walk->ClearInteractiveOverrides();
+        CHECK(baked->Evaluate(UsdTimeCode(5.0)).valid);
+    }
+
+    // The closure: on the shipped rig, and with SphereC, a volume outside
+    // Both's closure, added in the session layer.
+    CheckPlacementReads(stage, label, {});
+    const UsdStageRefPtr thirdStage = UsdStage::Open(stagePath);
+    CHECK(thirdStage);
+    if (!thirdStage) {
+        return;
+    }
+    thirdStage->SetEditTarget(thirdStage->GetSessionLayer());
+    const SdfPath sphereC("/PlacementAsset/Rig/Weights/SphereC");
+    const UsdPrim third =
+        thirdStage->DefinePrim(sphereC, TfToken("RigExecSphereWeight"));
+    CHECK(third);
+    third.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+        .Set(2.0);
+    third.CreateAttribute(TfToken("inputs:falloffMin"),
+                          SdfValueTypeNames->Float).Set(0.5f);
+    third.CreateAttribute(TfToken("inputs:falloffMax"),
+                          SdfValueTypeNames->Float).Set(2.0f);
+    CheckPlacementReads(thirdStage, std::string(label) + " with SphereC",
+                        {sphereC});
+}
+
 static std::string
 DefaultResourceDir()
 {
@@ -1718,6 +2025,9 @@ main(int argc, char **argv)
     TestVolumePlacementGate();
     TestTheOracleReadsTheProgramsPlacements();
     TestReleasedOverridePublishesTheProgramsPlacements();
+    if (argc > 1) {
+        TestVolumePlacementsAreIndependent(argv[1]);
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

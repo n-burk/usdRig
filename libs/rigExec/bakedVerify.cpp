@@ -694,7 +694,8 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     CompareVector(differences, &count, "constraint delta present",
                   deltaPresent, program.deltaPresent);
     // The weight half's hand-off: what the oracle and pose.weightFrames
-    // read. A cone that skipped VolumePlacements kept last run's placements.
+    // read. A cone that skipped a VolumePlacements step kept that volume's
+    // placement from the last run.
     CompareVector(differences, &count, "volumePlacement", volumePlacement,
                   program.volumePlacement);
     for (size_t s = 0; s < program.solvers.size() && s < solvers.size(); ++s) {

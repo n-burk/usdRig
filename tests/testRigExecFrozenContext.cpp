@@ -1674,7 +1674,8 @@ KeysOf(const std::map<SdfPath, GfMatrix4d> &frames)
     return keys;
 }
 
-// The cluster of \p B's VolumePlacements step, or -1.
+// The cluster of \p B's first VolumePlacements step (there is one per
+// volume), or -1.
 static int
 VolumePlacementsCluster(const RigExecBakedProgramImpl &B)
 {
@@ -1684,6 +1685,19 @@ VolumePlacementsCluster(const RigExecBakedProgramImpl &B)
         }
     }
     return -1;
+}
+
+// The clusters of every VolumePlacements step of \p B, in program order.
+static std::vector<int>
+VolumePlacementsClusters(const RigExecBakedProgramImpl &B)
+{
+    std::vector<int> clusters;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind == RigExecBakedStepKind::VolumePlacements) {
+            clusters.push_back(step.cluster);
+        }
+    }
+    return clusters;
 }
 
 // What a frozen job publishes as weightFrames, from live state at \p time:
@@ -1718,8 +1732,11 @@ CheckFrozenWeightFrameKeys(RigExecRigEvaluator *evaluator,
         return {};
     }
     const size_t clusters = B.clustering.clusters.size();
-    const int placements = VolumePlacementsCluster(B);
-    CHECK(placements >= 0);
+    const std::vector<int> placements = VolumePlacementsClusters(B);
+    CHECK(!placements.empty());
+    for (const int placement : placements) {
+        CHECK(placement >= 0);
+    }
 
     RigExecBakedClusterSet none;
     none.Resize(clusters);
@@ -1738,8 +1755,11 @@ CheckFrozenWeightFrameKeys(RigExecRigEvaluator *evaluator,
     const RigExecPartialRunResult ran =
         RigExecRunPartialCone(*frozen, inputs, slots, live, all, 0);
     CHECK(ran.completed);
-    CHECK(std::find(ran.executedClusters.begin(), ran.executedClusters.end(),
-                    placements) != ran.executedClusters.end());
+    for (const int placement : placements) {
+        CHECK(std::find(ran.executedClusters.begin(),
+                        ran.executedClusters.end(),
+                        placement) != ran.executedClusters.end());
+    }
     if (KeysOf(ran.pose.weightFrames) != EveryVolumeSlot(B)) {
         std::printf("FAIL %s: a cone that ran VolumePlacements does not "
                     "publish every volume slot\n", what);
@@ -1761,9 +1781,12 @@ CheckFrozenWeightFrameKeys(RigExecRigEvaluator *evaluator,
     CHECK(chained.executedClusters.empty());
     CHECK(chained.pose.weightFrames == ran.pose.weightFrames);
 
-    // On these rigs VolumePlacements shares its cluster with steps that read
-    // outside the program, so a whole job always runs it.
-    CHECK(B.cones.always.Test(placements));
+    // On these rigs every VolumePlacements step shares its cluster with
+    // steps that read outside the program, so a whole job always runs each
+    // of them and publishes every volume slot.
+    for (const int placement : placements) {
+        CHECK(placement >= 0 && B.cones.always.Test(placement));
+    }
     RigExecBackgroundScheduler scheduler;
     bool wholeRan = false;
     const RigExecRigPose whole =
@@ -4472,6 +4495,109 @@ TestProjectorSpacesMatchDynamic(const std::string &examplesDir)
     }
 }
 
+// tests/fixtures/volume_placements.usda, frozen. As shipped, StripSmooth's
+// field is current-phase (SphereA reads its weightTarget at `preceding`),
+// which the freeze refuses by name. With SphereA's read phase set to `base`
+// the rig freezes, and a warming job matches live baked and the dynamic walk
+// bit for bit, including both volumes' weightFrames: SphereB's is the final
+// placement BAim leaves, which differs from its base.
+void
+TestVolumePlacementsFixtureFreezes(const std::string &examplesDir)
+{
+    const char *label = "volume placements";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/volume_placements.usda";
+    const SdfPath rig("/PlacementAsset/Rig");
+    const SdfPath sphereA("/PlacementAsset/Rig/Joints/A/SphereA");
+    const SdfPath sphereB("/PlacementAsset/Rig/Joints/B/SphereB");
+    std::vector<std::string> errors;
+    std::string error;
+    {
+        UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        RigExecRigEvaluator evaluator(stage, rig);
+        CHECK(evaluator.Compile(&errors));
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        CHECK(evaluator.GetBakedGenerationCount() == 1);
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(!RigExecFreezeProgram(evaluator, &frozen, &error));
+        CHECK(!frozen);
+        const std::string expected =
+            "revision /PlacementAsset/Rig/GeometryMovers/StripSmooth "
+            "measures its weight field against the current phase, which "
+            "resolves through the live oracle";
+        if (error.find(expected) == std::string::npos) {
+            std::printf("FAIL %s: the freeze refusal is \"%s\"\n", label,
+                        error.c_str());
+            ++failures;
+        }
+    }
+
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim sphere = stage->GetPrimAtPath(sphereA);
+    CHECK(sphere);
+    if (!sphere) {
+        return;
+    }
+    CHECK(sphere.GetRelationship(TfToken("rigExec:weightTarget"))
+              .SetMetadata(TfToken("rigExecReadPhase"), std::string("base")));
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    // Both from frame 1, so their work counters compare at 5 and 10.
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(walk.Evaluate(UsdTimeCode(1.0)).valid);
+
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {5.0, 10.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", label,
+                        error.c_str());
+            ++failures;
+            return;
+        }
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == before + 1);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid);
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        CheckPosesBitIdentical((where + " warmed").c_str(), live, warmed);
+        CheckPosesBitIdentical((where + " baked").c_str(), dynamic, live);
+        CHECK(warmed.weightFrames.size() == 2);
+        CHECK(warmed.weightFrames.count(sphereA) == 1);
+        CHECK(warmed.weightFrames.count(sphereB) == 1);
+    }
+    // The key sets with two placement steps: each step's cluster is always
+    // run, so a whole job publishes both volumes.
+    const std::map<SdfPath, GfMatrix4d> every = CheckFrozenWeightFrameKeys(
+        &evaluator, rig, UsdTimeCode(7.0), "volume placements, base phase");
+    CHECK(every.size() == 2);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4528,6 +4654,7 @@ main(int argc, char **argv)
         TestFrozenWeightFramesKeepTheirKeySets(argv[1]);
         TestUnresolvableTargetDeclinesSampling(argv[1]);
         TestProjectorSpacesMatchDynamic(argv[1]);
+        TestVolumePlacementsFixtureFreezes(argv[1]);
     } else {
         std::printf("skipping the biped (no examples directory given)\n");
     }

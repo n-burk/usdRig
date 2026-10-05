@@ -99,22 +99,24 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
 {
     RigExecBakedProgramImpl &B = worker->B;
     if (step->kind == RigExecBakedStepKind::VolumePlacements) {
-        // Every no-scale provider, placed or identity, from the frame the
-        // walk ended with. This gate is IsValid + IsDegenerate only, with no
-        // finite check (RigExecVolumePlacement has one): a non-finite final
-        // frame places at a NaN matrix here and at the identity live.
-        for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
-            if (!B.noScaleAvars[i]) {
-                continue;
-            }
-            GfMatrix4d placement(1.0);
-            const RigExecPointFrame &frame = B.fin[size_t(B.finLast[i])];
-            if (frame.IsValid() && !frame.IsDegenerate()) {
-                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                      frame.points, &placement);
-            }
-            B.volumePlacement[i] = placement;
+        // This step's no-scale provider, placed or identity, from the frame
+        // the walk ended with. This gate is IsValid + IsDegenerate only, with
+        // no finite check (RigExecVolumePlacement has one): a non-finite
+        // final frame places at a NaN matrix here and at the identity live.
+        const size_t slot = size_t(step->object);
+        if (slot >= B.noScaleAvars.size() || !B.noScaleAvars[slot]) {
+            return false;
         }
+        GfMatrix4d placement(1.0);
+        const RigExecPointFrame &frame = B.fin[size_t(B.finLast[slot])];
+        if (frame.IsValid() && !frame.IsDegenerate()) {
+            RigExecPointsToMatrix(RigExecIdentityLandmarks(), frame.points,
+                                  &placement);
+        }
+        B.volumePlacement[slot] = placement;
+        // Any one placement step that ran publishes every volume slot: a
+        // slot whose step the cone skipped keeps the placement it would
+        // compute again (from the clone or the restored slots).
         B.volumePlacementKeys = RigExecVolumePlacementKeys::Every;
         return true;
     }
