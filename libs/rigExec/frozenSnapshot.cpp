@@ -324,10 +324,11 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                 }
             }
             // Read phases, snapshot-recording revisions and snapshot readers
-            // all run frozen: the snapshot store fills from this run's own
-            // steps in program order, and the static assembly builds the
-            // same per-revision overlay live builds. (Blend-sample phases
-            // keep their own refusal above.)
+            // all run frozen: a point phase resolves through its binding
+            // over the worker's own chains, the transform phase out of the
+            // store this run's own steps fill in program order, and the
+            // static assembly builds the same per-revision overlay live
+            // builds. (Blend-sample phases keep their own refusal above.)
             if (revision.weightCurrentPhase) {
                 return fail("revision " +
                             revision.moverPath.GetString() +

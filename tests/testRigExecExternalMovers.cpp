@@ -1,3 +1,4 @@
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/movers/moverRegistry.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/frozenContext.h"
@@ -397,6 +398,54 @@ void TestExport()
           error.find("no .rigexec encoding") != std::string::npos);
 }
 
+// The plugin mover's `final` reference is a phased point read like any
+// other: bound at Build to the reference chain's published points,
+// and, inside the reader, equal to what the run's phased-read store holds.
+// Playback takes the same answer through its own overlay (TestExport), so
+// the runtime's "have" flag for it is this binding's first candidate.
+void TestPhasedReferenceIsBound()
+{
+    const auto stage = MakeExportRig("ExternalQuadraticMover");
+    RigExecRigEvaluator baked(stage, kRig);
+    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    Compile(&baked);
+    for (double frame : {1.0, 2.0, 3.0}) {
+        bool captured = false;
+        if (const RigExecBakedProgram *program = baked.GetBakedProgram()) {
+            captured = RigExecBakedProgramTesting::CapturePointReads(*program);
+        }
+        const size_t generations = baked.GetBakedGenerationCount();
+        const RigExecRigPose pose = baked.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid && pose.bakedParityMismatches == 0);
+        CHECK(baked.GetBakedGenerationCount() == generations + 1);
+        const RigExecBakedProgram *program = baked.GetBakedProgram();
+        CHECK(program);
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+        const RigExecBakedPointsBinding *binding = nullptr;
+        for (const auto &chain : B.chains) {
+            for (const auto &revision : chain.revisions) {
+                if (revision.moverPath == SdfPath("/Rig/External")) {
+                    CHECK(revision.pointBindings.size() == 1);
+                    binding = &revision.pointBindings.front();
+                }
+            }
+        }
+        CHECK(binding && binding->input == kReference &&
+              binding->finalRead && binding->candidates.size() == 1);
+        const GfVec3f *points = nullptr;
+        size_t count = 0;
+        CHECK(RigExecBakedResolvePoints(B, *binding, &points, &count));
+        CHECK(VtVec3fArray(points, points + count) ==
+              pose.movedProperties.at(kReference).Get<VtVec3fArray>());
+        if (captured) {
+            const RigExecBakedPointCapture &capture =
+                B.pointCaptures.at(size_t(binding->id));
+            CHECK(capture.read && capture.storeAnswered &&
+                  capture.bindingAnswered && capture.store == capture.bound);
+        }
+    }
+}
+
 void TestIncompatiblePlugin()
 {
     const auto directory = std::filesystem::temp_directory_path() /
@@ -439,6 +488,7 @@ int main(int argc, char **argv)
         TestRegistration(argv[2]);
         TestEvaluation();
         TestExport();
+        TestPhasedReferenceIsBound();
         TestIncompatiblePlugin();
         std::cout << "External mover loading, registration, dynamic/baked parity, "
                      "invalidation, envelopes, export and playback passed\n";

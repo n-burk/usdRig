@@ -57,6 +57,124 @@ namespace rigExec {
 
 // Bake.
 
+namespace {
+
+/// Binds every phased point read of the program to the store records it can
+/// see (RigExecBakedPointsBinding).
+///
+/// "Before the reader" is program order, which RigExecBakedBuildGeometrySteps
+/// emits chain by chain in `chains` order: every step of an earlier chain,
+/// and on the reader's own chain the fuses of the revisions before it -- or,
+/// for a derived reader, every fuse and the chain's status step. The store
+/// records a revision only where `snapshotAfter` is set and a chain's final
+/// in its status step, and both only when the chain read a base this run.
+void
+BindPointReads(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    std::map<SdfPath, int> chainOf;
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        chainOf.emplace(B.chains[c].target, int(c));
+    }
+    int nextId = 0;
+    // `before` revisions of the reader's own chain precede it, and
+    // `afterStatus` says its status step does too.
+    const auto bind = [&](const SdfPath &input, const RigExecReadPhase &phase,
+                          const SdfPath &reader, size_t readerChain,
+                          size_t before, bool afterStatus) {
+        RigExecBakedPointsBinding out;
+        out.input = input;
+        out.phase = phase;
+        out.id = nextId++;
+        const auto found = chainOf.find(input);
+        if (found == chainOf.end()) {
+            return out;
+        }
+        const size_t c = size_t(found->second);
+        const std::vector<RigExecBakedProgramImpl::GeomRevision> &revisions =
+            B.chains[c].revisions;
+        const size_t recorded = c < readerChain    ? revisions.size()
+                                : c == readerChain ? before
+                                                   : 0;
+        switch (phase.kind) {
+        case RigExecReadPhaseKind::Base:
+            break;
+        case RigExecReadPhaseKind::Final:
+            if (c < readerChain || (c == readerChain && afterStatus)) {
+                out.finalRead = true;
+                out.candidates.push_back({int(c), int(revisions.size())});
+            }
+            break;
+        case RigExecReadPhaseKind::Preceding: {
+            // The record before the reader's own, among the records made so
+            // far; none when the reader's own is not among them yet.
+            int previous = -1;
+            for (size_t r = 0; r < recorded; ++r) {
+                if (!revisions[r].snapshotAfter) {
+                    continue;
+                }
+                if (revisions[r].moverPath == reader) {
+                    if (previous >= 0) {
+                        out.candidates.push_back({int(c), previous + 1});
+                    }
+                    break;
+                }
+                previous = int(r);
+            }
+            break;
+        }
+        case RigExecReadPhaseKind::AtPrim:
+            for (size_t r = recorded; r-- > 0;) {
+                const SdfPath &mover = revisions[r].moverPath;
+                if (revisions[r].snapshotAfter &&
+                    (mover == phase.prim || mover.HasPrefix(phase.prim))) {
+                    out.candidates.push_back({int(c), int(r) + 1});
+                }
+            }
+            break;
+        }
+        return out;
+    };
+    const auto bindRevision =
+        [&](RigExecBakedProgramImpl::GeomRevision *revision, size_t chain,
+            size_t before, bool afterStatus) {
+            revision->pointBindings.clear();
+            for (const auto &[input, phase] : revision->binding.phases) {
+                RigExecBakedPointsBinding bound =
+                    bind(input, phase, revision->moverPath, chain, before,
+                         afterStatus);
+                bound.diagnoseMiss =
+                    phase.kind != RigExecReadPhaseKind::Preceding;
+                revision->pointBindings.push_back(std::move(bound));
+            }
+            for (RigExecBakedProgramImpl::GeomBlendChannel &channel :
+                     revision->blendChannels) {
+                for (auto &sample : channel.samples) {
+                    sample.pointBinding = RigExecBakedPointsBinding();
+                    if (sample.phase.IsBase() || !sample.blendShape.IsEmpty()) {
+                        continue;
+                    }
+                    sample.pointBinding =
+                        bind(sample.pointsPath, sample.phase,
+                             revision->moverPath, chain, before, afterStatus);
+                }
+            }
+        };
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            bindRevision(&chain.revisions[r], c, r, false);
+        }
+        for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            bindRevision(&derived.revision, c, chain.revisions.size(), true);
+        }
+    }
+    B.pointBindingCount = nextId;
+}
+
+}  // namespace
+
 void
 RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                           const std::vector<RigExecBakedChainSpec> &chains)
@@ -89,15 +207,12 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                 break;
             }
         }
-        // A declared phase is the only thing that reads the snapshot store,
-        // and the pose half fills its half of that store only when one
-        // exists. All THREE consumers the dynamic walk has are counted: the
-        // per-input phases, an AtPrim transform (answered out of the same
-        // store), and a blend sample whose points carry a phase -- that last
-        // one reads chain-point records, which the geometry half writes
-        // ungated, but leaving it out would make this flag mean "some phases"
-        // rather than "some phased read", which is what the next consumer
-        // will read it as.
+        // Some phased read, of any of the THREE kinds the dynamic walk has:
+        // the per-input phases, an AtPrim transform, and a blend sample whose
+        // points carry a phase. `phasedReads` gates the store's recording
+        // and forces whole runs, and the exporter reads both flags; the
+        // program's own point reads resolve through their bindings
+        // (BindPointReads).
         bool phased = !r.binding.phases.empty() ||
                       r.binding.transformPhase.kind ==
                           RigExecReadPhaseKind::AtPrim;
@@ -164,9 +279,9 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         name(r.binding.driverCurveOrder);
         name(r.binding.driverCurveKnots);
         name(r.binding.widths);
-        // A phased input is read out of the run's snapshot store when the
-        // phase resolves and off the stage when it does not, so the path is
-        // one the bake asked about either way.
+        // A phased input reads the chain version it is bound to when a
+        // candidate answers and the resolved input -- the stage -- otherwise,
+        // so the path is one the bake asked about either way.
         for (const auto &[input, phase] : r.binding.phases) {
             name(input);
         }
@@ -350,6 +465,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         }
         B.chains.push_back(std::move(chain));
     }
+    BindPointReads(&B);
 }
 
 
@@ -692,6 +808,42 @@ DeclarePointVersionRead(const RigExecBakedProgramImpl &B,
         RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, revision));
 }
 
+/// Declares what \p binding can read: each candidate version, or the
+/// chain's published points for a final read. The tail is the resolved
+/// input, which is prologue state.
+void
+DeclarePointBindingReads(const RigExecBakedProgramImpl &B,
+                         const RigExecBakedPointsBinding &binding,
+                         std::vector<RigExecBakedSlotRange> *reads)
+{
+    for (const RigExecBakedPointVersion &candidate : binding.candidates) {
+        if (binding.finalRead) {
+            reads->push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::ChainPoints, candidate.chain));
+        } else {
+            DeclarePointVersionRead(B, candidate, reads);
+        }
+    }
+}
+
+/// The point bindings of \p revision: its declared input phases and its
+/// blend samples'.
+void
+DeclareRevisionPointReads(const RigExecBakedProgramImpl &B,
+                          const RigExecBakedProgramImpl::GeomRevision &revision,
+                          std::vector<RigExecBakedSlotRange> *reads)
+{
+    for (const RigExecBakedPointsBinding &binding : revision.pointBindings) {
+        DeclarePointBindingReads(B, binding, reads);
+    }
+    for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
+             revision.blendChannels) {
+        for (const auto &sample : channel.samples) {
+            DeclarePointBindingReads(B, sample.pointBinding, reads);
+        }
+    }
+}
+
 }  // namespace
 
 namespace {
@@ -918,10 +1070,9 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 // A pose-walk read phase is answered out of the run's
                 // snapshot store, so the fold waits for every recorder
                 // before it -- which is what the pose walk's own constraint
-                // exits are. The range is the same one the assemble
-                // declares, and it is the assemble's for the same reason:
-                // the store is ONE container and a reader of it has to be
-                // ordered against every writer that could still reach it.
+                // exits are. The store is ONE container, so a reader of it
+                // declares every step before it: any of them could still be
+                // a writer that reaches it.
                 if (revision.binding.transformPhase.kind ==
                     RigExecReadPhaseKind::AtPrim) {
                     fold.reads.push_back(RigExecBakedRange(
@@ -981,16 +1132,9 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                             channel.poseWeight));
                     }
                 }
-                // readsSnapshots and not `!binding.phases.empty()`: a
-                // blend sample's phase is looked up directly by the channel
-                // gather rather than through the revision's input overlay,
-                // so the overlay's own predicate does not cover it. It is a
-                // strict superset of the old guard.
-                if (revision.readsSnapshots) {
-                    assemble.reads.push_back(RigExecBakedRange(
-                        RigExecBakedSlotDomain::Snapshots, 0,
-                        int(B.steps.size()) - 1));
-                }
+                // The versions its phased inputs and blend samples are bound
+                // to. The AtPrim transform phase is the fold's read.
+                DeclareRevisionPointReads(B, revision, &assemble.reads);
                 assemble.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionPacket, id));
                 // It sizes the buffer the chunks write into, which is a write
@@ -1130,11 +1274,13 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainPoints, int(c)));
             step.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainBase, int(c)));
-            // A derived revision's binding carries phases like any other, and
-            // its assemble reads the run's store for them -- so it declares
-            // the store the same way a chain revision does: every step before
-            // it, because which of them recorded what is a runtime answer.
-            if (derived.revision.readsSnapshots) {
+            // A derived revision's binding carries phases like any other, so
+            // it reads the versions they are bound to. Its fold runs inside
+            // this step, and an AtPrim transform phase is looked up in the
+            // run's store, so that read declares every step before it.
+            DeclareRevisionPointReads(B, derived.revision, &step.reads);
+            if (derived.revision.binding.transformPhase.kind ==
+                RigExecReadPhaseKind::AtPrim) {
                 step.reads.push_back(RigExecBakedRange(
                     RigExecBakedSlotDomain::Snapshots, 0,
                     int(B.steps.size()) - 1));
@@ -1484,6 +1630,98 @@ SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
     return true;
 }
 
+/// The test capture (RigExecBakedProgramTesting::CapturePointReads): the run
+/// store's answer for \p binding as \p reader sees it at this moment, beside
+/// the binding's own answer. Only in the serial schedule, where no record is
+/// folded into the store while a step body runs.
+void
+CapturePointRead(RigExecBakedProgramImpl *program,
+                 const RigExecBakedPointsBinding &binding,
+                 const SdfPath &reader, const GfVec3f *points, size_t count,
+                 bool answered)
+{
+    RigExecBakedProgramImpl &B = *program;
+    if (!B.capturePointReads || binding.id < 0 ||
+        size_t(binding.id) >= B.pointCaptures.size()) {
+        return;
+    }
+    RigExecBakedPointCapture &capture = B.pointCaptures[size_t(binding.id)];
+    capture.read = true;
+    const VtValue *recorded =
+        B.runSnapshots.Lookup(binding.input, binding.phase, reader);
+    capture.storeAnswered = recorded && recorded->IsHolding<VtVec3fArray>();
+    capture.store = capture.storeAnswered
+                        ? recorded->UncheckedGet<VtVec3fArray>()
+                        : VtVec3fArray();
+    capture.bindingAnswered = answered;
+    capture.bound =
+        answered ? VtVec3fArray(points, points + count) : VtVec3fArray();
+}
+
+}  // namespace
+
+bool
+RigExecBakedResolvePoints(const RigExecBakedProgramImpl &B,
+                          const RigExecBakedPointsBinding &binding,
+                          const GfVec3f **points, size_t *count)
+{
+    for (const RigExecBakedPointVersion &candidate : binding.candidates) {
+        const RigExecBakedProgramImpl::GeomChain &chain =
+            B.chains[size_t(candidate.chain)];
+        if (!chain.haveBase) {
+            continue;
+        }
+        if (binding.finalRead) {
+            *points = chain.result.cdata();
+            *count = chain.result.size();
+        } else {
+            PointsAt(chain, size_t(candidate.version), points, count);
+        }
+        return true;
+    }
+    return false;
+}
+
+void
+RigExecBakedOverlayPointReads(RigExecBakedProgramImpl *program,
+                              RigExecBakedProgramImpl::GeomRevision *revision,
+                              const RigExecResolvedInputs &resolved,
+                              std::vector<std::string> *diagnostics)
+{
+    if (revision->binding.phases.empty()) {
+        return;
+    }
+    RigExecBakedProgramImpl &B = *program;
+    revision->revisionInputs = resolved;
+    for (const RigExecBakedPointsBinding &binding : revision->pointBindings) {
+        const GfVec3f *points = nullptr;
+        size_t count = 0;
+        const bool answered =
+            RigExecBakedResolvePoints(B, binding, &points, &count);
+        CapturePointRead(&B, binding, revision->moverPath, points, count,
+                         answered);
+        if (answered) {
+            // A final read shares the chain's published buffer, as the
+            // store's record of it did.
+            revision->revisionInputs.SetProperty(
+                binding.input,
+                binding.finalRead
+                    ? VtValue(B.chains[size_t(binding.candidates[0].chain)]
+                                  .result)
+                    : VtValue(VtVec3fArray(points, points + count)));
+        } else if (binding.diagnoseMiss) {
+            // A `preceding` tail is silent, as it is in the dynamic walk.
+            diagnostics->push_back(
+                "diag " + revision->moverPath.GetString() +
+                ": read phase '" + binding.phase.GetAsString() + "' for " +
+                binding.input.GetString() +
+                " resolved to nothing; read the authored base");
+        }
+    }
+}
+
+namespace {
+
 // WHICH points a revision is assembled against, stated once because the two
 // callers below pass different ones and the difference is invisible until an
 // operator reads them:
@@ -1509,30 +1747,13 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     RigExecProviderValues values;
     values.resolved = &R;
     // One overlay per REVISION: the generation-wide resolved inputs, plus
-    // whatever this revision's declared phases resolve to out of the run's
-    // snapshot store. The assembler reads inputs by path and never learns a
-    // phase exists, which is what lets a phase apply to any input. Built only
-    // for a revision that declares one, and owned by that revision, because
-    // one buffer shared by the walk is state two steps could be inside at
-    // once.
+    // whatever this revision's declared phases resolve to through their
+    // bindings. The assembler reads inputs by path and never learns a phase
+    // exists, which is what lets a phase apply to any input. Built only for
+    // a revision that declares one, and owned by that revision, because one
+    // buffer shared by the walk is state two steps could be inside at once.
     if (!revision->binding.phases.empty()) {
-        revision->revisionInputs = R;
-        for (const auto &[inputPath, phase] : revision->binding.phases) {
-            if (const VtValue *recorded = B.runSnapshots.Lookup(
-                    inputPath, phase, revision->moverPath)) {
-                revision->revisionInputs.SetProperty(inputPath, *recorded);
-            } else if (phase.kind != RigExecReadPhaseKind::Preceding) {
-                // Preceding falling through to the stage is correct: the
-                // reader is the chain's first revision, so its preceding
-                // value IS the base. Anything else means the phase named
-                // something that produced nothing.
-                step->diagnostics.push_back(
-                    "diag " + revision->moverPath.GetString() +
-                    ": read phase '" + phase.GetAsString() + "' for " +
-                    inputPath.GetString() +
-                    " resolved to nothing; read the authored base");
-            }
-        }
+        RigExecBakedOverlayPointReads(&B, revision, R, &step->diagnostics);
         values.resolved = &revision->revisionInputs;
     }
     // The fold decided whether there is a matrix at all -- a bound transform
@@ -1636,17 +1857,28 @@ AssembleRevision(RigExecBakedProgramImpl &B,
                     channel.samples.push_back(std::move(sample));
                     continue;
                 }
-                VtVec3fArray points;
-                const VtValue *phased = B.runSnapshots.Lookup(
-                    boundSample.pointsPath, boundSample.phase,
-                    revision->moverPath);
-                if (phased && phased->IsHolding<VtVec3fArray>()) {
-                    points = phased->UncheckedGet<VtVec3fArray>();
-                } else {
-                    R.GetAttribute(boundSample.points, time, &points);
+                // A phased sample reads the version it is bound to, and the
+                // resolved input when that chain read no base: silently,
+                // as the dynamic gather falls back.
+                const GfVec3f *phased = nullptr;
+                size_t phasedCount = 0;
+                const bool answered =
+                    boundSample.pointBinding.id >= 0 &&
+                    RigExecBakedResolvePoints(B, boundSample.pointBinding,
+                                              &phased, &phasedCount);
+                if (boundSample.pointBinding.id >= 0) {
+                    CapturePointRead(&B, boundSample.pointBinding,
+                                     revision->moverPath, phased,
+                                     phasedCount, answered);
                 }
-                sample.points.assign(points.begin(), points.end());
-                boundSample.lastPoints.assign(points.begin(), points.end());
+                if (answered) {
+                    sample.points.assign(phased, phased + phasedCount);
+                } else {
+                    VtVec3fArray points;
+                    R.GetAttribute(boundSample.points, time, &points);
+                    sample.points.assign(points.begin(), points.end());
+                }
+                boundSample.lastPoints = sample.points;
                 channel.samples.push_back(std::move(sample));
             }
             std::stable_sort(channel.samples.begin(), channel.samples.end(),

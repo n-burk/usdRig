@@ -532,6 +532,41 @@ struct RigExecBakedPointVersion {
     int version = 0;
 };
 
+/// A phased point read, bound at Build to the versions the run's phased-read
+/// store would have answered from: the records of the revisions some phase
+/// names (`snapshotAfter`) whose fuse -- or, for `final`, whose chain's
+/// status step -- runs before the reader, matched to the phase as
+/// RigExecChainSnapshots::Lookup matches them, newest first. The reader
+/// takes the first candidate whose chain read a base this run -- every
+/// record of a chain is written exactly then -- and otherwise the tail: the
+/// resolved input, with the "resolved to nothing" line when `diagnoseMiss`.
+struct RigExecBakedPointsBinding {
+    /// The chain target the reader reads, which the overlay sets.
+    SdfPath input;
+    /// As declared; the diagnostic names it.
+    RigExecReadPhase phase;
+    /// Versions per RigExecBakedPointVersion. For a `finalRead` the one
+    /// candidate is the chain's published ChainPoints, at version = the
+    /// chain's revision count.
+    std::vector<RigExecBakedPointVersion> candidates;
+    bool finalRead = false;
+    /// `phases` reads other than `preceding`; never a blend sample.
+    bool diagnoseMiss = false;
+    /// Dense over every binding of the program, for the test capture.
+    int id = -1;
+};
+
+/// Test-only: what the run's phased-read store answered for one point
+/// binding, taken by the reader beside its own resolution of the binding
+/// (RigExecBakedProgramTesting::CapturePointReads).
+struct RigExecBakedPointCapture {
+    bool read = false;
+    bool storeAnswered = false;
+    VtVec3fArray store;
+    bool bindingAnswered = false;
+    VtVec3fArray bound;
+};
+
 /// The name of \p domain, for the schedule report.
 const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
 
@@ -1520,10 +1555,19 @@ struct RigExecBakedProgramImpl {
 
     /// This run's phased-read store: what each chain held at each point of
     /// the walk, and what each provider's matrix was after each constraint
-    /// that named it. Run-local by design (see `chainSnapshots` above), and
-    /// the only store the program looks a phase up in -- the evaluator's
-    /// holds the previous generation's dynamic records.
+    /// that named it. Run-local by design (see `chainSnapshots` above); the
+    /// evaluator's holds the previous generation's dynamic records. Only an
+    /// AtPrim transform phase looks it up: point reads resolve through their
+    /// Build-time bindings (RigExecBakedPointsBinding).
     RigExecChainSnapshots runSnapshots;
+
+    /// The number of RigExecBakedPointsBinding ids handed out at Build.
+    int pointBindingCount = 0;
+    /// Test-only, off unless RigExecBakedProgramTesting::CapturePointReads
+    /// turned it on: indexed by binding id, each entry written only by its
+    /// binding's reader. Never cloned into a frozen program.
+    bool capturePointReads = false;
+    std::vector<RigExecBakedPointCapture> pointCaptures;
 
     /// True when some revision of this epoch declares a read phase, which is
     /// the only thing that can LOOK the store up. While it is false nothing
@@ -2204,6 +2248,9 @@ struct RigExecBakedProgramImpl {
             UsdAttribute points;
             SdfPath pointsPath;
             RigExecReadPhase phase;
+            /// A dense sample's non-base phase, bound at Build; `id` is -1
+            /// for a base or sparse sample, which never reads a record.
+            RigExecBakedPointsBinding pointBinding;
             /// The UsdSkelBlendShape a SPARSE sample names, and the layout
             /// the prologue resolved for it this frame: shared out of the
             /// evaluator's cache when the shape is epoch-constant, read per
@@ -2291,14 +2338,15 @@ struct RigExecBakedProgramImpl {
         /// wants the target's points from, so the chain records them after
         /// it. Decided at bake out of the evaluator's _chainPlan.snapshots.
         bool snapshotAfter = false;
-        /// This revision LOOKS the run's phased-read store up, so its static
-        /// step declares every step before it as a read. Two things can make
-        /// it true and the second is easy to miss: a declared input phase
-        /// (`binding.phases`), and a blend sample whose target shape carries
-        /// one -- that lookup is made directly by the channel gather rather
-        /// than through the revision's overlay, so the overlay's own
-        /// predicate does not cover it.
+        /// A declared input phase (`binding.phases`), an AtPrim transform
+        /// phase, or a blend sample whose target shape carries a phase.
+        /// Exported for the .rigexec runtime, which answers those reads out
+        /// of its own store; nothing in libs/rigExec reads it. The program's
+        /// point reads go through `pointBindings` and the samples' own
+        /// bindings, and the transform phase is the fold's.
         bool readsSnapshots = false;
+        /// One per `binding.phases` entry, in the map's order.
+        std::vector<RigExecBakedPointsBinding> pointBindings;
         /// This node is new to the rig's geometry state and its creation has
         /// not been reported yet. Cleared by AdoptGeometryStateFrom for a
         /// node the outgoing program already held, which is the same
@@ -2332,7 +2380,8 @@ struct RigExecBakedProgramImpl {
         /// wire carries its control polygons by it.
         GfMatrix4d carry{1.0};
         bool haveCarry = false;
-        /// This revision's overlay of the run's snapshot store, built only
+        /// The resolved inputs overlaid with what this revision's point
+        /// bindings resolve to (RigExecBakedOverlayPointReads), built only
         /// when the revision declares a read phase. Per revision, never one
         /// buffer shared by the walk.
         RigExecResolvedInputs revisionInputs;
@@ -3332,6 +3381,24 @@ void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
+/// The points \p binding resolves to this run: its first candidate whose
+/// chain read a base, as `*points` / `*count`. False for the tail, and then
+/// the reader reads the resolved input. Valid until the candidate's chain
+/// next runs.
+bool RigExecBakedResolvePoints(const RigExecBakedProgramImpl &program,
+                               const RigExecBakedPointsBinding &binding,
+                               const GfVec3f **points, size_t *count);
+
+/// Sets \p revision's `revisionInputs` to \p resolved overlaid with what each
+/// of its point bindings resolves to, and appends the "resolved to nothing"
+/// line for each tail that asks for one. The live and frozen assembles both
+/// build their overlay here. Does nothing for a revision with no phases.
+void RigExecBakedOverlayPointReads(
+    RigExecBakedProgramImpl *program,
+    RigExecBakedProgramImpl::GeomRevision *revision,
+    const RigExecResolvedInputs &resolved,
+    std::vector<std::string> *diagnostics);
+
 /// Appends one VolumePlacements step per volume provider slot (object =
 /// slot, part 1), then one WeightPacket step per weight object in the
 /// table's dependency order -- all of it between the pose half and the
@@ -3878,6 +3945,12 @@ struct RigExecBakedProgramTesting {
     /// map, so poisoning it must not move a baked answer.
     static void SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
                                         const GfMatrix4d &matrix);
+    /// Clears \p program's point captures and has every later run record,
+    /// per point binding, the run store's answer beside the binding's, both
+    /// taken inside the reader. Returns false and captures nothing under the
+    /// parallel schedule, where a later step may fold a record into the
+    /// store while a reader looks it up.
+    static bool CapturePointReads(const RigExecBakedProgram &program);
 };
 
 }  // namespace rigExec

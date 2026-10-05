@@ -1021,6 +1021,16 @@ foreach(_entry testRigExecVolumeWeightsBakedParity
         "RIGEXEC_TEST_BAKED_PATH=1")
 endforeach()
 
+# Phased point reads bound to chain versions, held to the run's store as the
+# reader sees it (captured in the serial schedule) and to the dynamic walk.
+add_executable(testRigExecPhaseBindings tests/testRigExecPhaseBindings.cpp)
+target_link_libraries(testRigExecPhaseBindings PRIVATE rigExec)
+target_compile_definitions(testRigExecPhaseBindings PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecPhaseBindings COMMAND testRigExecPhaseBindings
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+rigexec_add_baked_parity_test(testRigExecPhaseBindings REQUIRE_BAKE
+    CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
 add_executable(testRigExecWeightOverlay tests/testRigExecWeightOverlay.cpp)
 target_link_libraries(testRigExecWeightOverlay PRIVATE rigExecImaging)
 target_compile_definitions(testRigExecWeightOverlay PRIVATE ${_rigexec_schema_resource_define})

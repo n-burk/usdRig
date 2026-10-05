@@ -1,0 +1,223 @@
+#usda 1.0
+(
+    doc = """Two volume weights whose placements are independent, and one of
+    them placed differently at `base` and at `final`
+    (testRigExecVolumeWeights TestVolumePlacementsAreIndependent):
+
+      pose      BFK composes BCtl onto joint B; BAim then aims B at
+                AimTarget, which revises B's final frame and not its base
+      pose      AFK composes ACtl onto joint A, in a hierarchy of its own
+      weight    SphereA rides A and measures the points the skin left
+                (`preceding` on weightTarget); SphereB rides B and measures
+                the authored points
+      geometry  BSkin skins Strip.points to B at `final`, weighted by
+                SphereB: a mover's packet, placed at SphereB's BASE frame
+      geometry  StripSmooth relaxes the skinned points under Both, the max
+                of SphereA and SphereB: a current-phase field, placed at
+                each volume's FINAL frame
+
+    A and B are driven by separate solvers in separate hierarchies, so a
+    drag on ACtl reaches A, SphereA and their placement, and nothing of B:
+    one solver over both joints would re-run the commit that writes B and
+    SphereB as well (the baked cone is structural). The skin's influences
+    are B alone for the same reason."""
+    defaultPrim = "PlacementAsset"
+    endTimeCode = 10
+    metersPerUnit = 0.01
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PlacementAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PlacementAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "ACtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    10: 30; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+
+            def RigExecControl "BCtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    10: -25; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 0, 0, 1) )
+            }
+
+            def RigExecControl "AimTarget" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1: 0; pre (0, 0); post linear,
+                    10: 3; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 4, 0, 1) )
+            }
+        }
+
+        # Last in the pose stack, after every writer of B, so the skin's
+        # `final` read of B sees the aim.
+        def Scope "GeometryMovers"
+        {
+            # Composed post-order: BSkin (nested) applies first, then
+            # StripSmooth over the skinned points.
+            def RigExecSmoothMover "StripSmooth" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </PlacementAsset/Geom/Strip.points>
+                rel rigExec:weightObject = </PlacementAsset/Rig/Weights/Both>
+
+                def RigExecSkinMover "BSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform int rigExec:elementSize = 1
+                    rel rigExec:influences = </PlacementAsset/Rig/Joints/B> (
+                        rigExecReadPhase = "final"
+                    )
+                    int[] rigExec:jointIndices = [
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    ]
+                    float[] rigExec:jointWeights = [
+                        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                    ]
+                    rel rigExec:moves = </PlacementAsset/Geom/Strip.points>
+                    uniform token rigExec:skinningMethod = "classicLinear"
+                    rel rigExec:weightObject = </PlacementAsset/Rig/Joints/B/SphereB>
+                }
+            }
+        }
+
+        def Scope "ASolvers"
+        {
+            def RigExecFkChain "AFK"
+            {
+                rel rigExec:controls = </PlacementAsset/Rig/Controls/ACtl>
+                rel rigExec:joints = </PlacementAsset/Rig/Joints/A>
+            }
+        }
+
+        # After BFK: revises B's final frame, so SphereB's final placement
+        # differs from its base placement.
+        def Scope "BFollow"
+        {
+            def RigExecAimConstraint "BAim" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 0.6
+                uniform token rigExec:aimAxis = "x"
+                rel rigExec:aimTarget = </PlacementAsset/Rig/Controls/AimTarget>
+                rel rigExec:moves = </PlacementAsset/Rig/Joints/B>
+                uniform token[] rigExec:preserve = ["origin", "scale"]
+                uniform token rigExec:upPolicy = "preserveInputUp"
+            }
+        }
+
+        def Scope "BSolvers"
+        {
+            def RigExecFkChain "BFK"
+            {
+                rel rigExec:controls = </PlacementAsset/Rig/Controls/BCtl>
+                rel rigExec:joints = </PlacementAsset/Rig/Joints/B>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "A"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecSphereWeight "SphereA"
+                {
+                    rel rigExec:weightTarget = </PlacementAsset/Geom/Strip.points> (
+                        rigExecReadPhase = "preceding"
+                    )
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+                    uniform token rigExec:falloffProfile = "smooth"
+                    float inputs:falloffMin = 0.5
+                    float inputs:falloffMax = 2.5
+                }
+            }
+
+            # Not under A: a commit of AFK propagates to A's descendants
+            # only.
+            def RigExecJoint "B"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 0, 0, 1) )
+
+                def RigExecSphereWeight "SphereB"
+                {
+                    rel rigExec:weightTarget = </PlacementAsset/Geom/Strip.points>
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.5, 0, 0, 1) )
+                    uniform token rigExec:falloffProfile = "smooth"
+                    float inputs:falloffMin = 0.5
+                    float inputs:falloffMax = 3
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecCombineWeight "Both"
+            {
+                rel rigExec:weightTarget = </PlacementAsset/Geom/Strip.points>
+                uniform token rigExec:representation = "dense"
+                uniform token rigExec:rangePolicy = "clamp"
+                rel rigExec:inputWeights = [
+                    </PlacementAsset/Rig/Joints/A/SphereA>,
+                    </PlacementAsset/Rig/Joints/B/SphereB>,
+                ]
+                uniform token rigExec:combineMode = "max"
+                float inputs:strength = 1
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # Two rows of eleven points from A past B.
+        def Mesh "Strip"
+        {
+            float3[] extent = [(-2, -0.5, 0), (8, 0.5, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 1, 12, 11, 1, 2, 13, 12, 2, 3, 14, 13, 3, 4, 15, 14,
+                4, 5, 16, 15, 5, 6, 17, 16, 6, 7, 18, 17, 7, 8, 19, 18,
+                8, 9, 20, 19, 9, 10, 21, 20,
+            ]
+            point3f[] points = [
+                (-2, -0.5, 0), (-1, -0.5, 0), (0, -0.5, 0), (1, -0.5, 0),
+                (2, -0.5, 0), (3, -0.5, 0), (4, -0.5, 0), (5, -0.5, 0),
+                (6, -0.5, 0), (7, -0.5, 0), (8, -0.5, 0),
+                (-2, 0.5, 0), (-1, 0.5, 0), (0, 0.5, 0), (1, 0.5, 0),
+                (2, 0.5, 0), (3, 0.5, 0), (4, 0.5, 0), (5, 0.5, 0),
+                (6, 0.5, 0), (7, 0.5, 0), (8, 0.5, 0),
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}

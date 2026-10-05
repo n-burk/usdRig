@@ -1115,28 +1115,16 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         }
     }
     // One overlay per revision that declares phases: the worker's resolved
-    // inputs plus whatever the phases resolve to out of this run's
-    // snapshot store -- the same construction AssembleRevision builds,
-    // over the worker's own store, which the same-ordered steps filled.
-    // The side-input reads below consult it by binding path before their
-    // samples, exactly where live consults values.resolved.
+    // inputs plus whatever the phases' bindings resolve to over the
+    // worker's own chains -- the overlay AssembleRevision builds, by the
+    // same function. The side-input reads below consult it by binding path
+    // before their samples, exactly where live consults values.resolved.
     if (!revision.binding.phases.empty()) {
         if (!B.resolvedInputs) {
             return false;
         }
-        revision.revisionInputs = *B.resolvedInputs;
-        for (const auto &[inputPath, phase] : revision.binding.phases) {
-            if (const VtValue *recorded = B.runSnapshots.Lookup(
-                    inputPath, phase, revision.moverPath)) {
-                revision.revisionInputs.SetProperty(inputPath, *recorded);
-            } else if (phase.kind != RigExecReadPhaseKind::Preceding) {
-                step->diagnostics.push_back(
-                    "diag " + revision.moverPath.GetString() +
-                    ": read phase '" + phase.GetAsString() + "' for " +
-                    inputPath.GetString() +
-                    " resolved to nothing; read the authored base");
-            }
-        }
+        RigExecBakedOverlayPointReads(&B, &revision, *B.resolvedInputs,
+                                      &step->diagnostics);
     }
     if (revision.op == RigExecRevisionOp::Skin) {
         if (size_t(step->object) >= inputs.revisionPackets.size()) {

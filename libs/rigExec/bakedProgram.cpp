@@ -3793,6 +3793,18 @@ RigExecBakedProgramTesting::SetWalkVolumePlacements(
     RigExecBakedProgram::_SetWalkVolumePlacements(evaluator, matrix);
 }
 
+bool
+RigExecBakedProgramTesting::CapturePointReads(
+    const RigExecBakedProgram &program)
+{
+    RigExecBakedProgramImpl &B = *program._impl;
+    B.pointCaptures.assign(size_t(B.pointBindingCount),
+                           RigExecBakedPointCapture());
+    B.capturePointReads = RigExecBakedScheduleModeFromEnvironment() ==
+                          RigExecBakedScheduleMode::Serial;
+    return B.capturePointReads;
+}
+
 // The structural half of RigExecRigEvaluator::_ResolveWeights and
 // _ResolveVolumeWeights (rigEvaluatorGeometry.cpp), statement for
 // statement: the same reads, the same fallbacks, the same error text. What
