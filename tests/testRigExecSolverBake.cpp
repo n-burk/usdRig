@@ -1094,6 +1094,46 @@ main(int argc, char **argv)
                 MakeGuideOnlyBlendRig, frames, true,
                 /* guides = */ false);
 
+    // A blend reads its inputs' aggregates from the generation it answers,
+    // whatever came before: another frame, or a drag on an input solver.
+    {
+        using rigExecTest::EvaluationState;
+        const auto drag = [](const char *prim, const char *attribute,
+                             const VtValue &held) {
+            return EvaluationState{
+                UsdTimeCode(2.0),
+                {RigExecValueOverride{SdfPath(prim), TfToken(),
+                                      TfToken(attribute), held}}};
+        };
+        const EvaluationState frame2{UsdTimeCode(2.0), {}};
+        const EvaluationState frame5{UsdTimeCode(5.0), {}};
+        const EvaluationState footDrag =
+            drag("/Asset/Rig/Controls/FootIK", "avars:ty", VtValue(3.0));
+        const EvaluationState turnsDrag =
+            drag("/Asset/Rig/Solvers/SecondTwist", "inputs:twistTurns",
+                 VtValue(0.2));
+        for (const RigExecEvaluationMode mode :
+                 {RigExecEvaluationMode::ExecReference,
+                  RigExecEvaluationMode::Baked}) {
+            const auto check = [&](const char *what, const MakeStage &make,
+                                   const EvaluationState &before) {
+                rigExecTest::CheckHistoryIndependent(
+                    &failures, what, make, kRigPath, mode, before, frame2);
+            };
+            check("ik/fk blend after another frame", MakeBlendRig, frame5);
+            check("ik/fk blend after a drag on its ik", MakeBlendRig,
+                  footDrag);
+            check("linear-rotation blend after another frame",
+                  MakeBlendRigWithLinearRotation, frame5);
+            check("linear-rotation blend after a drag on its ik",
+                  MakeBlendRigWithLinearRotation, footDrag);
+            check("guide-only blend after another frame",
+                  MakeGuideOnlyBlendRig, frame5);
+            check("guide-only blend after a drag on an input",
+                  MakeGuideOnlyBlendRig, turnsDrag);
+        }
+    }
+
     // The drags: one per per-frame input this group added to a solver.
     CheckDrag("a drag on inputs:twistTurns", MakeTwistRig,
               SdfPath("/Asset/Rig/Solvers/SpineTwist"), "inputs:twistTurns",

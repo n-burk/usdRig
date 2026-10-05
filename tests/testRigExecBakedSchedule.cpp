@@ -2510,6 +2510,29 @@ TestTheValidatorRejectsAMalformedGraph()
                         "the first writer is step 1"});
     }
     {
+        // A blend whose input solver is solved after it would read last
+        // run's aggregate; in the other order the same two steps are valid.
+        RigExecBakedProgramImpl B;
+        B.steps.push_back(HandStep({RigExecBakedOne(D::Aggregate, 1)},
+                                   {RigExecBakedOne(D::Aggregate, 0)}));
+        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::Aggregate, 1)}));
+        ScheduleByHand(&B);
+        CHECK(B.steps[0].preds.empty());
+        ExpectRejected(B, "a blend input solved after the blend",
+                       {"step 0", "reads Aggregate[1]",
+                        "no step before it writes",
+                        "the first writer is step 1"});
+        RigExecBakedProgramImpl ordered;
+        ordered.steps.push_back(
+            HandStep({}, {RigExecBakedOne(D::Aggregate, 1)}));
+        ordered.steps.push_back(HandStep({RigExecBakedOne(D::Aggregate, 1)},
+                                         {RigExecBakedOne(D::Aggregate, 0)}));
+        ScheduleByHand(&ordered);
+        std::string error;
+        CHECK(RigExecBakedValidateStepGraph(ordered, &error));
+        CHECK(error.empty());
+    }
+    {
         RigExecBakedProgramImpl B;
         B.steps.push_back(HandStep({}, {RigExecBakedOne(D::CommitTable, 0)}));
         B.steps.push_back(HandStep(
@@ -2765,10 +2788,11 @@ TestTheValidatorRejectsALaterPoseVersion()
 /// Two root controls switched into each other's space: each compose group
 /// reads the other's last version, so no emission order is valid and Build
 /// must refuse the program. The compile rejects every such rig before a
-/// bake, so no stage reaches Build's refusal; this pins both refusals it
-/// would meet: the composeCycle flag, and the validator, which sees the
-/// group emitted first read a PosedM slot only the second writes. One switch
-/// alone is the control: its source's group is moved ahead of it instead.
+/// bake, so no stage reaches Build's refusal and this does not exercise it.
+/// It pins the composeCycle flag and the validator's verdict on the same
+/// steps: the group emitted first reads a PosedM slot only the second
+/// writes. One switch alone is the control: its source's group is moved
+/// ahead of it instead.
 void
 TestASwitchCycleIsDetectedNotEmitted()
 {
@@ -3262,6 +3286,20 @@ main(int argc, char **argv)
     TestTheValidatorAcceptsTheProgram(
         Build(examplesDir + "/../tests/fixtures/oneloop_cross_domain.usda"),
         "oneloop_cross_domain");
+    {
+        // Rigs with blends, whose input aggregates are produced in the graph.
+        const std::pair<std::string, const char *> blends[] = {
+            {examplesDir + "/03_IkFkBlendClamp.usda", "03_IkFkBlendClamp"},
+            {examplesDir + "/ArmRig.usda", "ArmRig"},
+            {examplesDir + "/../tests/fixtures/oneloop_cross_domain.usda",
+             "oneloop_cross_domain"},
+        };
+        for (const auto &[path, name] : blends) {
+            const BuiltProgram built = Build(path);
+            TestTheGraphDescribesTheProgram(built, name);
+            TestTheValidatorAcceptsTheProgram(built, name);
+        }
+    }
     TestTheValidatorRejectsAMalformedGraph();
     TestTheValidatorRejectsALaterPoseVersion();
     TestTheValidatorRejectsAnUnboundPointVersion();

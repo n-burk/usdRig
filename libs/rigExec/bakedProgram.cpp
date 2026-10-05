@@ -2176,6 +2176,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // .points, a property target is taken verbatim) would be a second
     // expression of a rule the compiler already applied.
     ctx.ribbonDriverPoints = E._ribbonDriverPoints;
+    // _solverDependencies holds every discovered solver as a key, which is
+    // the test "is an aggregate solver" uses below too.
+    for (const auto &[solverPath, dependencies] : E._solverDependencies) {
+        ctx.aggregateSolvers.insert(ctx.aggregateSolvers.end(), solverPath);
+    }
     const UsdTimeCode capture = ctx.capture;
     const std::set<SdfPath> &chainTargets = ctx.chainTargets;
     // The bodies below were written against these as lambdas of this
@@ -2801,10 +2806,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                 progressed = true;
             }
             if (!progressed) {
-                // A cycle among unbatched solvers. The compile's own Kahn
-                // pass would have refused to schedule one, so this cannot
-                // happen; taking the rest in path order rather than looping
-                // for ever is what an assertion would cost anyway.
+                // A cycle among unbatched solvers, which the compile refuses
+                // first. Refused here too: a reader baked before its input
+                // would find that input unbaked. The rest are still baked,
+                // in path order, so the tables below stay whole.
+                refuse("guide-only aggregate solvers form a dependency cycle",
+                       *pending.begin());
                 for (const SdfPath &solverPath : pending) {
                     ctx.guideOnlySolvers.push_back(solverPath);
                 }

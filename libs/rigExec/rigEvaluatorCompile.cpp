@@ -4186,6 +4186,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     };
     size_t scheduledPose = 0;
     size_t poseLevel = 0;
+    // Every step of the levels already emitted.
+    std::set<SdfPath> scheduledEarlier;
     while (!readyPose.empty()) {
         // THE INTERLEAVE (spec §4.2). A solver batch and a constraint are one
         // kind of step in one stack, so a ready level is emitted in POSE STACK
@@ -4222,6 +4224,23 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                 continue;
             }
             if (!requiredSolvers.count(path)) continue;
+            // Forward guard, unreachable while each aggregate read is a Kahn
+            // edge: a blend's input solver is emitted in an earlier level.
+            const auto aggregateReads = newSolverAggregateReads.find(path);
+            if (aggregateReads != newSolverAggregateReads.end()) {
+                for (const SdfPath &input : aggregateReads->second) {
+                    if (scheduledEarlier.count(input)) continue;
+                    const std::string message =
+                        path.GetString() + " reads the aggregate of " +
+                        input.GetString() + ", which is not scheduled before "
+                        "it; it is computed in the reader's own request this "
+                        "frame";
+                    if (errors) {
+                        errors->push_back("warning: " + message);
+                    }
+                    TF_WARN("%s", message.c_str());
+                }
+            }
             _SolverBatch batch;
             batch.level = poseLevel;
             const auto &dependencies = newSolverDependencies[path];
@@ -4312,6 +4331,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         scheduledPose += readyPose.size();
         std::vector<SdfPath> next;
         for (const SdfPath &path : readyPose) {
+            scheduledEarlier.insert(path);
             for (const SdfPath &consumer : poseConsumers[path]) {
                 if (--pendingPose[consumer] == 0) next.push_back(consumer);
             }

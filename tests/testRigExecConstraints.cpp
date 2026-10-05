@@ -1,4 +1,6 @@
 // FBX-equivalent constraint schema and evaluator conformance.
+#include "rigExecPoseCompare.h"
+
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExec/frozenContext.h"
@@ -3697,13 +3699,11 @@ TestSolverGuidesGate()
     }
 }
 
-static void
-TestSolverBatchLevelAudit()
+// Diamond aggregate dependency: A feeds B and C through their joints, D
+// blends B and C directly.
+static UsdStageRefPtr
+MakeSolverDiamondStage()
 {
-    // Diamond aggregate dependency: A feeds B and C through their joints,
-    // D blends B and C directly. Minimal longest-path layering puts A at 0,
-    // B and C together at 1, and D at 2 -- dense, with no wave wasted on
-    // schedule order.
     const auto stage = UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
     stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
@@ -3741,7 +3741,6 @@ TestSolverBatchLevelAudit()
     jointInput(jointC);
     const SdfPath jointD("/Asset/Rig/Joints/JD");
     stage->DefinePrim(jointD, TfToken("RigExecJoint"));
-    const SdfPath solverA("/Asset/Rig/Solvers/A");
     const SdfPath solverB("/Asset/Rig/Solvers/B");
     const SdfPath solverC("/Asset/Rig/Solvers/C");
     const SdfPath solverD("/Asset/Rig/Solvers/D");
@@ -3759,6 +3758,19 @@ TestSolverBatchLevelAudit()
     stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers"))
         .SetChildrenReorder({TfToken("D"), TfToken("C"), TfToken("B"),
                              TfToken("A")});
+    return stage;
+}
+
+static void
+TestSolverBatchLevelAudit()
+{
+    // Minimal longest-path layering puts A at 0, B and C together at 1, and
+    // D at 2 -- dense, with no wave wasted on schedule order.
+    const UsdStageRefPtr stage = MakeSolverDiamondStage();
+    const SdfPath solverA("/Asset/Rig/Solvers/A");
+    const SdfPath solverB("/Asset/Rig/Solvers/B");
+    const SdfPath solverC("/Asset/Rig/Solvers/C");
+    const SdfPath solverD("/Asset/Rig/Solvers/D");
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -3776,6 +3788,27 @@ TestSolverBatchLevelAudit()
     CHECK(pose.valid && pose.solverOverridesConverged);
     CHECK(pose.solverEvaluations == 4);
     CHECK(pose.solverOverrideRounds == 3);
+}
+
+// The diamond's blend reads B's and C's aggregates from the generation it
+// answers: after a drag on the source, the released rig publishes what a
+// fresh evaluator does, on the walk and on the program.
+static void
+TestSolverBatchDiamondIsHistoryIndependent()
+{
+    const rigExecTest::EvaluationState dragged{
+        UsdTimeCode::Default(),
+        {RigExecValueOverride{SdfPath("/Asset/Rig/Controls/Source"), TfToken(),
+                              TfToken("avars:tx"), VtValue(5.0)}}};
+    const rigExecTest::EvaluationState released{UsdTimeCode::Default(), {}};
+    for (const RigExecEvaluationMode mode :
+             {RigExecEvaluationMode::ExecReference,
+              RigExecEvaluationMode::Baked}) {
+        rigExecTest::CheckHistoryIndependent(
+            &failures, "solver diamond after a drag on its source",
+            MakeSolverDiamondStage, SdfPath("/Asset/Rig"), mode, dragged,
+            released);
+    }
 }
 
 // RigExecSplineIk: the control-driven spine solver, exercised through exec
@@ -4812,6 +4845,7 @@ main()
     TestConnectedAncestorRefreshIgnoresUnrelatedReaders();
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();
+    TestSolverBatchDiamondIsHistoryIndependent();
     TestAuthoredPosedSpaceBakesAndAnimatedOneFollows();
     TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag();
     TestSingleChainIkComputedStretch();

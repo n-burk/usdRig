@@ -46,10 +46,11 @@ writes; the dependency edges are computed mechanically from those declarations,
 and the graph is partitioned into **clusters** that either a serial executor
 walks in program order or a parallel executor spreads across the work arena.
 Before the program is used, Build checks that every slot a step reads is
-written by an earlier step or filled by the prologue (a solver aggregate a
-blend reads is, for now, the one read it does not check), and that every pose
+written by an earlier step or filled by the prologue, and that every pose
 version a step is bound to was produced before it; a program that fails is
 refused with the step, domain and slot named, and the walk answers instead.
+A blend therefore always reads its input solvers' aggregates from the same
+frame: a program that could not solve an input before the blend is refused.
 
 Three things this buys that the straight line could not:
 

@@ -321,17 +321,24 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                                       s.softDistance.constant,
                                       s.limbTwist.constant, &s.ikParams);
         } else if (s.type == "RigExecBlendPointFrames") {
+            // -1 is the computation's null pointer: a target that publishes
+            // no aggregate, so one missing input passes the OTHER through
+            // unchanged, rests and all, and two missing inputs publish
+            // nothing. An aggregate solver not baked yet is refused instead:
+            // the blend would read its aggregate before this run's Solve
+            // step wrote it, and the walk computes it in the same frame.
             auto solverSlot = [&](const SdfPathVector &v) {
                 if (v.empty()) return -1;
                 const auto it = B.solverIndex.find(v[0]);
-                return it == B.solverIndex.end() ? -1 : it->second;
+                if (it != B.solverIndex.end()) return it->second;
+                if (ctx->aggregateSolvers.count(v[0])) {
+                    refuse(solverPath.GetString() + " reads the aggregate of " +
+                               v[0].GetString() +
+                               ", which is not baked before it",
+                           solverPath);
+                }
+                return -1;
             };
-            // -1 is the computation's null pointer, and it means exactly
-            // what a null pointer means there: one missing input passes the
-            // OTHER through unchanged, rests and all, and two missing
-            // inputs publish nothing. It can never mean "not baked yet" --
-            // an inputA/inputB solver is a dependency, so the Kahn levels
-            // put it in an earlier batch.
             s.inA = solverSlot(targets(prim, "rigExec:inputA"));
             s.inB = solverSlot(targets(prim, "rigExec:inputB"));
             s.blendWeight = bind(prim, "inputs:weight", 0.0f);
@@ -1834,9 +1841,8 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                     step.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::SolverPoints, si));
                 }
-                // A BlendPointFrames input solver normally runs in an
-                // earlier batch; when it does not, the read is of last run's
-                // aggregate, which is why Aggregate is a source domain.
+                // An input solver's Solve step precedes this one; the
+                // validator refuses a program where it does not.
                 for (const int input : {solver.inA, solver.inB}) {
                     if (input >= 0) {
                         step.reads.push_back(RigExecBakedOne(

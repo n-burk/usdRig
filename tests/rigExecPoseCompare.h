@@ -19,8 +19,11 @@
 
 #include "rigExec/rigEvaluator.h"
 
+#include "pxr/usd/usd/stage.h"
+
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -188,6 +191,81 @@ ComparePose(int *failures, const std::string &where,
 {
     CompareEveryMap(failures, where, reference, baked);
     CompareGenerationScalars(failures, where, reference, baked);
+}
+
+/// One evaluator input: a time and the interactive overrides standing on it.
+struct EvaluationState {
+    UsdTimeCode time = UsdTimeCode::Default();
+    std::vector<rigExec::RigExecValueOverride> overrides;
+};
+
+/// A generation depends only on its own inputs: \p after evaluated right
+/// after \p before on one evaluator publishes exactly what a fresh evaluator
+/// publishes for \p after alone. A step that read a value the previous
+/// generation left -- a blend reading last run's input aggregate -- differs
+/// here. Only the maps are compared, because the counters depend on how warm
+/// the evaluator is. \p make builds one stage per evaluator; \p before must
+/// publish different solver frames from \p after, or the check is vacuous.
+inline void
+CheckHistoryIndependent(int *failures, const std::string &what,
+                        const std::function<UsdStageRefPtr()> &make,
+                        const SdfPath &rigPath,
+                        rigExec::RigExecEvaluationMode mode,
+                        const EvaluationState &before,
+                        const EvaluationState &after)
+{
+    const bool baked = rigExec::RigExecEvaluationModeWantsProgram(mode);
+    const std::string where = what + (baked ? " (baked)" : " (walk)");
+    const UsdStageRefPtr warmStage = make();
+    const UsdStageRefPtr freshStage = make();
+    if (!warmStage || !freshStage) {
+        ++*failures;
+        std::printf("FAIL %s: the fixture does not open\n", where.c_str());
+        return;
+    }
+    rigExec::RigExecRigEvaluator warm(warmStage, rigPath);
+    rigExec::RigExecRigEvaluator fresh(freshStage, rigPath);
+    warm.SetEvaluationMode(mode);
+    fresh.SetEvaluationMode(mode);
+    std::vector<std::string> errors;
+    if (!warm.Compile(&errors) || !fresh.Compile(&errors)) {
+        ++*failures;
+        std::printf("FAIL %s: the fixture does not compile\n",
+                    where.c_str());
+        return;
+    }
+    const auto evaluate = [](rigExec::RigExecRigEvaluator &evaluator,
+                             const EvaluationState &state) {
+        if (state.overrides.empty()) {
+            evaluator.ClearInteractiveOverrides();
+        } else {
+            evaluator.SetInteractiveOverrides(state.overrides);
+        }
+        return evaluator.Evaluate(state.time);
+    };
+    const rigExec::RigExecRigPose first = evaluate(warm, before);
+    const rigExec::RigExecRigPose second = evaluate(warm, after);
+    const rigExec::RigExecRigPose alone = evaluate(fresh, after);
+    if (!first.valid || !second.valid || !alone.valid) {
+        ++*failures;
+        std::printf("FAIL %s: a generation is invalid\n", where.c_str());
+        return;
+    }
+    if (first.solverFrames == second.solverFrames) {
+        ++*failures;
+        std::printf("FAIL %s: the two states publish the same solver "
+                    "frames\n", where.c_str());
+    }
+    CompareEveryMap(failures, where + " after a previous generation", alone,
+                    second);
+    if (baked && (warm.GetBakedGenerationCount() != 2 ||
+                  fresh.GetBakedGenerationCount() != 1)) {
+        ++*failures;
+        std::printf("FAIL %s: %zu of 2 and %zu of 1 generation(s) came from "
+                    "the program\n", where.c_str(),
+                    warm.GetBakedGenerationCount(),
+                    fresh.GetBakedGenerationCount());
+    }
 }
 
 }  // namespace rigExecTest

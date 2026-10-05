@@ -536,8 +536,8 @@ struct RigExecBakedPointVersion {
 const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
 
 /// Whether the prologue, and not a step, fills \p domain: a read of one needs
-/// no producer in the graph. Aggregate is one only provisionally, while a
-/// blend's input solver is not yet required to run before the blend.
+/// no producer in the graph. Aggregate is not one: a blend reads its inputs'
+/// aggregates from this run, so their Solve steps must precede it.
 ///
 /// Snapshots is deliberately NOT one of them although the prologue empties
 /// the store: every record in it is written by a step, so a read of it must
@@ -549,8 +549,7 @@ RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
     return domain == RigExecBakedSlotDomain::Avars ||
            domain == RigExecBakedSlotDomain::PropertyResult ||
            domain == RigExecBakedSlotDomain::ChainBase ||
-           domain == RigExecBakedSlotDomain::SolverPoints ||
-           domain == RigExecBakedSlotDomain::Aggregate;
+           domain == RigExecBakedSlotDomain::SolverPoints;
 }
 
 /// Whether \p domain's storage is SSA, one entry per writer (§3.1).
@@ -3072,6 +3071,9 @@ struct RigExecBakedBuildContext {
     /// RigExecBlendPointFrames may read another one's aggregate, and the
     /// order is what makes the reader run second.
     std::vector<SdfPath> guideOnlySolvers;
+    /// Every aggregate solver of the epoch, baked or not: a blend input that
+    /// names one must already be baked, or the bake is refused.
+    std::set<SdfPath> aggregateSolvers;
     std::vector<std::string> *reasons = nullptr;
     bool ok = true;
 

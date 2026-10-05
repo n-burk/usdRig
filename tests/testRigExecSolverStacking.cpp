@@ -1699,8 +1699,8 @@ TestProducersCarryNoStackPosition()
 /// The compile-time contradiction check (spec 4.2) survives as a forward
 /// guard for the day a consumed solver is allowed to hold a stack position:
 /// it compares two STACK STEPS, and a producer is never one.
-void
-TestAggregateContradictionIsRejected()
+std::string
+AggregateProducerText()
 {
     std::string text =
         Head(FkControls("Fk", 30),
@@ -1725,7 +1725,13 @@ TestAggregateContradictionIsRejected()
         "        }\n"
         "    }\n"
         "}\n";
-    const UsdStageRefPtr stage = OpenText(text);
+    return text;
+}
+
+void
+TestAggregateContradictionIsRejected()
+{
+    const UsdStageRefPtr stage = OpenText(AggregateProducerText());
     CHECK(stage);
     if (!stage) return;
     RigExecRigEvaluator evaluator(stage, kRigPath);
@@ -1763,6 +1769,37 @@ TestAggregateContradictionIsRejected()
     CHECK(after.valid);
     CHECK(SameJoint(agreeing, after, kHip));
     CHECK(SameJoint(agreeing, after, SdfPath("/Asset/Rig/Joints/Tip")));
+}
+
+/// The blend above reads its producer's aggregate from the generation it
+/// answers, in either hierarchy order: frame 5 then frame 2 publishes what
+/// frame 2 alone does, on the walk and on the program.
+void
+TestAggregateReadIsHistoryIndependent()
+{
+    const auto make = [](bool flipped) {
+        return [flipped]() {
+            const UsdStageRefPtr stage = OpenText(AggregateProducerText());
+            if (stage && flipped) {
+                stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers"))
+                    .SetChildrenReorder(
+                        {TfToken("Producer"), TfToken("Blend")});
+            }
+            return stage;
+        };
+    };
+    const rigExecTest::EvaluationState frame5{UsdTimeCode(5.0), {}};
+    const rigExecTest::EvaluationState frame2{UsdTimeCode(2.0), {}};
+    for (const RigExecEvaluationMode mode :
+             {RigExecEvaluationMode::ExecReference,
+              RigExecEvaluationMode::Baked}) {
+        rigExecTest::CheckHistoryIndependent(
+            &failures, "blend of a producer", make(false), kRigPath, mode,
+            frame5, frame2);
+        rigExecTest::CheckHistoryIndependent(
+            &failures, "blend of a producer, flipped", make(true), kRigPath,
+            mode, frame5, frame2);
+    }
 }
 
 /// Two unrelated stacked limbs stay in the SAME Kahn level.
@@ -2642,6 +2679,7 @@ main(int argc, char **argv)
     TestReadPhasesOverTheUnifiedStack();
     TestProducersCarryNoStackPosition();
     TestAggregateContradictionIsRejected();
+    TestAggregateReadIsHistoryIndependent();
     TestUnrelatedLimbsShareALevel();
     TestSolverInputReadPhaseFollowsAConstraintAbove();
     TestConstraintReadsAConstraintInStackOrder();

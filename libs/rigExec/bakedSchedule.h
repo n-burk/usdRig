@@ -50,11 +50,10 @@ RigExecBakedScheduleMode RigExecBakedScheduleModeFromEnvironment();
 /// range, an edge from those writers (write-after-write) and from every step
 /// that has read any slot of it since the program started (write-after-read;
 /// the reader lists are seeded from program start and not from the previous
-/// write so that a read of a source-domain slot, the provisional Aggregate
-/// among them, still precedes any later writer of it). Every edge points
-/// forward by construction; a read whose only producer is later raises no
-/// edge at all, which is why Build refuses such a program
-/// (RigExecBakedValidateStepGraph).
+/// write so that a read of a source-domain slot still precedes any later
+/// writer of it). Every edge points forward by construction; a read whose
+/// only producer is later raises no edge at all, which is why Build refuses
+/// such a program (RigExecBakedValidateStepGraph).
 ///
 /// \p sweep carries the edge sweep Build started over the pose half; this
 /// extends it over the steps appended since (see RigExecBakedEdgeSweep).
