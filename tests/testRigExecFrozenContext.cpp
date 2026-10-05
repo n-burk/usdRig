@@ -680,6 +680,63 @@ TestNestedSpaceSwitchesWarmBitIdentical()
     walk.SetInteractiveOverrides({});
 }
 
+// A job at live's last time under a different drag value than live's last
+// run: the clone carries live's time and both override flags, so nothing in
+// them says the value moved, and the worker re-samples every leaf anyway.
+// The warmed pose is the job's drag's, as the walk and live baked pose it.
+void
+TestAHeldFrameJobServesItsOwnDrag()
+{
+    UsdStageRefPtr stage = MakeNestedSpaceSwitchRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    const auto dragTo = [](double value) {
+        RigExecValueOverride drag;
+        drag.prim = SdfPath("/Asset/Rig/Movers/pSpaces");
+        drag.attribute = TfToken("inputs:activeSpace");
+        drag.value = VtValue(value);
+        return drag;
+    };
+    const UsdTimeCode held(3.0);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    evaluator.SetInteractiveOverrides({dragTo(0.25)});
+    CHECK(evaluator.Evaluate(held).valid);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("held-frame drag freeze refused: %s\n", error.c_str());
+        return;
+    }
+    const RigExecValueOverride other = dragTo(0.75);
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, held, {other}, &inputs,
+                                   &error));
+    RigExecBackgroundScheduler scheduler;
+    bool ran = false;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+    CHECK(ran);
+    walk.SetInteractiveOverrides({other});
+    CheckPosesBitIdentical("held-frame job against the walk",
+                           walk.Evaluate(held), warmed);
+    evaluator.SetInteractiveOverrides({other});
+    const RigExecRigPose live = evaluator.Evaluate(held);
+    CheckPosesBitIdentical("held-frame job against live", live, warmed);
+    // Not vacuous: the two drag values pose the rig differently.
+    walk.SetInteractiveOverrides({dragTo(0.25)});
+    const RigExecRigPose first = walk.Evaluate(held);
+    CHECK(first.controlFrames != live.controlFrames);
+    evaluator.SetInteractiveOverrides({});
+    walk.SetInteractiveOverrides({});
+}
+
 // A warming job's pose is bit-identical to live evaluation of the same
 // inputs: freeze after frame 2, warm frame 3 (an unrun time, with genuinely
 // different inputs), and diff against live at 3 from the same history. Then
@@ -5147,6 +5204,7 @@ main(int argc, char **argv)
     TestDigestMovesWithControls();
     TestProductionRunnerIsBitIdenticalToLive();
     TestNestedSpaceSwitchesWarmBitIdentical();
+    TestAHeldFrameJobServesItsOwnDrag();
     TestChainedRigWarmsBitIdentical();
     TestPhasedReadsWarmBitIdentical();
     TestBlinkDragWarmsAsReleased();

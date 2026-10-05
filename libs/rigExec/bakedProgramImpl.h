@@ -36,6 +36,7 @@
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
@@ -58,6 +59,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -199,6 +201,10 @@ struct RigExecBakedInput {
     /// input was never registered (the rest ladder, which is folded rather
     /// than read).
     int overrideIndex = -1;
+    /// Index into the program's leaf pool for T (RigExecBakedLeafPools), or
+    /// -1 before RigExecBakedNumberLeaves numbered it. The leaf holds this
+    /// input's value at the run's time; the fields above stay the binding.
+    int leaf = -1;
 };
 
 // The attribute GetAttribute would end up reading, plus why it cannot be
@@ -295,6 +301,10 @@ RigExecBakedBindInput(const UsdPrim &prim, const char *name, T fallback,
     return input;
 }
 
+// What \p input resolves to at \p time. Only the leaf samplers call it (live:
+// RigExecBakedSampleLeaves in the prologue; frozen: the worker prologue over
+// its patched constants); step bodies and the input fill read the sampled
+// leaf through RigExecBakedLeafRead.
 template <class T>
 inline T
 RigExecBakedRead(const RigExecBakedInput<T> &input,
@@ -324,6 +334,110 @@ RigExecBakedRead(const RigExecBakedInput<T> &input,
     }
     return value;
 }
+
+// Sampled leaves.
+// One leaf per binding frozenDetail::_ForEachPatchableInput visits, numbered
+// in its order. RigExecBakedSampleLeaves fills them on the owning thread
+// before the region from RigExecBakedRead, under the re-sample rules it
+// states; everything after it reads the leaf. A leaf has no fold or varying
+// bit of its own: it reads its binding's, so Build and
+// RigExecProgramAvarPatch stay the only writers of what a binding is.
+
+enum class RigExecBakedLeafType : uint8_t {
+    Double, Float, Int, Bool, Token, Matrix4d, Vec3d, Vec3f
+};
+
+/// The pool a binding of type T samples into, and how the pool stores it
+/// (bool as a byte, so a pool is a plain array).
+template <class T>
+struct RigExecBakedLeafTraits {
+    static_assert(sizeof(T) == 0, "no leaf pool holds this input type");
+};
+template <>
+struct RigExecBakedLeafTraits<double> {
+    static constexpr RigExecBakedLeafType type = RigExecBakedLeafType::Double;
+    using Stored = double;
+};
+template <>
+struct RigExecBakedLeafTraits<float> {
+    static constexpr RigExecBakedLeafType type = RigExecBakedLeafType::Float;
+    using Stored = float;
+};
+template <>
+struct RigExecBakedLeafTraits<int> {
+    static constexpr RigExecBakedLeafType type = RigExecBakedLeafType::Int;
+    using Stored = int;
+};
+template <>
+struct RigExecBakedLeafTraits<bool> {
+    static constexpr RigExecBakedLeafType type = RigExecBakedLeafType::Bool;
+    using Stored = unsigned char;
+};
+template <>
+struct RigExecBakedLeafTraits<TfToken> {
+    static constexpr RigExecBakedLeafType type = RigExecBakedLeafType::Token;
+    using Stored = TfToken;
+};
+template <>
+struct RigExecBakedLeafTraits<GfMatrix4d> {
+    static constexpr RigExecBakedLeafType type =
+        RigExecBakedLeafType::Matrix4d;
+    using Stored = GfMatrix4d;
+};
+template <>
+struct RigExecBakedLeafTraits<GfVec3d> {
+    static constexpr RigExecBakedLeafType type = RigExecBakedLeafType::Vec3d;
+    using Stored = GfVec3d;
+};
+template <>
+struct RigExecBakedLeafTraits<GfVec3f> {
+    static constexpr RigExecBakedLeafType type = RigExecBakedLeafType::Vec3f;
+    using Stored = GfVec3f;
+};
+
+template <class T>
+struct RigExecBakedLeafPool {
+    using Type = T;
+    using Stored = typename RigExecBakedLeafTraits<T>::Stored;
+    std::vector<Stored> value;
+    /// 1 when this run's sample differs bitwise from the one before it; 0
+    /// for a leaf this run did not re-sample.
+    std::vector<char> changed;
+    /// 1 when the next sample must re-read the leaf whatever else holds.
+    std::vector<char> mustSample;
+    /// The leaf id (RigExecBakedProgramImpl::leafRefs) of each entry.
+    std::vector<uint32_t> id;
+};
+
+/// Where leaf id k lives: its pool and its index in that pool.
+struct RigExecBakedLeafRef {
+    RigExecBakedLeafType type = RigExecBakedLeafType::Double;
+    uint32_t index = 0;
+};
+
+struct RigExecBakedLeafPools {
+    std::tuple<RigExecBakedLeafPool<double>, RigExecBakedLeafPool<float>,
+               RigExecBakedLeafPool<int>, RigExecBakedLeafPool<bool>,
+               RigExecBakedLeafPool<TfToken>, RigExecBakedLeafPool<GfMatrix4d>,
+               RigExecBakedLeafPool<GfVec3d>, RigExecBakedLeafPool<GfVec3f>>
+        pools;
+
+    template <class T>
+    RigExecBakedLeafPool<T> &Of()
+    {
+        return std::get<RigExecBakedLeafPool<T>>(pools);
+    }
+    template <class T>
+    const RigExecBakedLeafPool<T> &Of() const
+    {
+        return std::get<RigExecBakedLeafPool<T>>(pools);
+    }
+    template <class Fn>
+    void ForEach(Fn &&fn)
+    {
+        std::apply([&fn](auto &...pool) { (fn(pool), ...); }, pools);
+    }
+};
 
 /// Publishes \p value at \p key into \p map, in one comparison when the
 /// caller walks its keys in ascending order.
@@ -2748,6 +2862,27 @@ struct RigExecBakedProgramImpl {
     std::vector<char> overridden;
     /// Property path -> the inputs reading it, for the placeable case.
     std::map<SdfPath, std::vector<int>> overridableInputs;
+
+    /// The sampled leaves (RigExecBakedNumberLeaves, RigExecBakedSampleLeaves).
+    /// Prologue state: the sampler writes them before the region, on the
+    /// owning thread, and nothing after it does.
+    RigExecBakedLeafPools leaves;
+    /// Leaf id -> pool and index, in _ForEachPatchableInput order.
+    std::vector<RigExecBakedLeafRef> leafRefs;
+    /// Override number -> the leaf of the binding holding it, or -1.
+    std::vector<int> leafOfOverride;
+    /// Every path on a leaf's walk -> the leaves reading it. Built from
+    /// `overridableInputs`, which files every hop of a registered binding's
+    /// walk under its number; Build only, read on the owning thread.
+    std::map<SdfPath, std::vector<uint32_t>> leafByPath;
+    /// The overrides SetOverrides placed through the routed arm (no number),
+    /// by path, and the table the last sample compared against. A leaf filed
+    /// under a path whose value differs between the two is re-sampled.
+    std::map<SdfPath, VtValue> routedOverrides;
+    std::map<SdfPath, VtValue> lastRoutedOverrides;
+    /// Leaves re-read by every sample so far, Build's included. Test
+    /// observable; written only by the sampler.
+    uint64_t leafSamples = 0;
     /// Every property a chain writes: RigExecBakedBuildContext::chainTargets
     /// as Build classified the inputs against it, kept so a bake can
     /// recompute each input's walk the same way.
@@ -2786,6 +2921,76 @@ struct RigExecBakedProgramImpl {
     /// RigExecBakedProgram::SetPublishWeightFields.
     bool publishWeightFields = true;
 };
+
+/// \p input's sampled leaf, or its constant when it has none.
+template <class T>
+inline T
+RigExecBakedLeaf(const RigExecBakedProgramImpl &program,
+                 const RigExecBakedInput<T> &input)
+{
+    if (input.leaf < 0) {
+        return input.constant;
+    }
+    return T(program.leaves.Of<T>().value[size_t(input.leaf)]);
+}
+
+/// The read every step body and the prologue's input fill make: the value
+/// RigExecBakedRead answered for \p input when the leaf was last sampled,
+/// which the re-sample rules make this run's answer. No stage, no resolved
+/// inputs, no lock.
+template <class T>
+inline T
+RigExecBakedLeafRead(const RigExecBakedProgramImpl &program,
+                     const RigExecBakedInput<T> &input)
+{
+    TF_VERIFY(input.leaf >= 0 || !input.varying);
+    return RigExecBakedLeaf(program, input);
+}
+
+/// Sets leaf \p id's `mustSample` byte, so the next sample re-reads it.
+inline void
+RigExecBakedMarkLeaf(RigExecBakedProgramImpl *program, uint32_t id)
+{
+    if (id >= program->leafRefs.size()) {
+        return;
+    }
+    const RigExecBakedLeafRef &ref = program->leafRefs[id];
+    program->leaves.ForEach([&ref](auto &pool) {
+        using T = typename std::decay_t<decltype(pool)>::Type;
+        if (RigExecBakedLeafTraits<T>::type == ref.type &&
+            ref.index < pool.mustSample.size()) {
+            pool.mustSample[ref.index] = 1;
+        }
+    });
+}
+
+/// Numbers one leaf per binding _ForEachPatchableInput visits, in its order,
+/// seeded with the binding's constant, and files each under every path
+/// `overridableInputs` gives its override number. Renumbers from scratch,
+/// so Build calls it again once every binding exists.
+void RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program);
+
+/// Re-reads, through RigExecBakedRead at \p time, every leaf that one of
+/// these says can have moved since it was last sampled, and sets its
+/// `changed` byte by bitwise comparison:
+///  1. the first run of the program, a moved program stamp, or \p all from
+///     Build or a forced run;
+///  2. \p all from a frozen job, whose clone carries live's flags and time;
+///  3. a moved time, for a varying binding;
+///  4. an override on its number now or at the last run: while a drag
+///     stands and once after it lifts, since a drag scrubbed at a held frame
+///     keeps both flags set;
+///  5. an edit on its number (`edited`), or its `mustSample` byte: a value
+///     edit that reached one of its paths (ApplyValueEdits), or
+///     RigExecProgramAvarPatch;
+///  6. a value in `routedOverrides` that differs from `lastRoutedOverrides`
+///     on one of its paths;
+///  7. a moved chain result (`propertyResults` against
+///     `lastPropertyResults`), for a binding routed through a chain.
+/// Every other leaf keeps its value: none of RigExecBakedRead's inputs can
+/// have moved for it. Owning thread, prologue only.
+void RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program,
+                              UsdTimeCode time, bool all);
 
 /// The matrix table \p revision reads at its own phase: FinalMatrix for a
 /// final-phase revision, BaseMatrix otherwise.
@@ -3442,7 +3647,8 @@ void RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
                                   RigExecBakedStep *step);
 
 /// Resolves every provider's rest chain and default-space ladder from the
-/// bound channels of RigExecBakedProgramImpl::ladders, in slot order.
+/// bound channels of RigExecBakedProgramImpl::ladders, in slot order, as
+/// their leaves were last sampled (at \p time: the caller samples first).
 ///
 /// ONE definition, called from Build (once, at the capture time) and from
 /// the prologue (on any frame a channel can have moved). computations.cpp
@@ -3759,7 +3965,8 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///  * what only a NOTICE writes and no run reads: `valueEditSerial`/
 ///    `editSerial` and the routing's `connectedSources` cache.
 ///  * what the PROLOGUE writes: `propertyResults`, `avarsDisturbed`,
-///    `overridden`/`anyOverridden`/`folded`, and the
+///    `overridden`/`anyOverridden`/`folded`, the sampled `leaves`,
+///    `routedOverrides`/`lastRoutedOverrides` and `leafSamples`, and the
 ///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
 ///    `scheduleDirty`/`topology`/the partition. The prologue runs ONCE per
 ///    generation, before either pass, so both passes see one value of each

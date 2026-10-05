@@ -203,6 +203,14 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.xformPrims = src.xformPrims;
     D.overridden = src.overridden;
     D.overridableInputs = src.overridableInputs;
+    // The leaves, which the worker re-samples whole on every job.
+    D.leaves = src.leaves;
+    D.leafRefs = src.leafRefs;
+    D.leafOfOverride = src.leafOfOverride;
+    D.leafByPath = src.leafByPath;
+    D.routedOverrides = src.routedOverrides;
+    D.lastRoutedOverrides = src.lastRoutedOverrides;
+    D.leafSamples = src.leafSamples;
     D.resolvedRoutedPrims = src.resolvedRoutedPrims;
     D.avarsDisturbed = src.avarsDisturbed;
     D.folded = src.folded;

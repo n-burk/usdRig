@@ -259,8 +259,9 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
 {
     const RigExecBakedProgramImpl &B = program;
     RigExecBakedProgramImpl::WeightObject &object = *objectPtr;
-    const auto rd = [&](const auto &input) {
-        return RigExecBakedRead(input, *B.resolvedInputs, time, &B.overridden);
+    // The object's inputs as the prologue sampled them.
+    const auto rd = [&B](const auto &input) {
+        return RigExecBakedLeafRead(B, input);
     };
     if (object.type == _tokens->staticWeight) {
         RigExecStaticWeightInputs inputs;

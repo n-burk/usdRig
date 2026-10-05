@@ -21,6 +21,7 @@
 #include "bakedProgramImpl.h"
 #include "bakedSchedule.h"
 #include "frameExtraction.h"
+#include "frozenContextInternal.h"
 #include "moverGraph.h"
 #include "movers/moverRegistry.h"
 #include "parallel.h"
@@ -1484,9 +1485,35 @@ RigExecBakedProgram::ApplyValueEdits(const UsdNotice::ObjectsChanged &notice,
 {
     RigExecBakedProgramImpl &B = *_impl;
     std::vector<int> indices;
-    if (!_RouteValueEdits(B, notice, &indices, nullptr,
+    std::vector<SdfPath> read;
+    if (!_RouteValueEdits(B, notice, &indices, &read,
                           skipPatchableAvars)) {
         return false;
+    }
+    // The leaves the edit reached, re-read by the next sample: every leaf
+    // filed under an edited path, and on a routed prim -- whose edits carry
+    // no number -- every leaf with a path on that prim.
+    const auto mark = [&B](const std::vector<uint32_t> &ids) {
+        for (const uint32_t id : ids) {
+            RigExecBakedMarkLeaf(&B, id);
+        }
+    };
+    for (const SdfPath &path : read) {
+        const auto found = B.leafByPath.find(path);
+        if (found != B.leafByPath.end()) {
+            mark(found->second);
+            continue;
+        }
+        const SdfPath prim = path.GetPrimPath();
+        if (!B.resolvedRoutedPrims.count(prim)) {
+            continue;
+        }
+        for (auto it = B.leafByPath.lower_bound(prim);
+             it != B.leafByPath.end() && it->first.HasPrefix(prim); ++it) {
+            if (it->first.GetPrimPath() == prim) {
+                mark(it->second);
+            }
+        }
     }
     if (indices.empty()) {
         return true;
@@ -1524,6 +1551,11 @@ RigExecProgramAvarPatch(RigExecBakedProgramImpl *B, size_t bindingIndex,
 {
     RigExecBakedProgramImpl::AvarBinding &binding =
         B->avarConstantBindings[bindingIndex];
+    // The binding's leaf is re-read by the next sample, whichever way the
+    // patch moves the binding below.
+    if (binding.input.leaf >= 0) {
+        B->leaves.Of<double>().mustSample[size_t(binding.input.leaf)] = 1;
+    }
     const auto promoted = std::find(B->promotedAvars.begin(),
                                     B->promotedAvars.end(), bindingIndex);
     if (animated) {
@@ -1735,6 +1767,7 @@ RigExecBakedProgram::SetOverrides(
     const std::vector<RigExecValueOverride> &overrides)
 {
     RigExecBakedProgramImpl &B = *_impl;
+    B.routedOverrides.clear();
     if (overrides.empty()) {
         if (B.anyOverridden) {
             std::fill(B.overridden.begin(), B.overridden.end(), 0);
@@ -1771,8 +1804,10 @@ RigExecBakedProgram::SetOverrides(
         }
         // Routed readers consult resolved inputs at every connection hop,
         // so an override on their source is placed by that same overlay.
+        // It carries no number, so the leaf sampler compares its value.
         if (B.resolvedRoutedPrims.count(o.prim) ||
             _ConnectedSources(B).count(path)) {
+            B.routedOverrides[path] = o.value;
             continue;
         }
         placeable = false;
@@ -1954,6 +1989,37 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
             t.Int(int64_t(index));
         }
         t.count = B.avarConstants.size();
+    }
+    {
+        // Per leaf, in id order: its pool, its owner's head and the paths
+        // it is filed under.
+        _DigestTable &t = table("leaves");
+        std::vector<std::vector<const SdfPath *>> filed(B.leafRefs.size());
+        for (const auto &[path, ids] : B.leafByPath) {
+            for (const uint32_t id : ids) {
+                if (id < filed.size()) {
+                    filed[id].push_back(&path);
+                }
+            }
+        }
+        size_t id = 0;
+        frozenDetail::_ForEachPatchableInput(B, [&](const auto &input) {
+            const RigExecBakedLeafRef ref =
+                id < B.leafRefs.size() ? B.leafRefs[id]
+                                       : RigExecBakedLeafRef();
+            t.Int(int64_t(ref.type));
+            t.Int(int64_t(ref.index));
+            t.Int(input.leaf);
+            t.Path(input.head ? input.head.GetPath() : SdfPath());
+            if (id < filed.size()) {
+                t.Int(int64_t(filed[id].size()));
+                for (const SdfPath *path : filed[id]) {
+                    t.Path(*path);
+                }
+            }
+            ++id;
+        });
+        t.count = B.leafRefs.size();
     }
     {
         _DigestTable &t = table("schedule");
@@ -2630,7 +2696,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         B.ladderOverrides.end());
     // And the ladder itself, at the capture time, through the same function
     // the prologue calls. Nothing is captured that the frame path cannot
-    // re-resolve, which is what makes the two agree by construction.
+    // re-resolve, which is what makes the two agree by construction. It
+    // reads leaves, as the prologue does, so the ones bound so far are
+    // numbered and sampled first; the end of Build numbers them all again.
+    RigExecBakedNumberLeaves(&B);
+    RigExecBakedSampleLeaves(&B, capture, /* all = */ true);
     RigExecBakedComposeLadder(&B, capture, /* trackMoves = */ false);
     bindPhases.Close();
     // The comparison buffers the per-frame recompose dirties against, sized
@@ -3316,6 +3386,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             return nullptr;
         }
     }
+    // One leaf per binding, now that every binding exists. The first run
+    // samples them all (RigExecBakedSampleLeaves, rule 1).
+    RigExecBakedNumberLeaves(&B);
     if (RigExecBakedScheduleReportRequested()) {
         const std::string report = RigExecBakedScheduleReport(B);
         std::fwrite(report.data(), 1, report.size(), stderr);
@@ -3524,6 +3597,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                 B.resolvedInputs->SetProperty(path, value);
             }
         }
+        // Every bound input's value at this time, read here, on this
+        // thread, once the overrides and the chain results stand in the
+        // resolved inputs: nothing after this point reads a binding any
+        // other way. A forced run trusts no leaf it holds.
+        RigExecBakedSampleLeaves(&B, time, fullRunRequested);
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunSolverSources(&B, time);
         stageFramesOk = stageFrames();

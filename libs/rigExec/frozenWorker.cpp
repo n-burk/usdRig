@@ -23,14 +23,15 @@
 //    plain-data side-tables at freeze time.
 //  * Constant patching (below) writes every varying input's sampled value
 //    into its `constant` and nulls its head/query/resolvedAttr handles, so
-//    RigExecBakedRead -- the only input route the reused step bodies take
-//    (bakedPose.cpp's rd(), bakedProgramImpl.h:312) -- answers the patched
-//    constant on every arm: the overridden arm's GetAttribute on a nulled
-//    head is a safe no-op returning false with the value untouched, and the
-//    query/resolved arms are skipped for invalid handles.
+//    RigExecBakedRead answers the patched constant on every arm: the
+//    overridden arm's GetAttribute on a nulled head is a safe no-op
+//    returning false with the value untouched, and the query/resolved arms
+//    are skipped for invalid handles. The prologue samples every leaf
+//    through it (RigExecBakedSampleLeaves, `all`), and the reused step
+//    bodies read only those leaves.
 //  * Pose step bodies (RigExecBakedRunPoseStep, bakedPose.cpp:2524-3490)
 //    touch no live state besides B.resolvedInputs (reference formation only
-//    -- rd() never reaches it once patched) and B.resolveWeights, which is
+//    -- rd() reads only the sampled leaves) and B.resolveWeights, which is
 //    called only for a constraint binding a weight object; the freeze gate
 //    refuses any such constraint, and the snapshot nulls the function, so a
 //    call would throw into the scheduler's fail-closed catch, never into
@@ -78,9 +79,10 @@ namespace {
 
 // Patches every patchable input's constant from its head-keyed sample and
 // nulls its handles, so the reused step bodies answer the patched constant
-// on every arm of RigExecBakedRead. A varying input with no sample, or a
-// sample holding a type the typed read cannot consume, declines the job:
-// the snapshot and the vector describe different programs.
+// on every arm of RigExecBakedRead, which the prologue's leaf sample reads.
+// A varying input with no sample, or a sample holding a type the typed read
+// cannot consume, declines the job: the snapshot and the vector describe
+// different programs.
 bool
 _PatchInputs(RigExecBakedProgramImpl &B,
              const RigExecFrozenProgram &snapshot,
@@ -151,7 +153,6 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
                RigExecRigPose *pose)
 {
     RigExecBakedProgramImpl &B = worker->B;
-    const RigExecResolvedInputs &R = *B.resolvedInputs;
     const auto findSample = [&index, &inputs](const SdfPath &key) {
         const auto found = index.find(key);
         return found == index.end() ? nullptr : &inputs.values[found->second];
@@ -187,9 +188,14 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         B.resolvedInputs->SetProperty(target, value);
     }
 
-    // RunInputs (bakedPose.cpp:2099): ladders recompose from stage reads, so
-    // a recompute declines; everything else replays samples through the real
-    // RigExecBakedRead, which answers the patched constants.
+    // Every leaf, sampled through the real RigExecBakedRead, which answers
+    // the patched constants. All of them on every job: the clone carries
+    // live's time, flags and stamps, so nothing about the job's own inputs
+    // can be told from them.
+    RigExecBakedSampleLeaves(&B, time, /* all = */ true);
+
+    // RunInputs: ladders recompose from stage reads, so a recompute
+    // declines; everything else replays the leaves.
     bool ladderDragged = false;
     if (B.anyOverridden) {
         for (const int ladderIndex : B.ladderOverrides) {
@@ -214,23 +220,21 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         B.ladderMovedSlots.clear();
     }
     for (const auto &binding : B.avarBindings) {
-        B.avars[binding.slot] =
-            RigExecBakedRead(binding.input, R, time, &B.overridden);
+        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
     }
     for (const size_t promoted : B.promotedAvars) {
         if (promoted >= B.avarConstantBindings.size()) {
             return false;
         }
         const auto &binding = B.avarConstantBindings[promoted];
-        B.avars[binding.slot] =
-            RigExecBakedRead(binding.input, R, time, &B.overridden);
+        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
     }
     if (B.anyOverridden || B.avarsDisturbed) {
         for (const auto &binding : B.avarConstantBindings) {
             B.avars[binding.slot] =
                 (B.overridden[size_t(binding.input.overrideIndex)] ||
                  binding.input.varying)
-                    ? RigExecBakedRead(binding.input, R, time, &B.overridden)
+                    ? RigExecBakedLeafRead(B, binding.input)
                     : binding.input.constant;
         }
         B.avarsDisturbed = B.anyOverridden;
@@ -238,11 +242,11 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     for (RigExecBakedProgramImpl::PoseInterpolator &interpolator :
          B.poseInterpolators) {
         interpolator.enabledValue =
-            RigExecBakedRead(interpolator.enabled, R, time, &B.overridden);
+            RigExecBakedLeafRead(B, interpolator.enabled);
         // A numeric driver's dials, as RigExecBakedRunInputs reads them.
         for (size_t i = 0; i < interpolator.valueInputs.size(); ++i) {
-            interpolator.values[i] = RigExecBakedRead(
-                interpolator.valueInputs[i], R, time, &B.overridden);
+            interpolator.values[i] =
+                RigExecBakedLeafRead(B, interpolator.valueInputs[i]);
         }
     }
 

@@ -114,9 +114,9 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
         return false;
     }
     RigExecBakedProgramImpl::WeightObject &object = B.weightObjects[size_t(id)];
-    const auto rd = [&](const auto &input) {
-        return RigExecBakedRead(input, *B.resolvedInputs, time,
-                                &B.overridden);
+    // The worker prologue sampled every leaf from the patched constants.
+    const auto rd = [&B](const auto &input) {
+        return RigExecBakedLeafRead(B, input);
     };
     const auto findSample = [&](const SdfPath &path) {
         const auto found = index.find(path);

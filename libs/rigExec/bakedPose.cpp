@@ -10,6 +10,7 @@
 #include "bakedProgramImpl.h"
 
 #include "frameExtraction.h"
+#include "frozenContextInternal.h"
 #include "moverGraph.h"
 #include "rigEvaluator.h"
 #include "solverKernels.h"
@@ -33,10 +34,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -2292,16 +2295,12 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // thing that reads it is the guide publication.
     // Not gated on the guide toggle. The toggle can move without the epoch
     // moving, so gating would be a runtime branch in a step body; running
-    // and not publishing is the same published generation, because
-    // RigExecBakedRead only READS the override table and the epilogue
-    // consults the toggle where the dynamic path does.
-    // The one thing it does move with the guides off is the static-input
-    // cache: RigExecBakedRead's resolved path goes through
-    // RigExecResolvedInputs::GetAttribute, whose hit/miss/bypass counters
-    // are an observable of their own (spec 5.2 [P37][S36]). Nothing in the
-    // pose can see it, and no rig asserts on those counters for a
-    // guide-only solver -- but anyone measuring that cache should know the
-    // guide pass is a client of it whether the guides are drawn or not.
+    // and not publishing is the same published generation, because a
+    // solver step only reads its sampled leaves and the epilogue consults
+    // the toggle where the dynamic path does. The leaves are sampled in the
+    // prologue whether or not a guide solver runs, so the static-input
+    // cache's counters (spec 5.2 [P37][S36]) do not move with the toggle
+    // either.
     for (const int si : B.guideSolvers) {
         RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
         // +1 for the start provider's synthetic base element.
@@ -2641,19 +2640,151 @@ RigExecBakedLadderWatchMoved(RigExecBakedProgramImpl *program,
     return any;
 }
 
+namespace {
+
+// Bit for bit: a NaN that stays NaN has not moved, and -0 is not 0.
+template <class T>
+bool
+_LeafSame(const T &a, const T &b)
+{
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        return std::memcmp(&a, &b, sizeof(T)) == 0;
+    } else {
+        return a == b;
+    }
+}
+
+}  // namespace
+
+void
+RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    B.leaves = RigExecBakedLeafPools();
+    B.leafRefs.clear();
+    B.leafOfOverride.assign(B.overridden.size(), -1);
+    frozenDetail::_ForEachPatchableInput(B, [&B](auto &input) {
+        using T = std::decay_t<decltype(input.constant)>;
+        using Stored = typename RigExecBakedLeafTraits<T>::Stored;
+        RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
+        const uint32_t id = uint32_t(B.leafRefs.size());
+        input.leaf = int(pool.value.size());
+        pool.value.push_back(Stored(input.constant));
+        pool.changed.push_back(0);
+        pool.mustSample.push_back(0);
+        pool.id.push_back(id);
+        B.leafRefs.push_back(
+            {RigExecBakedLeafTraits<T>::type, uint32_t(input.leaf)});
+        if (input.overrideIndex >= 0 &&
+            size_t(input.overrideIndex) < B.leafOfOverride.size()) {
+            B.leafOfOverride[size_t(input.overrideIndex)] = int(id);
+        }
+    });
+    // RigExecBakedRecordBind files every hop of a registered binding's walk
+    // (its head alone when the walk is empty) under the binding's number,
+    // so the leaf's paths are exactly those entries.
+    B.leafByPath.clear();
+    for (const auto &[path, indices] : B.overridableInputs) {
+        std::vector<uint32_t> ids;
+        for (const int index : indices) {
+            if (index >= 0 && size_t(index) < B.leafOfOverride.size() &&
+                B.leafOfOverride[size_t(index)] >= 0) {
+                ids.push_back(uint32_t(B.leafOfOverride[size_t(index)]));
+            }
+        }
+        if (!ids.empty()) {
+            B.leafByPath.emplace_hint(B.leafByPath.end(), path,
+                                      std::move(ids));
+        }
+    }
+}
+
+void
+RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
+                         bool all)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const RigExecResolvedInputs &R = *B.resolvedInputs;
+    // Rule 6, carried into `mustSample`: the leaves under a routed override
+    // whose value moved (placed, changed or lifted).
+    if (B.routedOverrides != B.lastRoutedOverrides) {
+        const auto markPath = [&B](const SdfPath &path) {
+            const auto found = B.leafByPath.find(path);
+            if (found != B.leafByPath.end()) {
+                for (const uint32_t id : found->second) {
+                    RigExecBakedMarkLeaf(&B, id);
+                }
+            }
+        };
+        for (const auto &[path, value] : B.routedOverrides) {
+            const auto last = B.lastRoutedOverrides.find(path);
+            if (last == B.lastRoutedOverrides.end() ||
+                !(last->second == value)) {
+                markPath(path);
+            }
+        }
+        for (const auto &[path, value] : B.lastRoutedOverrides) {
+            if (!B.routedOverrides.count(path)) {
+                markPath(path);
+            }
+        }
+        B.lastRoutedOverrides = B.routedOverrides;
+    }
+    // Rules 1 and 2: the caller's `all`, the first run, a moved stamp.
+    all = all || !B.everRan || B.programStamp != B.lastProgramStamp;
+    const bool timeMoved = time != B.lastTime;
+    const bool chainsMoved = !all && B.hasPropertyChains &&
+                             B.propertyResults != B.lastPropertyResults;
+    const bool edited = B.anyEdited;
+    const auto flagged = [](const std::vector<char> &flags, int index) {
+        return index >= 0 && size_t(index) < flags.size() &&
+               flags[size_t(index)];
+    };
+    B.leaves.ForEach([](auto &pool) {
+        std::fill(pool.changed.begin(), pool.changed.end(), char(0));
+    });
+    frozenDetail::_ForEachPatchableInput(B, [&](auto &input) {
+        using T = std::decay_t<decltype(input.constant)>;
+        using Stored = typename RigExecBakedLeafTraits<T>::Stored;
+        if (input.leaf < 0) {
+            return;
+        }
+        RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
+        const size_t k = size_t(input.leaf);
+        const int o = input.overrideIndex;
+        // `all` first: a frozen job's handles are dead, and the chain rule
+        // is the only one that asks one.
+        const bool resample =
+            all || pool.mustSample[k] || (timeMoved && input.varying) ||
+            flagged(B.overridden, o) || flagged(B.lastOverridden, o) ||
+            (edited && flagged(B.edited, o)) ||
+            (chainsMoved && input.resolvedAttr);
+        if (!resample) {
+            return;
+        }
+        pool.mustSample[k] = 0;
+        ++B.leafSamples;
+        const Stored value =
+            Stored(RigExecBakedRead(input, R, time, &B.overridden));
+        pool.changed[k] = _LeafSame(value, pool.value[k]) ? 0 : 1;
+        pool.value[k] = value;
+    });
+}
+
 void
 RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
                           bool trackMoves, const std::vector<char> *only)
 {
     RigExecBakedProgramImpl &B = *program;
-    const RigExecResolvedInputs &R = *B.resolvedInputs;
     const int N = int(B.paths.size());
     const GfMatrix4d identity(1.0);
     if (trackMoves) {
         B.ladderMovedSlots.clear();
     }
-    const auto rd = [&](const auto &input) {
-        return RigExecBakedRead(input, R, time, &B.overridden);
+    // The channels as sampled at \p time (RigExecBakedSampleLeaves ran
+    // first, at Build and in the prologue).
+    const auto rd = [&B](const auto &input) {
+        return RigExecBakedLeafRead(B, input);
     };
     // A partial compose: the marked slots and everything below them, which
     // one forward pass settles because a parent's slot is always lower.
@@ -2754,7 +2885,6 @@ void
 RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
-    const RigExecResolvedInputs &R = *B.resolvedInputs;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
     // The provider ladder, before the avars that compose against it.
     // Three ways a frame can move it and nothing else can: a channel that
@@ -2790,14 +2920,13 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
         // otherwise dirty a compose this run has no reason to run.
         B.ladderMovedSlots.clear();
     }
+    // Every read below is a leaf RigExecBakedSampleLeaves left this run.
     for (const auto &binding : B.avarBindings) {
-        B.avars[binding.slot] =
-            RigExecBakedRead(binding.input, R, time, &B.overridden);
+        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
     }
     for (const size_t index : B.promotedAvars) {
         const auto &binding = B.avarConstantBindings[index];
-        B.avars[binding.slot] =
-            RigExecBakedRead(binding.input, R, time, &B.overridden);
+        B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
     }
     // A drag lands on avars the bake captured as constants -- that is what
     // dragging a control on a still rig IS -- so the varying list above is not
@@ -2808,12 +2937,12 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     // not a step's, so no arrangement of the graph can perform them twice.
     if (B.anyOverridden || B.avarsDisturbed) {
         for (const auto &binding : B.avarConstantBindings) {
-            // A promoted binding is varying, and RigExecBakedRead answers
-            // it the long way whether or not a drag stands on it.
+            // A promoted binding is varying, and its leaf holds the long
+            // way's answer whether or not a drag stands on it.
             B.avars[binding.slot] =
                 (B.overridden[size_t(binding.input.overrideIndex)] ||
                  binding.input.varying)
-                    ? RigExecBakedRead(binding.input, R, time, &B.overridden)
+                    ? RigExecBakedLeafRead(B, binding.input)
                     : binding.input.constant;
         }
         B.avarsDisturbed = B.anyOverridden;
@@ -2822,11 +2951,11 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     for (RigExecBakedProgramImpl::PoseInterpolator &interpolator :
              B.poseInterpolators) {
         interpolator.enabledValue =
-            RigExecBakedRead(interpolator.enabled, R, time, &B.overridden);
+            RigExecBakedLeafRead(B, interpolator.enabled);
         // A numeric driver's dials, read here so its step reads no USD.
         for (size_t i = 0; i < interpolator.valueInputs.size(); ++i) {
-            interpolator.values[i] = RigExecBakedRead(
-                interpolator.valueInputs[i], R, time, &B.overridden);
+            interpolator.values[i] =
+                RigExecBakedLeafRead(B, interpolator.valueInputs[i]);
         }
     }
 }
@@ -3352,13 +3481,13 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                         RigExecBakedStep *step, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
-    const RigExecResolvedInputs &R = *B.resolvedInputs;
-    // Every per-frame read goes through these two: `rd` reads one input the
-    // way this generation must (through the resolved inputs while an override
-    // stands on it, through the pinned query otherwise), and `live` answers
-    // whether a set of baked parameters has to be re-read at all.
-    const auto rd = [&](const auto &input) {
-        return RigExecBakedRead(input, R, time, &B.overridden);
+    // Every per-frame read goes through these two: `rd` reads one input's
+    // leaf, sampled in the prologue the way this generation must read it
+    // (through the resolved inputs while an override stands on it, through
+    // the pinned query otherwise), and `live` answers whether a set of baked
+    // parameters has to be re-read at all.
+    const auto rd = [&B](const auto &input) {
+        return RigExecBakedLeafRead(B, input);
     };
     const auto live = [&](const auto &input) {
         return input.varying ||
@@ -3425,10 +3554,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     unswitched * parentPosed.GetInverse() * parentDefault;
                 const GfMatrix4d localInverse = local.GetInverse();
                 const int count = int(sw.sourceSlots.size());
-                // Read here rather than in a prologue: the index is one
-                // double, the step already holds the reader, and a
-                // prologue copy would be a second place for an override
-                // to fail to reach.
+                // The index's leaf, sampled in the prologue with every
+                // other bound input, so an override reaches it by the same
+                // rules.
                 double active = rd(sw.activeInput);
                 if (!std::isfinite(active)) active = 0.0;
                 active = GfClamp(active, 0.0, double(count - 1));
