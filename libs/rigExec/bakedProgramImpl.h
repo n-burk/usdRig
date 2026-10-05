@@ -562,24 +562,29 @@ struct RigExecBakedPointsBinding {
     int id = -1;
 };
 
-/// One provider frame as one constraint of its stack left it, for an AtPrim
-/// read phase on a transform that names that constraint. A record exists
-/// only for a pair (provider, constraint) the compile named
-/// (`_chainPlan.snapshots`), exactly as the walk records only named pairs;
-/// its FrameMatrix step writes the matrix and a valid byte that is 0
+/// One provider frame as one writer of its stack -- a constraint or a
+/// solver -- left it, for an AtPrim read phase on a transform that names that
+/// writer. A record exists only for a pair (provider, writer) the compile
+/// named (`_chainPlan.snapshots`), exactly as the walk records only named
+/// pairs; its FrameMatrix step writes the matrix and a valid byte that is 0
 /// exactly where the walk declines to record (RigExecBakedEvalFrameRecord).
 struct RigExecBakedFrameRecord {
     /// The provider slot.
     int slot = -1;
-    /// The writer: an index into `commits` / `walkSteps`.
+    /// The writer's commit: an index into `commits` / `walkSteps`.
     int commit = -1;
-    /// The provider's position in the constraint's `targetSlots`.
+    /// A constraint's record: the provider's position in its `targetSlots`.
+    /// -1 for a solver's.
     int target = -1;
-    /// The `fin` entry the record reads: the commit's own version of the
+    /// A solver's record: the provider's position in the commit's `slots`,
+    /// whose `present` byte says whether the solver published it this run.
+    /// -1 for a constraint's.
+    int position = -1;
+    /// The `fin` entry the record reads: the commit's last version of the
     /// slot where it declares one, else the version it read. Bound after
     /// BindPoseVersions.
     uint32_t version = 0;
-    /// The constraint, which the read phase names.
+    /// The constraint or solver, which the read phase names.
     SdfPath mover;
 };
 
@@ -1575,7 +1580,8 @@ struct RigExecBakedProgramImpl {
     std::map<SdfPath, VtValue> propertyResults;
 
     /// Every record an AtPrim transform phase can read, in walk order (by
-    /// `commit`, then `target`), and what each one's FrameMatrix step wrote
+    /// `commit`, then the commit's target or output order), and what each
+    /// one's FrameMatrix step wrote
     /// this run. Kept across runs like deltaValues: a step the cone skipped
     /// left the record it would write again.
     std::vector<RigExecBakedFrameRecord> frameRecords;
@@ -1763,6 +1769,10 @@ struct RigExecBakedProgramImpl {
         RigExecBakedInput<int> ribbonSampleCount;
         // (providerSlot, element) pairs this solver writes
         std::vector<std::pair<int, int>> outputs;
+        /// Parallel to `outputs`: whether a read phase names this solver's
+        /// checkpoint of that joint (the evaluator's _chainPlan.snapshots
+        /// membership), which is what gives the output a frame record.
+        std::vector<char> outputSnapshots;
 
         // The candidates this solver published, in `outputs` order and
         // nowhere else: the merge into the batch's table is the commit's
@@ -2369,8 +2379,8 @@ struct RigExecBakedProgramImpl {
         /// One per `binding.phases` entry, in the map's order.
         std::vector<RigExecBakedPointsBinding> pointBindings;
         /// For an AtPrim `binding.transformPhase` only: the `frameRecords`
-        /// of the transform provider whose constraint is the phase's prim
-        /// or under it, newest first. The fold takes the first valid one,
+        /// of the transform provider whose writer (constraint or solver) is
+        /// the phase's prim or under it, newest first. The fold takes the first valid one,
         /// and otherwise keeps the dense-table matrix. `influenceRecords`
         /// is the same per `influenceSlots` entry.
         std::vector<int> transformRecords;
@@ -3172,6 +3182,10 @@ struct RigExecBakedWalkEntry {
     size_t level = 0;
     SdfPathVector batchSolvers;
     std::vector<std::vector<std::pair<SdfPath, int>>> solverJoints;
+    /// Parallel to solverJoints: whether a read phase asked for that joint's
+    /// frame as of that solver (the evaluator's _chainPlan.snapshots
+    /// membership).
+    std::vector<std::vector<char>> solverSnapshotJoints;
     /// Per solver, the joints whose REST is LIVE: a pose step below this
     /// solver in the rig's hierarchical stack already wrote them, so the
     /// solver measures from the frame that step left rather than from the
@@ -3410,10 +3424,11 @@ void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
 /// The matrix \p record holds this run, rest -> the recorded frame, into
-/// \p matrix. False exactly where the walk records nothing: the commit's
+/// \p matrix. False exactly where the walk records nothing: a constraint's
 /// exit records no frame (`recordAfter`), or records targets[0] alone
-/// (`recordEveryTarget`) and this is another target, or the frame is
-/// unusable or does not decompose. \p matrix is written either way.
+/// (`recordEveryTarget`) and this is another target; a solver published no
+/// element for the joint (`present`); or the frame is unusable or does not
+/// decompose. \p matrix is written either way.
 bool RigExecBakedEvalFrameRecord(const RigExecBakedProgramImpl &program,
                                  const RigExecBakedFrameRecord &record,
                                  GfMatrix4d *matrix);
@@ -3988,6 +4003,16 @@ struct RigExecBakedProgramTesting {
     /// Returns false and captures nothing under the parallel schedule: the
     /// capture is a test aid and stays off the parallel executor.
     static bool CapturePointReads(const RigExecBakedProgram &program);
+    /// The condition behind IsBakeable's and Build's solver-checkpoint
+    /// guard: the solvers in \p snapshots (joint -> read-phase movers) that
+    /// no batched solver commits for that joint. No compiled rig reaches it,
+    /// so it is tested on hand-built maps.
+    static std::vector<SdfPath> SolverCheckpointsWithoutAnOutput(
+        const std::map<SdfPath, std::set<SdfPath>> &snapshots,
+        const std::map<SdfPath, std::set<SdfPath>> &solverDependencies,
+        const std::map<SdfPath, std::vector<std::pair<SdfPath, int>>>
+            &solverJoints,
+        const std::set<SdfPath> &batched);
 };
 
 }  // namespace rigExec

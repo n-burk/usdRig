@@ -25,7 +25,9 @@
 #include "rigExecOpTrace.h"
 #include "rigExecPoseCompare.h"
 
+#include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
+#include "rigExec/frozenContext.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -38,9 +40,12 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 #include <map>
+#include <memory>
 #include <set>
 #include <cstdio>
 #include <string>
@@ -847,6 +852,147 @@ CheckParity(const char *what, const RigSpec &spec,
     }
 }
 
+// The baked half of the checkpoint cases: a read phase naming a solver reads
+// a FrameMatrix record on that solver's commit.
+
+/// A frozen warming job's pose at \p time: \p evaluator's program frozen, the
+/// frame sampled, and the job run through the production runner.
+RigExecRigPose
+WarmFrozen(const std::string &what, RigExecRigEvaluator *evaluator,
+           const SdfPath &rig, double time)
+{
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    if (!RigExecFreezeProgram(*evaluator, &frozen, &error) || !frozen) {
+        ++failures;
+        std::printf("FAIL %s: the freeze refused: %s\n", what.c_str(),
+                    error.c_str());
+        return RigExecRigPose();
+    }
+    RigExecFrameInputs inputs;
+    if (!RigExecSampleFrameInputs(*evaluator, UsdTimeCode(time), {}, &inputs,
+                                  &error)) {
+        ++failures;
+        std::printf("FAIL %s: sampling refused: %s\n", what.c_str(),
+                    error.c_str());
+        return RigExecRigPose();
+    }
+    RigExecBackgroundScheduler scheduler;
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator->GetBindingEpochDigest();
+    context.generation = scheduler.CurrentGeneration(rig);
+    context.slotCount = evaluator->GetBakedProgram()->GetProviderCount();
+    context.programDigest = 0;
+    context.varyingInputCount = inputs.values.size();
+    context.flags = 0;
+    if (evaluator->GetPublishWeightFields()) {
+        context.flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator->GetSolverGuidesEnabled()) {
+        context.flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.frozen = frozen.get();
+    return RigExecEvaluateFrozen(context, inputs,
+                                 RigExecMakeProductionStepRunner(), &scheduler,
+                                 rig);
+}
+
+/// One checkpoint rig run baked, frozen and dynamic.
+struct CheckpointRun {
+    /// BakedWithParityCheck, left after the last frame for structure and
+    /// drag checks.
+    std::unique_ptr<RigExecRigEvaluator> baked;
+    /// The dynamic walk's pose per frame.
+    std::map<double, RigExecRigPose> walked;
+};
+
+/// The checkpoint rig on \p stage bakes and freezes. At each of \p frames the
+/// program -- held to the walk by BakedWithParityCheck, and again as plain
+/// Baked -- and a frozen warming job publish the dynamic walk's generation
+/// bit for bit; every AtPrim reader's first valid record is the walk's store
+/// answer, and \p answered readers answer from a record. cpuParityMode stays
+/// off: the oracle has no AtPrim branch (see Evaluate).
+CheckpointRun
+CheckCheckpointBakes(const std::string &what, const UsdStageRefPtr &stage,
+                     const SdfPath &rig, const std::vector<double> &frames,
+                     size_t answered)
+{
+    CheckpointRun run;
+    if (!stage || frames.empty()) {
+        CHECK(stage && !frames.empty());
+        return run;
+    }
+    RigExecRigEvaluator walk(stage, rig);
+    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    RigExecRigEvaluator plain(stage, rig);
+    plain.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    run.baked = std::make_unique<RigExecRigEvaluator>(stage, rig);
+    run.baked->SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    std::vector<std::string> errors;
+    if (!walk.Compile(&errors) || !plain.Compile(&errors) ||
+        !run.baked->Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what.c_str());
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        run.baked.reset();
+        return run;
+    }
+    std::vector<std::string> reasons;
+    if (!run.baked->IsBakeable(&reasons)) {
+        ++failures;
+        std::printf("FAIL %s: the rig does not bake\n", what.c_str());
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+        run.baked.reset();
+        return run;
+    }
+    // All three from the same first frame, so their work counters compare.
+    const UsdTimeCode first(frames.front());
+    CHECK(walk.Evaluate(first).valid);
+    CHECK(plain.Evaluate(first).valid);
+    CHECK(run.baked->Evaluate(first).valid);
+    for (const double frame : frames) {
+        const std::string where = what + " frame " + std::to_string(frame);
+        // Frozen from the program the last live run left, before this
+        // frame runs live.
+        const RigExecRigPose warmed = WarmFrozen(where, &plain, rig, frame);
+        size_t generations = plain.GetBakedGenerationCount();
+        const RigExecRigPose live = plain.Evaluate(UsdTimeCode(frame));
+        CHECK(plain.GetBakedGenerationCount() == generations + 1);
+        generations = run.baked->GetBakedGenerationCount();
+        const RigExecRigPose checked = run.baked->Evaluate(UsdTimeCode(frame));
+        CHECK(run.baked->GetBakedGenerationCount() == generations + 1);
+        if (checked.bakedParityMismatches) {
+            ++failures;
+            std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
+                        where.c_str(), checked.bakedParityMismatches);
+            for (const std::string &line : checked.diagnostics) {
+                std::printf("    %s\n", line.c_str());
+            }
+        }
+        const RigExecRigPose walked = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(walked.valid && live.valid && checked.valid && warmed.valid);
+        rigExecTest::ComparePose(&failures, where + " baked", walked, live);
+        rigExecTest::ComparePose(&failures, where + " checked", walked,
+                                 checked);
+        rigExecTest::ComparePose(&failures, where + " frozen", walked,
+                                 warmed);
+        const size_t fromRecords =
+            rigExecTest::CheckFrameRecords(&failures, where, *run.baked);
+        if (fromRecords != answered) {
+            ++failures;
+            std::printf("FAIL %s: %zu reader(s) answered from a record, "
+                        "expected %zu\n",
+                        where.c_str(), fromRecords, answered);
+        }
+        run.walked[frame] = walked;
+    }
+    return run;
+}
+
 // The cases.
 
 /// Compile succeeds SILENTLY, and the chains carry the stack order.
@@ -1048,16 +1194,27 @@ TestCheckpointSeesTheEarlierWriter()
     CHECK(Near(GfVec3d(atCheckpoint), GfVec3d(atFkOnly), 1e-4));
     CHECK(!Near(GfVec3d(atFkOnly), GfVec3d(atIkOnly), 1e-4));
 
-    // ... and naming a solver is refused by the bake, because the baked
-    // phased-read store is written per CONSTRAINT and has no solver
-    // equivalent. A silent fall back to a different value is the one thing
-    // this program refuses.
-    RigExecRigEvaluator evaluator(atFkStage, kRigPath);
-    std::vector<std::string> errors;
-    CHECK(evaluator.Compile(&errors));
-    std::vector<std::string> reasons;
-    CHECK(!RigExecBakedProgram::IsBakeable(evaluator, &reasons));
-    CHECK(Mentions(reasons, "read phase names a solver checkpoint"));
+    // ... and the checkpoint bakes: the program reads LegFK's record of the
+    // knee, and so does a frozen warming job, bit for bit the walk's.
+    const CheckpointRun run = CheckCheckpointBakes(
+        "checkpoint probe", atFkStage, kRigPath, {1.0, 3.0, 5.0}, 1);
+    if (!run.baked) return;
+    const auto walked = run.walked.find(5.0);
+    GfVec3f walkedPoint;
+    CHECK(walked != run.walked.end() &&
+          ProbePoint(walked->second, &walkedPoint));
+    CHECK(walkedPoint == atCheckpoint);
+    const RigExecBakedProgram *program = run.baked->GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) return;
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const RigExecBakedProgramImpl::GeomRevision *probe =
+        rigExecTest::FindRevision(B, SdfPath("/Asset/Rig/Movers/KneeProbe"));
+    CHECK(probe != nullptr);
+    if (probe) {
+        CHECK(rigExecTest::RecordMovers(B, probe->transformRecords) ==
+              std::vector<SdfPath>{kLegFk});
+    }
 }
 
 /// The tear: a later writer replaces only the joints it NAMES.
@@ -1611,6 +1768,34 @@ TestReadPhasesOverTheUnifiedStack()
     CHECK(probe("final, movers first", "final", false, &fedFinal));
     CHECK(Near(GfVec3d(fedBase), GfVec3d(fedFinal), 1e-4));
     CHECK(!Near(GfVec3d(fedMovers), GfVec3d(fedFinal), 1e-4));
+
+    // The AtPrim(Solvers) probe names the IK's checkpoint, and bakes and
+    // freezes to the walk's knee, bit for bit.
+    RigSpec spec = Stacked();
+    spec.fk = false;
+    spec.kneeMove = true;
+    spec.probePhase = "/Asset/Rig/Solvers";
+    spec.rigOrder = SolversLast();
+    const CheckpointRun run =
+        CheckCheckpointBakes("AtPrim(Solvers) checkpoint, solvers last",
+                             MakeStage(spec), kRigPath, {1.0, 3.0, 5.0}, 1);
+    if (!run.baked) return;
+    const auto walked = run.walked.find(5.0);
+    GfVec3f walkedPoint;
+    CHECK(walked != run.walked.end() &&
+          ProbePoint(walked->second, &walkedPoint));
+    CHECK(Near(GfVec3d(walkedPoint), GfVec3d(atSolvers), 1e-6));
+    const RigExecBakedProgram *program = run.baked->GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) return;
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const RigExecBakedProgramImpl::GeomRevision *knee =
+        rigExecTest::FindRevision(B, SdfPath("/Asset/Rig/Movers/KneeProbe"));
+    CHECK(knee != nullptr);
+    if (knee) {
+        CHECK(rigExecTest::RecordMovers(B, knee->transformRecords) ==
+              std::vector<SdfPath>{kLegIk});
+    }
 }
 
 /// The AtPrim(Movers) probe held to the dynamic walk's phased-read store,
@@ -1663,6 +1848,250 @@ TestAtPrimMoversRecordsMatchTheStore()
         if (probe) {
             CHECK(rigExecTest::RecordMovers(B, probe->transformRecords) ==
                   std::vector<SdfPath>{SdfPath("/Asset/Rig/Movers/KneeMove")});
+        }
+    }
+}
+
+/// tests/fixtures/solver_checkpoint.usda: AtPrim read phases that name solver
+/// checkpoints, baked and frozen. The knee's writers, in walk order, are
+/// LegFK, KneeMove, LegBlend and LegZ. LegBlend never publishes the knee (its
+/// element 2 is past a two-element aggregate), so its record is skipped every
+/// run: P3, at the Stack scope, names it and falls to LegFK's record while P1
+/// names that one, and to `base` -- LegZ's knee -- without P1. Had the skipped
+/// record been read, P3 would see the knee KneeMove left, which is neither.
+void
+TestSolverCheckpointsBake(const std::string &examplesDir)
+{
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/solver_checkpoint.usda";
+    const SdfPath rig("/CheckpointAsset/Rig");
+    const SdfPath knee("/CheckpointAsset/Rig/Joints/Hip/Knee");
+    const SdfPath legFk("/CheckpointAsset/Rig/Stack/LegFK");
+    const SdfPath legBlend("/CheckpointAsset/Rig/Stack/LegBlend");
+    const SdfPath legZ("/CheckpointAsset/Rig/Late/LegZ");
+    const auto reader = [](const char *name) {
+        return SdfPath("/CheckpointAsset/Rig/Movers").AppendChild(
+            TfToken(name));
+    };
+    const auto points = [](const RigExecRigPose &pose, const char *name) {
+        const auto it = pose.movedProperties.find(
+            SdfPath("/CheckpointAsset/Geom")
+                .AppendChild(TfToken(name))
+                .AppendProperty(TfToken("points")));
+        return it != pose.movedProperties.end() &&
+                       it->second.IsHolding<VtVec3fArray>()
+                   ? it->second.UncheckedGet<VtVec3fArray>()
+                   : VtVec3fArray();
+    };
+    const std::vector<double> frames{1.0, 5.0, 9.0};
+    std::map<double, VtVec3fArray> namedP3;
+    for (const bool withP1 : {true, false}) {
+        const std::string label =
+            withP1 ? "solver checkpoints" : "solver checkpoints without P1";
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage);
+        if (!stage) return;
+        stage->SetEditTarget(stage->GetSessionLayer());
+        if (!withP1) {
+            CHECK(stage->GetPrimAtPath(reader("P1")).SetActive(false));
+        }
+        // With P1: P1, P2 and P3 answer from a record. Without it, P2 alone;
+        // P3's one record is skipped and it reads `base`.
+        const CheckpointRun run =
+            CheckCheckpointBakes(label, stage, rig, frames, withP1 ? 3 : 1);
+        if (!run.baked) return;
+        const RigExecBakedProgram *program = run.baked->GetBakedProgram();
+        CHECK(program != nullptr);
+        if (!program) return;
+        const RigExecBakedProgramImpl &B = program->GetStepGraph();
+
+        // The records: one per named (knee, solver) pair, in walk order, on
+        // the solvers' commits.
+        const std::vector<SdfPath> writers =
+            withP1 ? std::vector<SdfPath>{legFk, legBlend, legZ}
+                   : std::vector<SdfPath>{legBlend, legZ};
+        std::vector<int> all;
+        for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+            all.push_back(int(r));
+        }
+        CHECK(rigExecTest::RecordMovers(B, all) == writers);
+        int blendRecord = -1;
+        for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+            const RigExecBakedFrameRecord &record = B.frameRecords[r];
+            CHECK(B.paths[size_t(record.slot)] == knee);
+            CHECK(record.target == -1);
+            const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
+            CHECK(commit.solverOutput);
+            CHECK(record.position >= 0 &&
+                  size_t(record.position) < commit.slots.size());
+            if (record.position >= 0 &&
+                size_t(record.position) < commit.slots.size()) {
+                CHECK(commit.slots[size_t(record.position)] == record.slot);
+                CHECK(record.version ==
+                      commit.slotWrites[size_t(record.position)]);
+            }
+            if (record.mover == legBlend) {
+                blendRecord = int(r);
+            }
+        }
+        CHECK(blendRecord >= 0);
+        const auto list = [&](const char *name) {
+            const RigExecBakedProgramImpl::GeomRevision *revision =
+                rigExecTest::FindRevision(B, reader(name));
+            CHECK(revision != nullptr);
+            return revision
+                       ? rigExecTest::RecordMovers(B, revision->transformRecords)
+                       : std::vector<SdfPath>{SdfPath("/missing")};
+        };
+        if (withP1) {
+            CHECK(list("P1") == std::vector<SdfPath>{legFk});
+            CHECK(list("P3") == (std::vector<SdfPath>{legBlend, legFk}));
+        } else {
+            CHECK(list("P3") == std::vector<SdfPath>{legBlend});
+        }
+        CHECK(list("P2") == std::vector<SdfPath>{legZ});
+        CHECK(list("PB").empty());
+        // LegBlend's record is the one skipped; every other is valid.
+        for (size_t r = 0; r < B.frameRecords.size(); ++r) {
+            CHECK(B.frameMatrixValid[r] == (int(r) == blendRecord ? 0 : 1));
+        }
+
+        for (const double frame : frames) {
+            const std::string where = label + " frame " + std::to_string(frame);
+            const RigExecRigPose &pose = run.walked.at(frame);
+            const VtVec3fArray p2 = points(pose, "P2");
+            const VtVec3fArray p3 = points(pose, "P3");
+            const VtVec3fArray pb = points(pose, "PB");
+            CHECK(!p2.empty() && !p3.empty() && !pb.empty());
+            if (withP1) {
+                const VtVec3fArray p1 = points(pose, "P1");
+                // P3 falls past the skipped record to LegFK's, exactly.
+                CHECK(p3 == p1);
+                CHECK(p1 != p2);
+                CHECK(p1 != pb);
+                namedP3[frame] = p3;
+            } else {
+                // ... and with nothing else named, to `base`.
+                CHECK(p3 == pb);
+                CHECK(p3 != namedP3[frame]);
+            }
+            // `base` is LegZ's knee: the last solver writes it.
+            CHECK(p2.size() == pb.size());
+            for (size_t i = 0; i < p2.size() && i < pb.size(); ++i) {
+                if ((GfVec3d(p2[i]) - GfVec3d(pb[i])).GetLength() > 1e-5) {
+                    ++failures;
+                    std::printf("FAIL %s: P2 is not `base`\n", where.c_str());
+                    break;
+                }
+            }
+        }
+
+        // Drags, on the BakedWithParityCheck evaluator: each generation is
+        // held to the walk, its records to the walk's store, and the steps it
+        // ran to the cone.
+        RigExecRigEvaluator &baked = *run.baked;
+        const auto ranRecords = [&B]() {
+            std::vector<SdfPath> ran;
+            for (const RigExecBakedStep &step : B.steps) {
+                if (step.kind == RigExecBakedStepKind::FrameMatrix &&
+                    step.runSeq != 0) {
+                    ran.push_back(B.frameRecords[size_t(step.object)].mover);
+                }
+            }
+            std::sort(ran.begin(), ran.end());
+            return ran;
+        };
+        const auto foldRan = [&B](const SdfPath &mover) {
+            for (const RigExecBakedStep &step : B.steps) {
+                if (step.kind != RigExecBakedStepKind::InfluenceFold) {
+                    continue;
+                }
+                const auto [c, r] = B.revisionIndex[size_t(step.object)];
+                if (B.chains[size_t(c)].revisions[size_t(r)].moverPath ==
+                    mover) {
+                    return step.runSeq != 0;
+                }
+            }
+            return false;
+        };
+        const auto drag = [&](const std::string &what, const char *control,
+                              const char *avar, double value,
+                              std::vector<SdfPath> expectRan) {
+            const std::string where = label + " " + what;
+            const RigExecRigPose before = baked.Evaluate(UsdTimeCode(9.0));
+            baked.SetInteractiveOverrides({RigExecValueOverride{
+                SdfPath("/CheckpointAsset/Rig/Controls").AppendChild(
+                    TfToken(control)),
+                TfToken(), TfToken(avar), VtValue(value)}});
+            const RigExecRigPose dragged = baked.Evaluate(UsdTimeCode(9.0));
+            CHECK(dragged.valid);
+            if (dragged.bakedParityMismatches) {
+                ++failures;
+                std::printf("FAIL %s: %zu baked parity mismatch(es)\n",
+                            where.c_str(), dragged.bakedParityMismatches);
+            }
+            if (rigExecTest::CheckFrameRecords(&failures, where, baked) !=
+                (withP1 ? 3u : 1u)) {
+                ++failures;
+                std::printf("FAIL %s: the records answered differently\n",
+                            where.c_str());
+            }
+            std::sort(expectRan.begin(), expectRan.end());
+            if (ranRecords() != expectRan) {
+                ++failures;
+                std::printf("FAIL %s: the FrameMatrix steps that ran:\n",
+                            where.c_str());
+                for (const SdfPath &mover : ranRecords()) {
+                    std::printf("    %s\n", mover.GetText());
+                }
+            }
+            CHECK(B.frameMatrixValid[size_t(blendRecord)] == 0);
+            // Read before the release re-runs the program.
+            const bool p3Fold = foldRan(reader("P3"));
+            baked.ClearInteractiveOverrides();
+            const RigExecRigPose released = baked.Evaluate(UsdTimeCode(9.0));
+            CHECK(released.valid && released.bakedParityMismatches == 0);
+            for (const char *name : {"P2", "P3", "PB"}) {
+                CHECK(points(released, name) == points(before, name));
+            }
+            return std::make_tuple(before, dragged, p3Fold);
+        };
+        const auto movedBetween = [&points](const RigExecRigPose &before,
+                                            const RigExecRigPose &after) {
+            return [&points, &before, &after](const char *name) {
+                return points(after, name) != points(before, name);
+            };
+        };
+        {
+            // ZKnee drives LegZ alone: its record re-runs, nothing else's.
+            // P3 follows `base` only where it has no valid record to read.
+            const auto [before, dragged, p3Fold] =
+                drag("ZKnee dragged", "ZKnee", "avars:rx", 40.0, {legZ});
+            const auto moved = movedBetween(before, dragged);
+            (void)p3Fold;
+            CHECK(moved("P2") && moved("PB"));
+            CHECK(moved("P3") == !withP1);
+            if (withP1) {
+                CHECK(!moved("P1"));
+            }
+        }
+        {
+            // KneeTarget moves the knee KneeMove leaves, which LegBlend and
+            // LegZ both read: their records re-run, LegFK's stays clean, and
+            // P3's fold re-runs over LegFK's kept record.
+            const auto [before, dragged, p3Fold] = drag(
+                "KneeTarget dragged", "KneeTarget", "avars:tx", 0.8,
+                {legBlend, legZ});
+            const auto moved = movedBetween(before, dragged);
+            CHECK(p3Fold);
+            CHECK(moved("P2"));
+            if (withP1) {
+                CHECK(!moved("P3") && !moved("P1"));
+                CHECK(points(dragged, "P3") == points(dragged, "P1"));
+            } else {
+                CHECK(moved("P3"));
+                CHECK(points(dragged, "P3") == points(dragged, "PB"));
+            }
         }
     }
 }
@@ -2733,6 +3162,7 @@ main(int argc, char **argv)
     TestFkChainComposesOverTheIncomingFrame();
     TestReadPhasesOverTheUnifiedStack();
     TestAtPrimMoversRecordsMatchTheStore();
+    TestSolverCheckpointsBake(argv[1]);
     TestProducersCarryNoStackPosition();
     TestAggregateContradictionIsRejected();
     TestAggregateReadIsHistoryIndependent();
@@ -2742,10 +3172,10 @@ main(int argc, char **argv)
     TestConstraintReadsUnderASolvedJoint();
     TestIndependentConstraintsShareALevel();
 
-    // The baked half. Every fixture below stacks and carries no solver-named
-    // read phase, so every one of them bakes: the SSA ladder gives each
-    // commit on a slot its own version, and two solver commits on one slot is
-    // the shape that machinery was built for.
+    // The baked half. Every fixture below stacks, and every one of them
+    // bakes: the SSA ladder gives each commit on a slot its own version, and
+    // two solver commits on one slot is the shape that machinery was built
+    // for.
     const std::vector<double> frames{1, 2, 3, 4, 5};
     {
         RigSpec reordered = Stacked();

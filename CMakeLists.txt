@@ -516,6 +516,14 @@ rigexec_add_example_parity_test(NAME frame_record_fallbacks
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/frame_record_fallbacks.usda"
     FRAMES 1,4,8 GUIDES)
 
+# AtPrim read phases that name solver checkpoints, one of them a record the
+# solver never publishes. rigExecPose's parity mode is the dynamic/baked
+# comparison and never runs the CPU oracle, which has no AtPrim branch. No
+# verify_binary entry, for the same reason as above.
+rigexec_add_example_parity_test(NAME solver_checkpoint
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/solver_checkpoint.usda"
+    FRAMES 1,5,9 GUIDES)
+
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.h.in"
                "${CMAKE_CURRENT_BINARY_DIR}/tests/rigExecExampleFixtures.h"
                @ONLY)

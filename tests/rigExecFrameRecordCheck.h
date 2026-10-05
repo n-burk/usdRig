@@ -40,7 +40,7 @@ FindRevision(const rigExec::RigExecBakedProgramImpl &B, const SdfPath &mover)
     return nullptr;
 }
 
-/// The constraints of \p records, in list order.
+/// The writers (constraints or solvers) of \p records, in list order.
 inline std::vector<SdfPath>
 RecordMovers(const rigExec::RigExecBakedProgramImpl &B,
              const std::vector<int> &records)

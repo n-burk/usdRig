@@ -23,6 +23,7 @@
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/tf/diagnostic.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
@@ -90,6 +91,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
     auto bakeSolver = [&](const SdfPath &solverPath,
                           const std::vector<std::pair<SdfPath, int>>
                               &jointOutputs,
+                          const std::vector<char> &snapshotJoints,
                           const SdfPathVector &liveRestJoints) {
         RigExecBakedProgramImpl::Solver s;
         // Every slot whose REST this description measures from. Recorded at
@@ -187,7 +189,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 s.jointRests.push_back(B.restPts[foldRest(slot)]);
             }
         }
-        for (const auto &[joint, element] : jointOutputs) {
+        for (size_t k = 0; k < jointOutputs.size(); ++k) {
+            const auto &[joint, element] = jointOutputs[k];
             const int slot = slotOf(joint);
             if (slot < 0) {
                 // Unreachable: these joints come from the compiler's joint
@@ -198,6 +201,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 continue;
             }
             s.outputs.emplace_back(slot, element);
+            s.outputSnapshots.push_back(
+                k < snapshotJoints.size() ? snapshotJoints[k] : 0);
         }
 
         if (s.type == "RigExecFkChain") {
@@ -992,6 +997,9 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 const int slot =
                     bakeSolver(entry.batchSolvers[k],
                                entry.solverJoints[k],
+                               k < entry.solverSnapshotJoints.size()
+                                   ? entry.solverSnapshotJoints[k]
+                                   : std::vector<char>(),
                                k < entry.solverLiveRestJoints.size()
                                    ? entry.solverLiveRestJoints[k]
                                    : SdfPathVector());
@@ -1032,7 +1040,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
     // frames. Baked here, in the dependency order Build resolved, and run as
     // ordinary Solve steps after the walk.
     for (const SdfPath &solverPath : ctx->guideOnlySolvers) {
-        B.guideSolvers.push_back(bakeSolver(solverPath, {}, {}));
+        B.guideSolvers.push_back(bakeSolver(solverPath, {}, {}, {}));
     }
     B.aggregates.resize(B.solvers.size());
 }
@@ -1280,11 +1288,12 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
 }
 
 /// Builds `frameRecords` and every AtPrim reader's lists of them, before any
-/// commit step exists: records are named by (provider, constraint) and need
-/// no version. A record is a target a constraint's exit records
-/// (`snapshotTargets`, the compile's named pairs), kept only when some
+/// commit step exists: records are named by (provider, writer) and need no
+/// version. A record is a target a constraint's exit records
+/// (`snapshotTargets`) or an output a solver's commit records
+/// (`outputSnapshots`) -- the compile's named pairs -- kept only when some
 /// reader's list holds it. A list is RigExecChainSnapshots::Lookup's AtPrim
-/// rule stated statically: the provider's records whose constraint is the
+/// rule stated statically: the provider's records whose writer is the
 /// phase's prim or under it, newest first in walk order.
 void
 EnumerateFrameRecords(RigExecBakedProgramImpl *program)
@@ -1294,6 +1303,24 @@ EnumerateFrameRecords(RigExecBakedProgramImpl *program)
     for (size_t w = 0; w < B.walkSteps.size(); ++w) {
         const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
         if (walk.solverBatch) {
+            // The walk records every named joint of every solver in the
+            // batch once the batch commits. `position` is bound with the
+            // version, once the commit's slot table exists.
+            for (const int si : walk.batchSolvers) {
+                const RigExecBakedProgramImpl::Solver &solver =
+                    B.solvers[size_t(si)];
+                for (size_t k = 0; k < solver.outputs.size(); ++k) {
+                    if (k < solver.outputSnapshots.size() &&
+                        solver.outputSnapshots[k] &&
+                        solver.outputs[k].first >= 0) {
+                        RigExecBakedFrameRecord record;
+                        record.slot = solver.outputs[k].first;
+                        record.commit = int(w);
+                        record.mover = solver.path;
+                        all.push_back(std::move(record));
+                    }
+                }
+            }
             continue;
         }
         const RigExecBakedProgramImpl::Constraint &constraint =
@@ -1393,11 +1420,13 @@ EnumerateFrameRecords(RigExecBakedProgramImpl *program)
     B.frameMatrixValid.assign(B.frameRecords.size(), 0);
 }
 
-/// Binds each record to the `fin` entry its constraint left the provider
-/// in, once BindPoseVersions has handed the entries out: the commit's own
+/// Binds each record to the `fin` entry its writer left the provider in,
+/// once BindPoseVersions has handed the entries out: the commit's LAST
 /// version of the slot where it declares one -- whether it revised it or
-/// carried the one it found -- else the version it read, which is where a
-/// geometry-domain constraint leaves its target.
+/// carried the one it found -- which is the frame the walk records after the
+/// commit's propagation; else the version it read, which is where a
+/// geometry-domain constraint leaves its target. A solver's record also
+/// takes the slot's position in the commit, whose `present` byte gates it.
 void
 BindFrameRecordVersions(RigExecBakedProgramImpl *program)
 {
@@ -1406,10 +1435,33 @@ BindFrameRecordVersions(RigExecBakedProgramImpl *program)
         const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
         const auto found = std::lower_bound(commit.slots.begin(),
                                             commit.slots.end(), record.slot);
+        const bool candidate =
+            found != commit.slots.end() && *found == record.slot;
+        if (commit.solverOutput) {
+            // Every solver output is a slot of its commit (the sizing loop
+            // adds each one), so a miss is a broken table.
+            TF_VERIFY(candidate);
+            record.position =
+                candidate ? int(found - commit.slots.begin()) : -1;
+        }
+        if (!candidate) {
+            record.version =
+                record.target >= 0 &&
+                        size_t(record.target) < commit.targetReads.size()
+                    ? commit.targetReads[size_t(record.target)]
+                    : 0;
+            continue;
+        }
         record.version =
-            found != commit.slots.end() && *found == record.slot
-                ? commit.slotWrites[size_t(found - commit.slots.begin())]
-                : commit.targetReads[size_t(record.target)];
+            commit.slotWrites[size_t(found - commit.slots.begin())];
+        // The propagation pairs exclude every candidate (buildPropagation),
+        // so this finds nothing today; it keeps the binding at the slot's
+        // last version in the commit should a pair ever carry a candidate.
+        for (size_t k = 0; k < commit.propagate.size(); ++k) {
+            if (commit.propagate[k].first == record.slot) {
+                record.version = commit.descendantWrites[k];
+            }
+        }
     }
 }
 
@@ -1839,8 +1891,8 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // One FrameMatrix step per record, right after its commit's last step.
     // It reads the provider's frame -- an edge from the latest writer of the
     // slot so far, which is this commit or the producer of the version it
-    // read -- and the commit's exit flags, which its first step writes
-    // (CommitTable).
+    // read -- and the commit's table (a constraint's exit flags, a solver
+    // batch's `present` bytes), which its first step writes (CommitTable).
     size_t nextRecord = 0;
     const auto addFrameRecordSteps = [&B, &nextRecord](size_t w) {
         for (; nextRecord < B.frameRecords.size() &&
@@ -3252,11 +3304,21 @@ RigExecBakedEvalFrameRecord(const RigExecBakedProgramImpl &B,
                             GfMatrix4d *matrix)
 {
     *matrix = GfMatrix4d(1.0);
-    // The exit gates the walk's recordFrame calls sit behind: set by the
-    // commit's constraint step on every run, per exit.
     const RigExecBakedCommit &commit = B.commits[size_t(record.commit)];
-    if (!commit.recordAfter ||
-        (record.target > 0 && !commit.recordEveryTarget)) {
+    if (commit.solverOutput) {
+        // The walk records a solver's joint only when the batch published
+        // an element for it this run. No two solvers of one batch write one
+        // slot (RigExecBakedRefuseBatchedStackWrites), so the walk's
+        // batch-wide `candidates.count(joint)` is this slot's `present` byte.
+        if (record.position < 0 ||
+            size_t(record.position) >= commit.present.size() ||
+            !commit.present[size_t(record.position)]) {
+            return false;
+        }
+    } else if (!commit.recordAfter ||
+               (record.target > 0 && !commit.recordEveryTarget)) {
+        // The exit gates the walk's recordFrame calls sit behind: set by the
+        // commit's constraint step on every run, per exit.
         return false;
     }
     const RigExecPointFrame &frame = B.fin[size_t(record.version)];

@@ -1,0 +1,283 @@
+#usda 1.0
+(
+    """
+    Test fixture: AtPrim read phases on rigExec:transform that name SOLVER
+    checkpoints. The knee is written, in walk order, by LegFK (an FK chain),
+    KneeMove (a position constraint), LegBlend (a blend of two producer FK
+    chains) and LegZ (a one-control FK chain outside Stack). LegBlend binds the
+    hip at element 0 and the knee at element 2 of a two-element aggregate, so
+    it publishes the hip and never the knee: its knee checkpoint records
+    nothing, and the knee it carries is the one KneeMove left. Matrix movers
+    read the knee at:
+      P1  LegFK                 the FK knee
+      P2  LegZ                  LegZ's knee, which is also `base`
+      P3  Stack                 names LegBlend, whose record is skipped; its
+                                list also holds LegFK's record, because P1
+                                names it, so P3 reads the FK knee
+      PB  base                  the knee after its last solver, LegZ
+    Without P1, P3's list is LegBlend's record alone and it reads `base`.
+    testRigExecSolverStacking holds dynamic, baked and frozen to each other
+    and to the walk's store at frames 1, 5 and 9, with and without P1, and
+    under drags of ZKnee (LegZ's record alone re-runs) and KneeTarget (P3's
+    fold re-runs over LegFK's kept record).
+    """
+    defaultPrim = "CheckpointAsset"
+    endTimeCode = 9
+    startTimeCode = 1
+    upAxis = "Y"
+)
+
+def Xform "CheckpointAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "FkHip" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.timeSamples = {
+                    1: 0,
+                    9: 30,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 8, 0, 1) )
+
+                def RigExecControl "FkKnee" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    double avars:rz = 0
+                    double avars:rz.timeSamples = {
+                        1: -10,
+                        9: -45,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+
+                    def RigExecControl "FkAnkle" (
+                        prepend apiSchemas = ["RigExecControlAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+                    }
+                }
+            }
+
+            def RigExecControl "AHip" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.timeSamples = {
+                    1: 5,
+                    9: 20,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 8, 0, 1) )
+
+                def RigExecControl "AKnee" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+                }
+            }
+
+            def RigExecControl "BHip" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.timeSamples = {
+                    1: 0,
+                    9: 25,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 8, 0, 1) )
+
+                def RigExecControl "BKnee" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+                }
+            }
+
+            def RigExecControl "KneeTarget" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.timeSamples = {
+                    1: 0,
+                    9: 1.5,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 10, 2, 1) )
+            }
+
+            def RigExecControl "ZKnee" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rx = 0
+                double avars:rx.timeSamples = {
+                    1: 15,
+                    9: -20,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 8, 0, 1) )
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Hip"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 8, 0, 1) )
+
+                def RigExecJoint "Knee"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+
+                    def RigExecJoint "Ankle"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+                    }
+                }
+            }
+        }
+
+        # Read by LegBlend, so they write no joint and hold no stack position.
+        def Scope "Producers"
+        {
+            def RigExecFkChain "BlendA"
+            {
+                rel rigExec:controls = [
+                    </CheckpointAsset/Rig/Controls/AHip>,
+                    </CheckpointAsset/Rig/Controls/AHip/AKnee>,
+                ]
+            }
+
+            def RigExecFkChain "BlendB"
+            {
+                rel rigExec:controls = [
+                    </CheckpointAsset/Rig/Controls/BHip>,
+                    </CheckpointAsset/Rig/Controls/BHip/BKnee>,
+                ]
+            }
+        }
+
+        # The stack runs in reverse composed order, bottom sibling first:
+        # Stack (LegFK, KneeMove, LegBlend) before Late (LegZ).
+        def Scope "Late"
+        {
+            def RigExecFkChain "LegZ"
+            {
+                rel rigExec:controls = </CheckpointAsset/Rig/Controls/ZKnee>
+                rel rigExec:joints = </CheckpointAsset/Rig/Joints/Hip/Knee>
+            }
+        }
+
+        def Scope "Stack"
+        {
+            def RigExecBlendPointFrames "LegBlend"
+            {
+                float inputs:weight = 0.5
+                rel rigExec:inputA = </CheckpointAsset/Rig/Producers/BlendA>
+                rel rigExec:inputB = </CheckpointAsset/Rig/Producers/BlendB>
+                rel rigExec:joints = [
+                    </CheckpointAsset/Rig/Joints/Hip>,
+                    </CheckpointAsset/Rig/Joints/Hip/Knee>,
+                ]
+                int[] rigExec:jointElements = [0, 2]
+            }
+
+            def RigExecPositionConstraint "KneeMove" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:moves = </CheckpointAsset/Rig/Joints/Hip/Knee>
+                rel rigExec:sources = </CheckpointAsset/Rig/Controls/KneeTarget>
+            }
+
+            def RigExecFkChain "LegFK"
+            {
+                rel rigExec:controls = [
+                    </CheckpointAsset/Rig/Controls/FkHip>,
+                    </CheckpointAsset/Rig/Controls/FkHip/FkKnee>,
+                    </CheckpointAsset/Rig/Controls/FkHip/FkKnee/FkAnkle>,
+                ]
+                rel rigExec:joints = [
+                    </CheckpointAsset/Rig/Joints/Hip>,
+                    </CheckpointAsset/Rig/Joints/Hip/Knee>,
+                    </CheckpointAsset/Rig/Joints/Hip/Knee/Ankle>,
+                ]
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecMatrixMover "P1" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </CheckpointAsset/Geom/P1.points>
+                rel rigExec:transform = </CheckpointAsset/Rig/Joints/Hip/Knee> (
+                    rigExecReadPhase = "/CheckpointAsset/Rig/Stack/LegFK"
+                )
+            }
+
+            def RigExecMatrixMover "P2" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </CheckpointAsset/Geom/P2.points>
+                rel rigExec:transform = </CheckpointAsset/Rig/Joints/Hip/Knee> (
+                    rigExecReadPhase = "/CheckpointAsset/Rig/Late/LegZ"
+                )
+            }
+
+            def RigExecMatrixMover "P3" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </CheckpointAsset/Geom/P3.points>
+                rel rigExec:transform = </CheckpointAsset/Rig/Joints/Hip/Knee> (
+                    rigExecReadPhase = "/CheckpointAsset/Rig/Stack"
+                )
+            }
+
+            def RigExecMatrixMover "PB" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </CheckpointAsset/Geom/PB.points>
+                rel rigExec:transform = </CheckpointAsset/Rig/Joints/Hip/Knee> (
+                    rigExecReadPhase = "base"
+                )
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Points "P1"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+
+        def Points "P2"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+
+        def Points "P3"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+
+        def Points "PB"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        }
+    }
+}

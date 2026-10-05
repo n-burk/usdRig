@@ -1340,9 +1340,10 @@ ValidatePoseVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
             }
         }
     }
-    // A frame record reads the version its constraint left the provider in,
-    // which is usually not the slot's last, and its constraint's exit flags,
-    // which the commit's first step writes.
+    // A frame record reads the version its writer left the provider in,
+    // which is usually not the slot's last, and its commit's table -- a
+    // constraint's exit flags, a solver batch's `present` bytes -- which the
+    // commit's first step writes.
     for (size_t r = 0; r < B.frameRecords.size(); ++r) {
         const RigExecBakedFrameRecord &frameRecord = B.frameRecords[r];
         const int reader = frameRecordStep[r];
@@ -1372,6 +1373,18 @@ ValidatePoseVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
                      std::to_string(frameRecord.version) + " of " +
                      B.paths[size_t(slot)].GetString() +
                      ", not of the provider it records");
+        }
+        const RigExecBakedCommit &recordCommit =
+            B.commits[size_t(frameRecord.commit)];
+        if (recordCommit.solverOutput &&
+            (frameRecord.position < 0 ||
+             size_t(frameRecord.position) >= recordCommit.slots.size() ||
+             recordCommit.slots[size_t(frameRecord.position)] !=
+                 frameRecord.slot)) {
+            out->Add(NameStep(B, reader) + " reads position " +
+                     std::to_string(frameRecord.position) + " of commit " +
+                     std::to_string(frameRecord.commit) +
+                     ", which is not the provider it records");
         }
         const int head = commitFirst[size_t(frameRecord.commit)];
         if (head < 0 || head >= reader) {

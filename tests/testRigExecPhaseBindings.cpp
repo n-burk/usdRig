@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1553,6 +1554,71 @@ TestAPhasedRigSkipsOnRepeat(const std::string &examples)
     }
 }
 
+// The op graph of tests/fixtures/solver_checkpoint.usda: a solver's record is
+// a FrameMatrix step after its SolverCommit, reading the knee and the commit's
+// table. "knee after LegFK" waits on LegFK's commit, and P1's fold -- which
+// names LegFK -- waits on it. The values are testRigExecSolverStacking's.
+void
+TestSolverCheckpointSteps(const std::string &examples)
+{
+    const std::string where = "solver checkpoint steps";
+    const UsdStageRefPtr stage = UsdStage::Open(
+        examples + "/../tests/fixtures/solver_checkpoint.usda");
+    CHECK_AT(where, stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath p1("/CheckpointAsset/Rig/Movers/P1");
+    const SdfPath legFk("/CheckpointAsset/Rig/Stack/LegFK");
+    auto evaluator =
+        MakeEvaluator(stage, SdfPath("/CheckpointAsset/Rig"),
+                      RigExecEvaluationMode::BakedWithParityCheck);
+    if (!evaluator) {
+        return;
+    }
+    const RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode(5.0));
+    CHECK_AT(where, pose.valid && pose.bakedParityMismatches == 0);
+    const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+    CHECK_AT(where, program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CheckFrameRecordSteps(where, B, p1);
+    int recordStep = -1;
+    int commitStep = -1;
+    for (size_t s = 0; s < B.steps.size(); ++s) {
+        const RigExecBakedStep &step = B.steps[s];
+        if (step.kind == RigExecBakedStepKind::FrameMatrix &&
+            B.frameRecords[size_t(step.object)].mover == legFk) {
+            recordStep = int(s);
+            CHECK_AT(where, step.label ==
+                                "FrameMatrix "
+                                "/CheckpointAsset/Rig/Joints/Hip/Knee after "
+                                "/CheckpointAsset/Rig/Stack/LegFK");
+        }
+    }
+    CHECK_AT(where, recordStep >= 0);
+    if (recordStep < 0) {
+        return;
+    }
+    const int commit =
+        B.frameRecords[size_t(B.steps[size_t(recordStep)].object)].commit;
+    CHECK_AT(where, B.commits[size_t(commit)].solverOutput);
+    for (size_t s = 0; s < B.steps.size(); ++s) {
+        const RigExecBakedStep &step = B.steps[s];
+        if (step.object == commit &&
+            (step.kind == RigExecBakedStepKind::SolverCommit ||
+             step.kind == RigExecBakedStepKind::CommitApply)) {
+            commitStep = int(s);
+        }
+    }
+    CHECK_AT(where, commitStep >= 0);
+    const std::vector<int> &preds = B.steps[size_t(recordStep)].preds;
+    CHECK_AT(where, std::find(preds.begin(), preds.end(), commitStep) !=
+                        preds.end());
+}
+
 // RigExecBakedEvalFrameRecord's gates on a hand-built program, including
 // the two exits no authored rig reaches with a catalogued transform
 // provider: a geometry-domain constraint's (recordAfter false), whose target
@@ -1619,6 +1685,51 @@ TestFrameRecordGates()
     B.restFrames[0] = rest;
     B.restFrames[0].points[3] = B.restFrames[0].points[0];
     CHECK(!RigExecBakedEvalFrameRecord(B, record, &matrix));
+    B.restFrames[0] = rest;
+
+    // A solver's record is gated on its slot's `present` byte alone: the
+    // constraint exit flags do not apply to a solver commit.
+    B.commits[0].solverOutput = true;
+    B.commits[0].slots = {0};
+    B.commits[0].present = {1};
+    B.commits[0].recordAfter = false;
+    record.target = -1;
+    record.position = 0;
+    CHECK(RigExecBakedEvalFrameRecord(B, record, &matrix));
+    CHECK(matrix == expected);
+    B.commits[0].present = {0};
+    CHECK(!RigExecBakedEvalFrameRecord(B, record, &matrix));
+    record.position = -1;
+    B.commits[0].present = {1};
+    CHECK(!RigExecBakedEvalFrameRecord(B, record, &matrix));
+}
+
+// The solver-checkpoint guard of IsBakeable and Build on hand-built maps: a
+// read phase naming a solver is refused unless a batched solver binds that
+// joint. A read phase naming a non-solver is not the guard's business.
+void
+TestSolverCheckpointGuard()
+{
+    const SdfPath knee("/A/Rig/Joints/Hip/Knee");
+    const SdfPath ankle("/A/Rig/Joints/Hip/Knee/Ankle");
+    const SdfPath solver("/A/Rig/Stack/LegFK");
+    const SdfPath constraint("/A/Rig/Stack/KneeMove");
+    const std::map<SdfPath, std::set<SdfPath>> snapshots{
+        {knee, {solver, constraint}}};
+    const std::map<SdfPath, std::set<SdfPath>> dependencies{{solver, {}}};
+    const std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> binds{
+        {solver, {{knee, 1}}}};
+    const std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> elsewhere{
+        {solver, {{ankle, 2}}}};
+    const auto missing = [&](const auto &joints, const std::set<SdfPath> &b) {
+        return RigExecBakedProgramTesting::SolverCheckpointsWithoutAnOutput(
+            snapshots, dependencies, joints, b);
+    };
+    CHECK(missing(binds, {solver}).empty());
+    CHECK(missing(binds, {}) == std::vector<SdfPath>{solver});
+    CHECK(missing(elsewhere, {solver}) == std::vector<SdfPath>{solver});
+    CHECK(missing(decltype(binds){}, {solver}) ==
+          std::vector<SdfPath>{solver});
 }
 
 std::string
@@ -1657,7 +1768,9 @@ main(int argc, char **argv)
     TestFrameRecordsMatchTheStore(examples);
     TestTheFoldReadsItsRecords(examples);
     TestAPhasedRigSkipsOnRepeat(examples);
+    TestSolverCheckpointSteps(examples);
     TestFrameRecordGates();
+    TestSolverCheckpointGuard();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

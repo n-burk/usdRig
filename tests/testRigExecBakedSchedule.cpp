@@ -2975,6 +2975,67 @@ TestTheValidatorRejectsABadFrameRecord(const std::string &fixtures)
     }
 }
 
+/// A solver's frame record on solver_checkpoint (LegFK's knee) edited to
+/// read the wrong entry of its commit's `present` table: a negative
+/// position, then the position of another slot LegFK writes. The validator
+/// must refuse both, and pass again once the position is restored.
+void
+TestTheValidatorRejectsABadSolverRecord(const std::string &fixtures)
+{
+    BuiltProgram built = Build(fixtures + "/solver_checkpoint.usda");
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    TestTheValidatorAcceptsTheProgram(built, "solver_checkpoint");
+    const SdfPath legFk("/CheckpointAsset/Rig/Stack/LegFK");
+    RigExecBakedFrameRecord *record = nullptr;
+    for (RigExecBakedFrameRecord &candidate : B.frameRecords) {
+        if (candidate.mover == legFk) {
+            record = &candidate;
+        }
+    }
+    CHECK(record != nullptr);
+    if (!record) {
+        return;
+    }
+    const RigExecBakedCommit &commit = B.commits[size_t(record->commit)];
+    CHECK(commit.solverOutput);
+    int other = -1;
+    for (size_t k = 0; k < commit.slots.size(); ++k) {
+        if (commit.slots[k] != record->slot) {
+            other = int(k);
+        }
+    }
+    CHECK(other >= 0);
+    const std::string step =
+        "(FrameMatrix /CheckpointAsset/Rig/Joints/Hip/Knee after "
+        "/CheckpointAsset/Rig/Stack/LegFK)";
+    const auto passes = [&](const char *what) {
+        std::string restored;
+        if (!RigExecBakedValidateStepGraph(B, &restored)) {
+            ++failures;
+            std::printf("FAIL %s: rejected after the restore: %s\n", what,
+                        restored.c_str());
+        }
+    };
+    const int position = record->position;
+    for (const int wrong : {-1, other}) {
+        if (wrong == -1 || other >= 0) {
+            record->position = wrong;
+            ExpectRejected(B, "a solver record reading the wrong position",
+                           {step + " reads position " + std::to_string(wrong) +
+                                " of commit " +
+                                std::to_string(record->commit) +
+                                ", which is not the provider it records"});
+            record->position = position;
+            passes("a solver record reading the wrong position");
+        }
+    }
+}
+
 /// Two root controls switched into each other's space: each compose group
 /// reads the other's last version, so no emission order is valid and Build
 /// must refuse the program. The compile rejects every such rig before a
@@ -3495,6 +3556,7 @@ main(int argc, char **argv)
     TestTheValidatorRejectsALaterPoseVersion();
     TestTheValidatorRejectsAnUnboundPointVersion();
     TestTheValidatorRejectsABadFrameRecord(examplesDir + "/../tests/fixtures");
+    TestTheValidatorRejectsABadSolverRecord(examplesDir + "/../tests/fixtures");
     {
         // The chain fixtures: one revision per chain (Biped, spider_legs),
         // three on one chain (stacked_revisions), many stacked chains

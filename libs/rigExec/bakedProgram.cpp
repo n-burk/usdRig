@@ -155,6 +155,54 @@ _WalkVolumesWithoutASlot(const std::set<SdfPath> &programVolumes,
     return missing;
 }
 
+// The solvers the walk runs in a batch. A template, because the batch type
+// is private to the evaluator and only this file's friend code can hand it in.
+template <class Batches>
+std::set<SdfPath>
+_BatchedSolvers(const Batches &batches)
+{
+    std::set<SdfPath> batched;
+    for (const auto &batch : batches) {
+        for (const auto &[solverPath, tap] : batch.solvers) {
+            batched.insert(solverPath);
+        }
+    }
+    return batched;
+}
+
+// The read-phase solver checkpoints no batched solver commits: a pair
+// (joint, solver) the compile named whose solver is not batched or does not
+// bind the joint. "Is an aggregate solver" is _solverDependencies membership:
+// every discovered solver is a key there.
+std::vector<SdfPath>
+_SolverCheckpointsWithoutAnOutput(
+    const std::map<SdfPath, std::set<SdfPath>> &snapshots,
+    const std::map<SdfPath, std::set<SdfPath>> &solverDependencies,
+    const std::map<SdfPath, std::vector<std::pair<SdfPath, int>>>
+        &solverJoints,
+    const std::set<SdfPath> &batched)
+{
+    std::vector<SdfPath> missing;
+    for (const auto &[joint, movers] : snapshots) {
+        for (const SdfPath &mover : movers) {
+            if (!solverDependencies.count(mover)) {
+                continue;
+            }
+            bool bound = false;
+            const auto joints = solverJoints.find(mover);
+            if (batched.count(mover) && joints != solverJoints.end()) {
+                for (const auto &[path, element] : joints->second) {
+                    bound = bound || path == joint;
+                }
+            }
+            if (!bound) {
+                missing.push_back(mover);
+            }
+        }
+    }
+    return missing;
+}
+
 // The weight-object schemas the program can build a packet for.
 // It is about the BUILDER and nothing else. The volumetric three are here
 // because RigExecBuildVolumeWeightPacket is one of the builders; volumes
@@ -672,43 +720,16 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
-    // A read phase that names a SOLVER checkpoint -- the joint as one writer
-    // of its stack left it -- has no baked equivalent: the frame records an
-    // AtPrim phase reads (RigExecBakedFrameRecord) are per CONSTRAINT and
-    // key off constraint.snapshotAfter / snapshotTargets. A solver-named
-    // phase would silently find no record and read a different value, which
-    // is exactly the divergence this program refuses to have.
-    // "Is an aggregate solver" is _solverDependencies membership: every
-    // discovered solver is seeded as a key there and every value is also a
-    // key, so the map's key set IS the solver set. (The evaluator's own
-    // type predicate has internal linkage and cannot be called from here.)
-    const auto isAggregateSolver = [&E](const SdfPath &path) {
-        return !path.IsEmpty() && E._solverDependencies.count(path) > 0;
-    };
-    for (const auto &[provider, movers] : E._chainPlan.snapshots) {
-        for (const SdfPath &mover : movers) {
-            if (isAggregateSolver(mover)) {
-                say("read phase names a solver checkpoint, which is not "
-                    "baked",
-                    mover);
-            }
-        }
-    }
-    // The BINDING as well as the resolved point, because a skin mover's
-    // transformPhase never reaches _chainPlan.snapshots (its binding.transform is
-    // empty and the compile-time phase validation only inspects that field --
-    // a pre-existing gap, filed separately). Keying on both means the day
-    // that gap is closed this refusal is already in place.
-    for (const auto &[target, revisions] : E._graphChains) {
-        for (const auto &revision : revisions) {
-            const RigExecReadPhase &phase = revision.binding.transformPhase;
-            if (phase.kind == RigExecReadPhaseKind::AtPrim &&
-                isAggregateSolver(phase.prim)) {
-                say("read phase names a solver checkpoint, which is not "
-                    "baked",
-                    phase.prim);
-            }
-        }
+    // A read phase that names a SOLVER checkpoint reads a frame record on the
+    // solver's commit, which exists only for a joint the solver's batch
+    // commits. The compile names a writer of the joint, so this is a
+    // consistency guard; Build checks the same condition.
+    for (const SdfPath &solver : _SolverCheckpointsWithoutAnOutput(
+             E._chainPlan.snapshots, E._solverDependencies, E._solverJoints,
+             _BatchedSolvers(E._solverBatches))) {
+        say("read phase names a solver checkpoint the walk does not commit "
+            "for that joint",
+            solver);
     }
 
     auto checkRevision = [&](const RigExecRigEvaluator::_GraphRevision &r,
@@ -2755,6 +2776,14 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                     joints == E._solverJoints.end()
                         ? std::vector<std::pair<SdfPath, int>>()
                         : joints->second);
+                std::vector<char> snapshotJoints;
+                for (const auto &[joint, element] :
+                         entry.solverJoints.back()) {
+                    snapshotJoints.push_back(
+                        snapshotAfter(joint, solverPath) ? 1 : 0);
+                }
+                entry.solverSnapshotJoints.push_back(
+                    std::move(snapshotJoints));
                 // The live-rest half of the same binding, carried across so
                 // the baked description measures from the same frames the
                 // dynamic path's computeRestFrame overrides do. A restInputs
@@ -3219,33 +3248,14 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                    path);
         }
     }
-    // The mirror of IsBakeable's solver-checkpoint refusal, so a forced bake
+    // The mirror of IsBakeable's solver-checkpoint guard, so a forced bake
     // cannot slip past it. Same condition, same sentence.
-    {
-        const auto isAggregateSolver = [&E](const SdfPath &path) {
-            return !path.IsEmpty() && E._solverDependencies.count(path) > 0;
-        };
-        for (const auto &[provider, movers] : E._chainPlan.snapshots) {
-            for (const SdfPath &mover : movers) {
-                if (isAggregateSolver(mover)) {
-                    refuse("read phase names a solver checkpoint, which is "
-                           "not baked",
-                           mover);
-                }
-            }
-        }
-        for (const auto &[target, revisions] : E._graphChains) {
-            for (const auto &revision : revisions) {
-                const RigExecReadPhase &phase =
-                    revision.binding.transformPhase;
-                if (phase.kind == RigExecReadPhaseKind::AtPrim &&
-                    isAggregateSolver(phase.prim)) {
-                    refuse("read phase names a solver checkpoint, which is "
-                           "not baked",
-                           phase.prim);
-                }
-            }
-        }
+    for (const SdfPath &solver : _SolverCheckpointsWithoutAnOutput(
+             E._chainPlan.snapshots, E._solverDependencies, E._solverJoints,
+             _BatchedSolvers(E._solverBatches))) {
+        refuse("read phase names a solver checkpoint the walk does not commit "
+               "for that joint",
+               solver);
     }
     // One solver per commit is what makes a stack expressible at all; refuse
     // a batch that would collapse two writers of one slot into one.
@@ -3802,6 +3812,18 @@ RigExecBakedProgramTesting::CapturePointReads(
     B.capturePointReads = RigExecBakedScheduleModeFromEnvironment() ==
                           RigExecBakedScheduleMode::Serial;
     return B.capturePointReads;
+}
+
+std::vector<SdfPath>
+RigExecBakedProgramTesting::SolverCheckpointsWithoutAnOutput(
+    const std::map<SdfPath, std::set<SdfPath>> &snapshots,
+    const std::map<SdfPath, std::set<SdfPath>> &solverDependencies,
+    const std::map<SdfPath, std::vector<std::pair<SdfPath, int>>>
+        &solverJoints,
+    const std::set<SdfPath> &batched)
+{
+    return _SolverCheckpointsWithoutAnOutput(snapshots, solverDependencies,
+                                             solverJoints, batched);
 }
 
 // The structural half of RigExecRigEvaluator::_ResolveWeights and

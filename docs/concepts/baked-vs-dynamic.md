@@ -168,9 +168,7 @@ caused it. The families of refusal include:
 - a provider, solver, constraint or weight-object **type** the program does not
   yet bake (the reason names the type), and a solver that publishes guides;
 - a constraint naming no target, or one whose target is not a seeded pose
-  provider, or is both exec-seeded and xform-derived;
-- a read phase that names a **solver** checkpoint. A checkpoint naming a
-  constraint does bake; the solver form does not.
+  provider, or is both exec-seeded and xform-derived.
 
 The list is a report, not a gate: a rig that declines simply evaluates
 dynamically and keeps working.
