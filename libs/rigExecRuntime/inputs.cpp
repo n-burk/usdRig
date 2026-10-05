@@ -356,6 +356,8 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
                 : 0;
         state.slotHasValue[s] = state.slotDefaultHasValue[s];
     }
+    state.slotRan = state.slotCurrent;
+    state.slotRanHasValue = state.slotHasValue;
     state.touchedFlag.assign(slots, 0);
     // The token text the file holds, for SetInputToken: the empty token,
     // which the file writes as id 0, then each Token node's text, the
@@ -783,6 +785,21 @@ RrInputsBindReads(RrProgram *program, std::string *error)
         for (size_t n = 0; n < numbers; ++n) {
             state.overrideSlotBegin[n + 1] += state.overrideSlotBegin[n];
         }
+        const uint8_t animated =
+            uint8_t(RigExecWireInputSlotFlags::Animated);
+        state.overrideWalkMoves.assign(numbers, 0);
+        for (size_t n = 0; n < numbers; ++n) {
+            for (uint32_t j = state.overrideSlotBegin[n];
+                 j < state.overrideSlotBegin[n + 1]; ++j) {
+                const RigExecWireInputSlot &slot =
+                    file.inputs[state.overrideSlotList[j]];
+                if ((slot.flags() & animated) != 0 || slot.chain() >= 0 ||
+                    slot.phased() >= 0) {
+                    state.overrideWalkMoves[n] = 1;
+                    break;
+                }
+            }
+        }
     }
     state.nameIndex.clear();
     state.nameIndex.reserve(slots);
@@ -1138,9 +1155,23 @@ RrInputsApplyTouched(RrProgram *program)
             store.animatedTouched = true;
             continue;
         }
+        // Compared with what the last run read, not with the default: a
+        // set that repeats the value moves nothing, and a reset after a
+        // drag is a change like any other.
+        const bool changed =
+            state.slotHasValue[s] != state.slotRanHasValue[s] ||
+            !_RrSameValueBits(state.slotCurrent[s], state.slotRan[s]);
+        if (changed) {
+            state.slotRan[s] = state.slotCurrent[s];
+            state.slotRanHasValue[s] = state.slotHasValue[s];
+        }
         for (uint32_t k = state.slotOverrideBegin[s];
              k < state.slotOverrideBegin[s + 1]; ++k) {
             const size_t number = size_t(state.slotOverrideNumbers[k]);
+            if (changed && number < store.changedSinceRun.size()) {
+                store.changedSinceRun[number] = 1;
+                store.anyChangedSinceRun = true;
+            }
             if (number >= state.valueOverridden.size() ||
                 number + 1 >= state.overrideSlotBegin.size()) {
                 continue;

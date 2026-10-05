@@ -4712,6 +4712,433 @@ TestUnusableComposedRestRefusesPublish()
     publishes(1.0);
 }
 
+// Bakes the rig at \p rigPath of \p stage at \p time and opens the file's
+// tables; false, with a FAILED line naming \p what, when either fails.
+static bool
+_BakeAndOpen(const std::string &what, const UsdStageRefPtr &stage,
+             const SdfPath &rigPath, double time,
+             std::vector<uint8_t> *bytes,
+             std::unique_ptr<fb::RigExecWireFile> *file)
+{
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        if (!RigExecTestBakeAt(evaluator, time, bytes, &error)) {
+            std::printf("FAILED: %s: bake: %s\n", what.c_str(),
+                        error.c_str());
+            ++failures;
+            return false;
+        }
+    }
+    if (!RigExecFormatOpen(bytes->data(), bytes->size(), file, &error)) {
+        std::printf("FAILED: %s: open: %s\n", what.c_str(), error.c_str());
+        ++failures;
+        return false;
+    }
+    return true;
+}
+
+// How many steps of \p trace are not source steps of \p file.
+static size_t
+_NonSourceSteps(const fb::RigExecWireFile &file,
+                const std::vector<int32_t> &trace)
+{
+    size_t count = 0;
+    for (const int32_t step : trace) {
+        if (size_t(step) < file.steps.size() &&
+            !file.steps[size_t(step)].isSource) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// The steps a run owes when no input changed, in the order it runs them:
+// the source steps, then every step in the forward cone of a cluster the
+// file marks always dirty (a step that reads outside the program, such as
+// a Derived extent).
+static std::vector<int32_t>
+_AlwaysRunSteps(const fb::RigExecWireFile &file)
+{
+    const fb::RigExecWireCones &cones = *file.cones;
+    const size_t clusters = file.clustering->clusters.size();
+    std::vector<uint64_t> closed((clusters + 63) / 64, 0);
+    const std::vector<uint64_t> &always = cones.always->words;
+    for (size_t c = 0; c < clusters && c < cones.cone.size(); ++c) {
+        const bool dirty = c / 64 < always.size() &&
+                           ((always[c / 64] >> (c % 64)) & 1u) != 0;
+        if (!dirty) {
+            continue;
+        }
+        const std::vector<uint64_t> &cone = cones.cone[c].words;
+        for (size_t w = 0; w < closed.size() && w < cone.size(); ++w) {
+            closed[w] |= cone[w];
+        }
+    }
+    std::vector<int32_t> steps;
+    for (size_t i = 0; i < file.steps.size(); ++i) {
+        if (file.steps[i].isSource) {
+            steps.push_back(int32_t(i));
+        }
+    }
+    for (size_t i = 0; i < file.steps.size(); ++i) {
+        const size_t c = size_t(file.steps[i].cluster);
+        if (!file.steps[i].isSource && c / 64 < closed.size() &&
+            ((closed[c / 64] >> (c % 64)) & 1u) != 0) {
+            steps.push_back(int32_t(i));
+        }
+    }
+    return steps;
+}
+
+// An input set is an authored value, so a set that repeats the value the
+// last run read changes nothing and runs nothing. Each rig is baked at
+// frame 1. Set once, the input's readers run, and the outputs move to
+// live baked's under the same session edit. Set again to the same value,
+// and then run with nothing set, the run is what a run owes with no input
+// changed: the source steps and the steps the file marks always dirty
+// (the two-limb rig's Derived extents; none on the IK rig, so there no
+// step but the sources runs), and no revision executes. Reset, the readers
+// run once and the outputs are the bake time's again; the run after that
+// owes nothing either. The IK softness inputs are Solve steps' declared
+// inputs, which an override number names; A0's rz is the limb's keyed
+// avar, an Animated input whose readers the avar table's comparison
+// dirties.
+static void
+TestRepeatedSetRunsNothing()
+{
+    const char *const name = "repeated set runs nothing";
+    struct Row {
+        const char *file;
+        const char *rig;
+        const char *input;
+        double value;
+        bool animated;
+        // The label of a step among the input's readers.
+        const char *reader;
+        // No step but the sources is owed with no input changed.
+        bool noneOwed;
+    };
+    const Row rows[] = {
+        {"oneloop_two_limbs.usda", "/LimbsAsset/Rig",
+         "/LimbsAsset/Rig/Solvers/LimbBIK.inputs:softness", 0.5, false,
+         "Solve /LimbsAsset/Rig/Solvers/LimbBIK", false},
+        {"oneloop_two_limbs.usda", "/LimbsAsset/Rig",
+         "/LimbsAsset/Rig/Controls/A0.avars:rz", 15.0, true,
+         "ComposeSubtree /LimbsAsset/Rig/Controls/A0", false},
+        {"computed_ik_space.usda", "/IkSpaceAsset/Rig",
+         "/IkSpaceAsset/Rig/Solvers/ArmIK.inputs:softness", 0.35, false,
+         "Solve /IkSpaceAsset/Rig/Solvers/ArmIK", true},
+    };
+    const double frame = 1.0;
+    for (const Row &row : rows) {
+        const std::string what =
+            std::string(name) + ", " + row.file + " " + row.input;
+        const UsdStageRefPtr stage = UsdStage::Open(_FixturePath(row.file));
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const SdfPath rigPath(row.rig);
+        std::vector<uint8_t> bytes;
+        std::unique_ptr<fb::RigExecWireFile> file;
+        if (!_BakeAndOpen(what, stage, rigPath, frame, &bytes, &file)) {
+            continue;
+        }
+        const std::vector<int32_t> owed = _AlwaysRunSteps(*file);
+        CHECK(!row.noneOwed || _NonSourceSteps(*file, owed) == 0);
+        std::string error;
+        std::vector<RigExecRigPose> still;
+        std::vector<RigExecRigPose> dragged;
+        if (!RigExecTestEditedPoses(stage, rigPath,
+                                    RigExecEvaluationMode::Baked, {},
+                                    {frame}, &still, &error) ||
+            !RigExecTestEditedPoses(stage, rigPath,
+                                    RigExecEvaluationMode::Baked,
+                                    {_Edit(stage, row.input, row.value)},
+                                    {frame}, &dragged, &error) ||
+            still.size() != 1 || dragged.size() != 1) {
+            std::printf("FAILED: %s: reference: %s\n", what.c_str(),
+                        error.c_str());
+            ++failures;
+            continue;
+        }
+        RigExecTestPlayer player;
+        if (!player.Open(bytes, stage, &error)) {
+            std::printf("FAILED: %s: open: %s\n", what.c_str(),
+                        error.c_str());
+            ++failures;
+            continue;
+        }
+        size_t index = 0;
+        CHECK(player->FindInput(row.input, &index) &&
+              player->GetInputInfo(index).animated == row.animated);
+        CHECK(player.Play(frame, &error));
+
+        // The last run's non-source steps, and whether it ran only what a
+        // run owes with no input changed and executed no revision.
+        const auto idle = [&](const char *leg) {
+            const std::vector<int32_t> trace =
+                player->GetLastRunTraceForTesting();
+            const uint32_t revisions =
+                player->GetCounters().revisionsExecuted;
+            std::printf("%s, %s: %zu non-source step(s) of %zu run, %u "
+                        "revision(s) executed\n",
+                        what.c_str(), leg, _NonSourceSteps(*file, trace),
+                        trace.size(), unsigned(revisions));
+            return trace == owed && revisions == 0;
+        };
+        const auto ranReader = [&] {
+            for (const int32_t step : player->GetLastRunTraceForTesting()) {
+                if (player->GetStepLabelForTesting(size_t(step)) ==
+                    row.reader) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto matches = [&](const RigExecRigPose &pose,
+                                 const char *leg) {
+            std::vector<std::string> diffs;
+            const bool same =
+                RigExecCompareRuntimeOutputs(pose, player.Reader(), &diffs);
+            if (!same) {
+                std::printf("%s, %s: %s\n", what.c_str(), leg,
+                            diffs.empty() ? "differs"
+                                          : diffs.front().c_str());
+            }
+            return same;
+        };
+
+        CHECK(player->SetInput(row.input, row.value, &error) &&
+              player->Execute(&error));
+        CHECK(!idle("set") && ranReader());
+        CHECK(matches(dragged[0], "set"));
+        std::vector<std::string> moved;
+        CHECK(!RigExecCompareRuntimeOutputs(still[0], player.Reader(),
+                                            &moved));
+
+        CHECK(player->SetInput(row.input, row.value, &error) &&
+              player->Execute(&error));
+        CHECK(idle("set again"));
+        CHECK(matches(dragged[0], "set again"));
+
+        CHECK(player->Execute(&error));
+        CHECK(idle("nothing set"));
+        CHECK(matches(dragged[0], "nothing set"));
+
+        CHECK(player->ResetInput(row.input, &error) &&
+              player->Execute(&error));
+        CHECK(!idle("reset") && ranReader());
+        CHECK(matches(still[0], "reset"));
+
+        CHECK(player->Execute(&error));
+        CHECK(idle("after reset"));
+        CHECK(matches(still[0], "after reset"));
+        std::printf("%s: %zu non-source step(s) owed by every run\n",
+                    what.c_str(), _NonSourceSteps(*file, owed));
+    }
+    std::printf("%s: checked\n", name);
+}
+
+// A drag held for two runs counts the work live baked counts for the same
+// value authored as an edit: the edit applied, then two generations at
+// the held frame, the first a whole first run. After each run the
+// revisions executed and created, the schedules built and the clusters
+// the closure ran equal baked's, and the outputs are equal bit for bit;
+// the revision counters alone do not show a re-run that recomputes the
+// same values, the cluster count does. Two drags of the two-limb rig: the
+// keyed avar its verify_binary entry drags, and LimbBIK's softness, a
+// Solve's declared input that reaches MeshB's skin; and the Dial drag of
+// frame_record_fallbacks, which reaches R2's revision through its
+// defaultWeight.
+static void
+TestHeldDragCountsValueEditWork()
+{
+    const char *const name = "held drag counts value-edit work";
+    struct Row {
+        const char *file;
+        const char *rig;
+        double time;
+        const char *input;
+        double value;
+    };
+    const Row rows[] = {
+        {"oneloop_two_limbs.usda", "/LimbsAsset/Rig", 1.0,
+         "/LimbsAsset/Rig/Controls/A0.avars:rz", 0.25},
+        {"oneloop_two_limbs.usda", "/LimbsAsset/Rig", 1.0,
+         "/LimbsAsset/Rig/Solvers/LimbBIK.inputs:softness", 0.5},
+        {"frame_record_fallbacks.usda", "/RecordAsset/Rig", 1.0,
+         "/RecordAsset/Rig/Controls/Dial.avars:amount", 1.25},
+    };
+    for (const Row &row : rows) {
+        const std::string what =
+            std::string(name) + ", " + row.file + " " + row.input;
+        const UsdStageRefPtr stage = UsdStage::Open(_FixturePath(row.file));
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const SdfPath rigPath(row.rig);
+        std::vector<uint8_t> bytes;
+        std::unique_ptr<fb::RigExecWireFile> file;
+        if (!_BakeAndOpen(what, stage, rigPath, row.time, &bytes, &file)) {
+            continue;
+        }
+        std::string error;
+        std::vector<RigExecRigPose> poses;
+        // Per generation: the clusters baked's closure ran, and how many
+        // generations its program had answered.
+        std::vector<std::pair<size_t, size_t>> bakedRuns;
+        const auto each = [&](const RigExecRigEvaluator &evaluator,
+                              size_t) {
+            const RigExecBakedProgram *program =
+                evaluator.GetBakedProgram();
+            bakedRuns.emplace_back(
+                program ? program->GetStepGraph().lastClosedClusters
+                        : size_t(0),
+                evaluator.GetBakedGenerationCount());
+        };
+        if (!RigExecTestEditedPoses(stage, rigPath,
+                                    RigExecEvaluationMode::Baked,
+                                    {_Edit(stage, row.input, row.value)},
+                                    {row.time, row.time}, &poses, &error,
+                                    each) ||
+            poses.size() != 2 || bakedRuns.size() != 2) {
+            std::printf("FAILED: %s: reference: %s\n", what.c_str(),
+                        error.c_str());
+            ++failures;
+            continue;
+        }
+        RigExecTestPlayer player;
+        if (!player.Open(bytes, stage, &error)) {
+            std::printf("FAILED: %s: open: %s\n", what.c_str(),
+                        error.c_str());
+            ++failures;
+            continue;
+        }
+        CHECK(player.Hold(row.input, row.value, &error));
+        for (size_t g = 0; g < poses.size(); ++g) {
+            const RigExecRigPose &pose = poses[g];
+            CHECK(player.Play(row.time, &error));
+            const RigExecRuntimeCounters counters = player->GetCounters();
+            std::printf("%s, run %zu: executed %u/%u, created %u/%u, "
+                        "schedules %u/%u, clusters %zu/%zu, generations "
+                        "%zu (baked/binary)\n",
+                        what.c_str(), g + 1,
+                        unsigned(pose.moverGraphRevisionsExecuted),
+                        unsigned(counters.revisionsExecuted),
+                        unsigned(pose.moverGraphRevisionsCreated),
+                        unsigned(counters.revisionsCreated),
+                        unsigned(pose.moverGraphSchedulesBuilt),
+                        unsigned(counters.schedulesBuilt),
+                        bakedRuns[g].first,
+                        player->GetClosedClusterCountForTesting(),
+                        bakedRuns[g].second);
+            CHECK(pose.moverGraphRevisionsExecuted ==
+                      counters.revisionsExecuted &&
+                  pose.moverGraphRevisionsCreated ==
+                      counters.revisionsCreated &&
+                  pose.moverGraphSchedulesBuilt == counters.schedulesBuilt);
+            CHECK(bakedRuns[g].second == g + 1 &&
+                  bakedRuns[g].first ==
+                      player->GetClosedClusterCountForTesting());
+            std::vector<std::string> diffs;
+            CHECK(RigExecCompareRuntimeOutputs(pose, player.Reader(),
+                                               &diffs));
+            for (const std::string &diff : diffs) {
+                std::printf("  %s, run %zu: %s\n", what.c_str(), g + 1,
+                            diff.c_str());
+            }
+        }
+        // The first run executes the revisions; the second executes none.
+        CHECK(poses[0].moverGraphRevisionsExecuted > 0);
+        CHECK(poses[1].moverGraphRevisionsExecuted == 0);
+    }
+    std::printf("%s: checked\n", name);
+}
+
+// GetLastRunTraceForTesting on a fresh reader's first Execute: every step
+// GetStepRanForTesting reports, each once, the sources first, and each
+// step after every predecessor the run also ran.
+static void
+TestRunTraceOrder()
+{
+    const char *const name = "run trace order";
+    struct Row {
+        const char *file;
+        const char *rig;
+    };
+    const Row rows[] = {
+        {"oneloop_two_limbs.usda", "/LimbsAsset/Rig"},
+        {"frame_record_fallbacks.usda", "/RecordAsset/Rig"},
+    };
+    for (const Row &row : rows) {
+        const std::string what = std::string(name) + ", " + row.file;
+        const UsdStageRefPtr stage = UsdStage::Open(_FixturePath(row.file));
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        std::vector<uint8_t> bytes;
+        std::unique_ptr<fb::RigExecWireFile> file;
+        if (!_BakeAndOpen(what, stage, SdfPath(row.rig), 1.0, &bytes,
+                          &file)) {
+            continue;
+        }
+        std::string error;
+        std::unique_ptr<RigExecRuntimeReader> reader =
+            RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+        CHECK(reader);
+        if (!reader) {
+            continue;
+        }
+        CHECK(reader->GetLastRunTraceForTesting().empty());
+        CHECK(reader->Execute(&error));
+        const std::vector<int32_t> trace =
+            reader->GetLastRunTraceForTesting();
+        const size_t steps = file->steps.size();
+        // Each step's place in the trace, or -1.
+        std::vector<int64_t> place(steps, -1);
+        bool once = true;
+        for (size_t k = 0; k < trace.size(); ++k) {
+            const int32_t step = trace[k];
+            if (step < 0 || size_t(step) >= steps ||
+                place[size_t(step)] >= 0) {
+                once = false;
+                continue;
+            }
+            place[size_t(step)] = int64_t(k);
+        }
+        CHECK(once);
+        size_t ran = 0;
+        bool listed = true;
+        bool ordered = true;
+        for (size_t i = 0; i < steps; ++i) {
+            const bool stepRan = reader->GetStepRanForTesting(i);
+            ran += stepRan ? 1 : 0;
+            listed = listed && stepRan == (place[i] >= 0);
+            if (place[i] < 0) {
+                continue;
+            }
+            for (const int32_t pred : file->steps[i].preds) {
+                ordered = ordered && pred >= 0 && size_t(pred) < steps &&
+                          place[size_t(pred)] < place[i];
+            }
+        }
+        bool sourcesFirst = once;
+        for (size_t k = 1; sourcesFirst && k < trace.size(); ++k) {
+            sourcesFirst = file->steps[size_t(trace[k - 1])].isSource ||
+                           !file->steps[size_t(trace[k])].isSource;
+        }
+        CHECK(listed && ordered && sourcesFirst);
+        CHECK(trace.size() == ran && ran > 0);
+        std::printf("%s: %zu of %zu step(s) ran, in order\n", what.c_str(),
+                    trace.size(), steps);
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4736,6 +5163,9 @@ main(int argc, char **argv)
     TestIkSpaceFixture();
     TestFrameMatrixGates();
     TestUnusableComposedRestRefusesPublish();
+    TestRepeatedSetRunsNothing();
+    TestHeldDragCountsValueEditWork();
+    TestRunTraceOrder();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {

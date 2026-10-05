@@ -535,6 +535,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     store.weightPackets.assign(program.stepWeightObjects, RrWeightPacket());
     store.poseWeights.assign(poses.poseWeightPaths.size(), 0.0f);
     store.stepOutputs.assign(file.steps.size(), RrStepOutput());
+    store.runTrace.reserve(file.steps.size());
     for (size_t j = 0; j < poses.jointBindingJoints.size(); ++j) {
         program.jointBindingIndex[poses.jointBindingJoints[j]] = j;
     }
@@ -548,8 +549,9 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         maxOverride = std::max(maxOverride, entry.read->overrideIndex);
     }
     store.overridden.assign(size_t(maxOverride + 1), 0);
-    store.lastOverridden.assign(size_t(maxOverride + 1), 0);
     store.anyOverridden = false;
+    store.changedSinceRun.assign(store.overridden.size(), 0);
+    store.anyChangedSinceRun = false;
     program.inputState.valueOverridden.assign(store.overridden.size(), 0);
 
     if (!RrPoseSizeScratch(&program, error)) {

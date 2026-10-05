@@ -162,6 +162,11 @@ struct RrInputState {
     std::vector<RrWireValue> slotCurrent;
     std::vector<uint8_t> slotHasValue;
     std::vector<uint8_t> slotDefaultHasValue;
+    /// Per slot: the value and HasValue the last run read, which a set is
+    /// compared with to tell a change from a repeat. Seeded with the
+    /// defaults; kept for slots that are not Animated.
+    std::vector<RrWireValue> slotRan;
+    std::vector<uint8_t> slotRanHasValue;
 
     /// The avar table's reads (RigExecBakedProgramImpl::avarBindings and
     /// avarConstantBindings), as RrProgram::registeredReads indices, in
@@ -181,6 +186,11 @@ struct RrInputState {
     /// overrideSlotList[overrideSlotBegin[n], overrideSlotBegin[n + 1]).
     std::vector<uint32_t> overrideSlotBegin;
     std::vector<uint32_t> overrideSlotList;
+    /// Per override number: whether its walk holds an Animated slot or a
+    /// slot a property result is published at, where the long-way read of
+    /// a standing override can move with time or with the chains while no
+    /// slot is set.
+    std::vector<char> overrideWalkMoves;
     /// Per override number: whether a non-Animated slot of its walk holds a
     /// value other than its default, which the next run copies into
     /// RrStore::overridden. Sized at Open with the store's flags.
@@ -256,7 +266,11 @@ bool RrInputsClear(RrProgram *program, size_t index, std::string *error);
 /// override number its walk carries, whether a non-Animated slot of that
 /// walk differs bitwise from its default (HasValue included), so a value
 /// written back to its default clears the flag. Then RrStore::overridden
-/// takes those flags and the marks are cleared.
+/// takes those flags and the marks are cleared. A slot whose value or
+/// HasValue differs bitwise from what the last run read also sets
+/// RrStore::changedSinceRun for each of its override numbers, and this run
+/// becomes the one it is compared with; a set that repeats the value sets
+/// nothing.
 void RrInputsApplyTouched(RrProgram *program);
 
 /// Whether the resolved inputs hold a value at attribute \p path this run:

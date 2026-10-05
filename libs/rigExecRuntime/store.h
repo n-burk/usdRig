@@ -211,8 +211,14 @@ struct RrStore {
     // One flag per override number (RigExecBakedProgramImpl::overridden),
     // set while an input on the read's walk that is not Animated holds
     // other than its default, so the read walks the slots.
-    std::vector<char> overridden, lastOverridden;
+    std::vector<char> overridden;
     bool anyOverridden = false;
+    // One flag per override number, set when an input on the read's walk
+    // that is not Animated took a value (bits or HasValue) other than the
+    // one the last run read. The closure re-runs the number's readers once
+    // from it, and clears it.
+    std::vector<char> changedSinceRun;
+    bool anyChangedSinceRun = false;
     std::map<uint32_t, RrMat4d> providerXforms, providerBaseXforms;
     std::map<uint32_t, RrMat4d> jointMatricesFinal;
     std::map<uint32_t, RrPointFrame> jointFramesBase, jointFramesFinal;
@@ -225,6 +231,9 @@ struct RrStore {
     RrSnapshots runSnapshots;
     std::vector<RrStepOutput> stepOutputs;
     std::vector<uint64_t> closedWords;
+    // The steps the last Execute ran, by index, in the order it ran them.
+    // Reserved at Open to the step count.
+    std::vector<int32_t> runTrace;
     bool everRan = false;
     // An Animated input was set, or the caller said time moved
     // (RigExecRuntimeReader::TouchAnimatedInputs): the next closure dirties

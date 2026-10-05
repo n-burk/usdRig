@@ -202,6 +202,20 @@ public:
     // program spells it; the step's number past the steps.
     std::string GetStepLabelForTesting(size_t step) const;
 
+    // Test-only: how many clusters the last Execute's closure ran; the
+    // source steps run outside it.
+    size_t GetClosedClusterCountForTesting() const;
+
+    // Test-only: whether the last Execute ran step \p step: a source step
+    // always, any other when the closure ran its cluster. False past the
+    // steps and before the first Execute.
+    bool GetStepRanForTesting(size_t step) const;
+
+    // Test-only: the steps the last Execute ran, by index, in the order it
+    // ran them: the source steps, then the closure's. A step a test mask
+    // skips is not listed; empty before the first Execute.
+    std::vector<int32_t> GetLastRunTraceForTesting() const;
+
     // The property chains' published values (chain targets and phased
     // consumers) as the last Execute computed them, in path order.
     std::vector<RigExecRuntimePropertyValue> GetPropertyValues() const;

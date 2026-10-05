@@ -3,10 +3,15 @@
 // and the serial step walk of RigExecBakedRunSteps. The runtime never
 // rebuilds, so revision `ran` starts false and the program stamp never
 // moves, and it holds no time: where the program compares the time with
-// the last run's, the closure reads RrStore::animatedTouched. Everything
-// else is the same value comparisons in the same order.
+// the last run's, the closure reads RrStore::animatedTouched. An input set
+// is an authored value, so its readers re-run once per change, as the
+// program re-runs them for a value edit (RrStore::changedSinceRun), not on
+// every run a drag stands. Everything else is the same value comparisons
+// in the same order.
 #include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
+
+#include <algorithm>
 
 namespace rigExec {
 
@@ -92,6 +97,9 @@ RrComputeClosure(RrProgram *program, bool force)
     store.closedWords.assign((count + 63) / 64, 0);
     if (count == 0) {
         store.animatedTouched = false;
+        std::fill(store.changedSinceRun.begin(), store.changedSinceRun.end(),
+                  char(0));
+        store.anyChangedSinceRun = false;
         return;
     }
     std::vector<uint64_t> dirty((count + 63) / 64, 0);
@@ -211,13 +219,25 @@ RrComputeClosure(RrProgram *program, bool force)
                 }
             }
         }
-        for (int index : cones.overrideSteps) {
-            const RigExecWireStep &step = (*program->steps)[size_t(index)];
-            for (int input : step.overrideInputs) {
-                if (store.overridden[size_t(input)] ||
-                    store.lastOverridden[size_t(input)]) {
-                    _RrSet(&dirty, size_t(step.cluster));
-                    break;
+        // A step that declares an input re-runs once when a set changed a
+        // slot of its walk since the last run, a released drag included.
+        // A standing override re-runs it again only where its long-way
+        // read can move with time or with the chains while no slot is set.
+        const std::vector<char> &walkMoves =
+            program->inputState.overrideWalkMoves;
+        const bool runMoved = store.animatedTouched || chainResultsMoved;
+        if (store.anyChangedSinceRun || (runMoved && store.anyOverridden)) {
+            for (int index : cones.overrideSteps) {
+                const RigExecWireStep &step =
+                    (*program->steps)[size_t(index)];
+                for (int input : step.overrideInputs) {
+                    const size_t number = size_t(input);
+                    if (store.changedSinceRun[number] ||
+                        (runMoved && store.overridden[number] &&
+                         number < walkMoves.size() && walkMoves[number])) {
+                        _RrSet(&dirty, size_t(step.cluster));
+                        break;
+                    }
                 }
             }
         }
@@ -234,7 +254,13 @@ RrComputeClosure(RrProgram *program, bool force)
     store.lastXformBase = store.xformBase;
     store.lastPropertyValues = store.propertyValues;
     store.lastPropertyPublished = store.propertyPublished;
-    store.lastOverridden = store.overridden;
+    // Consumed by this closure whichever branch took it: a first or a
+    // forced run re-runs every reader the flags could name.
+    if (store.anyChangedSinceRun) {
+        std::fill(store.changedSinceRun.begin(), store.changedSinceRun.end(),
+                  char(0));
+        store.anyChangedSinceRun = false;
+    }
     for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
         store.lastHaveBase[c] = store.chainHaveBase[c];
     }
@@ -257,6 +283,7 @@ RrRunSteps(RrProgram *program, bool force, std::string *error)
         if ((_RrFamilyBit(steps[i].kind) & program->runMask) == 0) {
             continue;
         }
+        store.runTrace.push_back(int32_t(i));
         store.stepOutputs[i].BeginRun();
         const RigExecWireStepKind kind = steps[i].kind;
         bool ok = true;
@@ -296,6 +323,7 @@ RrRunSteps(RrProgram *program, bool force, std::string *error)
             }
             continue;
         }
+        store.runTrace.push_back(int32_t(i));
         store.stepOutputs[i].BeginRun();
         const RigExecWireStepKind kind = steps[i].kind;
         bool ok = true;

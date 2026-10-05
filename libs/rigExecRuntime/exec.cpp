@@ -189,6 +189,34 @@ RigExecRuntimeReader::GetStepLabelForTesting(size_t step) const
     return RrStepLabel(*_program, step);
 }
 
+size_t
+RigExecRuntimeReader::GetClosedClusterCountForTesting() const
+{
+    return _program->store.lastClosedClusters;
+}
+
+std::vector<int32_t>
+RigExecRuntimeReader::GetLastRunTraceForTesting() const
+{
+    return _program->store.runTrace;
+}
+
+bool
+RigExecRuntimeReader::GetStepRanForTesting(size_t step) const
+{
+    const RrStore &store = _program->store;
+    if (step >= _program->steps->size() || !store.everRan) {
+        return false;
+    }
+    const RigExecWireStep &wire = (*_program->steps)[step];
+    if (wire.isSource) {
+        return true;
+    }
+    const size_t cluster = size_t(wire.cluster);
+    return cluster / 64 < store.closedWords.size() &&
+           ((store.closedWords[cluster / 64] >> (cluster % 64)) & 1u) != 0;
+}
+
 std::vector<RigExecRuntimeJointMatrix>
 RigExecRuntimeReader::GetJointRestMatrices() const
 {
@@ -275,6 +303,7 @@ RigExecRuntimeReader::Execute(std::string *error)
 {
     RrProgram &program = *_program;
     RrStore &store = program.store;
+    store.runTrace.clear();
     // The inputs set since the last run. Only an Animated input set, or
     // TouchAnimatedInputs, dirties what a change of time dirties.
     RrInputsApplyTouched(&program);
@@ -289,7 +318,6 @@ RigExecRuntimeReader::Execute(std::string *error)
         }
         return false;
     }
-    store.runSnapshots.Clear();
 
     if ((program.runMask & 0x1u) != 0 &&
         !RrProloguePose(&program, &poseDiagnostics, error)) {
@@ -378,12 +406,20 @@ RigExecRuntimeReader::Execute(std::string *error)
         primvar.matrix = entry.second;
         matrixPrimvars.push_back(std::move(primvar));
     }
+    // Every volume slot whose VolumePlacements step has run, under the
+    // slot's path.
     std::vector<RigExecRuntimeWeightFrame> weightFrames;
-    weightFrames.reserve(store.weightFrames.size());
-    for (const auto &entry : store.weightFrames) {
+    const size_t volumeSlots =
+        std::min({program.slotMeta ? program.slotMeta->paths.size()
+                                   : size_t(0),
+                  store.volumePlaced.size(), store.volumePlacement.size()});
+    for (size_t slot = 0; slot < volumeSlots; ++slot) {
+        if (!store.volumePlaced[slot]) {
+            continue;
+        }
         RigExecRuntimeWeightFrame placed;
-        placed.path = program.TextOrEmpty(entry.first);
-        placed.matrix = entry.second;
+        placed.path = program.TextOrEmpty(program.slotMeta->paths[slot]);
+        placed.matrix = store.volumePlacement[slot];
         weightFrames.push_back(std::move(placed));
     }
     std::vector<RigExecRuntimeWeightField> weightFieldsOut;
