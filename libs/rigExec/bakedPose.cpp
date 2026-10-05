@@ -2144,12 +2144,11 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             RigExecBakedOne(RigExecBakedSlotDomain::Candidates, si));
     }
 
-    // Exactly the set today's lazy finalMatrixOf/baseMatrixOf computed:
-    // final for every published joint, and final or base per use for every
-    // matrix and influence a geometry revision reads. A ProviderMatrix step
-    // never gives the generation back -- RigExecPointsToMatrix leaves the
-    // identity and says so -- so the one bail of this phase stays where it
-    // is, in the joint publication.
+    // Final for every published joint, and the reads
+    // RigExecBakedForEachMatrixRead enumerates for every geometry revision.
+    // A ProviderMatrix step never gives the generation back --
+    // RigExecPointsToMatrix leaves the identity and says so -- so the one
+    // bail of this phase stays where it is, in the joint publication.
     B.needFinal.assign(size_t(N), 0);
     B.needBase.assign(size_t(N), 0);
     B.finalMatrix.assign(size_t(N), GfMatrix4d(1.0));
@@ -2161,22 +2160,13 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     }
     const auto needForRevision =
         [&B](const RigExecBakedProgramImpl::GeomRevision &revision) {
-        std::vector<char> &table = revision.finalPhase ? B.needFinal
-                                                       : B.needBase;
-        if (revision.transformSlot >= 0) {
-            table[size_t(revision.transformSlot)] = 1;
-        }
-        if (revision.transformSpaceSlot >= 0) {
-            table[size_t(revision.transformSpaceSlot)] = 1;
-        }
-        if (revision.carrySpaceSlot >= 0) {
-            table[size_t(revision.carrySpaceSlot)] = 1;
-        }
-        for (const int slot : revision.influenceSlots) {
-            if (slot >= 0) {
-                table[size_t(slot)] = 1;
-            }
-        }
+        RigExecBakedForEachMatrixRead(
+            revision, [&B](RigExecBakedSlotDomain domain, int slot) {
+            std::vector<char> &table =
+                domain == RigExecBakedSlotDomain::FinalMatrix ? B.needFinal
+                                                              : B.needBase;
+            table[size_t(slot)] = 1;
+        });
     };
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         for (const RigExecBakedProgramImpl::GeomRevision &revision :

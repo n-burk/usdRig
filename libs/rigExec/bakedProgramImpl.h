@@ -2728,6 +2728,46 @@ struct RigExecBakedProgramImpl {
     bool publishWeightFields = true;
 };
 
+/// The matrix table \p revision reads at its own phase: FinalMatrix for a
+/// final-phase revision, BaseMatrix otherwise.
+inline RigExecBakedSlotDomain
+RigExecBakedOwnMatrixDomain(
+    const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    return revision.finalPhase ? RigExecBakedSlotDomain::FinalMatrix
+                               : RigExecBakedSlotDomain::BaseMatrix;
+}
+
+/// Calls visit(domain, slot) for every provider matrix \p revision reads.
+/// Transform, transformSpace, carrySpace and influences are read at the
+/// revision's own phase; for a matrix target (RigExecIsDerivedMatrixOp) the
+/// first three are visited at BOTH phases, because its projector frames are
+/// built from base and final of all three (RigExecBakedProjectorFrames). The
+/// ProviderMatrix need tables and the steps' declared reads both come from
+/// here.
+template <class Visit>
+void
+RigExecBakedForEachMatrixRead(
+    const RigExecBakedProgramImpl::GeomRevision &revision, Visit &&visit)
+{
+    const RigExecBakedSlotDomain own = RigExecBakedOwnMatrixDomain(revision);
+    const bool bothPhases = RigExecIsDerivedMatrixOp(revision.op);
+    for (const int slot : {revision.transformSlot,
+                           revision.transformSpaceSlot,
+                           revision.carrySpaceSlot}) {
+        if (slot < 0) continue;
+        if (bothPhases) {
+            visit(RigExecBakedSlotDomain::BaseMatrix, slot);
+            visit(RigExecBakedSlotDomain::FinalMatrix, slot);
+        } else {
+            visit(own, slot);
+        }
+    }
+    for (const int slot : revision.influenceSlots) {
+        if (slot >= 0) visit(own, slot);
+    }
+}
+
 // What committing an input records, and where it can be recorded.
 // A committed input records two kinds of fact. Its override NUMBER is
 // order-bearing: numbers are handed out from one running counter, so the

@@ -4013,6 +4013,136 @@ TestStackAnimWarmsBitIdenticalAtSweepDistance(const std::string &examplesDir)
                                               "Biped_stack_anim.usda");
 }
 
+// Surface projectors whose providers are constrained controls
+// (tests/fixtures/projector_spaces.usda). The projector frames are built
+// from base and final of rigExec:space, rigExec:sources and
+// rigExec:sourceSpace, so the baked program must publish both matrices for
+// them although nothing else reads them. The bake must run at every frame,
+// live baked and a warming job must match the dynamic walk exactly, and both
+// primvars must move. Both primvars must also differ from a walk with the
+// constraints disabled, so a final matrix replaced by its base cannot match.
+void
+TestProjectorSpacesMatchDynamic(const std::string &examplesDir)
+{
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/projector_spaces.usda";
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/ProjectorAsset/Rig");
+    const SdfPath targets[2] = {
+        SdfPath("/ProjectorAsset/Geom/Ball.primvars:inSpace"),
+        SdfPath("/ProjectorAsset/Geom/Ball.primvars:fromSource")};
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+
+    // The same rig with every provider's final equal to its base.
+    UsdStageRefPtr unconstrainedStage = UsdStage::Open(stagePath);
+    CHECK(unconstrainedStage);
+    if (!unconstrainedStage) {
+        return;
+    }
+    unconstrainedStage->SetEditTarget(unconstrainedStage->GetSessionLayer());
+    for (const char *name : {"SpaceToDriver", "SourceToDriver",
+                             "SourceSpaceToDriver"}) {
+        const UsdPrim constraint = unconstrainedStage->GetPrimAtPath(
+            rig.AppendChild(TfToken("Constraints"))
+                .AppendChild(TfToken(name)));
+        CHECK(constraint);
+        if (!constraint) {
+            return;
+        }
+        CHECK(constraint.GetAttribute(TfToken("inputs:enabled"))
+                  .Set(false));
+    }
+    RigExecRigEvaluator unconstrained(unconstrainedStage, rig);
+    CHECK(unconstrained.Compile(&errors));
+    unconstrained.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+
+    GfMatrix4d previous[2];
+    // Live baked against the walk; true when the bake ran rather than
+    // falling back to the walk it is compared with.
+    const auto checkLive = [&](double frame, const RigExecRigPose &warmed) {
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid);
+        const bool ran = evaluator.GetBakedGenerationCount() == before + 1;
+        if (!ran) {
+            std::printf("FAIL projector spaces frame %g: the bake did not "
+                        "run\n", frame);
+        }
+        CHECK(ran);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(dynamic.valid);
+        CheckPosesBitIdentical(
+            TfStringPrintf("projector spaces baked frame %g", frame).c_str(),
+            dynamic, live);
+        if (warmed.valid) {
+            CheckPosesBitIdentical(
+                TfStringPrintf("projector spaces warmed frame %g", frame)
+                    .c_str(),
+                dynamic, warmed);
+        }
+        const RigExecRigPose baseOnly =
+            unconstrained.Evaluate(UsdTimeCode(frame));
+        CHECK(baseOnly.valid);
+        for (int k = 0; k < 2; ++k) {
+            const auto found = dynamic.movedProperties.find(targets[k]);
+            const auto foundBase = baseOnly.movedProperties.find(targets[k]);
+            if (found == dynamic.movedProperties.end() ||
+                !found->second.IsHolding<GfMatrix4d>() ||
+                foundBase == baseOnly.movedProperties.end() ||
+                !foundBase->second.IsHolding<GfMatrix4d>()) {
+                CHECK(false);
+                continue;
+            }
+            const GfMatrix4d matrix = found->second.UncheckedGet<GfMatrix4d>();
+            if (frame > 1.0) {
+                CHECK(matrix != previous[k]);
+            }
+            previous[k] = matrix;
+            const bool revised =
+                matrix != foundBase->second.UncheckedGet<GfMatrix4d>();
+            if (!revised) {
+                std::printf("FAIL projector spaces frame %g: %s ignores its "
+                            "providers' final matrices\n",
+                            frame, targets[k].GetText());
+            }
+            CHECK(revised);
+        }
+    };
+    checkLive(1.0, RigExecRigPose());
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    std::string error;
+    for (double frame : {4.0, 7.0, 10.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL projector spaces freeze refused: %s\n",
+                        error.c_str());
+            CHECK(false);
+            return;
+        }
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        checkLive(frame, warmed);
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4067,6 +4197,7 @@ main(int argc, char **argv)
         TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(argv[1]);
         TestVolumeWeightsBurstMatchesPlain(argv[1]);
         TestUnresolvableTargetDeclinesSampling(argv[1]);
+        TestProjectorSpacesMatchDynamic(argv[1]);
     } else {
         std::printf("skipping the biped (no examples directory given)\n");
     }

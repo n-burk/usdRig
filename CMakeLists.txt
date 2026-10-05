@@ -437,11 +437,14 @@ endfunction()
 rigexec_add_baked_parity_test(testRigExecConstraints CONE_VERIFY)
 
 function(rigexec_add_example_parity_test)
-    cmake_parse_arguments(A "GUIDES;DISABLED" "NAME;RIG;FRAMES" "" ${ARGN})
-    # DEFINED, not truthiness: a fixture whose frame list is the single
-    if (NOT DEFINED A_NAME OR NOT DEFINED A_RIG OR NOT DEFINED A_FRAMES)
+    cmake_parse_arguments(A "GUIDES;DISABLED" "NAME;RIG;STAGE;FRAMES" "" ${ARGN})
+    # DEFINED, not truthiness: a frame list that is the single frame 0 is
+    # false to if().
+    if (NOT DEFINED A_NAME OR NOT DEFINED A_FRAMES OR
+            (NOT DEFINED A_RIG AND NOT DEFINED A_STAGE) OR
+            (DEFINED A_RIG AND DEFINED A_STAGE))
         message(FATAL_ERROR "rigexec_add_example_parity_test: "
-                            "NAME, RIG and FRAMES are all required")
+                            "NAME, FRAMES and one of RIG or STAGE are required")
     endif()
     if (A_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "rigexec_add_example_parity_test: unknown "
@@ -451,8 +454,11 @@ function(rigexec_add_example_parity_test)
     if (A_GUIDES)
         set(_guides "--guides")
     endif()
+    if (DEFINED A_RIG)
+        set(A_STAGE "${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}")
+    endif()
     add_test(NAME example_parity_${A_NAME} COMMAND rigExecPose
-        "${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}"
+        "${A_STAGE}"
         --frames "${A_FRAMES}" --mode parity --require-baked ${_guides})
     set_tests_properties(example_parity_${A_NAME} PROPERTIES
         ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
@@ -487,6 +493,13 @@ endforeach()
 
 rigexec_add_example_parity_test(NAME biped_Biped_stack_anim
     RIG biped/Biped_stack_anim.usda FRAMES 1,50,100,150,200 GUIDES)
+
+# Surface projectors whose rigExec:space, rigExec:sources and
+# rigExec:sourceSpace are constrained controls that nothing else reads: the
+# projector frames are built from base and final of all three.
+rigexec_add_example_parity_test(NAME projector_spaces
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/projector_spaces.usda"
+    FRAMES 1,4,7,10 GUIDES)
 
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.h.in"
                "${CMAKE_CURRENT_BINARY_DIR}/tests/rigExecExampleFixtures.h"
@@ -817,6 +830,13 @@ foreach(_switch_fixture IN ITEMS space_switch_nested space_switch_same_round
         STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/${_switch_fixture}.usda"
         FRAMES 0,1,2,3 CLASS inputs ${_switch_drags_${_switch_fixture}})
 endforeach()
+
+# Projector providers that only a projector reads: guards the export and
+# its ProviderMatrix producers, not the projector values (matrix primvars
+# are outside the runtime output contract verify-binary compares).
+rigexec_add_verify_binary_test(NAME projector_spaces
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/projector_spaces.usda"
+    FRAMES 1,4,7,10)
 
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
 target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)

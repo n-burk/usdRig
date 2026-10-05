@@ -655,33 +655,17 @@ AddGeometryStep(RigExecBakedProgramImpl *program, RigExecBakedStepKind kind,
     return program->steps.back();
 }
 
-/// Declares the matrices \p revision folds, which are the slots the pose half
-/// published for it: final or base per the revision's phase, exactly the set
-/// the ProviderMatrix steps were created for.
+/// Declares the matrices \p revision reads, which are the slots the pose half
+/// published for it: the same enumeration the ProviderMatrix steps were
+/// created from.
 void
 DeclareMatrixReads(const RigExecBakedProgramImpl::GeomRevision &revision,
                    RigExecBakedStep *step)
 {
-    const RigExecBakedSlotDomain domain =
-        revision.finalPhase ? RigExecBakedSlotDomain::FinalMatrix
-                            : RigExecBakedSlotDomain::BaseMatrix;
-    if (revision.transformSlot >= 0) {
-        step->reads.push_back(
-            RigExecBakedOne(domain, revision.transformSlot));
-    }
-    if (revision.transformSpaceSlot >= 0) {
-        step->reads.push_back(
-            RigExecBakedOne(domain, revision.transformSpaceSlot));
-    }
-    if (revision.carrySpaceSlot >= 0) {
-        step->reads.push_back(
-            RigExecBakedOne(domain, revision.carrySpaceSlot));
-    }
-    for (const int slot : revision.influenceSlots) {
-        if (slot >= 0) {
-            step->reads.push_back(RigExecBakedOne(domain, slot));
-        }
-    }
+    RigExecBakedForEachMatrixRead(
+        revision, [step](RigExecBakedSlotDomain domain, int slot) {
+        step->reads.push_back(RigExecBakedOne(domain, slot));
+    });
 }
 
 /// Declares a read of point version \p version: the authored base for 0, and
@@ -981,9 +965,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     // final and the fuse decides afterwards whether the work
                     // was wanted.
                     const RigExecBakedSlotDomain domain =
-                        revision.finalPhase
-                            ? RigExecBakedSlotDomain::FinalMatrix
-                            : RigExecBakedSlotDomain::BaseMatrix;
+                        RigExecBakedOwnMatrixDomain(revision);
                     for (const int position : revision.chunks[k].key) {
                         const int slot =
                             revision.influenceSlots[size_t(position)];
@@ -1102,18 +1084,6 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     int(B.steps.size()) - 1));
             }
             DeclareMatrixReads(derived.revision, &step);
-            if (derived.matrixTarget) {
-                // A projector reads its providers at BOTH phases.
-                for (const int slot : {derived.revision.transformSlot,
-                                       derived.revision.transformSpaceSlot,
-                                       derived.revision.carrySpaceSlot}) {
-                    if (slot < 0) continue;
-                    step.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::BaseMatrix, slot));
-                    step.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::FinalMatrix, slot));
-                }
-            }
             step.writes.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::DerivedOut, id));
         }
