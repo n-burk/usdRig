@@ -1508,7 +1508,7 @@ TestAuthoredEditRepublishesFreshField()
     expect(field, _kExpectedWeights, "baseline");
 
     // Non-const: UsdAttribute::SetSpline is const-only from 26.08; the
-    // Houdini-vendored 26.05 still takes a mutable handle.
+    // Vendored USD 26.05 still takes a mutable handle.
     UsdAttribute falloffMax = f.stage->GetAttributeAtPath(
         _kVolumePath.AppendProperty(TfToken("inputs:falloffMax")));
     CHECK(bool(falloffMax));

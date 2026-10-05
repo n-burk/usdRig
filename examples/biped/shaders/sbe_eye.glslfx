@@ -775,9 +775,9 @@ float ecLimbusRing(float rSurface, float theta, float limbusRadius,
 
 // §4.9 — sclera emissive MASK: where the white self-illuminates, as a plain
 // multiplier for scleraColor * scleraEmissive. Texture-free and P-only, so a
-// host can evaluate it on an EMISSION pin that never ran ecProjectIris — which
-// is exactly Unreal's shape: the emissive Custom node rebuilds P from the
-// primitive packs and has no projection result to read.
+// host can evaluate it on an EMISSION pin that never ran ecProjectIris:
+// that pin rebuilds P from the primitive packs and has no projection
+// result to read.
 //
 // Two earlier shapes were authored and REJECTED; they are recorded here so
 // they do not get re-invented:
@@ -830,7 +830,7 @@ float ecFresnelSchlick(float NdotV, float F0) {
 //            would double-count). coatWeight goes on the host's coat weight,
 //            gated to the front hemisphere by the host — .baseRoughness and
 //            .filmRoughness are the two surfaces, not a blend of them.
-//   SINGLE LOBE (UE Default Lit, hosts without a coat input) -> .roughness,
+//   SINGLE LOBE (hosts without a coat input) -> .roughness,
 //            .specular and .baseMul, which collapse the layers. The collapse
 //            costs little HERE specifically: under the cornea the base is a
 //            REFRACTED image (§3), not a directly-lit rough surface, so the
@@ -842,8 +842,8 @@ float ecFresnelSchlick(float NdotV, float F0) {
 // corneal epithelium / conjunctiva ~1.37-1.40), so drying the eye changes how
 // the reflection SPREADS, never how much of it there is.
 struct EcSurface {
-  float roughness;      // single-lobe roughness   (UE MP_Roughness)
-  float specular;       // single-lobe UE Specular (F0 = 0.08 * specular)
+  float roughness;      // single-lobe roughness
+  float specular;       // single-lobe specular (F0 = 0.08 * specular)
   float baseRoughness;  // tissue under the film   (layered hosts' base)
   float filmRoughness;  // the film itself         (layered hosts' coat)
   float coatF0;         // tear-film F0 at normal incidence (§2: ~0.025)
@@ -875,18 +875,16 @@ EcSurface ecSurfaceResponse(float irisWeight, float frontGate, float NdotV,
   // shading seam down the sclera wherever that great circle swung into view.
   float w = ec_saturate(coatWeight) * frontGate;   // no tear film on the back
   o.roughness = mix(o.baseRoughness, o.filmRoughness, w);
-  // UE Specular 0.5 == F0 0.04 (IOR 1.5). coatF0 is what finally puts Unreal on
-  // the same tear film as every other host. NOT blended by w: per the dry-eye
+  // Specular 0.5 == F0 0.04 (IOR 1.5) under the 0.08 encoding. coatF0 is
+  // what puts a single-lobe host on the same tear film as every other host.
+  // NOT blended by w: per the dry-eye
   // note above the wet and dry surfaces share the interface, and blending
   // toward 0.04 made the DRY eye the more reflective of the two — a broad
   // mid-roughness lobe at a HIGHER F0, which is exactly what reads as fog.
   o.specular  = o.coatF0 * 12.5f;                // 12.5 = 1/0.08
   // §3.10 energy. Light that lit the base crossed the film twice, so the base
-  // keeps (1 - F)^2 of it. UE's clear coat applied precisely this and Default
-  // Lit applies nothing: ShadingModels.ush:507-508 has RefractedDiffuse =
-  // FresnelCoeff * Transmission * DefaultDiffuse with Lighting.Diffuse =
-  // lerp(DefaultDiffuse, RefractedDiffuse, ClearCoat), FresnelCoeff = (1 - F)^2
-  // at :435-437, and Transmission == 1 while Metallic is 0 (BRDF.ush:753). Drop
+  // keeps (1 - F)^2 of it. A clear-coat lobe applies that factor; a
+  // single-lobe host applies nothing. Drop
   // it and the film's own reflection lands on an unattenuated base, so the
   // refracted iris reads hazy instead of glazed.
   float t = 1.0f - ecFresnelSchlick(NdotV, o.coatF0);
@@ -1160,8 +1158,8 @@ float ecCorneaIor(float ior, float limbusRadius, float irisScaleX,
 // z component of the unit direction in projector space): 1.0 over the
 // sclera, blending onto the corneal sphere (apex at corneaApexZ) inside the
 // limbus, with the natural scleral sulcus at the seam. This is THE bulge
-// definition — mesh generators bake it; displacement hosts (UE WPO,
-// vertex-shader paths, Cycles/Arnold displacement) evaluate it live so the
+// definition — mesh generators bake it; displacement hosts (world-position
+// offset, vertex-shader paths, Cycles/Arnold displacement) evaluate it live so the
 // bulge follows the projector (gaze-tracking cornea on stylized eyes).
 float ecEyeballRadius(float dz, float corneaApexZ, float corneaRadius,
                       float limbusRadius, float blendAngle) {
@@ -1466,7 +1464,7 @@ void eye_project(
     baseRoughness = surf.baseRoughness;
     filmRoughness = surf.filmRoughness;
     // §4.9 sclera emissive: the sclera's own falloff attenuated by the STATIC
-    // limbal ring, front-gated — the shipped Unreal mask verbatim. It leaves
+    // limbal ring, front-gated — the shipped emissive mask verbatim. It leaves
     // eye_compose (base colour) entirely and drives standard_surface.emission
     // instead; a bare (1 - irisWeight) on base colour fills the limbal ring
     // back in and flattens it.

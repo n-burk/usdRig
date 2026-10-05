@@ -14,7 +14,6 @@ affiliation, endorsement, or ownership of the underlying techniques.
 | Wrinkle reference lengths and bounded offsets | Müller and Chentanez, *Wrinkle Meshes* (2010), [author-hosted paper](https://matthias-research.github.io/pages/publications/wrinkleMeshes.pdf), [DOI](https://doi.org/10.2312/SCA/SCA10/085-091) | `libs/rigExecMath/wrinkleKernel.h`; [method and limitations](concepts/wrinkle-deformation.md) |
 | Ray-triangle intersection | Möller and Trumbore, *Fast, Minimum Storage Ray-Triangle Intersection*, Journal of Graphics Tools 2(1):21–28 (1997), [publication entry](https://en-cg-web.coecis.cornell.edu/pubs/1997/MT97.html) | `libs/rigExecMath/surfaceProjectorKernel.h` (surface projector, `RigExecRaycastSurface`) |
 | Swing-twist decomposition | Dobrowolski, *Swing-twist decomposition in Clifford algebra* (2015), [arXiv:1506.05481](https://arxiv.org/abs/1506.05481) | `libs/rigExec/solverKernels.cpp` (space switch rotation filters), `libs/rigExecMath/rbf.cpp` |
-| Wrinkle deformer behavior | SideFX, [Wrinkle Deformer SOP](https://www.sidefx.com/docs/houdini/nodes/sop/wrinkledeformer.html) and [wrinkle workflow](https://www.sidefx.com/docs/houdini/vellum/wrinkledeformer.html) | [Wrinkle mover controls](concepts/wrinkle-deformation.md) |
 
 Implementation details and limitations are documented with each operator.
 In particular, referencing Delta Mush does not claim implementation of the

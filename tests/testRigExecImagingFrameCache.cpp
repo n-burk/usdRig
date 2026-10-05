@@ -3590,7 +3590,7 @@ TestWrinkleParameterEditsRetireAndRewarm()
                     CHECK(mover.GetAttribute(TfToken("inputs:topology")).Set(
                         TfToken("surfaceStruts")));
                 }
-                // Mutable for SetSpline with the Houdini USD headers.
+                // Mutable for SetSpline with USD 26.05 headers.
                 UsdAttribute attribute = mover.GetAttribute(TfToken(parameter.name));
                 CHECK(attribute);
                 if (authored == 1 || late) {

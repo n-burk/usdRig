@@ -3,10 +3,10 @@
 #
 # The editor can live in two places and it is the SAME editor in both: a
 # window of its own, as it always has, or a panel pinned to the right
-# edge of the viewport that folds down to a title strip. Blender's
-# sidebar is the shape being copied -- a panel inside the viewport rather
-# than beside it, a keystroke away from gone -- and none of its code is,
-# for the licence reason set out in avarWidgets.py.
+# edge of the viewport that folds down to a title strip. The sidebar
+# shape is a panel inside the viewport rather than beside it, a keystroke
+# away from gone. None of another application's code is used, for the
+# licence reason set out in avarWidgets.py.
 #
 # ONE PANEL, TWO HOMES. The dock does not build a second editor; it
 # REPARENTS the existing AvarEditorPanel into itself. A QDialog is a
@@ -66,7 +66,7 @@ def StageView(usdviewApi):
 class VerticalTab(QtWidgets.QAbstractButton):
     """A section name written up the side of the folded dock.
 
-    Blender's collapsed side panel: the strip still says what is in
+    A collapsed side panel: the strip still says what is in
     there, and clicking a name opens the panel at that group instead of
     opening it at whatever was last on screen. Painted rather than a
     styled QToolButton because the text has to run vertically, and a
@@ -172,7 +172,7 @@ class AvarDock(QtWidgets.QFrame):
         outer.addLayout(bar)
 
         # The category strip and the editor sit SIDE BY SIDE, which is
-        # what makes this read like Blender's sidebar: the tabs are a
+        # what makes this read as a sidebar: the tabs are a
         # permanent column you click to change category, not something
         # that only appears once the panel is folded away. Before, the
         # strip was stacked above the editor and hidden while expanded,

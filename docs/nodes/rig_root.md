@@ -110,7 +110,7 @@ of those set, the rig evaluates dynamically.
 *Type:* `uniform asset`. *Default:* `@@`.
 
 Baked-playback selector: when set, hosts that can play a
-.rigexec file (usdview through rigExecImaging, the Godot player)
+.rigexec file (usdview through rigExecImaging)
 answer this rig from the binary instead of evaluating it, and when
 unset the rig evaluates live. The path resolves like any asset
 attribute -- relative to the layer that authors it -- and names a

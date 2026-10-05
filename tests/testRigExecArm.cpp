@@ -1262,7 +1262,7 @@ TestControlAvarScaleDrivesMatrixMover()
     const TfType doubleType = TfType::Find<double>();
     for (int axis = 0; axis < 3; ++axis) {
         // Non-const: UsdAttribute::SetSpline is const-only from 26.08; the
-        // Houdini-vendored 26.05 still takes a mutable handle.
+        // Vendored USD 26.05 still takes a mutable handle.
         UsdAttribute attr = control.GetAttribute(
             TfToken(scaleNames[axis]));
         CHECK(attr.ClearAtTime(UsdTimeCode(0)));

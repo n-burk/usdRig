@@ -735,7 +735,7 @@ static void TestReleasedDragsFollowTheReauthoredSpline()
     // gizmoMath.SetAnimated, in C++: one curve-interpolated knot at `frame`,
     // re-authored in place by every later release on the same control.
     // Non-const: UsdAttribute::SetSpline is const-only from 26.08; the
-    // Houdini-vendored 26.05 still takes a mutable handle.
+    // Vendored USD 26.05 still takes a mutable handle.
     UsdAttribute attribute =
         stage->GetAttributeAtPath(driver.AppendProperty(tx));
     CHECK(attribute);

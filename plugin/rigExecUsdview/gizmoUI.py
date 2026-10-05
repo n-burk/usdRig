@@ -3094,7 +3094,7 @@ class GizmoController(QtCore.QObject):
         "this usually is happening after I select something in the
         viewport".
 
-        Every DCC ends a field edit when the viewport is clicked. This
+        A viewport click ends a field edit. This
         does the same, and clears rather than re-homing the focus:
         usdview's stage view reports NoFocus, so there is nothing to
         give it to, and a null focus widget is precisely what makes
