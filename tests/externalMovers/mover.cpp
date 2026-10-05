@@ -36,11 +36,6 @@ bool Assemble(const UsdPrim &prim, const RigExecRevisionBinding &,
     const UsdAttribute attribute = prim.GetAttribute(TfToken("inputs:gain"));
     if (values.resolved) {
         values.resolved->GetAttribute(attribute, time, &gain);
-        // Recorded for a bake, as a plugin that reads the stage may record
-        // its reads; the core's enumeration of path reads cannot list it.
-        RigExecRecordStageRead(values.resolved, values.resolved->bakeRecorder,
-                               attribute.GetPath(), attribute, time,
-                               VtValue(gain), /*forceFrame=*/true);
     } else {
         attribute.Get(&gain, time);
     }

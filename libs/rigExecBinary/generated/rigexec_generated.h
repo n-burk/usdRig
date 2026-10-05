@@ -8922,7 +8922,8 @@ struct DomainPose FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool publishWeightFields() const {
     return GetField<uint8_t>(VT_PUBLISHWEIGHTFIELDS, 1) != 0;
   }
-  /// One per switched provider, in slot order.
+  /// One per switched provider, in resolution order: every switch's reads
+  /// refer only to versions produced by switches stored before it.
   const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::SpaceSwitch>> *spaceSwitches() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::SpaceSwitch>> *>(VT_SPACESWITCHES);
   }
@@ -9818,7 +9819,6 @@ struct RigExecWireBlendSample : public ::flatbuffers::NativeTable {
   std::vector<int32_t> indices{};
   uint64_t pointCount = 0;
   bool layoutValid = false;
-  float activationValue{};
   uint32_t pointsValue = 0;
   std::unique_ptr<rigExec::fb::RigExecWireInput> activationRead{};
   RigExecWireBlendSample() = default;
@@ -9827,8 +9827,8 @@ struct RigExecWireBlendSample : public ::flatbuffers::NativeTable {
   RigExecWireBlendSample &operator=(RigExecWireBlendSample o) FLATBUFFERS_NOEXCEPT;
 };
 
-/// One sample of a blend channel: its stage handles, its epoch layout, and
-/// its activation and dense points at bake_time.
+/// One sample of a blend channel: its stage handles, its epoch layout, its
+/// dense points at bake_time and its activation read.
 struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef RigExecWireBlendSample NativeTableType;
   typedef BlendSampleBuilder Builder;
@@ -9850,9 +9850,8 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_INDICES = 24,
     VT_POINTCOUNT = 26,
     VT_LAYOUTVALID = 28,
-    VT_ACTIVATIONVALUE = 30,
-    VT_POINTSVALUE = 32,
-    VT_ACTIVATIONREAD = 34
+    VT_POINTSVALUE = 30,
+    VT_ACTIVATIONREAD = 32
   };
   uint32_t samplePath() const {
     return GetField<uint32_t>(VT_SAMPLEPATH, 0);
@@ -9894,17 +9893,13 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool layoutValid() const {
     return GetField<uint8_t>(VT_LAYOUTVALID, 0) != 0;
   }
-  const rigExec::fb::F32 *activationValue() const {
-    return GetStruct<const rigExec::fb::F32 *>(VT_ACTIVATIONVALUE);
-  }
   /// vec3f_arrays[]: the dense points at bake_time; a phased sample falls
   /// back to them.
   uint32_t pointsValue() const {
     return GetField<uint32_t>(VT_POINTSVALUE, 0);
   }
-  /// rigExec:activation (Resolved, Float, fallback 1), read every run
-  /// before the channel's samples are sorted by it; activation_value is
-  /// its value at bake_time.
+  /// rigExec:activation (Resolved, Float, fallback 1), read on every run
+  /// before the channel's samples are stable-sorted by it.
   const rigExec::fb::Input *activationRead() const {
     return GetPointer<const rigExec::fb::Input *>(VT_ACTIVATIONREAD);
   }
@@ -9926,7 +9921,6 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(indices()) &&
            VerifyField<uint64_t>(verifier, VT_POINTCOUNT, 8) &&
            VerifyField<uint8_t>(verifier, VT_LAYOUTVALID, 1) &&
-           VerifyField<rigExec::fb::F32>(verifier, VT_ACTIVATIONVALUE, 4) &&
            VerifyField<uint32_t>(verifier, VT_POINTSVALUE, 4) &&
            VerifyOffsetRequired(verifier, VT_ACTIVATIONREAD) &&
            verifier.VerifyTable(activationRead()) &&
@@ -9980,9 +9974,6 @@ struct BlendSampleBuilder {
   void add_layoutValid(bool layoutValid) {
     fbb_.AddElement<uint8_t>(BlendSample::VT_LAYOUTVALID, static_cast<uint8_t>(layoutValid), 0);
   }
-  void add_activationValue(const rigExec::fb::F32 *activationValue) {
-    fbb_.AddStruct(BlendSample::VT_ACTIVATIONVALUE, activationValue);
-  }
   void add_pointsValue(uint32_t pointsValue) {
     fbb_.AddElement<uint32_t>(BlendSample::VT_POINTSVALUE, pointsValue, 0);
   }
@@ -10016,14 +10007,12 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSample(
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> indices = 0,
     uint64_t pointCount = 0,
     bool layoutValid = false,
-    const rigExec::fb::F32 *activationValue = nullptr,
     uint32_t pointsValue = 0,
     ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0) {
   BlendSampleBuilder builder_(_fbb);
   builder_.add_pointCount(pointCount);
   builder_.add_activationRead(activationRead);
   builder_.add_pointsValue(pointsValue);
-  builder_.add_activationValue(activationValue);
   builder_.add_indices(indices);
   builder_.add_offsets(offsets);
   builder_.add_blendShape(blendShape);
@@ -10059,7 +10048,6 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSampleDirect(
     const std::vector<int32_t> *indices = nullptr,
     uint64_t pointCount = 0,
     bool layoutValid = false,
-    const rigExec::fb::F32 *activationValue = nullptr,
     uint32_t pointsValue = 0,
     ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0) {
   auto offsets__ = offsets ? _fbb.CreateVectorOfStructs<rigExec::fb::Vec3f>(*offsets) : 0;
@@ -10079,7 +10067,6 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSampleDirect(
       indices__,
       pointCount,
       layoutValid,
-      activationValue,
       pointsValue,
       activationRead);
 }
@@ -10348,10 +10335,13 @@ struct RigExecWireSkinTopology : public ::flatbuffers::NativeTable {
   std::vector<float> weights{};
 };
 
-/// One skin mover's per-point influence layout, sparse. Expanded, each
-/// point holds its kept (index, weight) entries in their original order,
-/// then (0, +0.0f) padding up to element_size. Kept: every entry whose
-/// weight is not zero.
+/// One skin mover's per-point influence layout, sparse. Kept: every entry
+/// except one whose index is 0 and whose weight is zero (either sign),
+/// which reads exactly as padding does. Expanded, each point holds its
+/// kept (index, weight) entries in their original order, then (0, +0.0f)
+/// padding up to element_size. RigExecFormatSparseTopology and
+/// RigExecFormatExpandTopology (rigExecBinary/format.h) are the two
+/// directions.
 struct SkinTopology FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef RigExecWireSkinTopology NativeTableType;
   typedef SkinTopologyBuilder Builder;
@@ -10391,8 +10381,9 @@ struct SkinTopology FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<uint16_t> *counts16() const {
     return GetPointer<const ::flatbuffers::Vector<uint16_t> *>(VT_COUNTS16);
   }
-  /// 1, 2 or 4: which indices vector holds the kept indices; 4 also when
-  /// any index is negative.
+  /// 1, 2 or 4: which indices vector holds the kept indices. The writer
+  /// picks 1 when every kept index is in [0, 255], 2 when every one is in
+  /// [0, 65535], else 4, and 4 whenever one is negative.
   uint8_t indexWidth() const {
     return GetField<uint8_t>(VT_INDEXWIDTH, 0);
   }
@@ -11002,8 +10993,9 @@ struct Revision FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<uint32_t> *shaderDials() const {
     return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_SHADERDIALS);
   }
-  /// A surface projector target's static mesh world inverse; the identity
-  /// when unused.
+  /// A surface projector target's static mesh world inverse. The writer
+  /// stores the identity when it is unused; the object API's default is
+  /// zeros.
   const rigExec::fb::Matrix4d *meshWorldInverse() const {
     return GetStruct<const rigExec::fb::Matrix4d *>(VT_MESHWORLDINVERSE);
   }
@@ -13188,6 +13180,8 @@ struct RigExecWireExternalMover : public ::flatbuffers::NativeTable {
   std::vector<uint8_t> epoch{};
   std::vector<rigExec::fb::RigExecWireInput> inputs{};
   std::vector<uint32_t> phasedFallback{};
+  std::vector<uint8_t> v2Frame{};
+  bool v2FrameValid = false;
 };
 
 /// One plugin mover revision (op External).
@@ -13204,7 +13198,9 @@ struct ExternalMover FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_TYPE = 8,
     VT_EPOCH = 10,
     VT_INPUTS = 12,
-    VT_PHASEDFALLBACK = 14
+    VT_PHASEDFALLBACK = 14,
+    VT_V2FRAME = 16,
+    VT_V2FRAMEVALID = 18
   };
   uint32_t chain() const {
     return GetField<uint32_t>(VT_CHAIN, 0);
@@ -13229,6 +13225,17 @@ struct ExternalMover FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<uint32_t> *phasedFallback() const {
     return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_PHASEDFALLBACK);
   }
+  /// The frame bytes the plugin encoded for its assembly at bake_time,
+  /// which its kernel applies on every run. Removed, with v2_frame_valid,
+  /// once kernels take the declared inputs.
+  const ::flatbuffers::Vector<uint8_t> *v2Frame() const {
+    return GetPointer<const ::flatbuffers::Vector<uint8_t> *>(VT_V2FRAME);
+  }
+  /// False when the assembly at bake_time failed: playback then fails the
+  /// mover, and v2_frame is empty.
+  bool v2FrameValid() const {
+    return GetField<uint8_t>(VT_V2FRAMEVALID, 0) != 0;
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -13242,6 +13249,9 @@ struct ExternalMover FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(inputs()) &&
            VerifyOffset(verifier, VT_PHASEDFALLBACK) &&
            verifier.VerifyVector(phasedFallback()) &&
+           VerifyOffset(verifier, VT_V2FRAME) &&
+           verifier.VerifyVector(v2Frame()) &&
+           VerifyField<uint8_t>(verifier, VT_V2FRAMEVALID, 1) &&
            verifier.EndTable();
   }
   RigExecWireExternalMover *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -13271,6 +13281,12 @@ struct ExternalMoverBuilder {
   void add_phasedFallback(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> phasedFallback) {
     fbb_.AddOffset(ExternalMover::VT_PHASEDFALLBACK, phasedFallback);
   }
+  void add_v2Frame(::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> v2Frame) {
+    fbb_.AddOffset(ExternalMover::VT_V2FRAME, v2Frame);
+  }
+  void add_v2FrameValid(bool v2FrameValid) {
+    fbb_.AddElement<uint8_t>(ExternalMover::VT_V2FRAMEVALID, static_cast<uint8_t>(v2FrameValid), 0);
+  }
   explicit ExternalMoverBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -13289,14 +13305,18 @@ inline ::flatbuffers::Offset<ExternalMover> CreateExternalMover(
     uint32_t type = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> epoch = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Input>>> inputs = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> phasedFallback = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> phasedFallback = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> v2Frame = 0,
+    bool v2FrameValid = false) {
   ExternalMoverBuilder builder_(_fbb);
+  builder_.add_v2Frame(v2Frame);
   builder_.add_phasedFallback(phasedFallback);
   builder_.add_inputs(inputs);
   builder_.add_epoch(epoch);
   builder_.add_type(type);
   builder_.add_revision(revision);
   builder_.add_chain(chain);
+  builder_.add_v2FrameValid(v2FrameValid);
   return builder_.Finish();
 }
 
@@ -13312,11 +13332,14 @@ inline ::flatbuffers::Offset<ExternalMover> CreateExternalMoverDirect(
     uint32_t type = 0,
     const std::vector<uint8_t> *epoch = nullptr,
     const std::vector<::flatbuffers::Offset<rigExec::fb::Input>> *inputs = nullptr,
-    const std::vector<uint32_t> *phasedFallback = nullptr) {
+    const std::vector<uint32_t> *phasedFallback = nullptr,
+    const std::vector<uint8_t> *v2Frame = nullptr,
+    bool v2FrameValid = false) {
   if (epoch) { _fbb.ForceVectorAlignment(epoch->size(), sizeof(uint8_t), 16); }
   auto epoch__ = epoch ? _fbb.CreateVector<uint8_t>(*epoch) : 0;
   auto inputs__ = inputs ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Input>>(*inputs) : 0;
   auto phasedFallback__ = phasedFallback ? _fbb.CreateVector<uint32_t>(*phasedFallback) : 0;
+  auto v2Frame__ = v2Frame ? _fbb.CreateVector<uint8_t>(*v2Frame) : 0;
   return rigExec::fb::CreateExternalMover(
       _fbb,
       chain,
@@ -13324,7 +13347,9 @@ inline ::flatbuffers::Offset<ExternalMover> CreateExternalMoverDirect(
       type,
       epoch__,
       inputs__,
-      phasedFallback__);
+      phasedFallback__,
+      v2Frame__,
+      v2FrameValid);
 }
 
 ::flatbuffers::Offset<ExternalMover> CreateExternalMover(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireExternalMover *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -16201,7 +16226,6 @@ inline RigExecWireBlendSample::RigExecWireBlendSample(const RigExecWireBlendSamp
         indices(o.indices),
         pointCount(o.pointCount),
         layoutValid(o.layoutValid),
-        activationValue(o.activationValue),
         pointsValue(o.pointsValue),
         activationRead((o.activationRead) ? new rigExec::fb::RigExecWireInput(*o.activationRead) : nullptr) {
 }
@@ -16220,7 +16244,6 @@ inline RigExecWireBlendSample &RigExecWireBlendSample::operator=(RigExecWireBlen
   std::swap(indices, o.indices);
   std::swap(pointCount, o.pointCount);
   std::swap(layoutValid, o.layoutValid);
-  std::swap(activationValue, o.activationValue);
   std::swap(pointsValue, o.pointsValue);
   std::swap(activationRead, o.activationRead);
   return *this;
@@ -16248,7 +16271,6 @@ inline void BlendSample::UnPackTo(RigExecWireBlendSample *_o, const ::flatbuffer
   { auto _e = indices(); if (_e) { _o->indices.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->indices[_i] = _e->Get(_i); } } else { _o->indices.resize(0); } }
   { auto _e = pointCount(); _o->pointCount = _e; }
   { auto _e = layoutValid(); _o->layoutValid = _e; }
-  { auto _e = activationValue(); if (_e) _o->activationValue = ::flatbuffers::UnPackF32(*_e); }
   { auto _e = pointsValue(); _o->pointsValue = _e; }
   { auto _e = activationRead(); if (_e) { if(_o->activationRead) { _e->UnPackTo(_o->activationRead.get(), _resolver); } else { _o->activationRead = std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->UnPack(_resolver)); } } else if (_o->activationRead) { _o->activationRead.reset(); } }
 }
@@ -16274,7 +16296,6 @@ inline ::flatbuffers::Offset<BlendSample> BlendSample::Pack(::flatbuffers::FlatB
   auto _indices = _o->indices.size() ? _fbb.CreateVector(_o->indices) : 0;
   auto _pointCount = _o->pointCount;
   auto _layoutValid = _o->layoutValid;
-  auto _activationValue = ::flatbuffers::PackF32(_o->activationValue);
   auto _pointsValue = _o->pointsValue;
   auto _activationRead = _o->activationRead ? CreateInput(_fbb, _o->activationRead.get(), _rehasher) : 0;
   return rigExec::fb::CreateBlendSample(
@@ -16292,7 +16313,6 @@ inline ::flatbuffers::Offset<BlendSample> BlendSample::Pack(::flatbuffers::FlatB
       _indices,
       _pointCount,
       _layoutValid,
-      &_activationValue,
       _pointsValue,
       _activationRead);
 }
@@ -17382,6 +17402,8 @@ inline void ExternalMover::UnPackTo(RigExecWireExternalMover *_o, const ::flatbu
   { auto _e = epoch(); if (_e) { _o->epoch.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->epoch.begin()); } }
   { auto _e = inputs(); if (_e) { _o->inputs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->inputs[_i] = *std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->inputs.resize(0); } }
   { auto _e = phasedFallback(); if (_e) { _o->phasedFallback.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->phasedFallback[_i] = _e->Get(_i); } } else { _o->phasedFallback.resize(0); } }
+  { auto _e = v2Frame(); if (_e) { _o->v2Frame.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->v2Frame.begin()); } }
+  { auto _e = v2FrameValid(); _o->v2FrameValid = _e; }
 }
 
 inline ::flatbuffers::Offset<ExternalMover> CreateExternalMover(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireExternalMover *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17399,6 +17421,8 @@ inline ::flatbuffers::Offset<ExternalMover> ExternalMover::Pack(::flatbuffers::F
   auto _epoch = _o->epoch.size() ? _fbb.CreateVector(_o->epoch) : 0;
   auto _inputs = _o->inputs.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Input>> (_o->inputs.size(), [](size_t i, _VectorArgs *__va) { return CreateInput(*__va->__fbb, &(__va->__o->inputs[i]), __va->__rehasher); }, &_va ) : 0;
   auto _phasedFallback = _o->phasedFallback.size() ? _fbb.CreateVector(_o->phasedFallback) : 0;
+  auto _v2Frame = _o->v2Frame.size() ? _fbb.CreateVector(_o->v2Frame) : 0;
+  auto _v2FrameValid = _o->v2FrameValid;
   return rigExec::fb::CreateExternalMover(
       _fbb,
       _chain,
@@ -17406,7 +17430,9 @@ inline ::flatbuffers::Offset<ExternalMover> ExternalMover::Pack(::flatbuffers::F
       _type,
       _epoch,
       _inputs,
-      _phasedFallback);
+      _phasedFallback,
+      _v2Frame,
+      _v2FrameValid);
 }
 
 inline RigExecWireFile::RigExecWireFile(const RigExecWireFile &o)
@@ -19082,18 +19108,16 @@ inline const ::flatbuffers::TypeTable *BlendSampleTypeTable() {
     { ::flatbuffers::ET_INT, 1, -1 },
     { ::flatbuffers::ET_ULONG, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 2 },
     { ::flatbuffers::ET_UINT, 0, -1 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 3 }
+    { ::flatbuffers::ET_SEQUENCE, 0, 2 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::ReadPhaseTypeTable,
     rigExec::fb::Vec3fTypeTable,
-    rigExec::fb::F32TypeTable,
     rigExec::fb::InputTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 16, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 15, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19436,13 +19460,15 @@ inline const ::flatbuffers::TypeTable *ExternalMoverTypeTable() {
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UCHAR, 1, -1 },
     { ::flatbuffers::ET_SEQUENCE, 1, 0 },
-    { ::flatbuffers::ET_UINT, 1, -1 }
+    { ::flatbuffers::ET_UINT, 1, -1 },
+    { ::flatbuffers::ET_UCHAR, 1, -1 },
+    { ::flatbuffers::ET_BOOL, 0, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::InputTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 6, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 8, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }

@@ -231,9 +231,9 @@ _RrComposeAvars(double tx, double ty, double tz, double sx, double sy,
 // The step body's `live`: whether a baked parameter has to be re-read
 // at all (bakedPose.cpp): read per run, or an override stands on its walk.
 bool
-_RrLive(const RrProgram *program, const v4::RigExecWireInput &read)
+_RrLive(const RrProgram *program, const RigExecWireInput &read)
 {
-    if ((read.flags & uint8_t(v4::InputReadFlags::Varying)) != 0) {
+    if ((read.flags & uint8_t(RigExecWireInputReadFlags::Varying)) != 0) {
         return true;
     }
     return read.overrideIndex >= 0 &&
@@ -342,7 +342,7 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
     scratch->interpScratch.assign(poses.poseInterpolators.size(), {});
     for (size_t i = 0; i < poses.poseInterpolators.size(); ++i) {
         const RigExecWireRbf &wire =
-            poses.poseInterpolators[i].solver;
+            *poses.poseInterpolators[i].solver;
         std::vector<RrVec3d> rbfPoses;
         for (const RigExecWireVec3d &p : wire.poses) {
             rbfPoses.push_back(RrVec3d(p[0], p[1], p[2]));
@@ -363,8 +363,13 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
             wire.translationRadius,
             wire.normalize, wire.enableRotation,
             wire.enableTranslation);
+        std::vector<std::vector<double>> weights;
+        weights.reserve(wire.weights.size());
+        for (const fb::RigExecWireDoubleList &row : wire.weights) {
+            weights.push_back(row.v);
+        }
         scratch->interpSolvers[i].SetSolvedTable(
-            wire.radii, wire.translationRadii, wire.weights);
+            wire.radii, wire.translationRadii, weights);
     }
     scratch->solvers.resize(poses.solvers.size());
     for (size_t s = 0; s < poses.solvers.size(); ++s) {
@@ -401,19 +406,19 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
         state.upperLengthBase = wire.upperLengthBase;
         state.lowerLengthBase = wire.lowerLengthBase;
         state.spaceRest = _RrWireLandmarks(wire.spaceRest);
-        state.splineRest.cvs = _RrWireLandmarks(wire.splineRest.cvs);
+        state.splineRest.cvs = _RrWireLandmarks(wire.splineRest->cvs);
         state.splineRest.rootControl =
-            RrWireToFrame(wire.splineRest.rootControl);
+            RrWireToFrame(wire.splineRest->rootControl);
         state.splineRest.midControl =
-            RrWireToFrame(wire.splineRest.midControl);
+            RrWireToFrame(wire.splineRest->midControl);
         state.splineRest.endControl =
-            RrWireToFrame(wire.splineRest.endControl);
-        for (const RigExecWireFrame &joint : wire.splineRest.joints) {
+            RrWireToFrame(wire.splineRest->endControl);
+        for (const RigExecWireFrame &joint : wire.splineRest->joints) {
             state.splineRest.joints.push_back(RrWireToFrame(joint));
         }
-        state.splineRest.segmentLengths = wire.splineRest.segmentLengths;
-        state.splineRest.restArcLength = wire.splineRest.restArcLength;
-        state.splineRest.volumeWeights = wire.splineRest.volumeWeights;
+        state.splineRest.segmentLengths = wire.splineRest->segmentLengths;
+        state.splineRest.restArcLength = wire.splineRest->restArcLength;
+        state.splineRest.volumeWeights = wire.splineRest->volumeWeights;
         for (const auto &rest : wire.splineJointRests) {
             state.splineJointRests.push_back(_RrWireLandmarks(rest));
         }
@@ -461,7 +466,7 @@ RrProloguePose(RrProgram *program,
     const RigExecWireSlotMeta &meta = *program->slotMeta;
     const RigExecWireDomainPose &poses = *program->poses;
     const RigExecWireDomainGeometry &geometry = *program->geometry;
-    // Open checked the static tables' sizes against the program.
+    // The validator checked the static tables' sizes against the program.
     const RrStatic &statics = program->statics;
     // RigExecBakedRunInputs. The provider ladder, before the avars that
     // compose against it: it recomposes when a channel varies, while a drag
@@ -491,9 +496,8 @@ RrProloguePose(RrProgram *program,
     // after it is released, every constant binding is walked too: the
     // released avar holds the dragged value until its constant is written
     // back over it.
-    const RigExecWireComputed &computed = *inputs.computed;
     const auto avarOf = [&](uint32_t read) {
-        return size_t(computed.registeredReads[read].avar);
+        return size_t(program->registeredReads[read].avar);
     };
     for (const uint32_t read : inputs.avarBindingReads) {
         store.avars[avarOf(read)] =
@@ -502,7 +506,7 @@ RrProloguePose(RrProgram *program,
     for (const uint32_t read : inputs.avarConstantReads) {
         // A constant binding an edit animated reads per run as well.
         if ((program->RegisteredInput(int32_t(read)).flags &
-             uint8_t(v4::InputReadFlags::Varying)) != 0) {
+             uint8_t(RigExecWireInputReadFlags::Varying)) != 0) {
             store.avars[avarOf(read)] =
                 program->ReadRegistered(int32_t(read)).f64;
         }
@@ -530,21 +534,6 @@ RrProloguePose(RrProgram *program,
                 program->ReadInterpValue(i, v).f64;
         }
     }
-    // Live ribbon driver points, swapped against last run's by value.
-    for (size_t s = 0; s < poses.solvers.size(); ++s) {
-        if (!store.ribbonVarying[s]) {
-            continue;
-        }
-        store.ribbonLast[s].swap(store.ribbonPoints[s]);
-        std::vector<RrVec3f> &points = store.ribbonPoints[s];
-        const std::vector<RigExecWireVec3f> &driver = statics.RibbonPoints(s);
-        points.clear();
-        points.reserve(driver.size());
-        for (const RigExecWireVec3f &p : driver) {
-            points.push_back(RrVec3f(p[0], p[1], p[2]));
-        }
-        store.ribbonDirty[s] = points != store.ribbonLast[s] ? 1 : 0;
-    }
     // Xform-derived slots, seeded from the stage values the bake captured.
     for (size_t k = 0; k < meta.xformSlots.size(); ++k) {
         const int slot = meta.xformSlots[k];
@@ -560,17 +549,17 @@ RrProloguePose(RrProgram *program,
         store.deltaBaseOk[k] = statics.DeltaBaseOk(k) ? 1 : 0;
         store.deltaBaseMatrix[k] = _RrWireMatrix(statics.DeltaBase(k));
     }
-    // The plain Xformables a constraint reads as a source. The bake
-    // carries frames only, no ok array, so ok is the frame's own
-    // usability: a store read that failed has no frame to seed.
+    // The plain Xformables a constraint reads as a source. ok is derived
+    // from the frame's own usability and the file's NativeSource.ok is not
+    // read: a store read that failed has no frame to seed.
     for (size_t k = 0; k < poses.nativeSources.size(); ++k) {
         const RrPointFrame frame = RrWireToFrame(statics.NativeFrame(k));
         store.nativeFrames[k] = frame;
         store.nativeFrameOk[k] = RrFrameUsable(frame) ? 1 : 0;
     }
     // A constraint's own authored tables, as the prologue read them at
-    // the bake time. Capture folded every read semantic into them; the
-    // cardinality lines it cannot carry stay empty.
+    // the bake time, with the cardinality lines those reads reported,
+    // which the constraint step replays.
     for (size_t k = 0; k < poses.constraintArrays.size(); ++k) {
         RrConstraintArraysLive &live = store.arrays[k];
         live.weights = statics.ArrayWeights(k);
@@ -591,8 +580,10 @@ RrProloguePose(RrProgram *program,
                 RrVec3d(v[0], v[1], v[2]));
         }
         live.ok = statics.ArrayOk(k);
+        live.diagnostics = statics.ArrayDiagnostics(k);
         live.poleWeights = statics.ArrayPoleWeights(k);
         live.poleOk = statics.ArrayPoleOk(k);
+        live.poleDiagnostics = statics.ArrayPoleDiagnostics(k);
     }
     return true;
 }

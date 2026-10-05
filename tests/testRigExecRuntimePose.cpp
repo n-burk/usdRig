@@ -8,9 +8,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
-#include "rigExecBinary/container.h"
-#include "rigExecBinary/inputTable.h"
-#include "rigExecBinary/pose.h"
+#include "rigExecBinary/format.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecRuntime/runtime.h"
 #include "rigExecExampleFixtures.h"
@@ -51,7 +49,7 @@ static int comparedFrames = 0;
         }                                                               \
     } while (0)
 
-#include "rigExecSectionEdit.h"
+#include "rigExecFileEdit.h"
 #include "rigExecRuntimeDrive.h"
 
 static SdfPath
@@ -412,29 +410,23 @@ _TestFixture(const std::string &name, const std::string &stagePath,
     _TestStage(name, stage, frames, nullptr, staticClass);
 }
 
-static bool
-_DecodeInputTable(const std::vector<uint8_t> &bytes,
-                  RigExecWireInputTable *table)
+// The input slot of \p file named \p path, or -1.
+static int64_t
+_InputOfPath(const fb::RigExecWireFile &file, const std::string &path)
 {
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    if (!reader ||
-        !reader->FindSection(RigExecBinarySection::InputTable, &data,
-                             &size)) {
-        return false;
+    for (size_t k = 0; k < file.inputs.size(); ++k) {
+        if (RigExecFormatPathText(file, file.inputs[k].name()) == path) {
+            return int64_t(k);
+        }
     }
-    RigExecWireReader cursor(data, size);
-    return RigExecWireDecodeInputTable(&cursor, table, &error);
+    return -1;
 }
 
 // Two transform constraints whose envelopes no mover binds: a StaticWeight
 // at 0.5 and a DynamicWeight whose driver connects to a double keyed from
 // 0.2 at frame 1 to \p lastDriver at frame 10 (testRigExecBinary's
-// envelope bake). Both resolve through the oracle from the Computed
-// section's envelope-only entries.
+// envelope bake). Both resolve through the oracle from the file's
+// envelope-only weight objects.
 static UsdStageRefPtr
 _EnvelopeStage(double lastDriver = 0.8)
 {
@@ -1041,34 +1033,6 @@ TestChainDrivenEnvelope()
     std::printf("%s: %zu frame(s) read through the chain\n", name, chained);
 }
 
-// \p bytes without section \p tag; everything else copied unchanged.
-static std::vector<uint8_t>
-_WithoutSection(const std::vector<uint8_t> &bytes, RigExecBinarySection tag)
-{
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    CHECK(reader);
-    if (!reader) {
-        return {};
-    }
-    RigExecBinaryWriter writer;
-    std::string text;
-    for (uint32_t id = 1; reader->GetString(id, &text); ++id) {
-        CHECK(writer.AddString(text) == id);
-    }
-    for (uint32_t t = uint32_t(RigExecBinarySection::Manifest);
-         t <= uint32_t(RigExecBinarySection::Computed); ++t) {
-        const RigExecBinarySection section = RigExecBinarySection(t);
-        const uint8_t *data = nullptr;
-        size_t size = 0;
-        if (section != tag && reader->FindSection(section, &data, &size)) {
-            writer.AddSection(section, data, size);
-        }
-    }
-    return writer.Finish();
-}
-
 // The text Open fails \p bytes with; empty when it opens.
 static std::string
 _OpenError(const std::vector<uint8_t> &bytes)
@@ -1079,10 +1043,10 @@ _OpenError(const std::vector<uint8_t> &bytes)
     return reader ? std::string() : error;
 }
 
-// Open refuses a file whose envelopes the Computed section does not
-// cover, each with its own text: no section at all, a malformed one, one
-// that does not match the tables it extends, an envelope index naming
-// another object, and a weight-object read that is not a float.
+// Open refuses a file whose envelopes do not match its constraints, each
+// with the validator's text naming the field: an envelope index naming
+// another object, a missing envelope index, and a weight-object read that
+// is not a float.
 static void
 TestComputedOpenRefusals()
 {
@@ -1095,90 +1059,63 @@ TestComputedOpenRefusals()
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
     CHECK(_OpenError(result.bytes).empty());
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
-                                  &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    RigExecWireComputed computed;
-    if (!binary ||
-        !binary->FindSection(RigExecBinarySection::Computed, &data, &size)) {
-        CHECK(false);
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        RigExecTestUnpack(result.bytes);
+    if (!file) {
         return;
-    }
-    const std::vector<uint8_t> original(data, data + size);
-    {
-        RigExecWireReader cursor(data, size);
-        CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
     }
     const auto expect = [&](const char *what,
                             const std::vector<uint8_t> &bytes,
                             const std::string &text) {
+        const std::string want = "invalid .rigexec: " + text;
         const std::string got = _OpenError(bytes);
-        if (got != text) {
+        if (got != want) {
             std::printf("%s: open said '%s', expected '%s'\n", what,
-                        got.c_str(), text.c_str());
+                        got.c_str(), want.c_str());
             CHECK(false);
         }
     };
-    const auto with = [&](const RigExecWireComputed &edited) {
-        std::vector<uint8_t> payload;
-        std::string why;
-        CHECK(RigExecWireEncodeComputed(edited, &payload, &why));
-        return _ReplaceSection(result.bytes, RigExecBinarySection::Computed,
-                               payload);
-    };
-
-    expect("no computed section",
-           _WithoutSection(result.bytes, RigExecBinarySection::Computed),
-           "the file carries no computed section, which every input read "
-           "needs; rebake it");
-    {
-        std::vector<uint8_t> truncated = original;
-        truncated.pop_back();
-        const std::string got = _OpenError(_ReplaceSection(
-            result.bytes, RigExecBinarySection::Computed, truncated));
-        CHECK(got.rfind("malformed computed section: computed section: ",
-                        0) == 0);
-        std::printf("truncated computed section: %s\n", got.c_str());
-    }
-    {
-        RigExecWireComputed edited = computed;
-        edited.frames.pop_back();
-        expect("one frame short", with(edited),
-               "computed section: one slot record per input-table frame "
-               "expected");
-    }
     // The pose table orders constraint B before A.
-    CHECK(computed.constraintWeightObjectIndex.size() == 2);
-    if (computed.constraintWeightObjectIndex.size() == 2) {
-        RigExecWireComputed edited = computed;
-        std::swap(edited.constraintWeightObjectIndex[0],
-                  edited.constraintWeightObjectIndex[1]);
-        expect("swapped envelope indices", with(edited),
-               "the computed section gives constraint /Asset/Rig/Movers/B "
-               "the envelope of /Asset/Rig/Weights/Fixed, not of its "
-               "weight object /Asset/Rig/Weights/Driven");
-        edited = computed;
-        edited.constraintWeightObjectIndex[0] = -1;
-        expect("missing envelope index", with(edited),
-               "constraint /Asset/Rig/Movers/B resolves an envelope the "
-               "computed section does not carry");
+    const std::vector<fb::RigExecWireConstraint> &constraints =
+        file->pose->constraints;
+    CHECK(constraints.size() == 2);
+    if (constraints.size() == 2) {
+        expect("swapped envelope indices",
+               RigExecTestEdited(result.bytes,
+                                 [](fb::RigExecWireFile *edited) {
+                                     std::swap(edited->pose->constraints[0]
+                                                   .weightObjectIndex,
+                                               edited->pose->constraints[1]
+                                                   .weightObjectIndex);
+                                 }),
+               "pose.constraints[0]: weight_object_index does not name the "
+               "envelope of its weight object");
+        expect("missing envelope index",
+               RigExecTestEdited(result.bytes,
+                                 [](fb::RigExecWireFile *edited) {
+                                     edited->pose->constraints[0]
+                                         .weightObjectIndex = -1;
+                                 }),
+               "pose.constraints[0]: weight_object_index does not name the "
+               "envelope of its weight object");
     }
     {
         // A double-tagged read (its constant re-pointed at values[0], the
-        // Double +0.0, so the section itself stays consistent).
-        RigExecWireComputed edited = computed;
-        CHECK(!edited.weightObjects.empty());
-        if (!edited.weightObjects.empty()) {
-            v4::RigExecWireWeightObject &object = edited.weightObjects.back();
-            object.driver.tag = v4::InputTag::Double;
-            object.driver.constant = 0;
-            std::string text;
-            CHECK(binary->GetString(object.path, &text));
-            expect("double read", with(edited),
-                   "weight object " + text +
-                       " carries a read that is not a float");
+        // Double +0.0, so the read itself stays consistent).
+        const size_t objects = file->geometry->weightObjects.size();
+        CHECK(objects > 0);
+        if (objects > 0) {
+            expect("double read",
+                   RigExecTestEdited(
+                       result.bytes,
+                       [](fb::RigExecWireFile *edited) {
+                           fb::RigExecWireInput &driver =
+                               *edited->geometry->weightObjects.back().driver;
+                           driver.tag = fb::InputTag::Double;
+                           driver.constant = 0;
+                       }),
+                   "geometry.weight_objects[" + std::to_string(objects - 1) +
+                       "].driver: tag 0, expected 1");
         }
     }
     std::printf("computed open refusals: checked\n");
@@ -2097,9 +2034,10 @@ TestPhasedConsumers()
 
 // The default read phase through the .rigexec: the runtime replays each
 // reader at its own phase, bit for bit with the baked program and the
-// dynamic evaluator, and the computed section carries a record per reader
-// the overlay walk alone would answer differently -- applied 0 for the
-// undeclared ones, every revision for the `final` behind a recorded hop.
+// dynamic evaluator, and the file's phased_consumers carry an entry per
+// reader the overlay walk alone would answer differently -- applied 0 for
+// the undeclared ones, every revision for the `final` behind a recorded
+// hop.
 static void
 TestDefaultReadPhaseRoundTrip()
 {
@@ -2153,7 +2091,7 @@ TestDefaultReadPhaseRoundTrip()
     }
     CHECK(clamped > 0 && clamped < frames.size());
 
-    // The round trip: the records the computed section carries.
+    // The round trip: the records the file carries.
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
@@ -2161,27 +2099,19 @@ TestDefaultReadPhaseRoundTrip()
     RigExecBakeResult result;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
-                                  &error);
-    CHECK(binary);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    if (!binary ||
-        !binary->FindSection(RigExecBinarySection::Computed, &data, &size)) {
-        CHECK(false);
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        RigExecTestUnpack(result.bytes);
+    if (!file) {
         return;
     }
-    RigExecWireReader cursor(data, size);
-    RigExecWireComputed computed;
-    CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
     std::map<std::string, uint32_t> applied;
-    std::string text;
-    for (const v4::PhasedConsumer &record : computed.phasedConsumers) {
-        CHECK(record.consumer < computed.inputs.size());
-        if (record.consumer < computed.inputs.size() &&
-            binary->GetString(computed.inputs[record.consumer].name, &text)) {
-            applied[text] = record.applied;
+    for (const fb::RigExecWirePhasedConsumer &record :
+         file->phasedConsumers) {
+        CHECK(record.consumer < file->inputs.size());
+        if (record.consumer < file->inputs.size()) {
+            applied[RigExecFormatPathText(
+                *file, file->inputs[record.consumer].name())] =
+                record.applied;
         }
     }
     const std::string readers = "/Asset/Rig/Movers/Readouts/";
@@ -2279,9 +2209,7 @@ TestNonFiniteBase()
 // chains, the chains' diagnostics, phased consumers) played through the
 // inputs of a bake at the first frame, against the baked program and the
 // dynamic evaluator, 10 values per frame, the constraint weight Follow
-// reads through the dial's chain at its declared `final` included. Without
-// the computed section the file does not open: nothing could read an
-// input.
+// reads through the dial's chain at its declared `final` included.
 static void
 TestComputedChainsFixture()
 {
@@ -2306,25 +2234,14 @@ TestComputedChainsFixture()
         published += row.values.size();
     }
     CHECK(published == 10 * frames.size());
-
-    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<uint8_t> bytes;
-    std::string error;
-    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
-    CHECK(_OpenError(_WithoutSection(bytes,
-                                     RigExecBinarySection::Computed)) ==
-          "the file carries no computed section, which every input read "
-          "needs; rebake it");
 }
 
 // tests/fixtures/computed_ik_space.usda: a TwoBoneIk measured in an
 // animated rigExec:space composed with a keyed, non-uniform
 // rigExec:spaceMatrix, beside one reading a constant spaceMatrix. The arm's
-// spaceMatrix is a registered read the record directory lists and the
-// record holds (a bake that left it out of the directory refused the rig),
-// and the runtime plays the fixture through its inputs bit for bit with
-// the baked program.
+// spaceMatrix is a live read of the solver over an Animated input whose
+// default is the keyed matrix at the bake time, and the runtime plays the
+// fixture through its inputs bit for bit with the baked program.
 static void
 TestIkSpaceFixture()
 {
@@ -2348,41 +2265,34 @@ TestIkSpaceFixture()
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    CHECK(binary);
-    if (!binary) {
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    if (!file) {
         return;
     }
     const std::string spaceMatrix =
         "/IkSpaceAsset/Rig/Solvers/ArmIK.rigExec:spaceMatrix";
-    RigExecWireInputTable table;
-    CHECK(_DecodeInputTable(bytes, &table));
-    int64_t uid = -1;
-    std::string text;
-    for (size_t k = 0; k < table.directory.size(); ++k) {
-        if (binary->GetString(table.directory[k].head, &text) &&
-            text == spaceMatrix) {
-            CHECK(uid < 0);
-            CHECK(table.directory[k].tag == RigExecWireInput::Tag::Matrix4d);
-            uid = int64_t(k);
-        }
-    }
-    CHECK(uid >= 0);
-    CHECK(table.frames.size() == 1);
-    if (uid < 0 || table.frames.size() != 1) {
+    const int64_t slot = _InputOfPath(*file, spaceMatrix);
+    CHECK(slot >= 0);
+    if (slot < 0) {
         return;
     }
-    // Recorded, and not the identity.
-    bool held = false;
-    const RigExecWireFrameInputs &record = table.frames[0];
-    for (size_t k = 0; k < record.uids.size(); ++k) {
-        if (record.uids[k] == uint32_t(uid)) {
-            held = true;
-            CHECK(record.values[k].matrix[0] != 1.0);
+    // An Animated Matrix4d input whose default is not the identity, which
+    // the arm's solver reads per run.
+    const fb::InputSlot &input = file->inputs[size_t(slot)];
+    CHECK(input.type() == fb::InputTag::Matrix4d);
+    CHECK((input.flags() & uint8_t(fb::InputSlotFlags::Animated)) != 0);
+    const fb::RigExecWireValue &held = file->values[input.value()];
+    CHECK(held.matrix && (*held.matrix)[0] != 1.0);
+    size_t readers = 0;
+    for (const fb::RigExecWireSolver &solver : file->pose->solvers) {
+        const fb::RigExecWireInput &read = *solver.ikSpace;
+        if (!read.walk.empty() && read.walk[0] == uint32_t(slot)) {
+            ++readers;
+            CHECK(read.tag == fb::InputTag::Matrix4d);
+            CHECK((read.flags & uint8_t(fb::InputReadFlags::Varying)) != 0);
         }
     }
-    CHECK(held);
+    CHECK(readers == 1);
 
     // A constant spaceMatrix and no space keep the leg on the solver's
     // constant arm, whose bone lengths are measured in that matrix when the
@@ -2564,6 +2474,100 @@ TestConstraintAndAvarReadersReplay(const std::string &examplesDir)
                              : "outside space index read at its base",
                        space, {1001.0, 1012.0, 1024.0, 1036.0});
         }
+    }
+}
+
+// Whether every played frame carries \p line among its diagnostics.
+static bool
+_EveryFrameSays(const std::vector<_PlayedFrame> &played,
+                const std::string &line)
+{
+    if (played.empty()) {
+        return false;
+    }
+    for (const _PlayedFrame &frame : played) {
+        if (std::find(frame.diagnostics.begin(), frame.diagnostics.end(),
+                      line) == frame.diagnostics.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A constraint's source or pole weights table with the wrong cardinality:
+// the bake keeps the read's line beside the arrays, and the constraint step
+// replays it where the baked one does, ahead of its pass-through. The
+// played diagnostics match the baked program's verbatim (_TestStage), and
+// carry the line on every frame.
+static void
+TestConstraintArrayDiagnostics(const std::string &examplesDir)
+{
+    const int failuresBefore = failures;
+    {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const auto xform = [&](const char *path,
+                               const GfVec3d &translation) {
+            const UsdGeomXform x = UsdGeomXform::Define(stage, SdfPath(path));
+            x.MakeMatrixXform().Set(GfMatrix4d(
+                GfRotation(GfVec3d(0, 0, 1), 0.0), translation));
+        };
+        xform("/Asset", GfVec3d(0));
+        xform("/Asset/Target", GfVec3d(0));
+        xform("/Asset/Source", GfVec3d(10, 0, 0));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim pos =
+            stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Pos"),
+                              TfToken("RigExecPositionConstraint"));
+        CHECK(pos.ApplyAPI(TfToken("RigExecMoverAPI")));
+        pos.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({SdfPath("/Asset/Target")});
+        pos.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/Source")});
+        pos.CreateAttribute(TfToken("inputs:sourceWeights"),
+                            SdfValueTypeNames->FloatArray)
+            .Set(VtFloatArray{1, 2});
+        std::vector<_PlayedFrame> played;
+        _TestStage("constraint source weights cardinality", stage,
+                   {1.0, 2.0}, &played);
+        const bool said = _EveryFrameSays(
+            played,
+            "/Asset/Rig/Movers/Pos inputs:sourceWeights has 2 entries for "
+            "1 sources");
+        CHECK(said);
+        if (!said) {
+            std::printf("constraint source weights cardinality: the line "
+                        "is not played\n");
+        }
+    }
+    {
+        const UsdStageRefPtr stage = UsdStage::Open(
+            examplesDir + "/../docs/examples/single_chain_ik_constraint.usda");
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        stage->SetEditTarget(stage->GetSessionLayer());
+        stage->GetPrimAtPath(SdfPath("/ScIkAsset/Rig/Movers/Pose/ArmIK"))
+            .CreateAttribute(TfToken("inputs:poleVectorWeights"),
+                             SdfValueTypeNames->FloatArray)
+            .Set(VtFloatArray{1, 1});
+        std::vector<_PlayedFrame> played;
+        _TestStage("constraint pole weights cardinality", stage,
+                   {1001.0, 1012.0}, &played);
+        const bool said = _EveryFrameSays(
+            played,
+            "/ScIkAsset/Rig/Movers/Pose/ArmIK inputs:poleVectorWeights has "
+            "2 entries for 1 sources");
+        CHECK(said);
+        if (!said) {
+            std::printf("constraint pole weights cardinality: the line is "
+                        "not played\n");
+        }
+    }
+    if (failures == failuresBefore) {
+        std::printf("constraint array diagnostics: source and pole lines "
+                    "replayed as the baked program replays them\n");
     }
 }
 
@@ -3359,16 +3363,16 @@ TestSetInputOnChainTarget()
     std::printf("%s: checked\n", name);
 }
 
-// Open refuses a Computed section whose registered reads do not bind the
-// runtime's tables exactly, each with its own text: two avar bindings
-// headed by one attribute, a table field bound twice, a uid given twice,
-// a table field left unbound, a chain read that differs from the
-// registered read of its uid in its constant, an override number reaching
-// another attribute than the program registered it on, and a walk through
-// an attribute the program registered no override on. An input refuses a
-// name the file does not list, a value of another type, a non-finite value
-// and an index past the count; a chain target, which no avar override
-// reached, takes a set like any input.
+// Open refuses a file whose registered reads do not bind the runtime's
+// tables exactly, each with its own text naming the field: two avar
+// bindings headed by one attribute; and, refused by the format's
+// validator, a walk past the input slots, a constant of another type than
+// the read's, an override number held twice, one held by no read, a read
+// of a mode its table does not admit; a required read left out fails the
+// FlatBuffers verifier. An input refuses a name the file does not list, a
+// value of another type, a non-finite value and an index past the count;
+// a chain target, which no avar override reached, takes a set like any
+// input.
 static void
 TestRegisteredReadRefusals()
 {
@@ -3390,160 +3394,133 @@ TestRegisteredReadRefusals()
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
     CHECK(_OpenError(result.bytes).empty());
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
-                                  &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    RigExecWireComputed computed;
-    if (!binary ||
-        !binary->FindSection(RigExecBinarySection::Computed, &data, &size)) {
-        CHECK(false);
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        RigExecTestUnpack(result.bytes);
+    if (!file) {
         return;
     }
-    {
-        RigExecWireReader cursor(data, size);
-        CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
-    }
-    const auto with = [&](const RigExecWireComputed &edited) {
-        std::vector<uint8_t> payload;
-        std::string why;
-        CHECK(RigExecWireEncodeComputed(edited, &payload, &why));
-        return _ReplaceSection(result.bytes, RigExecBinarySection::Computed,
-                               payload);
-    };
     const auto expect = [&](const char *what,
-                            const RigExecWireComputed &edited,
+                            const std::vector<uint8_t> &bytes,
                             const std::string &text) {
-        const std::string got = _OpenError(with(edited));
+        const std::string got = _OpenError(bytes);
         if (got != text) {
             std::printf("%s, %s: open said '%s', expected '%s'\n", name,
                         what, got.c_str(), text.c_str());
             CHECK(false);
         }
     };
-    using Family = RigExecWireRegisteredFamily;
-    const std::vector<RigExecWireRegisteredRead> &reads =
-        computed.registeredReads;
-    const auto isAvar = [](const RigExecWireRegisteredRead &entry) {
-        return entry.family == Family::AvarBinding ||
-               entry.family == Family::AvarConstantBinding;
+    const std::vector<fb::RigExecWireAvarBinding> &bindings =
+        file->pose->avarBindings;
+    const auto varying = [](const fb::RigExecWireAvarBinding &binding) {
+        return (binding.read->flags &
+                uint8_t(fb::InputReadFlags::Varying)) != 0;
     };
-    // An avar binding with a uid (Dial's keyed tx), an avar binding with
-    // none and an override number, another avar's, and a ladder field.
-    size_t recorded = reads.size(), constant = reads.size();
-    size_t other = reads.size(), ladder = reads.size();
-    for (size_t k = 0; k < reads.size(); ++k) {
-        if (isAvar(reads[k]) && reads[k].uid >= 0 &&
-            recorded == reads.size()) {
-            recorded = k;
-        }
-        if (isAvar(reads[k]) && reads[k].uid < 0 &&
-            reads[k].read.overrideIndex >= 0 && !reads[k].read.walk.empty() &&
-            constant == reads.size()) {
+    // A constant avar binding with an override number and a walk, and a
+    // binding of another avar the runtime binds before it (a varying one,
+    // or a constant one stored earlier).
+    size_t constant = bindings.size(), other = bindings.size();
+    for (size_t k = 0; k < bindings.size(); ++k) {
+        const fb::RigExecWireInput &read = *bindings[k].read;
+        if (!varying(bindings[k]) && read.overrideIndex >= 0 &&
+            !read.walk.empty() && constant == bindings.size()) {
             constant = k;
         }
-        if (reads[k].family == Family::Ladder && ladder == reads.size()) {
-            ladder = k;
-        }
     }
-    for (size_t k = 0; k < reads.size() && constant < reads.size(); ++k) {
-        if (isAvar(reads[k]) && k < constant && reads[k].avar >= 0 &&
-            reads[k].avar != reads[constant].avar &&
-            !reads[k].read.walk.empty()) {
+    for (size_t k = 0; k < bindings.size() && constant < bindings.size();
+         ++k) {
+        if (k != constant && !bindings[k].read->walk.empty() &&
+            bindings[k].flat != bindings[constant].flat &&
+            (varying(bindings[k]) || k < constant) &&
+            bindings[k].read->overrideIndex >= 0) {
             other = k;
+            break;
         }
     }
-    CHECK(recorded < reads.size() && constant < reads.size() &&
-          other < reads.size() && ladder < reads.size() &&
-          !computed.chainReads.empty());
-    if (recorded >= reads.size() || constant >= reads.size() ||
-        other >= reads.size() || ladder >= reads.size() ||
-        computed.chainReads.empty()) {
+    CHECK(constant < bindings.size() && other < bindings.size());
+    if (constant >= bindings.size() || other >= bindings.size()) {
         return;
     }
-    const std::string prefix = "the computed section's registered read ";
+    const std::string field =
+        "pose.avar_bindings[" + std::to_string(constant) + "]";
+    const std::string invalid = "invalid .rigexec: ";
+    expect("two avars at one head",
+           RigExecTestEdited(result.bytes,
+                             [&](fb::RigExecWireFile *edited) {
+                                 edited->pose->avarBindings[constant]
+                                     .read->walk[0] =
+                                     bindings[other].read->walk[0];
+                             }),
+           field + " heads two avars");
+    expect("a walk past the slots",
+           RigExecTestEdited(result.bytes,
+                             [&](fb::RigExecWireFile *edited) {
+                                 edited->pose->avarBindings[constant]
+                                     .read->walk[0] =
+                                     uint32_t(file->inputs.size());
+                             }),
+           invalid + field + ".read.walk[0]: slot " +
+               std::to_string(file->inputs.size()) + " out of range (" +
+               std::to_string(file->inputs.size()) + " slots)");
     {
-        RigExecWireComputed edited = computed;
-        edited.registeredReads[constant].read.walk[0] =
-            reads[other].read.walk[0];
-        expect("two avars at one head", edited,
-               prefix + std::to_string(constant) + " heads two avars");
-    }
-    {
-        RigExecWireComputed edited = computed;
-        edited.registeredReads.push_back(reads[ladder]);
-        expect("a field bound twice", edited,
-               prefix + std::to_string(reads.size()) +
-                   " binds a field another read binds");
-    }
-    {
-        RigExecWireComputed edited = computed;
-        edited.registeredReads.push_back(reads[recorded]);
-        expect("a uid given twice", edited,
-               prefix + std::to_string(reads.size()) + " repeats uid " +
-                   std::to_string(reads[recorded].uid));
-    }
-    {
-        RigExecWireComputed edited = computed;
-        edited.registeredReads.erase(edited.registeredReads.begin() +
-                                     std::ptrdiff_t(ladder));
-        expect("a field left unbound", edited,
-               "the computed section binds no read to a field of ladders[" +
-                   std::to_string(reads[ladder].object) + "]");
-    }
-    {
-        // The chain read's constant re-pointed at another value of its
-        // tag: a read the steps never make.
-        RigExecWireComputed edited = computed;
-        v4::RigExecWireInput &read = edited.chainReads[0].read;
-        size_t another = computed.values.size();
-        for (size_t v = 0; v < computed.values.size(); ++v) {
-            if (v != read.constant && computed.values[v].tag == read.tag) {
+        // A value of another tag than the binding's Double read.
+        size_t another = file->values.size();
+        for (size_t v = 0; v < file->values.size(); ++v) {
+            if (file->values[v].tag != fb::InputTag::Double) {
                 another = v;
                 break;
             }
         }
-        CHECK(another < computed.values.size());
-        read.constant = uint32_t(another);
-        expect("a chain read of another constant", edited,
-               "the computed section's chain read of uid " +
-                   std::to_string(computed.chainReads[0].uid) +
-                   " restates no registered read");
+        CHECK(another < file->values.size());
+        expect("a constant of another type",
+               RigExecTestEdited(result.bytes,
+                                 [&](fb::RigExecWireFile *edited) {
+                                     edited->pose->avarBindings[constant]
+                                         .read->constant = uint32_t(another);
+                                 }),
+               invalid + field + ".read: constant " +
+                   std::to_string(another) +
+                   " is not a value of the read's tag");
     }
     {
-        // The constant binding's override number given another's: its own
-        // attribute now reaches a number the program put elsewhere.
-        RigExecWireComputed edited = computed;
-        edited.registeredReads[constant].read.overrideIndex =
-            reads[other].read.overrideIndex;
-        std::string head;
-        CHECK(binary->GetString(
-            computed.inputs[reads[constant].read.walk[0]].name, &head));
-        expect("an override number moved", edited,
-               "the computed section's reads reach other override numbers "
-               "at " + head + " than the program registered there");
+        // The constant binding's override number given the other's: one
+        // number held twice, its own held by none.
+        const int32_t mine = bindings[constant].read->overrideIndex;
+        const int32_t theirs = bindings[other].read->overrideIndex;
+        const int32_t first = theirs < mine ? theirs + 1 : mine;
+        expect("an override number held twice",
+               RigExecTestEdited(result.bytes,
+                                 [&](fb::RigExecWireFile *edited) {
+                                     edited->pose->avarBindings[constant]
+                                         .read->overrideIndex = theirs;
+                                 }),
+               invalid + "override number " + std::to_string(first) +
+                   " is held by no read or by two");
+        const uint32_t count = file->pose->overrideCount;
+        expect("an override number held by no read",
+               RigExecTestEdited(result.bytes,
+                                 [&](fb::RigExecWireFile *edited) {
+                                     edited->pose->avarBindings[constant]
+                                         .read->overrideIndex = -1;
+                                 }),
+               invalid + "pose.override_count is " + std::to_string(count) +
+                   " but " + std::to_string(count - 1) +
+                   " reads carry override numbers");
     }
-    {
-        // A slot no overridable read walks, appended to one that does.
-        std::vector<char> walked(computed.inputs.size(), 0);
-        for (const RigExecWireRegisteredRead &entry : reads) {
-            if (entry.read.overrideIndex >= 0) {
-                for (const uint32_t slot : entry.read.walk) {
-                    walked[slot] = 1;
-                }
-            }
-        }
-        const auto unwalked = std::find(walked.begin(), walked.end(), 0);
-        CHECK(unwalked != walked.end());
-        if (unwalked != walked.end()) {
-            RigExecWireComputed edited = computed;
-            edited.registeredReads[constant].read.walk.push_back(
-                uint32_t(unwalked - walked.begin()));
-            expect("a walk through an unregistered attribute", edited,
-                   "the computed section's reads reach attributes the "
-                   "program registered no override on");
-        }
+    expect("a read of another mode",
+           RigExecTestEdited(result.bytes,
+                             [&](fb::RigExecWireFile *edited) {
+                                 edited->pose->avarBindings[constant]
+                                     .read->mode = fb::ReadMode::Resolved;
+                             }),
+           invalid + field + ".read: read mode 1 is not admitted here");
+    CHECK(!file->pose->ladders.empty());
+    if (!file->pose->ladders.empty()) {
+        expect("a required read left out",
+               RigExecTestEdited(result.bytes,
+                                 [](fb::RigExecWireFile *edited) {
+                                     edited->pose->ladders[0].restSpace.reset();
+                                 }),
+               "malformed .rigexec: the FlatBuffers verifier refused it");
     }
 
     // An input refuses, changing nothing, a name the file does not list,
@@ -3608,41 +3585,13 @@ _FixturePath(const char *file)
         .string();
 }
 
-// \p bytes' section \p tag, decoded by \p decode; false when absent or
-// malformed.
-template <class T, class Decode>
-static bool
-_DecodeSection(const std::vector<uint8_t> &bytes, RigExecBinarySection tag,
-               T *out, Decode decode)
-{
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    if (!reader || !reader->FindSection(tag, &data, &size)) {
-        return false;
-    }
-    RigExecWireReader cursor(data, size);
-    return decode(&cursor, out, &error) && cursor.Exhausted();
-}
-
-// The provider slot \p path names in \p bytes' slot inventory, or -1.
+// The provider slot \p path names in \p file's slot inventory, or -1.
 static int
-_SlotOfPath(const std::vector<uint8_t> &bytes, const std::string &path,
-            RigExecWireSlotMeta *meta)
+_SlotOfPath(const fb::RigExecWireFile &file, const std::string &path)
 {
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    if (!reader ||
-        !_DecodeSection(bytes, RigExecBinarySection::SlotMeta, meta,
-                        RigExecWireDecodeSlotMeta)) {
-        return -1;
-    }
-    std::string text;
-    for (size_t i = 0; i < meta->paths.size(); ++i) {
-        if (reader->GetString(meta->paths[i], &text) && text == path) {
+    const std::vector<uint32_t> &paths = file.slotMeta->paths;
+    for (size_t i = 0; i < paths.size(); ++i) {
+        if (RigExecFormatPathText(file, paths[i]) == path) {
             return int(i);
         }
     }
@@ -3650,7 +3599,7 @@ _SlotOfPath(const std::vector<uint8_t> &bytes, const std::string &path,
 }
 
 static bool
-_SameVersion(const RigExecWireFrameVersion &read, int anchor,
+_SameVersion(const fb::RigExecWireFrameVersion &read, int anchor,
              const std::vector<int32_t> &recompose)
 {
     return read.anchor == anchor && read.recompose == recompose;
@@ -3663,9 +3612,9 @@ _SameVersion(const RigExecWireFrameVersion &read, int anchor,
 // reads P recomposed from its avars before P's switch, so its parent
 // version is {-1, {P}}. In the carry fixture P hangs under G and S's space
 // Q under P, so S reads {G, {P}} for its parent and {G, {P, Q}} for its
-// space. The dial fixture's indices are keyed with no default: each is a
-// live input the record directory lists, whose record holds its key at
-// the bake time.
+// space. The dial fixture's indices are keyed with no default: each is an
+// Animated input whose default is its key at the bake time, which its
+// switch reads per run.
 static void
 TestSpaceSwitchVersionFixtures()
 {
@@ -3693,28 +3642,22 @@ TestSpaceSwitchVersionFixtures()
     };
 
     RigExecBakeResult nested;
-    if (bake("space_switch_nested.usda", &nested)) {
-        RigExecWireSlotMeta meta;
-        const int p = _SlotOfPath(nested.bytes, "/Rig/Controls/P", &meta);
-        const int s = _SlotOfPath(nested.bytes, "/Rig/Controls/P/S", &meta);
-        const int c =
-            _SlotOfPath(nested.bytes, "/Rig/Controls/P/S/C", &meta);
-        std::vector<RigExecWireSpaceSwitch> switches;
-        CHECK(p >= 0 && s >= 0 && c >= 0 &&
-              _DecodeSection(
-                  nested.bytes, RigExecBinarySection::SpaceSwitch,
-                  &switches,
-                  [&](RigExecWireReader *cursor,
-                      std::vector<RigExecWireSpaceSwitch> *out,
-                      std::string *error) {
-                      return RigExecWireDecodeSpaceSwitches(
-                          cursor, meta.parent, out, error);
-                  }));
+    const std::unique_ptr<fb::RigExecWireFile> nestedFile =
+        bake("space_switch_nested.usda", &nested)
+            ? RigExecTestUnpack(nested.bytes)
+            : nullptr;
+    if (nestedFile) {
+        const int p = _SlotOfPath(*nestedFile, "/Rig/Controls/P");
+        const int s = _SlotOfPath(*nestedFile, "/Rig/Controls/P/S");
+        const int c = _SlotOfPath(*nestedFile, "/Rig/Controls/P/S/C");
+        const std::vector<fb::RigExecWireSpaceSwitch> &switches =
+            nestedFile->pose->spaceSwitches;
+        CHECK(p >= 0 && s >= 0 && c >= 0);
         CHECK(switches.size() == 2);
-        for (const RigExecWireSpaceSwitch &sw : switches) {
+        for (const fb::RigExecWireSpaceSwitch &sw : switches) {
             if (sw.slot == s) {
                 // P resolves after S: S reads it before its switch.
-                CHECK(_SameVersion(sw.parentRead, -1, {p}));
+                CHECK(_SameVersion(*sw.parentRead, -1, {p}));
             } else {
                 // C, under S, resolves before P: its last version.
                 CHECK(sw.slot == p && sw.sourceReads.size() == 2 &&
@@ -3724,10 +3667,13 @@ TestSpaceSwitchVersionFixtures()
     }
 
     RigExecBakeResult carry;
-    if (bake("space_switch_carry.usda", &carry)) {
-        RigExecWireSlotMeta meta;
+    const std::unique_ptr<fb::RigExecWireFile> carryFile =
+        bake("space_switch_carry.usda", &carry)
+            ? RigExecTestUnpack(carry.bytes)
+            : nullptr;
+    if (carryFile) {
         const auto slot = [&](const char *path) {
-            return _SlotOfPath(carry.bytes, path, &meta);
+            return _SlotOfPath(*carryFile, path);
         };
         const int other = slot("/Rig/Controls/Other");
         const int g = slot("/Rig/Controls/G");
@@ -3735,34 +3681,27 @@ TestSpaceSwitchVersionFixtures()
         const int q = slot("/Rig/Controls/G/P/Q");
         const int s = slot("/Rig/Controls/G/P/S");
         const int c = slot("/Rig/Controls/G/P/S/C");
-        std::vector<RigExecWireSpaceSwitch> switches;
+        const std::vector<fb::RigExecWireSpaceSwitch> &switches =
+            carryFile->pose->spaceSwitches;
         CHECK(other >= 0 && g >= 0 && p >= 0 && q >= 0 && s >= 0 &&
-              c >= 0 &&
-              _DecodeSection(
-                  carry.bytes, RigExecBinarySection::SpaceSwitch, &switches,
-                  [&](RigExecWireReader *cursor,
-                      std::vector<RigExecWireSpaceSwitch> *out,
-                      std::string *error) {
-                      return RigExecWireDecodeSpaceSwitches(
-                          cursor, meta.parent, out, error);
-                  }));
+              c >= 0);
         CHECK(switches.size() == 2);
-        for (const RigExecWireSpaceSwitch &sw : switches) {
+        for (const fb::RigExecWireSpaceSwitch &sw : switches) {
             CHECK(sw.sourceReads.size() == 2);
             if (sw.sourceReads.size() != 2) {
                 continue;
             }
             if (sw.slot == s) {
                 // P resolves after S: P recomposed on G, then Q on that.
-                CHECK(_SameVersion(sw.parentRead, g, {p}));
+                CHECK(_SameVersion(*sw.parentRead, g, {p}));
                 CHECK(sw.spaceSlot == q &&
-                      _SameVersion(sw.spaceRead, g, {p, q}));
+                      _SameVersion(*sw.spaceRead, g, {p, q}));
                 CHECK(_SameVersion(sw.sourceReads[0], other, {}));
                 CHECK(_SameVersion(sw.sourceReads[1], -1, {}));
             } else {
-                CHECK(sw.slot == p && _SameVersion(sw.parentRead, g, {}) &&
+                CHECK(sw.slot == p && _SameVersion(*sw.parentRead, g, {}) &&
                       _SameVersion(sw.sourceReads[0], c, {}) &&
-                      _SameVersion(sw.spaceRead, -1, {}));
+                      _SameVersion(*sw.spaceRead, -1, {}));
             }
         }
     }
@@ -3771,47 +3710,45 @@ TestSpaceSwitchVersionFixtures()
     if (!bake("space_switch_dial.usda", &dial)) {
         return;
     }
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(dial.bytes.data(), dial.bytes.size(),
-                                  &error);
-    RigExecWireInputTable table;
-    CHECK(binary && _DecodeInputTable(dial.bytes, &table));
-    if (!binary || table.frames.size() != 1) {
-        CHECK(false);
+    const std::unique_ptr<fb::RigExecWireFile> dialFile =
+        RigExecTestUnpack(dial.bytes);
+    if (!dialFile) {
         return;
     }
     struct Dial {
         const char *path;
         std::array<double, 4> keys;
-        int64_t uid;
     };
-    std::vector<Dial> dials = {
-        {"/Rig/Controls/P.spaces:active", {0.0, 1.0, 0.5, 0.0}, -1},
-        {"/Rig/Controls/P/S.spaces:active", {0.5, 0.0, 1.0, 0.5}, -1}};
-    std::string text;
-    for (Dial &entry : dials) {
-        for (size_t k = 0; k < table.directory.size(); ++k) {
-            if (binary->GetString(table.directory[k].head, &text) &&
-                text == entry.path) {
-                CHECK(entry.uid < 0);
-                CHECK(table.directory[k].tag ==
-                      RigExecWireInput::Tag::Double);
-                entry.uid = int64_t(k);
+    const std::vector<Dial> dials = {
+        {"/Rig/Controls/P.spaces:active", {0.0, 1.0, 0.5, 0.0}},
+        {"/Rig/Controls/P/S.spaces:active", {0.5, 0.0, 1.0, 0.5}}};
+    for (const Dial &entry : dials) {
+        // Live: an Animated Double input holding its key at the bake time,
+        // which one switch's index reads per run.
+        const int64_t slot = _InputOfPath(*dialFile, entry.path);
+        CHECK(slot >= 0);
+        if (slot < 0) {
+            continue;
+        }
+        const fb::InputSlot &input = dialFile->inputs[size_t(slot)];
+        CHECK(input.type() == fb::InputTag::Double);
+        CHECK((input.flags() & uint8_t(fb::InputSlotFlags::Animated)) != 0);
+        double value = 0.0;
+        std::memcpy(&value, &dialFile->values[input.value()].bits,
+                    sizeof(value));
+        CHECK(value == entry.keys[0]);
+        size_t readers = 0;
+        for (const fb::RigExecWireSpaceSwitch &sw :
+             dialFile->pose->spaceSwitches) {
+            const fb::RigExecWireInput &read = *sw.active;
+            if (std::find(read.walk.begin(), read.walk.end(),
+                          uint32_t(slot)) != read.walk.end()) {
+                ++readers;
+                CHECK((read.flags & uint8_t(fb::InputReadFlags::Varying)) !=
+                      0);
             }
         }
-        // Live: listed in the directory, and recorded at its key at the
-        // bake time.
-        CHECK(entry.uid >= 0);
-        const RigExecWireFrameInputs &record = table.frames[0];
-        bool held = false;
-        for (size_t k = 0; k < record.uids.size() && entry.uid >= 0; ++k) {
-            if (record.uids[k] == uint32_t(entry.uid)) {
-                held = true;
-                CHECK(record.values[k].f64 == entry.keys[0]);
-            }
-        }
-        CHECK(held);
+        CHECK(readers == 1);
     }
     std::printf("space switch version fixtures: checked\n");
 }
@@ -3892,25 +3829,19 @@ TestHandBuiltSwitchReads()
     RigExecBakeResult result;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    RigExecWireSlotMeta meta;
-    const int pSlot =
-        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G/P", &meta);
-    const int sSlot =
-        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G/P/S", &meta);
-    const int armSlot =
-        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G/Arm", &meta);
-    const int gSlot =
-        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G", &meta);
-    std::vector<RigExecWireSpaceSwitch> switches;
-    CHECK(pSlot >= 0 && sSlot >= 0 && armSlot >= 0 && gSlot >= 0 &&
-          _DecodeSection(result.bytes, RigExecBinarySection::SpaceSwitch,
-                         &switches,
-                         [&](RigExecWireReader *cursor,
-                             std::vector<RigExecWireSpaceSwitch> *out,
-                             std::string *why) {
-                             return RigExecWireDecodeSpaceSwitches(
-                                 cursor, meta.parent, out, why);
-                         }));
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        RigExecTestUnpack(result.bytes);
+    if (!file) {
+        return;
+    }
+    const int pSlot = _SlotOfPath(*file, "/Asset/Rig/Controls/G/P");
+    const int sSlot = _SlotOfPath(*file, "/Asset/Rig/Controls/G/P/S");
+    const int armSlot = _SlotOfPath(*file, "/Asset/Rig/Controls/G/Arm");
+    const int gSlot = _SlotOfPath(*file, "/Asset/Rig/Controls/G");
+    const std::vector<fb::RigExecWireSpaceSwitch> &switches =
+        file->pose->spaceSwitches;
+    const size_t slotCount = file->slotMeta->paths.size();
+    CHECK(pSlot >= 0 && sSlot >= 0 && armSlot >= 0 && gSlot >= 0);
     CHECK(switches.size() == 1);
     if (pSlot < 0 || sSlot < 0 || armSlot < 0 || gSlot < 0 ||
         switches.size() != 1 ||
@@ -3920,7 +3851,7 @@ TestHandBuiltSwitchReads()
         return;
     }
     // Nothing above S is switched: the program reads last versions.
-    CHECK(_SameVersion(switches[0].parentRead, pSlot, {}));
+    CHECK(_SameVersion(*switches[0].parentRead, pSlot, {}));
     CHECK(_SameVersion(switches[0].sourceReads[0], armSlot, {}));
 
     enum class Rewrite { Parent, ParentAndSource, AnchoredParent };
@@ -3933,16 +3864,17 @@ TestHandBuiltSwitchReads()
             rewrite == Rewrite::Parent            ? "parent read"
             : rewrite == Rewrite::ParentAndSource ? "parent and source read"
                                                   : "anchored parent read";
-        std::vector<RigExecWireSpaceSwitch> handBuilt = switches;
-        handBuilt[0].parentRead = RigExecWireFrameVersion{anchor, {pSlot}};
-        if (rewriteSource) {
-            handBuilt[0].sourceReads[0] =
-                RigExecWireFrameVersion{-1, {armSlot}};
-        }
-        std::vector<uint8_t> payload;
-        CHECK(RigExecWireEncodeSpaceSwitches(handBuilt, &payload));
-        const std::vector<uint8_t> bytes = _ReplaceSection(
-            result.bytes, RigExecBinarySection::SpaceSwitch, payload);
+        const std::vector<uint8_t> bytes = RigExecTestEdited(
+            result.bytes, [&](fb::RigExecWireFile *edited) {
+                fb::RigExecWireSpaceSwitch &handBuilt =
+                    edited->pose->spaceSwitches[0];
+                handBuilt.parentRead->anchor = anchor;
+                handBuilt.parentRead->recompose = {pSlot};
+                if (rewriteSource) {
+                    handBuilt.sourceReads[0].anchor = -1;
+                    handBuilt.sourceReads[0].recompose = {armSlot};
+                }
+            });
         size_t movedFrames = 0;
         double largest = 0.0;
         for (const double frame : frames) {
@@ -3958,7 +3890,7 @@ TestHandBuiltSwitchReads()
             }
             RigExecBakedProgramImpl &B =
                 const_cast<RigExecBakedProgramImpl &>(baked->GetStepGraph());
-            CHECK(B.paths.size() == meta.paths.size() &&
+            CHECK(B.paths.size() == slotCount &&
                   B.paths[size_t(pSlot)] == p.GetPath() &&
                   B.paths[size_t(armSlot)] == arm.GetPath() &&
                   B.spaceSwitches.size() == 1 &&
@@ -4122,11 +4054,12 @@ TestSpaceSwitchIndexDrag()
     std::printf("%s: checked\n", name);
 }
 
-// Open refuses a SpaceSwitch section that reads a slot the inventory does
-// not hold, a recompose through a slot the compose has no avars for, and a
+// Open refuses a space switch that reads a slot the inventory does not
+// hold, a recompose through a slot the compose has no avars for, and a
 // version bound to a world source or a missing space; and refuses a cone
-// lookup table naming a cluster that is not there. Each is cut into the
-// carry fixture's bake, whose S switch reads {G, {P}} and {G, {P, Q}}.
+// lookup table naming a cluster that is not there. Each is edited into the
+// carry fixture's bake, whose S switch reads {G, {P}} and {G, {P, Q}}, and
+// refused by the format's validator naming the field.
 static void
 TestSpaceSwitchOpenRefusals()
 {
@@ -4145,23 +4078,18 @@ TestSpaceSwitchOpenRefusals()
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
     CHECK(_OpenError(result.bytes).empty());
-    RigExecWireSlotMeta meta;
-    const int g = _SlotOfPath(result.bytes, "/Rig/Controls/G", &meta);
-    const int p = _SlotOfPath(result.bytes, "/Rig/Controls/G/P", &meta);
-    const int s = _SlotOfPath(result.bytes, "/Rig/Controls/G/P/S", &meta);
-    std::vector<RigExecWireSpaceSwitch> switches;
-    RigExecWireCones cones;
-    CHECK(g >= 0 && p >= 0 && s >= 0 &&
-          _DecodeSection(result.bytes, RigExecBinarySection::SpaceSwitch,
-                         &switches,
-                         [&](RigExecWireReader *cursor,
-                             std::vector<RigExecWireSpaceSwitch> *out,
-                             std::string *why) {
-                             return RigExecWireDecodeSpaceSwitches(
-                                 cursor, meta.parent, out, why);
-                         }) &&
-          _DecodeSection(result.bytes, RigExecBinarySection::Cones, &cones,
-                         RigExecWireDecodeCones));
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        RigExecTestUnpack(result.bytes);
+    if (!file) {
+        return;
+    }
+    const int g = _SlotOfPath(*file, "/Rig/Controls/G");
+    const int p = _SlotOfPath(*file, "/Rig/Controls/G/P");
+    const int s = _SlotOfPath(*file, "/Rig/Controls/G/P/S");
+    const std::vector<fb::RigExecWireSpaceSwitch> &switches =
+        file->pose->spaceSwitches;
+    const fb::RigExecWireCones &cones = *file->cones;
+    CHECK(g >= 0 && p >= 0 && s >= 0);
     size_t at = switches.size();
     for (size_t k = 0; k < switches.size(); ++k) {
         if (switches[k].slot == s) {
@@ -4176,87 +4104,88 @@ TestSpaceSwitchOpenRefusals()
         CHECK(false);
         return;
     }
-    const int32_t slots = int32_t(meta.paths.size());
+    const int32_t slots = int32_t(file->slotMeta->paths.size());
     const auto expect = [&](const char *what,
                             const std::vector<uint8_t> &bytes,
                             const std::string &text) {
+        const std::string want = "invalid .rigexec: " + text;
         const std::string got = _OpenError(bytes);
-        if (got != text) {
+        if (got != want) {
             std::printf("%s, %s: open said '%s', expected '%s'\n", name,
-                        what, got.c_str(), text.c_str());
+                        what, got.c_str(), want.c_str());
             CHECK(false);
         }
     };
     const auto withSwitch =
-        [&](const std::function<void(RigExecWireSpaceSwitch &)> &edit) {
-            std::vector<RigExecWireSpaceSwitch> edited = switches;
-            edit(edited[at]);
-            std::vector<uint8_t> payload;
-            CHECK(RigExecWireEncodeSpaceSwitches(edited, &payload));
-            return _ReplaceSection(result.bytes,
-                                   RigExecBinarySection::SpaceSwitch,
-                                   payload);
+        [&](const std::function<void(fb::RigExecWireSpaceSwitch &)> &edit) {
+            return RigExecTestEdited(result.bytes,
+                                     [&](fb::RigExecWireFile *edited) {
+                                         edit(edited->pose->spaceSwitches[at]);
+                                     });
         };
-    const std::string noSlot = "space switch reads a version of no slot";
-    const std::string unread =
-        "space switch reads a version of a world source or a missing space";
+    const std::string row = "pose.space_switches[" + std::to_string(at) + "]";
+    const std::string range =
+        " out of range (" + std::to_string(slots) + ")";
+    const std::string unread = ": reads no slot, so its version is {-1, []}";
     expect("parent anchor past the slots",
-           withSwitch([&](RigExecWireSpaceSwitch &sw) {
-               sw.parentRead.anchor = slots;
+           withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
+               sw.parentRead->anchor = slots;
            }),
-           noSlot);
+           row + ".parent_read.anchor: " + std::to_string(slots) + range);
     expect("source anchor past the slots",
-           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+           withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
                sw.sourceReads[0].anchor = slots;
            }),
-           noSlot);
+           row + ".source_reads[0].anchor: " + std::to_string(slots) + range);
+    const size_t recomposed = switches[at].spaceRead->recompose.size();
     expect("space recompose past the slots",
-           withSwitch([&](RigExecWireSpaceSwitch &sw) {
-               sw.spaceRead.recompose.push_back(slots);
+           withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
+               sw.spaceRead->recompose.push_back(slots);
            }),
-           noSlot);
+           row + ".space_read.recompose[" + std::to_string(recomposed) +
+               "]: " + std::to_string(slots) + range);
     expect("space slot past the slots",
-           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+           withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
                sw.spaceSlot = slots;
            }),
-           "space switch names no space slot");
+           row + ".space_slot: " + std::to_string(slots) + range);
     expect("world source with a version",
-           withSwitch([&](RigExecWireSpaceSwitch &sw) {
-               sw.sourceReads[1] = RigExecWireFrameVersion{g, {}};
+           withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
+               sw.sourceReads[1].anchor = g;
+               sw.sourceReads[1].recompose.clear();
            }),
-           unread);
+           row + ".source_reads[1]" + unread);
     expect("world source with a recompose",
-           withSwitch([&](RigExecWireSpaceSwitch &sw) {
-               sw.sourceReads[1] = RigExecWireFrameVersion{-1, {p}};
+           withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
+               sw.sourceReads[1].anchor = -1;
+               sw.sourceReads[1].recompose = {p};
            }),
-           unread);
+           row + ".source_reads[1]" + unread);
     expect("missing space with a version",
-           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+           withSwitch([&](fb::RigExecWireSpaceSwitch &sw) {
                sw.spaceSlot = -1;
            }),
-           unread);
-    {
-        // P, which both of S's versions recompose, without the avars and
-        // ladder a recompose composes from.
-        RigExecWireSlotMeta flipped = meta;
-        flipped.slotKind[size_t(p)] = RigExecWireSlotKind::XformDerived;
-        std::vector<uint8_t> payload;
-        CHECK(RigExecWireEncodeSlotMeta(flipped, &payload));
-        expect("recompose of a slot that is not FirstFramePose",
-               _ReplaceSection(result.bytes, RigExecBinarySection::SlotMeta,
-                               payload),
-               noSlot);
-    }
+           row + ".space_read" + unread);
+    // P, which both of S's versions recompose, without the avars and
+    // ladder a recompose composes from.
+    expect("recompose of a slot that is not FirstFramePose",
+           RigExecTestEdited(result.bytes,
+                             [&](fb::RigExecWireFile *edited) {
+                                 edited->slotMeta->slotKind[size_t(p)] =
+                                     fb::SlotKind::XformDerived;
+                             }),
+           row + ".parent_read.recompose[0]: not a FirstFramePose slot");
     const int32_t clusters = int32_t(cones.cone.size());
     for (const int32_t cluster : {int32_t(-1), clusters}) {
-        RigExecWireCones edited = cones;
-        edited.avarCluster[size_t(s)] = cluster;
-        std::vector<uint8_t> payload;
-        CHECK(RigExecWireEncodeCones(edited, &payload));
         expect(cluster < 0 ? "avar cluster -1" : "avar cluster past the end",
-               _ReplaceSection(result.bytes, RigExecBinarySection::Cones,
-                               payload),
-               "a cone lookup table names no cluster");
+               RigExecTestEdited(result.bytes,
+                                 [&](fb::RigExecWireFile *edited) {
+                                     edited->cones->avarCluster[size_t(s)] =
+                                         cluster;
+                                 }),
+               "cones.avar_cluster[" + std::to_string(s) + "]: " +
+                   std::to_string(cluster) + " out of range (" +
+                   std::to_string(clusters) + ")");
     }
     std::printf("%s: checked\n", name);
 }
@@ -4285,8 +4214,8 @@ TestSpaceSwitchCarryDrag()
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, 0.0, &bytes, &error));
-    RigExecWireSlotMeta meta;
-    const int s = _SlotOfPath(bytes, "/Rig/Controls/G/P/S", &meta);
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    const int s = file ? _SlotOfPath(*file, "/Rig/Controls/G/P/S") : -1;
     RigExecTestPlayer player;
     const bool opened = player.Open(bytes, stage, &error);
     CHECK(opened && s >= 0);
@@ -4388,6 +4317,7 @@ main(int argc, char **argv)
         examplesDir = argv[1];
     }
     TestConstraintAndAvarReadersReplay(examplesDir);
+    TestConstraintArrayDiagnostics(examplesDir);
     TestSetInputOnPhasedReader();
     TestSetInputOnHop();
     TestSetInputOnLadderInput();

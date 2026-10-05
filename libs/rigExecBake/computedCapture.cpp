@@ -1,6 +1,7 @@
-// .rigexec Computed section producer.
+// .rigexec input collection.
 #include "rigExecBake/computedCapture.h"
-#include "rigExecBake/capture.h"
+#include "rigExecBake/pathTable.h"
+#include "rigExecBake/staticCapture.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frozenContextInternal.h"
@@ -30,16 +31,16 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace rigExec {
 namespace {
 
-using v4::InputTag;
+using InputTag = fb::InputTag;
 
 uint8_t
-_Bit(v4::InputReadFlags flag)
+_Bit(fb::InputReadFlags flag)
 {
     return uint8_t(flag);
 }
 
 uint8_t
-_Bit(v4::InputSlotFlags flag)
+_Bit(fb::InputSlotFlags flag)
 {
     return uint8_t(flag);
 }
@@ -77,87 +78,102 @@ _SlotTag(const UsdAttribute &attribute, InputTag *tag)
     return true;
 }
 
-v4::RigExecWireValue
+/// A value of \p tag holding zero: the member the tag names is allocated
+/// and zeroed, every other one stays null, as the pool stores it.
+fb::RigExecWireValue
 _Zero(InputTag tag)
 {
-    v4::RigExecWireValue value;
+    fb::RigExecWireValue value;
     value.tag = tag;
+    switch (tag) {
+    case InputTag::Matrix4d:
+        value.matrix = std::make_unique<RigExecWireMatrix4d>();
+        break;
+    case InputTag::Vec3d:
+        value.vec3d = std::make_unique<RigExecWireVec3d>();
+        break;
+    case InputTag::Vec3f:
+        value.vec3f = std::make_unique<RigExecWireVec3f>();
+        break;
+    default:
+        break;
+    }
     return value;
 }
 
-v4::RigExecWireValue
+fb::RigExecWireValue
 _Double(double d)
 {
-    v4::RigExecWireValue value = _Zero(InputTag::Double);
+    fb::RigExecWireValue value = _Zero(InputTag::Double);
     std::memcpy(&value.bits, &d, sizeof(d));
     return value;
 }
 
-v4::RigExecWireValue
+fb::RigExecWireValue
 _Float(float f)
 {
-    v4::RigExecWireValue value = _Zero(InputTag::Float);
+    fb::RigExecWireValue value = _Zero(InputTag::Float);
     uint32_t bits = 0;
     std::memcpy(&bits, &f, sizeof(f));
     value.bits = bits;
     return value;
 }
 
-v4::RigExecWireValue
+fb::RigExecWireValue
 _Bool(bool b)
 {
-    v4::RigExecWireValue value = _Zero(InputTag::Bool);
+    fb::RigExecWireValue value = _Zero(InputTag::Bool);
     value.bits = b ? 1 : 0;
     return value;
 }
 
-v4::RigExecWireValue
+fb::RigExecWireValue
 _Identity()
 {
-    v4::RigExecWireValue value = _Zero(InputTag::Matrix4d);
+    fb::RigExecWireValue value = _Zero(InputTag::Matrix4d);
     for (size_t i = 0; i < 4; ++i) {
-        value.matrix[i * 4 + i] = 1.0;
+        (*value.matrix)[i * 4 + i] = 1.0;
     }
     return value;
 }
 
-v4::PropertyValueType
+fb::PropertyValueType
 _PropertyType(RigExecBakedPropertyChainDesc::ValueType type)
 {
     using T = RigExecBakedPropertyChainDesc::ValueType;
     switch (type) {
     case T::Double:
-        return v4::PropertyValueType::Double;
+        return fb::PropertyValueType::Double;
     case T::Matrix4d:
-        return v4::PropertyValueType::Matrix4d;
+        return fb::PropertyValueType::Matrix4d;
     case T::Vec3f:
-        return v4::PropertyValueType::Vec3f;
+        return fb::PropertyValueType::Vec3f;
     default:
-        return v4::PropertyValueType::Float;
+        return fb::PropertyValueType::Float;
     }
 }
 
-v4::PropertyOp
+fb::PropertyOp
 _PropertyOp(bool valid, RigExecPropertyOp op)
 {
     if (!valid) {
-        return v4::PropertyOp::Invalid;
+        return fb::PropertyOp::Invalid;
     }
     switch (op) {
     case RigExecPropertyOp::Add:
-        return v4::PropertyOp::Add;
+        return fb::PropertyOp::Add;
     case RigExecPropertyOp::Multiply:
-        return v4::PropertyOp::Multiply;
+        return fb::PropertyOp::Multiply;
     case RigExecPropertyOp::Clamp:
-        return v4::PropertyOp::Clamp;
+        return fb::PropertyOp::Clamp;
     case RigExecPropertyOp::Remap:
-        return v4::PropertyOp::Remap;
+        return fb::PropertyOp::Remap;
     case RigExecPropertyOp::Blend:
-        return v4::PropertyOp::Blend;
+        return fb::PropertyOp::Blend;
     case RigExecPropertyOp::Curve:
-        return v4::PropertyOp::Curve;
+        return fb::PropertyOp::Curve;
     }
-    return v4::PropertyOp::Invalid;
+    return fb::PropertyOp::Invalid;
 }
 
 std::vector<RigExecWireVec2f>
@@ -174,13 +190,27 @@ _ToVec2fs(const std::vector<GfVec2f> &keys)
 /// Every read of a property revision.
 template <class Visit>
 void
-_ForEachRevisionRead(v4::PropertyRevision &revision, const Visit &visit)
+_ForEachRevisionRead(fb::RigExecWirePropertyRevision &revision,
+                     const Visit &visit)
 {
-    for (v4::RigExecWireInput *input :
-         {&revision.enabled, &revision.defaultWeight, &revision.value,
-          &revision.min, &revision.max}) {
+    for (fb::RigExecWireInput *input :
+         {revision.enabled.get(), revision.defaultWeight.get(),
+          revision.value.get(), revision.min.get(), revision.max.get()}) {
         visit(*input);
     }
+}
+
+/// A property revision with its five reads allocated.
+fb::RigExecWirePropertyRevision
+_NewPropertyRevision()
+{
+    fb::RigExecWirePropertyRevision revision;
+    for (std::unique_ptr<fb::RigExecWireInput> *input :
+         {&revision.enabled, &revision.defaultWeight, &revision.value,
+          &revision.min, &revision.max}) {
+        *input = std::make_unique<fb::RigExecWireInput>();
+    }
+    return revision;
 }
 
 std::vector<RigExecWireVec3f>
@@ -196,24 +226,24 @@ _ToVec3fs(const std::vector<GfVec3f> &points)
 
 void
 _ToAttributes(const std::vector<UsdAttribute> &attrs,
-              RigExecBinaryWriter *writer, std::vector<uint32_t> *paths,
+              RigExecBakePathTable *interner, std::vector<uint32_t> *paths,
               std::vector<uint8_t> *valid)
 {
     paths->reserve(attrs.size());
     valid->reserve(attrs.size());
     for (const UsdAttribute &attr : attrs) {
-        paths->push_back(attr ? writer->AddString(attr.GetPath().GetString())
-                              : 0);
+        paths->push_back(attr ? interner->Path(attr.GetPath()) : 0);
         valid->push_back(attr ? uint8_t(1) : uint8_t(0));
     }
 }
 
-/// Every read of a v4 weight object, so a walk rewrite cannot miss one.
+/// Every read slot of a weight object, in field order, so an allocation
+/// or a walk rewrite cannot miss one.
 template <class Visit>
 void
-_ForEachRead(v4::RigExecWireWeightObject &object, const Visit &visit)
+_ForEachReadSlot(fb::RigExecWireWeightObject &object, const Visit &visit)
 {
-    for (v4::RigExecWireInput *input :
+    for (std::unique_ptr<fb::RigExecWireInput> *input :
          {&object.defaultWeight, &object.driver, &object.scale, &object.bias,
           &object.strength, &object.invert, &object.falloffMin,
           &object.falloffMax, &object.scaleXPos, &object.scaleYPos,
@@ -224,14 +254,25 @@ _ForEachRead(v4::RigExecWireWeightObject &object, const Visit &visit)
     }
 }
 
+/// A weight object with its nineteen reads allocated.
+fb::RigExecWireWeightObject
+_NewWeightObject()
+{
+    fb::RigExecWireWeightObject object;
+    _ForEachReadSlot(object, [](std::unique_ptr<fb::RigExecWireInput> &input) {
+        input = std::make_unique<fb::RigExecWireInput>();
+    });
+    return object;
+}
+
 }  // namespace
 
 struct RigExecBakeComputedCapture::_State {
-    RigExecBinaryWriter *writer = nullptr;
+    RigExecBakePathTable *interner = nullptr;
     UsdStageRefPtr stage;
     const std::set<SdfPath> *chainTargets = nullptr;
     UsdTimeCode bakeTime;
-    RigExecWireComputed computed;
+    RigExecBakeInputs computed;
     std::map<std::string, uint32_t> valueIds;
     std::map<std::string, int32_t> arrayIds;
     /// Slots in first-reference order until Finish sorts them.
@@ -244,29 +285,10 @@ struct RigExecBakeComputedCapture::_State {
     std::vector<RigExecBakeTimeVaryingFact> timeVaryingFacts;
     std::vector<std::string> listedNames;
 
-    uint32_t Intern(const v4::RigExecWireValue &value)
+    uint32_t Intern(const fb::RigExecWireValue &value)
     {
-        std::string key(1, char(value.tag));
-        key.append(reinterpret_cast<const char *>(&value.bits),
-                   sizeof(value.bits));
-        switch (value.tag) {
-        case InputTag::Matrix4d:
-            key.append(reinterpret_cast<const char *>(value.matrix.data()),
-                       sizeof(double) * value.matrix.size());
-            break;
-        case InputTag::Vec3d:
-            key.append(reinterpret_cast<const char *>(value.vec3d.data()),
-                       sizeof(double) * value.vec3d.size());
-            break;
-        case InputTag::Vec3f:
-            key.append(reinterpret_cast<const char *>(value.vec3f.data()),
-                       sizeof(float) * value.vec3f.size());
-            break;
-        default:
-            break;
-        }
-        const auto found =
-            valueIds.emplace(key, uint32_t(computed.values.size()));
+        const auto found = valueIds.emplace(RigExecBakeValueKey(value),
+                                            uint32_t(computed.values.size()));
         if (found.second) {
             computed.values.push_back(value);
         }
@@ -280,7 +302,7 @@ struct RigExecBakeComputedCapture::_State {
         const auto found =
             arrayIds.emplace(key, int32_t(computed.vec3fArrays.size()));
         if (found.second) {
-            v4::RigExecWireVec3fArray array;
+            fb::RigExecWireVec3fArray array;
             array.v = _ToVec3fs(points);
             computed.vec3fArrays.push_back(std::move(array));
         }
@@ -292,7 +314,7 @@ struct RigExecBakeComputedCapture::_State {
     uint32_t ReadSlot(const UsdAttribute &a, InputTag tag, UsdTimeCode time,
                       bool *has)
     {
-        v4::RigExecWireValue value = _Zero(tag);
+        fb::RigExecWireValue value = _Zero(tag);
         switch (tag) {
         case InputTag::Double: {
             double v = 0.0;
@@ -325,7 +347,7 @@ struct RigExecBakeComputedCapture::_State {
         case InputTag::Token: {
             TfToken v;
             if ((*has = a.Get(&v, time))) {
-                value.bits = writer->AddString(v.GetString());
+                value.bits = interner->Token(v);
             }
             break;
         }
@@ -334,7 +356,7 @@ struct RigExecBakeComputedCapture::_State {
             if ((*has = a.Get(&v, time))) {
                 for (int r = 0; r < 4; ++r) {
                     for (int c = 0; c < 4; ++c) {
-                        value.matrix[size_t(r * 4 + c)] = v[r][c];
+                        (*value.matrix)[size_t(r * 4 + c)] = v[r][c];
                     }
                 }
             }
@@ -343,14 +365,14 @@ struct RigExecBakeComputedCapture::_State {
         case InputTag::Vec3d: {
             GfVec3d v(0.0);
             if ((*has = a.Get(&v, time))) {
-                value.vec3d = RigExecWireVec3d{v[0], v[1], v[2]};
+                *value.vec3d = RigExecWireVec3d{v[0], v[1], v[2]};
             }
             break;
         }
         case InputTag::Vec3f: {
             GfVec3f v(0.0f);
             if ((*has = a.Get(&v, time))) {
-                value.vec3f = RigExecWireVec3f{v[0], v[1], v[2]};
+                *value.vec3f = RigExecWireVec3f{v[0], v[1], v[2]};
             }
             break;
         }
@@ -383,7 +405,7 @@ struct RigExecBakeComputedCapture::_State {
 
     /// The walk GetAttribute takes from \p head, as slot ids (provisional
     /// until the slots are sorted), with what the classifier saw on it.
-    bool Walk(const UsdAttribute &head, v4::RigExecWireInput *out,
+    bool Walk(const UsdAttribute &head, fb::RigExecWireInput *out,
               SdfPathVector *paths, std::string *error)
     {
         bool viaChain = false, varying = false;
@@ -402,63 +424,63 @@ struct RigExecBakeComputedCapture::_State {
             out->walk.push_back(id);
         }
         if (viaChain) {
-            out->flags |= _Bit(v4::InputReadFlags::ViaChain);
+            out->flags |= _Bit(fb::InputReadFlags::ViaChain);
         }
-        if (varying && out->mode != v4::ReadMode::Baked) {
-            out->flags |= _Bit(v4::InputReadFlags::Varying);
+        if (varying && out->mode != fb::ReadMode::Baked) {
+            out->flags |= _Bit(fb::InputReadFlags::Varying);
         }
         return true;
     }
 
     /// A registered input's constant, tagged with the input's type.
-    v4::RigExecWireValue Value(float v) { return _Float(v); }
-    v4::RigExecWireValue Value(double v) { return _Double(v); }
-    v4::RigExecWireValue Value(bool v) { return _Bool(v); }
-    v4::RigExecWireValue Value(int v)
+    fb::RigExecWireValue Value(float v) { return _Float(v); }
+    fb::RigExecWireValue Value(double v) { return _Double(v); }
+    fb::RigExecWireValue Value(bool v) { return _Bool(v); }
+    fb::RigExecWireValue Value(int v)
     {
-        v4::RigExecWireValue value = _Zero(InputTag::Int);
+        fb::RigExecWireValue value = _Zero(InputTag::Int);
         value.bits = uint32_t(v);
         return value;
     }
-    v4::RigExecWireValue Value(const TfToken &v)
+    fb::RigExecWireValue Value(const TfToken &v)
     {
-        v4::RigExecWireValue value = _Zero(InputTag::Token);
-        value.bits = writer->AddString(v.GetString());
+        fb::RigExecWireValue value = _Zero(InputTag::Token);
+        value.bits = interner->Token(v);
         return value;
     }
-    v4::RigExecWireValue Value(const GfMatrix4d &v)
+    fb::RigExecWireValue Value(const GfMatrix4d &v)
     {
-        v4::RigExecWireValue value = _Zero(InputTag::Matrix4d);
+        fb::RigExecWireValue value = _Zero(InputTag::Matrix4d);
         for (int r = 0; r < 4; ++r) {
             for (int c = 0; c < 4; ++c) {
-                value.matrix[size_t(r * 4 + c)] = v[r][c];
+                (*value.matrix)[size_t(r * 4 + c)] = v[r][c];
             }
         }
         return value;
     }
-    v4::RigExecWireValue Value(const GfVec3d &v)
+    fb::RigExecWireValue Value(const GfVec3d &v)
     {
-        v4::RigExecWireValue value = _Zero(InputTag::Vec3d);
-        value.vec3d = RigExecWireVec3d{v[0], v[1], v[2]};
+        fb::RigExecWireValue value = _Zero(InputTag::Vec3d);
+        *value.vec3d = RigExecWireVec3d{v[0], v[1], v[2]};
         return value;
     }
 
     /// A registered program read, as RigExecBakedRead resolves it.
     template <class T>
-    bool Baked(const RigExecBakedInput<T> &input, v4::RigExecWireInput *out,
+    bool Baked(const RigExecBakedInput<T> &input, fb::RigExecWireInput *out,
                std::string *error)
     {
-        *out = v4::RigExecWireInput();
-        const v4::RigExecWireValue constant = Value(input.constant);
+        *out = fb::RigExecWireInput();
+        const fb::RigExecWireValue constant = Value(input.constant);
         out->tag = constant.tag;
-        out->mode = v4::ReadMode::Baked;
+        out->mode = fb::ReadMode::Baked;
         out->overrideIndex = int32_t(input.overrideIndex);
         out->constant = Intern(constant);
         if (input.varying) {
-            out->flags |= _Bit(v4::InputReadFlags::Varying);
+            out->flags |= _Bit(fb::InputReadFlags::Varying);
         }
         if (input.resolvedAttr) {
-            out->flags |= _Bit(v4::InputReadFlags::LongWay);
+            out->flags |= _Bit(fb::InputReadFlags::LongWay);
         }
         if (!input.head) {
             if (input.overrideIndex >= 0) {
@@ -502,12 +524,12 @@ struct RigExecBakeComputedCapture::_State {
     /// back as \p fallback: the oracle's _ResolvedRead, and every assembly
     /// read that resolves through the generation's inputs.
     bool Resolved(const UsdAttribute &head,
-                  const v4::RigExecWireValue &fallback,
-                  v4::RigExecWireInput *out, std::string *error)
+                  const fb::RigExecWireValue &fallback,
+                  fb::RigExecWireInput *out, std::string *error)
     {
-        *out = v4::RigExecWireInput();
+        *out = fb::RigExecWireInput();
         out->tag = fallback.tag;
-        out->mode = v4::ReadMode::Resolved;
+        out->mode = fb::ReadMode::Resolved;
         out->constant = Intern(fallback);
         if (!head) {
             return true;
@@ -518,7 +540,7 @@ struct RigExecBakeComputedCapture::_State {
 
     /// An envelope read, as the oracle's _ResolvedRead resolves it.
     bool Resolved(const UsdAttribute &head, float fallback,
-                  v4::RigExecWireInput *out, std::string *error)
+                  fb::RigExecWireInput *out, std::string *error)
     {
         return Resolved(head, _Float(fallback), out, error);
     }
@@ -527,24 +549,24 @@ struct RigExecBakeComputedCapture::_State {
     /// attribute through GetAttribute's walk (Resolved), an unconnected one
     /// from its own path (Pinned over the attribute alone), a missing one
     /// as \p fallback (an empty Pinned walk).
-    bool Property(const UsdAttribute &head, const v4::RigExecWireValue &fallback,
-                  v4::RigExecWireInput *out, std::string *error)
+    bool Property(const UsdAttribute &head, const fb::RigExecWireValue &fallback,
+                  fb::RigExecWireInput *out, std::string *error)
     {
-        *out = v4::RigExecWireInput();
+        *out = fb::RigExecWireInput();
         out->tag = fallback.tag;
-        out->mode = v4::ReadMode::Pinned;
+        out->mode = fb::ReadMode::Pinned;
         out->constant = Intern(fallback);
         if (!head) {
             return true;
         }
         if (head.HasAuthoredConnections()) {
-            out->mode = v4::ReadMode::Resolved;
+            out->mode = fb::ReadMode::Resolved;
         }
         SdfPathVector paths;
         if (!Walk(head, out, &paths, error)) {
             return false;
         }
-        if (out->mode == v4::ReadMode::Pinned && out->walk.size() != 1) {
+        if (out->mode == fb::ReadMode::Pinned && out->walk.size() != 1) {
             *error = "input " + head.GetPath().GetString() +
                      " has no connection but its walk leaves it";
             return false;
@@ -554,8 +576,8 @@ struct RigExecBakeComputedCapture::_State {
 };
 
 RigExecBakeComputedCapture::RigExecBakeComputedCapture(
-    RigExecRigEvaluator &evaluator, const RigExecBakeCapture &records,
-    double time, RigExecBinaryWriter *writer, std::string *error)
+    RigExecRigEvaluator &evaluator, double time,
+    RigExecBakePathTable *interner, std::string *error)
     : _state(std::make_unique<_State>())
 {
     auto Fail = [&](const std::string &what) {
@@ -564,18 +586,17 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
     };
     const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
-    if (!baked || !writer) {
+    if (!baked || !interner) {
         Fail("no baked program standing to capture from");
         return;
     }
     const RigExecBakedProgramImpl &B = baked->GetStepGraph();
     _State &S = *_state;
-    S.writer = writer;
+    S.interner = interner;
     S.stage = B.stage;
     S.chainTargets = &B.chainTargets;
     S.bakeTime = UsdTimeCode(time);
-    RigExecWireComputed &C = S.computed;
-    C.bakeTime = S.bakeTime.GetValue();
+    RigExecBakeInputs &C = S.computed;
     S.Intern(_Double(0.0));
     C.vec3fArrays.emplace_back();
     S.arrayIds.emplace(std::string(), 0);
@@ -597,16 +618,16 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         return;
     }
 
-    // The step-backed objects, in the geometry section's order, read as
-    // the program reads them.
+    // The step-backed objects, in the program's order, read as the program
+    // reads them.
     const auto token = [&](const TfToken &t) {
-        return writer->AddString(t.GetString());
+        return interner->Token(t);
     };
     C.weightObjects.reserve(B.weightObjects.size() + envelopes.size());
     for (const RigExecBakedProgramImpl::WeightObject &object :
          B.weightObjects) {
-        v4::RigExecWireWeightObject wire;
-        wire.path = writer->AddString(object.path.GetString());
+        fb::RigExecWireWeightObject wire = _NewWeightObject();
+        wire.path = interner->Path(object.path);
         wire.type = token(object.type);
         wire.representation = token(object.representation);
         wire.rangePolicy = token(object.rangePolicy);
@@ -615,41 +636,41 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         wire.base = int32_t(object.base);
         wire.inputs.assign(object.inputs.begin(), object.inputs.end());
         wire.combineMode = token(object.combineMode);
-        _ToAttributes(object.combineTargetPoints, writer,
+        _ToAttributes(object.combineTargetPoints, interner,
                       &wire.combineTargetPoints, &wire.combineTargetValid);
         wire.costElements = uint64_t(object.costElements);
         wire.providerSlot = int32_t(object.providerSlot);
         wire.planeAxis = token(object.planeAxis);
         wire.planeBounds = token(object.planeBounds);
-        _ToAttributes(object.targetPoints, writer, &wire.targetPoints,
+        _ToAttributes(object.targetPoints, interner, &wire.targetPoints,
                       &wire.targetValid);
-        _ToAttributes(object.samplePoints, writer, &wire.samplePoints,
+        _ToAttributes(object.samplePoints, interner, &wire.samplePoints,
                       &wire.sampleValid);
-        _ToAttributes(object.curvePoints, writer, &wire.curvePoints,
+        _ToAttributes(object.curvePoints, interner, &wire.curvePoints,
                       &wire.curveValid);
         wire.falloffCurve = object.falloffCurve;
         const std::pair<const RigExecBakedInput<float> *,
-                        v4::RigExecWireInput *>
+                        fb::RigExecWireInput *>
             reads[] = {
-                {&object.defaultWeight, &wire.defaultWeight},
-                {&object.driver, &wire.driver},
-                {&object.scale, &wire.scale},
-                {&object.bias, &wire.bias},
-                {&object.strength, &wire.strength},
-                {&object.invert, &wire.invert},
-                {&object.falloffMin, &wire.falloffMin},
-                {&object.falloffMax, &wire.falloffMax},
-                {&object.scaleXPos, &wire.scaleXPos},
-                {&object.scaleYPos, &wire.scaleYPos},
-                {&object.scaleZPos, &wire.scaleZPos},
-                {&object.scaleXNeg, &wire.scaleXNeg},
-                {&object.scaleYNeg, &wire.scaleYNeg},
-                {&object.scaleZNeg, &wire.scaleZNeg},
-                {&object.scaleX, &wire.scaleX},
-                {&object.scaleY, &wire.scaleY},
-                {&object.scaleZ, &wire.scaleZ},
-                {&object.extentU, &wire.extentU},
-                {&object.extentV, &wire.extentV},
+                {&object.defaultWeight, wire.defaultWeight.get()},
+                {&object.driver, wire.driver.get()},
+                {&object.scale, wire.scale.get()},
+                {&object.bias, wire.bias.get()},
+                {&object.strength, wire.strength.get()},
+                {&object.invert, wire.invert.get()},
+                {&object.falloffMin, wire.falloffMin.get()},
+                {&object.falloffMax, wire.falloffMax.get()},
+                {&object.scaleXPos, wire.scaleXPos.get()},
+                {&object.scaleYPos, wire.scaleYPos.get()},
+                {&object.scaleZPos, wire.scaleZPos.get()},
+                {&object.scaleXNeg, wire.scaleXNeg.get()},
+                {&object.scaleYNeg, wire.scaleYNeg.get()},
+                {&object.scaleZNeg, wire.scaleZNeg.get()},
+                {&object.scaleX, wire.scaleX.get()},
+                {&object.scaleY, wire.scaleY.get()},
+                {&object.scaleZ, wire.scaleZ.get()},
+                {&object.extentU, wire.extentU.get()},
+                {&object.extentV, wire.extentV.get()},
             };
         for (const auto &read : reads) {
             if (!S.Baked(*read.first, read.second, &why)) {
@@ -664,9 +685,9 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     // object reads none of the volume fields; they carry the oracle's
     // fallbacks over an empty walk so every entry has one shape.
     for (const RigExecBakedEnvelopeObject &object : envelopes) {
-        v4::RigExecWireWeightObject wire;
+        fb::RigExecWireWeightObject wire = _NewWeightObject();
         wire.envelopeOnly = true;
-        wire.path = writer->AddString(object.path.GetString());
+        wire.path = interner->Path(object.path);
         wire.type = token(object.type);
         wire.representation = token(object.representation);
         wire.rangePolicy = token(object.rangePolicy);
@@ -677,14 +698,14 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         wire.combineMode = token(object.combineMode);
         wire.costElements = uint64_t(std::max<size_t>(object.values.size(), 1));
         const std::pair<const RigExecBakedEnvelopeObject::Read *,
-                        v4::RigExecWireInput *>
+                        fb::RigExecWireInput *>
             reads[] = {
-                {&object.defaultWeight, &wire.defaultWeight},
-                {&object.driver, &wire.driver},
-                {&object.scale, &wire.scale},
-                {&object.bias, &wire.bias},
-                {&object.strength, &wire.strength},
-                {&object.invert, &wire.invert},
+                {&object.defaultWeight, wire.defaultWeight.get()},
+                {&object.driver, wire.driver.get()},
+                {&object.scale, wire.scale.get()},
+                {&object.bias, wire.bias.get()},
+                {&object.strength, wire.strength.get()},
+                {&object.invert, wire.invert.get()},
             };
         for (const auto &read : reads) {
             if (!S.Resolved(read.first->head, read.first->fallback,
@@ -693,14 +714,14 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 return;
             }
         }
-        const std::pair<v4::RigExecWireInput *, float> unread[] = {
-            {&wire.falloffMin, 0.0f}, {&wire.falloffMax, 1.0f},
-            {&wire.scaleXPos, 1.0f},  {&wire.scaleYPos, 1.0f},
-            {&wire.scaleZPos, 1.0f},  {&wire.scaleXNeg, 1.0f},
-            {&wire.scaleYNeg, 1.0f},  {&wire.scaleZNeg, 1.0f},
-            {&wire.scaleX, 1.0f},     {&wire.scaleY, 1.0f},
-            {&wire.scaleZ, 1.0f},     {&wire.extentU, 1.0f},
-            {&wire.extentV, 1.0f},
+        const std::pair<fb::RigExecWireInput *, float> unread[] = {
+            {wire.falloffMin.get(), 0.0f}, {wire.falloffMax.get(), 1.0f},
+            {wire.scaleXPos.get(), 1.0f},  {wire.scaleYPos.get(), 1.0f},
+            {wire.scaleZPos.get(), 1.0f},  {wire.scaleXNeg.get(), 1.0f},
+            {wire.scaleYNeg.get(), 1.0f},  {wire.scaleZNeg.get(), 1.0f},
+            {wire.scaleX.get(), 1.0f},     {wire.scaleY.get(), 1.0f},
+            {wire.scaleZ.get(), 1.0f},     {wire.extentU.get(), 1.0f},
+            {wire.extentV.get(), 1.0f},
         };
         for (const auto &read : unread) {
             S.Resolved(UsdAttribute(), read.second, read.first, &why);
@@ -721,7 +742,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                        : envelopes[i - B.weightObjects.size()].type;
         RigExecWeightOracleFacts facts;
         RigExecBakedDescribeWeightOracle(evaluator, path, S.bakeTime, &facts);
-        v4::RigExecWireWeightObject &wire = C.weightObjects[i];
+        fb::RigExecWireWeightObject &wire = C.weightObjects[i];
         wire.samplesInFlight = facts.samplesInFlight;
         wire.oracleSamples =
             facts.haveSamples ? S.InternPoints(facts.samples) : -1;
@@ -770,7 +791,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     C.propertyChains.reserve(chainDescs.size());
     for (const RigExecBakedPropertyChainDesc &desc : chainDescs) {
         using ValueType = RigExecBakedPropertyChainDesc::ValueType;
-        v4::PropertyChain chain;
+        fb::RigExecWirePropertyChain chain;
         chain.valueType = _PropertyType(desc.valueType);
         if (!S.Slot(desc.target, "property chain " + desc.target.GetString(),
                     &chain.target, &why)) {
@@ -779,7 +800,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
         // value, min and max as the chain's arm reads them: float for a
         // double chain too, which is computed in float.
-        v4::RigExecWireValue operand = _Float(0.0f);
+        fb::RigExecWireValue operand = _Float(0.0f);
         if (desc.valueType == ValueType::Vec3f) {
             operand = _Zero(InputTag::Vec3f);
         } else if (desc.valueType == ValueType::Matrix4d) {
@@ -787,19 +808,20 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
         for (const RigExecBakedPropertyChainDesc::Revision &r :
              desc.revisions) {
-            v4::PropertyRevision revision;
-            revision.mover = writer->AddString(r.mover.GetString());
+            fb::RigExecWirePropertyRevision revision =
+                _NewPropertyRevision();
+            revision.mover = interner->Path(r.mover);
             revision.op = _PropertyOp(r.opValid, r.op);
             const bool matrix = desc.valueType == ValueType::Matrix4d;
-            if (!S.Property(r.enabled, _Bool(true), &revision.enabled,
+            if (!S.Property(r.enabled, _Bool(true), revision.enabled.get(),
                             &why) ||
                 !S.Property(r.defaultWeight, _Float(1.0f),
-                            &revision.defaultWeight, &why) ||
-                !S.Property(r.value, operand, &revision.value, &why) ||
+                            revision.defaultWeight.get(), &why) ||
+                !S.Property(r.value, operand, revision.value.get(), &why) ||
                 !S.Property(matrix ? UsdAttribute() : r.minimum, operand,
-                            &revision.min, &why) ||
+                            revision.min.get(), &why) ||
                 !S.Property(matrix ? UsdAttribute() : r.maximum, operand,
-                            &revision.max, &why)) {
+                            revision.max.get(), &why)) {
                 Fail(why);
                 return;
             }
@@ -832,7 +854,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     for (size_t c = 0; c < chainDescs.size(); ++c) {
         for (const RigExecBakedPropertyChainDesc::Phased &p :
              chainDescs[c].phased) {
-            v4::PhasedConsumer phased;
+            fb::RigExecWirePhasedConsumer phased;
             phased.chain = uint32_t(c);
             phased.consumerType = _PropertyType(p.consumerType);
             phased.applied = uint32_t(p.applied);
@@ -857,9 +879,8 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
     }
 
-    // The program's registered reads that cross a chain target: each reads
-    // the long way, through the chain results, and the frame records hold
-    // what it read under the input's uid.
+    // A registered read that crosses a chain target reads the long way, from
+    // its head: the walk the file stores starts there.
     bool readsOk = true;
     frozenDetail::_ForEachPatchableInput(B, [&](const auto &input) {
         if (!readsOk || !input.resolvedAttr) {
@@ -873,85 +894,62 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         if (!viaChain) {
             return;
         }
-        const std::string head = input.resolvedAttr.GetPath().GetString();
         if (!input.head ||
             input.head.GetPath() != input.resolvedAttr.GetPath()) {
-            why = "input " + head + " reads the long way from another "
-                  "attribute than its head";
+            why = "input " + input.resolvedAttr.GetPath().GetString() +
+                  " reads the long way from another attribute than its head";
             readsOk = false;
-            return;
-        }
-        const int64_t uid = records.FindUid(&input);
-        if (uid < 0) {
-            why = "input " + head + " reads through a property chain, but "
-                  "the frame records give it no uid";
-            readsOk = false;
-            return;
-        }
-        RigExecWireChainRead entry;
-        entry.uid = uint32_t(uid);
-        readsOk = S.Baked(input, &entry.read, &why);
-        if (readsOk) {
-            C.chainReads.push_back(std::move(entry));
         }
     });
     if (!readsOk) {
         Fail(why);
         return;
     }
-    std::sort(C.chainReads.begin(), C.chainReads.end(),
-              [](const RigExecWireChainRead &a,
-                 const RigExecWireChainRead &b) { return a.uid < b.uid; });
 
     // Every registered read, in the frozen context's walk over the
     // program's tables, so the list cannot drift from the program. The row
-    // and field each sits at in the runtime's tables come from the
-    // enumeration below, in the capture's field order; the two must name
-    // the same inputs.
+    // and field each sits at in the file's tables come from the
+    // enumeration below, in the tables' field order; the two must name the
+    // same inputs.
     {
-        using Family = RigExecWireRegisteredFamily;
+        using Family = RigExecBakeReadFamily;
         struct _Where {
             Family family;
             uint32_t object;
             uint32_t field;
-            int32_t avar;
         };
         std::map<const void *, _Where> where;
         const auto place = [&](const void *input, Family family,
-                               size_t object, size_t field, int64_t avar) {
-            where.emplace(input, _Where{family, uint32_t(object),
-                                        uint32_t(field), int32_t(avar)});
+                               size_t object, size_t field) {
+            where.emplace(input,
+                          _Where{family, uint32_t(object), uint32_t(field)});
         };
         for (size_t i = 0; i < B.avarBindings.size(); ++i) {
-            place(&B.avarBindings[i].input, Family::AvarBinding, i, 0,
-                  int64_t(B.avarBindings[i].slot));
+            place(&B.avarBindings[i].input, Family::AvarBinding, i, 0);
         }
         for (size_t i = 0; i < B.avarConstantBindings.size(); ++i) {
             place(&B.avarConstantBindings[i].input,
-                  Family::AvarConstantBinding, i, 0,
-                  int64_t(B.avarConstantBindings[i].slot));
+                  Family::AvarConstantBinding, i, 0);
         }
         for (size_t i = 0; i < B.ladders.size(); ++i) {
             const RigExecBakedProgramImpl::Ladder &ladder = B.ladders[i];
-            place(&ladder.restSpace, Family::Ladder, i, 0, -1);
-            place(&ladder.defaultSpace, Family::Ladder, i, 1, -1);
-            place(&ladder.posedSpace, Family::Ladder, i, 2, -1);
+            place(&ladder.restSpace, Family::Ladder, i, 0);
+            place(&ladder.defaultSpace, Family::Ladder, i, 1);
+            place(&ladder.posedSpace, Family::Ladder, i, 2);
             for (size_t k = 0; k < 6; ++k) {
-                place(&ladder.restAvars[k], Family::Ladder, i, 3 + k, -1);
-                place(&ladder.defaultAvars[k], Family::Ladder, i, 9 + k, -1);
+                place(&ladder.restAvars[k], Family::Ladder, i, 3 + k);
+                place(&ladder.defaultAvars[k], Family::Ladder, i, 9 + k);
             }
-            place(&ladder.rotationOrder, Family::Ladder, i, 15, -1);
+            place(&ladder.rotationOrder, Family::Ladder, i, 15);
         }
         for (size_t i = 0; i < B.spaceSwitches.size(); ++i) {
-            place(&B.spaceSwitches[i].activeInput, Family::SpaceSwitch, i, 0,
-                  -1);
+            place(&B.spaceSwitches[i].activeInput, Family::SpaceSwitch, i, 0);
         }
         for (size_t i = 0; i < B.poseInterpolators.size(); ++i) {
             const auto &interp = B.poseInterpolators[i];
-            place(&interp.enabled, Family::Interpolator, i, 0, -1);
+            place(&interp.enabled, Family::Interpolator, i, 0);
             for (size_t k = 0; k < interp.valueInputs.size(); ++k) {
-                place(&interp.valueInputs[k], Family::Interpolator, i, 1 + k,
-                      -1);
+                place(&interp.valueInputs[k], Family::Interpolator, i, 1 + k);
             }
         }
         for (size_t i = 0; i < B.solvers.size(); ++i) {
@@ -963,7 +961,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 &s.twist,          &s.minLengthRatio, &s.twistTurns,
                 &s.ribbonSampleCount, &s.ikSpace};
             for (size_t f = 0; f < std::size(fields); ++f) {
-                place(fields[f], Family::Solver, i, f, -1);
+                place(fields[f], Family::Solver, i, f);
             }
         }
         for (size_t i = 0; i < B.constraints.size(); ++i) {
@@ -977,7 +975,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 &c.aimVector, &c.upVector,      &c.rotationOffset,
                 &c.worldUpVector, &c.poleVector, &c.twistDegrees};
             for (size_t f = 0; f < std::size(fields); ++f) {
-                place(fields[f], Family::Constraint, i, f, -1);
+                place(fields[f], Family::Constraint, i, f);
             }
         }
         for (size_t i = 0; i < B.weightObjects.size(); ++i) {
@@ -990,7 +988,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 &w.scaleXNeg,     &w.scaleYNeg, &w.scaleZNeg, &w.scaleX,
                 &w.scaleY,        &w.scaleZ,    &w.extentU,   &w.extentV};
             for (size_t f = 0; f < std::size(fields); ++f) {
-                place(fields[f], Family::WeightObject, i, f, -1);
+                place(fields[f], Family::WeightObject, i, f);
             }
         }
         size_t visited = 0;
@@ -1008,12 +1006,10 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 readsOk = false;
                 return;
             }
-            RigExecWireRegisteredRead entry;
+            RigExecBakeRegisteredRead entry;
             entry.family = found->second.family;
             entry.object = found->second.object;
             entry.field = found->second.field;
-            entry.avar = found->second.avar;
-            entry.uid = int32_t(records.FindUid(&input));
             readsOk = S.Baked(input, &entry.read, &why);
             if (readsOk) {
                 C.registeredReads.push_back(std::move(entry));
@@ -1034,9 +1030,8 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     // The geometry assembly's own reads: every blend channel's weight (a
     // pose-driven channel reads it only when a value is published at the
     // weight itself) and its samples' activations, a revision's
-    // inputs:defaultWeight (RevisionStatic),
-    // and the scalar mover inputs the assemblers read through their
-    // connections and record under the head's path.
+    // inputs:defaultWeight (RevisionStatic), and the scalar mover inputs the
+    // assemblers read through their connections, keyed by the head's path.
     {
         const TfToken defaultWeightName("inputs:defaultWeight");
         const auto blendReads =
@@ -1045,7 +1040,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 for (size_t ch = 0; ch < revision.blendChannels.size();
                      ++ch) {
                     const auto &bound = revision.blendChannels[ch];
-                    RigExecWireBlendWeightRead entry;
+                    RigExecBakeBlendRead entry;
                     entry.chain = uint32_t(chain);
                     entry.revision = uint32_t(index);
                     entry.derived = derived;
@@ -1067,11 +1062,12 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 }
                 return true;
             };
-        // The record keys these reads by the head's path alone, so one
-        // attribute read as two types cannot be compared and is refused.
-        std::map<SdfPath, std::pair<v4::InputTag, bool>> pathSeen;
+        // The file keys these reads by the head's path alone, so one
+        // attribute read as two types, or as a float one site widens to
+        // double and another does not, is refused.
+        std::map<SdfPath, std::pair<fb::InputTag, bool>> pathSeen;
         const auto pathRead = [&](const UsdAttribute &a,
-                                  const v4::RigExecWireValue &fallback,
+                                  const fb::RigExecWireValue &fallback,
                                   bool widen) {
             if (!a) {
                 return true;
@@ -1086,9 +1082,8 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 }
                 return true;
             }
-            RigExecWirePathScalarRead entry;
-            entry.path = writer->AddString(a.GetPath().GetString());
-            entry.widen = widen;
+            RigExecBakePathScalarRead entry;
+            entry.path = interner->Path(a.GetPath());
             // Every site below reads like moverGraph.cpp's _Read: the
             // resolved walk, then the head's own value, then the fallback.
             entry.headFallback = true;
@@ -1098,11 +1093,11 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             C.pathScalarReads.push_back(std::move(entry));
             return true;
         };
-        // The sites moverGraph.cpp records with forceFrame: _Enabled on every
-        // authored mover that assembles parameters, the skin's elementSize
-        // and skinningMethod, the
-        // iterative movers' scalars (_RecordedInput), and a surface
-        // projector's dials and ray settings.
+        // The connection-following sites of moverGraph.cpp: _Enabled on
+        // every authored mover that assembles parameters, the skin's
+        // elementSize and skinningMethod, the iterative movers' scalars
+        // (_RecordedInput), and a surface projector's dials and ray
+        // settings.
         const auto moverReads =
             [&](const RigExecBakedProgramImpl::GeomRevision &revision) {
                 const UsdPrim &prim = revision.moverPrim;
@@ -1173,7 +1168,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             for (size_t r = 0; ok && r < chain.revisions.size(); ++r) {
                 const RigExecBakedProgramImpl::GeomRevision &revision =
                     chain.revisions[r];
-                RigExecWireDefaultWeightRead entry;
+                RigExecBakeDefaultWeightRead entry;
                 entry.chain = uint32_t(c);
                 entry.revision = uint32_t(r);
                 ok = blendReads(revision, c, r, false) &&
@@ -1209,8 +1204,9 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             resolved[size_t(index)] = 1;
         }
     }
-    for (const v4::PropertyChain &chain : C.propertyChains) {
-        for (const v4::PropertyRevision &revision : chain.revisions) {
+    for (const fb::RigExecWirePropertyChain &chain : C.propertyChains) {
+        for (const fb::RigExecWirePropertyRevision &revision :
+             chain.revisions) {
             if (revision.envelope >= 0) {
                 resolved[size_t(revision.envelope)] = 1;
             }
@@ -1233,7 +1229,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             S.timeVaryingFacts.push_back(
                 {objectPaths[i].GetString(), timeVarying[i].GetString()});
         }
-        const v4::RigExecWireWeightObject &wire = C.weightObjects[i];
+        const fb::RigExecWireWeightObject &wire = C.weightObjects[i];
         if (wire.base >= 0) {
             resolved[size_t(wire.base)] = 1;
         }
@@ -1267,62 +1263,72 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     for (auto &entry : S.slotIds) {
         entry.second = remap[entry.second];
     }
-    const auto remapWalk = [&](v4::RigExecWireInput &input) {
+    const auto remapWalk = [&](fb::RigExecWireInput &input) {
         for (uint32_t &slot : input.walk) {
             slot = remap[slot];
         }
     };
-    for (v4::RigExecWireWeightObject &object : C.weightObjects) {
-        _ForEachRead(object, remapWalk);
+    for (fb::RigExecWireWeightObject &object : C.weightObjects) {
+        _ForEachReadSlot(object,
+                         [&](std::unique_ptr<fb::RigExecWireInput> &input) {
+                             remapWalk(*input);
+                         });
     }
-    for (v4::PropertyChain &chain : C.propertyChains) {
+    for (fb::RigExecWirePropertyChain &chain : C.propertyChains) {
         chain.target = remap[chain.target];
-        for (v4::PropertyRevision &revision : chain.revisions) {
+        for (fb::RigExecWirePropertyRevision &revision : chain.revisions) {
             _ForEachRevisionRead(revision, remapWalk);
         }
     }
-    for (v4::PhasedConsumer &phased : C.phasedConsumers) {
+    for (fb::RigExecWirePhasedConsumer &phased : C.phasedConsumers) {
         phased.consumer = remap[phased.consumer];
         for (uint32_t &hop : phased.hops) {
             hop = remap[hop];
         }
     }
-    for (RigExecWireChainRead &entry : C.chainReads) {
+    for (RigExecBakeRegisteredRead &entry : C.registeredReads) {
         remapWalk(entry.read);
     }
-    for (RigExecWireRegisteredRead &entry : C.registeredReads) {
+    for (RigExecBakeBlendRead &entry : C.blendWeightReads) {
         remapWalk(entry.read);
-    }
-    for (RigExecWireBlendWeightRead &entry : C.blendWeightReads) {
-        remapWalk(entry.read);
-        for (v4::RigExecWireInput &activation : entry.activations) {
+        for (fb::RigExecWireInput &activation : entry.activations) {
             remapWalk(activation);
         }
     }
-    for (RigExecWireDefaultWeightRead &entry : C.defaultWeightReads) {
+    for (RigExecBakeDefaultWeightRead &entry : C.defaultWeightReads) {
         remapWalk(entry.read);
     }
-    for (RigExecWirePathScalarRead &entry : C.pathScalarReads) {
+    for (RigExecBakePathScalarRead &entry : C.pathScalarReads) {
         remapWalk(entry.read);
     }
-    C.inputs.reserve(S.slots.size());
+    // A slot's fields until its chain and phased consumer are known.
+    struct _SlotRow {
+        uint32_t name = 0;
+        uint32_t value = 0;
+        int32_t chain = -1;
+        int32_t phased = -1;
+        InputTag type = InputTag::Double;
+        uint8_t flags = 0;
+    };
+    std::vector<_SlotRow> rows;
+    rows.reserve(S.slots.size());
     for (size_t s = 0; s < S.slots.size(); ++s) {
         const UsdAttribute &a = S.slots[s];
-        v4::InputSlot slot;
-        slot.name = writer->AddString(names[order[s]]);
+        _SlotRow slot;
+        slot.name = interner->Path(a.GetPath());
         slot.type = S.slotTags[s];
         bool has = false;
         slot.value = S.ReadSlot(a, slot.type, S.bakeTime, &has);
-        slot.flags = _Bit(v4::InputSlotFlags::Listed);
+        slot.flags = _Bit(fb::InputSlotFlags::Listed);
         if (a.ValueMightBeTimeVarying() || a.GetNumTimeSamples() > 0) {
-            slot.flags |= _Bit(v4::InputSlotFlags::Animated);
+            slot.flags |= _Bit(fb::InputSlotFlags::Animated);
         }
         if (has) {
-            slot.flags |= _Bit(v4::InputSlotFlags::HasValue);
+            slot.flags |= _Bit(fb::InputSlotFlags::HasValue);
         }
-        C.inputs.push_back(slot);
+        rows.push_back(slot);
     }
-    C.listedInputs = uint32_t(C.inputs.size());
+    C.listedInputs = uint32_t(rows.size());
     S.listedNames.reserve(order.size());
     for (const uint32_t at : order) {
         S.listedNames.push_back(names[at]);
@@ -1330,7 +1336,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     // Each slot names the chain it is the target of and the phased consumer
     // publishing at it; one of each at most.
     for (size_t c = 0; c < C.propertyChains.size(); ++c) {
-        v4::InputSlot &slot = C.inputs[C.propertyChains[c].target];
+        _SlotRow &slot = rows[C.propertyChains[c].target];
         if (slot.chain >= 0) {
             Fail("two property chains share the target " +
                  names[order[C.propertyChains[c].target]]);
@@ -1339,7 +1345,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         slot.chain = int32_t(c);
     }
     for (size_t k = 0; k < C.phasedConsumers.size(); ++k) {
-        v4::InputSlot &slot = C.inputs[C.phasedConsumers[k].consumer];
+        _SlotRow &slot = rows[C.phasedConsumers[k].consumer];
         if (slot.phased >= 0) {
             Fail("two phased connections publish at " +
                  names[order[C.phasedConsumers[k].consumer]]);
@@ -1347,38 +1353,18 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
         slot.phased = int32_t(k);
     }
+    C.inputs.reserve(rows.size());
+    for (const _SlotRow &slot : rows) {
+        C.inputs.emplace_back(slot.name, slot.value, slot.chain, slot.phased,
+                              slot.type, slot.flags);
+    }
     _valid = true;
 }
 
 RigExecBakeComputedCapture::~RigExecBakeComputedCapture() = default;
 
-bool
-RigExecBakeComputedCapture::RecordFrame(double frame, std::string *error)
-{
-    if (!_valid) {
-        if (error) {
-            *error = "the computed capture is not armed";
-        }
-        return false;
-    }
-    _State &S = *_state;
-    RigExecWireComputedFrame record;
-    record.frame = frame;
-    record.values.reserve(S.slots.size());
-    record.hasValue.reserve(S.slots.size());
-    const UsdTimeCode time(frame);
-    for (size_t s = 0; s < S.slots.size(); ++s) {
-        bool has = false;
-        record.values.push_back(
-            S.ReadSlot(S.slots[s], S.slotTags[s], time, &has));
-        record.hasValue.push_back(has ? uint8_t(1) : uint8_t(0));
-    }
-    S.computed.frames.push_back(std::move(record));
-    return true;
-}
-
-const RigExecWireComputed &
-RigExecBakeComputedCapture::GetComputed() const
+const RigExecBakeInputs &
+RigExecBakeComputedCapture::GetInputs() const
 {
     return _state->computed;
 }

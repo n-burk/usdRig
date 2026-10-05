@@ -1,6 +1,5 @@
 // .rigexec path-read enumeration.
 #include "rigExecBake/revisionReads.h"
-#include "rigExecBake/capture.h"
 #include "rigExec/moverGraph.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -18,15 +17,12 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
-#include <limits>
-#include <map>
-#include <set>
 #include <utility>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
-// The names and fallbacks the recording sites use, spelled as they spell
-// them.
+// The names and fallbacks the assembly's read sites use, spelled as they
+// spell them.
 TF_DEFINE_PRIVATE_TOKENS(
     _readTokens,
     ((enabled, "inputs:enabled"))
@@ -81,8 +77,8 @@ namespace {
 // The sites read through the generation's resolved inputs, and so does the
 // enumeration: a connection walk that reaches a property chain's target
 // takes the chain's result, as the run's did. A key the overlay holds
-// itself, at a site that consults it, is one the recorder skips; it is
-// emitted marked overlaid.
+// itself, at a site that consults it, is a value the runtime recomputes; it
+// is emitted marked overlaid.
 struct _Enumeration {
     const RigExecResolvedInputs *resolved = nullptr;
     UsdTimeCode time;
@@ -91,7 +87,10 @@ struct _Enumeration {
     void Emit(const SdfPath &path, UsdTimeCode at, bool resolved,
               VtValue value, bool overlaid = false) const
     {
-        if (path.IsEmpty()) {
+        // A relationship aimed at a prim where an attribute belongs holds
+        // no value: the site reads its fallback, and so does the runtime,
+        // which finds no row.
+        if (path.IsEmpty() || !path.IsPropertyPath()) {
             return;
         }
         RigExecBakeRevisionRead read;
@@ -103,14 +102,14 @@ struct _Enumeration {
         (*sink)(std::move(read));
     }
 
-    // RigExecRecordStageRead's skip: the overlay holds the key itself.
+    // Whether the overlay holds the key itself.
     bool Holds(const SdfPath &path) const
     {
         return resolved && resolved->Find(path) != nullptr;
     }
 
-    // RigExecRecordStageRead over a missing attribute: known absent, keyed
-    // rest whatever the read's time.
+    // A missing attribute: known absent, keyed rest whatever the read's
+    // time.
     void Missing(const SdfPath &path) const
     {
         Emit(path, UsdTimeCode::Default(), false, VtValue());
@@ -118,8 +117,8 @@ struct _Enumeration {
 };
 
 // _RecordedInput: a scalar on the mover, read through the resolved inputs
-// (falling back to the raw value, then to the fallback) and recorded as
-// following connections.
+// (falling back to the raw value, then to the fallback), following
+// connections.
 template <class T>
 void
 _ResolvedInput(const _Enumeration &E, const UsdPrim &prim,
@@ -161,8 +160,8 @@ _ResolvedOrRaw(const _Enumeration &E, const UsdPrim &prim,
     E.Emit(a.GetPath(), at, /*resolved=*/false, VtValue(value));
 }
 
-// _Enabled: both arms record as connection-following; only the resolved
-// arm skips a key the overlay holds.
+// _Enabled: both arms are connection-following; only the resolved arm can
+// take a key the overlay holds.
 void
 _Enabled(const _Enumeration &E, const UsdPrim &prim, UsdTimeCode at)
 {
@@ -196,10 +195,10 @@ _RawAttribute(const _Enumeration &E, const UsdPrim &prim,
     }
 }
 
-// A raw read of a binding path through RigExecRecordStageRead (the wire's
-// rest curve, order, knots and bind coordinates): known absent, keyed rest,
-// when nothing stands there. With \p overlay the site first takes the
-// overlay's value at the path, unrecorded (the wire's bind coordinates).
+// A raw read of a binding path (the wire's rest curve, order, knots and
+// bind coordinates): known absent, keyed rest, when nothing stands there.
+// With \p overlay the site first takes the overlay's value at the path
+// (the wire's bind coordinates), which the runtime recomputes.
 template <class T>
 void
 _RawPath(const _Enumeration &E, const UsdStageRefPtr &stage,
@@ -224,10 +223,10 @@ _RawPath(const _Enumeration &E, const UsdStageRefPtr &stage,
     }
 }
 
-// The recording _Array: a typed array at an exact path, keyed by the path
-// at the read's own rest flag, absent or not. With \p overlay (every site
-// but the lattice's bind-time cage) the site first takes the overlay's
-// array at the path, unrecorded.
+// moverGraph.cpp's _Array: a typed array at an exact path, keyed by the
+// path at the read's own rest flag, absent or not. With \p overlay (every
+// site but the lattice's bind-time cage) the site first takes the overlay's
+// array at the path, which the runtime recomputes.
 template <class T>
 void
 _Array(const _Enumeration &E, const UsdPrim &prim, const SdfPath &path,
@@ -310,14 +309,16 @@ _RunOverlay(const RigExecBakedProgramImpl &program)
 
 // The assembly of one revision (moverGraph.cpp: RigExecAssembleMatrix-,
 // RigExecAssembleSkin- and RigExecAssembleParameters), every arm, past
-// every early return an input can take, over \p overlay.
+// every early return an input can take, over \p overlay. \p derived: a
+// derived target's revision, which keeps no epoch skin layout.
 void
 _Revision(const RigExecBakedProgramImpl &program,
           const RigExecResolvedInputs &overlay, _Enumeration E,
-          const RigExecBakedProgramImpl::GeomRevision &revision)
+          const RigExecBakedProgramImpl::GeomRevision &revision,
+          bool derived)
 {
     const UsdPrim &prim = revision.moverPrim;
-    // Every site keys off the mover prim, and none records without one.
+    // Every site keys off the mover prim, and none reads without one.
     if (!prim) {
         return;
     }
@@ -359,13 +360,17 @@ _Revision(const RigExecBakedProgramImpl &program,
         _ResolvedOrRaw(E, prim, _readTokens->skinningMethod,
                        _readTokens->classicLinear, at);
         // The per-frame layout, read when the topology cache refuses the
-        // mover.
-        _Array<int>(E, prim,
-                    prim.GetPath().AppendProperty(_readTokens->jointIndices),
-                    at);
-        _Array<float>(E, prim,
-                      prim.GetPath().AppendProperty(_readTokens->jointWeights),
-                      at);
+        // mover. A chain revision whose fixed layout the run resolved
+        // carries that layout instead, and no input reaches its arrays.
+        if (derived || !revision.skinTopologyFixed ||
+            !revision.topologyResolved || !revision.topology) {
+            _Array<int>(
+                E, prim,
+                prim.GetPath().AppendProperty(_readTokens->jointIndices), at);
+            _Array<float>(
+                E, prim,
+                prim.GetPath().AppendProperty(_readTokens->jointWeights), at);
+        }
         _ResolvedOrRaw(E, prim, _readTokens->elementSize, 1, at);
         return;
     }
@@ -424,7 +429,7 @@ _Revision(const RigExecBakedProgramImpl &program,
         break;
     case RigExecRevisionOp::Lattice:
         // The bind-time cage reads past the overlay; the live one through
-        // it. Both record.
+        // it. Both are keys.
         _Array<GfVec3f>(E, prim, binding.cagePoints, rest,
                         /*overlay=*/false);
         _Array<GfVec3f>(E, prim, binding.cagePoints, at);
@@ -477,8 +482,8 @@ _Revision(const RigExecBakedProgramImpl &program,
     }
 }
 
-// RigExecBakedWeightPacket's gathers, over \p overlay: recorded only when
-// the resolved read answers, so a failed read leaves no key (the runtime's
+// RigExecBakedWeightPacket's gathers, over \p overlay: a key only when the
+// resolved read answers, so a failed read leaves none (the runtime's
 // fallback to a chain base depends on that).
 void
 _Weight(const RigExecResolvedInputs &overlay, _Enumeration E,
@@ -516,10 +521,17 @@ RigExecBakeEnumerateRevisionReads(
     const RigExecBakedProgramImpl::GeomRevision &revision, double time,
     const RigExecBakeRevisionReadSink &sink)
 {
+    bool derived = false;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : program.chains) {
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &d :
+             chain.derived) {
+            derived = derived || &d.revision == &revision;
+        }
+    }
     _Enumeration E;
     E.time = UsdTimeCode(time);
     E.sink = &sink;
-    _Revision(program, _RunOverlay(program), E, revision);
+    _Revision(program, _RunOverlay(program), E, revision, derived);
 }
 
 void
@@ -552,142 +564,17 @@ RigExecBakeEnumerateProgramReads(const RigExecBakedProgramImpl &program,
     for (const RigExecBakedProgramImpl::GeomChain &chain : program.chains) {
         for (const RigExecBakedProgramImpl::GeomRevision &revision :
              chain.revisions) {
-            _Revision(program, overlay, E, revision);
+            _Revision(program, overlay, E, revision, false);
         }
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
-            _Revision(program, overlay, E, derived.revision);
+            _Revision(program, overlay, E, derived.revision, true);
         }
     }
     for (const RigExecBakedProgramImpl::WeightObject &weight :
          program.weightObjects) {
         _Weight(overlay, E, weight);
     }
-}
-
-bool
-RigExecBakeCheckPathReads(
-    const std::vector<RigExecWirePathRead> &recorded,
-    const std::vector<RigExecBakeRevisionRead> &enumerated,
-    const std::function<bool(uint32_t, std::string *)> &text,
-    RigExecBakePathReadCheck *check, std::string *error,
-    bool acceptUnenumerated)
-{
-    auto Fail = [&](const std::string &what) {
-        if (error) {
-            *error = what;
-        }
-        return false;
-    };
-    std::map<std::pair<std::string, bool>, std::vector<size_t>> keys;
-    for (size_t i = 0; i < enumerated.size(); ++i) {
-        keys[std::make_pair(enumerated[i].path.GetString(),
-                            enumerated[i].rest)]
-            .push_back(i);
-    }
-    if (check) {
-        check->recorded = recorded.size();
-        check->enumerated = keys.size();
-        check->unenumerated = 0;
-    }
-    // An id no string table hands out, for an enumerated token whose text
-    // is not the recorded one.
-    constexpr uint32_t noToken = std::numeric_limits<uint32_t>::max();
-    for (const RigExecWirePathRead &read : recorded) {
-        std::string path;
-        if (!text(read.path, &path)) {
-            return Fail("a recorded path read names string " +
-                        std::to_string(read.path) +
-                        ", which the string table lacks");
-        }
-        const std::string label = "path read " + path + " (" +
-                                  (read.wasDefault ? "rest" : "live") + ")";
-        const auto found =
-            keys.find(std::make_pair(path, read.wasDefault != 0));
-        if (found == keys.end()) {
-            if (acceptUnenumerated) {
-                if (check) {
-                    ++check->unenumerated;
-                }
-                continue;
-            }
-            return Fail(label +
-                        " recorded by the assembly but not enumerated");
-        }
-        // Tokens compare by text: the enumerated token takes the recorded
-        // id exactly when its text is the recorded text.
-        std::string recordedToken;
-        const bool haveToken =
-            read.value.tag == RigExecWirePathValue::Tag::Token &&
-            text(read.value.token, &recordedToken);
-        const auto intern = [&](const std::string &token) {
-            return haveToken && token == recordedToken ? read.value.token
-                                                       : noToken;
-        };
-        bool sameValue = false;
-        bool sameRoute = false;
-        for (const size_t index : found->second) {
-            const RigExecBakeRevisionRead &candidate = enumerated[index];
-            RigExecWirePathValue encoded;
-            if (!RigExecBakeEncodePathValue(candidate.value, intern,
-                                            &encoded)) {
-                return Fail(label +
-                            " enumerated with an unencodable value of type " +
-                            candidate.value.GetTypeName());
-            }
-            if (!RigExecBakeSamePathValue(encoded, read.value)) {
-                continue;
-            }
-            sameValue = true;
-            if (!read.forceFrame || candidate.resolved) {
-                sameRoute = true;
-                break;
-            }
-        }
-        if (!sameValue) {
-            return Fail(label + " enumerated with another value");
-        }
-        if (!sameRoute) {
-            return Fail(label + " recorded as connection-following but "
-                                "enumerated as a raw read");
-        }
-    }
-    return true;
-}
-
-bool
-RigExecBakeCompletePathReads(
-    const std::vector<RigExecBakeRevisionRead> &enumerated,
-    const std::function<uint32_t(const std::string &)> &intern,
-    std::vector<RigExecWirePathRead> *record, std::string *error)
-{
-    std::set<std::pair<uint32_t, uint8_t>> keys;
-    for (const RigExecWirePathRead &read : *record) {
-        keys.emplace(read.path, read.wasDefault);
-    }
-    for (const RigExecBakeRevisionRead &candidate : enumerated) {
-        if (candidate.overlaid) {
-            continue;
-        }
-        RigExecWirePathRead read;
-        read.path = intern(candidate.path.GetString());
-        read.wasDefault = candidate.rest ? uint8_t(1) : uint8_t(0);
-        if (!keys.emplace(read.path, read.wasDefault).second) {
-            continue;
-        }
-        read.forceFrame = candidate.resolved ? uint8_t(1) : uint8_t(0);
-        if (!RigExecBakeEncodePathValue(candidate.value, intern,
-                                        &read.value)) {
-            if (error) {
-                *error = "path read " + candidate.path.GetString() +
-                         " enumerated with an unencodable value of type " +
-                         candidate.value.GetTypeName();
-            }
-            return false;
-        }
-        record->push_back(std::move(read));
-    }
-    return true;
 }
 
 }  // namespace rigExec

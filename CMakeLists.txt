@@ -199,16 +199,7 @@ target_include_directories(rigExecFlatBuffers INTERFACE
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 add_library(rigExec::rigExecFlatBuffers ALIAS rigExecFlatBuffers)
 
-add_library(rigExecBinary STATIC
-    libs/rigExecBinary/container.cpp
-    libs/rigExecBinary/program.cpp
-    libs/rigExecBinary/pose.cpp
-    libs/rigExecBinary/geometry.cpp
-    libs/rigExecBinary/inputTable.cpp
-    libs/rigExecBinary/propertyChains.cpp
-    libs/rigExecBinary/external.cpp
-    libs/rigExecBinary/computed.cpp
-    libs/rigExecBinary/format.cpp)
+add_library(rigExecBinary STATIC libs/rigExecBinary/format.cpp)
 target_include_directories(rigExecBinary PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -230,6 +221,7 @@ add_library(rigExecRuntime STATIC
     libs/rigExecRuntime/geometry.cpp
     libs/rigExecRuntime/weights.cpp
     libs/rigExecRuntime/inputs.cpp
+    libs/rigExecRuntime/labels.cpp
     libs/rigExecRuntime/properties.cpp)
 target_include_directories(rigExecRuntime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -264,9 +256,10 @@ add_library(rigExec::rigExecSampler ALIAS rigExecSampler)
 add_library(rigExecBake SHARED
     libs/rigExecBake/bake.cpp
     libs/rigExecBake/serialize.cpp
-    libs/rigExecBake/capture.cpp
     libs/rigExecBake/computedCapture.cpp
+    libs/rigExecBake/pathTable.cpp
     libs/rigExecBake/revisionReads.cpp
+    libs/rigExecBake/staticCapture.cpp
     libs/rigExecBake/staticReport.cpp)
 target_include_directories(rigExecBake PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>

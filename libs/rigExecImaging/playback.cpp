@@ -86,6 +86,8 @@ RigExecBakedPlayback::RigExecBakedPlayback(
 {
 }
 
+RigExecBakedPlayback::~RigExecBakedPlayback() = default;
+
 bool
 RigExecBakedPlayback::Open(const std::string &resolvedPath,
                            std::string *error)

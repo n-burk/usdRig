@@ -730,7 +730,8 @@ table DomainPose {
   has_property_chains: bool;
   phased_reads: bool;
   publish_weight_fields: bool = true;
-  /// One per switched provider, in slot order.
+  /// One per switched provider, in resolution order: every switch's reads
+  /// refer only to versions produced by switches stored before it.
   space_switches: [SpaceSwitch] (native_inline);
   avar_bindings: [AvarBinding] (native_inline);
   /// The xform bases at bake_time, one per slot_meta.xform_slots entry.
@@ -779,8 +780,8 @@ table RevisionBinding {
   phases: [ReadPhase];
   transform_phase: ReadPhase (native_inline);
 }
-/// One sample of a blend channel: its stage handles, its epoch layout, and
-/// its activation and dense points at bake_time.
+/// One sample of a blend channel: its stage handles, its epoch layout, its
+/// dense points at bake_time and its activation read.
 table BlendSample {
   sample_path: uint;
   activation: uint;
@@ -796,13 +797,11 @@ table BlendSample {
   indices: [int];
   point_count: ulong;
   layout_valid: bool;
-  activation_value: F32 (native_inline);
   /// vec3f_arrays[]: the dense points at bake_time; a phased sample falls
   /// back to them.
   points_value: uint;
-  /// rigExec:activation (Resolved, Float, fallback 1), read every run
-  /// before the channel's samples are sorted by it; activation_value is
-  /// its value at bake_time.
+  /// rigExec:activation (Resolved, Float, fallback 1), read on every run
+  /// before the channel's samples are stable-sorted by it.
   activation_read: Input (required);
 }
 /// One blend channel, in accumulation order.
@@ -819,10 +818,13 @@ table BlendChannel {
 }
 /// One contiguous vertex range and the influence positions it indexes.
 table Chunk { begin: int; end: int; key: [int]; }
-/// One skin mover's per-point influence layout, sparse. Expanded, each
-/// point holds its kept (index, weight) entries in their original order,
-/// then (0, +0.0f) padding up to element_size. Kept: every entry whose
-/// weight is not zero.
+/// One skin mover's per-point influence layout, sparse. Kept: every entry
+/// except one whose index is 0 and whose weight is zero (either sign),
+/// which reads exactly as padding does. Expanded, each point holds its
+/// kept (index, weight) entries in their original order, then (0, +0.0f)
+/// padding up to element_size. RigExecFormatSparseTopology and
+/// RigExecFormatExpandTopology (rigExecBinary/format.h) are the two
+/// directions.
 table SkinTopology {
   element_size: int;
   point_count: ulong;
@@ -831,8 +833,9 @@ table SkinTopology {
   /// Kept count per point: counts8 when element_size <= 255, else counts16.
   counts8: [ubyte];
   counts16: [ushort];
-  /// 1, 2 or 4: which indices vector holds the kept indices; 4 also when
-  /// any index is negative.
+  /// 1, 2 or 4: which indices vector holds the kept indices. The writer
+  /// picks 1 when every kept index is in [0, 255], 2 when every one is in
+  /// [0, 65535], else 4, and 4 whenever one is negative.
   index_width: ubyte;
   indices8: [ubyte];
   indices16: [ushort];
@@ -911,8 +914,9 @@ table Revision {
   topology_resolved: bool;
   /// A surface projector target's shader dial properties.
   shader_dials: [uint];
-  /// A surface projector target's static mesh world inverse; the identity
-  /// when unused.
+  /// A surface projector target's static mesh world inverse. The writer
+  /// stores the identity when it is unused; the object API's default is
+  /// zeros.
   mesh_world_inverse: Matrix4d (native_inline);
   /// <mover>.inputs:defaultWeight (Resolved, Float, fallback 1) on a main
   /// revision; absent on a derived one, which weighs 1.
@@ -1107,6 +1111,13 @@ table ExternalMover {
   /// vec3f_arrays[] per binding.phase_inputs entry: the authored points at
   /// bake_time, read when no producer publishes that phase.
   phased_fallback: [uint];
+  /// The frame bytes the plugin encoded for its assembly at bake_time,
+  /// which its kernel applies on every run. Removed, with v2_frame_valid,
+  /// once kernels take the declared inputs.
+  v2_frame: [ubyte];
+  /// False when the assembly at bake_time failed: playback then fails the
+  /// mover, and v2_frame is empty.
+  v2_frame_valid: bool;
 }
 
 // -------------------------------------------------------------------- root

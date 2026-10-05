@@ -1,9 +1,9 @@
 // .rigexec baking: a compiled rigExec character as a USD-independent binary.
 // BakeToBinary runs the evaluator's baked program once, in full, at one time
 // T and serializes the epoch: the static data that run read, the input slots
-// with their values at T as the defaults, the steps and schedule, into the
-// sectioned container libs/rigExecBinary owns. A binary holds no animation;
-// a client drives it by setting inputs.
+// with their values at T as the defaults, the steps and schedule, into one
+// FlatBuffer (rigExecBinary/format.h). A binary holds no animation; a client
+// drives it by setting inputs.
 // A bake is of the PROGRAM, never of a fallback: the run must be answered by
 // the baked program, and an epoch the program cannot express fails naming
 // the feature (RigExecBakedProgram::IsBakeable reasons), the same contract
@@ -13,8 +13,7 @@
 #ifndef RIGEXEC_BAKE_H
 #define RIGEXEC_BAKE_H
 
-#include "rigExecBinary/container.h"
-
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -37,28 +36,26 @@ struct RigExecBakeOpts {
 
 /// What a bake produced.
 struct RigExecBakeResult {
-    /// The .rigexec file bytes, ready to write.
+    /// The .rigexec file bytes, ready to write: the FlatBuffer file,
+    /// written through RigExecFormatWrite and opened again with
+    /// RigExecFormatOpen before the bake returns.
     std::vector<uint8_t> bytes;
-    /// The bake's path reads: the entries its run recorded; the entries its
-    /// record holds, those plus every enumerated key the run's branches did
-    /// not reach; and the distinct keys of the assembly's enumeration. Every
-    /// recorded entry is an enumerated key with the same value, except the
-    /// ones a plugin mover's assembly records of its own (unenumerated).
-    size_t pathReadsRecorded = 0;
+    /// The file's path-read rows (a read row per connection-following
+    /// scalar read, a value row per other key), and the distinct (path,
+    /// rest) keys of the assembly's enumeration they come from
+    /// (RigExecBakeEnumerateProgramReads).
     size_t pathReadsWritten = 0;
     size_t pathReadsEnumerated = 0;
-    size_t pathReadsUnenumerated = 0;
 };
 
 /// Bakes \p evaluator's epoch to a .rigexec binary, or returns false with
 /// the reason: a non-finite time, a compile failure, an epoch the program
 /// cannot express (with the IsBakeable reasons), interactive overrides
 /// standing, an invalid generation, a run that did not come from the
-/// program or rebuilt it, a presentation that does not verify or names an
-/// input the file does not list, or a path read the run recorded that the
-/// assembly's enumeration (RigExecBakeEnumerateProgramReads) does not list
-/// with the same value, which names the read (a key no core assembly reads
-/// is accepted when the program holds plugin movers).
+/// program or rebuilt it, a plugin mover that cannot encode its payload, a
+/// presentation that does not verify or names an input the file does not
+/// list, or a program the FlatBuffer file cannot hold or whose file does
+/// not open again.
 ///
 /// The caller sets the evaluation mode BEFORE calling -- Baked, the way
 /// rigExecPose honors --mode -- and this compiles, checks bakeability,

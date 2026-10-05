@@ -9,6 +9,7 @@
 // replays from the wire geometry tables. Bitwise: same ops in the same
 // order, float stays float.
 
+#include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
 #include "rigExecMath/deltaMushKernel.h"
 #include "rigExecMath/wrinkleKernel.h"
@@ -122,6 +123,102 @@ RrGeoKindToken(int op)
     default: return nullptr;
     }
 }
+
+// The mover-relative attributes the assemblers read, each a property of
+// the revision's mover prim, named as the bake's path-read enumeration
+// spells them. Open resolves every revision's to its property node and
+// path-read rows.
+enum RrGeoAttr : int {
+    RrGeoAttrEnabled = 0,
+    RrGeoAttrWeightBlend,
+    RrGeoAttrPointFrame,
+    RrGeoAttrDriverDeltaFrame,
+    RrGeoAttrJointIndices,
+    RrGeoAttrJointWeights,
+    RrGeoAttrElementSize,
+    RrGeoAttrSkinningMethod,
+    RrGeoAttrDivisions,
+    RrGeoAttrRestPoints,
+    RrGeoAttrIterations,
+    RrGeoAttrStep,
+    RrGeoAttrPinBorders,
+    RrGeoAttrDistanceWeight,
+    RrGeoAttrDisplacement,
+    RrGeoAttrTopology,
+    RrGeoAttrPinPoints,
+    RrGeoAttrNeighborDistance,
+    RrGeoAttrRestLengthScale,
+    RrGeoAttrStretchStiffness,
+    RrGeoAttrCompressionStiffness,
+    RrGeoAttrBendStiffness,
+    RrGeoAttrMaxDisplacement,
+    RrGeoAttrTangentPlaneCollisions,
+    RrGeoAttrTangentPlaneInset,
+    RrGeoAttrWrinkleScale,
+    RrGeoAttrSmoothingIterations,
+    RrGeoAttrDriverWeights,
+    RrGeoAttrDriverBaseWeights,
+    RrGeoAttrDropoffDistance,
+    RrGeoAttrRayOrigin,
+    RrGeoAttrRayDirection,
+    RrGeoAttrRayUp,
+    RrGeoAttrShaderOffset,
+    RrGeoAttrProjectionMode,
+    RrGeoAttrCount,
+};
+
+// Property names, in RrGeoAttr order.
+constexpr const char *RrGeoAttrNames[RrGeoAttrCount] = {
+    "inputs:enabled",
+    "rigExec:weightBlend",
+    "rigExec:pointFrame",
+    "rigExec:driverDeltaFrame",
+    "rigExec:jointIndices",
+    "rigExec:jointWeights",
+    "rigExec:elementSize",
+    "rigExec:skinningMethod",
+    "rigExec:divisions",
+    "inputs:restPoints",
+    "inputs:iterations",
+    "inputs:step",
+    "inputs:pinBorders",
+    "inputs:distanceWeight",
+    "inputs:displacement",
+    "inputs:topology",
+    "inputs:pinPoints",
+    "inputs:neighborDistance",
+    "inputs:restLengthScale",
+    "inputs:stretchStiffness",
+    "inputs:compressionStiffness",
+    "inputs:bendStiffness",
+    "inputs:maxDisplacement",
+    "inputs:tangentPlaneCollisions",
+    "inputs:tangentPlaneInset",
+    "inputs:wrinkleScale",
+    "inputs:smoothingIterations",
+    "inputs:driverWeights",
+    "inputs:driverBaseWeights",
+    "inputs:dropoffDistance",
+    "rigExec:rayOrigin",
+    "rigExec:rayDirection",
+    "rigExec:rayUp",
+    "rigExec:shaderOffset",
+    "rigExec:projectionMode",
+};
+
+// The stage handles of a revision's binding the assemblers read.
+enum RrGeoBinding : int {
+    RrGeoBindTopologyCounts = 0,
+    RrGeoBindTopologyIndices,
+    RrGeoBindCagePoints,
+    RrGeoBindSurfacePoints,
+    RrGeoBindBindCoords,
+    RrGeoBindDriverCurvePoints,
+    RrGeoBindDriverCurveOrder,
+    RrGeoBindDriverCurveKnots,
+    RrGeoBindWidths,
+    RrGeoBindCount,
+};
 
 RrMat4d
 RrGeoIdentity()
@@ -2162,10 +2259,12 @@ RrGeoApplySkinKernelWithTransforms(
     return RrGeoApplySkinKernelRange(p, transforms, 0, count, pts);
 }
 
+// One sample as the gather consumes it. `points` (the dense points, empty
+// for a sparse sample) is Open's conversion and is never null.
 struct RrGeoBlendSampleData {
     float activation = 1.0f;
     std::shared_ptr<const RrGeoBlendLayout> layout;
-    std::vector<RrVec3f> points;
+    const std::vector<RrVec3f> *points = nullptr;
 };
 
 struct RrGeoBlendChannel {
@@ -2192,7 +2291,7 @@ RrGeoAccumulateBlendSample(const RrGeoBlendSampleData &sample,
         return;
     }
     for (size_t i = 0; i < base.size(); ++i) {
-        (*deltas)[i] += (sample.points[i] - base[i]) * scale;
+        (*deltas)[i] += ((*sample.points)[i] - base[i]) * scale;
     }
 }
 
@@ -2216,8 +2315,8 @@ RrGeoSumBlendChannels(const std::vector<RrGeoBlendChannel> &channels,
                 sample.layout
                     ? (sample.layout->valid &&
                        sample.layout->pointCount == base.size() &&
-                       sample.points.empty())
-                    : sample.points.size() == base.size();
+                       sample.points->empty())
+                    : sample.points->size() == base.size();
             if (!std::isfinite(sample.activation) ||
                 sample.activation <= 0 || !shapeOk ||
                 (k > 0 && sample.activation ==
@@ -2247,8 +2346,8 @@ RrGeoSumBlendChannels(const std::vector<RrGeoBlendChannel> &channels,
 
         if (!hiSample.layout && (!loSample || !loSample->layout)) {
             const std::vector<RrVec3f> *lo =
-                loSample ? &loSample->points : nullptr;
-            const std::vector<RrVec3f> &hiPts = hiSample.points;
+                loSample ? loSample->points : nullptr;
+            const std::vector<RrVec3f> &hiPts = *hiSample.points;
             for (size_t i = 0; i < base.size(); ++i) {
                 const RrVec3f dHi = hiPts[i] - base[i];
                 const RrVec3f dLo = lo ? (*lo)[i] - base[i] : RrVec3f(0.0f);
@@ -2755,8 +2854,8 @@ RrGeoStatusForParameters(const RrGeoMoverParameters &parameters,
 }  // namespace
 
 // Scratch: revision packets, influence tables, output buffers, chunks, skin
-// topologies, blend layouts and the path-read lookup. Mirrors
-// GeomChain/GeomRevision/GeomChunk.
+// topologies, blend layouts and points, base points and the resolved stage
+// reads. Mirrors GeomChain/GeomRevision/GeomChunk.
 
 struct RrGeometryScratch {
     struct Chunk {
@@ -2813,9 +2912,32 @@ struct RrGeometryScratch {
         bool weightFieldPublished = false;
         std::vector<RrVec3f> lastAuxPoints;
         std::string resultStatus;
-        Revision() { transform.SetIdentity(); }
+        // The stage reads the assembly makes, resolved at Open. Per
+        // mover-relative attribute, its property node (0: none); per
+        // binding handle, its path. Per time (0 live, 1 rest) and read,
+        // its path-read row (-1: none, the site reads its fallback); and
+        // each shader dial's live row.
+        std::array<uint32_t, RrGeoAttrCount> attrPath{};
+        std::array<std::array<int32_t, RrGeoAttrCount>, 2> attrRead;
+        std::array<uint32_t, RrGeoBindCount> bindingPath{};
+        std::array<std::array<int32_t, RrGeoBindCount>, 2> bindingRead;
+        std::vector<int32_t> dialRead;
+        Revision()
+        {
+            transform.SetIdentity();
+            for (std::array<int32_t, RrGeoAttrCount> &rows : attrRead) {
+                rows.fill(-1);
+            }
+            for (std::array<int32_t, RrGeoBindCount> &rows : bindingRead) {
+                rows.fill(-1);
+            }
+        }
     };
     struct Chain {
+        // The base points the bake captured, converted at Open; haveBase
+        // is false when the file holds none.
+        std::vector<RrVec3f> base;
+        bool haveBase = false;
         std::vector<RrVec3f> lastBase;
         bool haveResult = false;
         std::vector<RrVec3f> result;
@@ -2827,6 +2949,8 @@ struct RrGeometryScratch {
         uint32_t scheduleCount = 0;
     };
     struct Derived {
+        std::vector<RrVec3f> base;
+        bool haveBase = false;
         std::vector<RrVec3f> lastBase;
         Revision revision;
         std::vector<RrVec3f> result;
@@ -2837,23 +2961,38 @@ struct RrGeometryScratch {
         uint32_t scheduleCount = 0;
     };
 
-    bool stringsIndexed = false;
-    std::unordered_map<std::string, uint32_t> stringToId;
-    std::unordered_map<uint32_t, std::string> idToText;
-    std::map<std::pair<uint32_t, uint8_t>, const RigExecWirePathValue *>
-        pathReads;
-    // The connection-following scalars this run, in the Computed section's
-    // pathScalarReads order; pathReads points at them in place of the
-    // recorded values.
-    std::vector<RigExecWirePathValue> pathReadValues;
-    std::map<std::pair<uint32_t, uint32_t>, const RigExecWireRefusedLayout *>
-        refusedLayouts;
+    // The program's path-read table (RrProgram::pathReads), whose read rows
+    // the prologue evaluates and whose rows the resolved reads index.
+    const std::vector<RrPathRead> *pathReads = nullptr;
+    // Per chain, per revision (blendLayouts) or derived target
+    // (derivedBlendLayouts), per binding channel, per sample: a sparse
+    // sample's layout, built at Open; null for a dense sample or one with
+    // no layout.
+    using SampleLayouts =
+        std::vector<std::vector<std::shared_ptr<const RrGeoBlendLayout>>>;
+    std::vector<std::vector<SampleLayouts>> blendLayouts;
+    std::vector<std::vector<SampleLayouts>> derivedBlendLayouts;
+    // The same shape for the dense points each sample consumed at the bake
+    // time, converted at Open, one vector per pool entry: noPoints for a
+    // sparse sample or one the file holds no points for.
+    using SamplePoints =
+        std::vector<std::vector<const std::vector<RrVec3f> *>>;
+    std::vector<std::vector<SamplePoints>> blendPoints;
+    std::vector<std::vector<SamplePoints>> derivedBlendPoints;
+    std::map<uint32_t, std::vector<RrVec3f>> blendPointPool;
+    std::vector<RrVec3f> noPoints;
     std::vector<Chain> chains;
     std::vector<Derived> derived;
     std::unordered_map<uint64_t, RrGeoWireBasisEntry> wireBasis;
     std::vector<std::shared_ptr<const RrGeoSkinTopology>> epochTopologies;
     std::vector<std::shared_ptr<const RrGeoSkinTopology>>
         epochPartitionTopologies;
+
+    // The sample point tables point into noPoints and blendPointPool, so
+    // the scratch never moves or copies.
+    RrGeometryScratch() = default;
+    RrGeometryScratch(const RrGeometryScratch &) = delete;
+    RrGeometryScratch &operator=(const RrGeometryScratch &) = delete;
 };
 
 namespace {
@@ -2864,54 +3003,65 @@ RrGeoScratch(RrProgram *program)
     return static_cast<RrGeometryScratch *>(program->geo.get());
 }
 
-const RigExecWirePathValue *
-RrGeoPathRead(const RrGeometryScratch *scratch, uint32_t path, bool wasDefault)
-{
-    if (path == 0) {
-        return nullptr;
-    }
-    const auto it = scratch->pathReads.find(
-        std::make_pair(path, uint8_t(wasDefault ? 1 : 0)));
-    return it == scratch->pathReads.end() ? nullptr : it->second;
-}
-
-uint32_t
-RrGeoStringId(RrProgram *program, RrGeometryScratch *scratch,
-              const std::string &text)
-{
-    if (!scratch->stringsIndexed) {
-        for (uint32_t id = 0;; ++id) {
-            std::string entry;
-            if (!program->strings ||
-                !program->strings->GetString(id, &entry)) {
-                break;
-            }
-            scratch->stringToId.emplace(entry, id);
-        }
-        scratch->stringsIndexed = true;
-    }
-    const auto it = scratch->stringToId.find(text);
-    return it == scratch->stringToId.end() ? 0 : it->second;
-}
-
-struct RrGeoTextContext {
-    RrProgram *program = nullptr;
-    RrGeometryScratch *scratch = nullptr;
+// One stage read an assembler makes, resolved at Open: the attribute's path
+// id (0 when the file names none), its path-read row at the site's time
+// (-1: none, so the site reads its fallback), and whether that time is the
+// rest (Default) one.
+struct RrGeoRead {
+    uint32_t path = 0;
+    int32_t row = -1;
+    bool rest = false;
 };
 
+// Mover-relative attribute \p attr of revision \p rev, read at the rest
+// time when \p rest, else live.
+RrGeoRead
+RrGeoAttrRead(const RrGeometryScratch::Revision &rev, RrGeoAttr attr,
+              bool rest = false)
+{
+    RrGeoRead read;
+    read.path = rev.attrPath[size_t(attr)];
+    read.row = rev.attrRead[rest ? 1 : 0][size_t(attr)];
+    read.rest = rest;
+    return read;
+}
+
+// Binding handle \p which of revision \p rev.
+RrGeoRead
+RrGeoBindingRead(const RrGeometryScratch::Revision &rev, RrGeoBinding which,
+                 bool rest = false)
+{
+    RrGeoRead read;
+    read.path = rev.bindingPath[size_t(which)];
+    read.row = rev.bindingRead[rest ? 1 : 0][size_t(which)];
+    read.rest = rest;
+    return read;
+}
+
+const RrPathValue *
+RrGeoPathRead(const RrGeometryScratch *scratch, const RrGeoRead &read)
+{
+    if (read.row < 0) {
+        return nullptr;
+    }
+    return &(*scratch->pathReads)[size_t(read.row)].value;
+}
+
+// The snapshot store's path text: a path node's text, or token text an
+// input set interned. \p context is the RrProgram.
 const std::string *
 RrGeoSnapshotText(uint32_t id, void *context)
 {
-    RrGeoTextContext *ctx = static_cast<RrGeoTextContext *>(context);
-    auto it = ctx->scratch->idToText.find(id);
-    if (it != ctx->scratch->idToText.end()) {
-        return &it->second;
+    const RrProgram *program = static_cast<const RrProgram *>(context);
+    if (id < program->nodeText.size()) {
+        return &program->nodeText[id];
     }
-    std::string text;
-    if (!ctx->program->GetText(id, &text)) {
+    const RrInputState &state = program->inputState;
+    if (id < state.extraTokenBase ||
+        size_t(id - state.extraTokenBase) >= state.extraTokens.size()) {
         return nullptr;
     }
-    return &ctx->scratch->idToText.emplace(id, text).first->second;
+    return &state.extraTokens[size_t(id - state.extraTokenBase)];
 }
 
 RrGeoWeightPacket
@@ -2927,24 +3077,27 @@ RrGeoStorePacket(const RrProgram *program, const RrWeightPacket &packet)
     return out;
 }
 
+// A skin layout as the kernels read it: the sparse table expanded to its
+// dense rows. Null when the revision has none.
 std::shared_ptr<const RrGeoSkinTopology>
-RrGeoWireTopology(const RigExecWireSkinTopology &wire)
+RrGeoWireTopology(const RigExecWireSkinTopology *wire)
 {
-    if (!wire.hasTopology) {
+    if (!wire) {
         return nullptr;
     }
     auto topology = std::make_shared<RrGeoSkinTopology>();
-    topology->indices.assign(wire.indices.begin(), wire.indices.end());
-    topology->weights = wire.weights;
-    topology->elementSize = wire.elementSize;
-    topology->pointCount = size_t(wire.pointCount);
-    topology->influenceCount = size_t(wire.influenceCount);
-    topology->validated = wire.validated;
+    std::vector<int32_t> indices;
+    RigExecFormatExpandTopology(*wire, &indices, &topology->weights);
+    topology->indices.assign(indices.begin(), indices.end());
+    topology->elementSize = wire->elementSize;
+    topology->pointCount = size_t(wire->pointCount);
+    topology->influenceCount = size_t(wire->influenceCount);
+    topology->validated = wire->validated;
     return topology;
 }
 
 std::shared_ptr<const RrGeoBlendLayout>
-RrGeoWireLayout(const RigExecWireBlendChannel::Sample &wire)
+RrGeoWireLayout(const RigExecWireBlendSample &wire)
 {
     if (!wire.hasLayout) {
         return nullptr;
@@ -2960,20 +3113,6 @@ RrGeoWireLayout(const RigExecWireBlendChannel::Sample &wire)
     return layout;
 }
 
-std::shared_ptr<const RrGeoBlendLayout>
-RrGeoRefusedLayout(const RigExecWireRefusedLayout &wire)
-{
-    auto layout = std::make_shared<RrGeoBlendLayout>();
-    layout->offsets.reserve(wire.offsets.size());
-    for (const RigExecWireVec3f &p : wire.offsets) {
-        layout->offsets.push_back(RrVec3f(p[0], p[1], p[2]));
-    }
-    layout->indices.assign(wire.indices.begin(), wire.indices.end());
-    layout->pointCount = size_t(wire.pointCount);
-    layout->valid = wire.valid;
-    return layout;
-}
-
 // A typed stage read: the resolved-inputs overlay first (RrInputsOverlay:
 // a standing override or a property-chain result, exact type, as
 // RigExecResolvedInputs::GetAttribute checks it), then this run's stage
@@ -2981,30 +3120,29 @@ RrGeoRefusedLayout(const RigExecWireRefusedLayout &wire)
 // the recorded one), else the fallback. Array sites take the phase
 // overlay's points instead of the property results, which carry no arrays.
 bool
-RrGeoReadBool(const RrProgram *program,
-              const RrGeometryScratch *scratch, uint32_t path, bool wasDefault,
+RrGeoReadBool(const RrGeometryScratch *scratch, const RrGeoRead &at,
               bool fallback)
 {
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Bool) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Bool) {
         return read->boolean;
     }
-    (void)program;
     return fallback;
 }
 
 float
 RrGeoReadFloat(const RrProgram *program,
-               const RrGeometryScratch *scratch, uint32_t path, bool wasDefault,
+               const RrGeometryScratch *scratch, const RrGeoRead &at,
                float fallback)
 {
-    v4::RigExecWireValue held;
-    if (path != 0 &&
-        RrInputsOverlay(program, path, v4::InputTag::Float, &held)) {
+    RrWireValue held;
+    if (at.path != 0 &&
+        RrInputsOverlay(program, at.path, RigExecWireInputTag::Float,
+                        &held)) {
         return RrWireValueFloat(held);
     }
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Float) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Float) {
         return read->f32;
     }
     return fallback;
@@ -3012,63 +3150,66 @@ RrGeoReadFloat(const RrProgram *program,
 
 double
 RrGeoReadDouble(const RrProgram *program,
-                const RrGeometryScratch *scratch, uint32_t path,
-                bool wasDefault, double fallback)
+                const RrGeometryScratch *scratch, const RrGeoRead &at,
+                double fallback)
 {
-    v4::RigExecWireValue held;
-    if (path != 0 &&
-        RrInputsOverlay(program, path, v4::InputTag::Double, &held)) {
+    RrWireValue held;
+    if (at.path != 0 &&
+        RrInputsOverlay(program, at.path, RigExecWireInputTag::Double,
+                        &held)) {
         double value = 0.0;
         std::memcpy(&value, &held.bits, sizeof(value));
         return value;
     }
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Double) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Double) {
         return read->f64;
+    }
+    // A float attribute the site reads as a double, widened here.
+    if (read && read->tag == RrPathValue::Tag::Float) {
+        return double(read->f32);
     }
     return fallback;
 }
 
 std::string
 RrGeoReadToken(const RrProgram *program,
-               const RrGeometryScratch *scratch, uint32_t path, bool wasDefault,
+               const RrGeometryScratch *scratch, const RrGeoRead &at,
                const std::string &fallback)
 {
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Token) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Token) {
         return program->TextOrEmpty(read->token);
     }
     return fallback;
 }
 
 void
-RrGeoReadVec3fArray(const RrProgram *program, RrGeometryScratch *scratch,
-                    uint32_t path, bool wasDefault,
+RrGeoReadVec3fArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
                     const RrSnapshotValue *overlay, std::vector<RrVec3f> *out)
 {
     if (overlay && overlay->tag == RrSnapshotValue::Tag::Points) {
         *out = overlay->points;
         return;
     }
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Vec3fArray) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Vec3fArray) {
         out->clear();
         out->reserve(read->vec3s.size());
         for (const RigExecWireVec3f &p : read->vec3s) {
             out->push_back(RrVec3f(p[0], p[1], p[2]));
         }
-        (void)program;
         return;
     }
     out->clear();
 }
 
 void
-RrGeoReadIntArray(const RrGeometryScratch *scratch, uint32_t path,
-                 bool wasDefault, std::vector<int> *out)
+RrGeoReadIntArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
+                  std::vector<int> *out)
 {
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::IntArray) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::IntArray) {
         out->assign(read->ints.begin(), read->ints.end());
         return;
     }
@@ -3076,14 +3217,11 @@ RrGeoReadIntArray(const RrGeometryScratch *scratch, uint32_t path,
 }
 
 void
-RrGeoReadFloatArray(const RrProgram *program,
-                   const RrGeometryScratch *scratch, uint32_t path,
-                   bool wasDefault, bool overlay, std::vector<float> *out)
+RrGeoReadFloatArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
+                    std::vector<float> *out)
 {
-    (void)program;
-    (void)overlay;
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::FloatArray) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::FloatArray) {
         *out = read->floats;
         return;
     }
@@ -3091,11 +3229,11 @@ RrGeoReadFloatArray(const RrProgram *program,
 }
 
 void
-RrGeoReadVec2fArray(const RrGeometryScratch *scratch, uint32_t path,
-                   bool wasDefault, std::vector<RrVec2f> *out)
+RrGeoReadVec2fArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
+                    std::vector<RrVec2f> *out)
 {
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Vec2fArray) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Vec2fArray) {
         out->clear();
         out->reserve(read->vec2s.size());
         for (const RigExecWireVec2f &p : read->vec2s) {
@@ -3107,11 +3245,11 @@ RrGeoReadVec2fArray(const RrGeometryScratch *scratch, uint32_t path,
 }
 
 void
-RrGeoReadDoubleArray(const RrGeometryScratch *scratch, uint32_t path,
-                    bool wasDefault, std::vector<double> *out)
+RrGeoReadDoubleArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
+                     std::vector<double> *out)
 {
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::DoubleArray) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::DoubleArray) {
         *out = read->doubles;
         return;
     }
@@ -3119,12 +3257,23 @@ RrGeoReadDoubleArray(const RrGeometryScratch *scratch, uint32_t path,
 }
 
 RrVec3i
-RrGeoReadVec3i(const RrGeometryScratch *scratch, uint32_t path, bool wasDefault,
+RrGeoReadVec3i(const RrGeometryScratch *scratch, const RrGeoRead &at,
                const RrVec3i &fallback)
 {
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Vec3i) {
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Vec3i) {
         return RrVec3i(read->vec3i[0], read->vec3i[1], read->vec3i[2]);
+    }
+    return fallback;
+}
+
+int
+RrGeoReadInt(const RrGeometryScratch *scratch, const RrGeoRead &at,
+             int fallback)
+{
+    const RrPathValue *read = RrGeoPathRead(scratch, at);
+    if (read && read->tag == RrPathValue::Tag::Int) {
+        return int(read->i32);
     }
     return fallback;
 }
@@ -3132,7 +3281,7 @@ RrGeoReadVec3i(const RrGeometryScratch *scratch, uint32_t path, bool wasDefault,
 // The revision's phase overlay: snapshot values for the binding's declared
 // phase inputs, looked up when the assembler reaches a phased site.
 const RrSnapshotValue *
-RrGeoPhaseOverlay(RrProgram *program, RrGeometryScratch *scratch,
+RrGeoPhaseOverlay(RrProgram *program,
                   const RigExecWireRevisionBinding &binding, uint32_t path)
 {
     for (size_t i = 0; i < binding.phaseInputs.size() &&
@@ -3145,12 +3294,57 @@ RrGeoPhaseOverlay(RrProgram *program, RrGeometryScratch *scratch,
         if (phase.kind == 0) {
             return nullptr;  // base: the stage value, no overlay
         }
-        RrGeoTextContext context{program, scratch};
         return program->store.runSnapshots.Lookup(
             path, phase.kind, phase.prim, binding.moverPath,
-            RrGeoSnapshotText, &context);
+            RrGeoSnapshotText, program);
     }
     return nullptr;
+}
+
+// Resolves revision \p wire's stage reads into \p rev at Open. A
+// mover-relative attribute is the property node of that name under the
+// revision's mover prim (none without a mover prim); every read is its
+// path's row at the site's time, none for path 0.
+void
+RrGeoResolveReads(const std::vector<RrPathRead> &table,
+                  const std::map<std::pair<uint32_t, int>, uint32_t>
+                      &properties,
+                  const RigExecWireRevision &wire,
+                  RrGeometryScratch::Revision *rev)
+{
+    const auto row = [&](uint32_t path, bool rest) {
+        return path == 0 ? int32_t(-1) : RrFindPathReadRow(table, path, rest);
+    };
+    for (int a = 0; a < RrGeoAttrCount; ++a) {
+        uint32_t path = 0;
+        if (wire.moverPrim != 0) {
+            const auto found =
+                properties.find(std::make_pair(wire.moverPrim, a));
+            if (found != properties.end()) {
+                path = found->second;
+            }
+        }
+        rev->attrPath[size_t(a)] = path;
+        rev->attrRead[0][size_t(a)] = row(path, false);
+        rev->attrRead[1][size_t(a)] = row(path, true);
+    }
+    const RigExecWireRevisionBinding &binding = *wire.binding;
+    const uint32_t handles[RrGeoBindCount] = {
+        binding.topologyCounts,    binding.topologyIndices,
+        binding.cagePoints,        binding.surfacePoints,
+        binding.bindCoords,        binding.driverCurvePoints,
+        binding.driverCurveOrder,  binding.driverCurveKnots,
+        binding.widths,
+    };
+    for (int b = 0; b < RrGeoBindCount; ++b) {
+        rev->bindingPath[size_t(b)] = handles[b];
+        rev->bindingRead[0][size_t(b)] = row(handles[b], false);
+        rev->bindingRead[1][size_t(b)] = row(handles[b], true);
+    }
+    rev->dialRead.clear();
+    for (const uint32_t dial : wire.shaderDials) {
+        rev->dialRead.push_back(row(dial, false));
+    }
 }
 
 }  // namespace
@@ -3161,6 +3355,43 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
     auto scratch = std::make_shared<RrGeometryScratch>();
     const RigExecWireDomainGeometry &geo = *program->geometry;
     RrStore &store = program->store;
+    const RrStatic &statics = program->statics;
+    if (!statics.file) {
+        if (error) {
+            *error = "geometry sizing needs the opened file";
+        }
+        return false;
+    }
+    const RigExecWireFile &file = *statics.file;
+
+    // The property node of each mover-relative attribute, by (prim,
+    // attribute). The validator holds every property under a prim and one
+    // node per (parent, name, kind).
+    std::map<std::pair<uint32_t, int>, uint32_t> properties;
+    {
+        std::map<std::string, int> wanted;
+        for (int a = 0; a < RrGeoAttrCount; ++a) {
+            wanted.emplace(RrGeoAttrNames[a], a);
+        }
+        std::vector<int> attrOfName(file.names.size(), -1);
+        for (size_t n = 0; n < file.names.size(); ++n) {
+            const auto found = wanted.find(file.names[n]);
+            if (found != wanted.end()) {
+                attrOfName[n] = found->second;
+            }
+        }
+        for (size_t i = 1; i < file.paths.size(); ++i) {
+            const RigExecWirePathNode &node = file.paths[i];
+            if (node.kind() != RigExecWirePathKind::Property ||
+                node.name() >= attrOfName.size() ||
+                attrOfName[node.name()] < 0) {
+                continue;
+            }
+            properties.emplace(
+                std::make_pair(node.parent(), attrOfName[node.name()]),
+                uint32_t(i));
+        }
+    }
 
     scratch->chains.resize(geo.chains.size());
     scratch->epochTopologies.resize(geo.revisionIndex.size());
@@ -3221,83 +3452,151 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
                     }
                 }
             }
+            // One expansion per layout: a partition the bake shared with
+            // the topology shares its expansion here too.
+            const std::shared_ptr<const RrGeoSkinTopology> topology =
+                RrGeoWireTopology(wire.topology.get());
             if (wire.topologyResolved) {
-                rev.topology = RrGeoWireTopology(wire.topology);
+                rev.topology = topology;
                 scratch->epochTopologies[id] = rev.topology;
             }
             rev.partitionTopology =
-                RrGeoWireTopology(wire.partitionTopology);
+                wire.partitionSameAsTopology
+                    ? topology
+                    : RrGeoWireTopology(wire.partitionTopology.get());
             scratch->epochPartitionTopologies[id] = rev.partitionTopology;
             rev.partitionElementSize = wire.partitionElementSize;
             rev.partitionIndexCount = size_t(wire.partitionIndexCount);
             rev.partitionPointCount = size_t(wire.partitionPointCount);
             store.revisionPublish[id].weightFieldTarget =
                 wire.weightFieldTarget;
+            RrGeoResolveReads(program->pathReads, properties, wire, &rev);
         }
     }
     scratch->derived.resize(geo.derivedIndex.size());
     for (size_t d = 0; d < geo.derivedIndex.size(); ++d) {
-        if (!RrGeoOpName(
-                geo.chains[size_t(geo.derivedIndex[d].first)]
-                    .derived[size_t(geo.derivedIndex[d].second)]
-                    .revision.op)) {
+        const RigExecWireRevision &wire =
+            *geo.chains[size_t(geo.derivedIndex[d].first)]
+                 .derived[size_t(geo.derivedIndex[d].second)]
+                 .revision;
+        if (!RrGeoOpName(wire.op)) {
             if (error) {
                 *error = "geometry references unknown revision op " +
-                         std::to_string(
-                             geo.chains[size_t(geo.derivedIndex[d].first)]
-                                 .derived[size_t(geo.derivedIndex[d].second)]
-                                 .revision.op);
+                         std::to_string(wire.op);
             }
             return false;
         }
+        RrGeoResolveReads(program->pathReads, properties, wire,
+                          &scratch->derived[d].revision);
     }
 
-    scratch->pathReadValues.resize(
-        program->inputState.computed->pathScalarReads.size());
+    // The chains' and derived targets' base points, converted once: the
+    // file holds the ones the bake captured, the same every run.
+    const auto convert = [](const std::vector<RigExecWireVec3f> &points,
+                            std::vector<RrVec3f> *out) {
+        out->reserve(points.size());
+        for (const RigExecWireVec3f &p : points) {
+            out->push_back(RrVec3f(p[0], p[1], p[2]));
+        }
+    };
+    for (size_t c = 0; c < geo.chains.size(); ++c) {
+        RrGeometryScratch::Chain &chain = scratch->chains[c];
+        const std::vector<RigExecWireVec3f> *base = statics.ChainBase(c);
+        chain.haveBase = base != nullptr;
+        if (base) {
+            convert(*base, &chain.base);
+        }
+    }
+    for (size_t d = 0; d < geo.derivedIndex.size(); ++d) {
+        RrGeometryScratch::Derived &derived = scratch->derived[d];
+        const std::vector<RigExecWireVec3f> *base = statics.DerivedBase(d);
+        derived.haveBase = base != nullptr;
+        if (base) {
+            convert(*base, &derived.base);
+        }
+    }
+
+    // Each sparse blend sample's layout, once, out of the sample's own
+    // fields, which also hold a layout the bake's cache refused.
+    const auto layoutsOf = [](const RigExecWireRevision &wire) {
+        RrGeometryScratch::SampleLayouts out(wire.blendChannels.size());
+        for (size_t c = 0; c < wire.blendChannels.size(); ++c) {
+            const RigExecWireBlendChannel &bound = wire.blendChannels[c];
+            out[c].resize(bound.samples.size());
+            for (size_t s = 0; s < bound.samples.size(); ++s) {
+                const RigExecWireBlendSample &sample = bound.samples[s];
+                if (!sample.blendShape) {
+                    continue;
+                }
+                out[c][s] = RrGeoWireLayout(sample);
+            }
+        }
+        return out;
+    };
+    scratch->blendLayouts.resize(geo.chains.size());
+    scratch->derivedBlendLayouts.resize(geo.chains.size());
+    for (size_t c = 0; c < geo.chains.size(); ++c) {
+        const RigExecWireChain &chain = geo.chains[c];
+        for (const RigExecWireRevision &wire : chain.revisions) {
+            scratch->blendLayouts[c].push_back(layoutsOf(wire));
+        }
+        for (const RigExecWireDerived &derived : chain.derived) {
+            scratch->derivedBlendLayouts[c].push_back(
+                layoutsOf(*derived.revision));
+        }
+    }
+    // Each dense sample's points, converted once per pool entry.
+    RrGeometryScratch &tables = *scratch;
+    const auto pointsOf = [&](const RigExecWireRevision &wire) {
+        RrGeometryScratch::SamplePoints out(wire.blendChannels.size());
+        for (size_t c = 0; c < wire.blendChannels.size(); ++c) {
+            const RigExecWireBlendChannel &bound = wire.blendChannels[c];
+            out[c].assign(bound.samples.size(), &tables.noPoints);
+            for (size_t s = 0; s < bound.samples.size(); ++s) {
+                const RigExecWireBlendSample &sample = bound.samples[s];
+                if (sample.blendShape) {
+                    continue;
+                }
+                auto found = tables.blendPointPool.find(sample.pointsValue);
+                if (found == tables.blendPointPool.end()) {
+                    found = tables.blendPointPool
+                                .emplace(sample.pointsValue,
+                                         std::vector<RrVec3f>())
+                                .first;
+                    convert(file.vec3fArrays[sample.pointsValue].v,
+                            &found->second);
+                }
+                out[c][s] = &found->second;
+            }
+        }
+        return out;
+    };
+    scratch->blendPoints.resize(geo.chains.size());
+    scratch->derivedBlendPoints.resize(geo.chains.size());
+    for (size_t c = 0; c < geo.chains.size(); ++c) {
+        const RigExecWireChain &chain = geo.chains[c];
+        for (const RigExecWireRevision &wire : chain.revisions) {
+            scratch->blendPoints[c].push_back(pointsOf(wire));
+        }
+        for (const RigExecWireDerived &derived : chain.derived) {
+            scratch->derivedBlendPoints[c].push_back(
+                pointsOf(*derived.revision));
+        }
+    }
+    scratch->pathReads = &program->pathReads;
     program->geo = std::move(scratch);
     return true;
 }
 
 namespace {
 
-// Step plumbing: step labels, mover-attribute paths.
+// Step plumbing: step labels.
 
 std::string
 RrGeoStepLabel(const RrProgram *program, size_t step)
 {
-    if (!program || !program->steps ||
-        step >= program->steps->size()) {
-        return "step " + std::to_string(step);
-    }
-    return "step " + program->TextOrEmpty((*program->steps)[step].label);
-}
-
-// A mover-relative attribute's path id: the prim path the bake recorded
-// the read under, composed the way SdfPath prints a property path. Zero
-// when the table holds no such path, which the typed readers below take
-// as "read the fallback" -- the same answer a missing attribute gives.
-uint32_t
-RrGeoMoverAttrId(RrProgram *program, RrGeometryScratch *scratch,
-                 const RigExecWireRevision &wire, const char *attr)
-{
-    const uint32_t prim =
-        wire.moverPrim != 0 ? wire.moverPrim : wire.moverPath;
-    const std::string text = program->TextOrEmpty(prim);
-    if (text.empty() || wire.moverPrim == 0) {
-        return 0;
-    }
-    return RrGeoStringId(program, scratch, text + "." + attr);
-}
-
-int
-RrGeoReadInt(const RrGeometryScratch *scratch, uint32_t path,
-             bool wasDefault, int fallback)
-{
-    const RigExecWirePathValue *read = RrGeoPathRead(scratch, path, wasDefault);
-    if (read && read->tag == RigExecWirePathValue::Tag::Int) {
-        return int(read->i32);
-    }
-    return fallback;
+    return "step " + (program ? RrStepLabel(*program, step)
+                              : std::to_string(step));
 }
 
 // The points entering (r == 0: the base; else after r - 1) and after
@@ -3366,11 +3665,11 @@ RrGeoPhaseName(const RrProgram *program, const RigExecWireReadPhase &phase)
 // Vec3fArray and Matrix sites -- the snapshot store holds nothing else,
 // so every scalar read misses it by type exactly as the baked one does.
 void
-RrGeoResolveRevisionPhases(RrProgram *program, RrGeometryScratch *scratch,
+RrGeoResolveRevisionPhases(RrProgram *program,
                            const RigExecWireRevision &wire,
                            std::vector<std::string> *diagnostics)
 {
-    const RigExecWireRevisionBinding &binding = wire.binding;
+    const RigExecWireRevisionBinding &binding = *wire.binding;
     const size_t count =
         std::min(binding.phaseInputs.size(), binding.phases.size());
     for (size_t i = 0; i < count; ++i) {
@@ -3388,10 +3687,9 @@ RrGeoResolveRevisionPhases(RrProgram *program, RrGeometryScratch *scratch,
             }
             continue;
         }
-        RrGeoTextContext context{program, scratch};
         const RrSnapshotValue *recorded = program->store.runSnapshots.Lookup(
             path, phase.kind, phase.prim, wire.moverPath,
-            RrGeoSnapshotText, &context);
+            RrGeoSnapshotText, program);
         if (!recorded && phase.kind != 1 && diagnostics) {
             diagnostics->push_back(
                 "diag " + program->TextOrEmpty(wire.moverPath) +
@@ -3427,9 +3725,8 @@ RrGeoAssembleEnabled(const RrGeoAssembleInputs &in)
     if (in.wire->moverPrim == 0) {
         return true;
     }
-    const uint32_t path = RrGeoMoverAttrId(
-        in.program, in.scratch, *in.wire, "inputs:enabled");
-    return RrGeoReadBool(in.program, in.scratch, path, false, true);
+    return RrGeoReadBool(in.scratch, RrGeoAttrRead(*in.rev, RrGeoAttrEnabled),
+                         true);
 }
 
 // inputs:defaultWeight as RevisionStatic reads it, for every main
@@ -3464,31 +3761,58 @@ RrGeoAssembleEnvelope(const RrGeoAssembleInputs &in, bool synthesizedDerived)
 }
 
 void
-RrGeoReadBindingVec3fArray(const RrGeoAssembleInputs &in, uint32_t path,
-                           bool wasDefault, std::vector<RrVec3f> *out)
+RrGeoReadBindingVec3fArray(const RrGeoAssembleInputs &in,
+                           const RrGeoRead &at, std::vector<RrVec3f> *out)
 {
     // Rest reads pass resolved=nullptr on the baked path: the phase
     // overlay only ever serves a live (time) read. A Default read
     // always replays the authored value.
     const RrSnapshotValue *overlay =
-        wasDefault ? nullptr
-                   : RrGeoPhaseOverlay(in.program, in.scratch,
-                                        in.wire->binding, path);
-    RrGeoReadVec3fArray(in.program, in.scratch, path, wasDefault, overlay,
-                        out);
+        at.rest ? nullptr
+                : RrGeoPhaseOverlay(in.program, *in.wire->binding, at.path);
+    RrGeoReadVec3fArray(in.scratch, at, overlay, out);
+}
+
+// Mover-relative attribute \p attr and binding handle \p which of the
+// revision being assembled.
+RrGeoRead
+RrGeoAttrRead(const RrGeoAssembleInputs &in, RrGeoAttr attr,
+              bool rest = false)
+{
+    return RrGeoAttrRead(*in.rev, attr, rest);
+}
+
+RrGeoRead
+RrGeoBindingRead(const RrGeoAssembleInputs &in, RrGeoBinding which,
+                 bool rest = false)
+{
+    return RrGeoBindingRead(*in.rev, which, rest);
 }
 
 // The blend channels: each channel's weight and each sample's activation
-// read over the slots, and the dense points the baked gather consumed, out
-// of the static data, in binding order, each channel's samples
-// stable-sorted by activation. Sparse samples take the refused layout when
-// the bake refused the cache and the epoch one otherwise.
+// read over the slots, and the dense points the baked gather consumed, as
+// Open converted them, in binding order, each channel's samples
+// stable-sorted by activation. Sparse samples take the layout Open built
+// out of the sample's fields.
 bool
 RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
                          const std::vector<RrVec3f> &base,
                          std::vector<RrVec3f> *deltas)
 {
-    const RrStatic &statics = in.program->statics;
+    const auto &layoutTable = in.derived ? in.scratch->derivedBlendLayouts
+                                         : in.scratch->blendLayouts;
+    const RrGeometryScratch::SampleLayouts *layouts =
+        in.chain < layoutTable.size() &&
+                in.revision < layoutTable[in.chain].size()
+            ? &layoutTable[in.chain][in.revision]
+            : nullptr;
+    const auto &pointTable = in.derived ? in.scratch->derivedBlendPoints
+                                        : in.scratch->blendPoints;
+    const RrGeometryScratch::SamplePoints *points =
+        in.chain < pointTable.size() &&
+                in.revision < pointTable[in.chain].size()
+            ? &pointTable[in.chain][in.revision]
+            : nullptr;
     std::vector<RrGeoBlendChannel> channels;
     channels.reserve(in.wire->blendChannels.size());
     for (size_t c = 0; c < in.wire->blendChannels.size(); ++c) {
@@ -3497,32 +3821,18 @@ RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
         channel.weight = RrReadBlendWeight(in.program, in.chain, in.revision,
                                            in.derived, c);
         for (size_t s = 0; s < bound.samples.size(); ++s) {
-            const RigExecWireBlendChannel::Sample &boundSample =
+            const RigExecWireBlendSample &boundSample =
                 bound.samples[s];
             RrGeoBlendSampleData sample;
             sample.activation = RrReadBlendActivation(
                 in.program, in.chain, in.revision, in.derived, c, s);
-            const std::vector<RigExecWireVec3f> *consumed =
-                boundSample.blendShape
-                    ? nullptr
-                    : statics.BlendPoints(in.chain, in.revision, in.derived,
-                                          c, s);
-            if (consumed) {
-                sample.points.reserve(consumed->size());
-                for (const RigExecWireVec3f &p : *consumed) {
-                    sample.points.push_back(RrVec3f(p[0], p[1], p[2]));
-                }
-            }
-            if (boundSample.blendShape) {
-                const auto refused = in.scratch->refusedLayouts.find(
-                    std::make_pair(in.wire->moverPath,
-                                   boundSample.samplePath));
-                if (refused != in.scratch->refusedLayouts.end()) {
-                    sample.layout =
-                        RrGeoRefusedLayout(*refused->second);
-                } else {
-                    sample.layout = RrGeoWireLayout(boundSample);
-                }
+            sample.points = points && c < points->size() &&
+                                    s < (*points)[c].size()
+                                ? (*points)[c][s]
+                                : &in.scratch->noPoints;
+            if (boundSample.blendShape && layouts && c < layouts->size() &&
+                s < (*layouts)[c].size()) {
+                sample.layout = (*layouts)[c][s];
             }
             channel.samples.push_back(std::move(sample));
         }
@@ -3555,9 +3865,8 @@ RrGeoAssembleMatrix(const RrGeoAssembleInputs &in,
     // position. A recorded read, so the runtime sees what the bake saw.
     params->radialWeight =
         RrGeoReadToken(in.program, in.scratch,
-                       RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                                        "rigExec:weightBlend"),
-                       false, "linear") == "radial";
+                       RrGeoAttrRead(in, RrGeoAttrWeightBlend),
+                       "linear") == "radial";
     if (!in.rev->haveTransform) {
         return;
     }
@@ -3609,10 +3918,8 @@ RrGeoAssembleSkin(const RrGeoAssembleInputs &in,
     }
     params->skinTransforms = table;
     params->skinningMethod = RrGeoReadToken(
-        in.program, in.scratch,
-        RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                         "rigExec:skinningMethod"),
-        false, "classicLinear");
+        in.program, in.scratch, RrGeoAttrRead(in, RrGeoAttrSkinningMethod),
+        "classicLinear");
     if (in.rev->topologyResolved && in.rev->topology) {
         params->skinTopology = in.rev->topology;
         params->skinElementSize = in.rev->topology->elementSize;
@@ -3641,19 +3948,12 @@ RrGeoAssembleSkin(const RrGeoAssembleInputs &in,
         return;
     }
     // The cache refused this mover: the layout reads per frame.
-    RrGeoReadIntArray(in.scratch,
-                      RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                                       "rigExec:jointIndices"),
-                      false, &params->skinIndices);
-    RrGeoReadFloatArray(in.program, in.scratch,
-                        RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                                         "rigExec:jointWeights"),
-                        false, false, &params->skinWeights);
+    RrGeoReadIntArray(in.scratch, RrGeoAttrRead(in, RrGeoAttrJointIndices),
+                      &params->skinIndices);
+    RrGeoReadFloatArray(in.scratch, RrGeoAttrRead(in, RrGeoAttrJointWeights),
+                        &params->skinWeights);
     params->skinElementSize = RrGeoReadInt(
-        in.scratch,
-        RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                         "rigExec:elementSize"),
-        false, 1);
+        in.scratch, RrGeoAttrRead(in, RrGeoAttrElementSize), 1);
     if (params->skinElementSize < 1 ||
         params->skinWeights.size() != params->skinIndices.size() ||
         params->skinIndices.size() % size_t(params->skinElementSize) != 0) {
@@ -3720,15 +4020,15 @@ RrGeoAssembleLattice(const RrGeoAssembleInputs &in,
                      RrGeoMoverParameters *params)
 {
     params->restPoints = base;
-    RrGeoReadBindingVec3fArray(in, in.wire->binding.cagePoints, true,
-                               &params->auxPoints);
-    RrGeoReadBindingVec3fArray(in, in.wire->binding.cagePoints, false,
-                               &params->auxPointsB);
+    RrGeoReadBindingVec3fArray(
+        in, RrGeoBindingRead(in, RrGeoBindCagePoints, true),
+        &params->auxPoints);
+    RrGeoReadBindingVec3fArray(
+        in, RrGeoBindingRead(in, RrGeoBindCagePoints, false),
+        &params->auxPointsB);
     params->divisions = RrGeoReadVec3i(
-        in.scratch,
-        RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                         "rigExec:divisions"),
-        false, RrVec3i(0, 0, 0));
+        in.scratch, RrGeoAttrRead(in, RrGeoAttrDivisions),
+        RrVec3i(0, 0, 0));
     const size_t cageCount = size_t(params->divisions[0]) *
                              size_t(params->divisions[1]) *
                              size_t(params->divisions[2]);
@@ -3743,13 +4043,14 @@ void
 RrGeoAssembleWire(const RrGeoAssembleInputs &in,
                   RrGeoMoverParameters *params)
 {
-    RrGeoReadBindingVec3fArray(in, in.wire->binding.driverCurvePoints, true,
-                               &params->restPoints);
-    if (in.wire->binding.driverTransformCount > 0) {
-        const size_t t = size_t(in.wire->binding.driverTransformCount);
-        const size_t s = size_t(in.wire->binding.driverSpaceCount);
+    RrGeoReadBindingVec3fArray(
+        in, RrGeoBindingRead(in, RrGeoBindDriverCurvePoints, true),
+        &params->restPoints);
+    if (in.wire->binding->driverTransformCount > 0) {
+        const size_t t = size_t(in.wire->binding->driverTransformCount);
+        const size_t s = size_t(in.wire->binding->driverSpaceCount);
         const size_t bt =
-            size_t(in.wire->binding.driverBaseTransformCount);
+            size_t(in.wire->binding->driverBaseTransformCount);
         // Every operation but a skin assembles against the folded table.
         const std::vector<RrMat4d> &table = in.rev->influences;
         if (table.size() < t + s + bt) {
@@ -3757,14 +4058,12 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
         }
         const size_t bs = table.size() - t - s - bt;
         std::vector<float> weights, baseWeights;
-        RrGeoReadFloatArray(in.program, in.scratch,
-                            RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                                             "inputs:driverWeights"),
-                            false, false, &weights);
-        RrGeoReadFloatArray(in.program, in.scratch,
-                            RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                                             "inputs:driverBaseWeights"),
-                            false, false, &baseWeights);
+        RrGeoReadFloatArray(in.scratch,
+                            RrGeoAttrRead(in, RrGeoAttrDriverWeights),
+                            &weights);
+        RrGeoReadFloatArray(in.scratch,
+                            RrGeoAttrRead(in, RrGeoAttrDriverBaseWeights),
+                            &baseWeights);
         const auto pick = [](size_t count, size_t j) {
             return count <= 1 ? size_t(0) : j % count;
         };
@@ -3774,9 +4073,8 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
         // runs before it. See rigExec:pointFrame in the schema.
         const bool posedPoints =
             RrGeoReadToken(in.program, in.scratch,
-                           RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                                            "rigExec:pointFrame"),
-                           false, "rest") == "posed";
+                           RrGeoAttrRead(in, RrGeoAttrPointFrame),
+                           "rest") == "posed";
         // Which frame the driver's offset from its space is applied in,
         // exactly as RigExecAssembleParameters reads it: "local" (the
         // fallback) is T * S^-1, "posed" conjugates that into the space's
@@ -3784,9 +4082,8 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
         // sees what the bake saw.
         const bool posedDelta =
             RrGeoReadToken(in.program, in.scratch,
-                           RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                                            "rigExec:driverDeltaFrame"),
-                           false, "local") == "posed";
+                           RrGeoAttrRead(in, RrGeoAttrDriverDeltaFrame),
+                           "local") == "posed";
         // MEASURE THE OFFSET IN THE ASSET'S OWN UNITS, and carry only the
         // finished displacement out of them. The curve, its bind distances
         // and the mesh rest points are authored at the asset's scale, while
@@ -3866,26 +4163,29 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
     } else {
         // A curve-driven wire's posed polygon comes from its own chain, so
         // there is no uncarried delta to carry: a named space is left alone.
-        RrGeoReadBindingVec3fArray(in, in.wire->binding.driverCurvePoints,
-                                   false, &params->auxPoints);
+        RrGeoReadBindingVec3fArray(
+            in, RrGeoBindingRead(in, RrGeoBindDriverCurvePoints, false),
+            &params->auxPoints);
     }
     {
         std::vector<int> order;
-        RrGeoReadIntArray(in.scratch, in.wire->binding.driverCurveOrder,
-                          true, &order);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindDriverCurveOrder,
+                                           true),
+                          &order);
         if (!order.empty()) {
             params->curveOrder = order[0];
         }
     }
-    RrGeoReadDoubleArray(in.scratch, in.wire->binding.driverCurveKnots,
-                         true, &params->curveKnots);
+    RrGeoReadDoubleArray(in.scratch,
+                         RrGeoBindingRead(in, RrGeoBindDriverCurveKnots, true),
+                         &params->curveKnots);
     params->dropoffDistance = double(RrGeoReadFloat(
-        in.program, in.scratch,
-        RrGeoMoverAttrId(in.program, in.scratch, *in.wire,
-                         "inputs:dropoffDistance"),
-        false, 0.0f));
-    if (in.wire->binding.bindCoords != 0) {
-        RrGeoReadVec2fArray(in.scratch, in.wire->binding.bindCoords, false,
+        in.program, in.scratch, RrGeoAttrRead(in, RrGeoAttrDropoffDistance),
+        0.0f));
+    if (in.wire->binding->bindCoords != 0) {
+        RrGeoReadVec2fArray(in.scratch,
+                            RrGeoBindingRead(in, RrGeoBindBindCoords),
                             &params->wireBindCoords);
     }
     const RrGeoNurbsCurve rest{&params->restPoints, params->curveOrder,
@@ -3912,7 +4212,8 @@ RrGeoAssembleRibbon(const RrGeoAssembleInputs &in, bool emitGuides,
     }
     params->frames = *frames;
     if (!emitGuides) {
-        RrGeoReadVec2fArray(in.scratch, in.wire->binding.bindCoords, false,
+        RrGeoReadVec2fArray(in.scratch,
+                            RrGeoBindingRead(in, RrGeoBindBindCoords),
                             &params->bindCoords);
         params->valid = !params->bindCoords.empty();
     } else {
@@ -3926,13 +4227,14 @@ RrGeoAssembleDerived(const RrGeoAssembleInputs &in,
                      RrGeoMoverParameters *params)
 {
     params->auxPoints = base;
-    RrGeoReadIntArray(in.scratch, in.wire->binding.topologyCounts, false,
+    RrGeoReadIntArray(in.scratch,
+                      RrGeoBindingRead(in, RrGeoBindTopologyCounts),
                       &params->topologyCounts);
-    RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices, false,
+    RrGeoReadIntArray(in.scratch,
+                      RrGeoBindingRead(in, RrGeoBindTopologyIndices),
                       &params->topologyIndices);
     if (recomputeExtent) {
-        RrGeoReadFloatArray(in.program, in.scratch,
-                            in.wire->binding.widths, false, false,
+        RrGeoReadFloatArray(in.scratch, RrGeoBindingRead(in, RrGeoBindWidths),
                             &params->widths);
     }
     params->valid =
@@ -3940,10 +4242,10 @@ RrGeoAssembleDerived(const RrGeoAssembleInputs &in,
         (recomputeExtent || !params->topologyCounts.empty());
 }
 
-// A plugin mover's packet: its playback state, the frame bytes the export
-// recorded for the selected frame, and its phased point inputs out of this
-// run's snapshots. No kernel here makes it a valid no-op; no bytes on this
-// frame -- the export's assembly failed -- leave it invalid, as it was.
+// A plugin mover's packet: its playback state, the frame bytes of the
+// bake's run (the entry's v2_frame), and its phased point inputs out of
+// this run's snapshots. No kernel here makes it a valid no-op; no frame
+// bytes -- the bake's assembly failed -- leave it invalid.
 void
 RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
                       RrGeoMoverParameters *params)
@@ -3951,8 +4253,7 @@ RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
     RrProgram &program = *in.program;
     const auto found = program.externalIndex.find(
         std::make_pair(uint32_t(in.chain), uint32_t(in.revision)));
-    if (in.derived || !program.external ||
-        found == program.externalIndex.end()) {
+    if (in.derived || found == program.externalIndex.end()) {
         return;
     }
     const RrProgram::ExternalRevision &state =
@@ -3963,17 +4264,16 @@ RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
         params->valid = true;
         return;
     }
-    const uint32_t blob = program.statics.ExternalFrame(found->second);
-    if (blob == RigExecWireExternalNoFrame) {
+    params->externalFrame = program.statics.ExternalFrame(found->second);
+    if (!params->externalFrame) {
         return;
     }
-    params->externalFrame = &program.external->blobs[blob];
-    const RigExecWireRevisionBinding &binding = in.wire->binding;
+    const RigExecWireRevisionBinding &binding = *in.wire->binding;
     for (size_t i = 0;
          i < binding.phaseInputs.size() && i < binding.phases.size(); ++i) {
         const uint32_t path = binding.phaseInputs[i];
         const RrSnapshotValue *overlay =
-            RrGeoPhaseOverlay(in.program, in.scratch, binding, path);
+            RrGeoPhaseOverlay(in.program, binding, path);
         const bool have =
             overlay && overlay->tag == RrSnapshotValue::Tag::Points;
         params->externalPhasedPaths.push_back(program.TextOrEmpty(path));
@@ -3991,8 +4291,7 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
 {
     RrGeoMoverParameters params;
     const int op = int(in.wire->op);
-    RrGeoResolveRevisionPhases(in.program, in.scratch, *in.wire,
-                               in.diagnostics);
+    RrGeoResolveRevisionPhases(in.program, *in.wire, in.diagnostics);
     if (op == RrGeoOpMatrix) {
         RrGeoAssembleMatrix(in, &params);
         return params;
@@ -4033,52 +4332,58 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         break;
     case RrGeoOpSmooth:
         params.strength = 1.0f;
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyCounts,
-                          false, &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices,
-                          false, &params.topologyIndices);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyCounts),
+                          &params.topologyCounts);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyIndices),
+                          &params.topologyIndices);
         params.valid = !params.topologyCounts.empty();
         break;
     case RrGeoOpDeltaMush: {
-        const auto attr = [&](const char *name) {
-            return RrGeoMoverAttrId(in.program, in.scratch, *in.wire, name);
+        const auto attr = [&](RrGeoAttr name, bool rest = false) {
+            return RrGeoAttrRead(in, name, rest);
         };
-        RrGeoReadBindingVec3fArray(in, attr("inputs:restPoints"), true,
+        RrGeoReadBindingVec3fArray(in, attr(RrGeoAttrRestPoints, true),
                                  &params.restPoints);
         if (params.restPoints.empty()) params.restPoints = base;
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyCounts,
-                         false, &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices,
-                         false, &params.topologyIndices);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyCounts),
+                          &params.topologyCounts);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyIndices),
+                          &params.topologyIndices);
         params.mushIterations = RrGeoReadInt(in.scratch,
-            attr("inputs:iterations"), false, 10);
+            attr(RrGeoAttrIterations), 10);
         params.mushStep = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:step"), false, 0.5f);
-        params.mushPinBorders = RrGeoReadBool(in.program, in.scratch,
-            attr("inputs:pinBorders"), false, true);
+            attr(RrGeoAttrStep), 0.5f);
+        params.mushPinBorders = RrGeoReadBool(in.scratch,
+            attr(RrGeoAttrPinBorders), true);
         params.mushDistanceWeight = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:distanceWeight"), false, 0.0f);
+            attr(RrGeoAttrDistanceWeight), 0.0f);
         params.mushDisplacement = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:displacement"), false, 1.0f);
+            attr(RrGeoAttrDisplacement), 1.0f);
         params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
         break;
     }
     case RrGeoOpWrinkle: {
-        const auto attr = [&](const char *name) {
-            return RrGeoMoverAttrId(in.program, in.scratch, *in.wire, name);
+        const auto attr = [&](RrGeoAttr name, bool rest = false) {
+            return RrGeoAttrRead(in, name, rest);
         };
-        RrGeoReadBindingVec3fArray(in, attr("inputs:restPoints"), true,
+        RrGeoReadBindingVec3fArray(in, attr(RrGeoAttrRestPoints, true),
                                  &params.restPoints);
         if (params.restPoints.empty()) params.restPoints = base;
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyCounts,
-                         false, &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices,
-                         false, &params.topologyIndices);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyCounts),
+                          &params.topologyCounts);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyIndices),
+                          &params.topologyIndices);
         auto &settings = params.wrinkleSettings;
         settings.iterations = RrGeoReadInt(in.scratch,
-            attr("inputs:iterations"), false, 80);
+            attr(RrGeoAttrIterations), 80);
         const std::string topology = RrGeoReadToken(in.program, in.scratch,
-            attr("inputs:topology"), true, "cloth");
+            attr(RrGeoAttrTopology, true), "cloth");
         if (topology == "cloth") {
             settings.topology = RigExecWrinkleTopology::Cloth;
         } else if (topology == "surfaceStruts") {
@@ -4088,29 +4393,29 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
             break;
         }
         settings.neighborDistance = RrGeoReadInt(in.scratch,
-            attr("inputs:neighborDistance"), false, 2);
+            attr(RrGeoAttrNeighborDistance), 2);
         settings.restLengthScale = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:restLengthScale"), false, 1.0f);
+            attr(RrGeoAttrRestLengthScale), 1.0f);
         settings.stretchStiffness = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:stretchStiffness"), false, 1.0f);
+            attr(RrGeoAttrStretchStiffness), 1.0f);
         settings.compressionStiffness = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:compressionStiffness"), false, 1.0f);
+            attr(RrGeoAttrCompressionStiffness), 1.0f);
         settings.bendStiffness = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:bendStiffness"), false, 0.1f);
+            attr(RrGeoAttrBendStiffness), 0.1f);
         settings.maxDisplacement = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:maxDisplacement"), false, 0.2f);
-        settings.pinBorders = RrGeoReadBool(in.program, in.scratch,
-            attr("inputs:pinBorders"), false, true);
-        RrGeoReadIntArray(in.scratch, attr("inputs:pinPoints"), true,
+            attr(RrGeoAttrMaxDisplacement), 0.2f);
+        settings.pinBorders = RrGeoReadBool(in.scratch,
+            attr(RrGeoAttrPinBorders), true);
+        RrGeoReadIntArray(in.scratch, attr(RrGeoAttrPinPoints, true),
                          &settings.pinPoints);
-        settings.tangentPlaneCollisions = RrGeoReadBool(in.program, in.scratch,
-            attr("inputs:tangentPlaneCollisions"), false, true);
+        settings.tangentPlaneCollisions = RrGeoReadBool(in.scratch,
+            attr(RrGeoAttrTangentPlaneCollisions), true);
         settings.tangentPlaneInset = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:tangentPlaneInset"), false, 0.0f);
+            attr(RrGeoAttrTangentPlaneInset), 0.0f);
         settings.wrinkleScale = RrGeoReadFloat(in.program, in.scratch,
-            attr("inputs:wrinkleScale"), false, 1.0f);
+            attr(RrGeoAttrWrinkleScale), 1.0f);
         settings.smoothingIterations = RrGeoReadInt(in.scratch,
-            attr("inputs:smoothingIterations"), false, 0);
+            attr(RrGeoAttrSmoothingIterations), 0);
         params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
         break;
     }
@@ -4119,12 +4424,15 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         break;
     case RrGeoOpSurfaceProject:
         params.strength = 1.0f;
-        RrGeoReadBindingVec3fArray(in, in.wire->binding.surfacePoints,
-                                   false, &params.auxPoints);
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyCounts,
-                          false, &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch, in.wire->binding.topologyIndices,
-                          false, &params.topologyIndices);
+        RrGeoReadBindingVec3fArray(
+            in, RrGeoBindingRead(in, RrGeoBindSurfacePoints),
+            &params.auxPoints);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyCounts),
+                          &params.topologyCounts);
+        RrGeoReadIntArray(in.scratch,
+                          RrGeoBindingRead(in, RrGeoBindTopologyIndices),
+                          &params.topologyIndices);
         params.valid =
             !params.auxPoints.empty() && !params.topologyCounts.empty();
         break;
@@ -4213,13 +4521,12 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
         rev->transform = store.deltaValues[size_t(wire.constraintDelta)];
         rev->haveTransform = true;
     }
-    const bool atPrim = wire.binding.transformPhase.kind == 3;
+    const bool atPrim = wire.binding->transformPhase.kind == 3;
     if (atPrim) {
-        RrGeoTextContext context{program, scratch};
         const RrSnapshotValue *recorded = store.runSnapshots.Lookup(
-            wire.binding.transform, wire.binding.transformPhase.kind,
-            wire.binding.transformPhase.prim, wire.moverPath,
-            RrGeoSnapshotText, &context);
+            wire.binding->transform, wire.binding->transformPhase.kind,
+            wire.binding->transformPhase.prim, wire.moverPath,
+            RrGeoSnapshotText, program);
         if (recorded && recorded->tag == RrSnapshotValue::Tag::Matrix) {
             rev->transform = recorded->matrix;
             rev->haveTransform = true;
@@ -4251,9 +4558,8 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
         }
         const bool clusterPosedPoints =
             RrGeoReadToken(program, scratch,
-                           RrGeoMoverAttrId(program, scratch, wire,
-                                            "rigExec:pointFrame"),
-                           false, "rest") == "posed";
+                           RrGeoAttrRead(*rev, RrGeoAttrPointFrame),
+                           "rest") == "posed";
         // The reference refines the SPACE first, then the carry consumes
         // it -- the twin of the same two steps in bakedGeometry.cpp.
         RrMat4d measuredSpace = *space;
@@ -4285,13 +4591,12 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
             return false;
         }
         RrMat4d entry = *matrix;
-        if (atPrim && k < wire.binding.influences.size()) {
-            RrGeoTextContext context{program, scratch};
+        if (atPrim && k < wire.binding->influences.size()) {
             const RrSnapshotValue *recorded = store.runSnapshots.Lookup(
-                wire.binding.influences[k],
-                wire.binding.transformPhase.kind,
-                wire.binding.transformPhase.prim, wire.moverPath,
-                RrGeoSnapshotText, &context);
+                wire.binding->influences[k],
+                wire.binding->transformPhase.kind,
+                wire.binding->transformPhase.prim, wire.moverPath,
+                RrGeoSnapshotText, program);
             if (recorded &&
                 recorded->tag == RrSnapshotValue::Tag::Matrix) {
                 entry = recorded->matrix;
@@ -4681,53 +4986,26 @@ RrPrologueGeometry(RrProgram *program,
         return false;
     }
 
-    // This run's lookups: the stage-sourced reads by (path, Default)
-    // and the refused blend layouts by (mover, sample).
-    const RrStatic &statics = program->statics;
-    scratch->pathReads.clear();
-    for (const RigExecWirePathRead &read : statics.PathReads()) {
-        scratch->pathReads[std::make_pair(read.path, read.wasDefault)] =
-            &read.value;
-    }
     // The scalars the assemblers read through their connections at the
-    // evaluation time, evaluated over the slots in place of the recorded
-    // ones.
-    const RigExecWireComputed &computed = *program->inputState.computed;
-    for (size_t k = 0; k < computed.pathScalarReads.size() &&
-                       k < scratch->pathReadValues.size();
-         ++k) {
-        const RigExecWirePathScalarRead &entry = computed.pathScalarReads[k];
-        RigExecWirePathValue &value = scratch->pathReadValues[k];
-        if (RrPathValueFromRead(entry, RrReadPathScalar(program, entry),
-                                &value)) {
-            scratch->pathReads[std::make_pair(entry.path, uint8_t(0))] =
-                &value;
-        }
-    }
-    scratch->refusedLayouts.clear();
-    for (const RigExecWireRefusedLayout &refused :
-         statics.RefusedLayouts()) {
-        scratch->refusedLayouts[std::make_pair(refused.mover,
-                                               refused.sample)] = &refused;
+    // evaluation time: the path-read table's read rows, evaluated over the
+    // slots. Open refused a read whose type does not convert.
+    for (const uint32_t row : program->pathReadRows) {
+        RrPathRead &entry = program->pathReads[row];
+        RrPathValueFromRead(*entry.read,
+                            RrReadPathScalar(program, *entry.read),
+                            &entry.value);
     }
 
+    // Base points are the ones Open converted. lastBase only ever takes
+    // a copy of them, so a lastBase equal to them already holds their bits
+    // and is copied again only when dirty.
     for (size_t c = 0; c < geo.chains.size(); ++c) {
         const RigExecWireChain &wireChain = geo.chains[c];
         RrGeometryScratch::Chain &chain = scratch->chains[c];
-        const std::vector<RigExecWireVec3f> *wireBase = statics.ChainBase(c);
-        const bool haveBase = wireBase != nullptr;
-        std::vector<RrVec3f> basePoints;
-        if (haveBase) {
-            basePoints.reserve(wireBase->size());
-            for (const RigExecWireVec3f &p : *wireBase) {
-                basePoints.push_back(RrVec3f(p[0], p[1], p[2]));
-            }
-        }
+        const bool haveBase = chain.haveBase;
+        const std::vector<RrVec3f> &basePoints = chain.base;
         if (c < store.chainHaveBase.size()) {
             store.chainHaveBase[c] = haveBase ? 1 : 0;
-        }
-        if (c < store.chainBases.size()) {
-            store.chainBases[c] = basePoints;
         }
         chain.createdCount = 0;
         chain.scheduleCount = 0;
@@ -4765,7 +5043,9 @@ RrPrologueGeometry(RrProgram *program,
         if (c < store.chainBaseDirty.size()) {
             store.chainBaseDirty[c] = baseDirty ? 1 : 0;
         }
-        chain.lastBase = std::move(basePoints);
+        if (baseDirty) {
+            chain.lastBase = basePoints;
+        }
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             const RigExecWireRevision &wire = wireChain.revisions[r];
             RrGeometryScratch::Revision &rev = chain.revisions[r];
@@ -4773,7 +5053,7 @@ RrPrologueGeometry(RrProgram *program,
                 size_t(geo.chainRevisionBegin[c] + int(r));
             // Epoch-fixed skin layouts: the same pointer while the
             // binding did not move. Compared by value here because the
-            // wire carries two copies of one layout; adopting the
+            // file can carry two copies of one layout; adopting the
             // resolved handle reproduces the baked pointer identity.
             if (wire.skinTopologyFixed && id < scratch->epochTopologies.size()) {
                 rev.topology = scratch->epochTopologies[id];
@@ -4814,21 +5094,10 @@ RrPrologueGeometry(RrProgram *program,
                 return false;
             }
             RrGeometryScratch::Derived &derived = scratch->derived[id];
-            const std::vector<RigExecWireVec3f> *wireDerived =
-                statics.DerivedBase(id);
-            const bool derivedHaveBase = wireDerived != nullptr;
-            std::vector<RrVec3f> derivedBase;
-            if (derivedHaveBase) {
-                derivedBase.reserve(wireDerived->size());
-                for (const RigExecWireVec3f &p : *wireDerived) {
-                    derivedBase.push_back(RrVec3f(p[0], p[1], p[2]));
-                }
-            }
+            const bool derivedHaveBase = derived.haveBase;
+            const std::vector<RrVec3f> &derivedBase = derived.base;
             if (id < store.derivedHaveBase.size()) {
                 store.derivedHaveBase[id] = derivedHaveBase ? 1 : 0;
-            }
-            if (id < store.derivedBases.size()) {
-                store.derivedBases[id] = derivedBase;
             }
             derived.createdCount = 0;
             derived.scheduleCount = 0;
@@ -4849,9 +5118,11 @@ RrPrologueGeometry(RrProgram *program,
             }
             derived.baseDirty =
                 !derived.haveResult || derivedBase != derived.lastBase;
-            derived.lastBase = std::move(derivedBase);
+            if (derived.baseDirty) {
+                derived.lastBase = derivedBase;
+            }
             const RigExecWireRevision &wire =
-                wireChain.derived[d].revision;
+                *wireChain.derived[d].revision;
             if (wire.skinTopologyFixed) {
                 // Derived revisions keep no epoch table of their own;
                 // the resolve answers null, which routes the packet
@@ -4873,6 +5144,7 @@ namespace {
 bool
 RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
                         size_t chainIndex, const RigExecWireRevision &wire,
+                        const RrGeometryScratch::Revision &rev,
                         size_t object, RrStepOutput *output)
 {
     RrStore &store = program->store;
@@ -4888,32 +5160,32 @@ RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
     if (wire.op == RrGeoOpShaderDials) {
         std::vector<double> dials;
         dials.reserve(wire.shaderDials.size());
-        for (const uint32_t dial : wire.shaderDials) {
-            dials.push_back(
-                RrGeoReadDouble(program, scratch, dial, false, 0.0));
+        for (size_t k = 0; k < wire.shaderDials.size(); ++k) {
+            RrGeoRead dial;
+            dial.path = wire.shaderDials[k];
+            dial.row = k < rev.dialRead.size() ? rev.dialRead[k] : -1;
+            dials.push_back(RrGeoReadDouble(program, scratch, dial, 0.0));
         }
         publish.matrix = RigExecPackShaderDialsT<RrMat4d>(dials);
         publish.haveMatrix = true;
         return true;
     }
-    const auto vec = [&](const char *attr, const RrVec3d &fallback) {
-        const RigExecWirePathValue *read = RrGeoPathRead(
-            scratch, RrGeoMoverAttrId(program, scratch, wire, attr), false);
-        if (read && read->tag == RigExecWirePathValue::Tag::Vec3d) {
+    const auto vec = [&](RrGeoAttr attr, const RrVec3d &fallback) {
+        const RrPathValue *read =
+            RrGeoPathRead(scratch, RrGeoAttrRead(rev, attr));
+        if (read && read->tag == RrPathValue::Tag::Vec3d) {
             return RrVec3d(read->vec[0], read->vec[1], read->vec[2]);
         }
         return fallback;
     };
     RigExecSurfaceProjectorInputs<RrMat4d, RrVec3d> in;
-    in.rayOrigin = vec("rigExec:rayOrigin", RrVec3d(0.0, 0.0, 0.0));
-    in.rayDirection = vec("rigExec:rayDirection", RrVec3d(0.0, 0.0, 1.0));
-    in.rayUp = vec("rigExec:rayUp", RrVec3d(0.0, 1.0, 0.0));
+    in.rayOrigin = vec(RrGeoAttrRayOrigin, RrVec3d(0.0, 0.0, 0.0));
+    in.rayDirection = vec(RrGeoAttrRayDirection, RrVec3d(0.0, 0.0, 1.0));
+    in.rayUp = vec(RrGeoAttrRayUp, RrVec3d(0.0, 1.0, 0.0));
     in.shaderOffset.SetIdentity();
-    if (const RigExecWirePathValue *read = RrGeoPathRead(
-            scratch,
-            RrGeoMoverAttrId(program, scratch, wire, "rigExec:shaderOffset"),
-            false)) {
-        if (read->tag == RigExecWirePathValue::Tag::Matrix4d) {
+    if (const RrPathValue *read = RrGeoPathRead(
+            scratch, RrGeoAttrRead(rev, RrGeoAttrShaderOffset))) {
+        if (read->tag == RrPathValue::Tag::Matrix4d) {
             for (int i = 0; i < 4; ++i) {
                 for (int j = 0; j < 4; ++j) {
                     in.shaderOffset[i][j] = read->matrix[size_t(i * 4 + j)];
@@ -4923,9 +5195,8 @@ RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
     }
     in.reproject =
         RrGeoReadToken(program, scratch,
-                       RrGeoMoverAttrId(program, scratch, wire,
-                                        "rigExec:projectionMode"),
-                       false, "material") == "reproject";
+                       RrGeoAttrRead(rev, RrGeoAttrProjectionMode),
+                       "material") == "reproject";
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
             in.worldToMesh[i][j] = wire.meshWorldInverse[size_t(i * 4 + j)];
@@ -4971,12 +5242,12 @@ RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
     in.hasSpace = named[2] && resolved[2];
     in.spaceFinal = fin[2];
     std::vector<int> counts, indices;
-    RrGeoReadIntArray(scratch, wire.binding.topologyCounts, false, &counts);
-    RrGeoReadIntArray(scratch, wire.binding.topologyIndices, false, &indices);
-    const std::vector<RrVec3f> &basePoints =
-        chainIndex < store.chainBases.size()
-            ? store.chainBases[chainIndex]
-            : std::vector<RrVec3f>();
+    RrGeoReadIntArray(scratch, RrGeoBindingRead(rev, RrGeoBindTopologyCounts),
+                      &counts);
+    RrGeoReadIntArray(scratch,
+                      RrGeoBindingRead(rev, RrGeoBindTopologyIndices),
+                      &indices);
+    const std::vector<RrVec3f> &basePoints = scratch->chains[chainIndex].base;
     const std::vector<RrVec3f> &finalPoints = scratch->chains[chainIndex].result;
     publish.haveMatrix = RigExecSolveSurfaceProjectorT(
         in, basePoints, finalPoints, counts, indices,
@@ -5027,7 +5298,7 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
         return true;
     }
     const RigExecWireRevision &wire =
-        geo.chains[chainIndex].derived[derivedIndex].revision;
+        *geo.chains[chainIndex].derived[derivedIndex].revision;
     if (!RrGeoOpName(wire.op)) {
         if (error) {
             *error = RrGeoStepLabel(program, step) +
@@ -5040,7 +5311,8 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
         wire.op == RrGeoOpShaderDials) {
         derived.haveResult = true;
         return RrGeoRunProjectorTarget(program, scratch, chainIndex, wire,
-                                       size_t(object), &output);
+                                       derived.revision, size_t(object),
+                                       &output);
     }
     RrGeometryScratch::Revision &rev = derived.revision;
     // The fold's answer is dropped for a derived revision, exactly as

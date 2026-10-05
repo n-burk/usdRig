@@ -12,13 +12,11 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 #include "rigExec/weightPackets.h"
-#include "rigExecBinary/container.h"
-#include "rigExecBinary/geometry.h"
-#include "rigExecBinary/inputTable.h"
-#include "rigExecBinary/program.h"
+#include "rigExecBinary/format.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/weightFields.h"
 #include "rigExecRuntime/runtime.h"
+#include "rigExecRuntime/store.h"
 #include "rigExecExampleFixtures.h"
 
 #include "pxr/base/plug/registry.h"
@@ -26,11 +24,14 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace rigExec;
@@ -46,6 +47,7 @@ static int failures = 0;
         }                                                               \
     } while (0)
 
+#include "rigExecFileEdit.h"
 #include "rigExecRuntimeDrive.h"
 
 static SdfPath
@@ -80,59 +82,45 @@ _ParseFrames(const std::string &text)
     return frames;
 }
 
+// The file's text of path id \p id (a token's text for a token id).
 static std::string
-_WireString(RigExecBinaryReader *reader, uint32_t id)
+_WireString(const fb::RigExecWireFile &file, uint32_t id)
 {
-    std::string out;
-    reader->GetString(id, &out);
-    return out;
+    return RigExecFormatPathText(file, id);
 }
 
-// Decodes the geometry domain and input table straight from the baked
-// bytes, for test-side introspection (object types for the deferral
-// analysis, token text for packet comparison).
-static bool
-_DecodeWeightWire(const std::vector<uint8_t> &bytes,
-                  std::unique_ptr<RigExecBinaryReader> *reader,
-                  RigExecWireDomainGeometry *geometry,
-                  std::string *error)
+// The step-backed weight objects of \p file: the leading entries the
+// WeightPacket steps build, before the envelope-only ones.
+static size_t
+_StepBackedObjects(const fb::RigExecWireFile &file)
 {
-    *reader = RigExecBinaryReader::Open(bytes.data(), bytes.size(),
-                                        error);
-    if (!*reader) {
-        return false;
+    const std::vector<fb::RigExecWireWeightObject> &objects =
+        file.geometry->weightObjects;
+    size_t count = 0;
+    while (count < objects.size() && !objects[count].envelopeOnly) {
+        ++count;
     }
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    if (!(*reader)->FindSection(RigExecBinarySection::DomainGeometry,
-                                &data, &size)) {
-        if (error) {
-            *error = "test cannot find the geometry section";
-        }
-        return false;
-    }
-    RigExecWireReader cursor(data, size);
-    return RigExecWireDecodeDomainGeometry(&cursor, geometry, error);
+    return count;
 }
 
 static bool
-_ComparePacket(RigExecBinaryReader *reader,
-               const RigExecWireWeightObject &wire,
+_ComparePacket(const fb::RigExecWireFile &file,
+               const fb::RigExecWireWeightObject &wire,
                const RigExecWeightPacket &baked,
                const RrWeightPacket &actual, double frame)
 {
-    const std::string path = _WireString(reader, wire.path);
+    const std::string path = _WireString(file, wire.path);
     bool ok = true;
     const auto note = [&](const char *field) {
         std::printf("  packet %s @ %g: %s differs\n", path.c_str(),
                     frame, field);
         ok = false;
     };
-    if (_WireString(reader, actual.representation) !=
+    if (_WireString(file, actual.representation) !=
         baked.representation.GetString()) {
         note("representation");
     }
-    if (_WireString(reader, actual.rangePolicy) !=
+    if (_WireString(file, actual.rangePolicy) !=
         baked.rangePolicy.GetString()) {
         note("rangePolicy");
     }
@@ -225,9 +213,10 @@ _CompareDiagnostics(const std::vector<std::string> &actual,
 // the diagnostics, bit for bit and verbatim.
 static bool
 _RunFixture(const UsdStageRefPtr &stage, const std::vector<double> &frames,
-            const std::vector<uint8_t> &bytes, RigExecBinaryReader *reader,
-            const RigExecWireDomainGeometry &geometry, size_t *compared)
+            const std::vector<uint8_t> &bytes,
+            const fb::RigExecWireFile &file, size_t *compared)
 {
+    const size_t objects = _StepBackedObjects(file);
     RigExecRigEvaluator evaluator(stage, _FindRig(stage));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::string error;
@@ -254,18 +243,17 @@ _RunFixture(const UsdStageRefPtr &stage, const std::vector<double> &frames,
             program->GetStepGraph().weightPackets;
         const std::vector<RrWeightPacket> &actualPackets =
             runtime->GetWeightPackets();
-        if (bakedPackets.size() != geometry.weightObjects.size() ||
-            actualPackets.size() != geometry.weightObjects.size()) {
+        if (bakedPackets.size() != objects ||
+            actualPackets.size() != objects) {
             std::printf("  packet storage @ %g: baked %zu runtime %zu "
-                        "wire %zu\n",
+                        "file %zu\n",
                         frame, bakedPackets.size(),
-                        actualPackets.size(),
-                        geometry.weightObjects.size());
+                        actualPackets.size(), objects);
             return false;
         }
-        for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
+        for (size_t i = 0; i < objects; ++i) {
             ++(*compared);
-            if (!_ComparePacket(reader, geometry.weightObjects[i],
+            if (!_ComparePacket(file, file.geometry->weightObjects[i],
                                 bakedPackets[i], actualPackets[i],
                                 frame)) {
                 ok = false;
@@ -311,11 +299,8 @@ _TestFixture(const std::string &name, const std::string &stagePath,
     if (bytes.empty()) {
         return;
     }
-    std::unique_ptr<RigExecBinaryReader> reader;
-    RigExecWireDomainGeometry geometry;
-    CHECK(_DecodeWeightWire(bytes, &reader, &geometry, &error));
-    if (!reader) {
-        std::printf("wire decode diagnostic: %s\n", error.c_str());
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    if (!file) {
         return;
     }
     // A `static` row holds an animated source in static data at the bake
@@ -323,8 +308,7 @@ _TestFixture(const std::string &name, const std::string &stagePath,
     const std::vector<double> times =
         staticClass ? std::vector<double>{frames.front()} : frames;
     size_t compared = 0;
-    if (_RunFixture(stage, times, bytes, reader.get(), geometry,
-                    &compared)) {
+    if (_RunFixture(stage, times, bytes, *file, &compared)) {
         std::printf("%s: %zu frame(s) of a bake at %g%s, packets=%zu "
                     "weightFrames=yes diagnostics=yes OK\n",
                     name.c_str(), times.size(), frames.front(),
@@ -335,220 +319,220 @@ _TestFixture(const std::string &name, const std::string &stagePath,
     std::printf("%s: FAILED\n", name.c_str());
 }
 
-// Synthetic builder checks: a hand-built wire program exercising every
-// builder arm against the real baked builders, including the pathReads
-// and chain-base gather layers no fixture populates for weight
-// attributes, and the invalid-packet shapes.
+// Synthetic builder checks: a hand-built file exercising every builder arm
+// against the real baked builders, including the path-read and chain-base
+// gather layers no fixture populates for weight attributes, and the
+// invalid-packet shapes.
 
-static RigExecWireInput
-_SynthFloat(float value)
+// The path table and value pool of a hand-built file: prims and properties
+// as tree nodes, parents first, tokens as Token nodes, floats pooled by
+// their bits; ids in insertion order.
+class _Synth {
+public:
+    explicit _Synth(fb::RigExecWireFile *file) : _file(file)
+    {
+        file->names = {std::string()};
+        file->paths = {fb::PathNode(0, 0, fb::PathKind::None)};
+        file->values.clear();
+        file->values.emplace_back();
+        file->intArrays.emplace_back();
+        file->floatArrays.emplace_back();
+        file->doubleArrays.emplace_back();
+        file->vec2fArrays.emplace_back();
+        file->vec3fArrays.emplace_back();
+    }
+
+    // "/A/B" as a prim node, "/A/B.c" as a property node of "/A/B".
+    uint32_t Path(const std::string &text)
+    {
+        const size_t slash = text.rfind('/');
+        const size_t dot = text.find('.', slash);
+        const std::string prim =
+            dot == std::string::npos ? text : text.substr(0, dot);
+        uint32_t at = 0;
+        size_t begin = 1;
+        while (begin <= prim.size()) {
+            size_t end = prim.find('/', begin);
+            if (end == std::string::npos) {
+                end = prim.size();
+            }
+            at = _Node(at, prim.substr(begin, end - begin),
+                       fb::PathKind::Prim);
+            begin = end + 1;
+        }
+        if (dot != std::string::npos) {
+            at = _Node(at, text.substr(dot + 1), fb::PathKind::Property);
+        }
+        return at;
+    }
+
+    uint32_t Token(const std::string &text)
+    {
+        return _Node(0, text, fb::PathKind::Token);
+    }
+
+    uint32_t Float(float f)
+    {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &f, sizeof(bits));
+        const auto found =
+            _floats.emplace(bits, uint32_t(_file->values.size()));
+        if (found.second) {
+            fb::RigExecWireValue value;
+            value.tag = fb::InputTag::Float;
+            value.bits = bits;
+            _file->values.push_back(std::move(value));
+        }
+        return found.first->second;
+    }
+
+    uint32_t Value(fb::RigExecWireValue value)
+    {
+        _file->values.push_back(std::move(value));
+        return uint32_t(_file->values.size() - 1);
+    }
+
+    uint32_t Points(const std::vector<GfVec3f> &points)
+    {
+        fb::RigExecWireVec3fArray array;
+        for (const GfVec3f &p : points) {
+            array.v.push_back(RigExecWireVec3f{p[0], p[1], p[2]});
+        }
+        _file->vec3fArrays.push_back(std::move(array));
+        return uint32_t(_file->vec3fArrays.size() - 1);
+    }
+
+private:
+    uint32_t _Node(uint32_t parent, const std::string &name,
+                   fb::PathKind kind)
+    {
+        const auto named =
+            _names.emplace(name, uint32_t(_file->names.size()));
+        if (named.second) {
+            _file->names.push_back(name);
+        }
+        const auto found = _nodes.emplace(
+            std::make_tuple(parent, named.first->second, uint8_t(kind)),
+            uint32_t(_file->paths.size()));
+        if (found.second) {
+            _file->paths.emplace_back(parent, named.first->second, kind);
+        }
+        return found.first->second;
+    }
+
+    fb::RigExecWireFile *_file;
+    std::map<std::string, uint32_t> _names;
+    std::map<std::tuple<uint32_t, uint32_t, uint8_t>, uint32_t> _nodes;
+    std::map<uint32_t, uint32_t> _floats;
+};
+
+static std::unique_ptr<fb::RigExecWireInput>
+_SynthOwn(const fb::RigExecWireInput &input)
 {
-    RigExecWireInput input;
-    input.tag = RigExecWireInput::Tag::Float;
-    input.f32 = value;
-    return input;
+    return std::make_unique<fb::RigExecWireInput>(input);
 }
 
-static RigExecWireInput
-_SynthVaryingFloat(float constant)
+// A Baked Float read of the table constant \p value.
+static std::unique_ptr<fb::RigExecWireInput>
+_SynthFloat(_Synth *synth, float value)
 {
-    RigExecWireInput input = _SynthFloat(constant);
-    input.varying = true;
-    input.bound = true;
-    return input;
+    fb::RigExecWireInput input;
+    input.tag = fb::InputTag::Float;
+    input.mode = fb::ReadMode::Baked;
+    input.constant = synth->Float(value);
+    return _SynthOwn(input);
 }
 
-static RigExecWireWeightObject
-_SynthObject(RigExecBinaryWriter *writer, const char *path,
-             const char *type, const char *representation,
-             const char *rangePolicy)
+// A Baked Float read made per run through a listed, Animated slot of its
+// own ("/Synth/<k>.value") whose default is \p slotDefault; \p constant is
+// the read's table constant.
+static std::unique_ptr<fb::RigExecWireInput>
+_SynthVaryingFloat(_Synth *synth, fb::RigExecWireFile *file, float constant,
+                   float slotDefault)
 {
-    RigExecWireWeightObject object;
-    object.path = writer->AddString(path);
-    object.type = writer->AddString(type);
-    object.representation = writer->AddString(representation);
-    object.rangePolicy = writer->AddString(rangePolicy);
-    object.defaultWeight = _SynthFloat(0.0f);
-    object.driver = _SynthFloat(1.0f);
-    object.scale = _SynthFloat(1.0f);
-    object.bias = _SynthFloat(0.0f);
-    object.strength = _SynthFloat(1.0f);
-    object.invert = _SynthFloat(0.0f);
-    object.falloffMin = _SynthFloat(0.0f);
-    object.falloffMax = _SynthFloat(1.0f);
-    object.scaleX = _SynthFloat(1.0f);
-    object.scaleY = _SynthFloat(1.0f);
-    object.scaleZ = _SynthFloat(1.0f);
-    object.extentU = _SynthFloat(1.0f);
-    object.extentV = _SynthFloat(1.0f);
+    const uint32_t slot = uint32_t(file->inputs.size());
+    file->inputs.emplace_back(
+        synth->Path("/Synth/" + std::to_string(slot) + ".value"),
+        synth->Float(slotDefault), -1, -1, fb::InputTag::Float,
+        uint8_t(fb::InputSlotFlags::Listed) |
+            uint8_t(fb::InputSlotFlags::Animated) |
+            uint8_t(fb::InputSlotFlags::HasValue));
+    file->listedInputs = uint32_t(file->inputs.size());
+    fb::RigExecWireInput input;
+    input.tag = fb::InputTag::Float;
+    input.mode = fb::ReadMode::Baked;
+    input.flags = uint8_t(fb::InputReadFlags::Varying);
+    input.constant = synth->Float(constant);
+    input.walk = {slot};
+    input.selected = 0;
+    return _SynthOwn(input);
+}
+
+static fb::RigExecWireWeightObject
+_SynthObject(_Synth *synth, const char *path, const char *type,
+             const char *representation, const char *rangePolicy)
+{
+    fb::RigExecWireWeightObject object;
+    object.path = synth->Path(path);
+    object.type = synth->Token(type);
+    object.representation = synth->Token(representation);
+    object.rangePolicy = synth->Token(rangePolicy);
+    object.defaultWeight = _SynthFloat(synth, 0.0f);
+    object.driver = _SynthFloat(synth, 1.0f);
+    object.scale = _SynthFloat(synth, 1.0f);
+    object.bias = _SynthFloat(synth, 0.0f);
+    object.strength = _SynthFloat(synth, 1.0f);
+    object.invert = _SynthFloat(synth, 0.0f);
+    object.falloffMin = _SynthFloat(synth, 0.0f);
+    object.falloffMax = _SynthFloat(synth, 1.0f);
+    for (std::unique_ptr<fb::RigExecWireInput> *scale :
+         {&object.scaleXPos, &object.scaleYPos, &object.scaleZPos,
+          &object.scaleXNeg, &object.scaleYNeg, &object.scaleZNeg}) {
+        *scale = _SynthFloat(synth, 1.0f);
+    }
+    object.scaleX = _SynthFloat(synth, 1.0f);
+    object.scaleY = _SynthFloat(synth, 1.0f);
+    object.scaleZ = _SynthFloat(synth, 1.0f);
+    object.extentU = _SynthFloat(synth, 1.0f);
+    object.extentV = _SynthFloat(synth, 1.0f);
     return object;
 }
 
 static void
-_SynthAttr(RigExecBinaryWriter *writer, const char *path,
-           std::vector<uint32_t> *paths, std::vector<uint8_t> *valid)
+_SynthAttr(_Synth *synth, const char *path, std::vector<uint32_t> *paths,
+           std::vector<uint8_t> *valid)
 {
-    paths->push_back(writer->AddString(path));
+    paths->push_back(synth->Path(path));
     valid->push_back(1);
 }
 
-static RigExecWirePathRead
-_SynthPointsRead(RigExecBinaryWriter *writer, const char *path,
+// A static path read of \p points at \p path, at the evaluation time.
+static fb::RigExecWirePathRead
+_SynthPointsRead(_Synth *synth, const char *path,
                  const std::vector<GfVec3f> &points)
 {
-    RigExecWirePathRead read;
-    read.path = writer->AddString(path);
-    read.value.tag = RigExecWirePathValue::Tag::Vec3fArray;
-    for (const GfVec3f &p : points) {
-        read.value.vec3s.push_back(
-            RigExecWireVec3f{p[0], p[1], p[2]});
-    }
+    fb::RigExecWirePathRead read;
+    read.path = synth->Path(path);
+    read.value = std::make_unique<fb::RigExecWirePathValue>();
+    read.value->tag = fb::PathTag::Vec3fArray;
+    read.value->array = synth->Points(points);
     return read;
-}
-
-// The Computed section a bake writes beside the synthetic tables: one
-// registered read per weight object field, each input the directory gives
-// a uid (in the capture's order) read per run through a slot named as that
-// entry's head and holding each frame's recorded value, every other field
-// its table constant; and one step-backed weight object per table entry,
-// whose reads only the weight oracle makes.
-static std::vector<uint8_t>
-_SynthComputed(RigExecBinaryWriter *writer,
-               const RigExecWireDomainGeometry &geometry,
-               RigExecWireInputTable *inputs)
-{
-    using v4::InputTag;
-    RigExecWireComputed computed;
-    computed.bakeTime =
-        inputs->frames.empty() ? 0.0 : inputs->frames[0].frame;
-    computed.values.push_back(v4::RigExecWireValue());
-    computed.vec3fArrays.emplace_back();
-    std::map<uint32_t, uint32_t> floats;
-    const auto intern = [&](float f) {
-        uint32_t bits = 0;
-        std::memcpy(&bits, &f, sizeof(bits));
-        const auto found =
-            floats.emplace(bits, uint32_t(computed.values.size()));
-        if (found.second) {
-            v4::RigExecWireValue value;
-            value.tag = InputTag::Float;
-            value.bits = bits;
-            computed.values.push_back(value);
-        }
-        return found.first->second;
-    };
-    // The uid of each slot, in slot order.
-    std::vector<uint32_t> slotUids;
-    uint32_t nextUid = 0;
-    for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
-        const RigExecWireWeightObject &wire = geometry.weightObjects[i];
-        const RigExecWireInput *const fields[RrWeightFieldCount] = {
-            &wire.defaultWeight, &wire.driver,    &wire.scale,
-            &wire.bias,          &wire.strength,  &wire.invert,
-            &wire.falloffMin,    &wire.falloffMax, &wire.scaleXPos,
-            &wire.scaleYPos,     &wire.scaleZPos, &wire.scaleXNeg,
-            &wire.scaleYNeg,     &wire.scaleZNeg, &wire.scaleX,
-            &wire.scaleY,        &wire.scaleZ,    &wire.extentU,
-            &wire.extentV};
-        v4::RigExecWireWeightObject object;
-        object.path = wire.path;
-        object.type = wire.type;
-        object.representation = wire.representation;
-        object.rangePolicy = wire.rangePolicy;
-        v4::RigExecWireInput *const reads[RrWeightFieldCount] = {
-            &object.defaultWeight, &object.driver,    &object.scale,
-            &object.bias,          &object.strength,  &object.invert,
-            &object.falloffMin,    &object.falloffMax, &object.scaleXPos,
-            &object.scaleYPos,     &object.scaleZPos, &object.scaleXNeg,
-            &object.scaleYNeg,     &object.scaleZNeg, &object.scaleX,
-            &object.scaleY,        &object.scaleZ,    &object.extentU,
-            &object.extentV};
-        for (size_t f = 0; f < size_t(RrWeightFieldCount); ++f) {
-            const RigExecWireInput &input = *fields[f];
-            reads[f]->tag = InputTag::Float;
-            reads[f]->mode = v4::ReadMode::Resolved;
-            reads[f]->constant = intern(input.f32);
-            RigExecWireRegisteredRead entry;
-            entry.family = RigExecWireRegisteredFamily::WeightObject;
-            entry.object = uint32_t(i);
-            entry.field = uint32_t(f);
-            entry.read.tag = InputTag::Float;
-            entry.read.mode = v4::ReadMode::Baked;
-            entry.read.overrideIndex = input.overrideIndex;
-            entry.read.constant = intern(input.f32);
-            if (input.varying) {
-                entry.read.flags |= uint8_t(v4::InputReadFlags::Varying);
-            }
-            if (input.varying && input.bound) {
-                const uint32_t slot = uint32_t(computed.inputs.size());
-                v4::InputSlot attribute;
-                attribute.name = writer->AddString(
-                    "/Synth/" + std::to_string(slot) + ".value");
-                attribute.type = InputTag::Float;
-                attribute.flags =
-                    uint8_t(v4::InputSlotFlags::Listed) |
-                    uint8_t(v4::InputSlotFlags::Animated) |
-                    uint8_t(v4::InputSlotFlags::HasValue);
-                attribute.value = entry.read.constant;
-                computed.inputs.push_back(attribute);
-                CHECK(nextUid < inputs->directory.size());
-                if (nextUid < inputs->directory.size()) {
-                    inputs->directory[nextUid].head = attribute.name;
-                }
-                entry.uid = int32_t(nextUid);
-                entry.read.walk = {slot};
-                entry.read.selected = 0;
-                slotUids.push_back(nextUid++);
-            }
-            computed.registeredReads.push_back(entry);
-        }
-        computed.weightObjects.push_back(std::move(object));
-    }
-    computed.listedInputs = uint32_t(computed.inputs.size());
-    for (const RigExecWireFrameInputs &record : inputs->frames) {
-        RigExecWireComputedFrame frame;
-        frame.frame = record.frame;
-        for (const uint32_t uid : slotUids) {
-            float value = 0.0f;
-            for (size_t k = 0; k < record.uids.size(); ++k) {
-                if (record.uids[k] == uid) {
-                    value = record.values[k].f32;
-                }
-            }
-            frame.values.push_back(intern(value));
-            frame.hasValue.push_back(1);
-        }
-        computed.frames.push_back(std::move(frame));
-    }
-    for (size_t s = 0; s < computed.inputs.size() &&
-                       !computed.frames.empty();
-         ++s) {
-        computed.inputs[s].value = computed.frames[0].values[s];
-    }
-    std::vector<uint8_t> payload;
-    std::string error;
-    CHECK(RigExecWireEncodeComputed(computed, &payload, &error));
-    if (!error.empty()) {
-        std::printf("synthetic computed section: %s\n", error.c_str());
-    }
-    return payload;
 }
 
 static bool
 _SynthCompare(const char *name, const RigExecWeightPacket &expected,
-              const RrWeightPacket &actual,
-              RigExecBinaryReader *reader)
+              const RrWeightPacket &actual, const fb::RigExecWireFile &file)
 {
     bool ok = true;
     const auto note = [&](const char *field) {
         std::printf("  synthetic %s: %s differs\n", name, field);
         ok = false;
     };
-    if (_WireString(reader, actual.representation) !=
+    if (_WireString(file, actual.representation) !=
         expected.representation.GetString()) {
         note("representation");
     }
-    if (_WireString(reader, actual.rangePolicy) !=
+    if (_WireString(file, actual.rangePolicy) !=
         expected.rangePolicy.GetString()) {
         note("rangePolicy");
     }
@@ -590,22 +574,34 @@ _SynthCompare(const char *name, const RigExecWeightPacket &expected,
 static void
 _TestSyntheticBuilders()
 {
-    RigExecBinaryWriter writer;
-    RigExecWireDomainGeometry geometry;
-    RigExecWireInputTable inputs;
-    RigExecWireSlotMeta slotMeta;
-    RigExecWireConstants constants;
-    std::vector<RigExecWireStep> steps;
+    fb::RigExecWireFile file;
+    _Synth synth(&file);
+    _Synth *const writer = &synth;
+    file.formatVersion = RigExecFormatVersion;
+    file.bakeTime = 1.0;
+    file.slotMeta = std::make_unique<fb::RigExecWireSlotMeta>();
+    file.constants = std::make_unique<fb::RigExecWireConstants>();
+    file.pose = std::make_unique<fb::RigExecWireDomainPose>();
+    file.geometry = std::make_unique<fb::RigExecWireDomainGeometry>();
+    fb::RigExecWireSlotMeta &slotMeta = *file.slotMeta;
+    fb::RigExecWireConstants &constants = *file.constants;
+    fb::RigExecWireDomainGeometry &geometry = *file.geometry;
 
     // One provider slot carrying the volumes; the pools hold default
     // frames, so placements are exactly the identity-landmark map.
-    slotMeta.paths.push_back(writer.AddString("/Volume"));
+    file.rig = synth.Path("/Volume");
+    slotMeta.paths.push_back(synth.Path("/Volume"));
+    slotMeta.slotKind = {fb::SlotKind::FirstFramePose};
+    slotMeta.parent = {-1};
+    slotMeta.propParent = {-1};
+    slotMeta.needFinal = {0};
+    slotMeta.needBase = {0};
     constants.avarConstants.assign(11, 0.0);
     constants.noScaleAvars.push_back(1);
+    constants.rotationSign.push_back(0);
+    RigExecWireMatrix4d identity{};
+    identity[0] = identity[5] = identity[10] = identity[15] = 1.0;
     {
-        RigExecWireMatrix4d identity{};
-        identity[0] = identity[5] = identity[10] = identity[15] =
-            1.0;
         constants.restM.push_back(identity);
         constants.selfD.push_back(identity);
         constants.parentDinv.push_back(identity);
@@ -624,16 +620,47 @@ _TestSyntheticBuilders()
         constants.rotOrder.push_back(0);
         constants.posedAuthored.push_back(0);
     }
+    // The slot's ladder: every field a fixed read of its constant.
+    {
+        fb::RigExecWireValue matrix;
+        matrix.tag = fb::InputTag::Matrix4d;
+        matrix.matrix = std::make_unique<RigExecWireMatrix4d>(identity);
+        const uint32_t identityValue = synth.Value(std::move(matrix));
+        fb::RigExecWireValue token;
+        token.tag = fb::InputTag::Token;
+        const uint32_t tokenValue = synth.Value(std::move(token));
+        const auto fixed = [](fb::InputTag tag, uint32_t constant) {
+            fb::RigExecWireInput input;
+            input.tag = tag;
+            input.mode = fb::ReadMode::Baked;
+            input.constant = constant;
+            return input;
+        };
+        fb::RigExecWireLadder ladder;
+        ladder.restSpace =
+            _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+        ladder.defaultSpace =
+            _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+        ladder.posedSpace =
+            _SynthOwn(fixed(fb::InputTag::Matrix4d, identityValue));
+        ladder.rotationOrder =
+            _SynthOwn(fixed(fb::InputTag::Token, tokenValue));
+        for (int k = 0; k < 6; ++k) {
+            ladder.restAvars.push_back(fixed(fb::InputTag::Double, 0));
+            ladder.defaultAvars.push_back(fixed(fb::InputTag::Double, 0));
+        }
+        file.pose->ladders.push_back(std::move(ladder));
+    }
 
     std::vector<RigExecWeightPacket> expected;
 
     // 0: static dense, valid.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/dense", "RigExecStaticWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/dense", "RigExecStaticWeight", "dense",
             "strict");
         object.values = {0.25f, 0.5f, 0.75f};
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecStaticWeightInputs in;
         in.representation = TfToken("dense");
         in.rangePolicy = TfToken("strict");
@@ -643,13 +670,13 @@ _TestSyntheticBuilders()
     }
     // 1: static sparse, unsorted pairs canonicalize.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/sparse", "RigExecStaticWeight", "sparse",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/sparse", "RigExecStaticWeight", "sparse",
             "strict");
         object.values = {0.9f, 0.1f};
         object.indices = {3, 1};
-        object.defaultWeight = _SynthFloat(0.5f);
-        geometry.weightObjects.push_back(object);
+        object.defaultWeight = _SynthFloat(writer, 0.5f);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecStaticWeightInputs in;
         in.representation = TfToken("sparse");
         in.rangePolicy = TfToken("strict");
@@ -658,13 +685,14 @@ _TestSyntheticBuilders()
         in.defaultWeight = 0.5f;
         expected.push_back(RigExecBuildStaticWeightPacket(in));
     }
-    // 2: static constant over a VARYING default (uid 0 reads 0.3).
+    // 2: static constant over a VARYING default (its slot reads 0.3).
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/varying", "RigExecStaticWeight", "constant",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/varying", "RigExecStaticWeight", "constant",
             "strict");
-        object.defaultWeight = _SynthVaryingFloat(0.7f);
-        geometry.weightObjects.push_back(object);
+        object.defaultWeight =
+            _SynthVaryingFloat(writer, &file, 0.7f, 0.3f);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecStaticWeightInputs in;
         in.representation = TfToken("constant");
         in.rangePolicy = TfToken("strict");
@@ -673,12 +701,12 @@ _TestSyntheticBuilders()
     }
     // 3: static dense with a nonzero default: invalid, tokens kept.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/denseBadDefault", "RigExecStaticWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/denseBadDefault", "RigExecStaticWeight",
             "dense", "strict");
         object.values = {0.5f};
-        object.defaultWeight = _SynthFloat(0.5f);
-        geometry.weightObjects.push_back(object);
+        object.defaultWeight = _SynthFloat(writer, 0.5f);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecStaticWeightInputs in;
         in.representation = TfToken("dense");
         in.rangePolicy = TfToken("strict");
@@ -688,12 +716,12 @@ _TestSyntheticBuilders()
     }
     // 4: static sparse with duplicate indices: invalid, tokens kept.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/sparseDup", "RigExecStaticWeight", "sparse",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/sparseDup", "RigExecStaticWeight", "sparse",
             "strict");
         object.values = {0.5f, 0.5f};
         object.indices = {2, 2};
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecStaticWeightInputs in;
         in.representation = TfToken("sparse");
         in.rangePolicy = TfToken("strict");
@@ -703,11 +731,11 @@ _TestSyntheticBuilders()
     }
     // 5: static with an unknown representation: invalid, tokens kept.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/unknownRep", "RigExecStaticWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/unknownRep", "RigExecStaticWeight",
             "exponential", "strict");
         object.values = {0.5f};
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecStaticWeightInputs in;
         in.representation = TfToken("exponential");
         in.rangePolicy = TfToken("strict");
@@ -716,13 +744,13 @@ _TestSyntheticBuilders()
     }
     // 6: dynamic over no base, clamp policy: 1.1 clamps to 1.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/dynFree", "RigExecDynamicWeight", "constant",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/dynFree", "RigExecDynamicWeight", "constant",
             "clamp");
-        object.driver = _SynthFloat(0.5f);
-        object.scale = _SynthFloat(2.0f);
-        object.bias = _SynthFloat(0.1f);
-        geometry.weightObjects.push_back(object);
+        object.driver = _SynthFloat(writer, 0.5f);
+        object.scale = _SynthFloat(writer, 2.0f);
+        object.bias = _SynthFloat(writer, 0.1f);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecDynamicWeightInputs in;
         in.representation = TfToken("constant");
         in.rangePolicy = TfToken("clamp");
@@ -734,12 +762,12 @@ _TestSyntheticBuilders()
     }
     // 7: dynamic remapping object 0's dense field.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/dynDense", "RigExecDynamicWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/dynDense", "RigExecDynamicWeight", "dense",
             "strict");
         object.base = 0;
-        object.scale = _SynthFloat(0.5f);
-        geometry.weightObjects.push_back(object);
+        object.scale = _SynthFloat(writer, 0.5f);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecDynamicWeightInputs in;
         in.representation = TfToken("dense");
         in.rangePolicy = TfToken("strict");
@@ -749,11 +777,11 @@ _TestSyntheticBuilders()
     }
     // 8: dynamic over object 0 with a mismatched representation.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/dynMismatch", "RigExecDynamicWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/dynMismatch", "RigExecDynamicWeight",
             "sparse", "strict");
         object.base = 0;
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecDynamicWeightInputs in;
         in.representation = TfToken("sparse");
         in.rangePolicy = TfToken("strict");
@@ -762,12 +790,12 @@ _TestSyntheticBuilders()
     }
     // 9: combine over two dense fields (subtract, authored order).
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/combine", "RigExecCombineWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/combine", "RigExecCombineWeight", "dense",
             "strict");
-        object.combineMode = writer.AddString("subtract");
+        object.combineMode = writer->Token("subtract");
         object.inputs = {0, 7};
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         expected.push_back(RigExecBuildCombineWeightPacket(
             TfToken("dense"), TfToken("strict"),
             TfToken("subtract"),
@@ -775,16 +803,16 @@ _TestSyntheticBuilders()
     }
     // 10: combine over two constants, sized by its weight target.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/combineConst", "RigExecCombineWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/combineConst", "RigExecCombineWeight",
             "dense", "strict");
-        object.combineMode = writer.AddString("add");
+        object.combineMode = writer->Token("add");
         object.inputs = {2, 6};
-        object.strength = _SynthFloat(0.5f);
-        _SynthAttr(&writer, "/mesh.points",
+        object.strength = _SynthFloat(writer, 0.5f);
+        _SynthAttr(writer, "/mesh.points",
                    &object.combineTargetPoints,
                    &object.combineTargetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         expected.push_back(RigExecBuildCombineWeightPacket(
             TfToken("dense"), TfToken("strict"), TfToken("add"),
             {expected[2], expected[6]}, 3, 0.5f, 0.0f));
@@ -817,21 +845,21 @@ _TestSyntheticBuilders()
     // 11: sphere over pathReads points, smooth remap LUT, and varying
     // signed/legacy scales whose uid order must match capture.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/sphere", "RigExecSphereWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/sphere", "RigExecSphereWeight", "dense",
             "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        _SynthAttr(&writer, "/signed.points", &object.samplePoints, &object.sampleValid);
-        object.scaleXPos = _SynthVaryingFloat(9.0f);
-        object.scaleY = _SynthVaryingFloat(9.0f);
-        object.scaleYPos = _SynthFloat(3.0f);
-        object.scaleZNeg = _SynthFloat(4.0f);
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        _SynthAttr(writer, "/signed.points", &object.samplePoints, &object.sampleValid);
+        object.scaleXPos = _SynthVaryingFloat(writer, &file, 9.0f, 2.0f);
+        object.scaleY = _SynthVaryingFloat(writer, &file, 9.0f, 0.5f);
+        object.scaleYPos = _SynthFloat(writer, 3.0f);
+        object.scaleZNeg = _SynthFloat(writer, 4.0f);
         object.falloffCurve =
             RigExecBuildFalloffLut(RigExecFalloffProfile::Smooth);
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs sphereIn =
             volumeInputs("y", "unbounded");
         sphereIn.samplePoints = signedSamples;
@@ -845,16 +873,16 @@ _TestSyntheticBuilders()
     }
     // 12: bounded plane over the same points, axis x.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/plane", "RigExecPlaneWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/plane", "RigExecPlaneWeight", "dense",
             "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        object.planeAxis = writer.AddString("x");
-        object.planeBounds = writer.AddString("bounded");
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        object.planeAxis = writer->Token("x");
+        object.planeBounds = writer->Token("bounded");
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs in =
             volumeInputs("x", "bounded");
         in.extentU = 1.0f;
@@ -864,16 +892,16 @@ _TestSyntheticBuilders()
     }
     // 13: curve weight with pathReads curve points.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/curve", "RigExecCurveWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/curve", "RigExecCurveWeight", "dense",
             "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        _SynthAttr(&writer, "/curve.points", &object.curvePoints,
+        _SynthAttr(writer, "/curve.points", &object.curvePoints,
                    &object.curveValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs in =
             volumeInputs("y", "unbounded");
         in.curvePoints = curvePoints;
@@ -883,16 +911,16 @@ _TestSyntheticBuilders()
     // 14: sphere with a mistyped sample override: cardinality
     // mismatch is invalid, tokens kept.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/sampleBad", "RigExecSphereWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/sampleBad", "RigExecSphereWeight", "dense",
             "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        _SynthAttr(&writer, "/sample.points", &object.samplePoints,
+        _SynthAttr(writer, "/sample.points", &object.samplePoints,
                    &object.sampleValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs in =
             volumeInputs("y", "unbounded");
         in.samplePoints = samplePoints;
@@ -901,14 +929,14 @@ _TestSyntheticBuilders()
     }
     // 15: sphere over a CHAIN base (no pathReads entry).
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/chainSphere", "RigExecSphereWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/chainSphere", "RigExecSphereWeight", "dense",
             "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        _SynthAttr(&writer, "/chainmesh.points",
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        _SynthAttr(writer, "/chainmesh.points",
                    &object.targetPoints, &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs in =
             volumeInputs("y", "unbounded");
         in.targetPoints = samplePoints;
@@ -917,14 +945,14 @@ _TestSyntheticBuilders()
     }
     // 16: sphere over an unreadable target: invalid, tokens kept.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/missing", "RigExecSphereWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/missing", "RigExecSphereWeight", "dense",
             "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        _SynthAttr(&writer, "/missing.points",
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        _SynthAttr(writer, "/missing.points",
                    &object.targetPoints, &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         // The baked gather reads no points, so the prologue passes
         // but the target check fails: tokens kept, invalid.
         RigExecVolumeWeightInputs missingIn =
@@ -935,22 +963,22 @@ _TestSyntheticBuilders()
     }
     // 17: unknown weight type: bare invalid packet.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/magic", "RigExecMagicWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/magic", "RigExecMagicWeight", "dense",
             "strict");
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         expected.push_back(RigExecWeightPacket());
     }
     // 18-22: the remaining combine modes over objects 0 and 7.
     for (const char *mode :
          {"multiply", "max", "min", "average", "overlay"}) {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer,
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer,
             (std::string("/w/combine-") + mode).c_str(),
             "RigExecCombineWeight", "dense", "strict");
-        object.combineMode = writer.AddString(mode);
+        object.combineMode = writer->Token(mode);
         object.inputs = {0, 7};
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         expected.push_back(RigExecBuildCombineWeightPacket(
             TfToken("dense"), TfToken("strict"), TfToken(mode),
             {expected[0], expected[7]}, 0, 1.0f, 0.0f));
@@ -958,12 +986,12 @@ _TestSyntheticBuilders()
     // 23: dynamic remapping object 1's sparse field (the default
     // remaps; dense would pin zero).
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/dynSparse", "RigExecDynamicWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/dynSparse", "RigExecDynamicWeight",
             "sparse", "strict");
         object.base = 1;
-        object.driver = _SynthFloat(0.5f);
-        geometry.weightObjects.push_back(object);
+        object.driver = _SynthFloat(writer, 0.5f);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecDynamicWeightInputs in;
         in.representation = TfToken("sparse");
         in.rangePolicy = TfToken("strict");
@@ -973,11 +1001,11 @@ _TestSyntheticBuilders()
     }
     // 24: static constant with an out-of-range default: invalid.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/constBad", "RigExecStaticWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/constBad", "RigExecStaticWeight",
             "constant", "strict");
-        object.defaultWeight = _SynthFloat(2.0f);
-        geometry.weightObjects.push_back(object);
+        object.defaultWeight = _SynthFloat(writer, 2.0f);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecStaticWeightInputs in;
         in.representation = TfToken("constant");
         in.rangePolicy = TfToken("strict");
@@ -987,30 +1015,30 @@ _TestSyntheticBuilders()
     // 25: constant-only combine whose epilogue violates strict: the
     // BARE invalid packet, not the token-carrying one.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/combineBare", "RigExecCombineWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/combineBare", "RigExecCombineWeight",
             "dense", "strict");
-        object.combineMode = writer.AddString("add");
+        object.combineMode = writer->Token("add");
         object.inputs = {2, 6};
-        _SynthAttr(&writer, "/mesh.points",
+        _SynthAttr(writer, "/mesh.points",
                    &object.combineTargetPoints,
                    &object.combineTargetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         expected.push_back(RigExecBuildCombineWeightPacket(
             TfToken("dense"), TfToken("strict"), TfToken("add"),
             {expected[2], expected[6]}, 3, 1.0f, 0.0f));
     }
     // 26: sphere over a degenerate band: a hard step at distance 1.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/degenerate", "RigExecSphereWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/degenerate", "RigExecSphereWeight",
             "dense", "clamp");
         object.providerSlot = 0;
-        object.falloffMin = _SynthFloat(1.0f);
-        object.falloffMax = _SynthFloat(1.0f);
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        object.falloffMin = _SynthFloat(writer, 1.0f);
+        object.falloffMax = _SynthFloat(writer, 1.0f);
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs in =
             volumeInputs("y", "unbounded");
         in.params.falloffMin = 1.0f;
@@ -1021,34 +1049,34 @@ _TestSyntheticBuilders()
     // 27: unbounded plane with bad extents: valid, the extents are
     // not even read off the unbounded arm.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/planeUnbounded", "RigExecPlaneWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/planeUnbounded", "RigExecPlaneWeight",
             "dense", "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        object.planeAxis = writer.AddString("y");
-        object.planeBounds = writer.AddString("unbounded");
-        object.extentU = _SynthFloat(0.0f);
-        object.extentV = _SynthFloat(-1.0f);
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        object.planeAxis = writer->Token("y");
+        object.planeBounds = writer->Token("unbounded");
+        object.extentU = _SynthFloat(writer, 0.0f);
+        object.extentV = _SynthFloat(writer, -1.0f);
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         expected.push_back(RigExecBuildVolumeWeightPacket(
             TfToken("RigExecPlaneWeight"),
             volumeInputs("y", "unbounded")));
     }
     // 28: plane with an unknown axis: invalid, tokens kept.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/planeBadAxis", "RigExecPlaneWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/planeBadAxis", "RigExecPlaneWeight",
             "dense", "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        object.planeAxis = writer.AddString("w");
-        object.planeBounds = writer.AddString("unbounded");
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        object.planeAxis = writer->Token("w");
+        object.planeBounds = writer->Token("unbounded");
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         expected.push_back(RigExecBuildVolumeWeightPacket(
             TfToken("RigExecPlaneWeight"),
             volumeInputs("w", "unbounded")));
@@ -1056,15 +1084,15 @@ _TestSyntheticBuilders()
     // 29: strict sphere driven out of range by strength: the BARE
     // invalid packet.
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/strictBare", "RigExecSphereWeight",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/strictBare", "RigExecSphereWeight",
             "dense", "strict");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        object.strength = _SynthFloat(10.0f);
-        _SynthAttr(&writer, "/mesh.points", &object.targetPoints,
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        object.strength = _SynthFloat(writer, 10.0f);
+        _SynthAttr(writer, "/mesh.points", &object.targetPoints,
                    &object.targetValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs in =
             volumeInputs("y", "unbounded");
         in.rangePolicy = TfToken("strict");
@@ -1075,16 +1103,16 @@ _TestSyntheticBuilders()
     // 30: sphere with a matching sample override: the samples, not
     // the targets, are measured (2 elements).
     {
-        RigExecWireWeightObject object = _SynthObject(
-            &writer, "/w/sampleOk", "RigExecSphereWeight", "dense",
+        fb::RigExecWireWeightObject object = _SynthObject(
+            writer, "/w/sampleOk", "RigExecSphereWeight", "dense",
             "clamp");
         object.providerSlot = 0;
-        object.falloffMax = _SynthFloat(2.0f);
-        _SynthAttr(&writer, "/mesh2.points", &object.targetPoints,
+        object.falloffMax = _SynthFloat(writer, 2.0f);
+        _SynthAttr(writer, "/mesh2.points", &object.targetPoints,
                    &object.targetValid);
-        _SynthAttr(&writer, "/sample.points", &object.samplePoints,
+        _SynthAttr(writer, "/sample.points", &object.samplePoints,
                    &object.sampleValid);
-        geometry.weightObjects.push_back(object);
+        geometry.weightObjects.push_back(std::move(object));
         RigExecVolumeWeightInputs in =
             volumeInputs("y", "unbounded");
         in.targetPoints = samplePoints;
@@ -1093,126 +1121,93 @@ _TestSyntheticBuilders()
             TfToken("RigExecSphereWeight"), in));
     }
 
-    // One chain feeding object 15's target.
+    // One chain feeding object 15's target, its base held.
     {
-        RigExecWireChain chain;
-        chain.target = writer.AddString("/chainmesh.points");
-        geometry.chains.push_back(chain);
+        fb::RigExecWireChain chain;
+        chain.target = synth.Path("/chainmesh.points");
+        chain.haveBase = true;
+        chain.base = synth.Points(samplePoints);
+        geometry.chains.push_back(std::move(chain));
+        geometry.chainRevisionBegin = {0};
+        geometry.chainRevisionEnd = {0};
+        geometry.chainChunkBegin = {0};
+        geometry.chainChunkEnd = {0};
+    }
+    // The static points the gathers read, sorted by (path, rest).
+    {
+        std::vector<fb::RigExecWirePathRead> reads;
+        reads.push_back(
+            _SynthPointsRead(writer, "/signed.points", signedSamples));
+        reads.push_back(_SynthPointsRead(writer, "/mesh.points", meshPoints));
+        reads.push_back(
+            _SynthPointsRead(writer, "/curve.points", curvePoints));
+        reads.push_back(
+            _SynthPointsRead(writer, "/sample.points", samplePoints));
+        reads.push_back(
+            _SynthPointsRead(writer, "/mesh2.points", samplePoints));
+        std::sort(reads.begin(), reads.end(),
+                  [](const fb::RigExecWirePathRead &a,
+                     const fb::RigExecWirePathRead &b) {
+                      return a.path < b.path;
+                  });
+        geometry.pathReads = std::move(reads);
     }
 
     for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
-        RigExecWireStep step;
-        step.kind = RigExecWireStepKind::WeightPacket;
+        fb::RigExecWireStep step;
+        step.kind = fb::StepKind::WeightPacket;
         step.object = int32_t(i);
         step.cluster = 0;
         step.isSource = true;
-        char label[32];
-        std::snprintf(label, sizeof(label), "weight %zu", i);
-        step.label = writer.AddString(label);
-        steps.push_back(step);
+        file.steps.push_back(std::move(step));
     }
     {
-        RigExecWireStep step;
-        step.kind = RigExecWireStepKind::VolumePlacements;
+        fb::RigExecWireStep step;
+        step.kind = fb::StepKind::VolumePlacements;
         step.object = 0;
         step.cluster = 0;
         step.isSource = true;
-        step.label = writer.AddString("placements");
-        steps.push_back(step);
+        file.steps.push_back(std::move(step));
     }
 
-    RigExecWireClustering clustering;
+    file.clustering = std::make_unique<fb::RigExecWireClustering>();
     {
-        RigExecWireCluster cluster;
-        for (size_t i = 0; i < steps.size(); ++i) {
+        fb::RigExecWireCluster cluster;
+        for (size_t i = 0; i < file.steps.size(); ++i) {
             cluster.members.push_back(int32_t(i));
         }
-        clustering.clusters.push_back(cluster);
-        clustering.clusterOf.assign(steps.size(), 0);
+        file.clustering->clusters.push_back(std::move(cluster));
+        file.clustering->clusterOf.assign(file.steps.size(), 0);
     }
-    RigExecWireCones cones;
+    file.cones = std::make_unique<fb::RigExecWireCones>();
     {
-        RigExecWireClusterSet all;
+        fb::RigExecWireClusterSet all;
         all.clusters = 1;
         all.words = {1};
-        RigExecWireClusterSet none;
+        fb::RigExecWireClusterSet none;
         none.clusters = 1;
         none.words = {0};
-        cones.cone.push_back(all);
-        cones.always = all;
-        cones.poseClusters = none;
-        cones.avarCluster = {0};
-        cones.chainBaseClusters = {{}};
+        file.cones->cone.push_back(all);
+        file.cones->always = std::make_unique<fb::RigExecWireClusterSet>(all);
+        file.cones->poseClusters =
+            std::make_unique<fb::RigExecWireClusterSet>(none);
+        file.cones->avarCluster = {0};
+        file.cones->chainBaseClusters.emplace_back();
     }
 
-    // Capture visits object 2's default, then object 11's signed scale
-    // before its legacy scale. Distinct axes expose a swapped uid mapping.
-    inputs.directory.resize(3);
-    for (auto &entry : inputs.directory) {
-        entry.tag = RigExecWireInput::Tag::Float;
-    }
-    {
-        RigExecWireFrameInputs record;
-        record.frame = 1.0;
-        record.uids = {0, 1, 2};
-        for (float input : {0.3f, 2.0f, 0.5f}) {
-            RigExecWireValue value;
-            value.tag = RigExecWireInput::Tag::Float;
-            value.f32 = input;
-            record.values.push_back(value);
-        }
-        record.pathReads.push_back(
-            _SynthPointsRead(&writer, "/signed.points", signedSamples));
-        record.pathReads.push_back(
-            _SynthPointsRead(&writer, "/mesh.points", meshPoints));
-        record.pathReads.push_back(
-            _SynthPointsRead(&writer, "/curve.points", curvePoints));
-        record.pathReads.push_back(
-            _SynthPointsRead(&writer, "/sample.points",
-                             samplePoints));
-        record.pathReads.push_back(
-            _SynthPointsRead(&writer, "/mesh2.points",
-                             samplePoints));
-        record.chainHaveBase = {1};
-        std::vector<RigExecWireVec3f> base;
-        for (const GfVec3f &p : samplePoints) {
-            base.push_back(RigExecWireVec3f{p[0], p[1], p[2]});
-        }
-        record.chainBases.push_back(base);
-        inputs.frames.push_back(record);
-    }
-
-    const std::vector<uint8_t> computed =
-        _SynthComputed(&writer, geometry, &inputs);
-    writer.AddSection(RigExecBinarySection::Computed, computed);
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeSteps(steps, &payload));
-    writer.AddSection(RigExecBinarySection::Steps, payload);
-    payload.clear();
-    CHECK(RigExecWireEncodeClustering(clustering, &payload));
-    writer.AddSection(RigExecBinarySection::Clusters, payload);
-    payload.clear();
-    CHECK(RigExecWireEncodeCones(cones, &payload));
-    writer.AddSection(RigExecBinarySection::Cones, payload);
-    payload.clear();
-    CHECK(RigExecWireEncodeSlotMeta(slotMeta, &payload));
-    writer.AddSection(RigExecBinarySection::SlotMeta, payload);
-    payload.clear();
-    CHECK(RigExecWireEncodeConstants(constants, &payload));
-    writer.AddSection(RigExecBinarySection::Constants, payload);
-    payload.clear();
-    CHECK(RigExecWireEncodeDomainPose(RigExecWireDomainPose{},
-                                      &payload));
-    writer.AddSection(RigExecBinarySection::DomainPose, payload);
-    payload.clear();
-    CHECK(RigExecWireEncodeDomainGeometry(geometry, &payload));
-    writer.AddSection(RigExecBinarySection::DomainGeometry, payload);
-    payload.clear();
-    CHECK(RigExecWireEncodeInputTable(inputs, &payload));
-    writer.AddSection(RigExecBinarySection::InputTable, payload);
-    const std::vector<uint8_t> bytes = writer.Finish();
-
+    // Every weight object field is read as a bake writes it: three
+    // through slots of their own, each holding the value the capture
+    // visits it with (object 2's default, then object 11's signed scale
+    // before its legacy scale; distinct values expose a swapped slot), the
+    // rest their table constants.
+    CHECK(file.inputs.size() == 3);
+    std::vector<uint8_t> bytes;
     std::string error;
+    CHECK(RigExecFormatWrite(file, &bytes, &error));
+    if (bytes.empty()) {
+        std::printf("synthetic write diagnostic: %s\n", error.c_str());
+        return;
+    }
     std::unique_ptr<RigExecRuntimeReader> runtime =
         RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
     CHECK(runtime);
@@ -1221,9 +1216,7 @@ _TestSyntheticBuilders()
         return;
     }
     // Pose and geometry prologues are siblings' work; the weight walk
-    // runs under its own bit. Every weight object field is read through
-    // the Computed section, as a bake writes it: a fresh reader plays the
-    // slots' defaults.
+    // runs under its own bit. A fresh reader plays the slots' defaults.
     runtime->SetRunMaskForTesting(0x2u);
     CHECK(runtime->Execute(&error));
     if (!error.empty()) {
@@ -1236,18 +1229,11 @@ _TestSyntheticBuilders()
     if (actual.size() != expected.size()) {
         return;
     }
-    std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    CHECK(reader);
-    if (!reader) {
-        return;
-    }
     size_t ok = 0;
     for (size_t i = 0; i < expected.size(); ++i) {
-        const std::string path = _WireString(
-            reader.get(), geometry.weightObjects[i].path);
-        if (_SynthCompare(path.c_str(), expected[i], actual[i],
-                          reader.get())) {
+        const std::string path =
+            _WireString(file, geometry.weightObjects[i].path);
+        if (_SynthCompare(path.c_str(), expected[i], actual[i], file)) {
             ++ok;
         } else {
             ++failures;
@@ -1317,8 +1303,8 @@ _TestSyntheticBuilders()
     size_t setOk = 0;
     for (size_t i = 0; i < moved.size() && i < set.size(); ++i) {
         const std::string path =
-            _WireString(reader.get(), geometry.weightObjects[i].path);
-        if (_SynthCompare(path.c_str(), moved[i], set[i], reader.get())) {
+            _WireString(file, geometry.weightObjects[i].path);
+        if (_SynthCompare(path.c_str(), moved[i], set[i], file)) {
             ++setOk;
         } else {
             ++failures;
@@ -1328,98 +1314,83 @@ _TestSyntheticBuilders()
                 setOk, moved.size());
 }
 
-// The read evaluator and the weight oracle over a hand-built Computed
-// section (inputs.cpp, weights.cpp): each read mode's arms, the
-// property-chain overlay, and the oracle's arithmetic and error text on
-// static, dynamic, combine and volume paths the baked fixtures do not
-// reach. Expected fields repeat the oracle's float expressions in its
-// order, with operands for which a reordering would change the bits.
+// The read evaluator and the weight oracle over a hand-built file
+// (inputs.cpp, weights.cpp): each read mode's arms, the property-chain
+// overlay, and the oracle's arithmetic and error text on static, dynamic,
+// combine and volume paths the baked fixtures do not reach. Expected fields
+// repeat the oracle's float expressions in its order, with operands for
+// which a reordering would change the bits.
 static void
 _TestComputedReadsAndOracle()
 {
-    using v4::InputTag;
-    using v4::ReadMode;
-    RigExecBinaryWriter writer;
+    using InputTag = fb::InputTag;
+    using ReadMode = fb::ReadMode;
+    fb::RigExecWireFile file;
+    _Synth synth(&file);
+    file.pose = std::make_unique<fb::RigExecWireDomainPose>();
+    file.geometry = std::make_unique<fb::RigExecWireDomainGeometry>();
     std::vector<uint32_t> paths;
     for (int i = 0; i <= 16; ++i) {
-        paths.push_back(writer.AddString("/W" + std::to_string(i)));
+        paths.push_back(synth.Path("/W" + std::to_string(i)));
     }
     std::vector<uint32_t> slotNames;
     for (int i = 0; i < 5; ++i) {
-        slotNames.push_back(writer.AddString("/S" + std::to_string(i) + ".v"));
+        slotNames.push_back(synth.Path("/S" + std::to_string(i) + ".v"));
     }
-    const uint32_t tokStatic = writer.AddString("RigExecStaticWeight");
-    const uint32_t tokDynamic = writer.AddString("RigExecDynamicWeight");
-    const uint32_t tokCombine = writer.AddString("RigExecCombineWeight");
-    const uint32_t tokSphere = writer.AddString("RigExecSphereWeight");
-    const uint32_t tokConstant = writer.AddString("constant");
-    const uint32_t tokDense = writer.AddString("dense");
-    const uint32_t tokSparse = writer.AddString("sparse");
-    const uint32_t tokStrict = writer.AddString("strict");
-    const uint32_t tokClamp = writer.AddString("clamp");
-    const uint32_t tokAdd = writer.AddString("add");
-    const uint32_t tokMax = writer.AddString("max");
-    const uint32_t tokMultiply = writer.AddString("multiply");
-    const uint32_t tokSubtract = writer.AddString("subtract");
-    const uint32_t tokMin = writer.AddString("min");
-    const uint32_t tokAverage = writer.AddString("average");
-    const uint32_t tokOverlay = writer.AddString("overlay");
-    const std::vector<uint8_t> bytes = writer.Finish();
+    const uint32_t tokStatic = synth.Token("RigExecStaticWeight");
+    const uint32_t tokDynamic = synth.Token("RigExecDynamicWeight");
+    const uint32_t tokCombine = synth.Token("RigExecCombineWeight");
+    const uint32_t tokSphere = synth.Token("RigExecSphereWeight");
+    const uint32_t tokConstant = synth.Token("constant");
+    const uint32_t tokDense = synth.Token("dense");
+    const uint32_t tokSparse = synth.Token("sparse");
+    const uint32_t tokStrict = synth.Token("strict");
+    const uint32_t tokClamp = synth.Token("clamp");
+    const uint32_t tokAdd = synth.Token("add");
+    const uint32_t tokMax = synth.Token("max");
+    const uint32_t tokMultiply = synth.Token("multiply");
+    const uint32_t tokSubtract = synth.Token("subtract");
+    const uint32_t tokMin = synth.Token("min");
+    const uint32_t tokAverage = synth.Token("average");
+    const uint32_t tokOverlay = synth.Token("overlay");
     std::string error;
-    const std::unique_ptr<RigExecBinaryReader> strings =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    CHECK(strings);
-    if (!strings) {
-        return;
-    }
 
-    RigExecWireComputed computed;
     const auto value = [&](InputTag tag, uint64_t bits) {
-        v4::RigExecWireValue v;
+        fb::RigExecWireValue v;
         v.tag = tag;
         v.bits = bits;
-        computed.values.push_back(v);
-        return uint32_t(computed.values.size() - 1);
+        return synth.Value(std::move(v));
     };
-    const auto floatValue = [&](float f) {
-        uint32_t bits = 0;
-        std::memcpy(&bits, &f, sizeof(bits));
-        return value(InputTag::Float, bits);
-    };
+    // Float constants pooled by their bits, so a read built after Open
+    // finds its constant in the pool Open took.
+    const auto floatValue = [&](float f) { return synth.Float(f); };
     const auto doubleValue = [&](double d) {
         uint64_t bits = 0;
         std::memcpy(&bits, &d, sizeof(bits));
         return value(InputTag::Double, bits);
     };
-    doubleValue(0.0);
     // Slots: s0 float 0.25, s1 double 0.7, s2 float with no value, s3 int,
     // s4 double with no value.
     const InputTag slotTypes[] = {InputTag::Float, InputTag::Double,
                                   InputTag::Float, InputTag::Int,
                                   InputTag::Double};
-    RigExecWireComputedFrame frame;
-    frame.values = {floatValue(0.25f), doubleValue(0.7), floatValue(0.0f),
-                    value(InputTag::Int, 3), doubleValue(0.0)};
-    frame.hasValue = {1, 1, 0, 1, 0};
+    const uint32_t slotValues[] = {floatValue(0.25f), doubleValue(0.7),
+                                   floatValue(0.0f), value(InputTag::Int, 3),
+                                   doubleValue(0.0)};
+    const bool slotHas[] = {true, true, false, true, false};
     for (size_t s = 0; s < 5; ++s) {
-        v4::InputSlot slot;
-        slot.name = slotNames[s];
-        slot.type = slotTypes[s];
-        slot.value = frame.values[s];
-        slot.flags = uint8_t(v4::InputSlotFlags::Listed) |
-                     (frame.hasValue[s]
-                          ? uint8_t(v4::InputSlotFlags::HasValue)
-                          : uint8_t(0));
-        computed.inputs.push_back(slot);
+        file.inputs.emplace_back(
+            slotNames[s], slotValues[s], -1, -1, slotTypes[s],
+            uint8_t(fb::InputSlotFlags::Listed) |
+                (slotHas[s] ? uint8_t(fb::InputSlotFlags::HasValue)
+                            : uint8_t(0)));
     }
-    computed.listedInputs = 5;
-    computed.frames.push_back(frame);
-    computed.vec3fArrays.emplace_back();
+    file.listedInputs = 5;
 
     const auto read = [&](float constant, ReadMode mode, uint8_t flags,
                           std::vector<uint32_t> walk, int16_t selected = -1,
                           int32_t overrideIndex = -1) {
-        v4::RigExecWireInput input;
+        fb::RigExecWireInput input;
         input.tag = InputTag::Float;
         input.mode = mode;
         input.flags = flags;
@@ -1429,30 +1400,25 @@ _TestComputedReadsAndOracle()
         input.overrideIndex = overrideIndex;
         return input;
     };
-    // A read whose one-slot walk holds \p v at the frame: the oracle reads
-    // a read's walk, and falls back to its own read-site constant, never
-    // the read's, when the walk yields nothing.
+    // A read whose one-slot walk holds \p v: the oracle reads a read's
+    // walk, and falls back to its own read-site constant, never the
+    // read's, when the walk yields nothing.
     const auto fixed = [&](float v) {
-        v4::InputSlot slot;
-        slot.type = InputTag::Float;
-        slot.value = floatValue(v);
-        slot.flags = uint8_t(v4::InputSlotFlags::Listed) |
-                     uint8_t(v4::InputSlotFlags::HasValue);
-        computed.inputs.push_back(slot);
-        computed.listedInputs = uint32_t(computed.inputs.size());
-        computed.frames[0].values.push_back(slot.value);
-        computed.frames[0].hasValue.push_back(1);
-        return read(v, ReadMode::Resolved, 0,
-                    {uint32_t(computed.inputs.size() - 1)});
+        file.inputs.emplace_back(0, floatValue(v), -1, -1, InputTag::Float,
+                                 uint8_t(fb::InputSlotFlags::Listed) |
+                                     uint8_t(fb::InputSlotFlags::HasValue));
+        file.listedInputs = uint32_t(file.inputs.size());
+        return _SynthOwn(read(v, ReadMode::Resolved, 0,
+                              {uint32_t(file.inputs.size() - 1)}));
     };
     const auto object = [&](size_t index, uint32_t type,
                             uint32_t representation, uint32_t rangePolicy) {
-        v4::RigExecWireWeightObject o;
+        fb::RigExecWireWeightObject o;
         o.path = paths[index];
         o.type = type;
         o.representation = representation;
         o.rangePolicy = rangePolicy;
-        for (v4::RigExecWireInput *input :
+        for (std::unique_ptr<fb::RigExecWireInput> *input :
              {&o.defaultWeight, &o.driver, &o.scale, &o.bias, &o.strength,
               &o.invert, &o.falloffMin, &o.falloffMax, &o.scaleXPos,
               &o.scaleYPos, &o.scaleZPos, &o.scaleXNeg, &o.scaleYNeg,
@@ -1466,8 +1432,8 @@ _TestComputedReadsAndOracle()
         o.falloffMin = fixed(0.0f);
         return o;
     };
-    std::vector<v4::RigExecWireWeightObject> &objects =
-        computed.weightObjects;
+    std::vector<fb::RigExecWireWeightObject> &objects =
+        file.geometry->weightObjects;
     objects.push_back(object(0, tokStatic, tokConstant, tokStrict));
     objects[0].defaultWeight = fixed(0.5f);
     objects.push_back(object(1, tokStatic, tokDense, tokClamp));
@@ -1480,7 +1446,7 @@ _TestComputedReadsAndOracle()
     objects[3].values = {0.2f, 0.1f};
     objects.push_back(object(4, tokDynamic, tokSparse, tokStrict));
     objects[4].base = 3;
-    objects[4].driver = read(1.0f, ReadMode::Resolved, 0, {1});
+    objects[4].driver = _SynthOwn(read(1.0f, ReadMode::Resolved, 0, {1}));
     objects[4].scale = fixed(0.85f);
     objects.push_back(object(5, tokCombine, tokDense, tokStrict));
     objects[5].combineMode = tokAdd;
@@ -1513,23 +1479,26 @@ _TestComputedReadsAndOracle()
                                     : std::vector<int32_t>{11, 3};
     }
 
-    RigExecWireDomainPose poses;
-    RigExecWireDomainGeometry geometry;
+    // The constant every read below falls back to.
+    floatValue(9.0f);
     RrProgram program;
-    program.poses = &poses;
-    program.geometry = &geometry;
-    program.strings = strings.get();
-    CHECK(RrInputsOpen(&program, &computed, &error));
+    program.poses = file.pose.get();
+    program.geometry = file.geometry.get();
+    program.stepWeightObjects = objects.size();
+    for (uint32_t id = 0; id < file.paths.size(); ++id) {
+        program.nodeText.push_back(RigExecFormatPathText(file, id));
+    }
+    CHECK(RrInputsOpen(&program, &file, &error));
     CHECK(RrWeightSizeScratch(&program, &error));
     program.store.overridden.assign(4, 0);
 
     // Reads, mode by mode.
-    const auto f = [&](const v4::RigExecWireInput &input) {
+    const auto f = [&](const fb::RigExecWireInput &input) {
         return RrWireValueFloat(RrReadInput(&program, input));
     };
     const float narrowed = static_cast<float>(0.7);
-    const uint8_t varying = uint8_t(v4::InputReadFlags::Varying);
-    const uint8_t longWay = uint8_t(v4::InputReadFlags::LongWay);
+    const uint8_t varying = uint8_t(fb::InputReadFlags::Varying);
+    const uint8_t longWay = uint8_t(fb::InputReadFlags::LongWay);
     // Resolved: a double hop reads a double walk and casts it; else the
     // most upstream readable hop of the read's type; else the constant.
     CHECK(f(read(9.0f, ReadMode::Resolved, 0, {0, 1})) == narrowed);
@@ -1687,7 +1656,7 @@ _TestComputedReadsAndOracle()
     CHECK(!resolve(10, 1, nullptr, &w) &&
           error == "weight range violation on /W10");
     CHECK(!resolve(objects.size(), 1, nullptr, &w) &&
-          error == "the computed section holds no weight object " +
+          error == "the file holds no weight object " +
                        std::to_string(objects.size()));
     std::printf("computed reads and oracle: checked\n");
 }

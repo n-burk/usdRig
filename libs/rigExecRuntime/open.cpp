@@ -1,203 +1,30 @@
 // rigExecRuntime Open (M2 framework).
-// Decodes every section, checks that the input table holds the one static
-// record and that its tables match the program, then derives what the file
-// implies but does not store: the input reads each table field binds, the
-// SSA version pool sizes and last-version maps (scanning the commit
-// writes), and the store sizing. Cross-references that do not close are
-// Open errors naming the table, and so is a step or cluster graph the
-// index walk cannot follow.
+// Opens the file through RigExecFormatOpen, whose validator holds every
+// rule the file alone decides (the step and cluster graph the index walk
+// follows among them), then derives what the file implies but does not
+// store: each path node's text, the input reads each table field binds,
+// the path-read table, the ribbon driver points, the SSA version pool
+// sizes and last-version maps (scanning the commit writes), and the store
+// sizing; the families build their own tables (blend layouts and points,
+// expanded skin topologies, base points, and the path-read rows each site
+// reads) as they size their scratch, so no run builds any of it.
+// Cross-references that do not close are Open errors naming the table.
 #include "rigExecRuntime/runtime.h"
 
-#include "rigExecBinary/stepGraph.h"
+#include "rigExecRuntime/store.h"
 
 #include <algorithm>
 #include <set>
 
 namespace rigExec {
 
-namespace {
-
-// The static tables the prologues index blindly against the program they
-// serve, each one entry per program row; empty when they match, else the
-// reason.
-std::string
-_StaticRecordError(const RigExecWireFrameInputs &record,
-                   const RigExecWireSlotMeta &meta,
-                   const RigExecWireDomainPose &poses,
-                   const RigExecWireDomainGeometry &geometry, size_t slots)
+RigExecRuntimeReader::RigExecRuntimeReader() : _program(new RrProgram())
 {
-    if (record.solverRibbonPoints.size() != poses.solvers.size()) {
-        return "the static record's ribbon tables do not match the solvers";
-    }
-    if (record.xformBase.size() != meta.xformSlots.size()) {
-        return "the static record's xform tables do not match the slots";
-    }
-    for (const int slot : meta.xformSlots) {
-        if (slot < 0 || size_t(slot) >= slots) {
-            return "an xform-derived slot names no slot";
-        }
-    }
-    if (record.nativeFrames.size() != poses.nativeSources.size()) {
-        return "the static record's native frames do not match the sources";
-    }
-    if (record.deltaBaseMatrix.size() != geometry.deltaBasePaths.size() ||
-        record.deltaBaseOk.size() != geometry.deltaBasePaths.size()) {
-        return "the static record's delta tables do not match the paths";
-    }
-    const size_t arrays = poses.constraintArrays.size();
-    if (record.arrayWeights.size() != arrays ||
-        record.arrayTranslationOffsets.size() != arrays ||
-        record.arrayRotationOffsets.size() != arrays ||
-        record.arrayOk.size() != arrays ||
-        record.arrayPoleWeights.size() != arrays ||
-        record.arrayPoleOk.size() != arrays) {
-        return "the static record's array tables do not match the "
-               "constraints";
-    }
-    if (record.chainHaveBase.size() != geometry.chains.size() ||
-        record.chainBases.size() != geometry.chains.size()) {
-        return "the static record's chain bases do not match the chains";
-    }
-    if (record.derivedHaveBase.size() != geometry.derivedIndex.size() ||
-        record.derivedBases.size() != geometry.derivedIndex.size()) {
-        return "the static record's derived bases do not match the derived "
-               "targets";
-    }
-    return std::string();
+    _noValue.matrix.SetDiagonal(0.0);
+    _noInput.defaultValue = _noValue;
 }
 
-// Minimal manifest reader for the "compileDiagnostics" string array. The
-// writer is _EscapeJson in rigExecBake/bake.cpp; this mirrors its escapes.
-// A manifest without the key (binaries baked before it) reads as empty;
-// a present-but-malformed array fails the open.
-bool
-_ParseManifestDiagnostics(const char *begin, const char *end,
-                          std::vector<std::string> *out,
-                          std::string *error)
-{
-    auto fail = [&](const std::string &why) {
-        if (error) {
-            *error = why;
-        }
-        return false;
-    };
-    static const char key[] = "\"compileDiagnostics\"";
-    const char *at =
-        std::search(begin, end, key, key + sizeof(key) - 1);
-    if (at == end) {
-        return true;
-    }
-    at += sizeof(key) - 1;
-    auto skipWs = [&]() {
-        while (at != end && (*at == ' ' || *at == '\t' || *at == '\n' ||
-                             *at == '\r')) {
-            ++at;
-        }
-    };
-    skipWs();
-    if (at == end || *at != ':') {
-        return fail("malformed manifest section");
-    }
-    ++at;
-    skipWs();
-    if (at == end || *at != '[') {
-        return fail("malformed manifest section");
-    }
-    ++at;
-    for (;;) {
-        skipWs();
-        if (at != end && *at == ']') {
-            return true;
-        }
-        if (at == end || *at != '"') {
-            return fail("malformed manifest section");
-        }
-        ++at;
-        std::string line;
-        while (at != end && *at != '"') {
-            if (*at != '\\') {
-                line.push_back(*at++);
-                continue;
-            }
-            ++at;
-            if (at == end) {
-                return fail("malformed manifest section");
-            }
-            switch (*at) {
-            case '"':
-                line.push_back('"');
-                ++at;
-                break;
-            case '\\':
-                line.push_back('\\');
-                ++at;
-                break;
-            case 'n':
-                line.push_back('\n');
-                ++at;
-                break;
-            case 'r':
-                line.push_back('\r');
-                ++at;
-                break;
-            case 't':
-                line.push_back('\t');
-                ++at;
-                break;
-            case 'u': {
-                // _EscapeJson only ever emits \u00XX for C0 controls.
-                unsigned code = 0;
-                for (int i = 0; i < 4; ++i) {
-                    ++at;
-                    if (at == end) {
-                        return fail("malformed manifest section");
-                    }
-                    code <<= 4;
-                    if (*at >= '0' && *at <= '9') {
-                        code |= unsigned(*at - '0');
-                    } else if (*at >= 'a' && *at <= 'f') {
-                        code |= unsigned(*at - 'a' + 10);
-                    } else if (*at >= 'A' && *at <= 'F') {
-                        code |= unsigned(*at - 'A' + 10);
-                    } else {
-                        return fail("malformed manifest section");
-                    }
-                }
-                ++at;
-                if (code < 0x80) {
-                    line.push_back(char(code));
-                } else if (code < 0x800) {
-                    line.push_back(char(0xC0 | (code >> 6)));
-                    line.push_back(char(0x80 | (code & 0x3F)));
-                } else {
-                    line.push_back(char(0xE0 | (code >> 12)));
-                    line.push_back(char(0x80 | ((code >> 6) & 0x3F)));
-                    line.push_back(char(0x80 | (code & 0x3F)));
-                }
-                break;
-            }
-            default:
-                return fail("malformed manifest section");
-            }
-        }
-        if (at == end) {
-            return fail("malformed manifest section");
-        }
-        ++at;  // closing quote
-        out->push_back(std::move(line));
-        skipWs();
-        if (at != end && *at == ',') {
-            ++at;
-            continue;
-        }
-        if (at != end && *at == ']') {
-            return true;
-        }
-        return fail("malformed manifest section");
-    }
-}
-
-}  // namespace
+RigExecRuntimeReader::~RigExecRuntimeReader() = default;
 
 std::unique_ptr<RigExecRuntimeReader>
 RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
@@ -210,311 +37,108 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         return std::unique_ptr<RigExecRuntimeReader>();
     };
     std::unique_ptr<RigExecRuntimeReader> self(new RigExecRuntimeReader());
-    self->_reader = RigExecBinaryReader::Open(bytes, size, error);
-    if (!self->_reader) {
-        return fail(error ? *error : std::string("unreadable file"));
-    }
-    const RigExecBinaryReader &reader = *self->_reader;
-    auto section = [&](RigExecBinarySection tag, const char *name,
-                       const uint8_t **data, size_t *bytesOut) {
-        if (!reader.FindSection(tag, data, bytesOut)) {
-            if (error) {
-                *error = std::string("missing ") + name + " section";
-            }
-            return false;
-        }
-        return true;
-    };
-    const uint8_t *data = nullptr;
-    size_t bytesOut = 0;
-    if (!section(RigExecBinarySection::Steps, "steps", &data, &bytesOut)) {
-        return fail(*error);
-    }
+    RrProgram &program = *self->_program;
     {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeSteps(&cursor, &self->_steps, error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed steps section");
-        }
-    }
-    if (section(RigExecBinarySection::Clusters, "clusters", &data,
-                &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeClustering(&cursor, &self->_clustering,
-                                         error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed clusters section");
-        }
-    }
-    if (section(RigExecBinarySection::Cones, "cones", &data, &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeCones(&cursor, &self->_cones, error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed cones section");
-        }
-    }
-    if (section(RigExecBinarySection::SlotMeta, "slot inventory", &data,
-                &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeSlotMeta(&cursor, &self->_slotMeta, error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed slot inventory section");
-        }
-    }
-    if (section(RigExecBinarySection::Constants, "constants", &data,
-                &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeConstants(&cursor, &self->_constants,
-                                        error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed constants section");
-        }
-    }
-    if (section(RigExecBinarySection::DomainPose, "pose domain", &data,
-                &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeDomainPose(&cursor, &self->_poses, error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed pose-domain section");
-        }
-    }
-    // Optional since major 1 minor 1: absent in older binaries, which load with
-    // every chain absolute. Present but dangling or malformed: fail.
-    if (section(RigExecBinarySection::SolverStart, "solver starts", &data,
-                &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        std::vector<RigExecWireSolverStart> starts;
-        if (!RigExecWireDecodeSolverStarts(&cursor, &starts, error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed solver-start section");
-        }
-        for (const RigExecWireSolverStart &entry : starts) {
-            if (size_t(entry.solver) >= self->_poses.solvers.size() ||
-                entry.start < 0) {
-                return fail("malformed solver-start section");
-            }
-            RigExecWireSolver &solver =
-                self->_poses.solvers[size_t(entry.solver)];
-            solver.start = entry.start;
-            solver.startRest = entry.rest;
-            solver.startRead = entry.read;
-        }
-    }
-    // Optional since minor 1: absent in older binaries, which load with
-    // every interpolator solving a transform's rotation alone. Present
-    // but dangling or malformed: fail.
-    if (section(RigExecBinarySection::PoseNumeric, "pose numerics", &data,
-                &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        std::vector<RigExecWirePoseNumeric> numerics;
-        if (!RigExecWireDecodePoseNumerics(&cursor, &numerics, error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed pose-numeric section");
-        }
-        for (const RigExecWirePoseNumeric &entry : numerics) {
-            if (size_t(entry.interpolator) >=
-                self->_poses.poseInterpolators.size()) {
-                return fail("malformed pose-numeric section");
-            }
-            RigExecWirePoseInterpolator &interp =
-                self->_poses.poseInterpolators[size_t(entry.interpolator)];
-            // A numeric driver names no driver prim; a transform-driven
-            // one names a slot. A file that says both is corrupt.
-            if (!entry.values.empty() && interp.driverSlot >= 0) {
-                return fail("malformed pose-numeric section");
-            }
-            interp.enableTranslation = entry.enableTranslation;
-            interp.valueInputs = entry.values;
-        }
-    }
-    // Optional since minor 1, in the same way: absent means every
-    // provider composes against its authored parent.
-    if (section(RigExecBinarySection::SpaceSwitch, "space switches", &data,
-                &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeSpaceSwitches(&cursor,
-                                            self->_slotMeta.parent,
-                                            &self->_poses.spaceSwitches,
-                                            error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed space-switch section");
-        }
-    }
-    if (section(RigExecBinarySection::DomainGeometry, "geometry domain",
-                &data, &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeDomainGeometry(&cursor, &self->_geometry,
-                                             error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed geometry-domain section");
-        }
-    }
-    if (!section(RigExecBinarySection::InputTable, "input table", &data,
-                 &bytesOut)) {
-        return fail(*error);
-    }
-    {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeInputTable(&cursor, &self->_inputs, error) ||
-            !cursor.Exhausted()) {
-            return fail("malformed input-table section");
-        }
-    }
-    // The one record holds the static data every run reads (RrStatic),
-    // captured at the bake time; a file of several records is an animation
-    // capture, which nothing plays.
-    if (self->_inputs.frames.size() != 1) {
-        return fail("the input table holds " +
-                    std::to_string(self->_inputs.frames.size()) +
-                    " frame records; a .rigexec holds one static record: "
-                    "rebake");
-    }
-    {
-        const std::string why = _StaticRecordError(
-            self->_inputs.frames[0], self->_slotMeta, self->_poses,
-            self->_geometry, self->_slotMeta.paths.size());
-        if (!why.empty()) {
-            return fail(why);
-        }
-    }
-    // The Computed section (temporary): the input slots every read the
-    // steps make is evaluated over, and the weight objects and property
-    // chains the runtime computes from them. Absent, malformed, or not
-    // matching the tables it extends: fail (RrInputsOpen below refuses a
-    // file without it).
-    bool hasComputed = false;
-    if (reader.FindSection(RigExecBinarySection::Computed, &data,
-                           &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
         std::string why;
-        if (!RigExecWireDecodeComputed(&cursor, &self->_computed, &why)) {
-            return fail("malformed computed section: " + why);
-        }
-        if (!RigExecWireApplyComputed(self->_computed, self->_geometry,
-                                      self->_inputs, &self->_poses, &why)) {
+        if (!RigExecFormatOpen(bytes, size, &program.file, &why)) {
             return fail(why);
         }
-        hasComputed = true;
     }
-    // Plugin movers' bytes, since minor 3. Every op-16 revision needs its
-    // entry and every entry an op-16 revision, with one frame row for the
-    // static record; anything else is a file that does not close.
-    bool hasExternal = false;
-    if (reader.FindSection(RigExecBinarySection::ExternalMovers, &data,
-                           &bytesOut)) {
-        RigExecWireReader cursor(data, bytesOut);
-        if (!RigExecWireDecodeExternalMovers(&cursor, &self->_external,
-                                             error)) {
-            return fail(*error);
-        }
-        if (self->_external.frames.size() != self->_inputs.frames.size()) {
-            return fail("external movers carry a frame count the input "
-                        "table does not");
-        }
-        hasExternal = true;
+    const RigExecWireFile &file = *program.file;
+    program.steps = &file.steps;
+    program.clustering = file.clustering.get();
+    program.cones = file.cones.get();
+    program.slotMeta = file.slotMeta.get();
+    program.constants = file.constants.get();
+    program.poses = file.pose.get();
+    program.geometry = file.geometry.get();
+    program.statics.file = &file;
+    program.compileDiagnostics = file.compileDiagnostics;
+    while (program.stepWeightObjects < file.geometry->weightObjects.size() &&
+           !file.geometry->weightObjects[program.stepWeightObjects]
+                .envelopeOnly) {
+        ++program.stepWeightObjects;
     }
-    {
-        RrProgram &program = self->_program;
-        for (const RigExecWireExternalRevision &entry :
-             self->_external.revisions) {
-            const auto &chains = self->_geometry.chains;
-            if (size_t(entry.chain) >= chains.size() ||
-                size_t(entry.revision) >=
-                    chains[entry.chain].revisions.size() ||
-                chains[entry.chain].revisions[entry.revision].op !=
-                    uint8_t(RigExecWireExternalRevisionOp)) {
-                return fail("an external mover entry names no plugin "
-                            "revision");
-            }
-            RrProgram::ExternalRevision state;
-            if (!reader.GetString(entry.type, &state.type) ||
-                state.type.empty()) {
-                return fail("an external mover names no type");
-            }
-            if (!program.externalIndex
-                     .emplace(std::make_pair(entry.chain, entry.revision),
-                              program.externals.size())
-                     .second) {
-                return fail("an external mover entry is duplicated");
-            }
-            program.externals.push_back(std::move(state));
-        }
-        for (size_t c = 0; c < self->_geometry.chains.size(); ++c) {
-            const auto &revisions = self->_geometry.chains[c].revisions;
-            for (size_t r = 0; r < revisions.size(); ++r) {
-                if (revisions[r].op ==
-                        uint8_t(RigExecWireExternalRevisionOp) &&
-                    !program.externalIndex.count(
-                        std::make_pair(uint32_t(c), uint32_t(r)))) {
-                    return fail("a plugin revision carries no external "
-                                "mover entry");
-                }
-            }
-        }
-        program.external = hasExternal ? &self->_external : nullptr;
-        program.statics.record = &self->_inputs.frames[0];
-        program.statics.external = program.external;
-    }
-    // The manifest is advisory except for its compile-diagnostics seed,
-    // which the first Execute replays. Absent (or seedless) in binaries
-    // baked before the key: not an error. Present but malformed: fail.
-    if (reader.FindSection(RigExecBinarySection::Manifest, &data,
-                           &bytesOut)) {
-        const char *text = reinterpret_cast<const char *>(data);
-        if (!_ParseManifestDiagnostics(
-                text, text + bytesOut,
-                &self->_program.compileDiagnostics, error)) {
-            return fail(*error);
-        }
-    }
-    // Playback walks the steps in index order and dirties whole clusters
-    // without reading an edge, so the file's own graph must make that walk
-    // a topological order, with every read produced before it, before
-    // anything is sized from it.
-    {
-        const std::string why = RigExecStepGraphError(
-            self->_steps, self->_clustering,
-            [](const RigExecWireSlotRange &range) {
-                return RigExecStepGraphRange{uint8_t(range.domain),
-                                             range.begin, range.end};
-            });
-        if (!why.empty()) {
-            return fail(why);
+
+    // Each node's text, a parent before its child: a prim is its parent's
+    // text, "/" and its name; a property its prim's, "." and its name; a
+    // token its name.
+    program.nodeText.assign(file.paths.size(), std::string());
+    for (size_t i = 1; i < file.paths.size(); ++i) {
+        const RigExecWirePathNode &node = file.paths[i];
+        const std::string &name = file.names[node.name()];
+        switch (node.kind()) {
+        case RigExecWirePathKind::Prim:
+            program.nodeText[i] = program.nodeText[node.parent()] + "/" + name;
+            break;
+        case RigExecWirePathKind::Property:
+            program.nodeText[i] = program.nodeText[node.parent()] + "." + name;
+            break;
+        default:
+            program.nodeText[i] = name;
+            break;
         }
     }
 
-    RrProgram &program = self->_program;
-    program.steps = &self->_steps;
-    program.clustering = &self->_clustering;
-    program.cones = &self->_cones;
-    program.slotMeta = &self->_slotMeta;
-    program.constants = &self->_constants;
-    program.poses = &self->_poses;
-    program.geometry = &self->_geometry;
-    program.inputs = &self->_inputs;
-    program.strings = self->_reader.get();
-    const size_t slots = self->_slotMeta.paths.size();
-    const size_t clusters = self->_clustering.clusters.size();
-    const size_t revisions = self->_geometry.revisionIndex.size();
-    if (self->_constants.avarConstants.size() != slots * 11) {
+    // Plugin movers: one playback state per entry, keyed by the revision
+    // it names; every op-16 revision has its entry.
+    const RigExecWireDomainGeometry &geometry = *file.geometry;
+    for (const RigExecWireExternalMover &entry : file.externalMovers) {
+        const auto &chains = geometry.chains;
+        if (size_t(entry.chain) >= chains.size() ||
+            size_t(entry.revision) >= chains[entry.chain].revisions.size() ||
+            chains[entry.chain].revisions[entry.revision].op !=
+                uint8_t(RigExecWireExternalRevisionOp)) {
+            return fail("an external mover entry names no plugin revision");
+        }
+        RrProgram::ExternalRevision state;
+        state.type = program.TextOrEmpty(entry.type);
+        if (state.type.empty()) {
+            return fail("an external mover names no type");
+        }
+        if (!program.externalIndex
+                 .emplace(std::make_pair(entry.chain, entry.revision),
+                          program.externals.size())
+                 .second) {
+            return fail("an external mover entry is duplicated");
+        }
+        program.externals.push_back(std::move(state));
+    }
+    for (size_t c = 0; c < geometry.chains.size(); ++c) {
+        const auto &revisions = geometry.chains[c].revisions;
+        for (size_t r = 0; r < revisions.size(); ++r) {
+            if (revisions[r].op == uint8_t(RigExecWireExternalRevisionOp) &&
+                !program.externalIndex.count(
+                    std::make_pair(uint32_t(c), uint32_t(r)))) {
+                return fail("a plugin revision carries no external mover "
+                            "entry");
+            }
+        }
+    }
+
+    const size_t slots = file.slotMeta->paths.size();
+    const size_t clusters = file.clustering->clusters.size();
+    const size_t revisions = geometry.revisionIndex.size();
+    if (file.constants->avarConstants.size() != slots * 11) {
         return fail("avar constants do not cover the slots");
     }
-    // The input reads: each table field the steps read binds one of the
-    // section's registered reads.
+    // The input reads: each table field the steps read binds its Input in
+    // place; the path reads come out of the pools.
     {
         std::string why;
-        if (!RrInputsOpen(&program, hasComputed ? &self->_computed : nullptr,
-                          &why) ||
-            !RrInputsBindReads(&program, &why)) {
+        if (!RrInputsOpen(&program, &file, &why) ||
+            !RrInputsBindReads(&program, &why) ||
+            !RrInputsBuildPathReads(&program, &why)) {
             return fail(why);
         }
     }
 
+    const RigExecWireDomainPose &poses = *file.pose;
     // Switch index by provider slot, dense, so the compose reads one int
     // per slot. Left empty when the rig has no switch, which is the
     // branch the compose tests first.
-    if (!self->_poses.spaceSwitches.empty()) {
-        const RigExecWireSlotMeta &meta = self->_slotMeta;
+    if (!poses.spaceSwitches.empty()) {
+        const RigExecWireSlotMeta &meta = *file.slotMeta;
         // A version the compose reads: its anchor's posedM (or identity),
         // then each recompose slot composed from its avars and ladder.
         const auto versionInRange = [&](const RigExecWireFrameVersion &read) {
@@ -533,9 +157,9 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             return true;
         };
         program.spaceSwitchBySlot.assign(slots, -1);
-        for (size_t i = 0; i < self->_poses.spaceSwitches.size(); ++i) {
+        for (size_t i = 0; i < poses.spaceSwitches.size(); ++i) {
             const RigExecWireSpaceSwitch &sw =
-                self->_poses.spaceSwitches[i];
+                poses.spaceSwitches[i];
             if (sw.slot < 0 || size_t(sw.slot) >= slots) {
                 return fail("space switch names no slot");
             }
@@ -548,8 +172,8 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                 return fail("space switch names no space slot");
             }
             if (sw.sourceReads.size() != sw.sourceSlots.size() ||
-                !versionInRange(sw.parentRead) ||
-                !versionInRange(sw.spaceRead)) {
+                !versionInRange(*sw.parentRead) ||
+                !versionInRange(*sw.spaceRead)) {
                 return fail("space switch reads a version of no slot");
             }
             for (const RigExecWireFrameVersion &read : sw.sourceReads) {
@@ -563,7 +187,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                 return read.anchor == -1 && read.recompose.empty();
             };
             bool versionWithoutSlot =
-                sw.spaceSlot < 0 && !unread(sw.spaceRead);
+                sw.spaceSlot < 0 && !unread(*sw.spaceRead);
             for (size_t k = 0; k < sw.sourceSlots.size(); ++k) {
                 versionWithoutSlot =
                     versionWithoutSlot ||
@@ -577,7 +201,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         }
     }
     RrStore &store = program.store;
-    store.avars = self->_constants.avarConstants;
+    store.avars = file.constants->avarConstants;
     store.lastAvars = store.avars;
 
     // SSA versions, replicating BindPoseVersions: the seeds are the
@@ -599,7 +223,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     auto noteBase = [&](uint32_t v) {
         haveBaseReference = true; baseMax = std::max(baseMax, v);
     };
-    for (const RigExecWireCommit &commit : self->_poses.commits) {
+    for (const RigExecWireCommit &commit : poses.commits) {
         for (size_t p = 0; p < commit.slots.size(); ++p) {
             const size_t slot = size_t(commit.slots[p]);
             if (slot >= slots ||
@@ -667,13 +291,13 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             noteBase(read.base);
         }
         for (const auto &list : commit.poleAncestors) {
-            for (const RigExecWireAncestorRead &read : list) {
+            for (const RigExecWireAncestorRead &read : list.v) {
                 noteFin(read.fin);
                 noteBase(read.base);
             }
         }
         for (const auto &list : commit.sourceAncestors) {
-            for (const RigExecWireAncestorRead &read : list) {
+            for (const RigExecWireAncestorRead &read : list.v) {
                 noteFin(read.fin);
                 noteBase(read.base);
             }
@@ -684,7 +308,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             noteBase(read.base);
         }
     }
-    for (const RigExecWireSolver &solver : self->_poses.solvers) {
+    for (const RigExecWireSolver &solver : poses.solvers) {
         for (uint32_t v : solver.restReads) {
             noteFin(v);
         }
@@ -725,22 +349,15 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     store.base.assign(basePool, RrPointFrame());
 
     // Cone table shapes, indexed blindly by the closure.
-    const RigExecWireCones &cones = self->_cones;
+    const RigExecWireCones &cones = *file.cones;
     const size_t words = (clusters + 63) / 64;
     if (cones.cone.size() != clusters ||
-        cones.always.words.size() != words ||
-        cones.poseClusters.words.size() != words ||
+        cones.always->words.size() != words ||
+        cones.poseClusters->words.size() != words ||
         cones.avarCluster.size() != slots ||
-        cones.chainBaseClusters.size() != self->_geometry.chains.size() ||
-        cones.solverPointsClusters.size() != self->_poses.solvers.size() ||
+        cones.chainBaseClusters.size() != geometry.chains.size() ||
         cones.revisionClusters.size() != revisions ||
-        cones.revisionStaticCluster.size() != revisions ||
-        cones.nativeSourceClusters.size() !=
-            self->_poses.nativeSources.size() ||
-        cones.deltaBaseClusters.size() !=
-            self->_geometry.deltaBasePaths.size() ||
-        cones.constraintArrayClusters.size() !=
-            self->_poses.constraintArrays.size()) {
+        cones.revisionStaticCluster.size() != revisions) {
         return fail("cone lookup tables do not match the program");
     }
     for (const RigExecWireClusterSet &set : cones.cone) {
@@ -758,14 +375,12 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                     clusterInRange) &&
         std::all_of(cones.revisionStaticCluster.begin(),
                     cones.revisionStaticCluster.end(), clusterInRange);
-    for (const std::vector<std::vector<int32_t>> *lists :
-         {&cones.chainBaseClusters, &cones.solverPointsClusters,
-          &cones.revisionClusters, &cones.nativeSourceClusters,
-          &cones.deltaBaseClusters, &cones.constraintArrayClusters}) {
-        for (const std::vector<int32_t> &list : *lists) {
+    for (const std::vector<fb::RigExecWireIntList> *lists :
+         {&cones.chainBaseClusters, &cones.revisionClusters}) {
+        for (const fb::RigExecWireIntList &list : *lists) {
             coneClustersInRange =
                 coneClustersInRange &&
-                std::all_of(list.begin(), list.end(), clusterInRange);
+                std::all_of(list.v.begin(), list.v.end(), clusterInRange);
         }
     }
     if (!coneClustersInRange) {
@@ -774,20 +389,20 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     // A compose step's Avars reads outside its own group: the slots a
     // switch recomposes an earlier version of (RigExecBakedCones::
     // avarVersionSteps, built from the same reads).
-    for (const RigExecWireStep &step : self->_steps) {
+    for (const RigExecWireStep &step : file.steps) {
         if (step.kind != RigExecWireStepKind::ComposeSubtree ||
             step.object < 0 ||
-            size_t(step.object) >= self->_poses.composeGroups.size()) {
+            size_t(step.object) >= poses.composeGroups.size()) {
             continue;
         }
         const RigExecWireComposeGroup &group =
-            self->_poses.composeGroups[size_t(step.object)];
+            poses.composeGroups[size_t(step.object)];
         for (const RigExecWireSlotRange &range : step.reads) {
-            if (range.domain != RigExecWireSlotDomain::Avars) {
+            if (range.domain() != RigExecWireSlotDomain::Avars) {
                 continue;
             }
-            for (uint64_t slot = range.begin / 11;
-                 slot < (uint64_t(range.end) + 10) / 11 && slot < slots;
+            for (uint64_t slot = range.begin() / 11;
+                 slot < (uint64_t(range.end()) + 10) / 11 && slot < slots;
                  ++slot) {
                 if (int64_t(slot) >= group.begin &&
                     int64_t(slot) < group.end) {
@@ -802,12 +417,12 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         }
     }
     for (int index : cones.varyingSteps) {
-        if (index < 0 || size_t(index) >= self->_steps.size()) {
+        if (index < 0 || size_t(index) >= file.steps.size()) {
             return fail("a varying step names no step");
         }
     }
     for (int index : cones.overrideSteps) {
-        if (index < 0 || size_t(index) >= self->_steps.size()) {
+        if (index < 0 || size_t(index) >= file.steps.size()) {
             return fail("an override step names no step");
         }
     }
@@ -818,12 +433,12 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     store.posedM.assign(slots, identity);
     store.finalMatrix.assign(slots, identity);
     store.baseMatrix.assign(slots, identity);
-    store.aggregates.assign(self->_poses.solvers.size(),
+    store.aggregates.assign(poses.solvers.size(),
                             RrPointFrameArray());
     store.ladders.assign(slots, RrLadderLive());
     // Seeded with the reads' folded constants until a prologue composes.
     for (size_t i = 0;
-         i < std::min(slots, self->_poses.ladders.size()); ++i) {
+         i < std::min(slots, poses.ladders.size()); ++i) {
         RrLadderLive &live = store.ladders[i];
         const auto constant = [&](int field) {
             return program.RegisteredConstant(
@@ -838,30 +453,29 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         }
         live.rotationOrder = constant(RrLadderRotationOrder).token;
     }
-    store.solverOutFrames.assign(self->_poses.solvers.size(), {});
-    store.solverOutPresent.assign(self->_poses.solvers.size(), {});
-    for (size_t i = 0; i < self->_poses.solvers.size(); ++i) {
+    store.solverOutFrames.assign(poses.solvers.size(), {});
+    store.solverOutPresent.assign(poses.solvers.size(), {});
+    for (size_t i = 0; i < poses.solvers.size(); ++i) {
         store.solverOutFrames[i].assign(
-            self->_poses.solvers[i].outputs.size(), RrPointFrame());
+            poses.solvers[i].outputs.size(), RrPointFrame());
         store.solverOutPresent[i].assign(
-            self->_poses.solvers[i].outputs.size(), 0);
+            poses.solvers[i].outputs.size(), 0);
     }
-    store.ribbonPoints.assign(self->_poses.solvers.size(), {});
-    store.ribbonLast.assign(self->_poses.solvers.size(), {});
-    store.ribbonConstant.assign(self->_poses.solvers.size(), {});
-    store.ribbonVarying.assign(self->_poses.solvers.size(), 0);
-    store.ribbonDirty.assign(self->_poses.solvers.size(), 0);
-    for (size_t i = 0; i < self->_poses.solvers.size(); ++i) {
-        const RigExecWireSolver &solver = self->_poses.solvers[i];
-        for (const RigExecWireVec3f &p : solver.ribbonConstantPoints) {
+    // A ribbon's driver points: the ones the bake read, constant from
+    // here on.
+    store.ribbonConstant.assign(poses.solvers.size(), {});
+    for (size_t i = 0; i < poses.solvers.size(); ++i) {
+        const std::vector<RigExecWireVec3f> &driver =
+            poses.solvers[i].ribbonConstantPoints;
+        store.ribbonConstant[i].reserve(driver.size());
+        for (const RigExecWireVec3f &p : driver) {
             store.ribbonConstant[i].push_back(
                 RrVec3f(p[0], p[1], p[2]));
         }
-        store.ribbonVarying[i] = solver.ribbonPointsVarying ? 1 : 0;
     }
-    store.commits.assign(self->_poses.commits.size(), RrCommitScratch());
-    for (size_t i = 0; i < self->_poses.commits.size(); ++i) {
-        const RigExecWireCommit &commit = self->_poses.commits[i];
+    store.commits.assign(poses.commits.size(), RrCommitScratch());
+    for (size_t i = 0; i < poses.commits.size(); ++i) {
+        const RigExecWireCommit &commit = poses.commits[i];
         RrCommitScratch &scratch = store.commits[i];
         scratch.present.assign(commit.slots.size(), 0);
         scratch.frames.assign(commit.slots.size(), RrPointFrame());
@@ -872,77 +486,66 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         scratch.sources.assign(commit.sources.size(),
                                RrConstraintSource());
     }
-    store.arrays.assign(self->_poses.constraintArrays.size(),
+    store.arrays.assign(poses.constraintArrays.size(),
                         RrConstraintArraysLive());
-    for (size_t i = 0; i < self->_poses.constraintArrays.size(); ++i) {
+    for (size_t i = 0; i < poses.constraintArrays.size(); ++i) {
         store.arrays[i].readPole =
-            self->_poses.constraintArrays[i].readPole;
+            poses.constraintArrays[i].readPole;
     }
-    store.chainHaveBase.assign(self->_geometry.chains.size(), 0);
-    store.chainBaseDirty.assign(self->_geometry.chains.size(), 0);
-    store.lastHaveBase.assign(self->_geometry.chains.size(), 0);
-    store.chainBases.assign(self->_geometry.chains.size(), {});
-    store.derivedHaveBase.assign(self->_geometry.derivedIndex.size(), 0);
-    store.derivedBases.assign(self->_geometry.derivedIndex.size(), {});
-    store.nativeFrames.assign(self->_poses.nativeSources.size(),
+    store.chainHaveBase.assign(geometry.chains.size(), 0);
+    store.chainBaseDirty.assign(geometry.chains.size(), 0);
+    store.lastHaveBase.assign(geometry.chains.size(), 0);
+    store.derivedHaveBase.assign(geometry.derivedIndex.size(), 0);
+    store.nativeFrames.assign(poses.nativeSources.size(),
                               RrPointFrame());
-    store.lastNativeFrames.assign(self->_poses.nativeSources.size(),
-                                  RrPointFrame());
-    store.nativeFrameOk.assign(self->_poses.nativeSources.size(), 0);
-    store.lastNativeFrameOk.assign(self->_poses.nativeSources.size(), 0);
-    store.xformBase.assign(self->_slotMeta.xformSlots.size(), identity);
-    store.lastXformBase.assign(self->_slotMeta.xformSlots.size(),
+    store.nativeFrameOk.assign(poses.nativeSources.size(), 0);
+    store.xformBase.assign(file.slotMeta->xformSlots.size(), identity);
+    store.lastXformBase.assign(file.slotMeta->xformSlots.size(),
                                identity);
-    store.deltaBaseMatrix.assign(self->_geometry.deltaBasePaths.size(),
+    store.deltaBaseMatrix.assign(geometry.deltaBasePaths.size(),
                                  identity);
-    store.lastDeltaBaseMatrix.assign(self->_geometry.deltaBasePaths.size(),
-                                     identity);
-    store.deltaBaseOk.assign(self->_geometry.deltaBasePaths.size(), 0);
-    store.lastDeltaBaseOk.assign(self->_geometry.deltaBasePaths.size(),
-                                 0);
-    store.deltaValues.assign(self->_geometry.deltaBasePaths.size(),
+    store.deltaBaseOk.assign(geometry.deltaBasePaths.size(), 0);
+    store.deltaValues.assign(geometry.deltaBasePaths.size(),
                              identity);
-    store.deltaPresent.assign(self->_geometry.deltaBasePaths.size(), 0);
+    store.deltaPresent.assign(geometry.deltaBasePaths.size(), 0);
     store.revisionRan.assign(revisions, 0);
     store.revisionStaticDirty.assign(revisions, 0);
     store.revisionPublish.assign(revisions, RrRevisionPublish());
     for (size_t r = 0; r < revisions; ++r) {
-        const auto &entry = self->_geometry.revisionIndex[r];
+        const auto &entry = geometry.revisionIndex[r];
         store.revisionPublish[r].target =
-            self->_geometry.chains[size_t(entry.first)]
+            geometry.chains[size_t(entry.first)]
                 .revisions[size_t(entry.second)]
                 .target;
     }
-    store.chainPublish.assign(self->_geometry.chains.size(),
+    store.chainPublish.assign(geometry.chains.size(),
                               RrChainPublish());
-    for (size_t c = 0; c < self->_geometry.chains.size(); ++c) {
-        store.chainPublish[c].target = self->_geometry.chains[c].target;
+    for (size_t c = 0; c < geometry.chains.size(); ++c) {
+        store.chainPublish[c].target = geometry.chains[c].target;
     }
-    store.derivedPublish.assign(self->_geometry.derivedIndex.size(),
+    store.derivedPublish.assign(geometry.derivedIndex.size(),
                                 RrDerivedPublish());
-    for (size_t d = 0; d < self->_geometry.derivedIndex.size(); ++d) {
-        const auto &entry = self->_geometry.derivedIndex[d];
+    for (size_t d = 0; d < geometry.derivedIndex.size(); ++d) {
+        const auto &entry = geometry.derivedIndex[d];
         store.derivedPublish[d].target =
-            self->_geometry.chains[size_t(entry.first)]
+            geometry.chains[size_t(entry.first)]
                 .derived[size_t(entry.second)]
                 .target;
     }
-    store.weightPackets.assign(self->_geometry.weightObjects.size(),
-                               RrWeightPacket());
-    store.poseWeights.assign(self->_poses.poseWeightPaths.size(), 0.0f);
-    store.stepOutputs.assign(self->_steps.size(), RrStepOutput());
-    for (size_t j = 0; j < self->_poses.jointBindingJoints.size(); ++j) {
-        program.jointBindingIndex[self->_poses.jointBindingJoints[j]] = j;
+    store.weightPackets.assign(program.stepWeightObjects, RrWeightPacket());
+    store.poseWeights.assign(poses.poseWeightPaths.size(), 0.0f);
+    store.stepOutputs.assign(file.steps.size(), RrStepOutput());
+    for (size_t j = 0; j < poses.jointBindingJoints.size(); ++j) {
+        program.jointBindingIndex[poses.jointBindingJoints[j]] = j;
     }
     int32_t maxOverride = -1;
-    for (const RigExecWireStep &step : self->_steps) {
+    for (const RigExecWireStep &step : file.steps) {
         for (int input : step.overrideInputs) {
             maxOverride = std::max(maxOverride, input);
         }
     }
-    for (const RigExecWireRegisteredRead &entry :
-         self->_computed.registeredReads) {
-        maxOverride = std::max(maxOverride, entry.read.overrideIndex);
+    for (const RrRegisteredRead &entry : program.registeredReads) {
+        maxOverride = std::max(maxOverride, entry.read->overrideIndex);
     }
     store.overridden.assign(size_t(maxOverride + 1), 0);
     store.lastOverridden.assign(size_t(maxOverride + 1), 0);
@@ -971,7 +574,7 @@ std::vector<std::string>
 RigExecRuntimeReader::GetExternalMoverTypes() const
 {
     std::set<std::string> types;
-    for (const RrProgram::ExternalRevision &state : _program.externals) {
+    for (const RrProgram::ExternalRevision &state : _program->externals) {
         types.insert(state.type);
     }
     return std::vector<std::string>(types.begin(), types.end());
@@ -994,13 +597,14 @@ RigExecRuntimeReader::SetExternalKernel(const std::string &type,
     bool found = false;
     bool prepared = true;
     std::string why;
-    for (size_t k = 0; k < _program.externals.size(); ++k) {
-        RrProgram::ExternalRevision &state = _program.externals[k];
+    for (size_t k = 0; k < _program->externals.size(); ++k) {
+        RrProgram::ExternalRevision &state = _program->externals[k];
         if (state.type != type) {
             continue;
         }
         found = true;
-        const std::vector<uint8_t> &epoch = _external.revisions[k].epoch;
+        const std::vector<uint8_t> &epoch =
+            _program->file->externalMovers[k].epoch;
         std::string reason;
         state.kernel = kernel;
         state.state = kernel.prepare(epoch.data(), epoch.size(), &reason);
@@ -1023,7 +627,7 @@ std::vector<std::string>
 RigExecRuntimeReader::GetMissingExternalKernels() const
 {
     std::set<std::string> types;
-    for (const RrProgram::ExternalRevision &state : _program.externals) {
+    for (const RrProgram::ExternalRevision &state : _program->externals) {
         if (!state.state) {
             types.insert(state.type);
         }

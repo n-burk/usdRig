@@ -1,9 +1,10 @@
 // The .rigexec file format: one FlatBuffer, schema libs/rigExecBinary/
 // rigexec.fbs, file identifier "REXB". The generated object API types live
 // in namespace rigExec::fb with the RigExecWire prefix (RigExecWireFile,
-// RigExecWireSolver, ...); the schema's math and POD structs map onto the
-// value types of rigExecBinary/wireTypes.h through the Pack/UnPack pairs
-// declared here. Open is the decoder and Write the encoder: there is no
+// RigExecWireSolver, ...) and are aliased into namespace rigExec under the
+// same names; the schema's math and POD structs map onto the value types
+// of rigExecBinary/wireTypes.h through the Pack/UnPack pairs declared
+// here. Open is the decoder and Write the encoder: there is no
 // hand-written codec. USD-free.
 #ifndef RIGEXEC_BINARY_FORMAT_H
 #define RIGEXEC_BINARY_FORMAT_H
@@ -376,9 +377,92 @@ Pack(const rigExec::RigExecWireMatrix4d &value)
 
 namespace rigExec {
 
+// The generated object types under the RigExecWire names the runtime, the
+// bake and the tests use.
+using RigExecWireFile = fb::RigExecWireFile;
+using RigExecWireValue = fb::RigExecWireValue;
+using RigExecWireIntArray = fb::RigExecWireIntArray;
+using RigExecWireFloatArray = fb::RigExecWireFloatArray;
+using RigExecWireDoubleArray = fb::RigExecWireDoubleArray;
+using RigExecWireVec2fArray = fb::RigExecWireVec2fArray;
+using RigExecWireVec3fArray = fb::RigExecWireVec3fArray;
+using RigExecWireIntList = fb::RigExecWireIntList;
+using RigExecWireUintList = fb::RigExecWireUintList;
+using RigExecWireFloatList = fb::RigExecWireFloatList;
+using RigExecWireDoubleList = fb::RigExecWireDoubleList;
+using RigExecWireAncestorReadList = fb::RigExecWireAncestorReadList;
+using RigExecWireInput = fb::RigExecWireInput;
+using RigExecWireSlotMeta = fb::RigExecWireSlotMeta;
+using RigExecWireConstants = fb::RigExecWireConstants;
+using RigExecWireStep = fb::RigExecWireStep;
+using RigExecWireCluster = fb::RigExecWireCluster;
+using RigExecWireClustering = fb::RigExecWireClustering;
+using RigExecWireClusterSet = fb::RigExecWireClusterSet;
+using RigExecWireCones = fb::RigExecWireCones;
+using RigExecWireLadder = fb::RigExecWireLadder;
+using RigExecWireRbf = fb::RigExecWireRbf;
+using RigExecWirePoseInterpolator = fb::RigExecWirePoseInterpolator;
+using RigExecWireSplineIkRest = fb::RigExecWireSplineIkRest;
+using RigExecWireSolver = fb::RigExecWireSolver;
+using RigExecWireConstraint = fb::RigExecWireConstraint;
+using RigExecWireWalkStep = fb::RigExecWireWalkStep;
+using RigExecWireCommit = fb::RigExecWireCommit;
+using RigExecWireConstraintArrays = fb::RigExecWireConstraintArrays;
+using RigExecWireNativeSource = fb::RigExecWireNativeSource;
+using RigExecWireComposeGroup = fb::RigExecWireComposeGroup;
+using RigExecWireFrameVersion = fb::RigExecWireFrameVersion;
+using RigExecWireSpaceSwitch = fb::RigExecWireSpaceSwitch;
+using RigExecWireAvarBinding = fb::RigExecWireAvarBinding;
+using RigExecWireDomainPose = fb::RigExecWireDomainPose;
+using RigExecWireBlendSampleBinding = fb::RigExecWireBlendSampleBinding;
+using RigExecWireBlendSampleBindingList =
+    fb::RigExecWireBlendSampleBindingList;
+using RigExecWireRevisionBinding = fb::RigExecWireRevisionBinding;
+using RigExecWireBlendSample = fb::RigExecWireBlendSample;
+using RigExecWireBlendChannel = fb::RigExecWireBlendChannel;
+using RigExecWireChunk = fb::RigExecWireChunk;
+using RigExecWireSkinTopology = fb::RigExecWireSkinTopology;
+using RigExecWirePathValue = fb::RigExecWirePathValue;
+using RigExecWirePathRead = fb::RigExecWirePathRead;
+using RigExecWireRevision = fb::RigExecWireRevision;
+using RigExecWireDerived = fb::RigExecWireDerived;
+using RigExecWireChain = fb::RigExecWireChain;
+using RigExecWireWeightObject = fb::RigExecWireWeightObject;
+using RigExecWireDomainGeometry = fb::RigExecWireDomainGeometry;
+using RigExecWirePropertyRevision = fb::RigExecWirePropertyRevision;
+using RigExecWirePropertyChain = fb::RigExecWirePropertyChain;
+using RigExecWirePhasedConsumer = fb::RigExecWirePhasedConsumer;
+using RigExecWireExternalMover = fb::RigExecWireExternalMover;
+
+// The schema's index structs, read through accessors (domain(), name()).
+using RigExecWireSlotRange = fb::SlotRange;
+using RigExecWirePathNode = fb::PathNode;
+using RigExecWireInputSlot = fb::InputSlot;
+
+// The schema's enums, whose enumerators keep their names.
+using RigExecWireStepKind = fb::StepKind;
+using RigExecWireSlotDomain = fb::SlotDomain;
+using RigExecWireSlotKind = fb::SlotKind;
+using RigExecWireInputTag = fb::InputTag;
+using RigExecWireReadMode = fb::ReadMode;
+using RigExecWireInputReadFlags = fb::InputReadFlags;
+using RigExecWireInputSlotFlags = fb::InputSlotFlags;
+using RigExecWirePathKind = fb::PathKind;
+using RigExecWirePathTag = fb::PathTag;
+using RigExecWirePropertyValueType = fb::PropertyValueType;
+using RigExecWirePropertyOp = fb::PropertyOp;
+
+/// Bits of RigExecWireConstraint::flags (fb::ConstraintFlags).
+inline constexpr uint8_t RigExecWireConstraintBlendShear =
+    uint8_t(fb::ConstraintFlags::BlendShear);
+inline constexpr uint8_t RigExecWireConstraintWorldUpRotationOnly =
+    uint8_t(fb::ConstraintFlags::WorldUpRotationOnly);
+inline constexpr uint8_t RigExecWireConstraintRadialBlend =
+    uint8_t(fb::ConstraintFlags::RadialBlend);
+
 /// The format version this code reads and writes. Any other value is
-/// refused, so every change to rigexec.fbs bumps it.
-inline constexpr uint32_t RigExecFormatVersion = 4;
+/// refused with a rebake message, so every change to rigexec.fbs bumps it.
+inline constexpr uint32_t RigExecFormatVersion = 5;
 
 /// The file identifier, bytes 4-7 of every .rigexec file.
 inline constexpr char RigExecFormatIdentifier[] = "REXB";
@@ -414,6 +498,27 @@ bool RigExecFormatWrite(const fb::RigExecWireFile &file,
 /// property, the token itself for a token; "" for 0 or an id out of range.
 std::string RigExecFormatPathText(const fb::RigExecWireFile &file,
                                   uint32_t id);
+
+/// The canonical sparse form of a dense skin layout: \p indices and
+/// \p weights hold \p pointCount rows of \p elementSize entries each. Every
+/// entry is kept, in order, except one whose index is 0 and whose weight
+/// is zero of either sign, which reads exactly as padding; the counts and
+/// indices go into the narrowest vectors that hold them. False with the
+/// reason, and \p out untouched, for an element size outside [0, 65535],
+/// more points than a file can hold, or a layout that is not
+/// \p pointCount rows of \p elementSize.
+bool RigExecFormatSparseTopology(const std::vector<int32_t> &indices,
+                                 const std::vector<float> &weights,
+                                 int32_t elementSize, uint64_t pointCount,
+                                 uint64_t influenceCount, bool validated,
+                                 fb::RigExecWireSkinTopology *out,
+                                 std::string *error);
+
+/// The dense rows a sparse layout the validator accepts stands for: each
+/// point's kept entries in order, then (0, +0.0f) up to element_size.
+void RigExecFormatExpandTopology(const fb::RigExecWireSkinTopology &topology,
+                                 std::vector<int32_t> *indices,
+                                 std::vector<float> *weights);
 
 }  // namespace rigExec
 

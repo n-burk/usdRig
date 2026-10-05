@@ -1847,6 +1847,9 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
                 inputsValid = false;
             }
             if (inputsValid && !arrays.poleOk) {
+                for (const std::string &line : arrays.poleDiagnostics) {
+                    output.diagnostics.push_back(line);
+                }
                 inputsValid = false;
             }
             RrVec3d polePoint(0.0);
@@ -1867,7 +1870,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
                 if (!resolveSource(
                         c.poleObjects[k], wireCommit.poleReads[k],
                         c.poleObjectNatives[k],
-                        wireCommit.poleAncestors[k], &poleFrame) ||
+                        wireCommit.poleAncestors[k].v, &poleFrame) ||
                     !std::isfinite(arrays.poleWeights[k]) ||
                     arrays.poleWeights[k] < 0) {
                     output.diagnostics.push_back(
@@ -1963,7 +1966,12 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
 
     scratch->recordEveryTarget[size_t(wire.object)] = 0;
 
+    // The authored tables first, then the source frames: the arrays' own
+    // lines ahead of any source's, as the baked step orders them.
     bool sourcesReady = arrays.ok;
+    for (const std::string &line : arrays.diagnostics) {
+        output.diagnostics.push_back(line);
+    }
     for (size_t k = 0; sourcesReady && k < c.sources.size(); ++k) {
         if (k >= wireCommit.sourceReads.size() ||
             k >= wireCommit.sourceAncestors.size() ||
@@ -1982,7 +1990,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         RrPointFrame frame;
         if (!resolveSource(c.sources[k], wireCommit.sourceReads[k],
                            c.sourceNatives[k],
-                           wireCommit.sourceAncestors[k], &frame)) {
+                           wireCommit.sourceAncestors[k].v, &frame)) {
             output.diagnostics.push_back(
                 cpath + " could not resolve source " +
                 program->TextOrEmpty(c.sourcePaths[k]));

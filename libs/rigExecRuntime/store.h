@@ -1,25 +1,24 @@
 // rigExecRuntime program state and pipeline contracts (M2 framework).
+// RrProgram owns the opened file and the tables Open derives from it;
 // RrStore owns every framework-visible slot domain: the avar table, the
 // SSA fin/base version pools, matrices, aggregates, commit scratch, the
 // prologue's retained arrays and their lasts, snapshots, step outputs and
 // the override flags. Every input a step reads is evaluated over the
 // input slots (inputs.h); every other stage value it reads is static data
-// the bake captured, read through RrStatic. Family .cpps own their private scratch
-// (solver live rests, revision packets, weight oracles) behind the three
-// extension points on RrProgram, and implement the pipeline functions
-// declared here. The framework implements Open/closure/walk/publish.
+// the bake captured into the file, read through RrStatic. Family .cpps own
+// their private scratch (solver live rests, revision packets, weight
+// oracles) behind the extension points on RrProgram, and implement the
+// pipeline functions declared here. The framework implements
+// Open/closure/walk/publish.
 #ifndef RIGEXEC_RUNTIME_STORE_H
 #define RIGEXEC_RUNTIME_STORE_H
 
-#include "rigExecBinary/container.h"
 #include "rigExecBinary/external.h"
-#include "rigExecBinary/geometry.h"
-#include "rigExecBinary/inputTable.h"
-#include "rigExecBinary/pose.h"
-#include "rigExecBinary/program.h"
+#include "rigExecBinary/format.h"
 #include "rigExecRuntime/inputs.h"
 #include "rigExecRuntime/values.h"
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -28,9 +27,9 @@
 
 namespace rigExec {
 
-// The runtime's field numbers of each table's inputs, in the capture's
-// field order. A registered read (rigExecBinary/computed.h) names the
-// table field it binds by them.
+// The runtime's field numbers of each table's inputs, in the tables'
+// field order. A registered read (RrRegisteredRead) names the table field
+// it binds by them.
 enum RrLadderField : int {
     RrLadderRestSpace = 0,
     RrLadderDefaultSpace = 1,
@@ -173,9 +172,9 @@ struct RrStore {
     std::vector<int> ladderMovedSlots;
     std::vector<std::vector<RrPointFrame>> solverOutFrames;
     std::vector<std::vector<char>> solverOutPresent;
-    std::vector<std::vector<RrVec3f>> ribbonPoints, ribbonLast;
+    // Per solver, the ribbon driver points the solve samples: the points
+    // the bake read, set at Open.
     std::vector<std::vector<RrVec3f>> ribbonConstant;
-    std::vector<char> ribbonVarying, ribbonDirty;
     std::vector<RrCommitScratch> commits;
     std::vector<RrConstraintArraysLive> arrays;
     // The property chains' results this run (properties.cpp), keyed by the
@@ -189,14 +188,12 @@ struct RrStore {
     std::vector<RrPropertyValue> propertyValues, lastPropertyValues;
     std::vector<char> propertyPublished, lastPropertyPublished;
     std::vector<char> chainHaveBase, chainBaseDirty, lastHaveBase;
-    std::vector<std::vector<RrVec3f>> chainBases;
     std::vector<char> derivedHaveBase;
-    std::vector<std::vector<RrVec3f>> derivedBases;
-    std::vector<RrPointFrame> nativeFrames, lastNativeFrames;
-    std::vector<char> nativeFrameOk, lastNativeFrameOk;
+    std::vector<RrPointFrame> nativeFrames;
+    std::vector<char> nativeFrameOk;
     std::vector<RrMat4d> xformBase, lastXformBase;
-    std::vector<RrMat4d> deltaBaseMatrix, lastDeltaBaseMatrix;
-    std::vector<char> deltaBaseOk, lastDeltaBaseOk;
+    std::vector<RrMat4d> deltaBaseMatrix;
+    std::vector<char> deltaBaseOk;
     // Per-frame solved constraint deltas, published by the pose family for
     // the geometry fold (the baked B.deltaValues/deltaPresent). Indexed by
     // constraint deltaBase, like deltaBaseMatrix; the pose step clears each
@@ -237,109 +234,125 @@ struct RrStore {
 };
 
 // The static data the steps read besides the tables and the input slots:
-// stage values the bake captured once, at the bake time (xform bases,
-// native sources, constraint arrays, ribbon driver points, chain and
-// derived bases, the assemblers' stage reads, refused blend layouts, dense
-// blend sample points, plugin movers' frame bytes). Held today by the
-// InputTable's one record. Every read of them goes through these
-// accessors; Open checks the sizes of the tables they index blindly.
+// stage values the bake captured once, at the bake time, into the file's
+// tables (xform bases, native sources, constraint arrays, chain and
+// derived bases, plugin movers' frame bytes). Every read of them goes
+// through these accessors; the validator checked the sizes of the tables
+// they index blindly. The geometry family converts the chain and derived
+// bases and the dense blend sample points once, at Open.
 struct RrStatic {
-    const RigExecWireFrameInputs *record = nullptr;
-    /// The ExternalMovers section, or null.
-    const RigExecWireExternalMovers *external = nullptr;
+    const RigExecWireFile *file = nullptr;
 
-    /// Solver \p solver's live ribbon driver points.
-    const std::vector<RigExecWireVec3f> &RibbonPoints(size_t solver) const
-    {
-        return record->solverRibbonPoints[solver];
-    }
     /// The base matrix of xform-derived slot entry \p k.
     const RigExecWireMatrix4d &XformBase(size_t k) const
     {
-        return record->xformBase[k];
+        return file->pose->xformBase[k];
     }
     /// Native source \p k's frame.
     const RigExecWireFrame &NativeFrame(size_t k) const
     {
-        return record->nativeFrames[k];
+        return file->pose->nativeSources[k].frame;
     }
     /// Geometry-domain constraint delta base \p k and whether it resolved.
     const RigExecWireMatrix4d &DeltaBase(size_t k) const
     {
-        return record->deltaBaseMatrix[k];
+        return file->geometry->deltaBaseMatrix[k];
     }
-    bool DeltaBaseOk(size_t k) const { return record->deltaBaseOk[k] != 0; }
+    bool DeltaBaseOk(size_t k) const
+    {
+        return file->geometry->deltaBaseOk[k] != 0;
+    }
     /// Constraint array \p k's authored tables.
     const std::vector<double> &ArrayWeights(size_t k) const
     {
-        return record->arrayWeights[k];
+        return file->pose->constraintArrays[k].weights;
     }
     const std::vector<RigExecWireVec3d> &ArrayTranslationOffsets(
         size_t k) const
     {
-        return record->arrayTranslationOffsets[k];
+        return file->pose->constraintArrays[k].translationOffsets;
     }
     const std::vector<RigExecWireVec3d> &ArrayRotationOffsets(size_t k) const
     {
-        return record->arrayRotationOffsets[k];
+        return file->pose->constraintArrays[k].rotationOffsets;
     }
-    bool ArrayOk(size_t k) const { return record->arrayOk[k] != 0; }
+    bool ArrayOk(size_t k) const { return file->pose->constraintArrays[k].ok; }
     const std::vector<double> &ArrayPoleWeights(size_t k) const
     {
-        return record->arrayPoleWeights[k];
+        return file->pose->constraintArrays[k].poleWeights;
     }
-    bool ArrayPoleOk(size_t k) const { return record->arrayPoleOk[k] != 0; }
+    bool ArrayPoleOk(size_t k) const
+    {
+        return file->pose->constraintArrays[k].poleOk;
+    }
+    /// The lines constraint array \p k's source and pole table reads
+    /// reported, which the constraint step replays.
+    const std::vector<std::string> &ArrayDiagnostics(size_t k) const
+    {
+        return file->pose->constraintArrays[k].diagnostics;
+    }
+    const std::vector<std::string> &ArrayPoleDiagnostics(size_t k) const
+    {
+        return file->pose->constraintArrays[k].poleDiagnostics;
+    }
     /// Geometry chain \p chain's base points, or null when it has none.
     const std::vector<RigExecWireVec3f> *ChainBase(size_t chain) const
     {
-        return record->chainHaveBase[chain] != 0 ? &record->chainBases[chain]
-                                                 : nullptr;
+        const RigExecWireChain &wire = file->geometry->chains[chain];
+        return wire.haveBase ? &file->vec3fArrays[wire.base].v : nullptr;
     }
     /// Derived target \p id's base points, or null when it has none.
     const std::vector<RigExecWireVec3f> *DerivedBase(size_t id) const
     {
-        return record->derivedHaveBase[id] != 0 ? &record->derivedBases[id]
-                                                : nullptr;
+        const auto &entry = file->geometry->derivedIndex[id];
+        const RigExecWireDerived &wire =
+            file->geometry->chains[size_t(entry.first)]
+                .derived[size_t(entry.second)];
+        return wire.haveBase ? &file->vec3fArrays[wire.base].v : nullptr;
     }
-    /// The assemblers' stage reads, in (path, was-Default) order.
-    const std::vector<RigExecWirePathRead> &PathReads() const
+    /// Plugin revision entry \p k's frame bytes, or null when the
+    /// plugin's assembly failed at the bake time.
+    const std::vector<uint8_t> *ExternalFrame(size_t k) const
     {
-        return record->pathReads;
-    }
-    /// The blend sample layouts the bake refused to cache.
-    const std::vector<RigExecWireRefusedLayout> &RefusedLayouts() const
-    {
-        return record->refusedLayouts;
-    }
-    /// The dense points blend channel \p channel's sample \p sample of
-    /// chain \p chain's revision (or derived target) \p revision consumed,
-    /// or null when none are held.
-    const std::vector<RigExecWireVec3f> *BlendPoints(size_t chain,
-                                                     size_t revision,
-                                                     bool derived,
-                                                     size_t channel,
-                                                     size_t sample) const
-    {
-        const auto &points =
-            derived ? record->derivedBlendPoints : record->blendPoints;
-        if (chain >= points.size() || revision >= points[chain].size() ||
-            channel >= points[chain][revision].size() ||
-            sample >= points[chain][revision][channel].size()) {
-            return nullptr;
-        }
-        return &points[chain][revision][channel][sample];
-    }
-    /// Plugin revision entry \p k's frame-bytes blob index, or
-    /// RigExecWireExternalNoFrame.
-    uint32_t ExternalFrame(size_t k) const
-    {
-        return external->frames[0][k];
+        const RigExecWireExternalMover &mover = file->externalMovers[k];
+        return mover.v2FrameValid ? &mover.v2Frame : nullptr;
     }
 };
 
-// The decoded program plus its working state. The wire tables borrow
-// from the reader; the store is sized at Open.
+// The tables a registered read belongs to, in the order the frozen
+// context's patchable-input walk visits them.
+enum class RrReadFamily : uint8_t {
+    AvarBinding = 0,
+    AvarConstantBinding = 1,
+    Ladder = 2,
+    SpaceSwitch = 3,
+    Interpolator = 4,
+    Solver = 5,
+    Constraint = 6,
+    WeightObject = 7,
+};
+
+// One program-registered read (a RigExecBakedInput the program holds),
+// Baked mode, bound in place: the Input of table field `field` of row
+// `object` of its family's table (an interpolator's enable is field 0 and
+// its dial k is 1 + k; an avar binding's is 0). `avar` is an avar
+// binding's flat avar index (slot * 11 + channel), -1 for every other
+// family.
+struct RrRegisteredRead {
+    const RigExecWireInput *read = nullptr;
+    RrReadFamily family = RrReadFamily::Ladder;
+    uint32_t object = 0;
+    uint32_t field = 0;
+    int32_t avar = -1;
+};
+
+// The opened program plus its working state. The table pointers borrow
+// from `file`; the store is sized at Open.
 struct RrProgram {
+    /// What Open decoded. A program a test assembles by hand leaves it
+    /// null and points the tables below at its own.
+    std::unique_ptr<RigExecWireFile> file;
+
     const std::vector<RigExecWireStep> *steps = nullptr;
     const RigExecWireClustering *clustering = nullptr;
     const RigExecWireCones *cones = nullptr;
@@ -347,15 +360,21 @@ struct RrProgram {
     const RigExecWireConstants *constants = nullptr;
     const RigExecWireDomainPose *poses = nullptr;
     const RigExecWireDomainGeometry *geometry = nullptr;
-    const RigExecWireInputTable *inputs = nullptr;
-    const RigExecBinaryReader *strings = nullptr;
-    /// The ExternalMovers section, or null when the file has no plugin
-    /// mover.
-    const RigExecWireExternalMovers *external = nullptr;
+    /// The weight objects WeightPacket steps build: the leading entries of
+    /// geometry->weightObjects, before the envelope-only ones.
+    size_t stepWeightObjects = 0;
+    /// Each path node's text, by id: one pass, a parent before its child.
+    std::vector<std::string> nodeText;
     /// The static data every run reads, plugin movers' bytes included.
     RrStatic statics;
+    /// The assemblers' stage reads (RrPathRead), sorted by (path, rest),
+    /// built at Open; and the indices of its read rows, which every
+    /// geometry prologue evaluates. The families resolve the rows their
+    /// sites read at Open and index the table by them.
+    std::vector<RrPathRead> pathReads;
+    std::vector<uint32_t> pathReadRows;
 
-    /// One plugin revision's playback state, in ExternalMovers order. No
+    /// One plugin revision's playback state, in external_movers order. No
     /// prepared state means no kernel here: the revision passes through.
     struct ExternalRevision {
         std::string type;
@@ -368,9 +387,11 @@ struct RrProgram {
 
     RrStore store;
 
-    // The registered read (an index into the Computed section's
-    // registeredReads) each table field binds, by row and field number;
-    // RrInputsBindReads fills every entry.
+    /// Every registered read, bound in place, in family order;
+    /// RrInputsBindReads fills it and the tables below.
+    std::vector<RrRegisteredRead> registeredReads;
+    // The registered read (an index into registeredReads) each table field
+    // binds, by row and field number.
     std::vector<std::array<int32_t, RrLadderFieldCount>> ladderRead;
     std::vector<int32_t> spaceSwitchRead;
     std::vector<int32_t> interpRead;
@@ -407,27 +428,30 @@ struct RrProgram {
     // one family's outputs are compared while another is still landing.
     unsigned runMask = 0x7u;
 
-    // Compile notices from the manifest ("compileDiagnostics"), replayed
-    // ahead of the program lines on the first Execute, then drained.
-    // Empty for binaries baked before the key existed.
+    // The file's compile notices, replayed ahead of the program lines on
+    // the first Execute, then drained.
     std::vector<std::string> compileDiagnostics;
 
     // The input slots and their values this run (inputs.h).
     RrInputState inputState;
 
-    // String-table text, or token text an input set interned
-    // (RrExtraTokenBase and up).
+    // A path node's text, or token text an input set interned
+    // (inputState.extraTokenBase and up).
     bool GetText(uint32_t id, std::string *out) const
     {
-        if (id >= RrExtraTokenBase) {
-            const size_t k = size_t(id - RrExtraTokenBase);
-            if (k >= inputState.extraTokens.size()) {
-                return false;
-            }
-            *out = inputState.extraTokens[k];
+        if (id < nodeText.size()) {
+            *out = nodeText[id];
             return true;
         }
-        return strings && strings->GetString(id, out);
+        if (id < inputState.extraTokenBase) {
+            return false;
+        }
+        const size_t k = size_t(id - inputState.extraTokenBase);
+        if (k >= inputState.extraTokens.size()) {
+            return false;
+        }
+        *out = inputState.extraTokens[k];
+        return true;
     }
 
     std::string TextOrEmpty(uint32_t id) const
@@ -442,17 +466,10 @@ struct RrProgram {
         return TextOrEmpty(id) == literal;
     }
 
-    // The table inputs the registered reads are checked against.
-    const RigExecWireInput &LadderInput(size_t slot, int field) const;
-    const RigExecWireInput &SolverInput(size_t solver, int field) const;
-    const RigExecWireInput &ConstraintInput(size_t constraint,
-                                            int field) const;
-    const RigExecWireInput &WeightInput(size_t object, int field) const;
-
-    // Registered read \p read of the Computed section.
-    const v4::RigExecWireInput &RegisteredInput(int32_t read) const
+    // Registered read \p read, bound in place.
+    const RigExecWireInput &RegisteredInput(int32_t read) const
     {
-        return inputState.computed->registeredReads[size_t(read)].read;
+        return *registeredReads[size_t(read)].read;
     }
     // The runtime form of RigExecBakedRead: the registered read evaluated
     // over this run's slots.
@@ -464,7 +481,7 @@ struct RrProgram {
     RrInputValue RegisteredConstant(int32_t read) const
     {
         return RrValueFromWire(
-            inputState.computed->values[RegisteredInput(read).constant]);
+            inputState.values[RegisteredInput(read).constant]);
     }
 
     RrInputValue ReadLadder(size_t slot, int field) const
@@ -507,8 +524,8 @@ struct RrProgram {
 bool RrPoseSizeScratch(RrProgram *program, std::string *error);
 bool RrGeometrySizeScratch(RrProgram *program, std::string *error);
 bool RrWeightSizeScratch(RrProgram *program, std::string *error);
-/// Classifies the Computed section's property chains and sizes the
-/// publish entries. Runs after the reads are bound.
+/// Classifies the file's property chains and sizes the publish entries.
+/// Runs after the reads are bound.
 bool RrPropertySizeScratch(RrProgram *program, std::string *error);
 
 /// The property chains (RigExecRigEvaluator::_EvaluatePropertyChains,
@@ -516,7 +533,7 @@ bool RrPropertySizeScratch(RrProgram *program, std::string *error);
 /// order, before every prologue: each published result lands in
 /// RrStore::propertyResults at once, so a later chain or any read crossing
 /// the target sees it. Diagnostics are appended to \p poseDiagnostics in
-/// chain order. False only when the section and the classified chains
+/// chain order. False only when the file and the classified chains
 /// disagree.
 bool RrRunPropertyChains(RrProgram *program,
                          std::vector<std::string> *poseDiagnostics);
@@ -538,10 +555,10 @@ bool RrRunWeightStep(RrProgram *program, size_t step, std::string *error);
 void RrSkipGeometryStep(RrProgram *program, size_t step);
 
 /// RigExecRigEvaluator::_ResolveWeights (rigEvaluatorGeometry.cpp) over the
-/// Computed section's weight objects: the field a constraint envelope
+/// file's weight objects: the field a constraint envelope
 /// (count 1) and a current-phase revision (count = the entering points,
 /// passed as \p current) copy, as the baked program does
-/// (bakedWeights.cpp). \p object indexes the section's weight objects.
+/// (bakedWeights.cpp). \p object indexes geometry.weight_objects.
 /// False with the oracle's own error text, checked in the oracle's order;
 /// \p weights is then unspecified. Pure: reads slot values, the run's
 /// property-chain results, the weight placements and static tables only.

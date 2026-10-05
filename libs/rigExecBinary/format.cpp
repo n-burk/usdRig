@@ -294,11 +294,56 @@ _ChainReadTag(fb::PropertyValueType type)
     }
 }
 
+/// The tag of a property chain's target slot: the value type itself.
+InputTag
+_ChainTargetTag(fb::PropertyValueType type)
+{
+    switch (type) {
+    case fb::PropertyValueType::Double:
+        return InputTag::Double;
+    case fb::PropertyValueType::Matrix4d:
+        return InputTag::Matrix4d;
+    case fb::PropertyValueType::Vec3f:
+        return InputTag::Vec3f;
+    default:
+        return InputTag::Float;
+    }
+}
+
 bool
 _IsScalar(fb::PropertyValueType type)
 {
     return type == fb::PropertyValueType::Float ||
            type == fb::PropertyValueType::Double;
+}
+
+/// Kept index \p k of \p topology, from the vector its index_width selects
+/// (indices32 for any width but 1 and 2). \p k must be inside that vector.
+int32_t
+_TopologyIndex(const fb::RigExecWireSkinTopology &topology, size_t k)
+{
+    switch (topology.indexWidth) {
+    case 1:
+        return int32_t(topology.indices8[k]);
+    case 2:
+        return int32_t(topology.indices16[k]);
+    default:
+        return topology.indices32[k];
+    }
+}
+
+/// How many kept indices the vector index_width selects holds.
+size_t
+_TopologyIndexCount(const fb::RigExecWireSkinTopology &topology)
+{
+    switch (topology.indexWidth) {
+    case 1:
+        return topology.indices8.size();
+    case 2:
+        return topology.indices16.size();
+    default:
+        return topology.indices32.size();
+    }
 }
 
 class _Validator {
@@ -565,6 +610,27 @@ private:
         if (read.anchor != -1 || !read.recompose.empty()) {
             return _Bad(where + ": reads no slot, so its version is "
                                 "{-1, []}");
+        }
+        return true;
+    }
+
+    /// Switches are stored in resolution order: an anchor that is itself
+    /// a switched slot reads the version its switch produces, so that
+    /// switch is stored before the reading one (\p reader).
+    bool _ResolvedAnchor(const fb::RigExecWireFrameVersion &read,
+                         const std::vector<int32_t> &switchOf, size_t reader,
+                         const std::string &where)
+    {
+        if (read.anchor < 0) {
+            return true;
+        }
+        const int32_t producer = switchOf[size_t(read.anchor)];
+        if (producer != -1 && size_t(producer) >= reader) {
+            return _Bad(where + ".anchor: slot " +
+                        _N(size_t(read.anchor)) +
+                        " is switched by pose.space_switches[" +
+                        _N(size_t(producer)) +
+                        "], which is not stored before this switch");
         }
         return true;
     }
@@ -1016,15 +1082,17 @@ private:
                 return false;
             }
         }
+        // Every slot's avars and every revision's static step belong to a
+        // cluster: the runtime dirties it without a -1 check.
         if (!_Size(c.avarCluster.size(), _slots, row, "avar_cluster") ||
-            !_Indices(c.avarCluster, _clusters, true, row, "avar_cluster") ||
+            !_Indices(c.avarCluster, _clusters, false, row, "avar_cluster") ||
             !_Size(c.chainBaseClusters.size(), _chains, row,
                    "chain_base_clusters") ||
             !_Size(c.revisionClusters.size(), _revisions, row,
                    "revision_clusters") ||
             !_Size(c.revisionStaticCluster.size(), _revisions, row,
                    "revision_static_cluster") ||
-            !_Indices(c.revisionStaticCluster, _clusters, true, row,
+            !_Indices(c.revisionStaticCluster, _clusters, false, row,
                       "revision_static_cluster") ||
             !_Indices(c.varyingSteps, _steps, false, row, "varying_steps") ||
             !_Indices(c.overrideSteps, _steps, false, row,
@@ -1144,23 +1212,33 @@ private:
             return _Bad("pose.has_property_chains disagrees with "
                         "property_chains");
         }
-        int32_t lastSwitch = -1;
+        // Slot -> the switch storing it. The runtime looks a switch up by
+        // its slot, so a slot is switched at most once.
+        std::vector<int32_t> switchOf(_slots, -1);
         for (size_t i = 0; i < p.spaceSwitches.size(); ++i) {
             const fb::RigExecWireSpaceSwitch &sw = p.spaceSwitches[i];
             const std::string row = "pose.space_switches[" + _N(i) + "]";
-            if (!_Index(sw.slot, _slots, false, row, "slot") ||
-                !_Indices(sw.sourceSlots, _slots, true, row,
+            if (!_Index(sw.slot, _slots, false, row, "slot")) {
+                return false;
+            }
+            if (switchOf[size_t(sw.slot)] != -1) {
+                return _Bad(row + ".slot: slot " + _N(size_t(sw.slot)) +
+                            " is already switched by "
+                            "pose.space_switches[" +
+                            _N(size_t(switchOf[size_t(sw.slot)])) + "]");
+            }
+            switchOf[size_t(sw.slot)] = int32_t(i);
+        }
+        for (size_t i = 0; i < p.spaceSwitches.size(); ++i) {
+            const fb::RigExecWireSpaceSwitch &sw = p.spaceSwitches[i];
+            const std::string row = "pose.space_switches[" + _N(i) + "]";
+            if (!_Indices(sw.sourceSlots, _slots, true, row,
                           "source_slots") ||
                 !_Index(sw.spaceSlot, _slots, true, row, "space_slot") ||
                 !_ReadPtr(sw.active, int(InputTag::Double), _Baked, row,
                           "active")) {
                 return false;
             }
-            if (sw.slot <= lastSwitch) {
-                return _Bad(row + ": switches are not in ascending slot "
-                                  "order");
-            }
-            lastSwitch = sw.slot;
             if (!sw.filters.empty() &&
                 !_Size(sw.filters.size(), sw.sourceSlots.size(), row,
                        "filters")) {
@@ -1177,14 +1255,19 @@ private:
                 (sw.spaceSlot == -1 &&
                  !_UnreadVersion(*sw.spaceRead, row + ".space_read")) ||
                 !_Size(sw.sourceReads.size(), sw.sourceSlots.size(), row,
-                       "source_reads")) {
+                       "source_reads") ||
+                !_ResolvedAnchor(*sw.parentRead, switchOf, i,
+                                 row + ".parent_read") ||
+                !_ResolvedAnchor(*sw.spaceRead, switchOf, i,
+                                 row + ".space_read")) {
                 return false;
             }
             for (size_t k = 0; k < sw.sourceReads.size(); ++k) {
                 const std::string at = _At(row, "source_reads", long(k));
                 if (!_FrameVersion(&sw.sourceReads[k], at) ||
                     (sw.sourceSlots[k] == -1 &&
-                     !_UnreadVersion(sw.sourceReads[k], at))) {
+                     !_UnreadVersion(sw.sourceReads[k], at)) ||
+                    !_ResolvedAnchor(sw.sourceReads[k], switchOf, i, at)) {
                     return false;
                 }
             }
@@ -1746,13 +1829,29 @@ private:
     bool _Binding(const fb::RigExecWireRevisionBinding &b,
                   const std::string &row)
     {
+        // bind_coords is rigExec:bindCoordinates' own target, which an
+        // authoring error can aim at a prim: every evaluator then reads no
+        // coordinates there, and so does the runtime.
         for (const uint32_t *id :
              {&b.moverPath, &b.target, &b.transform, &b.transformSpace,
-              &b.weightObject, &b.base, &b.topologyCounts,
-              &b.topologyIndices, &b.cagePoints, &b.surfacePoints,
-              &b.bindCoords, &b.driverCurvePoints, &b.driverCurveOrder,
-              &b.driverCurveKnots, &b.driverFrames, &b.widths}) {
+              &b.weightObject, &b.driverFrames, &b.bindCoords}) {
             if (!_PathId(*id, _AnyPath, row, "path role")) {
+                return false;
+            }
+        }
+        // The roles the binders build as attribute paths.
+        const std::pair<uint32_t, const char *> attributes[] = {
+            {b.base, "base"},
+            {b.topologyCounts, "topology_counts"},
+            {b.topologyIndices, "topology_indices"},
+            {b.cagePoints, "cage_points"},
+            {b.surfacePoints, "surface_points"},
+            {b.driverCurvePoints, "driver_curve_points"},
+            {b.driverCurveOrder, "driver_curve_order"},
+            {b.driverCurveKnots, "driver_curve_knots"},
+            {b.widths, "widths"}};
+        for (const auto &[id, field] : attributes) {
+            if (!_PathId(id, _Property | _Zero, row, field)) {
                 return false;
             }
         }
@@ -1818,19 +1917,38 @@ private:
                 !_Phase(sample.phase, at, "phase") ||
                 !_Pool(sample.pointsValue, _f.vec3fArrays.size(), at,
                        "points_value") ||
-                !_Size(sample.offsets.size(), sample.indices.size(), at,
-                       "offsets") ||
                 !_ReadPtr(sample.activationRead, int(InputTag::Float),
                           _Resolved, at, "activation_read")) {
                 return false;
+            }
+            // Offsets pair with indices, or, with no indices, run over
+            // every point (UsdSkelBlendShape's dense form). A layout the
+            // accumulation applies indexes only the points it counts.
+            const bool dense =
+                sample.indices.empty() &&
+                uint64_t(sample.offsets.size()) == sample.pointCount;
+            if (!dense && !_Size(sample.offsets.size(),
+                                 sample.indices.size(), at, "offsets")) {
+                return false;
+            }
+            if (sample.layoutValid) {
+                for (size_t k = 0; k < sample.indices.size(); ++k) {
+                    const int32_t index = sample.indices[k];
+                    if (index < 0 || uint64_t(index) >= sample.pointCount) {
+                        return _Bad(_At(at, "indices", long(k)) + ": " +
+                                    std::to_string(index) +
+                                    " outside the layout's " +
+                                    _N(sample.pointCount) + " points");
+                    }
+                }
             }
         }
         return true;
     }
 
     /// The sparse skin layout: one index width and its vector, one counts
-    /// vector, every count within element_size, and the counts summing to
-    /// the kept entries.
+    /// vector, every count within element_size, the counts summing to the
+    /// kept entries, and no kept entry the canonical form drops.
     bool _Topology(const fb::RigExecWireSkinTopology &t,
                    const std::string &row)
     {
@@ -1883,6 +2001,14 @@ private:
             return _Bad(row + ": " + _N(size_t(kept)) +
                         " kept entries, but the indices or weights hold a "
                         "different count");
+        }
+        // The canonical form drops every (0, +-0) entry, so a layout has
+        // one encoding of its kept entries.
+        for (size_t k = 0; k < t.weights.size(); ++k) {
+            if (t.weights[k] == 0.0f && _TopologyIndex(t, k) == 0) {
+                return _Bad(row + ": kept entry " + _N(k) +
+                            " is (0, 0), which the sparse form drops");
+            }
         }
         return true;
     }
@@ -2091,6 +2217,14 @@ private:
                 _f.inputs[chain.target].chain() != int32_t(c)) {
                 return _Bad(row + ": malformed value type or target");
             }
+            if (_f.inputs[chain.target].type() !=
+                _ChainTargetTag(chain.valueType)) {
+                return _Bad(row + ": target slot " + _N(chain.target) +
+                            " has tag " +
+                            _N(size_t(_f.inputs[chain.target].type())) +
+                            ", not its value type's " +
+                            _N(size_t(_ChainTargetTag(chain.valueType))));
+            }
             const InputTag tag = _ChainReadTag(chain.valueType);
             const bool scalar = _IsScalar(chain.valueType);
             for (size_t r = 0; r < chain.revisions.size(); ++r) {
@@ -2200,6 +2334,10 @@ private:
             claimed[mover.chain][mover.revision] = 1;
             if (!_PathId(mover.type, _Token, row, "type")) {
                 return false;
+            }
+            if (!mover.v2FrameValid && !mover.v2Frame.empty()) {
+                return _Bad(row + ".v2_frame: bytes of an assembly that "
+                                  "failed (v2_frame_valid is false)");
             }
             if (!_Size(mover.phasedFallback.size(),
                        revision.binding->phaseInputs.size(), row,
@@ -2371,6 +2509,8 @@ RigExecFormatOpen(const uint8_t *bytes, size_t size,
         return _Fail(error, "not a .rigexec file (" + _N(size) + " bytes)");
     }
     if (std::memcmp(bytes, RigExecFormatIdentifier, 4) == 0) {
+        // "v4" names the FlatBuffer generation of the format, not
+        // format_version.
         return _Fail(error,
                      "not a v4 .rigexec (old REXB container); rebake");
     }
@@ -2446,6 +2586,125 @@ RigExecFormatPathText(const fb::RigExecWireFile &file, uint32_t id)
         }
     }
     return text;
+}
+
+bool
+RigExecFormatSparseTopology(const std::vector<int32_t> &indices,
+                            const std::vector<float> &weights,
+                            int32_t elementSize, uint64_t pointCount,
+                            uint64_t influenceCount, bool validated,
+                            fb::RigExecWireSkinTopology *out,
+                            std::string *error)
+{
+    if (!out) {
+        return _Fail(error, "no skin topology to write into");
+    }
+    if (elementSize < 0 || elementSize > 65535) {
+        return _Fail(error, "skin topology: element size " +
+                                std::to_string(elementSize) +
+                                " is outside [0, 65535]");
+    }
+    if (pointCount > uint64_t(FLATBUFFERS_MAX_BUFFER_SIZE)) {
+        return _Fail(error, "skin topology: " + std::to_string(pointCount) +
+                                " points do not fit a .rigexec");
+    }
+    const size_t width = size_t(elementSize);
+    const bool rectangular =
+        indices.size() == weights.size() &&
+        (width == 0 ? indices.empty()
+                    : indices.size() % width == 0 &&
+                          uint64_t(indices.size() / width) == pointCount);
+    if (!rectangular) {
+        return _Fail(error, "skin topology: " + _N(indices.size()) +
+                                " indices and " + _N(weights.size()) +
+                                " weights are not " +
+                                std::to_string(pointCount) + " points of " +
+                                _N(width) + " entries");
+    }
+    fb::RigExecWireSkinTopology t;
+    t.elementSize = elementSize;
+    t.pointCount = pointCount;
+    t.influenceCount = influenceCount;
+    t.validated = validated;
+    const bool narrow = width <= 255;
+    const size_t points = size_t(pointCount);
+    if (narrow) {
+        t.counts8.reserve(points);
+    } else {
+        t.counts16.reserve(points);
+    }
+    std::vector<int32_t> kept;
+    kept.reserve(indices.size());
+    t.weights.reserve(weights.size());
+    bool negative = false;
+    int32_t largest = 0;
+    for (size_t p = 0; p < points; ++p) {
+        size_t count = 0;
+        for (size_t e = p * width; e < (p + 1) * width; ++e) {
+            // Index 0 at weight +-0 reads exactly as padding.
+            if (indices[e] == 0 && weights[e] == 0.0f) {
+                continue;
+            }
+            kept.push_back(indices[e]);
+            t.weights.push_back(weights[e]);
+            negative = negative || indices[e] < 0;
+            largest = std::max(largest, indices[e]);
+            ++count;
+        }
+        if (narrow) {
+            t.counts8.push_back(uint8_t(count));
+        } else {
+            t.counts16.push_back(uint16_t(count));
+        }
+    }
+    if (negative || largest > 65535) {
+        t.indexWidth = 4;
+        t.indices32 = std::move(kept);
+    } else if (largest > 255) {
+        t.indexWidth = 2;
+        t.indices16.reserve(kept.size());
+        for (const int32_t index : kept) {
+            t.indices16.push_back(uint16_t(index));
+        }
+    } else {
+        t.indexWidth = 1;
+        t.indices8.reserve(kept.size());
+        for (const int32_t index : kept) {
+            t.indices8.push_back(uint8_t(index));
+        }
+    }
+    *out = std::move(t);
+    return true;
+}
+
+void
+RigExecFormatExpandTopology(const fb::RigExecWireSkinTopology &topology,
+                            std::vector<int32_t> *indices,
+                            std::vector<float> *weights)
+{
+    if (!indices || !weights) {
+        return;
+    }
+    // Bounded by the stored vectors, so a topology the validator refused
+    // cannot read past them either.
+    const size_t width =
+        topology.elementSize > 0 ? size_t(topology.elementSize) : 0;
+    const bool narrow = width <= 255;
+    const size_t points =
+        narrow ? topology.counts8.size() : topology.counts16.size();
+    const size_t kept =
+        std::min(topology.weights.size(), _TopologyIndexCount(topology));
+    indices->assign(points * width, 0);
+    weights->assign(points * width, 0.0f);
+    size_t next = 0;
+    for (size_t p = 0; p < points; ++p) {
+        const size_t count = std::min<size_t>(
+            narrow ? topology.counts8[p] : topology.counts16[p], width);
+        for (size_t e = 0; e < count && next < kept; ++e, ++next) {
+            (*indices)[p * width + e] = _TopologyIndex(topology, next);
+            (*weights)[p * width + e] = topology.weights[next];
+        }
+    }
 }
 
 }  // namespace rigExec

@@ -2,13 +2,15 @@
 // calls in their place.
 //
 // A plugin mover assembles its payload from the stage, which playback does
-// not have. Export therefore asks the plugin to split each assembled payload
-// into EPOCH bytes, identical on every baked frame and written once per
-// revision, and FRAME bytes, written per baked frame. Playback hands both
-// back to the plugin's kernel together with the points the mover's binding
-// reads at a declared phase, which the runtime evaluates itself -- so a
-// posed playback moves those -- and with the preceding points to revise.
-// The bytes are the plugin's own format: the engine never interprets them.
+// not have. Export therefore asks the plugin to split its assembled payload
+// into EPOCH bytes, written once per revision, and FRAME bytes. Playback
+// hands both back to the plugin's kernel together with the points the
+// mover's binding reads at a declared phase, which the runtime evaluates
+// itself -- so a posed playback moves those -- and with the preceding
+// points to revise. The bytes are the plugin's own format: the engine never
+// interprets them. The file holds one ExternalMover entry per plugin
+// revision (rigexec.fbs): its type, its epoch bytes and the frame bytes of
+// the bake's run.
 //
 // Everything here is plain data and function pointers: a runtime without
 // USD can carry a kernel, and a runtime with no kernel for a type passes
@@ -16,13 +18,10 @@
 #ifndef RIGEXEC_BINARY_EXTERNAL_H
 #define RIGEXEC_BINARY_EXTERNAL_H
 
-#include "rigExecBinary/program.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace rigExec {
 
@@ -60,36 +59,6 @@ struct RigExecExternalKernel {
 /// The revision op a plugin mover is written with (RigExecRevisionOp::
 /// External, pinned by the format).
 inline constexpr uint8_t RigExecWireExternalRevisionOp = 16;
-
-/// One external revision: where it sits in DomainGeometry, the mover's
-/// registered type name, and its epoch bytes.
-struct RigExecWireExternalRevision {
-    uint32_t chain = 0;
-    uint32_t revision = 0;
-    /// String-table index of the type name the plugin registered.
-    uint32_t type = 0;
-    std::vector<uint8_t> epoch;
-};
-
-/// A frame entry with no payload: the plugin's assembly failed on that
-/// frame, so playback fails the mover there too.
-inline constexpr uint32_t RigExecWireExternalNoFrame = 0xffffffffu;
-
-/// The ExternalMovers section. Frame bytes are stored once per distinct
-/// value, so a revision whose frame bytes never change costs one blob.
-struct RigExecWireExternalMovers {
-    std::vector<RigExecWireExternalRevision> revisions;
-    std::vector<std::vector<uint8_t>> blobs;
-    /// frames[f][k]: the blob revisions[k] used at InputTable frame f, or
-    /// RigExecWireExternalNoFrame.
-    std::vector<std::vector<uint32_t>> frames;
-};
-
-bool RigExecWireEncodeExternalMovers(const RigExecWireExternalMovers &movers,
-                                     std::vector<uint8_t> *out);
-bool RigExecWireDecodeExternalMovers(RigExecWireReader *reader,
-                                     RigExecWireExternalMovers *movers,
-                                     std::string *error);
 
 }  // namespace rigExec
 

@@ -4,12 +4,15 @@
 // kind, value, pool and struct; Open refuses short buffers, the old
 // container, a wrong file identifier, buffers the verifier rejects and
 // other format versions, and buffers whose objects are shared or overlap,
-// takes bytes at any address and keeps none of them, and survives every
-// single-byte and many random multi-byte corruptions; writing is
+// takes bytes at any address and keeps none of them, refuses every
+// truncated tail and the named defects, and survives every single-byte
+// flip, vtable flips and many random multi-byte corruptions; writing is
 // deterministic; the validator refuses a smoke set of rule violations, a
-// step or cluster graph playback could not walk, and a presentation
-// without its identifier, orders listed inputs as their composed texts,
-// and handles a path tree 100000 prims deep.
+// step or cluster graph playback could not walk, space switches out of
+// resolution order, a failed plugin assembly holding frame bytes, and a
+// presentation without its identifier, orders listed inputs as their
+// composed texts, and handles a path tree 100000 prims deep; sparse skin
+// topologies encode canonically and expand back to the dense rows.
 // USD-free, like the format.
 #include "rigExecBinary/format.h"
 
@@ -639,14 +642,15 @@ _RichFile()
     sw.sourceSlots = {-1};
     sw.filters = {2};
     sw.twistAxis = _V3d(5);
-    // A recomposed parent version, a world source, the space at its last
-    // version.
+    // A recomposed parent version, a world source, and a recomposed space:
+    // this switch switches the one slot, so no read of it may anchor on
+    // that slot (TestSwitchOrder covers anchored reads).
     sw.spaceSlot = 0;
     sw.parentRead = std::make_unique<fb::RigExecWireFrameVersion>();
     sw.parentRead->recompose = {0};
     sw.sourceReads.resize(1);
     sw.spaceRead = std::make_unique<fb::RigExecWireFrameVersion>();
-    sw.spaceRead->anchor = 0;
+    sw.spaceRead->recompose = {0};
     sw.active = _In(InputTag::Double);
     sw.affectTranslation = {{true, false, true}};
     sw.affectRotation = {{false, true, false}};
@@ -677,13 +681,7 @@ _RichFile()
     sample.indices = {0, 3};
     sample.pointsValue = 1;
     sample.activationRead = _In(InputTag::Float, ReadMode::Resolved, {1});
-    // One sample per float special, so the one F32 field carries each:
-    // samples[k] holds _SF(k + 1).
-    for (size_t k = 0; k < _specialCount; ++k) {
-        fb::RigExecWireBlendSample copy = sample;
-        copy.activationValue = _SF(k + 1);
-        channel.samples.push_back(std::move(copy));
-    }
+    channel.samples.push_back(std::move(sample));
     revision.blendChannels.push_back(std::move(channel));
     revision.packetInfluences = {_M(2)};
     revision.meshWorldInverse = _M(3);
@@ -805,7 +803,8 @@ _RichFile()
     return f;
 }
 
-/// Makes the rich file's revision a plugin mover, with its entry.
+/// Makes the rich file's revision a plugin mover, with its entry and the
+/// frame bytes of a successful assembly.
 void
 _AddPlugin(RigExecWireFile &file)
 {
@@ -815,6 +814,36 @@ _AddPlugin(RigExecWireFile &file)
     mover.type = _pTokenPlugin;
     mover.epoch = {1, 2, 3};
     mover.inputs.push_back(_InValue(InputTag::Float, ReadMode::Baked));
+    mover.v2Frame = {0, 0xff, 7, 0x80};
+    mover.v2FrameValid = true;
+    file.externalMovers.push_back(std::move(mover));
+}
+
+/// Appends a second revision to the rich file's chain, a plugin mover
+/// whose assembly failed: its entry holds no frame bytes.
+void
+_AddFailedPlugin(RigExecWireFile &file)
+{
+    fb::RigExecWireDomainGeometry &g = *file.geometry;
+    fb::RigExecWireRevision revision;
+    revision.moverPath = _pMover;
+    revision.target = _pMeshPoints;
+    revision.moverPrim = _pMover;
+    revision.op = uint8_t(fb::RevisionOp::External);
+    revision.binding = _Binding();
+    revision.defaultWeight = _In(InputTag::Float, ReadMode::Resolved, {2});
+    g.chains[0].revisions.push_back(std::move(revision));
+    g.revisionIndex.push_back({0, 1});
+    g.chainRevisionEnd[0] = 2;
+    g.revisionChunkBase.push_back(0);
+    g.revisionChunkCount.push_back(0);
+    file.cones->revisionClusters.resize(2);
+    file.cones->revisionStaticCluster.push_back(0);
+    fb::RigExecWireExternalMover mover;
+    mover.revision = 1;
+    mover.type = _pTokenPlugin;
+    mover.epoch = {9};
+    mover.v2FrameValid = false;
     file.externalMovers.push_back(std::move(mover));
 }
 
@@ -952,14 +981,8 @@ TestBitExactness()
         o->geometry->chains[0].revisions[0].blendChannels[0].samples;
     const auto &samples0 =
         file.geometry->chains[0].revisions[0].blendChannels[0].samples;
-    CHECK(samples.size() == _specialCount &&
-          samples0.size() == _specialCount);
-    for (size_t k = 0; k < samples.size() && k < samples0.size(); ++k) {
-        CHECK(_Same(samples[k].activationValue, samples0[k].activationValue));
-        CHECK(_Bits(samples[k].activationValue) ==
-              _specialF[(k + 1) % _specialCount]);
-    }
-    if (samples.empty()) {
+    CHECK(samples.size() == 1 && samples0.size() == 1);
+    if (samples.empty() || samples0.empty()) {
         return;
     }
     const fb::RigExecWireBlendSample &bs = samples[0];
@@ -1043,8 +1066,8 @@ TestBitExactness()
           sw.parentRead->recompose == std::vector<int32_t>{0});
     CHECK(sw.sourceReads.size() == 1 && sw.sourceReads[0].anchor == -1 &&
           sw.sourceReads[0].recompose.empty());
-    CHECK(sw.spaceRead && sw.spaceRead->anchor == 0 &&
-          sw.spaceRead->recompose.empty());
+    CHECK(sw.spaceRead && sw.spaceRead->anchor == -1 &&
+          sw.spaceRead->recompose == std::vector<int32_t>{0});
     const fb::RigExecWireRevision &r = o->geometry->chains[0].revisions[0];
     const fb::RigExecWireRevision &r0 = file.geometry->chains[0].revisions[0];
     CHECK(_Same(r.packetInfluences, r0.packetInfluences));
@@ -1114,7 +1137,7 @@ TestBitExactness()
     CHECK(std::signbit(_SD(0)) && _SD(0) == 0.0);
     CHECK(_Bits(o->bakeTime) == 0x8000000000000000ull);
     CHECK(_Bits(o->clustering->grainUs) == _specialD[4]);
-    CHECK(_Bits(bs.activationValue) == _specialF[1]);
+    CHECK(_Bits(bs.offsets[0][0]) == _specialF[1]);
     std::printf("rich file: %zu bytes, bit-exact through Write -> Open -> "
                 "Write\n",
                 bytes.size());
@@ -1171,14 +1194,23 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    // The format version, named before any other table is read.
-    RigExecWireFile older = _RichFile();
-    older.formatVersion = 3;
-    CHECK(!_Open(_PackUnchecked(older), &why) &&
-          _Contains(why, "format version 3"));
-    older.formatVersion = 5;
-    CHECK(!_Open(_PackUnchecked(older), &why) &&
-          _Contains(why, "format version 5"));
+    // The format version, named before any other table is read: earlier
+    // and later versions are refused with a rebake message, the current
+    // one opens.
+    RigExecWireFile versioned = _RichFile();
+    for (const uint32_t version : {3u, 4u, RigExecFormatVersion + 1}) {
+        _context = "open refusals: version " + std::to_string(version);
+        versioned.formatVersion = version;
+        CHECK(!_Open(_PackUnchecked(versioned), &why) &&
+              _Contains(why, "format version " + std::to_string(version)) &&
+              _Contains(why, "rebake"));
+    }
+    _context = "open refusals";
+    versioned.formatVersion = RigExecFormatVersion;
+    std::vector<uint8_t> current;
+    CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
+    std::printf("format versions: 3, 4 and %u refused, %u writes and opens\n",
+                RigExecFormatVersion + 1, RigExecFormatVersion);
 
     // A verified buffer that breaks a rule.
     RigExecWireFile broken = _RichFile();
@@ -1348,6 +1380,36 @@ TestValidationSmoke()
         f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
             .activationRead = _In(InputTag::Double, ReadMode::Resolved);
     });
+    // Blend sample layouts: offsets without indices run over every point,
+    // and an applied layout indexes only its points.
+    expect("blend offsets without indices", "samples[0].offsets", [](F &f) {
+        f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+            .indices.clear();
+    });
+    expect("blend layout index", "samples[0].indices[1]: 3 outside", [](F &f) {
+        fb::RigExecWireBlendSample &sample =
+            f.geometry->chains[0].revisions[0].blendChannels[0].samples[0];
+        sample.hasLayout = true;
+        sample.layoutValid = true;
+        sample.pointCount = 2;
+    });
+    expect("blend layout negative index", "samples[0].indices[0]: -1",
+           [](F &f) {
+               fb::RigExecWireBlendSample &sample =
+                   f.geometry->chains[0].revisions[0].blendChannels[0]
+                       .samples[0];
+               sample.layoutValid = true;
+               sample.pointCount = 4;
+               sample.indices[0] = -1;
+           });
+    // Binding attribute roles name properties.
+    expect("binding attribute role", "binding.base: path id", [](F &f) {
+        f.geometry->chains[0].revisions[0].binding->base = _pMesh;
+    });
+    expect("binding curve role", "binding.driver_curve_knots", [](F &f) {
+        f.geometry->chains[0].revisions[0].binding->driverCurveKnots =
+            _pTokenXyz;
+    });
     // Avar bindings.
     expect("avar flat", "flat", [](F &f) { f.pose->avarBindings[0].flat = 11; });
     // Slot tables and constants.
@@ -1362,6 +1424,12 @@ TestValidationSmoke()
            [](F &f) { f.cones->chainBaseClusters[0].v = {1}; });
     expect("cluster set words", "cones.always",
            [](F &f) { f.cones->always->words = {0, 0}; });
+    // Every slot's avars and every revision's static step have a cluster.
+    expect("avar cluster none", "cones.avar_cluster[0]: -1 out of range",
+           [](F &f) { f.cones->avarCluster = {-1}; });
+    expect("revision static cluster none",
+           "cones.revision_static_cluster[0]: -1 out of range",
+           [](F &f) { f.cones->revisionStaticCluster = {-1}; });
     // Solvers and interpolators.
     expect("ik rests", "ik_rests",
            [](F &f) { f.pose->solvers[0].ikRests.pop_back(); });
@@ -1454,6 +1522,9 @@ TestValidationSmoke()
            [](F &f) { f.phasedConsumers[0].hops = {1, 2}; });
     expect("chain flag", "has_property_chains",
            [](F &f) { f.pose->hasPropertyChains = false; });
+    expect("chain target type", "property_chains[0]: target slot 2", [](F &f) {
+        f.propertyChains[0].valueType = fb::PropertyValueType::Double;
+    });
     expect("keys off a curve", "keys", [](F &f) {
         f.propertyChains[0].revisions[0].op = fb::PropertyOp::Add;
     });
@@ -1479,6 +1550,27 @@ TestValidationSmoke()
     plugin.externalMovers.push_back(plugin.externalMovers[0]);
     CHECK(!RigExecFormatValidate(plugin, &why) &&
           _Contains(why, "external_movers[1]"));
+
+    // A dense blend layout (offsets for every point, no indices) and an
+    // applied sparse one inside its points are accepted.
+    _context = "validation: blend layouts";
+    for (const bool dense : {true, false}) {
+        RigExecWireFile layouts = _RichFile();
+        fb::RigExecWireBlendSample &sample =
+            layouts.geometry->chains[0].revisions[0].blendChannels[0]
+                .samples[0];
+        sample.hasLayout = true;
+        sample.layoutValid = true;
+        sample.pointCount = dense ? sample.offsets.size() : 4;
+        if (dense) {
+            sample.indices.clear();
+        }
+        why.clear();
+        CHECK(RigExecFormatValidate(layouts, &why));
+        if (!why.empty()) {
+            std::printf("  %s\n", why.c_str());
+        }
+    }
 }
 
 /// The rich file with four steps in two clusters: 0 -> 1 -> 2 -> 3 and
@@ -1696,6 +1788,7 @@ TestStepGraph()
             fb::SlotRange(fb::SlotDomain::Snapshots, 0, 3));
         file.steps[3].reads.push_back(
             fb::SlotRange(fb::SlotDomain::ChainBase, 0, 1));
+        why.clear();
         CHECK(RigExecFormatValidate(file, &why));
         if (!why.empty()) {
             std::printf("  source reads refused: %s\n", why.c_str());
@@ -1727,6 +1820,481 @@ TestPresentationIdentifier()
               _Contains(why, "invalid .rigexec") &&
               _Contains(why, "presentation"));
     }
+}
+
+/// A plugin mover whose assembly succeeded and one whose assembly failed
+/// survive Write -> Open; a failed one that still holds frame bytes is
+/// refused by the validator, Write and Open.
+void
+TestExternalMovers()
+{
+    _context = "external movers";
+    RigExecWireFile file = _RichFile();
+    _AddPlugin(file);
+    _AddFailedPlugin(file);
+    std::string why;
+    CHECK(RigExecFormatValidate(file, &why));
+    if (!why.empty()) {
+        std::printf("  plugin file refused: %s\n", why.c_str());
+    }
+    std::vector<uint8_t> bytes;
+    CHECK(_Write(file, &bytes));
+    const auto o = _Open(bytes, &why);
+    CHECK(o && o->externalMovers.size() == 2);
+    if (o && o->externalMovers.size() == 2) {
+        const fb::RigExecWireExternalMover &done = o->externalMovers[0];
+        const fb::RigExecWireExternalMover &failed = o->externalMovers[1];
+        CHECK(done.v2FrameValid &&
+              done.v2Frame == std::vector<uint8_t>({0, 0xff, 7, 0x80}) &&
+              done.epoch == std::vector<uint8_t>({1, 2, 3}));
+        CHECK(!failed.v2FrameValid && failed.v2Frame.empty() &&
+              failed.revision == 1 &&
+              failed.epoch == std::vector<uint8_t>({9}));
+        std::vector<uint8_t> again;
+        CHECK(_Write(*o, &again) && again == bytes);
+    }
+
+    // A successful assembly may encode no frame bytes at all.
+    RigExecWireFile empty = _Copy(file);
+    empty.externalMovers[0].v2Frame.clear();
+    CHECK(RigExecFormatValidate(empty, &why));
+
+    const std::string stale =
+        "external_movers[1].v2_frame: bytes of an assembly that failed "
+        "(v2_frame_valid is false)";
+    RigExecWireFile holding = _Copy(file);
+    holding.externalMovers[1].v2Frame = {1};
+    CHECK(!RigExecFormatValidate(holding, &why) && why == stale);
+    std::vector<uint8_t> refused = {1};
+    CHECK(!_Write(holding, &refused, &why) && refused.empty() &&
+          why == "invalid .rigexec: " + stale);
+    CHECK(!_Open(_PackUnchecked(holding), &why) &&
+          why == "invalid .rigexec: " + stale);
+    std::printf("external movers: a successful and a failed assembly "
+                "round-trip; a failed one holding frame bytes is refused\n");
+}
+
+/// Appends \p count provider slots under /Rig to \p f, with their slot
+/// tables, constants, avar clusters and ladders of constant reads.
+/// Returns the first new slot.
+int32_t
+_AddSlots(RigExecWireFile &f, size_t count)
+{
+    const int32_t first = int32_t(f.slotMeta->paths.size());
+    for (size_t k = 0; k < count; ++k) {
+        f.names.push_back("Slot" + std::to_string(k));
+        f.paths.push_back(fb::PathNode(
+            _pRig, uint32_t(f.names.size() - 1), PathKind::Prim));
+        fb::RigExecWireSlotMeta &meta = *f.slotMeta;
+        meta.paths.push_back(uint32_t(f.paths.size() - 1));
+        meta.slotKind.push_back(fb::SlotKind::FirstFramePose);
+        meta.parent.push_back(-1);
+        meta.propParent.push_back(-1);
+        meta.needFinal.push_back(1);
+        meta.needBase.push_back(0);
+        fb::RigExecWireConstants &c = *f.constants;
+        c.restM.push_back(_M(k));
+        c.restPts.push_back(_L(k));
+        c.restFrames.push_back(_Frame(k));
+        c.selfD.push_back(_M(k + 1));
+        c.parentDinv.push_back(_M(k + 2));
+        c.rotOrder.push_back(_pTokenXyz);
+        c.restRoundTrip.push_back(_M(k + 3));
+        c.defaultRoundTrip.push_back(_M(k + 4));
+        c.posedAuthored.push_back(0);
+        c.posedAuthoredM.push_back(_M(k + 5));
+        c.noScaleAvars.push_back(0);
+        const std::vector<double> avars = _Ds(11, k);
+        c.avarConstants.insert(c.avarConstants.end(), avars.begin(),
+                               avars.end());
+        c.rotationSign.push_back(0);
+        fb::RigExecWireLadder ladder;
+        ladder.restSpace = _In(InputTag::Matrix4d);
+        ladder.defaultSpace = _In(InputTag::Matrix4d);
+        ladder.posedSpace = _In(InputTag::Matrix4d);
+        for (size_t a = 0; a < 6; ++a) {
+            ladder.restAvars.push_back(_InValue(InputTag::Double));
+            ladder.defaultAvars.push_back(_InValue(InputTag::Double));
+        }
+        ladder.rotationOrder = _In(InputTag::Token);
+        f.pose->ladders.push_back(std::move(ladder));
+        f.pose->restChainVaries.push_back(0);
+        f.cones->avarCluster.push_back(0);
+    }
+    return first;
+}
+
+/// A switch of \p slot with one world source, reading its parent and space
+/// as they stand (anchor -1, nothing recomposed).
+fb::RigExecWireSpaceSwitch
+_Switch(int32_t slot)
+{
+    fb::RigExecWireSpaceSwitch sw;
+    sw.slot = slot;
+    sw.sourceSlots = {-1};
+    sw.sourceReads.resize(1);
+    sw.parentRead = std::make_unique<fb::RigExecWireFrameVersion>();
+    sw.spaceRead = std::make_unique<fb::RigExecWireFrameVersion>();
+    sw.active = _In(InputTag::Double);
+    sw.affectTranslation = {{true, true, true}};
+    sw.affectRotation = {{true, true, true}};
+    sw.affectScale = {{true, true, true}};
+    return sw;
+}
+
+/// The rich file with two more slots, 1 and 2, switched in resolution
+/// order against slot order: space_switches[0] switches slot 2, and
+/// space_switches[1] switches slot 1 with slot 2 as a source and as its
+/// space, both read at slot 2's switched version; slot 0 is not switched,
+/// and space_switches[0] reads it as its parent.
+RigExecWireFile
+_SwitchFile()
+{
+    RigExecWireFile f = _RichFile();
+    const int32_t lo = _AddSlots(f, 2);
+    const int32_t hi = lo + 1;
+    f.pose->spaceSwitches.clear();
+    fb::RigExecWireSpaceSwitch first = _Switch(hi);
+    first.parentRead->anchor = 0;
+    fb::RigExecWireSpaceSwitch second = _Switch(lo);
+    second.sourceSlots = {-1, hi};
+    second.filters = {0, 1};
+    second.sourceReads.resize(2);
+    second.sourceReads[1].anchor = hi;
+    second.spaceSlot = hi;
+    second.spaceRead->anchor = hi;
+    f.pose->spaceSwitches.push_back(std::move(first));
+    f.pose->spaceSwitches.push_back(std::move(second));
+    return f;
+}
+
+/// Space switches are stored in resolution order, not slot order: a slot is
+/// switched at most once, and a read anchored on a switched slot names a
+/// switch stored before the reading one.
+void
+TestSwitchOrder()
+{
+    _context = "switch order";
+    std::string why;
+    const RigExecWireFile valid = _SwitchFile();
+    CHECK(RigExecFormatValidate(valid, &why));
+    if (!why.empty()) {
+        std::printf("  switch file refused: %s\n", why.c_str());
+    }
+    std::vector<uint8_t> bytes;
+    CHECK(_Write(valid, &bytes));
+    const auto o = _Open(bytes, &why);
+    CHECK(o && o->pose->spaceSwitches.size() == 2);
+    if (o && o->pose->spaceSwitches.size() == 2) {
+        const auto &switches = o->pose->spaceSwitches;
+        CHECK(switches[0].slot == 2 && switches[1].slot == 1);
+        CHECK(switches[0].parentRead->anchor == 0);
+        CHECK(switches[1].sourceReads.size() == 2 &&
+              switches[1].sourceReads[1].anchor == 2 &&
+              switches[1].spaceRead->anchor == 2);
+    }
+
+    using F = RigExecWireFile;
+    int cases = 0;
+    const auto expect = [&](const char *name, const std::string &text,
+                            const std::function<void(F &)> &mutate) {
+        _context = std::string("switch order: ") + name;
+        ++cases;
+        F file = _SwitchFile();
+        mutate(file);
+        const bool ok = RigExecFormatValidate(file, &why);
+        CHECK(!ok && why == text);
+        if (ok || why != text) {
+            std::printf("  got '%s', expected '%s'\n",
+                        ok ? "(accepted)" : why.c_str(), text.c_str());
+        }
+        const bool opened = _Open(_PackUnchecked(file), &why) != nullptr;
+        CHECK(!opened && why == "invalid .rigexec: " + text);
+    };
+    const std::string later =
+        "is switched by pose.space_switches[1], which is not stored before "
+        "this switch";
+    expect("slot switched twice",
+           "pose.space_switches[1].slot: slot 2 is already switched by "
+           "pose.space_switches[0]",
+           [](F &f) { f.pose->spaceSwitches[1].slot = 2; });
+    expect("source anchored on a later switch",
+           "pose.space_switches[0].source_reads[0].anchor: slot 1 " + later,
+           [](F &f) {
+               f.pose->spaceSwitches[0].sourceSlots = {1};
+               f.pose->spaceSwitches[0].sourceReads[0].anchor = 1;
+           });
+    expect("parent anchored on a later switch",
+           "pose.space_switches[0].parent_read.anchor: slot 1 " + later,
+           [](F &f) { f.pose->spaceSwitches[0].parentRead->anchor = 1; });
+    expect("space anchored on a later switch",
+           "pose.space_switches[0].space_read.anchor: slot 1 " + later,
+           [](F &f) {
+               f.pose->spaceSwitches[0].spaceSlot = 1;
+               f.pose->spaceSwitches[0].spaceRead->anchor = 1;
+           });
+    expect("anchored on its own switch",
+           "pose.space_switches[1].source_reads[1].anchor: slot 1 " + later,
+           [](F &f) { f.pose->spaceSwitches[1].sourceReads[1].anchor = 1; });
+
+    // Recomposing a switched slot reads it unswitched: not an anchor.
+    _context = "switch order: recompose of a later switch's slot";
+    F recomposed = _SwitchFile();
+    recomposed.pose->spaceSwitches[0].parentRead->anchor = -1;
+    recomposed.pose->spaceSwitches[0].parentRead->recompose = {1};
+    CHECK(RigExecFormatValidate(recomposed, &why));
+    std::printf("switch order: stored against slot order and anchored on "
+                "an earlier switch accepted, %d violations refused\n",
+                cases);
+}
+
+/// Every field of two sparse layouts, weights bit for bit.
+bool
+_Same(const fb::RigExecWireSkinTopology &a,
+      const fb::RigExecWireSkinTopology &b)
+{
+    return a.elementSize == b.elementSize && a.pointCount == b.pointCount &&
+           a.influenceCount == b.influenceCount &&
+           a.validated == b.validated && a.counts8 == b.counts8 &&
+           a.counts16 == b.counts16 && a.indexWidth == b.indexWidth &&
+           a.indices8 == b.indices8 && a.indices16 == b.indices16 &&
+           a.indices32 == b.indices32 && _Same(a.weights, b.weights);
+}
+
+/// The canonical dense form, from the definition: each row's entries other
+/// than (0, +-0) in order, then (0, +0.0f) padding.
+void
+_CanonicalDense(const std::vector<int32_t> &indices,
+                const std::vector<float> &weights, size_t width,
+                std::vector<int32_t> *outIndices,
+                std::vector<float> *outWeights)
+{
+    outIndices->assign(indices.size(), 0);
+    outWeights->assign(weights.size(), 0.0f);
+    for (size_t row = 0; width > 0 && row < indices.size() / width; ++row) {
+        size_t at = row * width;
+        for (size_t e = row * width; e < (row + 1) * width; ++e) {
+            if (indices[e] == 0 && weights[e] == 0.0f) {
+                continue;
+            }
+            (*outIndices)[at] = indices[e];
+            (*outWeights)[at] = weights[e];
+            ++at;
+        }
+    }
+}
+
+/// Sparse skin topologies: canonical encoding of dense rows with interior
+/// zeros of either sign, negative weights and non-finite weights; the
+/// counts and index vectors at their size boundaries; refusal of layouts
+/// that are not rectangular; every encoded layout validates, survives
+/// Write -> Open and expands to the canonical dense form; a kept (0, +-0)
+/// entry is refused.
+void
+TestSparseTopology()
+{
+    _context = "sparse topology";
+    std::string why;
+    size_t encoded = 0;
+
+    // Encodes \p indices x \p weights, checks the encoding validates inside
+    // the rich file, survives Write -> Open, re-encodes identically from
+    // its expansion, and expands to the canonical dense form bit for bit.
+    const auto encode = [&](const std::string &label,
+                            const std::vector<int32_t> &indices,
+                            const std::vector<float> &weights,
+                            int32_t elementSize, uint64_t pointCount) {
+        _context = "sparse topology: " + label;
+        fb::RigExecWireSkinTopology sparse;
+        const bool ok = RigExecFormatSparseTopology(
+            indices, weights, elementSize, pointCount, 7, true, &sparse,
+            &why);
+        CHECK(ok);
+        if (!ok) {
+            std::printf("  refused: %s\n", why.c_str());
+            return sparse;
+        }
+        ++encoded;
+        CHECK(sparse.elementSize == elementSize &&
+              sparse.pointCount == pointCount &&
+              sparse.influenceCount == 7 && sparse.validated);
+        std::vector<int32_t> wantIndices, gotIndices;
+        std::vector<float> wantWeights, gotWeights;
+        _CanonicalDense(indices, weights, size_t(elementSize), &wantIndices,
+                        &wantWeights);
+        RigExecFormatExpandTopology(sparse, &gotIndices, &gotWeights);
+        CHECK(gotIndices == wantIndices && _Same(gotWeights, wantWeights));
+
+        fb::RigExecWireSkinTopology again;
+        CHECK(RigExecFormatSparseTopology(gotIndices, gotWeights,
+                                          elementSize, pointCount, 7, true,
+                                          &again, &why) &&
+              _Same(again, sparse));
+
+        RigExecWireFile file = _RichFile();
+        file.geometry->chains[0].revisions[0].topology =
+            std::make_unique<fb::RigExecWireSkinTopology>(sparse);
+        why.clear();
+        CHECK(RigExecFormatValidate(file, &why));
+        if (!why.empty()) {
+            std::printf("  file refused: %s\n", why.c_str());
+        }
+        std::vector<uint8_t> bytes;
+        std::unique_ptr<RigExecWireFile> o;
+        if (_Write(file, &bytes)) {
+            o = _Open(bytes, &why);
+        }
+        CHECK(o && o->geometry->chains[0].revisions[0].topology);
+        if (o && o->geometry->chains[0].revisions[0].topology) {
+            const fb::RigExecWireSkinTopology &read =
+                *o->geometry->chains[0].revisions[0].topology;
+            CHECK(_Same(read, sparse));
+            RigExecFormatExpandTopology(read, &gotIndices, &gotWeights);
+            CHECK(gotIndices == wantIndices &&
+                  _Same(gotWeights, wantWeights));
+        }
+        return sparse;
+    };
+
+    // Interior (0, +0) and (0, -0) entries are dropped; a zero weight at
+    // another index, a -0 at another index, a negative weight, a denormal
+    // and a NaN payload at index 0 are kept, in order.
+    const float denormal = _F(0x00000001u), nan = _F(0x7fc12345u);
+    const std::vector<int32_t> indices = {2, 0, 3, 0, 0,   //
+                                          0, 5, 0, 6, 0,   //
+                                          0, 0, 0, 0, 0};
+    const std::vector<float> weights = {
+        0.5f, 0.0f,  -0.25f, -0.0f,  denormal,  //
+        0.0f, 0.0f,  1.0f,   -0.0f,  nan,       //
+        -0.0f, 0.0f, -0.0f,  0.0f,   -0.0f};
+    const fb::RigExecWireSkinTopology rows =
+        encode("interior zeros", indices, weights, 5, 3);
+    CHECK(rows.counts8 == std::vector<uint8_t>({3, 4, 0}) &&
+          rows.counts16.empty());
+    CHECK(rows.indexWidth == 1 &&
+          rows.indices8 == std::vector<uint8_t>({2, 3, 0, 5, 0, 6, 0}) &&
+          rows.indices16.empty() && rows.indices32.empty());
+    CHECK(_Same(rows.weights, std::vector<float>({0.5f, -0.25f, denormal,
+                                                  0.0f, 1.0f, -0.0f, nan})));
+    std::vector<int32_t> denseIndices;
+    std::vector<float> denseWeights;
+    RigExecFormatExpandTopology(rows, &denseIndices, &denseWeights);
+    _context = "sparse topology: interior zeros";
+    CHECK(denseIndices == std::vector<int32_t>({2, 3, 0, 0, 0,  //
+                                                5, 0, 6, 0, 0,  //
+                                                0, 0, 0, 0, 0}));
+    CHECK(_Same(denseWeights,
+                std::vector<float>({0.5f, -0.25f, denormal, 0.0f, 0.0f,  //
+                                    0.0f, 1.0f, -0.0f, nan, 0.0f,        //
+                                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f})));
+
+    // The counts vector by element size.
+    for (const int32_t width : {255, 256}) {
+        std::vector<int32_t> full(static_cast<size_t>(width), 0);
+        for (int32_t e = 0; e < width; ++e) {
+            full[size_t(e)] = e % 200 + 1;
+        }
+        const fb::RigExecWireSkinTopology counted = encode(
+            "element size " + std::to_string(width), full,
+            std::vector<float>(size_t(width), 0.25f), width, 1);
+        CHECK(width == 255
+                  ? counted.counts8 == std::vector<uint8_t>({255}) &&
+                        counted.counts16.empty()
+                  : counted.counts16 == std::vector<uint16_t>({256}) &&
+                        counted.counts8.empty());
+    }
+
+    // The index vector by the largest kept index, which a zero weight at
+    // that index still decides; any negative index takes 32 bits.
+    const std::pair<int32_t, uint8_t> widths[] = {
+        {255, 1}, {256, 2}, {65535, 2}, {65536, 4}};
+    for (const auto &[largest, width] : widths) {
+        const fb::RigExecWireSkinTopology wide =
+            encode("largest index " + std::to_string(largest),
+                   {1, largest, 0, 0}, {0.5f, 0.0f, 0.0f, -0.0f}, 2, 2);
+        CHECK(wide.indexWidth == width &&
+              wide.indices8.size() == (width == 1 ? 2u : 0u) &&
+              wide.indices16.size() == (width == 2 ? 2u : 0u) &&
+              wide.indices32.size() == (width == 4 ? 2u : 0u));
+    }
+    const fb::RigExecWireSkinTopology negative = encode(
+        "negative index", {3, -1, -2, 0}, {0.25f, 0.5f, 0.0f, 0.0f}, 2, 2);
+    CHECK(negative.indexWidth == 4 &&
+          negative.indices32 == std::vector<int32_t>({3, -1, -2}) &&
+          negative.indices8.empty() && negative.indices16.empty());
+
+    // Zero-width rows and no rows.
+    const fb::RigExecWireSkinTopology zeroWidth =
+        encode("element size 0", {}, {}, 0, 3);
+    CHECK(zeroWidth.counts8 == std::vector<uint8_t>({0, 0, 0}) &&
+          zeroWidth.weights.empty());
+    encode("no points", {}, {}, 4, 0);
+
+    // Layouts that are not point_count rows of element_size: refused with a
+    // reason, the output untouched.
+    const auto refuse = [&](const char *label,
+                            const std::vector<int32_t> &badIndices,
+                            const std::vector<float> &badWeights,
+                            int32_t elementSize, uint64_t pointCount,
+                            const char *part) {
+        _context = std::string("sparse topology refuses: ") + label;
+        fb::RigExecWireSkinTopology out;
+        out.elementSize = 12345;
+        CHECK(!RigExecFormatSparseTopology(badIndices, badWeights,
+                                           elementSize, pointCount, 0, false,
+                                           &out, &why) &&
+              _Contains(why, part) && out.elementSize == 12345);
+    };
+    refuse("ragged rows", std::vector<int32_t>(7, 1),
+           std::vector<float>(7, 1.0f), 2, 3, "not 3 points of 2 entries");
+    refuse("weights short", std::vector<int32_t>(8, 1),
+           std::vector<float>(7, 1.0f), 2, 4, "not 4 points of 2 entries");
+    refuse("point count", std::vector<int32_t>(8, 1),
+           std::vector<float>(8, 1.0f), 2, 3, "not 3 points of 2 entries");
+    refuse("entries of zero width", {1}, {1.0f}, 0, 0,
+           "not 0 points of 0 entries");
+    refuse("negative element size", {}, {}, -1, 0, "element size -1");
+    refuse("element size past 65535", {}, {}, 65536, 0,
+           "element size 65536");
+
+    // The validator refuses a hand-made kept entry the canonical form
+    // drops, at any index width, and keeps a NaN weight at index 0.
+    const auto handMade = [&](uint8_t width, float weight) {
+        fb::RigExecWireSkinTopology t;
+        t.elementSize = 2;
+        t.pointCount = 1;
+        t.counts8 = {2};
+        t.indexWidth = width;
+        if (width == 1) {
+            t.indices8 = {1, 0};
+        } else if (width == 2) {
+            t.indices16 = {1, 0};
+        } else {
+            t.indices32 = {1, 0};
+        }
+        t.weights = {0.5f, weight};
+        RigExecWireFile file = _RichFile();
+        file.geometry->chains[0].revisions[0].topology =
+            std::make_unique<fb::RigExecWireSkinTopology>(t);
+        return file;
+    };
+    for (const uint8_t width : {uint8_t(1), uint8_t(2), uint8_t(4)}) {
+        for (const float zero : {0.0f, -0.0f}) {
+            _context = "sparse topology: kept (0, " +
+                       std::string(std::signbit(zero) ? "-0" : "+0") +
+                       ") at width " + std::to_string(width);
+            CHECK(!RigExecFormatValidate(handMade(width, zero), &why) &&
+                  why == "geometry.chains[0].revisions[0].topology: kept "
+                         "entry 1 is (0, 0), which the sparse form drops");
+        }
+        _context = "sparse topology: kept (0, NaN) at width " +
+                   std::to_string(width);
+        CHECK(RigExecFormatValidate(handMade(width, nan), &why));
+    }
+    std::printf("sparse topology: %zu layouts encoded canonically, "
+                "validated and expanded; 6 malformed layouts and 6 kept "
+                "(0, +-0) entries refused\n",
+                encoded);
 }
 
 /// Offsets a test builds by hand in place of what Pack would write.
@@ -2042,6 +2610,139 @@ TestDeepPaths()
                 bytes.size());
 }
 
+/// Every byte of the vtable of the table at \p table, as offsets into the
+/// buffer at \p base: the two header entries and each field's.
+std::vector<size_t>
+_VtableBytes(const uint8_t *base, const uint8_t *table)
+{
+    const uint8_t *vtable =
+        table - flatbuffers::ReadScalar<flatbuffers::soffset_t>(table);
+    const uint16_t size = flatbuffers::ReadScalar<uint16_t>(vtable);
+    std::vector<size_t> out;
+    for (uint16_t at = 0; at < size; ++at) {
+        out.push_back(size_t(vtable - base) + at);
+    }
+    return out;
+}
+
+/// The corruptions the format names, each made to the rich file and handed
+/// to Open (the identifier, the old container and other versions are
+/// TestOpenRefusals'): a truncated tail, refused at every length that
+/// cuts more than trailing padding; a reserved revision op, a walk past
+/// the slots, a constant of another tag than its read, a cluster past the
+/// clusters in a cone list, a path node whose parent follows it, and
+/// topology counts that do not sum to the kept entries, each refused
+/// naming the defect; and every byte of the root table's vtable and of
+/// the first revision's flipped, each refused with a reason or opening and
+/// writing back to a file Open accepts.
+void
+TestCorruptionList()
+{
+    _context = "corruption list";
+    std::vector<uint8_t> bytes;
+    CHECK(_Write(_RichFile(), &bytes));
+    std::string why;
+    // A cut that only drops the builder's trailing alignment padding holds
+    // the same file: it opens and writes back to the uncut bytes. Every
+    // other cut is refused.
+    size_t truncations = 0, truncationsRefused = 0, paddingCuts = 0;
+    for (size_t cut = 1; cut < bytes.size(); cut += cut < 64 ? 1 : 61) {
+        const std::vector<uint8_t> shorter(bytes.begin(), bytes.end() - cut);
+        ++truncations;
+        why.clear();
+        const auto file = _Open(shorter, &why);
+        if (!file) {
+            CHECK(!why.empty());
+            ++truncationsRefused;
+            continue;
+        }
+        std::vector<uint8_t> rewritten;
+        const bool padding = _Write(*file, &rewritten) && rewritten == bytes;
+        if (!padding) {
+            std::printf("  a tail %zu bytes short opened as another file\n",
+                        cut);
+        }
+        CHECK(padding);
+        ++paddingCuts;
+    }
+    CHECK(truncations > 64 && truncationsRefused > 64 &&
+          truncationsRefused + paddingCuts == truncations);
+
+    int cases = 0;
+    using F = RigExecWireFile;
+    const auto refused = [&](const char *name, const char *part,
+                             const std::function<void(F &)> &mutate) {
+        _context = std::string("corruption list: ") + name;
+        F file = _RichFile();
+        mutate(file);
+        why.clear();
+        const bool named =
+            !_Open(_PackUnchecked(file), &why) && _Contains(why, part);
+        if (!named) {
+            std::printf("  got: %s\n", why.empty() ? "(accepted)" : why.c_str());
+        }
+        CHECK(named);
+        ++cases;
+    };
+    refused("op 10", "reserved",
+            [](F &f) { f.geometry->chains[0].revisions[0].op = 10; });
+    refused("walk out of range", "walk[0]",
+            [](F &f) { f.pose->solvers[0].bend->walk = {7}; });
+    refused("constant tag", "constant",
+            [](F &f) { f.pose->solvers[0].roll->constant = _vFloatNaN; });
+    refused("cone list cluster", "chain_base_clusters[0]",
+            [](F &f) { f.cones->chainBaseClusters[0].v = {1}; });
+    refused("parent after node", "malformed prim node",
+            [](F &f) { f.paths[_pCtl] = fb::PathNode(5, 2, PathKind::Prim); });
+    refused("topology sum", "kept entries", [](F &f) {
+        f.geometry->chains[0].revisions[0].topology->counts8 = {2, 2};
+    });
+
+    _context = "corruption list: vtables";
+    std::vector<uint64_t> aligned((bytes.size() + 7) / 8);
+    std::memcpy(aligned.data(), bytes.data(), bytes.size());
+    const uint8_t *base = reinterpret_cast<const uint8_t *>(aligned.data());
+    const fb::File *root = flatbuffers::GetRoot<fb::File>(base);
+    const fb::Revision *revision = nullptr;
+    if (root->geometry() && root->geometry()->chains() &&
+        root->geometry()->chains()->size() > 0) {
+        const fb::Chain *chain = root->geometry()->chains()->Get(0);
+        if (chain->revisions() && chain->revisions()->size() > 0) {
+            revision = chain->revisions()->Get(0);
+        }
+    }
+    CHECK(revision);
+    if (!revision) {
+        return;
+    }
+    size_t flips = 0, flipsRefused = 0, flipsOpened = 0;
+    for (const uint8_t *table : {reinterpret_cast<const uint8_t *>(root),
+                                 reinterpret_cast<const uint8_t *>(revision)}) {
+        for (const size_t at : _VtableBytes(base, table)) {
+            std::vector<uint8_t> flipped = bytes;
+            flipped[at] ^= 0xff;
+            ++flips;
+            why.clear();
+            const auto file = _Open(flipped, &why);
+            if (!file) {
+                ++flipsRefused;
+                CHECK(!why.empty());
+                continue;
+            }
+            ++flipsOpened;
+            std::vector<uint8_t> rewritten;
+            CHECK(_Write(*file, &rewritten) && _Open(rewritten) != nullptr);
+        }
+    }
+    CHECK(flipsRefused > 0 && flipsRefused + flipsOpened == flips);
+    std::printf("corruption list: %zu truncated tails refused, %zu cutting "
+                "only trailing padding open as the same file; %d named "
+                "defects refused by Open; %zu vtable bytes of the root and a "
+                "revision flipped, %zu refused, %zu opened\n",
+                truncationsRefused, paddingCuts, cases, flips, flipsRefused,
+                flipsOpened);
+}
+
 /// Random multi-byte corruptions of the rich file, including retargeted
 /// offsets: each is refused with a reason or opens and writes back; none
 /// crashes. Exercises the bounding walk on unverified offsets, lengths and
@@ -2118,9 +2819,13 @@ main()
     TestValidationSmoke();
     TestStepGraph();
     TestPresentationIdentifier();
+    TestExternalMovers();
+    TestSwitchOrder();
+    TestSparseTopology();
     TestBoundedOpen();
     TestPathOrder();
     TestDeepPaths();
+    TestCorruptionList();
     TestCorruptions();
     if (_failures) {
         std::printf("testRigExecFormat: %d failures\n", _failures);

@@ -705,9 +705,9 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                     bool readable =
                         sw.sourceReads.size() == sw.sourceSlots.size() &&
                         _RrVersionReadable(*program, *scratch,
-                                           sw.parentRead) &&
+                                           *sw.parentRead) &&
                         _RrVersionReadable(*program, *scratch,
-                                           sw.spaceRead);
+                                           *sw.spaceRead);
                     for (const RigExecWireFrameVersion &read :
                          sw.sourceReads) {
                         readable = readable &&
@@ -732,7 +732,7 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                     // this switch's round or later.
                     const RrMat4d parentPosed =
                         _RrReadFrameVersion(*program, *scratch,
-                                            sw.parentRead);
+                                            *sw.parentRead);
                     const RrMat4d parentDefault =
                         parent >= 0
                             ? scratch->defaultRoundTrip[size_t(parent)]
@@ -782,7 +782,7 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                         carry = scratch->defaultRoundTrip[size_t(sw.spaceSlot)]
                                     .GetInverse() *
                                 _RrReadFrameVersion(*program, *scratch,
-                                                    sw.spaceRead);
+                                                    *sw.spaceRead);
                         carryInverse = carry.GetInverse();
                     }
                     const auto rawDeltaOf = [&](int index) {
@@ -839,9 +839,10 @@ RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
                         delta = RrBlendTransforms(delta, deltaOf(upper),
                                                   blend);
                     }
-                    delta = RrMaskTransform(delta, sw.affectTranslation,
-                                            sw.affectRotation,
-                                            sw.affectScale);
+                    delta = RrMaskTransform(delta,
+                                            sw.affectTranslation.data(),
+                                            sw.affectRotation.data(),
+                                            sw.affectScale.data());
                     store.base[size_t(i)] =
                         RrFrameFromMatrix(delta * local);
                 }

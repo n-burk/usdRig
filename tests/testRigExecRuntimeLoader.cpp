@@ -1,22 +1,25 @@
 // rigExecRuntime loader conformance: bake every baking fixture in-process
 // at the probe time, open the bytes with the zero-USD reader, and check
-// malformed-input refusal, including a truncated file, a step graph with a
-// predecessor after its step, step and cluster indices past their tables,
-// a cluster graph with a cycle, an input table of other than one record
-// and static tables that do not match the program. Then: a fresh reader's defaults
-// against a fresh evaluator at the bake time (every output, the
-// diagnostics and the counters), twice, and the input API -- the inputs'
-// names, lookup and defaults, the table's control avar and operator input
-// found as inputs, refusals, a set that moves the outputs, a reset, and
-// token text the file lacks. Last, on a bake at the table's first frame:
+// every step's label as the reader names it in error text against the
+// program's, and malformed-input refusal, including a truncated file, the
+// old container, another file identifier or format version, a step graph
+// with a predecessor after its step, step and cluster indices past their
+// tables, a cluster graph with a cycle, and static tables that do not match
+// the program. Then: a fresh reader's defaults against a fresh evaluator at
+// the bake time (every output, the diagnostics and the counters), twice,
+// and the input API -- the inputs' names, lookup and defaults, the table's
+// control avar and operator input found as inputs, refusals, a set that
+// moves the outputs, a reset, and token text the file lacks or holds as
+// the empty token. Last, on a bake at the table's first frame:
 // the input sampler drives a fresh reader along the table's frames (an
 // `inputs` row) or at the bake time (a `static` row), each run against a
 // fresh evaluator's generation at that time, counters and summary line
 // included.
 #include "rigExecBake/bake.h"
+#include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
-#include "rigExecBinary/program.h"
+#include "rigExecBinary/format.h"
 #include "rigExecRuntime/runtime.h"
 #include "rigExecExampleFixtures.h"
 
@@ -47,7 +50,7 @@ static int failures = 0;
         }                                                               \
     } while (0)
 
-#include "rigExecSectionEdit.h"
+#include "rigExecFileEdit.h"
 #include "rigExecRuntimeDrive.h"
 
 static SdfPath
@@ -98,31 +101,17 @@ _TestMalformed()
     const std::vector<uint8_t> wrong(256, 0);
     CHECK(!RigExecRuntimeReader::Open(wrong.data(), wrong.size(), &error));
     CHECK(!error.empty());
-}
-
-// The steps and clustering \p bytes carries.
-static bool
-_DecodeGraph(const std::vector<uint8_t> &bytes,
-             std::vector<RigExecWireStep> *steps,
-             RigExecWireClustering *clustering)
-{
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    if (!reader ||
-        !reader->FindSection(RigExecBinarySection::Steps, &data, &size)) {
-        return false;
-    }
-    RigExecWireReader stepCursor(data, size);
-    if (!RigExecWireDecodeSteps(&stepCursor, steps, &error) ||
-        !reader->FindSection(RigExecBinarySection::Clusters, &data,
-                             &size)) {
-        return false;
-    }
-    RigExecWireReader clusterCursor(data, size);
-    return RigExecWireDecodeClustering(&clusterCursor, clustering, &error);
+    // The old sectioned container's magic leads the file.
+    std::vector<uint8_t> old(64, 0);
+    old[0] = 'R';
+    old[1] = 'E';
+    old[2] = 'X';
+    old[3] = 'B';
+    old[4] = 3;
+    old[6] = 3;
+    error.clear();
+    CHECK(!RigExecRuntimeReader::Open(old.data(), old.size(), &error));
+    CHECK(error == "not a v4 .rigexec (old REXB container); rebake");
 }
 
 // What Open says about \p bytes, or "(opened)".
@@ -135,44 +124,60 @@ _OpenError(const std::vector<uint8_t> &bytes)
     return reader ? std::string("(opened)") : error;
 }
 
+static int fileRefusalRows = 0;
+
+// A real bake with another file identifier, and with another format
+// version, each refused with its exact message.
+static void
+_TestFileRefusals(const std::vector<uint8_t> &bytes)
+{
+    std::vector<uint8_t> identifier = bytes;
+    CHECK(identifier.size() > 8);
+    if (identifier.size() <= 8) {
+        return;
+    }
+    identifier[4] = 'R';
+    identifier[5] = 'I';
+    identifier[6] = 'G';
+    identifier[7] = 'X';
+    std::string got = _OpenError(identifier);
+    CHECK(got == "not a .rigexec file (file identifier is not REXB)");
+    const std::vector<uint8_t> version =
+        RigExecTestEdited(bytes, [](fb::RigExecWireFile *file) {
+            file->formatVersion = 4;
+        });
+    got = _OpenError(version);
+    CHECK(got == "unsupported .rigexec format version 4 (this reader reads " +
+                     std::to_string(RigExecFormatVersion) + "); rebake");
+    if (got.find("format version 4") == std::string::npos) {
+        std::printf("version 4: open said '%s'\n", got.c_str());
+    }
+    ++fileRefusalRows;
+}
+
 static int stepGraphFlips = 0;
 static int stepGraphRanges = 0;
 static int stepGraphCycles = 0;
 static int stepGraphProducers = 0;
 
-// Open refuses \p bytes with section \p tag replaced by \p payload, saying
-// exactly \p expected.
+// Open refuses \p bytes changed by \p edit, saying exactly \p expected
+// after the validator's prefix.
+template <class Edit>
 static void
 _ExpectRefusal(const std::string &name, const char *what,
-               const std::vector<uint8_t> &bytes, RigExecBinarySection tag,
-               const std::vector<uint8_t> &payload,
+               const std::vector<uint8_t> &bytes, const Edit &edit,
                const std::string &expected)
 {
-    const std::string got = _OpenError(_ReplaceSection(bytes, tag, payload));
-    CHECK(got == expected);
-    if (got != expected) {
+    const std::string want = "invalid .rigexec: " + expected;
+    const std::string got = _OpenError(RigExecTestEdited(bytes, edit));
+    CHECK(got == want);
+    if (got != want) {
         std::printf("%s, %s: open said '%s', expected '%s'\n", name.c_str(),
-                    what, got.c_str(), expected.c_str());
+                    what, got.c_str(), want.c_str());
     }
 }
 
-static std::vector<uint8_t>
-_StepsPayload(const std::vector<RigExecWireStep> &steps)
-{
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeSteps(steps, &payload));
-    return payload;
-}
-
-static std::vector<uint8_t>
-_ClustersPayload(const RigExecWireClustering &clustering)
-{
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeClustering(clustering, &payload));
-    return payload;
-}
-
-// Step and cluster graphs playback could not walk, cut into a fixture's
+// Step and cluster graphs playback could not walk, edited into a fixture's
 // bake, each refused by Open with the step-graph check's exact message:
 // the first step with a predecessor names the last step instead; indices
 // past the end in a step's predecessors, a step's cluster, a cluster's
@@ -183,9 +188,12 @@ static void
 _TestStepGraphRefusals(const std::string &name,
                        const std::vector<uint8_t> &bytes)
 {
-    std::vector<RigExecWireStep> steps;
-    RigExecWireClustering clustering;
-    CHECK(_DecodeGraph(bytes, &steps, &clustering));
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    if (!file) {
+        return;
+    }
+    const std::vector<fb::RigExecWireStep> &steps = file->steps;
+    const fb::RigExecWireClustering &clustering = *file->clustering;
     const size_t count = steps.size();
     const auto &clusters = clustering.clusters;
     const std::string stepCount = std::to_string(count);
@@ -194,16 +202,17 @@ _TestStepGraphRefusals(const std::string &name,
         if (steps[s].preds.empty()) {
             continue;
         }
-        std::vector<RigExecWireStep> edited = steps;
-        edited[s].preds[0] = int32_t(count - 1);
         _ExpectRefusal(name, "flipped predecessor", bytes,
-                       RigExecBinarySection::Steps, _StepsPayload(edited),
+                       [&](fb::RigExecWireFile *edited) {
+                           edited->steps[s].preds[0] = int32_t(count - 1);
+                       },
                        "step " + std::to_string(s) +
                            " depends on later step " +
                            std::to_string(count - 1));
-        edited[s].preds[0] = int32_t(count);
         _ExpectRefusal(name, "predecessor past the steps", bytes,
-                       RigExecBinarySection::Steps, _StepsPayload(edited),
+                       [&](fb::RigExecWireFile *edited) {
+                           edited->steps[s].preds[0] = int32_t(count);
+                       },
                        "step " + std::to_string(s) + " names predecessor " +
                            stepCount + ", which is no step");
         ++stepGraphFlips;
@@ -215,15 +224,16 @@ _TestStepGraphRefusals(const std::string &name,
     if (count > 0) {
         const uint32_t past = uint32_t(1) << 30;
         const std::string last = std::to_string(count - 1);
-        const std::pair<RigExecWireSlotDomain, const char *> domains[] = {
-            {RigExecWireSlotDomain::PosedM, "PosedM"},
-            {RigExecWireSlotDomain::Aggregate, "Aggregate"}};
+        const std::pair<fb::SlotDomain, const char *> domains[] = {
+            {fb::SlotDomain::PosedM, "PosedM"},
+            {fb::SlotDomain::Aggregate, "Aggregate"}};
         for (const auto &[domain, text] : domains) {
-            std::vector<RigExecWireStep> edited = steps;
-            edited.back().reads.push_back({domain, past, past + 1});
+            const fb::SlotDomain read = domain;
             _ExpectRefusal(name, "read nothing writes", bytes,
-                           RigExecBinarySection::Steps,
-                           _StepsPayload(edited),
+                           [&](fb::RigExecWireFile *edited) {
+                               edited->steps.back().reads.push_back(
+                                   fb::SlotRange(read, past, past + 1));
+                           },
                            "step " + last + " reads " + text + " slots [" +
                                std::to_string(past) + ", " +
                                std::to_string(past + 1) +
@@ -232,32 +242,31 @@ _TestStepGraphRefusals(const std::string &name,
         }
     }
     if (count > 0 && !clusters.empty()) {
-        std::vector<RigExecWireStep> editedSteps = steps;
-        editedSteps[0].cluster = int32_t(clusters.size());
         _ExpectRefusal(name, "cluster past the clusters", bytes,
-                       RigExecBinarySection::Steps,
-                       _StepsPayload(editedSteps),
+                       [&](fb::RigExecWireFile *edited) {
+                           edited->steps[0].cluster =
+                               int32_t(clusters.size());
+                       },
                        "step 0 names cluster " + clusterCount +
                            ", which is no cluster");
-        RigExecWireClustering edited = clustering;
-        edited.clusters[0].members.push_back(int32_t(count));
         _ExpectRefusal(name, "member past the steps", bytes,
-                       RigExecBinarySection::Clusters,
-                       _ClustersPayload(edited),
+                       [&](fb::RigExecWireFile *edited) {
+                           edited->clustering->clusters[0].members.push_back(
+                               int32_t(count));
+                       },
                        "cluster 0 names member " + stepCount +
                            ", which is no step");
-        edited = clustering;
-        edited.clusters[0].preds.push_back(int32_t(clusters.size()));
         _ExpectRefusal(name, "cluster predecessor past the clusters", bytes,
-                       RigExecBinarySection::Clusters,
-                       _ClustersPayload(edited),
+                       [&](fb::RigExecWireFile *edited) {
+                           edited->clustering->clusters[0].preds.push_back(
+                               int32_t(clusters.size()));
+                       },
                        "cluster 0 names predecessor " + clusterCount +
                            ", which is no cluster");
-        edited = clustering;
-        edited.clusterOf.pop_back();
         _ExpectRefusal(name, "clustering one step short", bytes,
-                       RigExecBinarySection::Clusters,
-                       _ClustersPayload(edited),
+                       [&](fb::RigExecWireFile *edited) {
+                           edited->clustering->clusterOf.pop_back();
+                       },
                        "the clustering places " + std::to_string(count - 1) +
                            " steps; the file has " + stepCount);
         stepGraphRanges += 4;
@@ -296,83 +305,137 @@ _TestStepGraphRefusals(const std::string &name,
             if (otherPath || !lowest) {
                 continue;
             }
-            RigExecWireClustering edited = clustering;
-            std::vector<int32_t> &preds = edited.clusters[size_t(a)].preds;
-            preds.insert(
-                std::lower_bound(preds.begin(), preds.end(), int32_t(b)),
-                int32_t(b));
-            std::vector<int32_t> &succs = edited.clusters[b].succs;
-            succs.insert(std::lower_bound(succs.begin(), succs.end(), a), a);
-            _ExpectRefusal(name, "two-cluster cycle", bytes,
-                           RigExecBinarySection::Clusters,
-                           _ClustersPayload(edited),
-                           "the cluster graph has a cycle through cluster " +
-                               std::to_string(a));
+            _ExpectRefusal(
+                name, "two-cluster cycle", bytes,
+                [&](fb::RigExecWireFile *edited) {
+                    std::vector<int32_t> &preds =
+                        edited->clustering->clusters[size_t(a)].preds;
+                    preds.insert(std::lower_bound(preds.begin(), preds.end(),
+                                                  int32_t(b)),
+                                 int32_t(b));
+                    std::vector<int32_t> &succs =
+                        edited->clustering->clusters[b].succs;
+                    succs.insert(
+                        std::lower_bound(succs.begin(), succs.end(), a), a);
+                },
+                "the cluster graph has a cycle through cluster " +
+                    std::to_string(a));
             ++stepGraphCycles;
             return;
         }
     }
 }
 
-static int staticRecordRows = 0;
+static int staticTableRows = 0;
+static int staticChainRows = 0;
+static int staticArrayRows = 0;
 
-// Open refuses an input table that does not hold exactly one record, and a
-// record whose static tables do not match the program, each with its exact
-// message: no record, the record twice, an xform base past the xform
-// slots, and a chain base past the chains.
+// Open refuses static tables that do not match the program, each with the
+// validator's exact message naming the field: an xform base past the
+// xform slots, a delta-base flag past the delta bases, a chain base
+// without its have_base flag, and a constraint's array weights of another
+// count than its sources.
 static void
-_TestStaticRecordRefusals(const std::string &name,
-                          const std::vector<uint8_t> &bytes)
+_TestStaticTableRefusals(const std::string &name,
+                         const std::vector<uint8_t> &bytes)
+{
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    if (!file) {
+        return;
+    }
+    const size_t xforms = file->pose->xformBase.size();
+    _ExpectRefusal(name, "xform base past the slots", bytes,
+                   [](fb::RigExecWireFile *edited) {
+                       edited->pose->xformBase.push_back(
+                           RigExecWireMatrix4d{});
+                   },
+                   "pose.xform_base: " + std::to_string(xforms + 1) +
+                       " entries, expected " + std::to_string(xforms));
+    const size_t deltas = file->geometry->deltaBasePaths.size();
+    _ExpectRefusal(name, "delta-base flag past the delta bases", bytes,
+                   [](fb::RigExecWireFile *edited) {
+                       edited->geometry->deltaBaseOk.push_back(0);
+                   },
+                   "geometry.delta_base_ok: " + std::to_string(deltas + 1) +
+                       " entries, expected " + std::to_string(deltas));
+    ++staticTableRows;
+    // A chain holding base points, which keeps them without the flag.
+    const auto &chains = file->geometry->chains;
+    for (size_t c = 0; c < chains.size(); ++c) {
+        if (!chains[c].haveBase || chains[c].base == 0) {
+            continue;
+        }
+        _ExpectRefusal(name, "chain base without have_base", bytes,
+                       [c](fb::RigExecWireFile *edited) {
+                           edited->geometry->chains[c].haveBase = false;
+                       },
+                       "geometry.chains[" + std::to_string(c) +
+                           "]: a base without have_base");
+        ++staticChainRows;
+        break;
+    }
+    // A constraint's arrays that resolved, one weight more than sources.
+    const auto &arrays = file->pose->constraintArrays;
+    for (size_t k = 0; k < arrays.size(); ++k) {
+        if (!arrays[k].ok) {
+            continue;
+        }
+        const uint64_t sources = arrays[k].sourceCount;
+        _ExpectRefusal(name, "array weights past the sources", bytes,
+                       [k](fb::RigExecWireFile *edited) {
+                           edited->pose->constraintArrays[k].weights.push_back(
+                               1.0);
+                       },
+                       "pose.constraint_arrays[" + std::to_string(k) +
+                           "].weights: " + std::to_string(sources + 1) +
+                           " entries, expected " + std::to_string(sources));
+        ++staticArrayRows;
+        break;
+    }
+}
+
+static int stepLabelRows = 0;
+
+// Every step's label, as the reader builds it from the tables for error
+// text, is the live program's label; a step past the steps is its number.
+static void
+_TestStepLabels(const RigExecExampleFixture &fixture,
+                const RigExecRigEvaluator &evaluator,
+                const std::vector<uint8_t> &bytes)
 {
     std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    RigExecWireInputTable table;
-    CHECK(reader &&
-          reader->FindSection(RigExecBinarySection::InputTable, &data,
-                              &size));
-    if (!data) {
+    const std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
+    CHECK(reader);
+    CHECK(baked);
+    if (!reader || !baked) {
         return;
     }
-    RigExecWireReader cursor(data, size);
-    CHECK(RigExecWireDecodeInputTable(&cursor, &table, &error));
-    CHECK(table.frames.size() == 1);
-    if (table.frames.size() != 1) {
-        return;
+    const RigExecBakedProgramImpl &program = baked->GetStepGraph();
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    CHECK(file && file->steps.size() == program.steps.size());
+    size_t matched = 0;
+    size_t printed = 0;
+    for (size_t i = 0; i < program.steps.size(); ++i) {
+        const std::string label = reader->GetStepLabelForTesting(i);
+        const bool same = label == program.steps[i].label;
+        CHECK(same);
+        if (same) {
+            ++matched;
+        } else if (printed++ < 5) {
+            std::printf("%s step %zu: label '%s', program '%s'\n",
+                        fixture.stage, i, label.c_str(),
+                        program.steps[i].label.c_str());
+        }
     }
-    const auto payload = [](const RigExecWireInputTable &edited) {
-        std::vector<uint8_t> out;
-        CHECK(RigExecWireEncodeInputTable(edited, &out));
-        return out;
-    };
-    RigExecWireInputTable edited = table;
-    edited.frames.clear();
-    _ExpectRefusal(name, "no record", bytes, RigExecBinarySection::InputTable,
-                   payload(edited),
-                   "the input table holds 0 frame records; a .rigexec "
-                   "holds one static record: rebake");
-    edited = table;
-    edited.frames.push_back(table.frames[0]);
-    _ExpectRefusal(name, "two records", bytes,
-                   RigExecBinarySection::InputTable, payload(edited),
-                   "the input table holds 2 frame records; a .rigexec "
-                   "holds one static record: rebake");
-    edited = table;
-    edited.frames[0].xformBase.push_back(RigExecWireMatrix4d{});
-    _ExpectRefusal(name, "xform base past the slots", bytes,
-                   RigExecBinarySection::InputTable, payload(edited),
-                   "the static record's xform tables do not match the "
-                   "slots");
-    edited = table;
-    edited.frames[0].chainHaveBase.push_back(0);
-    edited.frames[0].chainBases.emplace_back();
-    _ExpectRefusal(name, "chain base past the chains", bytes,
-                   RigExecBinarySection::InputTable, payload(edited),
-                   "the static record's chain bases do not match the "
-                   "chains");
-    ++staticRecordRows;
+    const size_t count = program.steps.size();
+    CHECK(reader->GetStepLabelForTesting(count) == std::to_string(count));
+    std::printf("step labels %s: %zu of %zu match\n", fixture.stage, matched,
+                count);
+    if (matched == count) {
+        ++stepLabelRows;
+    }
 }
 
 // A fresh reader executes its defaults: Execute has no precondition, and
@@ -875,9 +938,13 @@ _TestInputApi(const RigExecExampleFixture &fixture,
         ++inputApiResets;
     }
 
-    // Token text the file lacks is interned once and round-trips; known
-    // text resolves to the file's own id.
+    // Token text the file lacks is interned once, past the file's path
+    // ids, and round-trips; known text resolves to the file's own id, the
+    // empty token to id 0.
     std::string tokenNote = "n/a";
+    const std::unique_ptr<fb::RigExecWireFile> unpacked =
+        RigExecTestUnpack(bytes);
+    const size_t paths = unpacked ? unpacked->paths.size() : 0;
     for (size_t i = 0; i < count; ++i) {
         const RigExecRuntimeInputInfo &info = fresh->GetInputInfo(i);
         if (info.type != RrInputTag::Token) {
@@ -891,15 +958,18 @@ _TestInputApi(const RigExecExampleFixture &fixture,
         CHECK(tokens->SetInputToken(info.name, text, &why));
         const uint32_t id = tokens->GetInputValue(i).token;
         CHECK(tokens->GetInputValue(i).tag == RrInputTag::Token);
-        CHECK(id >= 0x80000000u);
+        CHECK(paths > 0 && id >= paths);
         CHECK(tokens->GetTokenText(id) == text);
         CHECK(tokens->SetInputToken(info.name, text, &why));
         CHECK(tokens->GetInputValue(i).token == id);
         const std::string known =
             tokens->GetTokenText(info.defaultValue.token);
         CHECK(tokens->SetInputToken(info.name, known, &why));
-        CHECK(tokens->GetInputValue(i).token < 0x80000000u);
+        CHECK(tokens->GetInputValue(i).token < paths);
         CHECK(tokens->GetTokenText(tokens->GetInputValue(i).token) == known);
+        CHECK(tokens->SetInputToken(info.name, "", &why));
+        CHECK(tokens->GetInputValue(i).token == 0);
+        CHECK(tokens->GetTokenText(0).empty());
         CHECK(tokens->SetInputToken(info.name, text, &why));
         CHECK(tokens->Execute(&error));
         tokenNote = info.name;
@@ -950,15 +1020,16 @@ _TestFixture(const RigExecExampleFixture &fixture,
         std::printf("%s: probe bake: %s\n", fixture.stage, error.c_str());
         return;
     }
-    // The bake always emits every section, so the loader decodes all of
-    // them; a missing or malformed one fails Open.
+    // The bake writes a file the format's validator accepts, so Open
+    // takes it.
     CHECK(RigExecRuntimeReader::Open(atProbe.data(), atProbe.size(),
                                      &error));
 
+    _TestStepLabels(fixture, evaluator, atProbe);
     _TestStepGraphRefusals(stagePath, atProbe);
-    _TestStaticRecordRefusals(stagePath, atProbe);
+    _TestStaticTableRefusals(stagePath, atProbe);
 
-    // Truncating the tail breaks a section payload, so Open refuses.
+    // Truncating the tail breaks the buffer, so Open refuses.
     if (atProbe.size() > 64) {
         std::string truncError;
         CHECK(!RigExecRuntimeReader::Open(
@@ -1026,6 +1097,7 @@ main(int argc, char **argv)
                                       &error) &&
                     !bytes.empty()) {
                     _TestFreshExecute(bytes);
+                    _TestFileRefusals(bytes);
                     sawBytes = true;
                 }
             }
@@ -1044,9 +1116,21 @@ main(int argc, char **argv)
     CHECK(stepGraphFlips > 0);
     CHECK(stepGraphRanges > 0);
     CHECK(stepGraphCycles > 0);
-    std::printf("static record refusals: %d of %d baking row(s)\n",
-                staticRecordRows, bakingRows);
-    CHECK(staticRecordRows == bakingRows);
+    std::printf("file refusals: %d row(s) (identifier, format "
+                "version)\n",
+                fileRefusalRows);
+    CHECK(fileRefusalRows == 1);
+    std::printf("static table refusals: %d of %d baking row(s); chain base "
+                "on %d, constraint arrays on %d\n",
+                staticTableRows, bakingRows, staticChainRows,
+                staticArrayRows);
+    CHECK(staticTableRows == bakingRows);
+    CHECK(staticChainRows > 0);
+    CHECK(staticArrayRows > 0);
+    std::printf("step labels: %d of %d baking row(s) match the "
+                "program's\n",
+                stepLabelRows, bakingRows);
+    CHECK(stepLabelRows == bakingRows);
     // Every baking row ran the input API; the set, the reset and the token
     // cases need a fixture that has each.
     std::printf("input api: %d of %d baking row(s), %d table field(s) "

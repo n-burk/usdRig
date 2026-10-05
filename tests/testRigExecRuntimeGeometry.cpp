@@ -7,8 +7,7 @@
 #include "rigExecBake/bake.h"
 #include "rigExecBake/staticReport.h"
 #include "rigExec/rigEvaluator.h"
-#include "rigExecBinary/container.h"
-#include "rigExecBinary/inputTable.h"
+#include "rigExecBinary/format.h"
 #include "rigExecRuntime/runtime.h"
 #include "rigExecExampleFixtures.h"
 
@@ -20,6 +19,7 @@
 #include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -43,7 +43,7 @@ static int comparedFrames = 0;
         }                                                               \
     } while (0)
 
-#include "rigExecSectionEdit.h"
+#include "rigExecFileEdit.h"
 #include "rigExecRuntimeDrive.h"
 
 static SdfPath
@@ -476,17 +476,16 @@ TestComputedCurrentPhase()
 }
 
 // The assemblers' connection-following scalar reads of every type
-// (tests/fixtures/computed_path_reads.usda): the computed section reads
+// (tests/fixtures/computed_path_reads.usda): the file's read rows are
 // exactly those sites, each reading its head when its walk yields nothing,
-// and the record holds what each read computes, including the two floats
-// whose connection ends on a double with no value, which read their own
-// authored value. The fixture's mesh points are keyed and held as a chain
-// base, static data the file holds at the bake time: the binary plays that
-// time (rigExecPose --verify-binary drags its inputs there). The same stage
-// with the points held by a stronger default
-// (tests/rigExecPathReadsHeldPoints.usda) reads every animated source as an
-// input, so its binary plays every frame, the keyed double3, matrix4d and
-// float reads computed at each.
+// including the two floats whose connection ends on a double with no
+// value, which read their own authored value. The fixture's mesh points
+// are keyed and held as a chain base, static data the file holds at the
+// bake time: the binary plays that time (rigExecPose --verify-binary drags
+// its inputs there). The same stage with the points held by a stronger
+// default (tests/rigExecPathReadsHeldPoints.usda) reads every animated
+// source as an input, so its binary plays every frame, the keyed double3,
+// matrix4d and float reads computed at each.
 static void
 TestPathReadsFixture()
 {
@@ -518,70 +517,48 @@ TestPathReadsFixture()
     std::vector<uint8_t> bytes;
     std::string error;
     CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    CHECK(binary);
-    if (!binary) {
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    if (!file) {
         return;
     }
     const std::string step = "/PathReadAsset/Rig/Movers/Mush.inputs:step";
     const std::string held = "/PathReadAsset/Rig/Dials.held";
-    // The section reads exactly those sites, each reading its head when its
+    // The read rows are exactly those sites, each reading its head when its
     // walk yields nothing; the two that end on the valueless double walk
-    // two hops.
-    {
-        const uint8_t *data = nullptr;
-        size_t size = 0;
-        RigExecWireComputed computed;
-        CHECK(binary->FindSection(RigExecBinarySection::Computed, &data,
-                                  &size));
-        RigExecWireReader cursor(data, size);
-        CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
-        CHECK(computed.pathScalarReads.size() == 13);
-        size_t twoHops = 0;
-        std::string text;
-        for (const RigExecWirePathScalarRead &entry :
-             computed.pathScalarReads) {
-            CHECK(entry.headFallback);
-            if (binary->GetString(entry.path, &text) &&
-                (text == step || text == held)) {
-                CHECK(entry.read.walk.size() == 2);
-                ++twoHops;
-            }
-        }
-        CHECK(twoHops == 2);
-    }
-    // The record took the head's own value at both sites.
-    RigExecWireInputTable table;
-    {
-        const uint8_t *data = nullptr;
-        size_t size = 0;
-        CHECK(binary->FindSection(RigExecBinarySection::InputTable, &data,
-                                  &size));
-        RigExecWireReader cursor(data, size);
-        CHECK(RigExecWireDecodeInputTable(&cursor, &table, &error));
-    }
-    CHECK(table.frames.size() == 1);
-    size_t found = 0;
-    std::string text;
-    for (const RigExecWirePathRead &read :
-         table.frames.empty() ? std::vector<RigExecWirePathRead>()
-                              : table.frames[0].pathReads) {
-        if (read.wasDefault != 0 || read.forceFrame == 0 ||
-            !binary->GetString(read.path, &text)) {
+    // two hops, and their head holds the float the site reads.
+    size_t rows = 0;
+    size_t twoHops = 0;
+    for (const fb::RigExecWirePathRead &row : file->geometry->pathReads) {
+        if (!row.read) {
             continue;
         }
-        if (text == step) {
-            CHECK(read.value.tag == RigExecWirePathValue::Tag::Float &&
-                  read.value.f32 == 0.3f);
-            ++found;
-        } else if (text == held) {
-            CHECK(read.value.tag == RigExecWirePathValue::Tag::Double &&
-                  read.value.f64 == double(0.6f));
-            ++found;
+        ++rows;
+        CHECK(row.headFallback && !row.rest);
+        const std::string text = RigExecFormatPathText(*file, row.path);
+        if (text != step && text != held) {
+            continue;
         }
+        const fb::RigExecWireInput &read = *row.read;
+        CHECK(read.walk.size() == 2);
+        CHECK(read.tag == fb::InputTag::Float);
+        if (read.walk.size() != 2) {
+            continue;
+        }
+        // The head's own float, and a double hop with no value.
+        const fb::InputSlot &head = file->inputs[read.walk[0]];
+        const fb::InputSlot &hop = file->inputs[read.walk[1]];
+        CHECK(head.type() == fb::InputTag::Float &&
+              (head.flags() & uint8_t(fb::InputSlotFlags::HasValue)) != 0);
+        CHECK(hop.type() == fb::InputTag::Double &&
+              (hop.flags() & uint8_t(fb::InputSlotFlags::HasValue)) == 0);
+        const uint32_t bits = uint32_t(file->values[head.value()].bits);
+        float value = 0.0f;
+        std::memcpy(&value, &bits, sizeof(value));
+        CHECK(value == (text == step ? 0.3f : 0.6f));
+        ++twoHops;
     }
-    CHECK(found == 2);
+    CHECK(rows == 13);
+    CHECK(twoHops == 2);
 }
 
 // A blend channel whose inputs:weight is connected to a pose
@@ -897,6 +874,88 @@ TestBlendActivationDrag()
     CHECK(pass("released", unset, &released));
     CHECK(_SamePoints(released, undragged));
     std::printf("%s: checked\n", name);
+}
+
+// A blend shape mover whose two channels read UsdSkelBlendShape prims: one
+// dense (an offset per point, no pointIndices, the schema's own form) and
+// one sparse. Each channel's weight is keyed from 0 to 1.
+static UsdStageRefPtr
+_BlendShapeLayoutStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const VtVec3fArray base{GfVec3f(0.0f, 0.0f, 0.0f),
+                            GfVec3f(1.0f, 0.0f, 0.0f),
+                            GfVec3f(1.0f, 1.0f, 0.0f),
+                            GfVec3f(0.0f, 1.0f, 0.0f)};
+    stage->DefinePrim(SdfPath("/Asset/Geom/Mesh"), TfToken("Mesh"))
+        .GetAttribute(TfToken("points"))
+        .Set(base);
+    const auto shape = [&](const char *path, const VtVec3fArray &offsets,
+                           const VtIntArray *indices) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("BlendShape"));
+        prim.CreateAttribute(TfToken("offsets"),
+                             SdfValueTypeNames->Vector3fArray, false,
+                             SdfVariabilityUniform)
+            .Set(offsets);
+        if (indices) {
+            prim.CreateAttribute(TfToken("pointIndices"),
+                                 SdfValueTypeNames->IntArray, false,
+                                 SdfVariabilityUniform)
+                .Set(*indices);
+        }
+    };
+    shape("/Asset/Targets/Dense",
+          {GfVec3f(0.0f, 0.0f, 1.0f), GfVec3f(0.0f, 0.0f, 2.0f),
+           GfVec3f(0.0f, 0.5f, 0.0f), GfVec3f(0.25f, 0.0f, 0.0f)},
+          nullptr);
+    const VtIntArray sparse{1, 3};
+    shape("/Asset/Targets/Sparse",
+          {GfVec3f(0.0f, 0.0f, -1.0f), GfVec3f(0.5f, 0.0f, 0.0f)}, &sparse);
+    SdfPathVector inputs;
+    for (const char *name : {"Dense", "Sparse"}) {
+        const UsdPrim input = stage->DefinePrim(
+            SdfPath("/Asset/Rig/BlendInputs").AppendChild(TfToken(name)),
+            TfToken("RigExecBlendInput"));
+        const UsdAttribute weight =
+            input.GetAttribute(TfToken("inputs:weight"));
+        weight.Set(0.0f, UsdTimeCode(1.0));
+        weight.Set(1.0f, UsdTimeCode(3.0));
+        const UsdPrim sample = stage->DefinePrim(
+            input.GetPath().AppendChild(TfToken("Full")),
+            TfToken("RigExecBlendSample"));
+        sample.GetAttribute(TfToken("rigExec:activation")).Set(1.0f);
+        sample.CreateRelationship(TfToken("rigExec:blendShape"))
+            .SetTargets({SdfPath("/Asset/Targets").AppendChild(
+                TfToken(name))});
+        input.CreateRelationship(TfToken("rigExec:samples"))
+            .SetTargets({sample.GetPath()});
+        inputs.push_back(input.GetPath());
+    }
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim blend = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Blend"), TfToken("RigExecBlendShapeMover"));
+    blend.ApplyAPI(TfToken("RigExecMoverAPI"));
+    blend.GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/Mesh.points")});
+    blend.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    blend.CreateRelationship(TfToken("rigExec:blendInputs")).SetTargets(inputs);
+    return stage;
+}
+
+// Both UsdSkelBlendShape forms bake, and the file plays them bit for bit
+// with the baked program: the dense layout's offsets run over every point.
+static void
+TestBlendShapeLayouts()
+{
+    const char *const name = "blend shape layouts";
+    std::vector<std::vector<RigExecRuntimePoints>> rows;
+    _TestStage(name, _BlendShapeLayoutStage(), {1.0, 2.0, 3.0}, &rows);
+    _CheckFramesDiffer(name, rows);
 }
 
 static const RigExecRuntimeWeightField *
@@ -1625,10 +1684,11 @@ TestEmptyPlaneAxis()
     std::printf("%s: checked\n", name);
 }
 
-// The Computed section holds the oracle's static sample and curve points
-// at the bake time. A current-phase field that reads animated ones still
-// bakes -- the binary holds them at that time only -- and the static report
-// names the object and the attribute; the same stage unanimated reports
+// The file's weight objects hold the oracle's static sample and curve
+// points (geometry.weight_objects oracle_samples and oracle_curve) at the
+// bake time. A current-phase field that reads animated ones still bakes --
+// the binary holds them at that time only -- and the static report names
+// the object and the attribute; the same stage unanimated reports
 // nothing.
 static void
 TestAnimatedStaticPointsReported()
@@ -1676,37 +1736,10 @@ TestAnimatedStaticPointsReported()
     std::printf("animated sample source and curve: baked, reported\n");
 }
 
-// \p bytes without section \p tag; everything else copied unchanged.
-static std::vector<uint8_t>
-_WithoutSection(const std::vector<uint8_t> &bytes, RigExecBinarySection tag)
-{
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    CHECK(reader);
-    if (!reader) {
-        return {};
-    }
-    RigExecBinaryWriter writer;
-    std::string text;
-    for (uint32_t id = 1; reader->GetString(id, &text); ++id) {
-        CHECK(writer.AddString(text) == id);
-    }
-    for (uint32_t t = uint32_t(RigExecBinarySection::Manifest);
-         t <= uint32_t(RigExecBinarySection::Computed); ++t) {
-        const RigExecBinarySection section = RigExecBinarySection(t);
-        const uint8_t *data = nullptr;
-        size_t size = 0;
-        if (section != tag && reader->FindSection(section, &data, &size)) {
-            writer.AddSection(section, data, size);
-        }
-    }
-    return writer.Finish();
-}
-
-// Open refuses a current-phase file without the Computed section, and an
-// envelope index on a geometry-domain constraint (whose weight resolves
-// per point on its revision), each with its own text.
+// Open refuses an envelope index on a geometry-domain constraint (whose
+// weight resolves per point on its revision), and a main revision without
+// its inputs:defaultWeight read, each refused by the format's validator
+// naming the field.
 static void
 TestComputedOpenRefusals()
 {
@@ -1725,44 +1758,153 @@ TestComputedOpenRefusals()
         return reader ? std::string() : why;
     };
     CHECK(openError(result.bytes).empty());
+    const std::unique_ptr<fb::RigExecWireFile> file =
+        RigExecTestUnpack(result.bytes);
+    if (!file) {
+        return;
+    }
+    const std::vector<fb::RigExecWireConstraint> &constraints =
+        file->pose->constraints;
+    CHECK(constraints.size() == 1 && constraints[0].weightObjectIndex == -1);
+    CHECK(!file->geometry->weightObjects.empty());
+    if (constraints.size() != 1 || file->geometry->weightObjects.empty()) {
+        return;
+    }
     std::string got = openError(
-        _WithoutSection(result.bytes, RigExecBinarySection::Computed));
-    CHECK(got == "the file carries no computed section, which every input "
-                 "read needs; rebake it");
-    std::printf("current phase without the computed section: %s\n",
-                got.c_str());
-
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
-                                  &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    RigExecWireComputed computed;
-    if (!binary ||
-        !binary->FindSection(RigExecBinarySection::Computed, &data, &size)) {
-        CHECK(false);
-        return;
-    }
-    {
-        RigExecWireReader cursor(data, size);
-        CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
-    }
-    CHECK(computed.constraintWeightObjectIndex == std::vector<int32_t>{-1});
-    CHECK(!computed.weightObjects.empty());
-    if (computed.constraintWeightObjectIndex.size() != 1 ||
-        computed.weightObjects.empty()) {
-        return;
-    }
-    computed.constraintWeightObjectIndex[0] = 0;
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeComputed(computed, &payload, &error));
-    got = openError(_ReplaceSection(result.bytes,
-                                    RigExecBinarySection::Computed, payload));
-    CHECK(got == "the computed section gives constraint "
-                 "/Asset/Rig/Movers/Sweep/Pull an envelope it does not "
-                 "resolve");
+        RigExecTestEdited(result.bytes, [](fb::RigExecWireFile *edited) {
+            edited->pose->constraints[0].weightObjectIndex = 0;
+        }));
+    CHECK(got == "invalid .rigexec: pose.constraints[0]: "
+                 "weight_object_index does not name the envelope of its "
+                 "weight object");
     std::printf("envelope index on a geometry constraint: %s\n",
                 got.c_str());
+    CHECK(!file->geometry->chains.empty() &&
+          !file->geometry->chains[0].revisions.empty());
+    if (file->geometry->chains.empty() ||
+        file->geometry->chains[0].revisions.empty()) {
+        return;
+    }
+    got = openError(
+        RigExecTestEdited(result.bytes, [](fb::RigExecWireFile *edited) {
+            edited->geometry->chains[0].revisions[0].defaultWeight.reset();
+        }));
+    CHECK(got == "invalid .rigexec: geometry.chains[0].revisions[0]."
+                 "default_weight: present on a derived revision or missing "
+                 "on a main one");
+    std::printf("main revision without its default weight: %s\n",
+                got.c_str());
+}
+
+// A skin whose per-point layout holds, inside its rows, index-0 entries of
+// weight +0 and -0 (which the file's sparse form drops), a zero weight on
+// another index (which it keeps), and in one variant a negative weight,
+// under classicLinear and dualQuaternion: the file keeps exactly the
+// entries other than (0, +-0), and plays every frame bit for bit with the
+// baked program.
+static UsdStageRefPtr
+_SparseSkinStage(const char *method, bool negative)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *path, const char *avar,
+                             const std::array<double, 3> &values) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        const UsdAttribute attribute = prim.CreateAttribute(
+            TfToken(avar), SdfValueTypeNames->Double);
+        for (size_t f = 0; f < values.size(); ++f) {
+            attribute.Set(values[f], UsdTimeCode(double(f + 1)));
+        }
+        return prim;
+    };
+    const UsdPrim a = control("/Asset/Rig/A", "avars:rz", {0.0, 35.0, -60.0});
+    const UsdPrim b = control("/Asset/Rig/B", "avars:tx", {0.0, 2.5, -4.0});
+    const UsdPrim c = control("/Asset/Rig/C", "avars:ry", {10.0, -25.0, 80.0});
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Geom/Mesh"), TfToken("Mesh"));
+    mesh.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(1, 0, 0), GfVec3f(0, 2, 0.5f),
+                          GfVec3f(-1, 1, 2), GfVec3f(3, -1, 1)});
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim skin = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/Skin"),
+                                           TfToken("RigExecSkinMover"));
+    skin.ApplyAPI(TfToken("RigExecMoverAPI"));
+    skin.GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/Mesh.points")});
+    skin.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({a.GetPath(), b.GetPath(), c.GetPath()});
+    skin.CreateAttribute(TfToken("rigExec:elementSize"),
+                         SdfValueTypeNames->Int)
+        .Set(4);
+    skin.CreateAttribute(TfToken("rigExec:skinningMethod"),
+                         SdfValueTypeNames->Token)
+        .Set(TfToken(method));
+    skin.CreateAttribute(TfToken("rigExec:jointIndices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 1, 0, 2,   //
+                        2, 1, 0, 0,   //
+                        1, 0, 2, 0,   //
+                        0, 0, 1, 2});
+    skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{0.0f, 0.5f, -0.0f, 0.5f,                    //
+                          0.0f, 1.0f, 0.0f, -0.0f,                    //
+                          negative ? -0.25f : 0.25f, 0.75f, 0.0f, 0.0f,  //
+                          -0.0f, 0.0f, 0.6f, 0.4f});
+    return stage;
+}
+
+static void
+TestSparseSkinTopology()
+{
+    for (const char *method : {"classicLinear", "dualQuaternion"}) {
+        for (const bool negative : {false, true}) {
+            const std::string name = std::string("sparse skin topology, ") +
+                                     method +
+                                     (negative ? ", negative weight" : "");
+            const UsdStageRefPtr stage = _SparseSkinStage(method, negative);
+            std::vector<std::vector<RigExecRuntimePoints>> rows;
+            _TestStage(name, stage, {1.0, 2.0, 3.0}, &rows);
+            if (!negative) {
+                _CheckFramesDiffer(name, rows);
+            }
+            // The file's layout: the 16 entries less the seven (0, +-0)
+            // ones, the zero on index 2 kept. A negative weight fails the
+            // layout's validation, so the bake keeps no epoch layout and
+            // both sides read the per-frame arrays.
+            RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+            std::vector<uint8_t> bytes;
+            std::string error;
+            CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+            const std::unique_ptr<fb::RigExecWireFile> file =
+                RigExecTestUnpack(bytes);
+            const fb::RigExecWireSkinTopology *topology =
+                file && !file->geometry->chains.empty() &&
+                        !file->geometry->chains[0].revisions.empty()
+                    ? file->geometry->chains[0].revisions[0].topology.get()
+                    : nullptr;
+            CHECK(file && (topology != nullptr) == !negative);
+            if (!topology) {
+                continue;
+            }
+            CHECK(topology->elementSize == 4 && topology->pointCount == 4);
+            CHECK(topology->validated);
+            CHECK(topology->counts8 ==
+                  (std::vector<uint8_t>{2, 2, 3, 2}));
+            CHECK(topology->indexWidth == 1);
+            CHECK(topology->indices8 ==
+                  (std::vector<uint8_t>{1, 2, 2, 1, 1, 0, 2, 1, 2}));
+            CHECK(topology->weights ==
+                  (std::vector<float>{0.5f, 0.5f, 0.0f, 1.0f, 0.25f, 0.75f,
+                                      0.0f, 0.6f, 0.4f}));
+        }
+    }
+    std::printf("sparse skin topology: checked\n");
 }
 
 int
@@ -1779,9 +1921,11 @@ main(int argc, char **argv)
     TestEmptyPlaneAxis();
     TestAnimatedStaticPointsReported();
     TestComputedOpenRefusals();
+    TestSparseSkinTopology();
     TestPathReadsFixture();
     TestPoseDrivenBlendWeights();
     TestBlendActivationDrag();
+    TestBlendShapeLayouts();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {

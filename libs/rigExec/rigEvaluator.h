@@ -548,7 +548,7 @@ public:
     bool GetPublishWeightFields() const { return _publishWeightFields; }
 
     /// The rig prim this evaluator was constructed with, for tools that
-    /// report on the bake (a bake manifest names its rig).
+    /// report on the bake (a .rigexec file's rig field names it).
     const SdfPath &GetRigPath() const { return _rigPath; }
 
     /// Target-local spatial matrix primvars produced by SurfaceProjector

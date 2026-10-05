@@ -225,9 +225,6 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::LiveOnly,
          "single-threaded or notice-invalidated live state (THREAD rule); "
          "workers use sampled values and held bindings, never the caches"},
-        {"RigExecBakeReadRecorder",
-         RigExecFrozenPurity::LiveOnly,
-         "mutex plus per-run maps; a capture tool, never a worker input"},
         {"calibration/timing statics (bakedSchedule.cpp framesSeen)",
          RigExecFrozenPurity::LiveOnly,
          "unsynchronized diagnostic counters; frozen runs never enable "

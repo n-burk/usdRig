@@ -1,6 +1,6 @@
 // rigExecRuntime property chains: a line port of runChain and its three
 // appliers (RigExecRigEvaluator::_EvaluatePropertyChains,
-// rigEvaluatorProperties.cpp) over the Computed section. The chains run
+// rigEvaluatorProperties.cpp) over the file's chain tables. The chains run
 // before every prologue, as the baked prologue runs them, and publish into
 // RrStore::propertyResults, which every later read of a chain target sees.
 // The arithmetic is propertyMathKernel.h instantiated with the runtime's
@@ -35,10 +35,10 @@ struct RrPropertyScratch {
     struct Chain {
         std::string target;  ///< target path text, for diagnostics
         /// The slot type the chain's typed base read needs.
-        v4::InputTag baseTag = v4::InputTag::Float;
+        RigExecWireInputTag baseTag = RigExecWireInputTag::Float;
         /// propertyValues entry of the target.
         size_t publish = 0;
-        /// [phasedBegin, phasedEnd) in the section's phasedConsumers.
+        /// [phasedBegin, phasedEnd) in the file's phasedConsumers.
         size_t phasedBegin = 0;
         size_t phasedEnd = 0;
         std::vector<Revision> revisions;
@@ -157,7 +157,7 @@ _RrMatrix(const RigExecWireMatrix4d &m)
 }
 
 RrVec3f
-_RrVec3f(const v4::RigExecWireValue &value)
+_RrVec3f(const RrWireValue &value)
 {
     return RrVec3f(value.vec3f[0], value.vec3f[1], value.vec3f[2]);
 }
@@ -176,7 +176,7 @@ _RrPublish(RrProgram *program, const RrPropertyScratch &scratch, size_t entry,
 // finite-checked whatever the operation, then the curve's keys and
 // tangents, then the kernel.
 bool
-_RrApplyFloat(const RrProgram *program, const v4::PropertyRevision &revision,
+_RrApplyFloat(const RrProgram *program, const RigExecWirePropertyRevision &revision,
               const RrPropertyScratch::Revision &bound, float in,
               float envelope, float *out)
 {
@@ -185,9 +185,9 @@ _RrApplyFloat(const RrProgram *program, const v4::PropertyRevision &revision,
     }
     RigExecPropertyMathKernelParams<float, RrVec2f> params;
     params.op = bound.op;
-    params.value = RrWireValueFloat(RrReadInput(program, revision.value));
-    params.min = RrWireValueFloat(RrReadInput(program, revision.min));
-    params.max = RrWireValueFloat(RrReadInput(program, revision.max));
+    params.value = RrWireValueFloat(RrReadInput(program, *revision.value));
+    params.min = RrWireValueFloat(RrReadInput(program, *revision.min));
+    params.max = RrWireValueFloat(RrReadInput(program, *revision.max));
     if (!_RrFinite(params.value) || !_RrFinite(params.min) ||
         !_RrFinite(params.max)) {
         return false;
@@ -214,7 +214,7 @@ _RrApplyFloat(const RrProgram *program, const v4::PropertyRevision &revision,
 // A double chain is computed in float: the incoming value is narrowed, the
 // float applier runs, and its result is widened back.
 bool
-_RrApplyDouble(const RrProgram *program, const v4::PropertyRevision &revision,
+_RrApplyDouble(const RrProgram *program, const RigExecWirePropertyRevision &revision,
                const RrPropertyScratch::Revision &bound, double in,
                float envelope, double *out)
 {
@@ -228,7 +228,7 @@ _RrApplyDouble(const RrProgram *program, const v4::PropertyRevision &revision,
 }
 
 bool
-_RrApplyMatrix(const RrProgram *program, const v4::PropertyRevision &revision,
+_RrApplyMatrix(const RrProgram *program, const RigExecWirePropertyRevision &revision,
                const RrPropertyScratch::Revision &bound, const RrMat4d &in,
                float envelope, RrMat4d *out)
 {
@@ -236,7 +236,7 @@ _RrApplyMatrix(const RrProgram *program, const v4::PropertyRevision &revision,
         return false;
     }
     const RrMat4d opValue =
-        _RrMatrix(RrReadInput(program, revision.value).matrix);
+        _RrMatrix(RrReadInput(program, *revision.value).matrix);
     if (!_RrFinite(opValue)) {
         return false;
     }
@@ -244,7 +244,7 @@ _RrApplyMatrix(const RrProgram *program, const v4::PropertyRevision &revision,
 }
 
 bool
-_RrApplyVec3f(const RrProgram *program, const v4::PropertyRevision &revision,
+_RrApplyVec3f(const RrProgram *program, const RigExecWirePropertyRevision &revision,
               const RrPropertyScratch::Revision &bound, const RrVec3f &in,
               float envelope, RrVec3f *out)
 {
@@ -253,9 +253,9 @@ _RrApplyVec3f(const RrProgram *program, const v4::PropertyRevision &revision,
     }
     RigExecPropertyMathKernelParams<RrVec3f, RrVec2f> params;
     params.op = bound.op;
-    params.value = _RrVec3f(RrReadInput(program, revision.value));
-    params.min = _RrVec3f(RrReadInput(program, revision.min));
-    params.max = _RrVec3f(RrReadInput(program, revision.max));
+    params.value = _RrVec3f(RrReadInput(program, *revision.value));
+    params.min = _RrVec3f(RrReadInput(program, *revision.min));
+    params.max = _RrVec3f(RrReadInput(program, *revision.max));
     if (!_RrFinite(params.value) || !_RrFinite(params.min) ||
         !_RrFinite(params.max)) {
         return false;
@@ -274,8 +274,8 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
             T value, const Apply &apply,
             std::vector<std::string> *diagnostics)
 {
-    const RigExecWireComputed &computed = *program->inputState.computed;
-    const v4::PropertyChain &chain = computed.propertyChains[c];
+    const RigExecWireFile &file = *program->inputState.file;
+    const RigExecWirePropertyChain &chain = file.propertyChains[c];
     const RrPropertyScratch::Chain &plan = scratch->chains[c];
     if (!_RrFinite(value)) {
         diagnostics->push_back("property chain " + plan.target +
@@ -290,12 +290,12 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
     std::vector<RrPropertyValue> &history = scratch->history;
     history.clear();
     for (size_t r = 0; r < chain.revisions.size(); ++r) {
-        const v4::PropertyRevision &revision = chain.revisions[r];
+        const RigExecWirePropertyRevision &revision = chain.revisions[r];
         const RrPropertyScratch::Revision &bound = plan.revisions[r];
         if (phased) {
             history.push_back(_RrHold(value));
         }
-        if (RrReadInput(program, revision.enabled).bits == 0) {
+        if (RrReadInput(program, *revision.enabled).bits == 0) {
             diagnostics->push_back("diag " + bound.mover +
                                    ": disabled; revision passed through");
             continue;
@@ -313,7 +313,7 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
             envelope = scratch->weights[0];
         } else {
             envelope =
-                RrWireValueFloat(RrReadInput(program, revision.defaultWeight));
+                RrWireValueFloat(RrReadInput(program, *revision.defaultWeight));
             if (!std::isfinite(envelope) || envelope < 0.0f ||
                 envelope > 1.0f) {
                 diagnostics->push_back(
@@ -346,15 +346,15 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
     }
     history.push_back(_RrHold(value));
     for (size_t k = plan.phasedBegin; k < plan.phasedEnd; ++k) {
-        const v4::PhasedConsumer &consumer = computed.phasedConsumers[k];
+        const RigExecWirePhasedConsumer &consumer = file.phasedConsumers[k];
         RrPropertyValue held =
             history[std::min(size_t(consumer.applied), history.size() - 1)];
         // RigExecPhasedConsumerValue: a float/double pair converts, every
         // other pair passes the value as it is.
-        if (consumer.consumerType == v4::PropertyValueType::Double &&
+        if (consumer.consumerType == RigExecWirePropertyValueType::Double &&
             held.tag == _RrTag::Float) {
             held = _RrHold(double(held.f32));
-        } else if (consumer.consumerType == v4::PropertyValueType::Float &&
+        } else if (consumer.consumerType == RigExecWirePropertyValueType::Float &&
                    held.tag == _RrTag::Double) {
             held = _RrHold(float(held.f64));
         }
@@ -369,38 +369,38 @@ RrPropertySizeScratch(RrProgram *program, std::string *error)
 {
     auto scratch = std::make_shared<RrPropertyScratch>();
     RrStore &store = program->store;
-    const RigExecWireComputed *computed = program->inputState.computed;
-    const size_t slots = computed->inputs.size();
+    const RigExecWireFile *file = program->inputState.file;
+    const size_t slots = file->inputs.size();
     std::vector<int64_t> slotEntry(slots, -1);
     const auto entryOf = [&](uint32_t slot) {
         if (slotEntry[slot] < 0) {
             slotEntry[slot] = int64_t(scratch->publishNames.size());
-            scratch->publishNames.push_back(computed->inputs[slot].name);
+            scratch->publishNames.push_back(file->inputs[slot].name());
         }
         return size_t(slotEntry[slot]);
     };
-    scratch->chains.resize(computed->propertyChains.size());
-    for (size_t c = 0; c < computed->propertyChains.size(); ++c) {
-        const v4::PropertyChain &chain = computed->propertyChains[c];
+    scratch->chains.resize(file->propertyChains.size());
+    for (size_t c = 0; c < file->propertyChains.size(); ++c) {
+        const RigExecWirePropertyChain &chain = file->propertyChains[c];
         RrPropertyScratch::Chain &plan = scratch->chains[c];
         if (chain.target >= slots) {
             return _RrFail(error, "a property chain targets no input "
                                   "slot");
         }
-        plan.target = program->TextOrEmpty(computed->inputs[chain.target]
-                                               .name);
+        plan.target =
+            program->TextOrEmpty(file->inputs[chain.target].name());
         switch (chain.valueType) {
-        case v4::PropertyValueType::Float:
-            plan.baseTag = v4::InputTag::Float;
+        case RigExecWirePropertyValueType::Float:
+            plan.baseTag = RigExecWireInputTag::Float;
             break;
-        case v4::PropertyValueType::Double:
-            plan.baseTag = v4::InputTag::Double;
+        case RigExecWirePropertyValueType::Double:
+            plan.baseTag = RigExecWireInputTag::Double;
             break;
-        case v4::PropertyValueType::Matrix4d:
-            plan.baseTag = v4::InputTag::Matrix4d;
+        case RigExecWirePropertyValueType::Matrix4d:
+            plan.baseTag = RigExecWireInputTag::Matrix4d;
             break;
-        case v4::PropertyValueType::Vec3f:
-            plan.baseTag = v4::InputTag::Vec3f;
+        case RigExecWirePropertyValueType::Vec3f:
+            plan.baseTag = RigExecWireInputTag::Vec3f;
             break;
         default:
             return _RrFail(error, "property chain " + plan.target +
@@ -409,20 +409,20 @@ RrPropertySizeScratch(RrProgram *program, std::string *error)
         plan.publish = entryOf(chain.target);
         plan.revisions.resize(chain.revisions.size());
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
-            const v4::PropertyRevision &revision = chain.revisions[r];
+            const RigExecWirePropertyRevision &revision = chain.revisions[r];
             RrPropertyScratch::Revision &bound = plan.revisions[r];
             bound.mover = program->TextOrEmpty(revision.mover);
             if (revision.envelope >= 0 &&
                 size_t(revision.envelope) >=
-                    computed->weightObjects.size()) {
+                    program->geometry->weightObjects.size()) {
                 return _RrFail(error, bound.mover +
                                           " binds a weight object the "
-                                          "computed section does not "
-                                          "carry");
+                                          "file does not carry");
             }
-            // RigExecPropertyOp's enumerators in the section's order.
-            bound.opValid = revision.op != v4::PropertyOp::Invalid &&
-                            uint8_t(revision.op) < v4::PropertyOpLast;
+            // RigExecPropertyOp's enumerators in the file's order.
+            bound.opValid =
+                revision.op != RigExecWirePropertyOp::Invalid &&
+                uint8_t(revision.op) < uint8_t(RigExecWirePropertyOp::MAX);
             if (bound.opValid) {
                 bound.op = RigExecPropertyOp(int(revision.op));
             }
@@ -439,9 +439,9 @@ RrPropertySizeScratch(RrProgram *program, std::string *error)
         }
     }
     // Grouped by chain, so each chain's consumers are one range.
-    scratch->phasedPublish.resize(computed->phasedConsumers.size());
-    for (size_t k = 0; k < computed->phasedConsumers.size(); ++k) {
-        const v4::PhasedConsumer &consumer = computed->phasedConsumers[k];
+    scratch->phasedPublish.resize(file->phasedConsumers.size());
+    for (size_t k = 0; k < file->phasedConsumers.size(); ++k) {
+        const RigExecWirePhasedConsumer &consumer = file->phasedConsumers[k];
         if (consumer.chain >= scratch->chains.size() ||
             consumer.consumer >= slots) {
             return _RrFail(error, "a phased consumer names no chain or "
@@ -478,22 +478,22 @@ RrRunPropertyChains(RrProgram *program,
               _RrPropertyZero());
     std::fill(store.propertyPublished.begin(), store.propertyPublished.end(),
               char(0));
-    const RigExecWireComputed *computed = program->inputState.computed;
-    if (computed->propertyChains.empty()) {
+    const RigExecWireFile *file = program->inputState.file;
+    if (file->propertyChains.empty()) {
         return true;
     }
     RrPropertyScratch *scratch =
         static_cast<RrPropertyScratch *>(program->properties.get());
-    if (!scratch || scratch->chains.size() != computed->propertyChains.size()) {
+    if (!scratch || scratch->chains.size() != file->propertyChains.size()) {
         return false;
     }
-    for (size_t c = 0; c < computed->propertyChains.size(); ++c) {
-        const v4::PropertyChain &chain = computed->propertyChains[c];
+    for (size_t c = 0; c < file->propertyChains.size(); ++c) {
+        const RigExecWirePropertyChain &chain = file->propertyChains[c];
         const RrPropertyScratch::Chain &plan = scratch->chains[c];
         // The base: the target's own value, which an input set there
         // authors; a missing value, or one of another type, fails that
         // read.
-        v4::RigExecWireValue base;
+        RrWireValue base;
         if (!RrChainBase(program, c, plan.baseTag, &base)) {
             poseDiagnostics->push_back("property chain " + plan.target +
                                        ": target has no authored value; "
@@ -501,22 +501,22 @@ RrRunPropertyChains(RrProgram *program,
             continue;
         }
         switch (chain.valueType) {
-        case v4::PropertyValueType::Float:
+        case RigExecWirePropertyValueType::Float:
             _RrRunChain(program, scratch, c, RrWireValueFloat(base),
                         _RrApplyFloat, poseDiagnostics);
             break;
-        case v4::PropertyValueType::Double: {
+        case RigExecWirePropertyValueType::Double: {
             double value = 0.0;
             std::memcpy(&value, &base.bits, sizeof(value));
             _RrRunChain(program, scratch, c, value, _RrApplyDouble,
                         poseDiagnostics);
             break;
         }
-        case v4::PropertyValueType::Matrix4d:
+        case RigExecWirePropertyValueType::Matrix4d:
             _RrRunChain(program, scratch, c, _RrMatrix(base.matrix),
                         _RrApplyMatrix, poseDiagnostics);
             break;
-        case v4::PropertyValueType::Vec3f:
+        case RigExecWirePropertyValueType::Vec3f:
             _RrRunChain(program, scratch, c, _RrVec3f(base), _RrApplyVec3f,
                         poseDiagnostics);
             break;

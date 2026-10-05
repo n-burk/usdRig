@@ -57,6 +57,8 @@ public:
     RigExecBakedPlayback(
         const UsdStageRefPtr &stage, const SdfPath &rigPath,
         std::shared_ptr<RigExecSnapshotStore> store);
+    // Out of line: the reader's destructor lives in the runtime library.
+    ~RigExecBakedPlayback();
 
     /// Opens the .rigexec at \p resolvedPath and binds its inputs to the
     /// stage (an input the stage lacks keeps its bake-time value, with a

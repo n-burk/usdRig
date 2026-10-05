@@ -3,6 +3,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/frozenContext.h"
 #include "rigExecBake/bake.h"
+#include "rigExecBinary/format.h"
 #include "rigExecRigging/rigBuilder.h"
 #include "rigExecRuntime/runtime.h"
 
@@ -181,9 +182,20 @@ void TestEvaluation()
     error.clear();
     CHECK(RigExecBakeToBinary(baked, options, &output, &error));
     CHECK(!output.bytes.empty());
-    // The plugin records its gain read, a key no core assembly reads: the
-    // bake counts it rather than refusing it.
-    CHECK(output.pathReadsUnenumerated == 1);
+    // The plugin's own reads stay inside its payload: the file holds its
+    // one entry, with the epoch and the frame bytes of the bake's run.
+    {
+        std::unique_ptr<fb::RigExecWireFile> file;
+        CHECK(RigExecFormatOpen(output.bytes.data(), output.bytes.size(),
+                                &file, &error));
+        CHECK(file && file->externalMovers.size() == 1);
+        if (file && file->externalMovers.size() == 1) {
+            const fb::RigExecWireExternalMover &mover =
+                file->externalMovers.front();
+            CHECK(mover.v2FrameValid);
+            CHECK(!mover.epoch.empty() && !mover.v2Frame.empty());
+        }
+    }
 }
 
 // A plugin mover on /Rig/Body that also reads /Rig/Reference at `final`,
@@ -302,7 +314,20 @@ void TestExport()
     if (!RigExecBakeToBinary(baked, options, &result, &error)) {
         throw std::runtime_error("export failed: " + error);
     }
-    CHECK(result.pathReadsUnenumerated == 1);
+    // The file holds the plugin mover's entry: its type, its epoch and the
+    // frame bytes of the bake's run. The plugin's own reads stay inside
+    // its payload; no path read stands for them.
+    {
+        std::unique_ptr<fb::RigExecWireFile> file;
+        CHECK(RigExecFormatOpen(result.bytes.data(), result.bytes.size(),
+                                &file, &error));
+        CHECK(file->externalMovers.size() == 1);
+        const fb::RigExecWireExternalMover &mover =
+            file->externalMovers.front();
+        CHECK(RigExecFormatPathText(*file, mover.type) == type);
+        CHECK(mover.v2FrameValid);
+        CHECK(!mover.epoch.empty() && !mover.v2Frame.empty());
+    }
 
     // Played through the plugin's kernel: what the baked program evaluated.
     auto reader = RigExecRuntimeReader::Open(result.bytes.data(),

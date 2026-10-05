@@ -1,10 +1,12 @@
 // rigExecRuntime driver (M2 framework).
 // The input API writes slot values; Execute applies the inputs set since
 // the last run, runs the property chains, then the prologues over the
-// static record, the region and the epilogue, then assembles the outputs.
+// file's static data, the region and the epilogue, then assembles the
+// outputs.
 // Failures name the step and keep the previous outputs.
 #include "rigExecRuntime/runtime.h"
 
+#include "rigExecRuntime/labels.h"
 #include "poseInternal.h"
 
 #include <algorithm>
@@ -13,7 +15,7 @@ namespace rigExec {
 
 namespace {
 
-// The store's publication maps key by string id (bake insertion order);
+// The store's publication maps key by path id (bake insertion order);
 // every reader getter promises path order, so each assembly sorts by the
 // resolved path text before it ships.
 template <typename T>
@@ -29,20 +31,20 @@ _SortByPath(std::vector<T> *out)
 size_t
 RigExecRuntimeReader::GetInputCount() const
 {
-    return _program.inputState.inputInfo.size();
+    return _program->inputState.inputInfo.size();
 }
 
 const RigExecRuntimeInputInfo &
 RigExecRuntimeReader::GetInputInfo(size_t index) const
 {
-    const auto &info = _program.inputState.inputInfo;
+    const auto &info = _program->inputState.inputInfo;
     return index < info.size() ? info[index] : _noInput;
 }
 
 bool
 RigExecRuntimeReader::FindInput(const std::string &name, size_t *index) const
 {
-    const RrInputState &state = _program.inputState;
+    const RrInputState &state = _program->inputState;
     const auto found = state.nameIndex.find(name);
     if (found == state.nameIndex.end() ||
         found->second >= state.inputInfo.size()) {
@@ -57,7 +59,7 @@ RigExecRuntimeReader::FindInput(const std::string &name, size_t *index) const
 const RrInputValue &
 RigExecRuntimeReader::GetInputValue(size_t index) const
 {
-    const auto &values = _program.inputState.inputValues;
+    const auto &values = _program->inputState.inputValues;
     return index < values.size() ? values[index] : _noValue;
 }
 
@@ -72,7 +74,7 @@ RigExecRuntimeReader::SetInput(const std::string &name,
         }
         return false;
     }
-    return RrInputsSet(&_program, index, value, error);
+    return RrInputsSet(_program.get(), index, value, error);
 }
 
 bool
@@ -97,14 +99,14 @@ RigExecRuntimeReader::SetInputToken(const std::string &name,
         }
         return false;
     }
-    return RrInputsSetToken(&_program, index, text, error);
+    return RrInputsSetToken(_program.get(), index, text, error);
 }
 
 bool
 RigExecRuntimeReader::SetInputAt(size_t index, const RrInputValue &value,
                                  std::string *error)
 {
-    return RrInputsSet(&_program, index, value, error);
+    return RrInputsSet(_program.get(), index, value, error);
 }
 
 bool
@@ -112,7 +114,7 @@ RigExecRuntimeReader::SetSampledInputAt(size_t index,
                                         const RrInputValue &value,
                                         std::string *error)
 {
-    return RrInputsSet(&_program, index, value, error,
+    return RrInputsSet(_program.get(), index, value, error,
                        /*acceptNonFinite=*/true);
 }
 
@@ -126,13 +128,13 @@ RigExecRuntimeReader::ClearInput(const std::string &name, std::string *error)
         }
         return false;
     }
-    return RrInputsClear(&_program, index, error);
+    return RrInputsClear(_program.get(), index, error);
 }
 
 bool
 RigExecRuntimeReader::ClearInputAt(size_t index, std::string *error)
 {
-    return RrInputsClear(&_program, index, error);
+    return RrInputsClear(_program.get(), index, error);
 }
 
 bool
@@ -145,7 +147,7 @@ RigExecRuntimeReader::ResetInput(const std::string &name, std::string *error)
         }
         return false;
     }
-    RrInputsReset(&_program, index);
+    RrInputsReset(_program.get(), index);
     return true;
 }
 
@@ -153,48 +155,56 @@ void
 RigExecRuntimeReader::ResetInputs()
 {
     for (size_t i = 0; i < GetInputCount(); ++i) {
-        RrInputsReset(&_program, i);
+        RrInputsReset(_program.get(), i);
     }
 }
 
 void
 RigExecRuntimeReader::TouchAnimatedInputs()
 {
-    _program.store.animatedTouched = true;
+    _program->store.animatedTouched = true;
 }
 
 double
 RigExecRuntimeReader::GetBakeTime() const
 {
-    return _computed.bakeTime;
+    return _program->file ? _program->file->bakeTime : 0.0;
 }
 
 std::string
 RigExecRuntimeReader::GetTokenText(uint32_t token) const
 {
-    return _program.TextOrEmpty(token);
+    return _program->TextOrEmpty(token);
 }
 
 void
 RigExecRuntimeReader::SetRunMaskForTesting(unsigned mask)
 {
-    _program.runMask = mask;
+    _program->runMask = mask;
+}
+
+std::string
+RigExecRuntimeReader::GetStepLabelForTesting(size_t step) const
+{
+    return RrStepLabel(*_program, step);
 }
 
 std::vector<RigExecRuntimeJointMatrix>
 RigExecRuntimeReader::GetJointRestMatrices() const
 {
     std::vector<RigExecRuntimeJointMatrix> out;
-    const std::vector<RrPointFrame> &restFrames = RrPoseRestFrames(&_program);
-    for (size_t i = 0; i < _slotMeta.jointSlots.size(); ++i) {
-        const size_t slot = size_t(_slotMeta.jointSlots[i]);
+    const std::vector<RrPointFrame> &restFrames =
+        RrPoseRestFrames(_program.get());
+    const RigExecWireSlotMeta &meta = *_program->slotMeta;
+    for (size_t i = 0; i < meta.jointSlots.size(); ++i) {
+        const size_t slot = size_t(meta.jointSlots[i]);
         if (slot >= restFrames.size()) {
             continue;
         }
         RrMat4d rest;
         const RrPointFrame &frame = restFrames[slot];
         if (RrPointsToMatrix(RrIdentityLandmarks(), frame.points, &rest)) {
-            out.push_back({_program.TextOrEmpty(_slotMeta.jointPaths[i]), rest});
+            out.push_back({_program->TextOrEmpty(meta.jointPaths[i]), rest});
         }
     }
     _SortByPath(&out);
@@ -222,9 +232,9 @@ std::vector<RigExecRuntimePropertyValue>
 RigExecRuntimeReader::GetPropertyValues() const
 {
     std::vector<RigExecRuntimePropertyValue> out;
-    out.reserve(_program.store.propertyResults.size());
-    for (const auto &entry : _program.store.propertyResults) {
-        out.push_back({_program.TextOrEmpty(entry.first), entry.second});
+    out.reserve(_program->store.propertyResults.size());
+    for (const auto &entry : _program->store.propertyResults) {
+        out.push_back({_program->TextOrEmpty(entry.first), entry.second});
     }
     _SortByPath(&out);
     return out;
@@ -233,37 +243,37 @@ RigExecRuntimeReader::GetPropertyValues() const
 const std::vector<RrPointFrame> &
 RigExecRuntimeReader::GetFinFrames() const
 {
-    return _program.store.fin;
+    return _program->store.fin;
 }
 
 const std::vector<RrPointFrame> &
 RigExecRuntimeReader::GetBaseFrames() const
 {
-    return _program.store.base;
+    return _program->store.base;
 }
 
 const std::vector<RrMat4d> &
 RigExecRuntimeReader::GetFinalMatrices() const
 {
-    return _program.store.finalMatrix;
+    return _program->store.finalMatrix;
 }
 
 const std::vector<RrMat4d> &
 RigExecRuntimeReader::GetBaseMatrices() const
 {
-    return _program.store.baseMatrix;
+    return _program->store.baseMatrix;
 }
 
 const std::vector<RrWeightPacket> &
 RigExecRuntimeReader::GetWeightPackets() const
 {
-    return _program.store.weightPackets;
+    return _program->store.weightPackets;
 }
 
 bool
 RigExecRuntimeReader::Execute(std::string *error)
 {
-    RrProgram &program = _program;
+    RrProgram &program = *_program;
     RrStore &store = program.store;
     // The inputs set since the last run. Only an Animated input set, or
     // TouchAnimatedInputs, dirties what a change of time dirties.
@@ -275,7 +285,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     std::vector<std::string> poseDiagnostics;
     if (!RrRunPropertyChains(&program, &poseDiagnostics)) {
         if (error) {
-            *error = "the property chains disagree with the computed section";
+            *error = "the property chains disagree with the file";
         }
         return false;
     }
@@ -323,7 +333,7 @@ RigExecRuntimeReader::Execute(std::string *error)
             continue;
         }
         const RigExecWireRevision &wire =
-            _geometry.chains[slot.first].revisions[slot.second];
+            program.geometry->chains[slot.first].revisions[slot.second];
         poseDiagnostics.push_back(
             "warning: " + program.TextOrEmpty(wire.moverPath) + " is a " +
             state.type + ", which this runtime has no kernel for; its "
@@ -331,7 +341,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     }
 
     // The compile notices a fresh evaluator seeds its first generation
-    // with (inert movers, purpose warnings): manifest order, ahead of
+    // with (inert movers, purpose warnings): file order, ahead of
     // every program line, exactly once. Drained here, on the success
     // path only, so a failed Execute keeps both the seed and the
     // previous frame.

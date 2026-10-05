@@ -5,6 +5,7 @@
 // moves, and it holds no time: where the program compares the time with
 // the last run's, the closure reads RrStore::animatedTouched. Everything
 // else is the same value comparisons in the same order.
+#include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
 
 namespace rigExec {
@@ -110,8 +111,8 @@ RrComputeClosure(RrProgram *program, bool force)
             _RrSet(&dirty, c);
         }
     } else if (!store.everRan) {
-        _RrUnionWords(&dirty, cones.poseClusters.words);
-        _RrUnionWords(&dirty, cones.always.words);
+        _RrUnionWords(&dirty, cones.poseClusters->words);
+        _RrUnionWords(&dirty, cones.always->words);
         for (int index : cones.varyingSteps) {
             _RrSet(&dirty, size_t((*program->steps)[size_t(index)].cluster));
         }
@@ -126,7 +127,7 @@ RrComputeClosure(RrProgram *program, bool force)
             if (store.revisionRan[r]) {
                 continue;
             }
-            for (int cluster : cones.revisionClusters[r]) {
+            for (int cluster : cones.revisionClusters[r].v) {
                 _RrSet(&dirty, size_t(cluster));
             }
         }
@@ -134,12 +135,12 @@ RrComputeClosure(RrProgram *program, bool force)
             if (store.chainHaveBase[c] && !store.chainBaseDirty[c]) {
                 continue;
             }
-            for (int cluster : cones.chainBaseClusters[c]) {
+            for (int cluster : cones.chainBaseClusters[c].v) {
                 _RrSet(&dirty, size_t(cluster));
             }
         }
     } else {
-        _RrUnionWords(&dirty, cones.always.words);
+        _RrUnionWords(&dirty, cones.always->words);
         // A provider's own compose cluster, and every cluster that
         // recomposes an earlier version of it from the same avars and
         // ladder.
@@ -171,54 +172,15 @@ RrComputeClosure(RrProgram *program, bool force)
         for (int slot : store.ladderMovedSlots) {
             dirtyAvarReaders(size_t(slot));
         }
-        for (size_t k = 0; k < store.arrays.size(); ++k) {
-            const RrConstraintArraysLive &arrays = store.arrays[k];
-            if (arrays.ok == arrays.lastOk &&
-                arrays.weights == arrays.lastWeights &&
-                arrays.translationOffsets ==
-                    arrays.lastTranslationOffsets &&
-                arrays.rotationOffsets == arrays.lastRotationOffsets &&
-                arrays.diagnostics == arrays.lastDiagnostics &&
-                arrays.poleOk == arrays.lastPoleOk &&
-                arrays.poleWeights == arrays.lastPoleWeights &&
-                arrays.poleDiagnostics == arrays.lastPoleDiagnostics) {
-                continue;
-            }
-            for (int cluster : cones.constraintArrayClusters[k]) {
-                _RrSet(&dirty, size_t(cluster));
-            }
-        }
-        for (size_t k = 0; k < store.deltaBaseMatrix.size(); ++k) {
-            if (store.deltaBaseOk[k] != store.lastDeltaBaseOk[k] ||
-                store.deltaBaseMatrix[k] != store.lastDeltaBaseMatrix[k]) {
-                for (int cluster : cones.deltaBaseClusters[k]) {
-                    _RrSet(&dirty, size_t(cluster));
-                }
-            }
-        }
-        for (size_t k = 0; k < store.nativeFrames.size(); ++k) {
-            if (store.nativeFrameOk[k] != store.lastNativeFrameOk[k] ||
-                store.nativeFrames[k].points !=
-                    store.lastNativeFrames[k].points) {
-                for (int cluster : cones.nativeSourceClusters[k]) {
-                    _RrSet(&dirty, size_t(cluster));
-                }
-            }
-        }
+        // Constraint arrays, delta bases, native frames and ribbon driver
+        // points are static: they never differ from the last run's, so no
+        // diff is taken.
         for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
             if (!store.chainBaseDirty[c] &&
                 store.chainHaveBase[c] == store.lastHaveBase[c]) {
                 continue;
             }
-            for (int cluster : cones.chainBaseClusters[c]) {
-                _RrSet(&dirty, size_t(cluster));
-            }
-        }
-        for (size_t si = 0; si < store.ribbonDirty.size(); ++si) {
-            if (!store.ribbonDirty[si]) {
-                continue;
-            }
-            for (int cluster : cones.solverPointsClusters[si]) {
+            for (int cluster : cones.chainBaseClusters[c].v) {
                 _RrSet(&dirty, size_t(cluster));
             }
         }
@@ -228,7 +190,7 @@ RrComputeClosure(RrProgram *program, bool force)
                 _RrSet(&dirty, size_t(cones.revisionStaticCluster[r]));
             }
             if (!store.revisionRan[r]) {
-                for (int cluster : cones.revisionClusters[r]) {
+                for (int cluster : cones.revisionClusters[r].v) {
                     _RrSet(&dirty, size_t(cluster));
                 }
             }
@@ -270,20 +232,6 @@ RrComputeClosure(RrProgram *program, bool force)
     // What the next run compares against.
     store.lastAvars = store.avars;
     store.lastXformBase = store.xformBase;
-    store.lastNativeFrames = store.nativeFrames;
-    store.lastNativeFrameOk = store.nativeFrameOk;
-    store.lastDeltaBaseMatrix = store.deltaBaseMatrix;
-    store.lastDeltaBaseOk = store.deltaBaseOk;
-    for (RrConstraintArraysLive &arrays : store.arrays) {
-        arrays.lastOk = arrays.ok;
-        arrays.lastWeights = arrays.weights;
-        arrays.lastTranslationOffsets = arrays.translationOffsets;
-        arrays.lastRotationOffsets = arrays.rotationOffsets;
-        arrays.lastDiagnostics = arrays.diagnostics;
-        arrays.lastPoleOk = arrays.poleOk;
-        arrays.lastPoleWeights = arrays.poleWeights;
-        arrays.lastPoleDiagnostics = arrays.poleDiagnostics;
-    }
     store.lastPropertyValues = store.propertyValues;
     store.lastPropertyPublished = store.propertyPublished;
     store.lastOverridden = store.overridden;
@@ -367,7 +315,7 @@ RrRunSteps(RrProgram *program, bool force, std::string *error)
         }
         if (store.stepOutputs[i].bail) {
             if (error) {
-                *error = "step " + program->TextOrEmpty(steps[i].label) +
+                *error = "step " + RrStepLabel(*program, i) +
                          " gave the generation back";
             }
             return false;

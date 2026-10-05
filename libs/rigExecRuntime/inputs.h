@@ -1,6 +1,6 @@
 // rigExecRuntime input slot model and read evaluation.
-// The slots, their bake-time defaults and every computed read come from
-// the temporary Computed section (rigExecBinary/computed.h). A slot's
+// The slots, their bake-time defaults and every read come from the opened
+// file (File.inputs, File.values and the Input tables in place). A slot's
 // value is mutable: an input set through the reader is the attribute's
 // authored value. A read is a pure function of the slot values, the
 // override flags the set inputs raise and the property-chain results the
@@ -8,11 +8,12 @@
 #ifndef RIGEXEC_RUNTIME_INPUTS_H
 #define RIGEXEC_RUNTIME_INPUTS_H
 
-#include "rigExecBinary/computed.h"
+#include "rigExecBinary/format.h"
 #include "rigExecRuntime/values.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -22,24 +23,149 @@ namespace rigExec {
 
 struct RrProgram;
 
-/// The first token id SetInputToken gives text the string table lacks;
-/// RrProgram::GetText resolves ids from here through
-/// RrInputState::extraTokens. Above every string-table index.
-inline constexpr uint32_t RrExtraTokenBase = 0x80000000u;
+/// A tagged value by value: the file's Value with its optional members
+/// inline, so a slot, a read and the overlay copy it without allocating.
+/// Only the member `tag` names is meaningful: `bits` holds a Double's
+/// IEEE-754 pattern, a Float's in the low 32 bits, a Bool as 0/1, an Int as
+/// its uint32 two's-complement form, a Token as its path id.
+struct RrWireValue {
+    RigExecWireInputTag tag = RigExecWireInputTag::Double;
+    uint64_t bits = 0;
+    RigExecWireMatrix4d matrix{};
+    RigExecWireVec3d vec3d{};
+    RigExecWireVec3f vec3f{};
+};
 
-/// The slot model, over the section `computed` borrows from the reader.
+// A slot-model value in the steps' form: the member its tag names holds
+// the value's bits, every other member stays zero. No step input reads a
+// Vec3f; an input's value can be one.
+inline RrInputValue
+RrValueFromWire(const RrWireValue &value)
+{
+    RrInputValue out;
+    out.tag = RrInputTag(uint8_t(value.tag));
+    out.matrix.SetDiagonal(0.0);
+    switch (value.tag) {
+    case RigExecWireInputTag::Double:
+        std::memcpy(&out.f64, &value.bits, sizeof(out.f64));
+        break;
+    case RigExecWireInputTag::Float: {
+        const uint32_t bits = uint32_t(value.bits);
+        std::memcpy(&out.f32, &bits, sizeof(out.f32));
+        break;
+    }
+    case RigExecWireInputTag::Bool:
+        out.boolean = value.bits != 0;
+        break;
+    case RigExecWireInputTag::Int:
+        out.i32 = int32_t(uint32_t(value.bits));
+        break;
+    case RigExecWireInputTag::Matrix4d:
+        for (size_t r = 0; r < 4; ++r) {
+            for (size_t c = 0; c < 4; ++c) {
+                out.matrix[r][c] = value.matrix[r * 4 + c];
+            }
+        }
+        break;
+    case RigExecWireInputTag::Token:
+        out.token = uint32_t(value.bits);
+        break;
+    case RigExecWireInputTag::Vec3d:
+        out.vec = RrVec3d(value.vec3d[0], value.vec3d[1], value.vec3d[2]);
+        break;
+    case RigExecWireInputTag::Vec3f:
+        out.vec3f = RrVec3f(value.vec3f[0], value.vec3f[1], value.vec3f[2]);
+        break;
+    }
+    return out;
+}
+
+/// The file's Value \p value inline: its tag and bits, and the optional
+/// member its tag names.
+RrWireValue RrWireValueOf(const fb::RigExecWireValue &value);
+
+/// A stage value an assembler reads: what the bake captured, or what a
+/// connection-following read evaluated this run. Absent marks a site that
+/// read its fallback; every other tag carries the value in the member it
+/// names.
+struct RrPathValue {
+    enum class Tag : uint8_t {
+        Absent = 0,
+        Bool = 1,
+        Int = 2,
+        Float = 3,
+        Double = 4,
+        Token = 5,
+        Matrix4d = 6,
+        Vec3d = 7,
+        IntArray = 8,
+        FloatArray = 9,
+        Vec2fArray = 10,
+        Vec3fArray = 11,
+        Vec3i = 12,
+        DoubleArray = 13,
+    };
+    Tag tag = Tag::Absent;
+    bool boolean = false;
+    int32_t i32 = 0;
+    float f32 = 0;
+    double f64 = 0;
+    uint32_t token = 0;
+    RigExecWireMatrix4d matrix{};
+    RigExecWireVec3d vec{};
+    std::vector<int32_t> ints;
+    std::vector<float> floats;
+    std::vector<RigExecWireVec2f> vec2s;
+    std::vector<RigExecWireVec3f> vec3s;
+    RigExecWireVec3i vec3i{{0, 0, 0}};
+    std::vector<double> doubles;
+};
+
+/// One row of the path-read table (RrProgram::pathReads), keyed by the
+/// attribute's path id and whether the site read its rest (Default) value.
+/// A value row holds what the bake captured. A read row holds the head of
+/// a connection-following read, whose value every geometry prologue
+/// evaluates over the slots.
+struct RrPathRead {
+    uint32_t path = 0;
+    bool rest = false;
+    /// The file's row of a read row; null on a value row.
+    const RigExecWirePathRead *read = nullptr;
+    RrPathValue value;
+};
+
+/// The index of row (\p path, \p rest) of path-read table \p table, or -1
+/// when it holds no such row. A binary search: the table is sorted by
+/// (path, rest), one row per key. The families resolve their sites' rows
+/// with it at Open; no run searches the table.
+int32_t RrFindPathReadRow(const std::vector<RrPathRead> &table,
+                          uint32_t path, bool rest);
+
+/// Builds the path-read table at Open from the file's path_reads: a value
+/// row per static value, decoded out of the pools, and a read row per
+/// connection-following read. False with the reason for a read whose type
+/// no assembler site reads.
+bool RrInputsBuildPathReads(RrProgram *program, std::string *error);
+
+/// The slot model over the opened file.
 struct RrInputState {
-    const RigExecWireComputed *computed = nullptr;
+    const RigExecWireFile *file = nullptr;
+    /// File.values inline, entry for entry.
+    std::vector<RrWireValue> values;
+    /// The first id SetInputToken gives text no Token node holds: the path
+    /// table's size, so every id below it is the file's.
+    uint32_t extraTokenBase = 0;
     /// Per slot: the value every read sees this run, and whether it holds
     /// one (the attribute's typed read succeeded, or a value was set).
     /// Seeded with the bake-time defaults (values[slot.value] and the
     /// HasValue flag, kept in slotDefaultHasValue).
-    std::vector<v4::RigExecWireValue> slotCurrent;
+    std::vector<RrWireValue> slotCurrent;
     std::vector<uint8_t> slotHasValue;
     std::vector<uint8_t> slotDefaultHasValue;
 
-    /// The avar table's registered reads (RigExecBakedProgramImpl::
-    /// avarBindings and avarConstantBindings), in section order.
+    /// The avar table's reads (RigExecBakedProgramImpl::avarBindings and
+    /// avarConstantBindings), as RrProgram::registeredReads indices, in
+    /// file order.
     std::vector<uint32_t> avarBindingReads;
     std::vector<uint32_t> avarConstantReads;
     /// The override numbers of the provider ladders' inputs, sorted
@@ -62,49 +188,37 @@ struct RrInputState {
     /// Slots set or reset since the last run, each listed once.
     std::vector<uint32_t> touched;
     std::vector<char> touchedFlag;
-    /// Per listed input (index = slot id < computed->listedInputs): what
+    /// Per listed input (index = slot id < file->listedInputs): what
     /// GetInputInfo reports, and the value GetInputValue reports.
     std::vector<RigExecRuntimeInputInfo> inputInfo;
     std::vector<RrInputValue> inputValues;
-    /// Token text SetInputToken met that the string table lacks, at ids
-    /// RrExtraTokenBase + k.
+    /// Token text SetInputToken met that the file does not hold, at ids
+    /// extraTokenBase + k.
     std::vector<std::string> extraTokens;
-    /// Token text -> id over the string table and extraTokens, built on
-    /// the first SetInputToken.
+    /// Token text -> id: the empty token at 0 and each Token node's text
+    /// (the first node wins), built at Open, then each text SetInputToken
+    /// interned.
     std::unordered_map<std::string, uint32_t> tokenIds;
-    bool tokenIdsBuilt = false;
     /// Attribute path text -> slot id, for the input API.
     std::unordered_map<std::string, uint32_t> nameIndex;
-
-    /// Per geometry chain and revision, the index of its default weight
-    /// read, or -1; per chain and revision (and per chain and derived
-    /// target), per binding channel, the index of its blend weight read.
-    std::vector<std::vector<int32_t>> defaultWeightRead;
-    std::vector<std::vector<std::vector<int32_t>>> blendReads;
-    std::vector<std::vector<std::vector<int32_t>>> derivedBlendReads;
-    /// The path reads by head path: (path id, pathScalarReads index),
-    /// sorted by path id.
-    std::vector<std::pair<uint32_t, uint32_t>> pathReadIndex;
 };
 
-/// Attaches \p computed to the program and checks it covers what the
-/// tables need: for every constraint whose envelope arm resolves a weight
-/// object, the entry of that same object; a weight object for every
-/// current-phase revision; float reads only. Refuses a file without the
-/// section: every input the steps read is evaluated through it. Runs at
-/// Open after the pose, geometry and input tables are attached.
-bool RrInputsOpen(RrProgram *program, const RigExecWireComputed *computed,
+/// Attaches \p file's slots to the program: the value pool inline, each
+/// slot at its bake-time default, the token index; and checks what the
+/// tables need of the weight objects: for every constraint whose envelope
+/// arm resolves a weight object, the entry of that same object; a weight
+/// object for every current-phase revision; float reads only. Runs at
+/// Open after the pose and geometry tables are attached.
+bool RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
                   std::string *error);
 
-/// Binds the section's registered reads to the runtime's tables: each
-/// names a table field the runtime reads, with that input's tag, override
-/// number and per-run liveness, and every field of every table row is
-/// named exactly once; the override numbers the reads reach at each
-/// attribute are the ones the program registered there. Indexes the avar
-/// bindings, the ladder's override numbers, the override numbers by slot
-/// and the slots by override number, the slot names, the listed inputs and
-/// the geometry reads by revision and channel. Runs after RrInputsOpen
-/// attached the section; every read below relies on that.
+/// Binds the tables' reads in place: every Input of the ladders, the space
+/// switches, the interpolators, the solvers, the constraints and the
+/// step-backed weight objects, and the avar bindings split by their
+/// Varying flag, each named by its table field. Indexes the ladder's
+/// override numbers, the override numbers by slot and the slots by
+/// override number, the slot names and the listed inputs. Runs after
+/// RrInputsOpen attached the slots; every read below relies on that.
 bool RrInputsBindReads(RrProgram *program, std::string *error);
 
 /// Input \p index (a listed slot) becomes \p value, as authored: the slot
@@ -118,10 +232,10 @@ bool RrInputsBindReads(RrProgram *program, std::string *error);
 bool RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
                  std::string *error, bool acceptNonFinite = false);
 
-/// Token input \p index becomes \p text: text the string table holds sets
-/// its id; other text is interned at RrExtraTokenBase + k first, once.
-/// False with the reason, nothing changed, for an index past the listed
-/// inputs or an input that is not a Token.
+/// Token input \p index becomes \p text: text the file holds (the empty
+/// token, or a Token node's text) sets its id; other text is interned at
+/// extraTokenBase + k first, once. False with the reason, nothing changed,
+/// for an index past the listed inputs or an input that is not a Token.
 bool RrInputsSetToken(RrProgram *program, size_t index,
                       const std::string &text, std::string *error);
 
@@ -154,7 +268,7 @@ bool RrInputsPublished(const RrProgram *program, uint32_t path);
 /// written only on a hit. Every walk's hop and every geometry scalar read
 /// meets this overlay.
 bool RrInputsOverlay(const RrProgram *program, uint32_t path,
-                     v4::InputTag tag, v4::RigExecWireValue *out);
+                     RigExecWireInputTag tag, RrWireValue *out);
 
 /// The value property chain \p chain starts from this run, in the chain's
 /// type \p tag: the target's own typed value, which an input set there
@@ -163,8 +277,8 @@ bool RrInputsOverlay(const RrProgram *program, uint32_t path,
 /// result at the target, and each phased reader reads the chain's history
 /// from it, so every reader sees what it sees once that value is authored
 /// and rebaked.
-bool RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
-                 v4::RigExecWireValue *base);
+bool RrChainBase(const RrProgram *program, size_t chain,
+                 RigExecWireInputTag tag, RrWireValue *base);
 
 /// \p input as the program resolves it in its mode, tagged with the read's
 /// tag: Baked is RigExecBakedRead (bakedProgramImpl.h), Resolved is
@@ -173,40 +287,40 @@ bool RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
 /// value. GetAttribute's overlay at each hop is RrInputsOverlay: the
 /// property-chain result published there (RrStore::propertyResults),
 /// answering when it holds exactly the walk's type.
-v4::RigExecWireValue RrReadInput(const RrProgram *program,
-                                 const v4::RigExecWireInput &input);
+RrWireValue RrReadInput(const RrProgram *program,
+                        const RigExecWireInput &input);
 
-/// A connection-following assembler read: RrReadInput, and for a site
-/// that reads the head's own value when the walk yields nothing
-/// (`headFallback`), that value before the read's constant.
-v4::RigExecWireValue RrReadPathScalar(const RrProgram *program,
-                                      const RigExecWirePathScalarRead &entry);
+/// A connection-following assembler read (a read row of path_reads):
+/// RrReadInput, and for a site that reads the head's own value when the
+/// walk yields nothing (`head_fallback`), that value before the read's
+/// constant.
+RrWireValue RrReadPathScalar(const RrProgram *program,
+                             const RigExecWirePathRead &row);
 
-/// \p value of path read \p entry in the form the assemblers read stage
-/// values in: its own type, or a double for a site that widens a float.
-/// False for a type no scalar site reads.
-bool RrPathValueFromRead(const RigExecWirePathScalarRead &entry,
-                         const v4::RigExecWireValue &value,
-                         RigExecWirePathValue *out);
+/// \p value of read row \p row in the form the assemblers read stage
+/// values in: the read's own type. A double site widens a Float value
+/// itself. False for a type no scalar site reads.
+bool RrPathValueFromRead(const RigExecWirePathRead &row,
+                         const RrWireValue &value, RrPathValue *out);
 
 /// A blend channel's weight as the assembly reads it: a pose-driven
 /// channel's pose weight unless a value is published at the channel's own
 /// weight (bakedGeometry.cpp's `!R.Find(weightPath)`), else its
 /// inputs:weight read. Geometry chain \p chain, revision \p revision (or
 /// derived target \p revision when \p derived), binding channel
-/// \p channel; 0 when the section carries no read for it.
+/// \p channel; 0 when the file holds no such channel.
 float RrReadBlendWeight(const RrProgram *program, size_t chain,
                         size_t revision, bool derived, size_t channel);
 
 /// The rigExec:activation of sample \p sample of that blend channel, as
-/// the gather reads it through the resolved inputs; 1 when the section
-/// carries no read for it.
+/// the gather reads it through the resolved inputs; 1 when the file holds
+/// no such sample.
 float RrReadBlendActivation(const RrProgram *program, size_t chain,
                             size_t revision, bool derived, size_t channel,
                             size_t sample);
 
 /// A chain revision's inputs:defaultWeight as RevisionStatic reads it; 1
-/// when the section carries no read for it.
+/// when the revision carries no read for it.
 float RrReadDefaultWeight(const RrProgram *program, size_t chain,
                           size_t revision);
 
@@ -217,10 +331,10 @@ float RrReadDefaultWeight(const RrProgram *program, size_t chain,
 /// A double hop is read as a double walk from that hop and cast with
 /// static_cast<float>.
 float RrReadResolvedFloat(const RrProgram *program,
-                          const v4::RigExecWireInput &input, float fallback);
+                          const RigExecWireInput &input, float fallback);
 
-/// The float a Float-tagged wire value holds (bits in the low 32).
-float RrWireValueFloat(const v4::RigExecWireValue &value);
+/// The float a Float-tagged value holds (bits in the low 32).
+float RrWireValueFloat(const RrWireValue &value);
 
 }  // namespace rigExec
 

@@ -40,7 +40,7 @@ _RrComposeAvars(double tx, double ty, double tz, double sx, double sy,
                 const std::string &order);
 
 bool
-_RrLive(const RrProgram *program, const v4::RigExecWireInput &read);
+_RrLive(const RrProgram *program, const RigExecWireInput &read);
 
 bool
 _RrLiveSolver(const RrProgram *program, size_t solver, int field);

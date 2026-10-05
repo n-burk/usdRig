@@ -6,8 +6,7 @@
 #ifndef RIGEXEC_RUNTIME_VALUES_H
 #define RIGEXEC_RUNTIME_VALUES_H
 
-#include "rigExecBinary/computed.h"
-#include "rigExecBinary/program.h"
+#include "rigExecBinary/wireTypes.h"
 #include "rigExecRuntime/runtimeMath.h"
 
 #include <array>
@@ -102,8 +101,8 @@ struct RrPointFrameArray {
     }
 };
 
-// The value type of an input, a read or a constant: the slot model's tag
-// numbers (v4::InputTag), of which 0..6 are also RigExecWireInput::Tag's.
+// The value type of an input, a read or a constant, numbered as the
+// file's InputTag.
 enum class RrInputTag : uint8_t {
     Double = 0,
     Float = 1,
@@ -117,7 +116,7 @@ enum class RrInputTag : uint8_t {
 
 // A resolved input value: a read the slots answered, a wire constant, or
 // an input's value. The member `tag` names holds the value; Token is a
-// string-table id (or an id the reader interned for unknown text).
+// path id of the file (or an id the reader interned for unknown text).
 struct RrInputValue {
     RrInputTag tag = RrInputTag::Double;
     double f64 = 0;
@@ -150,51 +149,7 @@ struct RigExecRuntimeInputInfo {
     RrInputValue defaultValue;
 };
 
-// A slot-model value in the steps' form: the member its tag names holds
-// the value's bits, every other member stays zero. No step input reads a
-// Vec3f; an input's value can be one.
-inline RrInputValue
-RrValueFromWire(const v4::RigExecWireValue &value)
-{
-    RrInputValue out;
-    out.tag = RrInputTag(uint8_t(value.tag));
-    out.matrix.SetDiagonal(0.0);
-    switch (value.tag) {
-    case v4::InputTag::Double:
-        std::memcpy(&out.f64, &value.bits, sizeof(out.f64));
-        break;
-    case v4::InputTag::Float: {
-        const uint32_t bits = uint32_t(value.bits);
-        std::memcpy(&out.f32, &bits, sizeof(out.f32));
-        break;
-    }
-    case v4::InputTag::Bool:
-        out.boolean = value.bits != 0;
-        break;
-    case v4::InputTag::Int:
-        out.i32 = int32_t(uint32_t(value.bits));
-        break;
-    case v4::InputTag::Matrix4d:
-        for (size_t r = 0; r < 4; ++r) {
-            for (size_t c = 0; c < 4; ++c) {
-                out.matrix[r][c] = value.matrix[r * 4 + c];
-            }
-        }
-        break;
-    case v4::InputTag::Token:
-        out.token = uint32_t(value.bits);
-        break;
-    case v4::InputTag::Vec3d:
-        out.vec = RrVec3d(value.vec3d[0], value.vec3d[1], value.vec3d[2]);
-        break;
-    case v4::InputTag::Vec3f:
-        out.vec3f = RrVec3f(value.vec3f[0], value.vec3f[1], value.vec3f[2]);
-        break;
-    }
-    return out;
-}
-
-// Mirrors RigExecWeightPacket with string-table token ids.
+// Mirrors RigExecWeightPacket with token path ids.
 struct RrWeightPacket {
     uint32_t representation = 0;
     uint32_t rangePolicy = 0;
@@ -217,7 +172,7 @@ struct RrWeightPacket {
 };
 
 // One property-chain result: the four types _EvaluatePropertyChains
-// instantiates, keyed by string-table path id.
+// instantiates, keyed by path id.
 struct RrPropertyValue {
     enum class Tag : uint8_t {
         Float = 0,
@@ -254,7 +209,7 @@ struct RrSnapshotValue {
     std::vector<RrVec3f> points;
 };
 
-// Mirrors RigExecChainSnapshots over string-table ids: target id -> the
+// Mirrors RigExecChainSnapshots over path ids: target id -> the
 // (mover id, value) revisions in walk order plus the final.
 class RrSnapshots
 {
@@ -272,7 +227,7 @@ public:
         chain.hasFinal = true;
     }
 
-    // Mirrors Lookup, with the string table resolving the AtPrim prefix
+    // Mirrors Lookup, with the path text resolving the AtPrim prefix
     // rule. `text` maps an id to its path string; null when unresolvable.
     const RrSnapshotValue *Lookup(
         uint32_t target, uint8_t phaseKind, uint32_t phasePrim,
@@ -395,20 +350,16 @@ struct RrStepOutput {
     }
 };
 
-// A constraint's per-frame arrays, current and last runs.
+// A constraint's authored arrays, as the bake read them.
 struct RrConstraintArraysLive {
     std::vector<double> weights;
     std::vector<RrVec3d> translationOffsets, rotationOffsets;
     std::vector<std::string> diagnostics;
     bool ok = true;
-    std::vector<double> lastWeights;
-    std::vector<RrVec3d> lastTranslationOffsets, lastRotationOffsets;
-    std::vector<std::string> lastDiagnostics;
-    bool lastOk = true;
     bool readPole = false;
-    std::vector<double> poleWeights, lastPoleWeights;
-    std::vector<std::string> poleDiagnostics, lastPoleDiagnostics;
-    bool poleOk = true, lastPoleOk = true;
+    std::vector<double> poleWeights;
+    std::vector<std::string> poleDiagnostics;
+    bool poleOk = true;
 };
 
 // Mirrors RigExecConstraintSource: one resolved constraint source.

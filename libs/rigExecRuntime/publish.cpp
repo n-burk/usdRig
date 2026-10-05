@@ -78,11 +78,11 @@ RrPublishPose(RrProgram *program,
                     const size_t row = binding->second;
                     const std::vector<uint32_t> &writers =
                         program->poses
-                            ->jointBindingSolvers[row];
+                            ->jointBindingSolvers[row].v;
                     for (size_t w = 0; w < writers.size(); ++w) {
                         if (writers[w] == s.path) {
                             element = program->poses
-                                          ->jointBindingElements[row][w];
+                                          ->jointBindingElements[row].v[w];
                             break;
                         }
                     }

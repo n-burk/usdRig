@@ -296,16 +296,6 @@ RigExecBakedBindInput(const UsdPrim &prim, const char *name, T fallback,
 }
 
 template <class T>
-inline void
-RigExecBakeRecordRead(const RigExecResolvedInputs &resolved,
-                      const void *input, const T &value)
-{
-    if (resolved.bakeRecorder) {
-        resolved.bakeRecorder->Record(input, VtValue(value));
-    }
-}
-
-template <class T>
 inline T
 RigExecBakedRead(const RigExecBakedInput<T> &input,
                  const RigExecResolvedInputs &resolved, UsdTimeCode time,
@@ -327,12 +317,10 @@ RigExecBakedRead(const RigExecBakedInput<T> &input,
     }
     if (input.resolvedAttr) {
         resolved.GetAttribute(input.resolvedAttr, time, &value);
-        RigExecBakeRecordRead(resolved, &input, value);
         return value;
     }
     if (input.query.IsValid()) {
         input.query.Get(&value, time);
-        RigExecBakeRecordRead(resolved, &input, value);
     }
     return value;
 }
@@ -2254,10 +2242,6 @@ struct RigExecBakedProgramImpl {
         /// phase filled; here the phase is a step and the value is a slot,
         /// which is what puts the edge in the graph.
         int poseWeight = -1;
-        /// The weight the last assembly consumed for this channel, retained
-        /// for the bake (M1 slice 4): the assembly reads it off the resolved
-        /// inputs or a pose slot, neither of which the read recorder sees.
-        float lastWeight = 0.0f;
         struct Sample {
             /// The RigExecBlendSample prim, which keys the shape cache.
             SdfPath samplePath;
@@ -2287,11 +2271,9 @@ struct RigExecBakedProgramImpl {
             /// than leaving the runtime to the epoch one. Written beside
             /// `layout`, every frame, so it is never stale.
             bool layoutRefused = false;
-            /// The activation and dense points the last assembly consumed,
-            /// retained for the bake (M1 slice 4): same read-recorder gap
-            /// as the channel weight. Points only for the dense form; a
-            /// sparse sample's shape rides the layout stream instead.
-            float lastActivation = 1.0f;
+            /// The dense points the last assembly consumed; the bake stores
+            /// them as the sample's static points. Dense form only; a sparse
+            /// sample's shape rides its layout instead.
             std::vector<GfVec3f> lastPoints;
         };
         std::vector<Sample> samples;

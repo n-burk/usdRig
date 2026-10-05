@@ -1689,8 +1689,7 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                                 RrSolverTwistTurns).f64,
             liveRests, liveFlags);
     } else if (type == "RigExecRibbon") {
-        if (size_t(wire.object) >= store.ribbonPoints.size() ||
-            size_t(wire.object) >= store.ribbonConstant.size()) {
+        if (size_t(wire.object) >= store.ribbonConstant.size()) {
             if (error) {
                 *error = _RrStepHead(program, step) +
                          " names no solver";
@@ -1698,9 +1697,7 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
             return false;
         }
         aggregate = _RrSampleRibbonFrames(
-            ws.ribbonPointsVarying
-                ? store.ribbonPoints[size_t(wire.object)]
-                : store.ribbonConstant[size_t(wire.object)],
+            store.ribbonConstant[size_t(wire.object)],
             s.ribbonRestPoints,
             program->ReadSolver(size_t(wire.object),
                                 RrSolverRibbonSampleCount).i32,

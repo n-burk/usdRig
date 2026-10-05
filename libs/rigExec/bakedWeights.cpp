@@ -299,10 +299,6 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         for (const UsdAttribute &a : object.combineTargetPoints) {
             VtVec3fArray value;
             if (B.resolvedInputs->GetAttribute(a, time, &value)) {
-                RigExecRecordStageRead(
-                    B.resolvedInputs, B.resolvedInputs->bakeRecorder,
-                    a.GetPath(), a, time, VtValue(value),
-                    /*forceFrame=*/true);
                 targetCount += value.size();
             }
         }
@@ -366,12 +362,6 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
             for (const UsdAttribute &a : attributes) {
                 VtVec3fArray value;
                 if (B.resolvedInputs->GetAttribute(a, time, &value)) {
-                    // Recorded: the binary runtime replays these
-                    // arrays from the frame record.
-                    RigExecRecordStageRead(
-                        B.resolvedInputs, B.resolvedInputs->bakeRecorder,
-                        a.GetPath(), a, time, VtValue(value),
-                        /*forceFrame=*/true);
                     out->insert(out->end(), value.begin(), value.end());
                 }
             }

@@ -1,9 +1,10 @@
 // rigExecRuntime: zero-USD .rigexec playback (M2).
-// Opens a baked .rigexec file, replays its cluster DAG over the inputs the
-// caller sets, and publishes joint matrices and deformed points -- no USD
-// headers, no USD library. The wire structs and decoders come from rigExecBinary (already
-// USD-free); the math is runtimeMath.h (a bit-identical Gf mirror); the
-// step bodies are ports of the baked program's, one family per .cpp.
+// Opens a baked .rigexec file (one FlatBuffer, rigExecBinary/format.h),
+// replays its cluster DAG over the inputs the caller sets, and publishes
+// joint matrices and deformed points -- no USD headers, no USD library. The
+// opened program is private to the library (store.h); the math is
+// runtimeMath.h (a bit-identical Gf mirror); the step bodies are ports of
+// the baked program's, one family per .cpp.
 // Fidelity rule: for the same input values, floating-point results must be
 // bit-identical to the baked path with those values authored. rigExecPose
 // --verify-binary gates every family on dynamic==baked==binary over the
@@ -15,22 +16,20 @@
 #ifndef RIGEXEC_RUNTIME_H
 #define RIGEXEC_RUNTIME_H
 
-#include "rigExecBinary/computed.h"
-#include "rigExecBinary/container.h"
 #include "rigExecBinary/external.h"
-#include "rigExecBinary/geometry.h"
-#include "rigExecBinary/inputTable.h"
-#include "rigExecBinary/pose.h"
-#include "rigExecBinary/program.h"
 #include "rigExecRuntime/runtimeMath.h"
-#include "rigExecRuntime/store.h"
+#include "rigExecRuntime/values.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace rigExec {
+
+// The opened program and its working state (store.h).
+struct RrProgram;
 
 // A joint-matrix output: the joint's path (as baked) plus its final
 // asset-space matrix, row-major.
@@ -93,7 +92,7 @@ struct RigExecRuntimeCounters {
 };
 
 // Plays a .rigexec file: a static graph whose inputs are the attributes the
-// rig reads. Open decodes every section, and the inputs start at their
+// rig reads. Open decodes the file, and the inputs start at their
 // bake-time defaults; each input set takes effect as an authored value at
 // the next Execute; Execute replays the cluster DAG over the inputs; the
 // getters publish its outputs. A fresh reader executes its defaults, which
@@ -102,14 +101,14 @@ struct RigExecRuntimeCounters {
 class RigExecRuntimeReader
 {
 public:
-    ~RigExecRuntimeReader() = default;
+    ~RigExecRuntimeReader();
 
     RigExecRuntimeReader(const RigExecRuntimeReader &) = delete;
     RigExecRuntimeReader &operator=(const RigExecRuntimeReader &) = delete;
 
-    // Opens a .rigexec image. False with the reason on a malformed file,
-    // an undecodable section, an input table that does not hold exactly
-    // one static record, static tables that do not match the program, or
+    // Opens a .rigexec image. False with the reason on a file
+    // RigExecFormatOpen refuses (another format, a malformed buffer, or a
+    // rule of the format broken, the step graph's among them), or on
     // tables whose cross-references do not close (versions, input reads,
     // cone sizes).
     static std::unique_ptr<RigExecRuntimeReader> Open(
@@ -199,6 +198,10 @@ public:
     // one family's outputs are compared while another is still landing.
     void SetRunMaskForTesting(unsigned mask);
 
+    // Test-only: the label error text names step \p step by, as the baked
+    // program spells it; the step's number past the steps.
+    std::string GetStepLabelForTesting(size_t step) const;
+
     // The property chains' published values (chain targets and phased
     // consumers) as the last Execute computed them, in path order.
     std::vector<RigExecRuntimePropertyValue> GetPropertyValues() const;
@@ -264,29 +267,14 @@ public:
     const std::vector<RrWeightPacket> &GetWeightPackets() const;
 
 private:
-    RigExecRuntimeReader() = default;
+    RigExecRuntimeReader();
 
-    std::unique_ptr<RigExecBinaryReader> _reader;
-    std::vector<RigExecWireStep> _steps;
-    RigExecWireClustering _clustering;
-    RigExecWireCones _cones;
-    RigExecWireSlotMeta _slotMeta;
-    RigExecWireConstants _constants;
-    RigExecWireDomainPose _poses;
-    RigExecWireDomainGeometry _geometry;
-    RigExecWireInputTable _inputs;
-    RigExecWireExternalMovers _external;
-    // The Computed section (temporary): the input slots every read
-    // evaluates over.
-    RigExecWireComputed _computed;
+    std::unique_ptr<RrProgram> _program;
 
-    RrProgram _program;
-
-    // What the input getters answer past the count.
-    RigExecRuntimeInputInfo _noInput{
-        std::string(), RrInputTag::Double, false,
-        RrValueFromWire(v4::RigExecWireValue())};
-    RrInputValue _noValue = RrValueFromWire(v4::RigExecWireValue());
+    // What the input getters answer past the count: a Double +0.0, every
+    // other member zero.
+    RigExecRuntimeInputInfo _noInput;
+    RrInputValue _noValue;
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;

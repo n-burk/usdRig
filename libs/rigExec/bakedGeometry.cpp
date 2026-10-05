@@ -1836,16 +1836,11 @@ AssembleRevision(RigExecBakedProgramImpl &B,
             } else {
                 R.GetAttribute(bound.weight, time, &channel.weight);
             }
-            // Retained for the bake beside the read, before the accumulate
-            // below consumes the local: what the record carries is what the
-            // gather gathered, whatever route it came by.
-            bound.lastWeight = channel.weight;
             for (size_t s = 0; s < bound.samples.size(); ++s) {
                 auto &boundSample = bound.samples[s];
                 RigExecBlendSampleData sample;
                 R.GetAttribute(boundSample.activation, time,
                                &sample.activation);
-                boundSample.lastActivation = sample.activation;
                 if (!boundSample.blendShape.IsEmpty()) {
                     // Sparse: the shape the prologue resolved, shared by
                     // pointer. The packet compares layouts by pointer, so an

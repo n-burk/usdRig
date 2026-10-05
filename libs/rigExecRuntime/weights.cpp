@@ -4,28 +4,29 @@
 // A bit-identical port of RigExecBakedRunWeightStep
 // (libs/rigExec/bakedWeights.cpp) with its builders
 // (libs/rigExec/weightPackets.cpp, libs/rigExecMath/weightFields.cpp).
-// Gf -> Rr, TfToken comparisons -> string-table text comparisons, the
+// Gf -> Rr, TfToken comparisons -> token text comparisons, the
 // arithmetic untouched: float stays float, in the same order.
 // Where the baked step reads the stage per frame, the runtime reads the
 // stage values the bake captured (RrStatic). Scalar inputs are read over
 // the input slots (ReadWeight, the runtime form of RigExecBakedRead); the
-// point arrays a volume measures resolve through two layers, in order: a
-// live (wasDefault == false) path read for the attribute, else the chain
-// base of the chain
-// whose target IS that attribute path. Chain targets are attribute
-// paths (the prologue builds the base query on GetAttributeAtPath of
-// the target), so the second layer matches by exact id, not by
-// heuristics. Its values equal the baked gather's when the attribute
-// carries no connections and no overlay entry -- the overlay holds
-// scalars only during capture, so arrays never hit it -- and the
-// parity test proves it per fixture by comparing every packet bit for
-// bit. A connected weight target is a known residual risk: the correct
-// fix is a bake-side recorder hook in the weight gather (a capture
-// hole, not a runtime approximation), which this file cannot add.
+// point arrays a volume measures resolve at Open through two layers, in
+// order: a live (non-rest) path-read row for the attribute, else the
+// chain base of the chain whose target IS that attribute path. Chain
+// targets are attribute paths (the prologue builds the base query on
+// GetAttributeAtPath of the target), so the second layer matches by
+// exact id, not by heuristics. Its values equal the baked gather's when
+// the attribute carries no connections and no overlay entry -- the
+// overlay holds scalars only during capture, so arrays never hit it --
+// and the parity test proves it per fixture by comparing every packet
+// bit for bit. A connected weight target is a known residual risk: the
+// rows come from the bake's path-read enumeration of the gather
+// (RigExecBakeEnumerateWeightReads), so a gap there is a capture hole
+// to close in the enumeration, not a runtime approximation.
 // Unknown weight object TYPES and unknown structural tokens stay
 // exactly what the baked builders return for them: invalid packets
 // (bare for an unknown type, carrying the object's tokens
 // otherwise), never a defaulted valid field.
+#include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
@@ -40,7 +41,7 @@
 
 namespace rigExec {
 
-// One Computed weight object's token fields as the oracle branches on
+// One weight object's token fields as the oracle branches on
 // them, classified once at Open so no call compares text.
 struct RrWeightOracleKind {
     enum class Type : uint8_t {
@@ -56,21 +57,31 @@ struct RrWeightOracleKind {
     bool unbounded = false;  ///< rigExec:planeBounds is `unbounded`
 };
 
+// One point attribute of a volume gather, resolved at Open: its live
+// path-read row, else the chain whose target it is (the chain-base
+// fallback), else neither, when it contributes nothing.
+struct RrWeightPointSource {
+    int32_t row = -1;
+    int32_t chain = -1;
+};
+
 struct RrWeightScratch {
-    // The path-read list the lookup below was built from (RrStatic::
-    // PathReads), null before the first build.
-    const std::vector<RigExecWirePathRead> *liveReadsOf = nullptr;
-    // Live stage reads: attribute path id -> path-read index, for
-    // wasDefault == false entries only. A rest-time read is not what a
-    // frame-time gather consumed.
-    std::unordered_map<uint32_t, size_t> liveReads;
-    // Chain target attribute id -> chain index, built once (epoch data).
-    std::unordered_map<uint32_t, size_t> chainByTarget;
-    // Per Computed weight object, its classified tokens; empty without
-    // the section.
+    // Per weight object, the sources of its gathers, entry for entry with
+    // its combine_target_points, target_points, sample_points and
+    // curve_points.
+    struct Gathers {
+        std::vector<RrWeightPointSource> combineTargets, targets, samples,
+            curves;
+    };
+    std::vector<Gathers> gathers;
+    // Per weight object, its classified tokens.
     std::vector<RrWeightOracleKind> oracleKinds;
-    // The Computed points pool as RrVec3f, entry for entry.
+    // The pool entries the oracle reads as static sample or curve points,
+    // as RrVec3f, each converted once.
     std::vector<std::vector<RrVec3f>> oraclePoints;
+    // Per weight object, the oraclePoints index of its oracle_samples and
+    // oracle_curve; -1 for a pool id out of range.
+    std::vector<int32_t> oracleSamples, oracleCurve;
 };
 
 bool
@@ -84,16 +95,43 @@ RrWeightSizeScratch(RrProgram *program, std::string *error)
     }
     RrWeightScratch *scratch = new RrWeightScratch();
     program->weights = std::shared_ptr<void>(scratch);
-    const std::vector<RigExecWireChain> &chains =
-        program->geometry->chains;
-    for (size_t c = 0; c < chains.size(); ++c) {
-        scratch->chainByTarget.emplace(chains[c].target, c);
-    }
-    const RigExecWireComputed *computed = program->inputState.computed;
     using Kind = RrWeightOracleKind;
-    scratch->oracleKinds.reserve(computed->weightObjects.size());
-    for (const v4::RigExecWireWeightObject &object :
-         computed->weightObjects) {
+    const std::vector<RigExecWireWeightObject> &objects =
+        program->geometry->weightObjects;
+    // Every gather's point sources: the live path-read row of the
+    // attribute, else the chain whose target is exactly that attribute
+    // (chain targets are attribute paths, so this matches by id).
+    {
+        std::unordered_map<uint32_t, size_t> chainByTarget;
+        const std::vector<RigExecWireChain> &chains =
+            program->geometry->chains;
+        for (size_t c = 0; c < chains.size(); ++c) {
+            chainByTarget.emplace(chains[c].target, c);
+        }
+        const auto sources = [&](const std::vector<uint32_t> &paths) {
+            std::vector<RrWeightPointSource> out(paths.size());
+            for (size_t i = 0; i < paths.size(); ++i) {
+                out[i].row =
+                    RrFindPathReadRow(program->pathReads, paths[i], false);
+                const auto chain = chainByTarget.find(paths[i]);
+                if (out[i].row < 0 && chain != chainByTarget.end()) {
+                    out[i].chain = int32_t(chain->second);
+                }
+            }
+            return out;
+        };
+        scratch->gathers.reserve(objects.size());
+        for (const RigExecWireWeightObject &object : objects) {
+            RrWeightScratch::Gathers gathers;
+            gathers.combineTargets = sources(object.combineTargetPoints);
+            gathers.targets = sources(object.targetPoints);
+            gathers.samples = sources(object.samplePoints);
+            gathers.curves = sources(object.curvePoints);
+            scratch->gathers.push_back(std::move(gathers));
+        }
+    }
+    scratch->oracleKinds.reserve(objects.size());
+    for (const RigExecWireWeightObject &object : objects) {
         const std::string type = program->TextOrEmpty(object.type);
         const std::string representation =
             program->TextOrEmpty(object.representation);
@@ -138,14 +176,32 @@ RrWeightSizeScratch(RrProgram *program, std::string *error)
         kind.unbounded = planeBounds == "unbounded";
         scratch->oracleKinds.push_back(kind);
     }
-    scratch->oraclePoints.reserve(computed->vec3fArrays.size());
-    for (const v4::RigExecWireVec3fArray &array : computed->vec3fArrays) {
-        std::vector<RrVec3f> points;
-        points.reserve(array.v.size());
-        for (const RigExecWireVec3f &p : array.v) {
-            points.push_back(RrVec3f(p[0], p[1], p[2]));
+    // The oracle's static points: only the pool entries a weight object
+    // names, the pool also holding every other point array of the file.
+    const std::vector<RigExecWireVec3fArray> &pool =
+        program->inputState.file->vec3fArrays;
+    std::unordered_map<int32_t, int32_t> converted;
+    const auto points = [&](int32_t id) -> int32_t {
+        if (id < 0 || size_t(id) >= pool.size()) {
+            return -1;
         }
-        scratch->oraclePoints.push_back(std::move(points));
+        const auto found = converted.emplace(
+            id, int32_t(scratch->oraclePoints.size()));
+        if (found.second) {
+            std::vector<RrVec3f> out;
+            out.reserve(pool[size_t(id)].v.size());
+            for (const RigExecWireVec3f &p : pool[size_t(id)].v) {
+                out.push_back(RrVec3f(p[0], p[1], p[2]));
+            }
+            scratch->oraclePoints.push_back(std::move(out));
+        }
+        return found.first->second;
+    };
+    scratch->oracleSamples.reserve(objects.size());
+    scratch->oracleCurve.reserve(objects.size());
+    for (const RigExecWireWeightObject &object : objects) {
+        scratch->oracleSamples.push_back(points(object.oracleSamples));
+        scratch->oracleCurve.push_back(points(object.oracleCurve));
     }
     return true;
 }
@@ -158,32 +214,13 @@ namespace {
 std::string
 _RrStepLabel(const RrProgram *program, size_t step)
 {
-    return program->TextOrEmpty((*program->steps)[step].label);
+    return RrStepLabel(*program, step);
 }
 
 RrWeightScratch *
 _RrScratch(const RrProgram *program)
 {
     return static_cast<RrWeightScratch *>(program->weights.get());
-}
-
-void
-_RrRefreshReads(RrProgram *program)
-{
-    RrWeightScratch *scratch = _RrScratch(program);
-    const std::vector<RigExecWirePathRead> &reads =
-        program->statics.PathReads();
-    if (scratch->liveReadsOf == &reads) {
-        return;
-    }
-    scratch->liveReads.clear();
-    for (size_t i = 0; i < reads.size(); ++i) {
-        const RigExecWirePathRead &read = reads[i];
-        if (read.wasDefault == 0) {
-            scratch->liveReads.emplace(read.path, i);
-        }
-    }
-    scratch->liveReadsOf = &reads;
 }
 
 // A bound weight input as the float the builders consume. The read
@@ -203,30 +240,25 @@ _RrReadWeightFloat(const RrProgram *program, size_t object, int field)
 }
 
 // Appends one attribute's points to a volume gather. A failed read --
-// no live entry, a known-absent mark, a mistyped holding, or a chain
-// with no base -- contributes nothing, exactly as a false GetAttribute
-// does in the baked gather.
+// no live (non-rest) path read, a known-absent mark, a mistyped holding,
+// or a chain with no base -- contributes nothing, exactly as a false
+// GetAttribute does in the baked gather.
 void
-_RrGatherPoints(const RrProgram *program, RrWeightScratch *scratch,
-               uint32_t path, std::vector<RrVec3f> *out)
+_RrGatherPoints(const RrProgram *program, const RrWeightPointSource &source,
+                std::vector<RrVec3f> *out)
 {
     const RrStatic &statics = program->statics;
-    const std::vector<RigExecWirePathRead> &reads = statics.PathReads();
-    const auto live = scratch->liveReads.find(path);
-    if (live != scratch->liveReads.end() && live->second < reads.size()) {
-        const RigExecWirePathValue &value = reads[live->second].value;
-        if (value.tag == RigExecWirePathValue::Tag::Vec3fArray) {
+    if (source.row >= 0) {
+        const RrPathValue &value = program->pathReads[size_t(source.row)].value;
+        if (value.tag == RrPathValue::Tag::Vec3fArray) {
             for (const RigExecWireVec3f &p : value.vec3s) {
                 out->push_back(RrVec3f(p[0], p[1], p[2]));
             }
         }
         return;
     }
-    const auto chain = scratch->chainByTarget.find(path);
     const std::vector<RigExecWireVec3f> *base =
-        chain == scratch->chainByTarget.end()
-            ? nullptr
-            : statics.ChainBase(chain->second);
+        source.chain < 0 ? nullptr : statics.ChainBase(size_t(source.chain));
     if (!base) {
         return;
     }
@@ -238,38 +270,33 @@ _RrGatherPoints(const RrProgram *program, RrWeightScratch *scratch,
 // The element count one attribute contributes to a combine's target
 // fallback: the same read as above, measured rather than copied.
 size_t
-_RrGatherPointCount(const RrProgram *program, RrWeightScratch *scratch,
-                   uint32_t path)
+_RrGatherPointCount(const RrProgram *program,
+                    const RrWeightPointSource &source)
 {
     const RrStatic &statics = program->statics;
-    const std::vector<RigExecWirePathRead> &reads = statics.PathReads();
-    const auto live = scratch->liveReads.find(path);
-    if (live != scratch->liveReads.end() && live->second < reads.size()) {
-        const RigExecWirePathValue &value = reads[live->second].value;
-        if (value.tag == RigExecWirePathValue::Tag::Vec3fArray) {
+    if (source.row >= 0) {
+        const RrPathValue &value = program->pathReads[size_t(source.row)].value;
+        if (value.tag == RrPathValue::Tag::Vec3fArray) {
             return value.vec3s.size();
         }
         return 0;
     }
-    const auto chain = scratch->chainByTarget.find(path);
     const std::vector<RigExecWireVec3f> *base =
-        chain == scratch->chainByTarget.end()
-            ? nullptr
-            : statics.ChainBase(chain->second);
+        source.chain < 0 ? nullptr : statics.ChainBase(size_t(source.chain));
     return base ? base->size() : 0;
 }
 
 void
-_RrGatherPointList(const RrProgram *program, RrWeightScratch *scratch,
-                   const std::vector<uint32_t> &paths,
+_RrGatherPointList(const RrProgram *program,
+                   const std::vector<RrWeightPointSource> &sources,
                    const std::vector<uint8_t> &valid,
                    std::vector<RrVec3f> *out)
 {
-    for (size_t i = 0; i < paths.size(); ++i) {
+    for (size_t i = 0; i < sources.size(); ++i) {
         if (i < valid.size() && !valid[i]) {
             continue;
         }
-        _RrGatherPoints(program, scratch, paths[i], out);
+        _RrGatherPoints(program, sources[i], out);
     }
 }
 
@@ -988,8 +1015,8 @@ _RrBuildDynamicPacket(const RrProgram *program,
         return packet;
     }
     const RrWeightPacket &base = store.weightPackets[size_t(wire.base)];
-    // String-table ids intern equal strings, so id inequality is token
-    // inequality -- the same comparison the baked TfToken one is.
+    // A token's text is one Token node of the file, so id inequality is
+    // token inequality -- the same comparison the baked TfToken one is.
     if (!base.valid || base.representation != packet.representation) {
         return packet;
     }
@@ -1237,8 +1264,7 @@ _RrRunWeightPacket(RrProgram *program, size_t step, std::string *error)
     RrStore &store = program->store;
     const RigExecWireStep &wireStep = (*program->steps)[step];
     const int32_t object = wireStep.object;
-    if (object < 0 ||
-        size_t(object) >= program->geometry->weightObjects.size() ||
+    if (object < 0 || size_t(object) >= program->stepWeightObjects ||
         size_t(object) >= store.weightPackets.size()) {
         if (error) {
             *error = "weight step " + _RrStepLabel(program, step) +
@@ -1266,15 +1292,23 @@ _RrRunWeightPacket(RrProgram *program, size_t step, std::string *error)
             _RrReadWeightFloat(program, index, RrWeightBias), store);
         return true;
     }
+    if (index >= scratch->gathers.size()) {
+        if (error) {
+            *error = "weight step " + _RrStepLabel(program, step) +
+                     " names a weight object Open did not resolve";
+        }
+        return false;
+    }
+    const RrWeightScratch::Gathers &gathers = scratch->gathers[index];
     if (program->TokenEquals(wire.type, "RigExecCombineWeight")) {
         size_t targetCount = 0;
-        for (size_t i = 0; i < wire.combineTargetPoints.size(); ++i) {
+        for (size_t i = 0; i < gathers.combineTargets.size(); ++i) {
             if (i < wire.combineTargetValid.size() &&
                 !wire.combineTargetValid[i]) {
                 continue;
             }
-            targetCount += _RrGatherPointCount(
-                program, scratch, wire.combineTargetPoints[i]);
+            targetCount +=
+                _RrGatherPointCount(program, gathers.combineTargets[i]);
         }
         store.weightPackets[index] = _RrBuildCombinePacket(
             program, wire, store, targetCount,
@@ -1337,13 +1371,13 @@ _RrRunWeightPacket(RrProgram *program, size_t step, std::string *error)
         RrMat4d worldToLocal;
         if (_RrVolumeCanBuild(program, wire, !isPlane, placement,
                               hasPlacement, scales, &worldToLocal)) {
-            _RrGatherPointList(program, scratch, wire.targetPoints,
-                               wire.targetValid, &targetPoints);
-            _RrGatherPointList(program, scratch, wire.samplePoints,
-                               wire.sampleValid, &samplePoints);
+            _RrGatherPointList(program, gathers.targets, wire.targetValid,
+                               &targetPoints);
+            _RrGatherPointList(program, gathers.samples, wire.sampleValid,
+                               &samplePoints);
             if (isCurve) {
-                _RrGatherPointList(program, scratch, wire.curvePoints,
-                                   wire.curveValid, &curvePoints);
+                _RrGatherPointList(program, gathers.curves, wire.curveValid,
+                                   &curvePoints);
             }
         }
         if (isSphere) {
@@ -1427,9 +1461,9 @@ _RrRunVolumePlacements(RrProgram *program, size_t step,
 
 // The weight oracle: RigExecRigEvaluator::_ResolveWeights and
 // _ResolveVolumeWeights (rigEvaluatorGeometry.cpp), statement for
-// statement, over the Computed section. What the evaluator reads off the
-// stage arrives as follows: the object's composition and tokens from its
-// entry (tokens classified at Open), each scalar through
+// statement, over the file's weight objects. What the evaluator reads
+// off the stage arrives as follows: the object's composition and tokens
+// from its entry (tokens classified at Open), each scalar through
 // RrReadResolvedFloat with the oracle's own fallback at that read site
 // (the _ResolvedRead image), a volume's placement from store.weightFrames
 // (the VolumePlacements step's image of _volumeWeightMatrices, keyed by
@@ -1454,12 +1488,13 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
                 std::vector<float> *weights, std::string *error)
 {
     using Kind = RrWeightOracleKind;
-    const RigExecWireComputed &computed = *program->inputState.computed;
-    const v4::RigExecWireWeightObject &wire = computed.weightObjects[object];
+    const RigExecWireWeightObject &wire =
+        program->geometry->weightObjects[object];
     const Kind &kind = scratch.oracleKinds[object];
     const auto who = [&]() { return program->TextOrEmpty(wire.path); };
-    const auto read = [&](const v4::RigExecWireInput &input, float fallback) {
-        return RrReadResolvedFloat(program, input, fallback);
+    const auto read = [&](const std::unique_ptr<RigExecWireInput> &input,
+                          float fallback) {
+        return RrReadResolvedFloat(program, *input, fallback);
     };
 
     if (kind.type == Kind::Type::Combine) {
@@ -1521,12 +1556,12 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         }
         samples = current;
     } else {
-        if (wire.oracleSamples < 0 ||
-            size_t(wire.oracleSamples) >= scratch.oraclePoints.size()) {
+        const int32_t at = scratch.oracleSamples[object];
+        if (at < 0) {
             *error = who() + ": could not read the points to sample";
             return false;
         }
-        samples = &scratch.oraclePoints[size_t(wire.oracleSamples)];
+        samples = &scratch.oraclePoints[size_t(at)];
     }
     if (samples->size() != count) {
         *error = who() + ": sampled point count does not match the target";
@@ -1607,14 +1642,13 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         return true;
     }
     if (kind.type == Kind::Type::Curve) {
-        if (wire.oracleCurve < 0 ||
-            size_t(wire.oracleCurve) >= scratch.oraclePoints.size()) {
+        const int32_t at = scratch.oracleCurve[object];
+        if (at < 0) {
             *error =
                 who() + ": rigExec:curve must name exactly one points source";
             return false;
         }
-        _RrCurveWeightField(*samples,
-                            scratch.oraclePoints[size_t(wire.oracleCurve)],
+        _RrCurveWeightField(*samples, scratch.oraclePoints[size_t(at)],
                             worldToLocal, falloffMin, falloffMax, invert,
                             strength, curve, weights);
         return true;
@@ -1633,12 +1667,13 @@ _RrOracle(const RrProgram *program, const RrWeightScratch &scratch,
 {
     using Kind = RrWeightOracleKind;
     weights->assign(count, 1.0f);
-    const RigExecWireComputed &computed = *program->inputState.computed;
-    const v4::RigExecWireWeightObject &wire = computed.weightObjects[object];
+    const RigExecWireWeightObject &wire =
+        program->geometry->weightObjects[object];
     const Kind &kind = scratch.oracleKinds[object];
     const auto who = [&]() { return program->TextOrEmpty(wire.path); };
-    const auto read = [&](const v4::RigExecWireInput &input, float fallback) {
-        return RrReadResolvedFloat(program, input, fallback);
+    const auto read = [&](const std::unique_ptr<RigExecWireInput> &input,
+                          float fallback) {
+        return RrReadResolvedFloat(program, *input, fallback);
     };
 
     // The structural failures (a missing prim, an unknown type, combine
@@ -1793,13 +1828,11 @@ RrResolveWeightOracle(const RrProgram *program, size_t object, size_t count,
     const RrWeightScratch *scratch =
         program ? _RrScratch(program) : nullptr;
     // A wire violation, not an oracle answer: Open checked every index the
-    // pose and geometry tables hand in, and the section keeps each entry's
+    // pose and geometry tables hand in, and the file keeps each entry's
     // composition below the entry itself.
-    if (!scratch ||
-        object >= program->inputState.computed->weightObjects.size() ||
+    if (!scratch || object >= program->geometry->weightObjects.size() ||
         object >= scratch->oracleKinds.size()) {
-        *why = "the computed section holds no weight object " +
-               std::to_string(object);
+        *why = "the file holds no weight object " + std::to_string(object);
         return false;
     }
     return _RrOracle(program, *scratch, object, count, current, weights, why);
@@ -1809,8 +1842,8 @@ bool
 RrRunWeightStep(RrProgram *program, size_t step, std::string *error)
 {
     if (!program || !program->steps || !program->geometry ||
-        !program->inputs || !program->slotMeta || !program->constants ||
-        !program->weights || step >= program->steps->size()) {
+        !program->slotMeta || !program->constants || !program->weights ||
+        step >= program->steps->size()) {
         if (error) {
             *error = "weight step names no step";
         }
@@ -1827,7 +1860,6 @@ RrRunWeightStep(RrProgram *program, size_t step, std::string *error)
         }
         return false;
     }
-    _RrRefreshReads(program);
     return _RrRunWeightPacket(program, step, error);
 }
 

@@ -3,16 +3,15 @@
 // order) and dirties whole clusters, so a file is refused unless that walk
 // is a topological order of its step graph, every slot a step reads has
 // been written by then, and its cluster graph is an acyclic quotient of
-// the step graph. The current wire reader and the FlatBuffer validator both
-// call RigExecStepGraphError, whose step and cluster types share their
-// field names, so the two refuse a bad graph in the same words. USD-free
-// and header-only. On a valid file it allocates the cluster sort's two
-// count-sized vectors, the walk order, and one map node per run of written
-// slots.
+// the step graph. The file validator (RigExecFormatValidate, which every
+// Open runs) calls RigExecStepGraphError, so the bake's self-check and the
+// runtime refuse a bad graph in the same words. USD-free and header-only.
+// On a valid file it allocates the cluster sort's two count-sized vectors,
+// the walk order, and one map node per run of written slots.
 #ifndef RIGEXEC_BINARY_STEP_GRAPH_H
 #define RIGEXEC_BINARY_STEP_GRAPH_H
 
-#include "rigExecBinary/program.h"
+#include "rigExecBinary/format.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -25,8 +24,8 @@
 
 namespace rigExec {
 
-/// A slot range as either reader's range type holds it; the domain is a
-/// RigExecWireSlotDomain value, which the FlatBuffer SlotDomain mirrors.
+/// A slot range as the file's SlotRange holds it; the domain is an
+/// fb::SlotDomain value.
 struct RigExecStepGraphRange {
     uint8_t domain = 0;
     uint32_t begin = 0;
@@ -41,12 +40,12 @@ struct RigExecStepGraphRange {
 inline bool
 RigExecStepGraphDomainHoldsValue(uint8_t domain)
 {
-    switch (RigExecWireSlotDomain(domain)) {
-    case RigExecWireSlotDomain::Avars:
-    case RigExecWireSlotDomain::PropertyResult:
-    case RigExecWireSlotDomain::ChainBase:
-    case RigExecWireSlotDomain::SolverPoints:
-    case RigExecWireSlotDomain::Snapshots:
+    switch (fb::SlotDomain(domain)) {
+    case fb::SlotDomain::Avars:
+    case fb::SlotDomain::PropertyResult:
+    case fb::SlotDomain::ChainBase:
+    case fb::SlotDomain::SolverPoints:
+    case fb::SlotDomain::Snapshots:
         return true;
     default:
         return false;
@@ -64,34 +63,34 @@ Text(int64_t value)
 inline std::string
 DomainName(uint8_t domain)
 {
-    switch (RigExecWireSlotDomain(domain)) {
-    case RigExecWireSlotDomain::Avars: return "Avars";
-    case RigExecWireSlotDomain::PoseBase: return "PoseBase";
-    case RigExecWireSlotDomain::PoseFin: return "PoseFin";
-    case RigExecWireSlotDomain::PosedM: return "PosedM";
-    case RigExecWireSlotDomain::FinalMatrix: return "FinalMatrix";
-    case RigExecWireSlotDomain::BaseMatrix: return "BaseMatrix";
-    case RigExecWireSlotDomain::Aggregate: return "Aggregate";
-    case RigExecWireSlotDomain::SolverPoints: return "SolverPoints";
-    case RigExecWireSlotDomain::Candidates: return "Candidates";
-    case RigExecWireSlotDomain::CommitTable: return "CommitTable";
-    case RigExecWireSlotDomain::CommitDelta: return "CommitDelta";
-    case RigExecWireSlotDomain::CommitStaging: return "CommitStaging";
-    case RigExecWireSlotDomain::ConstraintDelta: return "ConstraintDelta";
-    case RigExecWireSlotDomain::PropertyResult: return "PropertyResult";
-    case RigExecWireSlotDomain::ChainBase: return "ChainBase";
-    case RigExecWireSlotDomain::RevisionPacket: return "RevisionPacket";
-    case RigExecWireSlotDomain::RevisionTransforms:
+    switch (fb::SlotDomain(domain)) {
+    case fb::SlotDomain::Avars: return "Avars";
+    case fb::SlotDomain::PoseBase: return "PoseBase";
+    case fb::SlotDomain::PoseFin: return "PoseFin";
+    case fb::SlotDomain::PosedM: return "PosedM";
+    case fb::SlotDomain::FinalMatrix: return "FinalMatrix";
+    case fb::SlotDomain::BaseMatrix: return "BaseMatrix";
+    case fb::SlotDomain::Aggregate: return "Aggregate";
+    case fb::SlotDomain::SolverPoints: return "SolverPoints";
+    case fb::SlotDomain::Candidates: return "Candidates";
+    case fb::SlotDomain::CommitTable: return "CommitTable";
+    case fb::SlotDomain::CommitDelta: return "CommitDelta";
+    case fb::SlotDomain::CommitStaging: return "CommitStaging";
+    case fb::SlotDomain::ConstraintDelta: return "ConstraintDelta";
+    case fb::SlotDomain::PropertyResult: return "PropertyResult";
+    case fb::SlotDomain::ChainBase: return "ChainBase";
+    case fb::SlotDomain::RevisionPacket: return "RevisionPacket";
+    case fb::SlotDomain::RevisionTransforms:
         return "RevisionTransforms";
-    case RigExecWireSlotDomain::RevisionOut: return "RevisionOut";
-    case RigExecWireSlotDomain::RevisionDone: return "RevisionDone";
-    case RigExecWireSlotDomain::ChainDirty: return "ChainDirty";
-    case RigExecWireSlotDomain::ChainPoints: return "ChainPoints";
-    case RigExecWireSlotDomain::DerivedOut: return "DerivedOut";
-    case RigExecWireSlotDomain::WeightPacket: return "WeightPacket";
-    case RigExecWireSlotDomain::WeightFrames: return "WeightFrames";
-    case RigExecWireSlotDomain::PoseWeight: return "PoseWeight";
-    case RigExecWireSlotDomain::Snapshots: return "Snapshots";
+    case fb::SlotDomain::RevisionOut: return "RevisionOut";
+    case fb::SlotDomain::RevisionDone: return "RevisionDone";
+    case fb::SlotDomain::ChainDirty: return "ChainDirty";
+    case fb::SlotDomain::ChainPoints: return "ChainPoints";
+    case fb::SlotDomain::DerivedOut: return "DerivedOut";
+    case fb::SlotDomain::WeightPacket: return "WeightPacket";
+    case fb::SlotDomain::WeightFrames: return "WeightFrames";
+    case fb::SlotDomain::PoseWeight: return "PoseWeight";
+    case fb::SlotDomain::Snapshots: return "Snapshots";
     }
     return "domain " + Text(domain);
 }

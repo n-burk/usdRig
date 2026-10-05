@@ -1,12 +1,11 @@
 // .rigexec time-variance audit.
 #include "rigExecBake/staticReport.h"
-#include "rigExecBake/capture.h"
 #include "rigExecBake/computedCapture.h"
+#include "rigExecBake/pathTable.h"
 #include "rigExecBake/revisionReads.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
-#include "rigExecBinary/container.h"
 
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -80,9 +79,9 @@ _Attribute(const UsdStageRefPtr &stage, const SdfPath &path,
     }
 }
 
-// Whether the computed section evaluates the attribute at a path over the
-// input slots (a connection-following scalar the assembly reads), rather
-// than the record replaying it.
+// Whether the file evaluates the attribute at a path over the input slots
+// (a connection-following scalar the assembly reads, a read row), rather
+// than holding its value at the bake time.
 using _SlotDriven = std::function<bool(const SdfPath &)>;
 
 // A revision's stage-routed dense blend-sample points, the shapes of its
@@ -188,28 +187,26 @@ RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
     const double probe = RigExecBakedProbeTime(stage).GetValue();
     _Entries found;
 
-    // The captures read the standing program and the stage; neither
-    // evaluates. The computed section names the reads the slots evaluate
-    // and the oracle facts of the objects the runtime resolves.
-    RigExecBinaryWriter writer;
-    std::string why;
-    RigExecBakeCapture capture(evaluator, &writer, &why);
-    if (!capture.Valid()) {
-        return Fail(why);
+    // The report is of the authored epoch, as a bake is.
+    if (evaluator.HasInteractiveOverrides()) {
+        return Fail("cannot bake with interactive overrides standing");
     }
-    RigExecBakeComputedCapture computed(evaluator, capture, probe, &writer,
-                                        &why);
+    // The input collection reads the standing program and the stage; it
+    // never evaluates. It names the reads the slots evaluate and the
+    // oracle facts of the objects the runtime resolves.
+    RigExecBakePathTable paths;
+    std::string why;
+    RigExecBakeComputedCapture computed(evaluator, probe, &paths, &why);
     if (!computed.Valid()) {
         return Fail(why);
     }
-    std::set<uint32_t> slotPaths;
-    for (const RigExecWirePathScalarRead &read :
-         computed.GetComputed().pathScalarReads) {
-        slotPaths.insert(read.path);
+    std::set<std::string> slotPaths;
+    for (const RigExecBakePathScalarRead &read :
+         computed.GetInputs().pathScalarReads) {
+        slotPaths.insert(paths.Text(read.path));
     }
-    // The writer interns: a path the section names has its id already.
     const _SlotDriven slotDriven = [&](const SdfPath &path) {
-        return slotPaths.count(writer.AddString(path.GetString())) != 0;
+        return slotPaths.count(path.GetString()) != 0;
     };
 
     // Transforms the prologue reads off the stage.

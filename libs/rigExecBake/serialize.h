@@ -1,49 +1,43 @@
-// .rigexec serialization: the live baked program as wire structs.
-// Converts RigExecBakedProgramImpl's epoch-stable state into the plain wire
-// structs libs/rigExecBinary/program.h defines. Per-run state -- scratch
-// buffers, last-run comparisons, counters, timestamps, diagnostics -- is
-// deliberately NOT converted: a file carries what Build decided, and the
+// .rigexec serialization: the live baked program as the file's object
+// tables. Converts RigExecBakedProgramImpl's epoch-stable state into the
+// RigExecWireFile a bake writes (rigExecBinary/format.h). Per-run state --
+// scratch buffers, last-run comparisons, counters, timestamps -- is
+// deliberately NOT converted here: a file carries what Build decided, the
+// static data one run left is filled by RigExecBakeCaptureStatics, and the
 // runtime re-derives the rest by running.
 // Internal to rigExecBake: the Impl type is that library's business, and
 // nothing outside it includes this header.
 #ifndef RIGEXEC_BAKE_SERIALIZE_H
 #define RIGEXEC_BAKE_SERIALIZE_H
 
-#include "rigExecBinary/container.h"
-#include "rigExecBinary/pose.h"
-#include "rigExecBinary/geometry.h"
-#include "rigExecBinary/program.h"
+#include "rigExecBinary/format.h"
+
+#include <string>
 
 namespace rigExec {
 
 struct RigExecBakedProgramImpl;
+struct RigExecBakeInputs;
+class RigExecBakePathTable;
+class RigExecBakePools;
 
-/// Converts the program's slot inventory, interning paths into \p writer's
-/// string table.
-RigExecWireSlotMeta RigExecBakeConvertSlotMeta(
-    const RigExecBakedProgramImpl &program, RigExecBinaryWriter *writer);
-
-/// Converts the epoch constants, interning rotation-order tokens.
-RigExecWireConstants RigExecBakeConvertConstants(
-    const RigExecBakedProgramImpl &program, RigExecBinaryWriter *writer);
-
-/// Converts the step list, interning labels.
-std::vector<RigExecWireStep> RigExecBakeConvertSteps(
-    const RigExecBakedProgramImpl &program, RigExecBinaryWriter *writer);
-
-/// Converts the cluster partition and the cone closures.
-RigExecWireClustering RigExecBakeConvertClustering(
-    const RigExecBakedProgramImpl &program);
-RigExecWireCones RigExecBakeConvertCones(
-    const RigExecBakedProgramImpl &program);
-
-/// Converts the pose-domain build tables.
-RigExecWireDomainPose RigExecBakeConvertDomainPose(
-    const RigExecBakedProgramImpl &program, RigExecBinaryWriter *writer);
-
-/// Converts the geometry-domain build tables.
-RigExecWireDomainGeometry RigExecBakeConvertDomainGeometry(
-    const RigExecBakedProgramImpl &program, RigExecBinaryWriter *writer);
+/// Builds \p file's tables from \p program, plus the input list of
+/// \p inputs (a collection over the same program interning through
+/// \p paths): the slot inventory, constants, steps, clusters and cones, the
+/// pose and geometry tables with every read in the field it was collected
+/// for (each registered read, the geometry assembly's blend weight,
+/// activation and default weight reads), the weight objects with their
+/// oracle facts, the property chains and the phased consumers. Skin
+/// topologies are written sparse. \p pools is seeded with \p inputs'
+/// values and points first, so the ids its tables hold stand. The static
+/// data a run leaves (RigExecBakeCaptureStatics), the external movers and
+/// the root's own fields are not filled here. False, naming the table,
+/// for a read the collection does not hold or a topology the format
+/// cannot.
+bool RigExecBakeFillFile(const RigExecBakedProgramImpl &program,
+                         const RigExecBakeInputs &inputs,
+                         RigExecBakePathTable *paths, RigExecBakePools *pools,
+                         fb::RigExecWireFile *file, std::string *error);
 
 }  // namespace rigExec
 
