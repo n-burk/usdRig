@@ -457,6 +457,7 @@ MeasureArenaBytes(const RigExecBakedProgramImpl &B, const char *rig)
         weightBytes += WeightPacketBytes(packet);
     }
     line("weight packets", weightBytes);
+    line("volume placements", VecBytes(B.volumePlacement));
 
     line("constraint deltas",
          VecBytes(B.deltaValues) + VecBytes(B.deltaPresent) +

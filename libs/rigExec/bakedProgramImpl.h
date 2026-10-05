@@ -1173,6 +1173,13 @@ enum class RigExecBakedPropagateOutcome : uint8_t {
     InvalidResult,      ///< the propagated frame is unusable
 };
 
+/// The volume slots a pose.weightFrames publication holds.
+enum class RigExecVolumePlacementKeys : uint8_t {
+    None,   ///< no volume
+    Placed, ///< placedVolumes: the volumes the dynamic walk places
+    Every,  ///< noScaleAvars: every volume slot
+};
+
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
@@ -2621,22 +2628,31 @@ struct RigExecBakedProgramImpl {
                        std::vector<float> *, std::string *,
                        const std::vector<GfVec3f> *)> resolveWeights;
 
-    /// Where each volume weight object is placed, as the walk left it.
-    ///
-    /// A POINTER to the evaluator's own _volumeWeightMatrices, because the
-    /// oracle reads that member and nothing else: a program-owned copy would
-    /// be a second map the oracle never looks at. Written by the one
-    /// VolumePlacements step, which declares it, so no two steps can be
-    /// inside it at once.
-    std::map<SdfPath, GfMatrix4d> *volumeWeightMatrices = nullptr;
-    /// RigExecRigEvaluator::_UpdateVolumePlacements, bound at Build.
-    ///
-    /// The body has a subtlety worth not restating: a frame no matrix can be
-    /// built from leaves whatever the failed decomposition wrote, over an
-    /// identity seed, rather than the identity. Calling the evaluator's own
-    /// is how the program cannot drift from that.
-    std::function<void(const std::function<
-        bool(const SdfPath &, RigExecPointFrame *)> &)> updateVolumePlacements;
+    /// Per provider slot, where the volume at that slot is placed: the
+    /// VolumePlacements step's output (WeightFrames), read by the oracle and
+    /// by pose.weightFrames. The live and frozen steps both fill every
+    /// noScaleAvars slot; the live oracle reads only the placedVolumes
+    /// slots, and each publication reads the slots volumePlacementKeys
+    /// names. Non-volume slots stay identity and are never read. Kept across
+    /// runs like deltaValues, and carried by a frozen clone and
+    /// RigExecPartialSlots: a cone that skipped the step left the placement
+    /// it would compute again.
+    std::vector<GfMatrix4d> volumePlacement;
+    /// Per provider slot: 1 where the dynamic walk places this volume (a key
+    /// of the evaluator's _volumeWeightMatrixTaps). A subset of
+    /// noScaleAvars: a volume outside the rig that only a constraint names
+    /// is a provider but is not tapped, so the walk neither places nor
+    /// publishes it, and neither do the oracle view and pose.weightFrames.
+    std::vector<char> placedVolumes;
+    /// The slots pose.weightFrames publishes: the key set of the placements
+    /// this job and the jobs it restored state from have written. The live
+    /// program is always Placed. A frozen job differs: _RunFrozen starts at
+    /// None, so a whole frozen run that skips VolumePlacements publishes no
+    /// volume; a partial cone takes the value RigExecPartialSlots restores
+    /// (Placed from a live capture); the frozen VolumePlacements step sets
+    /// Every, its own key set.
+    RigExecVolumePlacementKeys volumePlacementKeys =
+        RigExecVolumePlacementKeys::Placed;
     /// Weight objects whose field is measured against the points AS THEY
     /// STAND at the revision that binds them, rather than the authored base
     /// (the evaluator's _currentPhaseWeights). A combine is in here when
@@ -3323,6 +3339,12 @@ void RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program);
 void RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
                                RigExecBakedStep *step, UsdTimeCode time);
 
+/// Replaces \p frames (pose.weightFrames) with one entry per volume slot
+/// that the program's volumePlacementKeys names, from volumePlacement.
+void RigExecBakedPublishVolumePlacements(
+    const RigExecBakedProgramImpl &program,
+    std::map<SdfPath, GfMatrix4d> *frames);
+
 /// Every per-frame input one weight object's step reads.
 void RigExecBakedNoteWeightInputs(
     const RigExecBakedProgramImpl::WeightObject &weight,
@@ -3786,6 +3808,7 @@ struct RigExecBakedRunShadow {
     std::vector<StepState> steps;
     std::vector<GfMatrix4d> deltaValues;
     std::vector<char> deltaPresent;
+    std::vector<GfMatrix4d> volumePlacement;
     bool avarsDisturbed = false;
 };
 
@@ -3844,6 +3867,15 @@ bool RigExecBakedRunProjectorTarget(
     const RigExecBakedProgramImpl::GeomRevision &revision,
     const RigExecResolvedInputs &resolved, UsdTimeCode time,
     GfMatrix4d *matrix, std::vector<std::string> *diagnostics);
+
+/// Test-only access to evaluator state a baked run must not touch.
+struct RigExecBakedProgramTesting {
+    /// Sets every entry of \p evaluator's dynamic-walk volume placement map
+    /// (_volumeWeightMatrices) to \p matrix. A baked run never reads that
+    /// map, so poisoning it must not move a baked answer.
+    static void SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
+                                        const GfMatrix4d &matrix);
+};
 
 }  // namespace rigExec
 

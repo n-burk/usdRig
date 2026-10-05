@@ -242,6 +242,28 @@ using RigExecPoseFrameEnumerator =
 using RigExecPoseFrameLookup =
     TfFunctionRef<bool(const SdfPath &provider, RigExecPointFrame *frame)>;
 
+/// Volume placements held outside the evaluator -- the baked program's
+/// slot-indexed table -- for the CPU oracle to read in place of its own map.
+/// Borrowed pointers, no allocation. A path resolves when \p index maps it to
+/// a slot below \p count whose \p placed byte is set; any other path has no
+/// placement, as a path missing from the evaluator's map has none.
+struct RigExecVolumePlacementView {
+    const std::map<SdfPath, int> *index = nullptr;
+    const char *placed = nullptr;
+    const GfMatrix4d *placements = nullptr;
+    size_t count = 0;
+
+    const GfMatrix4d *Find(const SdfPath &path) const
+    {
+        const auto it = index->find(path);
+        if (it == index->end() || it->second < 0 ||
+            size_t(it->second) >= count || !placed[it->second]) {
+            return nullptr;
+        }
+        return placements + it->second;
+    }
+};
+
 /// Rides \p frame on the revision of the deepest provider above \p xformPath
 /// that the walk has already moved.
 ///
@@ -788,17 +810,23 @@ private:
     /// a silent fall back to the base, because the two fields differ and
     /// quietly publishing the wrong one is exactly the failure the
     /// parity harness exists to catch.
+    ///
+    /// \p placements, when non-null, is where a volume is placed instead of
+    /// _volumeWeightMatrices: the baked program passes its own table, so the
+    /// oracle reads only state a step declared.
     bool _ResolveWeights(
         const SdfPath &weightPrimPath, size_t count, UsdTimeCode time,
         std::vector<float> *weights, std::string *error,
-        const std::vector<GfVec3f> *currentPoints = nullptr) const;
+        const std::vector<GfVec3f> *currentPoints = nullptr,
+        const RigExecVolumePlacementView *placements = nullptr) const;
 
     /// The volumetric half of _ResolveWeights: sphere, plane, curve, and
     /// the combine that folds them.
     bool _ResolveVolumeWeights(
         const UsdPrim &prim, size_t count, UsdTimeCode time,
         std::vector<float> *weights, std::string *error,
-        const std::vector<GfVec3f> *currentPoints) const;
+        const std::vector<GfVec3f> *currentPoints,
+        const RigExecVolumePlacementView *placements) const;
 
     /// Reads \p prim's points-bearing target relationship and returns its
     /// authored value at \p time. Accepts either an exact property path

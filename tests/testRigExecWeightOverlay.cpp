@@ -12,7 +12,13 @@
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
 
+#include "rigExec/bakedProgram.h"
+#include "rigExec/bakedProgramImpl.h"
+#include "rigExec/rigEvaluator.h"
+#include "rigExec/weightPackets.h"
+
 #include "pxr/base/gf/range3d.h"
+#include "pxr/base/gf/vec3d.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
@@ -33,6 +39,7 @@
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
@@ -1636,6 +1643,165 @@ TestOverlayValueChangeDirtiesDisplayColor()
     results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
 }
 
+// The baked program publishes pose.weightFrames from its own placement table,
+// keyed by the volume slots the walk places; the walk keys the same map by
+// the volumes it taps. Both the key set and every matrix must match the walk,
+// bit for bit, at each frame of a start/mid/mid/end/start sequence. Every
+// generation must come from the program. On these fixtures the
+// VolumePlacements cluster is in cones.always, so every run re-places the
+// volumes; publication of a table a skipped step left behind is covered by
+// testRigExecVolumeWeights TestTheOracleReadsTheProgramsPlacements. Returns
+// the walk's last weightFrames.
+static std::map<SdfPath, GfMatrix4d>
+CheckBakedWeightFramesMatchTheWalk(const UsdStageRefPtr &stage,
+                                   const std::string &label)
+{
+    std::map<SdfPath, GfMatrix4d> last;
+    SdfPath rigPath;
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (prim.GetTypeName() == TfToken("RigExecRoot")) {
+            rigPath = prim.GetPath();
+            break;
+        }
+    }
+    CHECK(!rigPath.IsEmpty());
+    RigExecRigEvaluator walk(stage, rigPath);
+    walk.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    RigExecRigEvaluator baked(stage, rigPath);
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    if (!walk.Compile(&errors) || !baked.Compile(&errors)) {
+        std::printf("FAIL %s: does not compile\n", label.c_str());
+        ++failures;
+        return last;
+    }
+    const double start = stage->GetStartTimeCode();
+    const double end = stage->GetEndTimeCode();
+    const double mid = std::floor(0.5 * (start + end));
+    size_t generation = 0;
+    for (const double t : {start, mid, mid, end, start}) {
+        const RigExecRigPose want = walk.Evaluate(UsdTimeCode(t));
+        const RigExecRigPose got = baked.Evaluate(UsdTimeCode(t));
+        CHECK(want.valid && got.valid);
+        const bool fromProgram =
+            baked.GetBakedGenerationCount() == ++generation;
+        if (!fromProgram) {
+            std::printf("FAIL %s t=%g: not evaluated by the program\n",
+                        label.c_str(), t);
+            ++failures;
+            break;
+        }
+        CHECK(!want.weightFrames.empty());
+        if (got.weightFrames != want.weightFrames) {
+            std::printf("FAIL %s t=%g: baked weightFrames (%zu) differ "
+                        "from the walk's (%zu)\n",
+                        label.c_str(), t, got.weightFrames.size(),
+                        want.weightFrames.size());
+            ++failures;
+        }
+        last = want.weightFrames;
+    }
+    return last;
+}
+
+static void
+TestBakedWeightFramesKeySetMatchesTheWalk(const std::string &examplesDir)
+{
+    const std::string fixtures = examplesDir + "/../tests/fixtures";
+    const std::vector<std::string> stages = {
+        examplesDir + "/11_VolumeWeights.usda",
+        examplesDir + "/14_VolumeConstrainedSweep.usda",
+        fixtures + "/oneloop_cross_domain.usda",
+        fixtures + "/computed_weights.usda",
+    };
+    for (const std::string &path : stages) {
+        const UsdStageRefPtr stage = UsdStage::Open(path);
+        CHECK(stage);
+        if (stage) {
+            CheckBakedWeightFramesMatchTheWalk(stage, path);
+        }
+    }
+}
+
+// A volume outside the rig that a constraint names only as a source is a
+// pose provider (so the program gives it a volume slot) but has no placement
+// tap (so the walk neither places nor publishes it). The rig must still bake,
+// and the program must publish the walk's key set, without that volume.
+static void
+TestUntappedVolumeSourceBakesWithTheWalksKeys(const std::string &examplesDir)
+{
+    const std::string path = examplesDir + "/14_VolumeConstrainedSweep.usda";
+    const UsdStageRefPtr stage = UsdStage::Open(path);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const SdfPath outsidePath("/SweepAsset/Outside");
+    const UsdPrim outside =
+        stage->DefinePrim(outsidePath, TfToken("RigExecSphereWeight"));
+    CHECK(outside);
+    // Placed by its avars, as a volume provider is; away from the origin so
+    // its placement is not the identity a never-written slot holds.
+    const GfVec3d from(0, 5, 0), to(6, 5, 4);
+    const char *const avars[3] = {"avars:tx", "avars:ty", "avars:tz"};
+    for (int k = 0; k < 3; ++k) {
+        const UsdAttribute avar = outside.CreateAttribute(
+            TfToken(avars[k]), SdfValueTypeNames->Double);
+        avar.Set(from[k], UsdTimeCode(1001));
+        avar.Set(to[k], UsdTimeCode(1048));
+    }
+    const UsdPrim sweep =
+        stage->GetPrimAtPath(SdfPath("/SweepAsset/Rig/Movers/Sweep"));
+    CHECK(sweep);
+    if (!outside || !sweep) {
+        return;
+    }
+    sweep.GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({outsidePath});
+
+    const std::map<SdfPath, GfMatrix4d> walkFrames =
+        CheckBakedWeightFramesMatchTheWalk(stage,
+                                           path + " (untapped source)");
+    CHECK(!walkFrames.count(outsidePath));
+
+    // The scenario: the outside volume holds a volume slot the walk does not
+    // place. The VolumePlacements step fills every volume slot, and the live
+    // program publishes only the placed ones.
+    RigExecRigEvaluator baked(stage, SdfPath("/SweepAsset/Rig"));
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    CHECK(baked.Compile(&errors));
+    const RigExecRigPose got =
+        baked.Evaluate(UsdTimeCode(stage->GetStartTimeCode()));
+    CHECK(got.valid);
+    CHECK(baked.GetBakedGenerationCount() == 1);
+    CHECK(!got.weightFrames.count(outsidePath));
+    const RigExecBakedProgram *program = baked.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK(B.volumePlacementKeys == RigExecVolumePlacementKeys::Placed);
+    const auto slot = B.index.find(outsidePath);
+    CHECK(slot != B.index.end());
+    if (slot == B.index.end()) {
+        return;
+    }
+    const size_t i = size_t(slot->second);
+    CHECK(i < B.noScaleAvars.size() && B.noScaleAvars[i] == 1);
+    CHECK(i < B.placedVolumes.size() && B.placedVolumes[i] == 0);
+    if (i >= B.volumePlacement.size() || i >= B.finLast.size()) {
+        CHECK(false);
+        return;
+    }
+    const GfMatrix4d placement =
+        RigExecVolumePlacement(B.fin[size_t(B.finLast[i])]);
+    CHECK(placement != GfMatrix4d(1.0));
+    CHECK(B.volumePlacement[i] == placement);
+}
+
 static std::string
 DefaultResourceDir()
 {
@@ -1671,6 +1837,10 @@ main(int argc, char **argv)
     TestPlaneGuideSizeIsExtentsNotBand();
     TestRegistrySetWeightOverlay();
     TestAuthoredEditRepublishesFreshField();
+    if (argc > 1) {
+        TestBakedWeightFramesKeySetMatchesTheWalk(argv[1]);
+        TestUntappedVolumeSourceBakesWithTheWalksKeys(argv[1]);
+    }
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

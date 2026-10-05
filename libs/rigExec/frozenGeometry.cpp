@@ -90,8 +90,8 @@ _AssembleDerivedPacket(const RigExecBakedProgramImpl::GeomRevision &revision,
 // and sampled point arrays (the synthetic keys _SampleWeightArrays
 // writes). The builders are the shared pure kernels; only the reads
 // differ, because the worker cannot touch the stage or the oracle.
-// Volume placements mirror the evaluator's refresh over the same frames
-// (rigEvaluator.cpp); the map written is the worker's own.
+// Volume placements write the worker's own program table, as the live
+// VolumePlacements step does.
 bool
 _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
                   const std::map<SdfPath, size_t> &index,
@@ -99,31 +99,23 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
 {
     RigExecBakedProgramImpl &B = worker->B;
     if (step->kind == RigExecBakedStepKind::VolumePlacements) {
-        // rigEvaluator.cpp _UpdateVolumePlacements over B.fin, through the
-        // same provider->fin lookup the live step passes it
-        // (bakedWeights.cpp): every no-scale provider writes its path,
-        // placed or identity, into the worker's map. The usable gate is
-        // that function's exact body (IsValid + IsDegenerate -- NOT the
-        // baked pose walk's stricter RigExecBakedUsable), and the write
-        // is unconditional: a failed decomposition leaves whatever it
-        // wrote rather than the identity, and that partial write is the
-        // contract (see the live step's comment).
+        // Every no-scale provider, placed or identity, from the frame the
+        // walk ended with. This gate is IsValid + IsDegenerate only, with no
+        // finite check (RigExecVolumePlacement has one): a non-finite final
+        // frame places at a NaN matrix here and at the identity live.
         for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
             if (!B.noScaleAvars[i]) {
                 continue;
             }
             GfMatrix4d placement(1.0);
-            const auto slot = B.index.find(B.paths[i]);
-            if (slot != B.index.end()) {
-                const RigExecPointFrame &frame =
-                    B.fin[size_t(B.finLast[size_t(slot->second)])];
-                if (frame.IsValid() && !frame.IsDegenerate()) {
-                    RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                          frame.points, &placement);
-                }
+            const RigExecPointFrame &frame = B.fin[size_t(B.finLast[i])];
+            if (frame.IsValid() && !frame.IsDegenerate()) {
+                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                      frame.points, &placement);
             }
-            worker->volumeWeightMatrices[B.paths[i]] = placement;
+            B.volumePlacement[i] = placement;
         }
+        B.volumePlacementKeys = RigExecVolumePlacementKeys::Every;
         return true;
     }
     const int id = step->object;

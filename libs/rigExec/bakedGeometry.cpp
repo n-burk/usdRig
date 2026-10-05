@@ -901,9 +901,10 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 if (revision.weightCurrentPhase) {
                     // A current-phase field is measured against the points
                     // ENTERING this revision, so the assemble reads that
-                    // version exactly as a chunk does. The placement the
-                    // oracle reads comes from the walk, so it waits for that
-                    // too.
+                    // version exactly as a chunk does. The oracle places
+                    // the volume from the program's volumePlacement table,
+                    // which the VolumePlacements step writes (WeightFrames),
+                    // so it waits for that step too.
                     assemble.maxDiagnostics += 1;
                     assemble.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::WeightFrames, 0));

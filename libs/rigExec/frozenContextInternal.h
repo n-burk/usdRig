@@ -317,11 +317,6 @@ struct _FrozenWorker {
     RigExecProfiler profiler;
     bool guidesEnabled = false;
     std::unique_ptr<RigExecTapSet> nullTaps;
-    // The worker's own placement map: the snapshot nulls the evaluator's
-    // volumeWeightMatrices pointer, so the frozen VolumePlacements body
-    // writes here, and B.volumeWeightMatrices points at it for the packet
-    // build and pose publish to read.
-    std::map<SdfPath, GfMatrix4d> volumeWeightMatrices;
 };
 
 template <class T>

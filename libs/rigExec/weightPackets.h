@@ -91,6 +91,16 @@ RigExecWeightPacket RigExecBuildDynamicWeightPacket(
 bool RigExecRigidWorldToLocal(
     const RigExecPointFrame &posed, GfMatrix4d *result);
 
+/// The placement a volume publishes (pose.weightFrames) and the CPU oracle
+/// measures its field in: the map taking the identity landmarks to the
+/// volume's FINAL frame, scale and shear kept. Identity unless the frame is
+/// valid, non-degenerate and finite. The dynamic walk's refresh and the
+/// baked program's VolumePlacements step place a volume through this one
+/// function; the frozen worker keeps its own gate, which has no finite
+/// check. The exec packet path above places against the BASE frame
+/// instead, and the two differ for a volume a constraint revises.
+GfMatrix4d RigExecVolumePlacement(const RigExecPointFrame &final);
+
 /// The resolved inputs of a volumetric weight object.
 ///
 /// One struct for all three shapes: the fields a shape does not read are

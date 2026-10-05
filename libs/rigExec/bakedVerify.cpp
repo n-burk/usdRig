@@ -534,6 +534,7 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     aggregates = program.aggregates;
     deltaValues = program.deltaValues;
     deltaPresent = program.deltaPresent;
+    volumePlacement = program.volumePlacement;
     avarsDisturbed = program.avarsDisturbed;
 
     solvers.resize(program.solvers.size());
@@ -603,6 +604,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.aggregates = aggregates;
     B.deltaValues = deltaValues;
     B.deltaPresent = deltaPresent;
+    B.volumePlacement = volumePlacement;
     B.avarsDisturbed = avarsDisturbed;
     // Run-local by construction: the prologue empties it, so a second run
     // over one frame has to start with it empty too or every record lands in
@@ -691,6 +693,10 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                   program.deltaValues);
     CompareVector(differences, &count, "constraint delta present",
                   deltaPresent, program.deltaPresent);
+    // The weight half's hand-off: what the oracle and pose.weightFrames
+    // read. A cone that skipped VolumePlacements kept last run's placements.
+    CompareVector(differences, &count, "volumePlacement", volumePlacement,
+                  program.volumePlacement);
     for (size_t s = 0; s < program.solvers.size() && s < solvers.size(); ++s) {
         const std::string where =
             "solver " + program.solvers[s].path.GetString();

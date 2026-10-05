@@ -789,8 +789,10 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     _FrozenWorker worker;
     _CloneImpl(snapshot.program, &worker.B);
     RigExecBakedProgramImpl &B = worker.B;
+    // A whole frozen job publishes only the volumes its own VolumePlacements
+    // step places; the clone's table is not its publication.
+    B.volumePlacementKeys = RigExecVolumePlacementKeys::None;
     B.resolvedInputs = &worker.resolved;
-    B.volumeWeightMatrices = &worker.volumeWeightMatrices;
     B.chainSnapshots = &worker.chainSnapshots;
     B.profiler = &worker.profiler;
     B.interactiveOverrides = &inputs.overrides;
@@ -857,9 +859,10 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
                                 solverPath, B.aggregates[size_t(si)].frames);
         }
     }
-    if (B.volumeWeightMatrices) {
-        working.weightFrames = *B.volumeWeightMatrices;
-    }
+    // No volume when the closure skipped VolumePlacements; otherwise every
+    // volume slot (noScaleAvars), including a volume that only a constraint
+    // names as a source, which the walk and the live program do not publish.
+    RigExecBakedPublishVolumePlacements(B, &working.weightFrames);
     _FrozenPublishGeometry(B, &working);
     working.solverOverrideRounds += B.solverOverrideRounds;
     working.solverEvaluations += B.solverEvaluations;
@@ -900,6 +903,16 @@ RigExecPartialSlots::Capture(const RigExecBakedProgramImpl &program)
     aggregates = program.aggregates;
     deltaValues = program.deltaValues;
     deltaPresent = program.deltaPresent;
+    volumePlacementKeys = program.volumePlacementKeys;
+    // Volume slots only, in slot order: the table is provider-sized and
+    // almost every slot of a large rig is not a volume.
+    volumePlacement.clear();
+    for (size_t i = 0; i < program.noScaleAvars.size() &&
+                       i < program.volumePlacement.size(); ++i) {
+        if (program.noScaleAvars[i]) {
+            volumePlacement.push_back(program.volumePlacement[i]);
+        }
+    }
     solvers.resize(program.solvers.size());
     for (size_t s = 0; s < program.solvers.size(); ++s) {
         solvers[s].outFrames = program.solvers[s].outFrames;
@@ -923,10 +936,6 @@ RigExecPartialSlots::Capture(const RigExecBakedProgramImpl &program)
         steps[k].counters = program.steps[k].counters;
         steps[k].bail = program.steps[k].bail;
     }
-    volumeWeightMatrices.clear();
-    if (program.volumeWeightMatrices) {
-        volumeWeightMatrices = *program.volumeWeightMatrices;
-    }
 }
 
 bool
@@ -938,7 +947,15 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
     RigExecBakedProgramImpl &B = *program;
     if (solvers.size() != B.solvers.size() ||
         commits.size() != B.commits.size() ||
-        steps.size() != B.steps.size()) {
+        steps.size() != B.steps.size() ||
+        B.volumePlacement.size() < B.noScaleAvars.size()) {
+        return false;
+    }
+    size_t volumes = 0;
+    for (const char isVolume : B.noScaleAvars) {
+        volumes += isVolume ? 1 : 0;
+    }
+    if (volumes != volumePlacement.size()) {
         return false;
     }
     B.poseWeights = poseWeights;
@@ -951,6 +968,12 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
     B.aggregates = aggregates;
     B.deltaValues = deltaValues;
     B.deltaPresent = deltaPresent;
+    B.volumePlacementKeys = volumePlacementKeys;
+    for (size_t i = 0, v = 0; i < B.noScaleAvars.size(); ++i) {
+        if (B.noScaleAvars[i]) {
+            B.volumePlacement[i] = volumePlacement[v++];
+        }
+    }
     for (size_t s = 0; s < B.solvers.size(); ++s) {
         B.solvers[s].outFrames = solvers[s].outFrames;
         B.solvers[s].outPresent = solvers[s].outPresent;
@@ -972,11 +995,6 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
         B.steps[k].bail = steps[k].bail;
     }
     B.runSnapshots.Clear();
-    if (B.volumeWeightMatrices) {
-        *B.volumeWeightMatrices = volumeWeightMatrices;
-    } else if (!volumeWeightMatrices.empty()) {
-        return false;
-    }
     return true;
 }
 
@@ -998,6 +1016,7 @@ RigExecPartialSlots::Bytes() const
     total += aggregates.size() * sizeof(RigExecPointFrameArray);
     total += deltaValues.size() * sizeof(GfMatrix4d);
     total += deltaPresent.size() * sizeof(char);
+    total += volumePlacement.size() * sizeof(GfMatrix4d);
     for (const SolverSlots &solver : solvers) {
         total += solver.outFrames.size() * sizeof(RigExecPointFrame);
         total += solver.outPresent.size() * sizeof(char);
@@ -1018,8 +1037,6 @@ RigExecPartialSlots::Bytes() const
         }
         total += sizeof(RigExecBakedStepCounters) + sizeof(bool);
     }
-    total += volumeWeightMatrices.size() *
-             (sizeof(SdfPath) + sizeof(GfMatrix4d));
     return total;
 }
 
@@ -1089,7 +1106,6 @@ RigExecRunPartialCone(
     _CloneImpl(snapshot.program, &worker.B);
     RigExecBakedProgramImpl &B = worker.B;
     B.resolvedInputs = &worker.resolved;
-    B.volumeWeightMatrices = &worker.volumeWeightMatrices;
     B.chainSnapshots = &worker.chainSnapshots;
     B.profiler = &worker.profiler;
     B.interactiveOverrides = &freshInputs.overrides;
@@ -1169,9 +1185,10 @@ RigExecRunPartialCone(
                                 solverPath, B.aggregates[size_t(si)].frames);
         }
     }
-    if (B.volumeWeightMatrices) {
-        working.weightFrames = *B.volumeWeightMatrices;
-    }
+    // The restored key set (the live program's volumes when the slots came
+    // from a live run), or every volume slot once this cone or a job it
+    // restored from ran VolumePlacements.
+    RigExecBakedPublishVolumePlacements(B, &working.weightFrames);
     _FrozenPublishGeometry(B, &working);
     for (const RigExecBakedStep &step : B.steps) {
         if (!RigExecBakedIsGeometryStep(step.kind)) {

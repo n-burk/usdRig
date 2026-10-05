@@ -135,12 +135,32 @@ _IsVolumeWeightTypeName(const TfToken &type)
            type == "RigExecCurveWeight";
 }
 
+// The volumes the walk places (_volumeWeightMatrixTaps) that have no
+// volume-typed provider slot, so the program could not place or publish
+// them. Expected empty: the compile seeds every tapped volume as a provider
+// (seedProvider over the taps, rigEvaluatorCompile.cpp). The converse is
+// not checked because it does not hold: a constraint can name a volume
+// outside the rig as a source, which makes it a provider without a tap,
+// and the program then holds a slot the walk never places (placedVolumes).
+std::vector<SdfPath>
+_WalkVolumesWithoutASlot(const std::set<SdfPath> &programVolumes,
+                         const std::map<SdfPath, RigExecTapId> &walkVolumes)
+{
+    std::vector<SdfPath> missing;
+    for (const auto &[path, tap] : walkVolumes) {
+        if (!programVolumes.count(path)) {
+            missing.push_back(path);
+        }
+    }
+    return missing;
+}
+
 // The weight-object schemas the program can build a packet for.
 // It is about the BUILDER and nothing else. The volumetric three are here
-// because RigExecBuildVolumeWeightPacket is one of the builders, and they are
-// still refused above by the _volumeWeightMatrixTaps loop, which is about the
-// PLACEMENT a volume's field needs -- which the pose walk now composes, so
-// the two questions have one answer again.
+// because RigExecBuildVolumeWeightPacket is one of the builders; volumes
+// bake, and the program places them itself (VolumePlacements). The only
+// tap-related check is the one-way guard above (_WalkVolumesWithoutASlot):
+// every volume the walk places needs a provider slot.
 bool
 _IsBakedWeightType(const TfToken &type)
 {
@@ -573,18 +593,18 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
         // A volume anywhere in the closure used to be refused here, on the
         // grounds that a constraint's envelope is resolved by the CPU oracle
-        // out of _volumeWeightMatrices AS THAT MAP STANDS AT THE
-        // CONSTRAINT'S POINT IN THE WALK, while the program republishes the
-        // map once, after the walk. That reasoning describes a constraint
+        // against the volume placements AS THEY STAND AT THE CONSTRAINT'S
+        // POINT IN THE WALK, while the program places volumes once, after
+        // the walk. That reasoning describes a constraint
         // the epoch cannot hold: a volumetric field requires a POINT domain
         // (_ValidateWeightObjectDomain, composed inputs included), so the
         // only constraint that can bind one is a geometry-domain constraint
         // -- and a geometry-domain constraint resolves NO envelope in the
         // walk at all. Its weight is per point and resolves after the solve,
         // on the revision its delta feeds, where the placement is the same
-        // one every other mover's packet uses. So the map is never read
-        // mid-walk by anything, and one republication after it is what every
-        // reader of it sees.
+        // one every other mover's packet uses. So no placement is read
+        // mid-walk, and the one VolumePlacements step after the walk is
+        // what every reader sees.
         sayUnbakedWeights(constraint.weightObject);
         if (constraint.targets.empty()) {
             say("constraint names no target", constraint.moverPath);
@@ -627,6 +647,28 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                     "xform-derived",
                     target);
             }
+        }
+    }
+
+    // Every volume the walk places needs a program slot; Build checks the
+    // same set from its own table.
+    {
+        std::set<SdfPath> programVolumes;
+        const auto noteVolume = [&](const SdfPath &path) {
+            const UsdPrim prim = E._stage->GetPrimAtPath(path);
+            if (prim && _IsVolumeWeightTypeName(prim.GetTypeName())) {
+                programVolumes.insert(path);
+            }
+        };
+        for (const auto &[path, tap] : E._firstFramePoseFrames) {
+            noteVolume(path);
+        }
+        for (const SdfPath &path : E._xformDerivedProviders) {
+            noteVolume(path);
+        }
+        for (const SdfPath &path : _WalkVolumesWithoutASlot(
+                 programVolumes, E._volumeWeightMatrixTaps)) {
+            say("a volume weight the walk places has no program slot", path);
         }
     }
 
@@ -2112,32 +2154,31 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // recomputed: these are the same bytes the authoritative snapshot hands
     // exec, and resampling the curve again here would risk a different
     // answer for a spline edited between Compile and Build.
-    B.volumeWeightMatrices = &E._volumeWeightMatrices;
     B.currentPhaseWeights = E._currentPhaseWeights;
-    B.updateVolumePlacements =
-        [evaluator](const std::function<
-                        bool(const SdfPath &, RigExecPointFrame *)> &lookup) {
-            // The pose is the routine's second output and this call wants
-            // only its first: what the program publishes is the MAP, which
-            // the epilogue copies where the dynamic walk assigns it from.
-            // One empty pose per frame, and nothing in it but the same
-            // handful of matrices.
-            RigExecRigPose unused;
-            evaluator->_UpdateVolumePlacements(
-                RigExecPoseFrameLookup(lookup), &unused);
-        };
     // The oracle a constraint's envelope resolves through, bound here
     // because this is the only translation unit the evaluator's friendship
     // reaches. `evaluator` outlives the program -- the evaluator owns it and
     // drops it on any epoch change -- so capturing the pointer is safe in
-    // exactly the way every other capture in this block is.
-    B.resolveWeights = [evaluator](const SdfPath &weightPath, size_t count,
-                                   UsdTimeCode time,
-                                   std::vector<float> *weights,
-                                   std::string *error,
-                                   const std::vector<GfVec3f> *current) {
+    // exactly the way every other capture in this block is; `program` is
+    // the impl that stores this function, and a frozen clone drops it.
+    // A volume is placed from the program's own table, never the
+    // evaluator's map, which only the dynamic walk refreshes. Every caller
+    // shares this one function, so none can reach that map by accident.
+    B.resolveWeights = [evaluator, program = &B](
+                           const SdfPath &weightPath, size_t count,
+                           UsdTimeCode time, std::vector<float> *weights,
+                           std::string *error,
+                           const std::vector<GfVec3f> *current) {
+        // placedVolumes, not noScaleAvars: the oracle sees exactly the
+        // volumes the walk places, so an untapped volume stays a miss.
+        RigExecVolumePlacementView placements;
+        placements.index = &program->index;
+        placements.placed = program->placedVolumes.data();
+        placements.placements = program->volumePlacement.data();
+        placements.count = std::min(program->placedVolumes.size(),
+                                    program->volumePlacement.size());
         return evaluator->_ResolveWeights(weightPath, count, time, weights,
-                                          error, current);
+                                          error, current, &placements);
     };
     // The reader a sparse blend sample shape resolves through, on a cache
     // miss: the shared resolver, so the program and the dynamic walk admit
@@ -3152,12 +3193,32 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     }
 
     B.posedM.assign(N, GfMatrix4d(1.0));
+    B.volumePlacement.assign(N, GfMatrix4d(1.0));
     B.base.resize(N);
     B.fin.resize(N);
     if (!ctx.ok) {
         return nullptr;
     }
 
+    // The volumes this program places and publishes: the walk's, at their
+    // slots. Then the mirror of IsBakeable's refusal of a tapped volume
+    // with no slot. Same sentence.
+    {
+        std::set<SdfPath> programVolumes;
+        B.placedVolumes.assign(B.noScaleAvars.size(), 0);
+        for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
+            if (B.noScaleAvars[i]) {
+                programVolumes.insert(B.paths[i]);
+                B.placedVolumes[i] =
+                    E._volumeWeightMatrixTaps.count(B.paths[i]) ? 1 : 0;
+            }
+        }
+        for (const SdfPath &path : _WalkVolumesWithoutASlot(
+                 programVolumes, E._volumeWeightMatrixTaps)) {
+            refuse("a volume weight the walk places has no program slot",
+                   path);
+        }
+    }
     // The mirror of IsBakeable's solver-checkpoint refusal, so a forced bake
     // cannot slip past it. Same condition, same sentence.
     {
@@ -3586,14 +3647,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         _lastBail = RigExecBakedBail::Publish;
         return false;  // the dynamic fallback needs exec
     }
-    // Where every volume weight ended up, as the VolumePlacements step left
-    // it. The dynamic walk assigns the pose from the same map at the same
-    // point -- the last refresh before anything reads it -- and a run whose
-    // cone skipped the step is a run in which no volume's final frame moved,
-    // so the map it kept is still this generation's.
-    if (B.volumeWeightMatrices) {
-        pose->weightFrames = *B.volumeWeightMatrices;
-    }
+    // Where every volume the walk places ended up, as the VolumePlacements
+    // step left it. A run whose cone skipped the step is a run in which no
+    // volume's final frame moved, so the placements it kept are this
+    // generation's.
+    RigExecBakedPublishVolumePlacements(B, &pose->weightFrames);
     RigExecBakedPublishGeometry(&B, pose);
 
     // The generation's work counters. Two of them are PROGRAM CONSTANTS
@@ -3717,6 +3775,22 @@ UsdTimeCode
 RigExecBakedProbeTime(const UsdStageRefPtr &stage)
 {
     return _ProbeTime(stage);
+}
+
+void
+RigExecBakedProgram::_SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
+                                              const GfMatrix4d &matrix)
+{
+    for (auto &[path, placement] : evaluator->_volumeWeightMatrices) {
+        placement = matrix;
+    }
+}
+
+void
+RigExecBakedProgramTesting::SetWalkVolumePlacements(
+    RigExecRigEvaluator *evaluator, const GfMatrix4d &matrix)
+{
+    RigExecBakedProgram::_SetWalkVolumePlacements(evaluator, matrix);
 }
 
 // The structural half of RigExecRigEvaluator::_ResolveWeights and

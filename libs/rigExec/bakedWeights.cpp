@@ -23,14 +23,16 @@
 //     MoverFailed pass-through rather than a diagnostic string.
 //   * a CONSTRAINT copies the ORACLE. The dynamic constraint path does not
 //     go through exec at all: it calls RigExecRigEvaluator::_ResolveWeights
-//     and takes its error string, against the FINAL-frame placement in
-//     _volumeWeightMatrices. So does the baked one, for the same value.
+//     and takes its error string, against the FINAL-frame placement. So
+//     does the baked one, handed the program's own placements.
 //   * a CURRENT-PHASE field copies the ORACLE, for the same reason: the
 //     dynamic path patches the tapped packet with what _ResolveWeights
 //     measured against the in-flight points.
-//   * pose.weightFrames copies the walk's FINAL frames, which is what
-//     _UpdateVolumePlacements publishes and what the oracle then reads.
-// The two placements genuinely differ for a volume some constraint revises,
+//   * pose.weightFrames is the FINAL-frame placement, the table the oracle
+//     reads. One function places a volume, RigExecVolumePlacement, for the
+//     dynamic walk's refresh and this program's VolumePlacements step alike.
+// So packets place against the BASE frame and the oracle against the FINAL
+// one. The two genuinely differ for a volume some constraint revises,
 // and reproducing BOTH is the contract: parity is with the dynamic path as
 // it stands, not with the dynamic path as it might be tidied.
 #include "bakedProgramImpl.h"
@@ -439,15 +441,17 @@ void
 RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
-    // Where every volume weight ended up, as one step and one slot.
-    // It exists for two readers. pose.weightFrames is one; the other is the
-    // ORACLE, which places a volume from this map and is what a constraint's
-    // envelope and a current-phase field resolve through. The dynamic path
-    // refreshes it after every commit and the geometry walk runs after all of
-    // them, so one refresh at the end of the pose half is the same map every
-    // reader of it sees -- and making it a step is what orders those readers
-    // against it instead of leaving the refresh somewhere in the epilogue
-    // where a parallel schedule could have read it already.
+    // Where every volume weight ended up, as one step and one slot: the
+    // program's slot-indexed volumePlacement table. It exists for two
+    // readers. pose.weightFrames is one (the epilogue publishes it); the
+    // other is the ORACLE, handed the table as a RigExecVolumePlacementView,
+    // which is what a constraint's envelope and a current-phase field
+    // resolve through. The geometry walk runs after every pose commit, so
+    // one placement at the end of the pose half is what every reader sees
+    // -- and making it a step is what orders those readers against it
+    // instead of leaving it somewhere in the epilogue where a parallel
+    // schedule could have read the table already. The step reads every
+    // volume slot because both bodies place them all.
     bool anyVolume = false;
     for (const RigExecBakedProgramImpl::WeightObject &weight :
              B.weightObjects) {
@@ -514,19 +518,15 @@ RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
 {
     RigExecBakedProgramImpl &B = *program;
     if (step->kind == RigExecBakedStepKind::VolumePlacements) {
-        // The evaluator's own routine, over the frames this walk ended with.
-        // Not a second copy of it: a frame no matrix can be built from leaves
-        // whatever the failed decomposition wrote rather than the identity,
-        // and that is exactly the kind of detail a second copy loses.
-        B.updateVolumePlacements(
-            [&B](const SdfPath &provider, RigExecPointFrame *frame) {
-                const auto slot = B.index.find(provider);
-                if (slot == B.index.end()) {
-                    return false;
-                }
-                *frame = B.fin[size_t(B.finLast[size_t(slot->second)])];
-                return true;
-            });
+        // Every volume slot, from the frame the walk ended with, as the
+        // dynamic refresh places it. Live readers mask by placedVolumes and
+        // leave volumePlacementKeys at Placed.
+        for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
+            if (B.noScaleAvars[i]) {
+                B.volumePlacement[i] =
+                    RigExecVolumePlacement(B.fin[size_t(B.finLast[i])]);
+            }
+        }
         return;
     }
     RigExecBakedProgramImpl::WeightObject &weight =
@@ -551,6 +551,35 @@ RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
     // pass and everything else.
     B.weightPackets[size_t(step->object)] =
         RigExecBakedWeightPacket(B, &weight, B.weightPackets, time);
+}
+
+void
+RigExecBakedPublishVolumePlacements(const RigExecBakedProgramImpl &program,
+                                    std::map<SdfPath, GfMatrix4d> *frames)
+{
+    frames->clear();
+    const std::vector<char> *slots = nullptr;
+    switch (program.volumePlacementKeys) {
+    case RigExecVolumePlacementKeys::None:
+        return;
+    case RigExecVolumePlacementKeys::Placed:
+        slots = &program.placedVolumes;
+        break;
+    case RigExecVolumePlacementKeys::Every:
+        slots = &program.noScaleAvars;
+        break;
+    }
+    if (!slots) {
+        return;
+    }
+    for (size_t i = 0; i < slots->size() && i < program.paths.size() &&
+                       i < program.volumePlacement.size(); ++i) {
+        if ((*slots)[i]) {
+            // Slots are in path order, so each entry lands at the end.
+            frames->emplace_hint(frames->end(), program.paths[i],
+                                 program.volumePlacement[i]);
+        }
+    }
 }
 
 }  // namespace rigExec

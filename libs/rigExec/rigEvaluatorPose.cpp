@@ -7,6 +7,7 @@
 #include "frameExtraction.h"
 #include "rigExecMath/rbf.h"
 #include "solverKernels.h"
+#include "weightPackets.h"
 #include "rigExecMath/singleChainIk.h"
 #include "rigExecMath/solvers.h"
 
@@ -1405,12 +1406,9 @@ RigExecRigEvaluator::_UpdateVolumePlacements(
     _volumeWeightMatrices.clear();
     for (const auto &[path, tap] : _volumeWeightMatrixTaps) {
         RigExecPointFrame frame;
-        GfMatrix4d placement(1.0);
-        if (finalFrameOf(path, &frame) && _IsUsableConstraintFrame(frame)) {
-            RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                  frame.points, &placement);
-        }
-        _volumeWeightMatrices[path] = placement;
+        _volumeWeightMatrices[path] = finalFrameOf(path, &frame)
+                                          ? RigExecVolumePlacement(frame)
+                                          : GfMatrix4d(1.0);
     }
     pose->weightFrames = _volumeWeightMatrices;
 }

@@ -9,11 +9,16 @@
 // paths would still move points, just not the same points.
 // argv[1] = path to the examples directory; the codeless schema plugin is
 // expected at <examples>/../plugin/rigExecSchema/resources.
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 #include "rigExec/weightPackets.h"
+#include "rigExec/frameExtraction.h"
+#include "rigExecMath/pointFrame.h"
 #include <limits>
 
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
@@ -1431,6 +1436,236 @@ TestVolumeWeightOnAConstraint(const char *readPhase)
     CHECK(differs);
 }
 
+// RigExecVolumePlacement: the decomposition of a usable final frame, and the
+// identity for every frame that is not one.
+static void
+TestVolumePlacementGate()
+{
+    GfMatrix4d placed(1.0);
+    placed.SetRotate(GfRotation(GfVec3d(0, 0, 1), 30.0));
+    placed.SetTranslateOnly(GfVec3d(1, 2, 3));
+    const RigExecPointFrame usable =
+        RigExecMatrixToPoints(RigExecIdentityLandmarks(), placed);
+    GfMatrix4d expected(1.0);
+    CHECK(RigExecPointsToMatrix(RigExecIdentityLandmarks(), usable.points,
+                                &expected));
+    CHECK(RigExecVolumePlacement(usable) == expected);
+    CHECK(GfIsClose(RigExecVolumePlacement(usable), placed, 1e-9));
+
+    const GfMatrix4d identity(1.0);
+    RigExecPointFrame degenerate = usable;
+    degenerate.flags |= RigExecPointFrameDegenerate;
+    CHECK(RigExecVolumePlacement(degenerate) == identity);
+
+    RigExecPointFrame invalid = usable;
+    invalid.flags = 0;
+    CHECK(RigExecVolumePlacement(invalid) == identity);
+
+    RigExecPointFrame notFinite = usable;
+    notFinite.points[2][1] = std::numeric_limits<double>::quiet_NaN();
+    CHECK(RigExecVolumePlacement(notFinite) == identity);
+    notFinite = usable;
+    notFinite.points[0][0] = std::numeric_limits<double>::infinity();
+    CHECK(RigExecVolumePlacement(notFinite) == identity);
+}
+
+// A baked run places a volume from the program's own table. The dynamic
+// walk's map is poisoned between two baked runs; the second run's cone skips
+// VolumePlacements (no pose input moved) but re-runs the current-phase
+// assemble (the base points are animated), which resolves its field through
+// the oracle. The field and pose.weightFrames must equal a fresh evaluation.
+static void
+TestTheOracleReadsTheProgramsPlacements()
+{
+    const char *label = "oracle reads the program's placements";
+    const VtVec3fArray base{GfVec3f(0, 0, 0), GfVec3f(0.5f, 0, 0),
+                            GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+    Fixture f(base, GfVec3d(0, 2, 0));
+    VtVec3fArray later = base;
+    for (GfVec3f &p : later) {
+        p += GfVec3f(0.25f, 0, 0);
+    }
+    const UsdAttribute points = f.stage->GetAttributeAtPath(Fixture::Target());
+    points.Set(base, UsdTimeCode(1));
+    points.Set(later, UsdTimeCode(2));
+
+    UsdPrim v = f.MakeVolume("Sphere", TfToken("RigExecSphereWeight"),
+                             GfVec3d(0, 0, 0), 0.0f, 3.0f);
+    v.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetMetadata(TfToken("rigExecReadPhase"), std::string("preceding"));
+    f.MakeMover(SdfPath("/Asset/Rig/Movers/Lift"), v.GetPath());
+
+    RigExecRigEvaluator E(f.stage, SdfPath("/Asset/Rig"));
+    E.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    E.SetProfilingEnabled(true);
+    std::vector<std::string> errors;
+    if (!E.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("%s: compile error: %s\n", label, e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    const RigExecRigPose first = E.Evaluate(UsdTimeCode(1));
+    if (!first.valid || E.GetBakedGenerationCount() != 1) {
+        std::printf("FAIL %s: the first generation is not baked\n", label);
+        ++failures;
+        return;
+    }
+    GfMatrix4d poison(1.0);
+    poison.SetTranslate(GfVec3d(100, 0, 0));
+    RigExecBakedProgramTesting::SetWalkVolumePlacements(&E, poison);
+
+    E.ClearProfile();
+    const RigExecRigPose second = E.Evaluate(UsdTimeCode(2));
+    CHECK(second.valid);
+    CHECK(E.GetBakedGenerationCount() == 2);
+    CHECK(second.bakedParityMismatches == 0);
+    size_t placements = 0, assembles = 0;
+    for (const RigExecOpTraceEntry &entry : E.GetLastOpTrace()) {
+        placements += entry.kind == "VolumePlacements";
+        assembles += entry.kind == "RevisionStatic";
+    }
+    // The setup the assertion below depends on: the oracle ran, the
+    // placement step did not.
+    CHECK(placements == 0);
+    CHECK(assembles > 0);
+
+    RigExecRigEvaluator fresh(f.stage, SdfPath("/Asset/Rig"));
+    fresh.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    CHECK(fresh.Compile(&errors));
+    const RigExecRigPose reference = fresh.Evaluate(UsdTimeCode(2));
+    CHECK(reference.valid);
+
+    const auto got = second.movedProperties.find(Fixture::Target());
+    const auto want = reference.movedProperties.find(Fixture::Target());
+    CHECK(got != second.movedProperties.end());
+    CHECK(want != reference.movedProperties.end());
+    if (got == second.movedProperties.end() ||
+        want == reference.movedProperties.end()) {
+        return;
+    }
+    const VtVec3fArray gotPoints = got->second.Get<VtVec3fArray>();
+    CHECK(gotPoints == want->second.Get<VtVec3fArray>());
+    // Not vacuous: the field reaches the points, so a far-away placement
+    // would have moved none of them.
+    bool lifted = false;
+    for (size_t i = 0; i < gotPoints.size() && i < later.size(); ++i) {
+        lifted = lifted || !Near(gotPoints[i], later[i]);
+    }
+    CHECK(lifted);
+    CHECK(second.weightFrames == reference.weightFrames);
+    const auto frame = second.weightFrames.find(v.GetPath());
+    CHECK(frame != second.weightFrames.end() && frame->second != poison);
+}
+
+// A baked run publishes the program's placements, not the dynamic walk's
+// map. An unplaceable override (a computation override) sends one
+// generation down the walk while the program is kept, and the walk places
+// the overridden volume. After the release, a baked run at the same time
+// has nothing dirty relative to the program's last run, so its cone skips
+// VolumePlacements (no step reads outside the program, so that cluster is
+// not always run). It must publish the program's earlier answer.
+static void
+TestReleasedOverridePublishesTheProgramsPlacements()
+{
+    // The setup is a deliberate fallback, which a RIGEXEC_BAKE_REQUIRED
+    // registration reports as a failure; the default registration runs it.
+    if (TfGetenvBool("RIGEXEC_BAKE_REQUIRED", false)) {
+        return;
+    }
+    const char *label = "released override publishes program placements";
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const bool imported = stage->GetRootLayer()->ImportFromString(R"(#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 10
+)
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def RigExecControl "Root"
+        {
+            double avars:rz = 0
+            double avars:rz.timeSamples = {1: 0, 2: 45}
+        }
+        def RigExecJoint "Joint"
+        {
+            matrix4d rest:space = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+            double avars:rz.connect = </Asset/Rig/Root.avars:rz>
+        }
+        def RigExecSphereWeight "Guide"
+        {
+            double avars:ty = 3
+            float inputs:falloffMin = 0
+            float inputs:falloffMax = 1
+        }
+    }
+}
+)");
+    CHECK(imported);
+    const SdfPath rig("/Asset/Rig"), guide("/Asset/Rig/Guide");
+    RigExecRigEvaluator E(stage, rig);
+    E.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    E.SetProfilingEnabled(true);
+    std::vector<std::string> errors;
+    if (!E.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("FAIL %s: compile error: %s\n", label, e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    CHECK(E.Evaluate(UsdTimeCode(1)).valid);
+    const RigExecRigPose answer = E.Evaluate(UsdTimeCode(2));
+    CHECK(answer.valid);
+    if (E.GetBakedGenerationCount() != 2) {
+        std::printf("FAIL %s: the first generations are not baked\n", label);
+        ++failures;
+        return;
+    }
+    const auto authored = answer.weightFrames.find(guide);
+    CHECK(authored != answer.weightFrames.end() &&
+          authored->second.ExtractTranslation()[1] == 3.0);
+    for (const RigExecBakedStep &step :
+         E.GetBakedProgram()->GetStepGraph().steps) {
+        CHECK(!step.externalReads);
+    }
+
+    GfMatrix4d moved(1.0);
+    moved.SetTranslate(GfVec3d(0, 50, 0));
+    RigExecValueOverride drag;
+    drag.prim = guide;
+    drag.computation = TfToken("computePointFrame");
+    drag.value =
+        VtValue(RigExecMatrixToPoints(RigExecIdentityLandmarks(), moved));
+    E.SetInteractiveOverrides({drag});
+    const RigExecRigPose held = E.Evaluate(UsdTimeCode(2));
+    CHECK(held.valid);
+    CHECK(E.GetBakedGenerationCount() == 2);
+    CHECK(E.GetBakedProgram() != nullptr);
+    // Not vacuous: the walk's map now holds a placement the program's table
+    // does not.
+    const auto dragged = held.weightFrames.find(guide);
+    CHECK(dragged != held.weightFrames.end() &&
+          dragged->second.ExtractTranslation()[1] == 50.0);
+
+    E.ClearInteractiveOverrides();
+    E.ClearProfile();
+    const RigExecRigPose released = E.Evaluate(UsdTimeCode(2));
+    CHECK(released.valid);
+    CHECK(E.GetBakedGenerationCount() == 3);
+    for (const RigExecOpTraceEntry &entry : E.GetLastOpTrace()) {
+        CHECK(entry.kind != "VolumePlacements");
+    }
+    if (released.weightFrames != answer.weightFrames) {
+        std::printf("FAIL %s: weightFrames differ from the earlier baked "
+                    "answer\n", label);
+        ++failures;
+    }
+}
+
 static std::string
 DefaultResourceDir()
 {
@@ -1480,6 +1715,9 @@ main(int argc, char **argv)
     TestCurveWeightRejectsTwoCurves();
     TestVolumeWeightOnAConstraint("base");
     TestVolumeWeightOnAConstraint("preceding");
+    TestVolumePlacementGate();
+    TestTheOracleReadsTheProgramsPlacements();
+    TestReleasedOverridePublishesTheProgramsPlacements();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

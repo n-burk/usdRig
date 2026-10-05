@@ -588,6 +588,9 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 if (!weightObjects.empty()) {
                     std::vector<float> weights;
                     std::string error;
+                    // Reads _volumeWeightMatrices, which a baked run does
+                    // not refresh. Unreachable for a volume: a property
+                    // envelope cannot bind one (_ValidateWeightObjectDomain).
                     if (!_ResolveWeights(weightObjects[0], 1, time,
                                          &weights, &error) ||
                         weights.size() != 1) {

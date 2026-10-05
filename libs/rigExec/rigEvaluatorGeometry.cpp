@@ -248,7 +248,8 @@ bool
 RigExecRigEvaluator::_ResolveVolumeWeights(
     const UsdPrim &prim, size_t count, UsdTimeCode time,
     std::vector<float> *weights, std::string *error,
-    const std::vector<GfVec3f> *currentPoints) const
+    const std::vector<GfVec3f> *currentPoints,
+    const RigExecVolumePlacementView *placements) const
 {
     // Spelled only when an error needs it: this runs every time a volume
     // weight is resolved, and a resolve that succeeds reports nothing.
@@ -295,7 +296,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
         for (const SdfPath &input : inputs) {
             std::vector<float> field;
             if (!_ResolveWeights(input, count, time, &field, error,
-                                 currentPoints)) {
+                                 currentPoints, placements)) {
                 return false;
             }
             fields.push_back(std::move(field));
@@ -321,15 +322,23 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     // its own parity coverage, and a second hand-rolled implementation
     // of posed:space + rest offsets + avars + rotation order is exactly
     // the drift frameExtraction.h was created to prevent.
-    const auto matrixIt = _volumeWeightMatrices.find(prim.GetPath());
-    if (matrixIt == _volumeWeightMatrices.end()) {
+    const GfMatrix4d *placement = nullptr;
+    if (placements) {
+        placement = placements->Find(prim.GetPath());
+    } else {
+        const auto matrixIt = _volumeWeightMatrices.find(prim.GetPath());
+        if (matrixIt != _volumeWeightMatrices.end()) {
+            placement = &matrixIt->second;
+        }
+    }
+    if (!placement) {
         *error = who() + ": no resolved placement for this volume weight";
         return false;
     }
     // Scale and shear are removed so the field matches the rigid guide a
     // viewer draws; inputs:scaleX/Y/Z is the sole authority on
     // anisotropy (see the RigExecVolumeWeight schema doc).
-    GfMatrix4d rigid = matrixIt->second.RemoveScaleShear();
+    GfMatrix4d rigid = placement->RemoveScaleShear();
     const double det = rigid.GetDeterminant();
     if (!std::isfinite(det) || std::abs(det) < 1e-12) {
         *error = who() + ": degenerate volume placement";
@@ -480,7 +489,8 @@ bool
 RigExecRigEvaluator::_ResolveWeights(
     const SdfPath &weightPrimPath, size_t count, UsdTimeCode time,
     std::vector<float> *weights, std::string *error,
-    const std::vector<GfVec3f> *currentPoints) const
+    const std::vector<GfVec3f> *currentPoints,
+    const RigExecVolumePlacementView *placements) const
 {
     weights->assign(count, 1.0f);
     const UsdPrim prim = _stage->GetPrimAtPath(weightPrimPath);
@@ -504,7 +514,7 @@ RigExecRigEvaluator::_ResolveWeights(
     if (_IsVolumeWeightType(typeName) || typeName == _kGeoCombineWeight) {
         std::vector<float> resolved;
         if (!_ResolveVolumeWeights(prim, count, time, &resolved, error,
-                                   currentPoints)) {
+                                   currentPoints, placements)) {
             return false;
         }
         TfToken volumePolicy = _kGeoClamp;
@@ -646,7 +656,7 @@ RigExecRigEvaluator::_ResolveWeights(
             // in-flight points, or the base silently reverts to the
             // reference field.
             if (!_ResolveWeights(baseTargets[0], count, time, &base, error,
-                                 currentPoints)) {
+                                 currentPoints, placements)) {
                 return false;
             }
         }

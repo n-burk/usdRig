@@ -184,6 +184,25 @@ RigExecRigidWorldToLocal(const RigExecPointFrame &posed, GfMatrix4d *result)
     return true;
 }
 
+GfMatrix4d
+RigExecVolumePlacement(const RigExecPointFrame &final)
+{
+    GfMatrix4d placement(1.0);
+    if (!final.IsValid() || final.IsDegenerate()) {
+        return placement;
+    }
+    for (const GfVec3d &point : final.points) {
+        if (!std::isfinite(point[0]) || !std::isfinite(point[1]) ||
+            !std::isfinite(point[2])) {
+            return placement;
+        }
+    }
+    // A failed decomposition writes the identity (pointFrame.cpp).
+    RigExecPointsToMatrix(RigExecIdentityLandmarks(), final.points,
+                          &placement);
+    return placement;
+}
+
 namespace {
 
 // Per-axis divisors have to describe a volume: see _CheckVolumePrologue,

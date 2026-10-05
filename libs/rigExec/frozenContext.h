@@ -919,7 +919,10 @@ struct RigExecPartialSlots {
         bool bail = false;
     };
     std::vector<StepSlots> steps;
-    std::map<SdfPath, GfMatrix4d> volumeWeightMatrices;
+    /// The program's volumePlacement at its volume slots, in slot order.
+    std::vector<GfMatrix4d> volumePlacement;
+    RigExecVolumePlacementKeys volumePlacementKeys =
+        RigExecVolumePlacementKeys::None;
     void Capture(const RigExecBakedProgramImpl &program);
     bool Restore(RigExecBakedProgramImpl *program) const;
     size_t Bytes() const;

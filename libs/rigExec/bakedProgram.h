@@ -510,6 +510,12 @@ public:
     std::vector<RigExecOpGraphNode> GetOpGraph() const;
 
 private:
+    // Test-only; reached through RigExecBakedProgramTesting
+    // (bakedProgramImpl.h), because only this class is the evaluator's friend.
+    friend struct RigExecBakedProgramTesting;
+    static void _SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
+                                         const GfMatrix4d &matrix);
+
     explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);
     std::unique_ptr<RigExecBakedProgramImpl> _impl;
     RigExecBakedBail _lastBail = RigExecBakedBail::None;

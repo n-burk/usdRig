@@ -4648,7 +4648,8 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // NO published domain is left empty by a standing refusal any more, and
     // that is new as of the Phase 3 merge -- this block used to be a list of
     // four. A volume weight object bakes, so weightFrames is published from
-    // the placement map the walk left (bakedProgram.cpp's epilogue); a
+    // the program's volumePlacement table, which the VolumePlacements step
+    // writes (bakedProgram.cpp's epilogue); a
     // mover's weight object bakes, so weightFields is drained per revision
     // beside the geometry it deformed (RigExecBakedPublishGeometry); and a
     // constraint may target a plain Xformable, so providerXforms and
