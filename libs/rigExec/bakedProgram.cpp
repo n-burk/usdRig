@@ -1480,7 +1480,7 @@ RigExecBakedProgram::DryRunValueEdits(
     const UsdNotice::ObjectsChanged &notice,
     std::vector<SdfPath> *readPaths, bool skipPatchableAvars) const
 {
-    return _RouteValueEdits(*_impl, notice, nullptr, readPaths,
+    return _RouteValueEdits(*_impl, notice, nullptr, readPaths, nullptr,
                             skipPatchableAvars);
 }
 

@@ -10333,15 +10333,31 @@ struct RigExecWireSkinTopology : public ::flatbuffers::NativeTable {
   std::vector<uint16_t> indices16{};
   std::vector<int32_t> indices32{};
   std::vector<float> weights{};
+  bool raw = false;
+  std::vector<int32_t> rawIndices{};
+  std::vector<float> rawWeights{};
 };
 
-/// One skin mover's per-point influence layout, sparse. Kept: every entry
-/// except one whose index is 0 and whose weight is zero (either sign),
-/// which reads exactly as padding does. Expanded, each point holds its
-/// kept (index, weight) entries in their original order, then (0, +0.0f)
-/// padding up to element_size. RigExecFormatSparseTopology and
-/// RigExecFormatExpandTopology (rigExecBinary/format.h) are the two
-/// directions.
+/// One skin mover's per-point influence layout, in one of two forms, and
+/// only one per layout:
+/// - sparse, for every layout whose indices and weights are rows of an
+///   element_size in [0, 65535] (none at element_size 0). Kept: every
+///   entry except one whose index is 0 and whose weight is zero (either
+///   sign), which reads exactly as padding does. Expanded, each point
+///   holds its kept (index, weight) entries in their original order, then
+///   (0, +0.0f) padding up to element_size.
+/// - raw, for every layout the sparse form cannot hold (an element_size
+///   below 0 or past 65535, entries at element_size 0, indices and
+///   weights of different lengths, or entries short of a whole row):
+///   raw_indices and raw_weights verbatim, every sparse vector empty,
+///   index_width 0. point_count is its rows when it is rows of an
+///   element_size of at least 1, else 0, as the evaluators count them.
+/// validated is exactly the evaluator's layout rules, in either form: rows
+/// of an element_size of at least 1, at least one influence, every index
+/// in [0, influence_count) and every weight finite and not negative, so
+/// the kernels index the influence table without a check.
+/// RigExecFormatTopology and RigExecFormatExpandTopology
+/// (rigExecBinary/format.h) are the two directions.
 struct SkinTopology FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef RigExecWireSkinTopology NativeTableType;
   typedef SkinTopologyBuilder Builder;
@@ -10360,7 +10376,10 @@ struct SkinTopology FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_INDICES8 = 18,
     VT_INDICES16 = 20,
     VT_INDICES32 = 22,
-    VT_WEIGHTS = 24
+    VT_WEIGHTS = 24,
+    VT_RAW = 26,
+    VT_RAWINDICES = 28,
+    VT_RAWWEIGHTS = 30
   };
   int32_t elementSize() const {
     return GetField<int32_t>(VT_ELEMENTSIZE, 0);
@@ -10381,9 +10400,10 @@ struct SkinTopology FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<uint16_t> *counts16() const {
     return GetPointer<const ::flatbuffers::Vector<uint16_t> *>(VT_COUNTS16);
   }
-  /// 1, 2 or 4: which indices vector holds the kept indices. The writer
-  /// picks 1 when every kept index is in [0, 255], 2 when every one is in
-  /// [0, 65535], else 4, and 4 whenever one is negative.
+  /// 1, 2 or 4 in the sparse form, 0 in the raw form: which indices
+  /// vector holds the kept indices. The writer picks 1 when every kept
+  /// index is in [0, 255], 2 when every one is in [0, 65535], else 4, and
+  /// 4 whenever one is negative.
   uint8_t indexWidth() const {
     return GetField<uint8_t>(VT_INDEXWIDTH, 0);
   }
@@ -10399,6 +10419,17 @@ struct SkinTopology FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// Kept weights, point-major.
   const ::flatbuffers::Vector<float> *weights() const {
     return GetPointer<const ::flatbuffers::Vector<float> *>(VT_WEIGHTS);
+  }
+  /// The raw form; false for the sparse one.
+  bool raw() const {
+    return GetField<uint8_t>(VT_RAW, 0) != 0;
+  }
+  /// The raw form's arrays, bit for bit; empty in the sparse form.
+  const ::flatbuffers::Vector<int32_t> *rawIndices() const {
+    return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_RAWINDICES);
+  }
+  const ::flatbuffers::Vector<float> *rawWeights() const {
+    return GetPointer<const ::flatbuffers::Vector<float> *>(VT_RAWWEIGHTS);
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -10420,6 +10451,11 @@ struct SkinTopology FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(indices32()) &&
            VerifyOffset(verifier, VT_WEIGHTS) &&
            verifier.VerifyVector(weights()) &&
+           VerifyField<uint8_t>(verifier, VT_RAW, 1) &&
+           VerifyOffset(verifier, VT_RAWINDICES) &&
+           verifier.VerifyVector(rawIndices()) &&
+           VerifyOffset(verifier, VT_RAWWEIGHTS) &&
+           verifier.VerifyVector(rawWeights()) &&
            verifier.EndTable();
   }
   RigExecWireSkinTopology *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -10464,6 +10500,15 @@ struct SkinTopologyBuilder {
   void add_weights(::flatbuffers::Offset<::flatbuffers::Vector<float>> weights) {
     fbb_.AddOffset(SkinTopology::VT_WEIGHTS, weights);
   }
+  void add_raw(bool raw) {
+    fbb_.AddElement<uint8_t>(SkinTopology::VT_RAW, static_cast<uint8_t>(raw), 0);
+  }
+  void add_rawIndices(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> rawIndices) {
+    fbb_.AddOffset(SkinTopology::VT_RAWINDICES, rawIndices);
+  }
+  void add_rawWeights(::flatbuffers::Offset<::flatbuffers::Vector<float>> rawWeights) {
+    fbb_.AddOffset(SkinTopology::VT_RAWWEIGHTS, rawWeights);
+  }
   explicit SkinTopologyBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -10487,10 +10532,15 @@ inline ::flatbuffers::Offset<SkinTopology> CreateSkinTopology(
     ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> indices8 = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint16_t>> indices16 = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> indices32 = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<float>> weights = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<float>> weights = 0,
+    bool raw = false,
+    ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> rawIndices = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<float>> rawWeights = 0) {
   SkinTopologyBuilder builder_(_fbb);
   builder_.add_influenceCount(influenceCount);
   builder_.add_pointCount(pointCount);
+  builder_.add_rawWeights(rawWeights);
+  builder_.add_rawIndices(rawIndices);
   builder_.add_weights(weights);
   builder_.add_indices32(indices32);
   builder_.add_indices16(indices16);
@@ -10498,6 +10548,7 @@ inline ::flatbuffers::Offset<SkinTopology> CreateSkinTopology(
   builder_.add_counts16(counts16);
   builder_.add_counts8(counts8);
   builder_.add_elementSize(elementSize);
+  builder_.add_raw(raw);
   builder_.add_indexWidth(indexWidth);
   builder_.add_validated(validated);
   return builder_.Finish();
@@ -10520,13 +10571,18 @@ inline ::flatbuffers::Offset<SkinTopology> CreateSkinTopologyDirect(
     const std::vector<uint8_t> *indices8 = nullptr,
     const std::vector<uint16_t> *indices16 = nullptr,
     const std::vector<int32_t> *indices32 = nullptr,
-    const std::vector<float> *weights = nullptr) {
+    const std::vector<float> *weights = nullptr,
+    bool raw = false,
+    const std::vector<int32_t> *rawIndices = nullptr,
+    const std::vector<float> *rawWeights = nullptr) {
   auto counts8__ = counts8 ? _fbb.CreateVector<uint8_t>(*counts8) : 0;
   auto counts16__ = counts16 ? _fbb.CreateVector<uint16_t>(*counts16) : 0;
   auto indices8__ = indices8 ? _fbb.CreateVector<uint8_t>(*indices8) : 0;
   auto indices16__ = indices16 ? _fbb.CreateVector<uint16_t>(*indices16) : 0;
   auto indices32__ = indices32 ? _fbb.CreateVector<int32_t>(*indices32) : 0;
   auto weights__ = weights ? _fbb.CreateVector<float>(*weights) : 0;
+  auto rawIndices__ = rawIndices ? _fbb.CreateVector<int32_t>(*rawIndices) : 0;
+  auto rawWeights__ = rawWeights ? _fbb.CreateVector<float>(*rawWeights) : 0;
   return rigExec::fb::CreateSkinTopology(
       _fbb,
       elementSize,
@@ -10539,7 +10595,10 @@ inline ::flatbuffers::Offset<SkinTopology> CreateSkinTopologyDirect(
       indices8__,
       indices16__,
       indices32__,
-      weights__);
+      weights__,
+      raw,
+      rawIndices__,
+      rawWeights__);
 }
 
 ::flatbuffers::Offset<SkinTopology> CreateSkinTopology(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireSkinTopology *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -16429,6 +16488,9 @@ inline void SkinTopology::UnPackTo(RigExecWireSkinTopology *_o, const ::flatbuff
   { auto _e = indices16(); if (_e) { _o->indices16.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->indices16[_i] = _e->Get(_i); } } else { _o->indices16.resize(0); } }
   { auto _e = indices32(); if (_e) { _o->indices32.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->indices32[_i] = _e->Get(_i); } } else { _o->indices32.resize(0); } }
   { auto _e = weights(); if (_e) { _o->weights.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->weights[_i] = _e->Get(_i); } } else { _o->weights.resize(0); } }
+  { auto _e = raw(); _o->raw = _e; }
+  { auto _e = rawIndices(); if (_e) { _o->rawIndices.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->rawIndices[_i] = _e->Get(_i); } } else { _o->rawIndices.resize(0); } }
+  { auto _e = rawWeights(); if (_e) { _o->rawWeights.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->rawWeights[_i] = _e->Get(_i); } } else { _o->rawWeights.resize(0); } }
 }
 
 inline ::flatbuffers::Offset<SkinTopology> CreateSkinTopology(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireSkinTopology *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -16450,6 +16512,9 @@ inline ::flatbuffers::Offset<SkinTopology> SkinTopology::Pack(::flatbuffers::Fla
   auto _indices16 = _o->indices16.size() ? _fbb.CreateVector(_o->indices16) : 0;
   auto _indices32 = _o->indices32.size() ? _fbb.CreateVector(_o->indices32) : 0;
   auto _weights = _o->weights.size() ? _fbb.CreateVector(_o->weights) : 0;
+  auto _raw = _o->raw;
+  auto _rawIndices = _o->rawIndices.size() ? _fbb.CreateVector(_o->rawIndices) : 0;
+  auto _rawWeights = _o->rawWeights.size() ? _fbb.CreateVector(_o->rawWeights) : 0;
   return rigExec::fb::CreateSkinTopology(
       _fbb,
       _elementSize,
@@ -16462,7 +16527,10 @@ inline ::flatbuffers::Offset<SkinTopology> SkinTopology::Pack(::flatbuffers::Fla
       _indices8,
       _indices16,
       _indices32,
-      _weights);
+      _weights,
+      _raw,
+      _rawIndices,
+      _rawWeights);
 }
 
 inline RigExecWirePathValue::RigExecWirePathValue(const RigExecWirePathValue &o)
@@ -19165,10 +19233,13 @@ inline const ::flatbuffers::TypeTable *SkinTopologyTypeTable() {
     { ::flatbuffers::ET_UCHAR, 1, -1 },
     { ::flatbuffers::ET_USHORT, 1, -1 },
     { ::flatbuffers::ET_INT, 1, -1 },
+    { ::flatbuffers::ET_FLOAT, 1, -1 },
+    { ::flatbuffers::ET_BOOL, 0, -1 },
+    { ::flatbuffers::ET_INT, 1, -1 },
     { ::flatbuffers::ET_FLOAT, 1, -1 }
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 11, type_codes, nullptr, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 14, type_codes, nullptr, nullptr, nullptr, nullptr
   };
   return &tt;
 }

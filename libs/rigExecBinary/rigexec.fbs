@@ -818,13 +818,26 @@ table BlendChannel {
 }
 /// One contiguous vertex range and the influence positions it indexes.
 table Chunk { begin: int; end: int; key: [int]; }
-/// One skin mover's per-point influence layout, sparse. Kept: every entry
-/// except one whose index is 0 and whose weight is zero (either sign),
-/// which reads exactly as padding does. Expanded, each point holds its
-/// kept (index, weight) entries in their original order, then (0, +0.0f)
-/// padding up to element_size. RigExecFormatSparseTopology and
-/// RigExecFormatExpandTopology (rigExecBinary/format.h) are the two
-/// directions.
+/// One skin mover's per-point influence layout, in one of two forms, and
+/// only one per layout:
+/// - sparse, for every layout whose indices and weights are rows of an
+///   element_size in [0, 65535] (none at element_size 0). Kept: every
+///   entry except one whose index is 0 and whose weight is zero (either
+///   sign), which reads exactly as padding does. Expanded, each point
+///   holds its kept (index, weight) entries in their original order, then
+///   (0, +0.0f) padding up to element_size.
+/// - raw, for every layout the sparse form cannot hold (an element_size
+///   below 0 or past 65535, entries at element_size 0, indices and
+///   weights of different lengths, or entries short of a whole row):
+///   raw_indices and raw_weights verbatim, every sparse vector empty,
+///   index_width 0. point_count is its rows when it is rows of an
+///   element_size of at least 1, else 0, as the evaluators count them.
+/// validated is exactly the evaluator's layout rules, in either form: rows
+/// of an element_size of at least 1, at least one influence, every index
+/// in [0, influence_count) and every weight finite and not negative, so
+/// the kernels index the influence table without a check.
+/// RigExecFormatTopology and RigExecFormatExpandTopology
+/// (rigExecBinary/format.h) are the two directions.
 table SkinTopology {
   element_size: int;
   point_count: ulong;
@@ -833,15 +846,21 @@ table SkinTopology {
   /// Kept count per point: counts8 when element_size <= 255, else counts16.
   counts8: [ubyte];
   counts16: [ushort];
-  /// 1, 2 or 4: which indices vector holds the kept indices. The writer
-  /// picks 1 when every kept index is in [0, 255], 2 when every one is in
-  /// [0, 65535], else 4, and 4 whenever one is negative.
+  /// 1, 2 or 4 in the sparse form, 0 in the raw form: which indices
+  /// vector holds the kept indices. The writer picks 1 when every kept
+  /// index is in [0, 255], 2 when every one is in [0, 65535], else 4, and
+  /// 4 whenever one is negative.
   index_width: ubyte;
   indices8: [ubyte];
   indices16: [ushort];
   indices32: [int];
   /// Kept weights, point-major.
   weights: [float];
+  /// The raw form; false for the sparse one.
+  raw: bool;
+  /// The raw form's arrays, bit for bit; empty in the sparse form.
+  raw_indices: [int];
+  raw_weights: [float];
 }
 /// A static stage value a revision's assembly reads.
 table PathValue {

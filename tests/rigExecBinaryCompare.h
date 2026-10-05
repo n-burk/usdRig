@@ -150,6 +150,8 @@ _BinarySlotName(const _BinaryFile &file, uint32_t slot)
 struct _BinaryCompareStats {
     size_t reads = 0;
     size_t topologies = 0;
+    /// Of the topologies, those stored raw.
+    size_t rawTopologies = 0;
     size_t droppedEntries = 0;
     size_t samples = 0;
     size_t bases = 0;
@@ -1405,8 +1407,11 @@ _BinaryCanonicalTopology(const rigExec::RigExecSkinTopology &live,
     }
 }
 
-/// A sparse topology against the program's dense one: its expansion is
-/// the canonical form, bit for bit, with the same shape facts.
+/// A stored topology against the program's dense one, with the same shape
+/// facts: in the sparse form, which holds exactly the layouts that are
+/// rows of an element size in [0, 65535] (none at 0), its expansion is the
+/// canonical form, bit for bit; in the raw form, which holds every other
+/// layout, it is the program's arrays, bit for bit.
 void
 _BinaryCompareTopology(const rigExec::RigExecSkinTopology &live,
                        const rigExec::fb::RigExecWireSkinTopology *wire)
@@ -1415,10 +1420,22 @@ _BinaryCompareTopology(const rigExec::RigExecSkinTopology &live,
     if (!wire) {
         return;
     }
+    const size_t n = live.indices.size();
+    const bool sparseHolds =
+        live.elementSize >= 0 && live.elementSize <= 65535 &&
+        n == live.weights.size() &&
+        (live.elementSize == 0 ? n == 0
+                               : n % size_t(live.elementSize) == 0);
+    CHECK(wire->raw == !sparseHolds);
     size_t dropped = 0;
     std::vector<int32_t> wantIndices, gotIndices;
     std::vector<float> wantWeights, gotWeights;
-    _BinaryCanonicalTopology(live, &wantIndices, &wantWeights, &dropped);
+    if (wire->raw) {
+        wantIndices.assign(live.indices.begin(), live.indices.end());
+        wantWeights.assign(live.weights.begin(), live.weights.end());
+    } else {
+        _BinaryCanonicalTopology(live, &wantIndices, &wantWeights, &dropped);
+    }
     rigExec::RigExecFormatExpandTopology(*wire, &gotIndices, &gotWeights);
     CHECK(wantIndices == gotIndices);
     CHECK(wantWeights.size() == gotWeights.size() &&
@@ -1431,6 +1448,7 @@ _BinaryCompareTopology(const rigExec::RigExecSkinTopology &live,
     CHECK(live.validated == wire->validated);
     if (_binaryStats) {
         ++_binaryStats->topologies;
+        _binaryStats->rawTopologies += wire->raw ? 1 : 0;
         _binaryStats->droppedEntries += dropped;
     }
 }

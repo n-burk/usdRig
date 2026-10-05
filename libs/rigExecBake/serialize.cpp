@@ -1027,7 +1027,9 @@ _FileFill::_Topology(const RigExecSkinTopology &topology,
 {
     auto out = std::make_unique<fb::RigExecWireSkinTopology>();
     std::string why;
-    if (!RigExecFormatSparseTopology(
+    // A layout the sparse form cannot hold is stored raw, so playback reads
+    // the arrays the evaluators read.
+    if (!RigExecFormatTopology(
             topology.indices, topology.weights, int32_t(topology.elementSize),
             uint64_t(topology.pointCount), uint64_t(topology.influenceCount),
             topology.validated, out.get(), &why)) {

@@ -868,6 +868,33 @@ rigexec_add_verify_binary_test(NAME volume_placements
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/volume_placements.usda"
     FRAMES 1,5,10)
 
+# Three skin layouts the file stores raw because the sparse form cannot
+# hold them, OddSkin, WideOddSkin and WideEmptySkin, and two it stores
+# sparse, ShortSkin and RowSkin. OddSkin, WideOddSkin, WideEmptySkin and
+# ShortSkin fail and RowSkin skins; playback gives the evaluators'
+# MoverFailed lines and counts the same work. The four failing skins'
+# meshes have keyed points, chain bases held at the bake time, so the
+# class is static. The same stage, and a two-limb rig, cut into chunks of two
+# vertices whatever their ready levels: the only bakes that store chunked
+# revisions, so Open's chunk rules meet real cuts and playback runs the
+# chunk, staleness and re-cut paths.
+rigexec_add_verify_binary_test(NAME raw_skin_layouts
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/raw_skin_layouts.usda"
+    FRAMES 1,4,7,10 TIME 1 CLASS static
+    DRAGS "/RawSkinAsset/Rig/Controls/C0.avars:rz,/RawSkinAsset/Rig/Controls/C0/C1.avars:rz")
+rigexec_add_verify_binary_test(NAME raw_skin_layouts_chunked
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/raw_skin_layouts.usda"
+    FRAMES 1,4,7,10 TIME 1 CLASS static
+    DRAGS "/RawSkinAsset/Rig/Controls/C0.avars:rz,/RawSkinAsset/Rig/Controls/C0/C1.avars:rz")
+rigexec_add_verify_binary_test(NAME oneloop_two_limbs_chunked
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/oneloop_two_limbs.usda"
+    FRAMES 1,4,8,12 CLASS inputs
+    DRAGS "/LimbsAsset/Rig/Controls/A0.avars:rz,/LimbsAsset/Rig/Controls/BEffector.avars:tx")
+foreach(_chunked IN ITEMS raw_skin_layouts_chunked oneloop_two_limbs_chunked)
+    set_property(TEST verify_binary_${_chunked} APPEND PROPERTY ENVIRONMENT
+        "RIGEXEC_BAKED_CHUNK_VERTS=2" "RIGEXEC_BAKED_CHUNK_ALWAYS=1")
+endforeach()
+
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
 target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecPack PRIVATE ${_rigexec_schema_resource_define})

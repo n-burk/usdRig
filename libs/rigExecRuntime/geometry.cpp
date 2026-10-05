@@ -3077,8 +3077,9 @@ RrGeoStorePacket(const RrProgram *program, const RrWeightPacket &packet)
     return out;
 }
 
-// A skin layout as the kernels read it: the sparse table expanded to its
-// dense rows. Null when the revision has none.
+// A skin layout as the baked program holds it: a raw layout's stored
+// arrays, or the sparse table expanded to its dense rows. Null when the
+// revision has none.
 std::shared_ptr<const RrGeoSkinTopology>
 RrGeoWireTopology(const RigExecWireSkinTopology *wire)
 {

@@ -6,6 +6,7 @@
 #include "rigExecBinary/stepGraph.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <new>
 #include <string_view>
@@ -346,6 +347,88 @@ _TopologyIndexCount(const fb::RigExecWireSkinTopology &topology)
     }
 }
 
+/// Whether the sparse form holds a skin layout of \p indices indices and
+/// \p weights weights at \p elementSize: rows of an element size in
+/// [0, 65535], with no entries at element size 0.
+bool
+_SparseCanHold(size_t indices, size_t weights, int32_t elementSize)
+{
+    if (elementSize < 0 || elementSize > 65535 || indices != weights) {
+        return false;
+    }
+    return elementSize == 0 ? indices == 0
+                            : indices % size_t(elementSize) == 0;
+}
+
+/// Whether a skin layout of \p indices indices and \p weights weights is
+/// rows of \p elementSize, at least 1: the only layouts the evaluators
+/// give points and may validate.
+bool
+_Rows(size_t indices, size_t weights, int32_t elementSize)
+{
+    return elementSize >= 1 && indices == weights &&
+           indices % size_t(elementSize) == 0;
+}
+
+/// The point count the evaluators give such a layout: its rows, else 0.
+uint64_t
+_RowCount(size_t indices, size_t weights, int32_t elementSize)
+{
+    return _Rows(indices, weights, elementSize)
+               ? uint64_t(indices / size_t(elementSize))
+               : 0;
+}
+
+/// How skin layout \p t breaks the evaluator's layout rules, as the text
+/// that follows "validated", or empty when it passes them. The rules: rows
+/// of an element size of at least 1, at least one influence, every index
+/// in [0, influence_count) and every weight finite and not negative; the
+/// kernels rely on them to index the influence table unchecked. The sparse
+/// form is rows by its shape, and an entry it drops is (0, +-0), which
+/// passes whenever there is an influence. \p t must have passed its form's
+/// shape checks, so its index and weight vectors are the same length.
+std::string
+_RuleBreak(const fb::RigExecWireSkinTopology &t)
+{
+    if (t.raw &&
+        !_Rows(t.rawIndices.size(), t.rawWeights.size(), t.elementSize)) {
+        return ", but its raw layout is not rows of element_size";
+    }
+    if (t.elementSize < 1 || t.influenceCount < 1) {
+        return " with element_size " + std::to_string(t.elementSize) +
+               " and " + std::to_string(t.influenceCount) + " influence(s)";
+    }
+    const size_t entries = t.raw ? t.rawWeights.size() : t.weights.size();
+    for (size_t k = 0; k < entries; ++k) {
+        const int32_t index = t.raw ? t.rawIndices[k] : _TopologyIndex(t, k);
+        const float weight = t.raw ? t.rawWeights[k] : t.weights[k];
+        const char *entry = t.raw ? ", but raw entry " : ", but kept entry ";
+        if (index < 0 || uint64_t(index) >= t.influenceCount) {
+            return entry + _N(k) + " indexes influence " +
+                   std::to_string(index) + " of " +
+                   std::to_string(t.influenceCount);
+        }
+        if (!std::isfinite(weight) || weight < 0.0f) {
+            return entry + _N(k) + " has a negative or non-finite weight";
+        }
+    }
+    return {};
+}
+
+/// Whether \p index names an entry of \p table.
+template <class Table>
+bool
+_Has(const Table &table, int64_t index)
+{
+    return index >= 0 && uint64_t(index) < uint64_t(table.size());
+}
+
+// The step rules, the step labels and the step graph's domain names cover
+// every kind and domain up to these; an appended one needs its own.
+static_assert(fb::StepKind::MAX == fb::StepKind::FrameMatrix &&
+                  fb::SlotDomain::MAX == fb::SlotDomain::FrameMatrix,
+              "a step kind or slot domain was appended: give it its rules");
+
 class _Validator {
 public:
     explicit _Validator(const RigExecWireFile &file) : _f(file) {}
@@ -363,8 +446,9 @@ private:
     {
         return _Root() && _Paths() && _Values() && _Pools() && _Slots() &&
                _SlotMeta() && _Constants() && _Steps() && _Cones() &&
-               _Pose() && _Geometry() && _PropertyChains() && _External() &&
-               _Overrides() && _Presentation();
+               _Pose() && _Geometry() && _PhaseBindings() && _StepGraph() &&
+               _PropertyChains() && _External() && _Overrides() &&
+               _Presentation();
     }
 
     bool _Bad(std::string what)
@@ -1031,8 +1115,58 @@ private:
         return true;
     }
 
+    /// "step N (<label>)", the program's name for a step in its refusals.
+    std::string _StepName(size_t step) const
+    {
+        return "step " + _N(step) + " (" + RigExecFormatStepLabel(_f, step) +
+               ")";
+    }
+
+    /// One VolumePlacements step places one volume: part 1, its object a
+    /// volume slot (no_scale_avars), its one write that slot of
+    /// WeightFrames, and no other step placing the same slot. \p placer
+    /// maps each slot to the step that places it, or -1.
+    bool _VolumePlacement(size_t i, std::vector<int64_t> *placer)
+    {
+        const fb::RigExecWireStep &step = _f.steps[i];
+        if (step.part != 1) {
+            return _Bad(_StepName(i) +
+                        (step.part == -1
+                             ? " is the retired whole-map placement (part -1)"
+                             : " has part " + std::to_string(step.part) +
+                                   ", which is no VolumePlacements form"));
+        }
+        const std::vector<uint8_t> &volumes = _f.constants->noScaleAvars;
+        if (!_Has(volumes, step.object) || !volumes[size_t(step.object)]) {
+            return _Bad(_StepName(i) + " places slot " +
+                        std::to_string(step.object) +
+                        ", which is no volume slot");
+        }
+        const uint32_t slot = uint32_t(step.object);
+        if (step.writes.size() != 1 ||
+            step.writes[0].domain() != fb::SlotDomain::WeightFrames ||
+            step.writes[0].begin() != slot ||
+            step.writes[0].end() != slot + 1) {
+            return _Bad(_StepName(i) + " writes other than WeightFrames[" +
+                        _N(slot) + "]");
+        }
+        const int64_t first = (*placer)[slot];
+        if (first >= 0) {
+            return _Bad(_StepName(i) + " places volume slot " + _N(slot) +
+                        " again; " + _StepName(size_t(first)) +
+                        " already does");
+        }
+        (*placer)[slot] = int64_t(i);
+        return true;
+    }
+
     bool _Steps()
     {
+        // The VolumePlacements step of each volume slot. With one step per
+        // volume and no other writer of WeightFrames, the step graph's
+        // producer check puts each volume's step before every reader of its
+        // slot.
+        std::vector<int64_t> placer(_slots, -1);
         for (size_t i = 0; i < _f.steps.size(); ++i) {
             const fb::RigExecWireStep &step = _f.steps[i];
             const std::string row = "steps[" + _N(i) + "]";
@@ -1051,21 +1185,66 @@ private:
                     }
                 }
             }
+        }
+        // The reserved values ahead of every rule on what a step of a kind
+        // reads or writes, so a retired step is named as one rather than
+        // by the rule its kind breaks.
+        const std::string reserved =
+            RigExecStepGraphReservedError(_f.steps, _GraphRange);
+        if (!reserved.empty()) {
+            return _Bad(reserved);
+        }
+        for (size_t i = 0; i < _f.steps.size(); ++i) {
+            const fb::RigExecWireStep &step = _f.steps[i];
             if (step.kind == fb::StepKind::WeightPacket &&
                 (step.object < 0 || size_t(step.object) >= _stepBacked)) {
-                return _Bad(row + ": a WeightPacket step names no "
-                                  "step-backed weight object");
+                return _Bad("steps[" + _N(i) +
+                            "]: a WeightPacket step names no step-backed "
+                            "weight object");
+            }
+            if (step.kind == fb::StepKind::VolumePlacements) {
+                if (!_VolumePlacement(i, &placer)) {
+                    return false;
+                }
+                continue;
+            }
+            for (const fb::SlotRange &range : step.writes) {
+                if (range.domain() == fb::SlotDomain::WeightFrames) {
+                    return _Bad(_StepName(i) +
+                                " writes WeightFrames, which only a "
+                                "VolumePlacements step writes");
+                }
             }
         }
-        // Every step and cluster index, edge order, producers, membership,
-        // the partition and the acyclic cluster graph: the rules the
-        // runtime's reader applies, in its words.
-        const std::string why = RigExecStepGraphError(
-            _f.steps, *_f.clustering, [](const fb::SlotRange &range) {
-                return RigExecStepGraphRange{uint8_t(range.domain()),
-                                             range.begin(), range.end()};
-            });
+        const std::vector<uint8_t> &volumes = _f.constants->noScaleAvars;
+        for (size_t slot = 0; slot < volumes.size(); ++slot) {
+            if (volumes[slot] && placer[slot] < 0) {
+                return _Bad("volume slot " + _N(slot) + " (" +
+                            RigExecFormatPathText(
+                                _f, _f.slotMeta->paths[slot]) +
+                            ") has no VolumePlacements step");
+            }
+        }
+        return true;
+    }
+
+    /// Every step and cluster index, edge order, producers, membership, the
+    /// partition and the acyclic cluster graph: the rules the runtime's
+    /// reader applies, in its words. It runs after the phase bindings, so a
+    /// reader ordered before what it is bound to is named by the binding's
+    /// own rule rather than as an unproduced read.
+    bool _StepGraph()
+    {
+        const std::string why =
+            RigExecStepGraphError(_f.steps, *_f.clustering, _GraphRange);
         return why.empty() || _Bad(why);
+    }
+
+    /// A step's read or write range as the step graph checks it.
+    static RigExecStepGraphRange _GraphRange(const fb::SlotRange &range)
+    {
+        return RigExecStepGraphRange{uint8_t(range.domain()), range.begin(),
+                                     range.end()};
     }
 
     bool _Cones()
@@ -1439,7 +1618,6 @@ private:
                     "arrays") ||
             !_Index(c.weightObjectIndex, _weights, true, row,
                     "weight_object_index") ||
-            !_Bools(c.snapshotTargets, row, "snapshot_targets") ||
             !_Bools(c.ikRestLive, row, "ik_rest_live")) {
             return false;
         }
@@ -1653,6 +1831,7 @@ private:
             return _Bad("pose: a version reference exceeds the version "
                         "pools");
         }
+        _finPool = finPool;
         return true;
     }
 
@@ -1823,6 +2002,104 @@ private:
              !_Topology(*r.partitionTopology, row + ".partition_topology"))) {
             return false;
         }
+        return derived || _Chunks(r, row);
+    }
+
+    /// A main revision's vertex partition, as the bake cuts one. Its point
+    /// count is its index count in rows of its element size. A chunked
+    /// revision is a skin whose layout the epoch fixes, cut into at least
+    /// two ranges that tile the partition's points in order, each keyed by
+    /// ascending positions in influence_slots, which size the chunk's
+    /// influence rows; its partition layout, when it has one, holds the
+    /// partition's element size and index count. An unchunked revision is
+    /// at most one range, with no key.
+    bool _Chunks(const fb::RigExecWireRevision &r, const std::string &row)
+    {
+        const uint64_t width = r.partitionElementSize < 1
+                                   ? 0
+                                   : uint64_t(r.partitionElementSize);
+        const uint64_t rows = width ? r.partitionIndexCount / width : 0;
+        if (r.partitionPointCount != rows) {
+            return _Bad(row + ": partition_point_count " +
+                        std::to_string(r.partitionPointCount) +
+                        ", but partition_index_count " +
+                        std::to_string(r.partitionIndexCount) + " is " +
+                        std::to_string(rows) +
+                        " row(s) of partition_element_size " +
+                        std::to_string(r.partitionElementSize));
+        }
+        if (!r.chunked) {
+            if (r.chunks.size() > 1) {
+                return _Bad(row + ": " + _N(r.chunks.size()) +
+                            " chunks, but not chunked");
+            }
+            for (size_t k = 0; k < r.chunks.size(); ++k) {
+                if (!r.chunks[k].key.empty()) {
+                    return _Bad(_At(row, "chunks", long(k)) +
+                                ": a key on an unchunked revision");
+                }
+            }
+            return true;
+        }
+        if (r.chunks.size() < 2) {
+            return _Bad(row + ": chunked with " + _N(r.chunks.size()) +
+                        " chunk(s)");
+        }
+        if (r.op != uint8_t(fb::RevisionOp::Skin) || !r.skinTopologyFixed) {
+            return _Bad(row + ": chunked, but not a skin whose layout the "
+                              "epoch fixes");
+        }
+        const size_t influences = r.influenceSlots.size();
+        uint64_t at = 0;
+        for (size_t k = 0; k < r.chunks.size(); ++k) {
+            const fb::RigExecWireChunk &chunk = r.chunks[k];
+            const std::string where = _At(row, "chunks", long(k));
+            const std::string range = "[" + std::to_string(chunk.begin) +
+                                      ", " + std::to_string(chunk.end) +
+                                      ")";
+            if (chunk.begin < 0 || uint64_t(chunk.begin) != at) {
+                return _Bad(where + ": vertex range " + range +
+                            " does not continue the partition at " +
+                            std::to_string(at));
+            }
+            if (chunk.end < chunk.begin) {
+                return _Bad(where + ": vertex range " + range +
+                            " ends before it begins");
+            }
+            at = uint64_t(chunk.end);
+            for (size_t j = 0; j < chunk.key.size(); ++j) {
+                const int32_t position = chunk.key[j];
+                if (position < 0 || size_t(position) >= influences ||
+                    (j > 0 && position <= chunk.key[j - 1])) {
+                    return _Bad(_At(where, "key", long(j)) + ": " +
+                                std::to_string(position) +
+                                " is not an ascending influence position "
+                                "below " +
+                                _N(influences));
+                }
+            }
+        }
+        if (at != r.partitionPointCount) {
+            return _Bad(_At(row, "chunks", long(r.chunks.size() - 1)) +
+                        ": the last range ends at " + std::to_string(at) +
+                        ", not at the partition's " +
+                        std::to_string(r.partitionPointCount) + " point(s)");
+        }
+        const fb::RigExecWireSkinTopology *layout =
+            r.partitionTopology ? r.partitionTopology.get()
+            : r.partitionSameAsTopology ? r.topology.get()
+                                        : nullptr;
+        if (layout) {
+            const uint64_t entries =
+                layout->raw ? uint64_t(layout->rawIndices.size())
+                            : layout->pointCount *
+                                  uint64_t(std::max(layout->elementSize, 0));
+            if (r.partitionElementSize != layout->elementSize ||
+                r.partitionIndexCount != entries) {
+                return _Bad(row + ": the partition's element_size and "
+                                  "index_count are not its layout's");
+            }
+        }
         return true;
     }
 
@@ -1946,12 +2223,21 @@ private:
         return true;
     }
 
-    /// The sparse skin layout: one index width and its vector, one counts
-    /// vector, every count within element_size, the counts summing to the
-    /// kept entries, and no kept entry the canonical form drops.
+    /// A skin layout in the form its flag names, validated exactly when the
+    /// evaluator's layout rules pass. The sparse form: one index width and
+    /// its vector, one counts vector, every count within element_size, the
+    /// counts summing to the kept entries, no kept entry the canonical form
+    /// drops, and no raw arrays.
     bool _Topology(const fb::RigExecWireSkinTopology &t,
                    const std::string &row)
     {
+        if (t.raw) {
+            return _RawTopology(t, row);
+        }
+        if (!t.rawIndices.empty() || !t.rawWeights.empty()) {
+            return _Bad(row + ": raw_indices or raw_weights on a sparse "
+                              "layout");
+        }
         if (t.elementSize < 0 || t.elementSize > 65535) {
             return _Bad(row + ": element_size out of range");
         }
@@ -2009,6 +2295,54 @@ private:
                 return _Bad(row + ": kept entry " + _N(k) +
                             " is (0, 0), which the sparse form drops");
             }
+        }
+        return _Validated(t, row);
+    }
+
+    /// The raw form, for a layout the sparse form cannot hold: its arrays
+    /// alone, with the point count the evaluators give it.
+    bool _RawTopology(const fb::RigExecWireSkinTopology &t,
+                      const std::string &row)
+    {
+        if (!t.counts8.empty() || !t.counts16.empty() ||
+            !t.indices8.empty() || !t.indices16.empty() ||
+            !t.indices32.empty() || !t.weights.empty() ||
+            t.indexWidth != 0) {
+            return _Bad(row + ": a raw layout with sparse vectors or an "
+                              "index_width");
+        }
+        const size_t indices = t.rawIndices.size();
+        const size_t weights = t.rawWeights.size();
+        const std::string shape = row + ": a raw layout of " + _N(indices) +
+                                  " indices and " + _N(weights) +
+                                  " weights at element_size " +
+                                  std::to_string(t.elementSize);
+        if (_SparseCanHold(indices, weights, t.elementSize)) {
+            return _Bad(shape + ", which the sparse form holds");
+        }
+        const uint64_t points = _RowCount(indices, weights, t.elementSize);
+        if (t.pointCount != points) {
+            return _Bad(row + ": point_count " +
+                        std::to_string(t.pointCount) +
+                        ", but its raw layout holds " +
+                        std::to_string(points) + " point(s)");
+        }
+        return _Validated(t, row);
+    }
+
+    /// validated exactly when the evaluator's layout rules pass, in either
+    /// form, so playback fails the layouts the evaluators fail and the
+    /// kernels index only layouts they pass.
+    bool _Validated(const fb::RigExecWireSkinTopology &t,
+                    const std::string &row)
+    {
+        const std::string broken = _RuleBreak(t);
+        if (t.validated && !broken.empty()) {
+            return _Bad(row + ": validated" + broken);
+        }
+        if (!t.validated && broken.empty()) {
+            return _Bad(row + ": not validated, but its layout passes the "
+                              "evaluator's rules");
         }
         return true;
     }
@@ -2203,6 +2537,669 @@ private:
                                    : _Bad(row + ": bits its tag does not "
                                                 "use");
         }
+    }
+
+    // ---------------------------------------------------- phase bindings
+
+    /// What a phased read was bound to at bake, against the steps that
+    /// evaluate and read it: frame records and their FrameMatrix steps, the
+    /// record lists an AtPrim transform phase folds, and the chain versions
+    /// a phased point read or blend sample reads. A reader declares what
+    /// it reads, so the step graph's producer check orders it after the
+    /// writer. A record's PoseFin version is ordered here instead: the step
+    /// graph sees one PoseFin slot per provider, which all of the
+    /// provider's versions share.
+    bool _PhaseBindings()
+    {
+        return _PhaseSteps() && _FrameRecords() && _RevisionPhases();
+    }
+
+    /// Where a revision's phase tables sit: revision \p index of chain
+    /// \p chain, or the revision of its derived target \p index.
+    struct _RevisionRow {
+        size_t chain = 0;
+        size_t index = 0;
+        bool derived = false;
+    };
+
+    std::string _RowText(const _RevisionRow &row) const
+    {
+        return "geometry.chains[" + _N(row.chain) +
+               (row.derived ? "].derived[" + _N(row.index) + "].revision"
+                            : "].revisions[" + _N(row.index) + "]");
+    }
+
+    /// "step N (<label>)" when \p step names a step, else \p row's text.
+    std::string _ReaderName(int64_t step, const _RevisionRow &row) const
+    {
+        return step >= 0 ? _StepName(size_t(step)) : _RowText(row);
+    }
+
+    /// The path of provider slot \p slot, which is in range.
+    std::string _SlotText(size_t slot) const
+    {
+        return RigExecFormatPathText(_f, _f.slotMeta->paths[slot]);
+    }
+
+    /// Whether step \p step declares a read of slot \p slot of \p domain.
+    bool _Declares(size_t step, fb::SlotDomain domain, uint64_t slot) const
+    {
+        for (const fb::SlotRange &range : _f.steps[step].reads) {
+            if (range.domain() == domain && range.begin() <= slot &&
+                slot < range.end()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The steps the phase tables name, met in playback order (the source
+    /// pass, then every other step, each in index order): each frame
+    /// record's one FrameMatrix step, which writes that record's slot of
+    /// FrameMatrix and nothing else, while no other step writes the domain;
+    /// each commit's first and last step; and the first InfluenceFold and
+    /// RevisionStatic step of each revision and Derived step of each
+    /// derived target.
+    bool _PhaseSteps()
+    {
+        const fb::RigExecWireDomainPose &p = *_f.pose;
+        const size_t records = p.frameRecords.size();
+        _played.clear();
+        _played.reserve(_steps);
+        for (const bool sourcePass : {true, false}) {
+            for (size_t s = 0; s < _steps; ++s) {
+                if (bool(_f.steps[s].isSource) == sourcePass) {
+                    _played.push_back(s);
+                }
+            }
+        }
+        _playAt.assign(_steps, 0);
+        for (size_t k = 0; k < _played.size(); ++k) {
+            _playAt[_played[k]] = k;
+        }
+        _recordStep.assign(records, -1);
+        _commitFirst.assign(p.commits.size(), -1);
+        _commitLast.assign(p.commits.size(), -1);
+        _foldStep.assign(_revisions, -1);
+        _staticStep.assign(_revisions, -1);
+        _derivedStep.assign(_derived, -1);
+        for (const size_t i : _played) {
+            const fb::RigExecWireStep &step = _f.steps[i];
+            if (step.kind == fb::StepKind::FrameMatrix) {
+                // A FrameMatrix step has no "no record" object: a negative
+                // one is out of range like a too-large one.
+                if (!_Has(p.frameRecords, step.object)) {
+                    return _Bad(_StepName(i) + " names frame record " +
+                                std::to_string(step.object) + " of " +
+                                _N(records));
+                }
+                const size_t o = size_t(step.object);
+                if (_recordStep[o] >= 0) {
+                    return _Bad(_StepName(i) +
+                                " evaluates the same frame record as " +
+                                _StepName(size_t(_recordStep[o])));
+                }
+                _recordStep[o] = int64_t(i);
+                if (step.writes.size() != 1 ||
+                    step.writes[0].domain() != fb::SlotDomain::FrameMatrix ||
+                    step.writes[0].begin() != o ||
+                    step.writes[0].end() != o + 1) {
+                    return _Bad(_StepName(i) + " writes other than "
+                                               "FrameMatrix[" +
+                                _N(o) + "]");
+                }
+                continue;
+            }
+            for (const fb::SlotRange &range : step.writes) {
+                if (range.domain() == fb::SlotDomain::FrameMatrix) {
+                    return _Bad(_StepName(i) +
+                                " writes FrameMatrix, which only a "
+                                "FrameMatrix step writes");
+                }
+            }
+            const auto first = [i](std::vector<int64_t> *table,
+                                   int32_t object) {
+                if (_Has(*table, object) && (*table)[size_t(object)] < 0) {
+                    (*table)[size_t(object)] = int64_t(i);
+                }
+            };
+            switch (step.kind) {
+            case fb::StepKind::SolverCommit:
+            case fb::StepKind::Constraint:
+            case fb::StepKind::CommitDelta:
+            case fb::StepKind::PropagateChunk:
+            case fb::StepKind::CommitApply:
+                if (_Has(_commitLast, step.object)) {
+                    first(&_commitFirst, step.object);
+                    _commitLast[size_t(step.object)] = int64_t(i);
+                }
+                break;
+            case fb::StepKind::InfluenceFold:
+                first(&_foldStep, step.object);
+                break;
+            case fb::StepKind::RevisionStatic:
+                first(&_staticStep, step.object);
+                break;
+            case fb::StepKind::Derived:
+                first(&_derivedStep, step.object);
+                break;
+            default:
+                break;
+            }
+        }
+        return true;
+    }
+
+    /// Each frame record: in range; a constraint's names a target and
+    /// position -1, a solver's target -1 and the position of its provider
+    /// in the commit's slots; evaluated by its FrameMatrix step, which reads
+    /// the provider's PoseFin slot and the commit's table and runs after
+    /// the step that writes the record's version and after the commit's
+    /// first step, which writes the table. As the program's own check, a
+    /// version below the slot count is that slot's compose and every other
+    /// one a commit's write-back, written by the commit's last step.
+    bool _FrameRecords()
+    {
+        const fb::RigExecWireDomainPose &p = *_f.pose;
+        if (p.frameRecords.empty()) {
+            return true;
+        }
+        for (size_t r = 0; r < p.frameRecords.size(); ++r) {
+            const fb::FrameRecord &record = p.frameRecords[r];
+            if (_recordStep[r] < 0) {
+                // No step to name: the record's own row, then the missing
+                // step.
+                const std::string row = "pose.frame_records[" + _N(r) + "]";
+                if (!_Index(int64_t(record.slot()), _slots, false, row,
+                            "slot") ||
+                    !_Index(int64_t(record.commit()), p.commits.size(), false,
+                            row, "commit") ||
+                    !_Index(int64_t(record.version()), size_t(_finPool),
+                            false, row, "version") ||
+                    !_PathId(record.moverLabel(), _AnyPath, row,
+                             "mover_label")) {
+                    return false;
+                }
+                return _Bad("frame record " + _N(r) + " of " +
+                            _SlotText(record.slot()) + " after " +
+                            RigExecFormatPathText(_f, record.moverLabel()) +
+                            " has no FrameMatrix step");
+            }
+            // Named only on a violation: this runs over every record at
+            // each Open.
+            const size_t reader = size_t(_recordStep[r]);
+            const auto step = [this, reader] { return _StepName(reader); };
+            if (record.slot() >= _slots) {
+                return _Bad(step() + " names slot " + _N(record.slot()) +
+                            " of " + _N(_slots));
+            }
+            if (record.commit() >= p.commits.size()) {
+                return _Bad(step() + " names commit " + _N(record.commit()) +
+                            " of " + _N(p.commits.size()));
+            }
+            if (uint64_t(record.version()) >= _finPool) {
+                return _Bad(step() + " is bound to PoseFin version " +
+                            _N(record.version()) + ", which no step writes");
+            }
+            // Every other id names a prim, property or token (_Paths), so
+            // the range is the whole of the label's rule.
+            if (record.moverLabel() >= _f.paths.size()) {
+                return _Bad(step() + " names mover label path id " +
+                            _N(record.moverLabel()) + " of " +
+                            _N(_f.paths.size()));
+            }
+            if (!p.commits[record.commit()].solverOutput) {
+                if (record.target() < 0 || record.position() != -1) {
+                    return _Bad(step() + " records commit " +
+                                _N(record.commit()) +
+                                ", a constraint's, at target " +
+                                std::to_string(record.target()) +
+                                " and position " +
+                                std::to_string(record.position()) +
+                                "; a constraint's record has a target and "
+                                "position -1");
+                }
+            } else if (record.target() != -1) {
+                return _Bad(step() + " records commit " + _N(record.commit()) +
+                            ", a solver's, at target " +
+                            std::to_string(record.target()) +
+                            "; a solver's record has target -1");
+            }
+        }
+
+        // Which step writes each PoseFin version, and of which slot. One
+        // writer per version.
+        std::vector<int64_t> writer(size_t(_finPool), -1);
+        std::vector<int64_t> slotOf(size_t(_finPool), -1);
+        const auto write = [&](uint64_t entry, size_t step, int64_t slot) {
+            if (writer[entry] >= 0) {
+                return _Bad(_StepName(step) + " writes PoseFin version " +
+                            _N(entry) + ", which " +
+                            _StepName(size_t(writer[entry])) + " writes too");
+            }
+            writer[entry] = int64_t(step);
+            slotOf[entry] = slot;
+            return true;
+        };
+        for (const size_t i : _played) {
+            const fb::RigExecWireStep &step = _f.steps[i];
+            if (step.kind != fb::StepKind::ComposeSubtree ||
+                !_Has(p.composeGroups, step.object)) {
+                continue;
+            }
+            const fb::RigExecWireComposeGroup &group =
+                p.composeGroups[size_t(step.object)];
+            for (int32_t slot = group.begin; slot < group.end; ++slot) {
+                if (!write(uint64_t(slot), i, slot)) {
+                    return false;
+                }
+            }
+        }
+        for (size_t w = 0; w < p.commits.size(); ++w) {
+            const fb::RigExecWireCommit &commit = p.commits[w];
+            if (_commitLast[w] < 0) {
+                continue;
+            }
+            const size_t last = size_t(_commitLast[w]);
+            // Each entry is inside the pool (_Commits).
+            for (size_t k = 0; k < commit.slots.size(); ++k) {
+                if (!write(commit.slotWrites[k], last, commit.slots[k])) {
+                    return false;
+                }
+            }
+            for (size_t k = 0; k < commit.propagate.size(); ++k) {
+                if (!write(commit.descendantWrites[k], last,
+                           commit.propagate[k].first)) {
+                    return false;
+                }
+            }
+        }
+
+        for (size_t r = 0; r < p.frameRecords.size(); ++r) {
+            const fb::FrameRecord &record = p.frameRecords[r];
+            const size_t reader = size_t(_recordStep[r]);
+            const auto step = [this, reader] { return _StepName(reader); };
+            const uint32_t version = record.version();
+            const int64_t by = writer[version];
+            if (by < 0 || _playAt[size_t(by)] >= _playAt[reader]) {
+                std::string line =
+                    step() + " is bound to PoseFin version " + _N(version);
+                if (slotOf[version] >= 0) {
+                    line += " of " + _SlotText(size_t(slotOf[version]));
+                }
+                return _Bad(line + (by < 0 ? std::string(", which no step "
+                                                         "writes")
+                                           : ", which " +
+                                                 _StepName(size_t(by)) +
+                                                 " writes at or after it"));
+            }
+            if (slotOf[version] != int64_t(record.slot())) {
+                return _Bad(step() + " is bound to PoseFin version " +
+                            _N(version) + " of " +
+                            _SlotText(size_t(slotOf[version])) +
+                            ", not of the provider it records");
+            }
+            const fb::RigExecWireCommit &commit = p.commits[record.commit()];
+            if (commit.solverOutput &&
+                (!_Has(commit.slots, record.position()) ||
+                 commit.slots[size_t(record.position())] !=
+                     int32_t(record.slot()))) {
+                return _Bad(step() + " reads position " +
+                            std::to_string(record.position()) +
+                            " of commit " + _N(record.commit()) +
+                            ", which is not the provider it records");
+            }
+            const int64_t head = _commitFirst[record.commit()];
+            if (head < 0 || _playAt[size_t(head)] >= _playAt[reader]) {
+                return _Bad(step() + " reads the exit of commit " +
+                            _N(record.commit()) + ", which " +
+                            (head < 0 ? std::string("no step writes")
+                                      : _StepName(size_t(head)) +
+                                            " writes at or after it"));
+            }
+            if (!_Declares(reader, fb::SlotDomain::PoseFin, record.slot())) {
+                return _Bad(step() + " does not declare PoseFin[" +
+                            _N(record.slot()) + "]");
+            }
+            if (!_Declares(reader, fb::SlotDomain::CommitTable,
+                           record.commit())) {
+                return _Bad(step() + " does not declare CommitTable[" +
+                            _N(record.commit()) + "]");
+            }
+        }
+        return true;
+    }
+
+    /// The phase tables of every revision, main ones then derived ones,
+    /// chain-major as their ids; then that every step reading them
+    /// declares what it reads: an InfluenceFold its revision's frame
+    /// records, a RevisionStatic its revision's point versions, and a
+    /// Derived step both.
+    bool _RevisionPhases()
+    {
+        const fb::RigExecWireDomainGeometry &g = *_f.geometry;
+        size_t id = 0;
+        for (size_t c = 0; c < _chains; ++c) {
+            const fb::RigExecWireChain &chain = g.chains[c];
+            for (size_t r = 0; r < chain.revisions.size(); ++r, ++id) {
+                if (!_RevisionTables(chain.revisions[r], _foldStep[id],
+                                     _staticStep[id], "InfluenceFold",
+                                     "RevisionStatic", {c, r, false})) {
+                    return false;
+                }
+            }
+        }
+        id = 0;
+        for (size_t c = 0; c < _chains; ++c) {
+            const fb::RigExecWireChain &chain = g.chains[c];
+            for (size_t d = 0; d < chain.derived.size(); ++d, ++id) {
+                if (!_RevisionTables(*chain.derived[d].revision,
+                                     _derivedStep[id], _derivedStep[id],
+                                     "Derived", "Derived", {c, d, true})) {
+                    return false;
+                }
+            }
+        }
+        for (size_t i = 0; i < _steps; ++i) {
+            const fb::RigExecWireStep &step = _f.steps[i];
+            const bool fold = step.kind == fb::StepKind::InfluenceFold;
+            const bool reads = step.kind == fb::StepKind::RevisionStatic;
+            const bool derived = step.kind == fb::StepKind::Derived;
+            const fb::RigExecWireRevision *revision = nullptr;
+            if ((fold || reads) && _Has(g.revisionIndex, step.object)) {
+                const RigExecWireIntPair &at =
+                    g.revisionIndex[size_t(step.object)];
+                revision =
+                    &g.chains[size_t(at.first)].revisions[size_t(at.second)];
+            } else if (derived && _Has(g.derivedIndex, step.object)) {
+                const RigExecWireIntPair &at =
+                    g.derivedIndex[size_t(step.object)];
+                revision = g.chains[size_t(at.first)]
+                               .derived[size_t(at.second)]
+                               .revision.get();
+            }
+            if (!revision) {
+                continue;
+            }
+            if ((fold || derived) && !_DeclaresRecords(i, *revision)) {
+                return false;
+            }
+            if ((reads || derived) && !_DeclaresVersions(i, *revision)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// One revision's frame-record lists and point bindings: the lists only
+    /// under an AtPrim transform phase, the influence lists one per
+    /// influence slot, every record in range and of the provider it stands
+    /// for; one point binding per phased input, naming that input and its
+    /// phase; a binding on exactly the dense blend samples with a non-base
+    /// phase, naming the sample's points and phase; every candidate in
+    /// range. \p fold and \p reader are the first steps of \p foldKind and
+    /// \p readerKind that read them, which name the refusals.
+    bool _RevisionTables(const fb::RigExecWireRevision &r, int64_t fold,
+                         int64_t reader, const char *foldKind,
+                         const char *readerKind, const _RevisionRow &row)
+    {
+        const fb::RigExecWireDomainPose &p = *_f.pose;
+        const fb::RigExecWireRevisionBinding &b = *r.binding;
+        // The names below are composed only for a violation: this runs over
+        // every revision, binding and blend sample at each Open.
+        const auto folder = [&] { return _ReaderName(fold, row); };
+        const bool records =
+            !r.transformRecords.empty() || !r.influenceRecords.empty();
+        if (records &&
+            b.transformPhase.kind != uint8_t(fb::ReadPhaseKind::AtPrim)) {
+            return _Bad(folder() + " holds frame records for a transform "
+                                   "phase that is not AtPrim");
+        }
+        if (!r.influenceRecords.empty() &&
+            r.influenceRecords.size() != r.influenceSlots.size()) {
+            return _Bad(folder() + " holds " + _N(r.influenceRecords.size()) +
+                        " influence record lists for " +
+                        _N(r.influenceSlots.size()) + " influence slots");
+        }
+        // Record \p k of the transform's list (\p influence -1) or of
+        // influence \p influence's, whose provider is slot \p slot (-1:
+        // none).
+        const auto listed = [&](uint32_t k, int64_t slot, int64_t influence) {
+            if (k >= p.frameRecords.size()) {
+                return _Bad(folder() + " reads frame record " + _N(k) +
+                            " of " + _N(p.frameRecords.size()));
+            }
+            const uint32_t provider = p.frameRecords[k].slot();
+            if (int64_t(provider) != slot) {
+                return _Bad(folder() + " reads frame record " + _N(k) +
+                            " of " + _SlotText(provider) + " for " +
+                            (influence < 0
+                                 ? std::string("its transform")
+                                 : "influence " + _N(size_t(influence))) +
+                            ", whose provider is " +
+                            (slot >= 0 ? _SlotText(size_t(slot))
+                                       : std::string("no slot")));
+            }
+            return true;
+        };
+        for (const uint32_t k : r.transformRecords) {
+            if (!listed(k, r.transformSlot, -1)) {
+                return false;
+            }
+        }
+        for (size_t i = 0; i < r.influenceRecords.size(); ++i) {
+            for (const uint32_t k : r.influenceRecords[i].v) {
+                if (!listed(k, r.influenceSlots[i], int64_t(i))) {
+                    return false;
+                }
+            }
+        }
+        if (records && fold < 0) {
+            return _Bad(_RowText(row) + ": frame records with no " +
+                        std::string(foldKind) + " step to read them");
+        }
+
+        const auto who = [&] { return _ReaderName(reader, row); };
+        if (r.pointBindings.size() != b.phaseInputs.size()) {
+            return _Bad(who() + " holds " + _N(r.pointBindings.size()) +
+                        " point bindings for " + _N(b.phaseInputs.size()) +
+                        " phased inputs");
+        }
+        bool bound = !r.pointBindings.empty();
+        for (size_t i = 0; i < r.pointBindings.size(); ++i) {
+            const RigExecWirePointsBinding &binding = r.pointBindings[i];
+            const auto input = [&] {
+                return RigExecFormatPathText(_f, binding.inputPath);
+            };
+            if (binding.inputPath != b.phaseInputs[i]) {
+                return _Bad(who() + " binds " + input() +
+                            " for phased input " + _N(i) + ", which is " +
+                            RigExecFormatPathText(_f, b.phaseInputs[i]));
+            }
+            if (binding.phase.kind != b.phases[i].kind ||
+                binding.phase.prim != b.phases[i].prim) {
+                return _Bad(who() + " binds " + input() +
+                            " at a phase other than the one it declares");
+            }
+            if (!_Candidates(binding, who, input)) {
+                return false;
+            }
+        }
+        for (size_t ch = 0; ch < r.blendChannels.size(); ++ch) {
+            const fb::RigExecWireBlendChannel &channel = r.blendChannels[ch];
+            for (size_t s = 0; s < channel.samples.size(); ++s) {
+                const fb::RigExecWireBlendSample &sample = channel.samples[s];
+                const auto at = [&] {
+                    return "blend_channels[" + _N(ch) + "].samples[" +
+                           _N(s) + "]";
+                };
+                const bool phased =
+                    sample.blendShape == 0 &&
+                    sample.phase.kind != uint8_t(fb::ReadPhaseKind::Base);
+                if (!sample.pointBinding) {
+                    if (phased) {
+                        return _Bad(who() + " leaves " + at() + " unbound, "
+                                    "though it reads phased points");
+                    }
+                    continue;
+                }
+                if (!phased) {
+                    return _Bad(who() + " binds " + at() +
+                                ", which reads no phased points");
+                }
+                const RigExecWirePointsBinding &binding = *sample.pointBinding;
+                const auto input = [&] {
+                    return RigExecFormatPathText(_f, binding.inputPath);
+                };
+                if (binding.inputPath != sample.pointsPath) {
+                    return _Bad(who() + " binds " + at() + " to " + input() +
+                                ", not to its points " +
+                                RigExecFormatPathText(_f, sample.pointsPath));
+                }
+                if (binding.phase.kind != sample.phase.kind ||
+                    binding.phase.prim != sample.phase.prim) {
+                    return _Bad(who() + " binds " + at() +
+                                " at a phase other than its own");
+                }
+                if (binding.diagnoseMiss) {
+                    return _Bad(who() + " binds " + at() +
+                                " with a miss diagnostic, which a blend "
+                                "sample never emits");
+                }
+                if (!_Candidates(binding, who, input)) {
+                    return false;
+                }
+                bound = true;
+            }
+        }
+        if (bound && reader < 0) {
+            return _Bad(_RowText(row) + ": point bindings with no " +
+                        std::string(readerKind) + " step to read them");
+        }
+        return true;
+    }
+
+    /// Every candidate of \p binding a chain of the file and a version of
+    /// it, 0 the authored base to the revision count; a final read one
+    /// candidate, the chain's published points at its last version. \p who
+    /// and \p input compose the reader's and the input's names for a
+    /// refusal.
+    template <class Who, class Input>
+    bool _Candidates(const RigExecWirePointsBinding &binding, const Who &who,
+                     const Input &input)
+    {
+        const auto &chains = _f.geometry->chains;
+        for (const fb::PointVersion &candidate : binding.candidates) {
+            const int32_t c = candidate.chain();
+            const int32_t v = candidate.version();
+            if (!_Has(chains, c)) {
+                return _Bad(who() + " binds " + input() + " to chain " +
+                            std::to_string(c) + " of " + _N(_chains));
+            }
+            const size_t last = chains[size_t(c)].revisions.size();
+            if (v < 0 || uint64_t(v) > last) {
+                return _Bad(who() + " binds " + input() + " to version " +
+                            std::to_string(v) + " of chain " +
+                            std::to_string(c) +
+                            (v < 0 ? std::string(", which is no version")
+                                   : ", past its last version " + _N(last)));
+            }
+        }
+        if (!binding.finalRead) {
+            return true;
+        }
+        if (binding.candidates.size() != 1) {
+            return _Bad(who() + " binds " + input() + " as a final read of " +
+                        _N(binding.candidates.size()) +
+                        " candidates; a final read has one");
+        }
+        const fb::PointVersion &only = binding.candidates[0];
+        const size_t last = chains[size_t(only.chain())].revisions.size();
+        if (uint64_t(only.version()) != last) {
+            return _Bad(who() + " binds " + input() +
+                        " as a final read of version " +
+                        std::to_string(only.version()) + " of chain " +
+                        std::to_string(only.chain()) +
+                        ", not its last version " + _N(last));
+        }
+        return true;
+    }
+
+    /// Step \p step folds \p r: it declares FrameMatrix for every record
+    /// \p r's lists hold.
+    bool _DeclaresRecords(size_t step, const fb::RigExecWireRevision &r)
+    {
+        const auto declared = [&](uint32_t k) {
+            return _Declares(step, fb::SlotDomain::FrameMatrix, k) ||
+                   _Bad(_StepName(step) + " does not declare FrameMatrix[" +
+                        _N(k) + "]");
+        };
+        for (const uint32_t k : r.transformRecords) {
+            if (!declared(k)) {
+                return false;
+            }
+        }
+        for (const fb::RigExecWireUintList &list : r.influenceRecords) {
+            for (const uint32_t k : list.v) {
+                if (!declared(k)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Step \p step reads \p r's point bindings: it declares every
+    /// candidate's version -- the chain's published points (ChainPoints)
+    /// for a final read, its base (ChainBase) for version 0, else the
+    /// RevisionDone and ChainDirty slots of the revision whose fuse left
+    /// that version.
+    bool _DeclaresVersions(size_t step, const fb::RigExecWireRevision &r)
+    {
+        const auto declared = [&](const RigExecWirePointsBinding &binding) {
+            const auto need = [&](fb::SlotDomain domain, uint64_t slot) {
+                return _Declares(step, domain, slot) ||
+                       _Bad(_StepName(step) + " does not declare " +
+                            rigExecStepGraphDetail::DomainName(
+                                uint8_t(domain)) +
+                            "[" + _N(slot) + "] for " +
+                            RigExecFormatPathText(_f, binding.inputPath));
+            };
+            for (const fb::PointVersion &candidate : binding.candidates) {
+                const uint64_t c = uint64_t(candidate.chain());
+                if (binding.finalRead) {
+                    if (!need(fb::SlotDomain::ChainPoints, c)) {
+                        return false;
+                    }
+                } else if (candidate.version() == 0) {
+                    if (!need(fb::SlotDomain::ChainBase, c)) {
+                        return false;
+                    }
+                } else {
+                    const uint64_t revision =
+                        uint64_t(_f.geometry->chainRevisionBegin[c]) +
+                        uint64_t(candidate.version()) - 1;
+                    if (!need(fb::SlotDomain::RevisionDone, revision) ||
+                        !need(fb::SlotDomain::ChainDirty, revision)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        };
+        for (const RigExecWirePointsBinding &binding : r.pointBindings) {
+            if (!declared(binding)) {
+                return false;
+            }
+        }
+        for (const fb::RigExecWireBlendChannel &channel : r.blendChannels) {
+            for (const fb::RigExecWireBlendSample &sample : channel.samples) {
+                if (sample.pointBinding && !declared(*sample.pointBinding)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // --------------------------------------------------- property chains
@@ -2423,9 +3420,23 @@ private:
     size_t _weights = 0;
     size_t _stepBacked = 0;
     uint32_t _overrideCount = 0;
+    /// The PoseFin versions the commits size: version references are
+    /// below it.
+    uint64_t _finPool = 0;
     std::vector<uint32_t> _overrideUses;
     /// Per path node: 0 for paths[0], else its parent's depth plus one.
     std::vector<uint32_t> _depth;
+    /// The steps in playback order, and each step's position in it.
+    std::vector<size_t> _played;
+    std::vector<size_t> _playAt;
+    /// Per frame record, commit, revision id and derived id: the step
+    /// _PhaseSteps maps to it, or -1.
+    std::vector<int64_t> _recordStep;
+    std::vector<int64_t> _commitFirst;
+    std::vector<int64_t> _commitLast;
+    std::vector<int64_t> _foldStep;
+    std::vector<int64_t> _staticStep;
+    std::vector<int64_t> _derivedStep;
 };
 
 }  // namespace
@@ -2437,6 +3448,22 @@ RigExecFormatValidate(const fb::RigExecWireFile &file, std::string *error)
 }
 
 namespace {
+
+/// Why a file of format \p version does not open. The previous version
+/// cannot hold a skin layout its sparse form cannot, which this one stores
+/// raw and only an export from the rig's stage can supply; any other
+/// version is a rebake.
+std::string
+_VersionRefusal(uint32_t version)
+{
+    static_assert(RigExecFormatVersion == 7,
+                  "name what the previous format version lacks");
+    return "unsupported .rigexec format version " + _N(version) +
+           " (this reader reads " + _N(RigExecFormatVersion) + "); " +
+           (version + 1 == RigExecFormatVersion
+                ? "re-export: raw skin layouts"
+                : "rebake");
+}
 
 /// Open after the identifier checks: copy, version probe, bounding walk,
 /// verifier, unpack, validate.
@@ -2462,10 +3489,7 @@ _OpenAligned(const uint8_t *bytes, size_t size,
             const uint32_t version =
                 table->GetField<uint32_t>(fb::File::VT_FORMATVERSION, 0);
             if (version != RigExecFormatVersion) {
-                return _Fail(error, "unsupported .rigexec format version " +
-                                        _N(version) + " (this reader reads " +
-                                        _N(RigExecFormatVersion) +
-                                        "); rebake");
+                return _Fail(error, _VersionRefusal(version));
             }
         }
     }
@@ -2480,8 +3504,7 @@ _OpenAligned(const uint8_t *bytes, size_t size,
     }
     const fb::File *root = fb::GetFile(data);
     if (root->formatVersion() != RigExecFormatVersion) {
-        return _Fail(error, "unsupported .rigexec format version " +
-                                _N(root->formatVersion()) + "; rebake");
+        return _Fail(error, _VersionRefusal(root->formatVersion()));
     }
     std::unique_ptr<fb::RigExecWireFile> unpacked(root->UnPack());
     std::string why;
@@ -2588,6 +3611,186 @@ RigExecFormatPathText(const fb::RigExecWireFile &file, uint32_t id)
     return text;
 }
 
+namespace {
+
+/// RigExecBakedStepKindName.
+const char *
+_StepKindName(fb::StepKind kind)
+{
+    switch (kind) {
+    case fb::StepKind::ComposeSubtree: return "ComposeSubtree";
+    case fb::StepKind::Solve: return "Solve";
+    case fb::StepKind::SolverCommit: return "SolverCommit";
+    case fb::StepKind::Constraint: return "Constraint";
+    case fb::StepKind::CommitDelta: return "CommitDelta";
+    case fb::StepKind::PropagateChunk: return "PropagateChunk";
+    case fb::StepKind::CommitApply: return "CommitApply";
+    case fb::StepKind::ProviderMatrix: return "ProviderMatrix";
+    case fb::StepKind::SnapshotFinals: return "SnapshotFinals";
+    case fb::StepKind::PoseInterpolator: return "PoseInterpolator";
+    case fb::StepKind::VolumePlacements: return "VolumePlacements";
+    case fb::StepKind::WeightPacket: return "WeightPacket";
+    case fb::StepKind::InfluenceFold: return "InfluenceFold";
+    case fb::StepKind::RevisionStatic: return "RevisionStatic";
+    case fb::StepKind::RevisionChunk: return "RevisionChunk";
+    case fb::StepKind::RevisionFuse: return "RevisionFuse";
+    case fb::StepKind::ChainStatus: return "ChainStatus";
+    case fb::StepKind::Derived: return "Derived";
+    case fb::StepKind::FrameMatrix: return "FrameMatrix";
+    }
+    return "unknown";
+}
+
+/// The text after the kind: the path of the object \p step works on, in
+/// StepLabel's words. False when an index is past its table.
+bool
+_StepObject(const RigExecWireFile &file, const fb::RigExecWireStep &step,
+            std::string *out)
+{
+    const auto text = [&file](uint32_t id) {
+        return RigExecFormatPathText(file, id);
+    };
+    const fb::RigExecWireSlotMeta *meta = file.slotMeta.get();
+    const fb::RigExecWireDomainPose *pose = file.pose.get();
+    const fb::RigExecWireDomainGeometry *geometry = file.geometry.get();
+    const int32_t object = step.object;
+    switch (step.kind) {
+    case fb::StepKind::ComposeSubtree: {
+        if (!pose || !meta || !_Has(pose->composeGroups, object)) {
+            return false;
+        }
+        const int32_t begin = pose->composeGroups[size_t(object)].begin;
+        if (!_Has(meta->paths, begin)) {
+            return false;
+        }
+        *out = text(meta->paths[size_t(begin)]);
+        return true;
+    }
+    case fb::StepKind::Solve:
+        if (!pose || !_Has(pose->solvers, object)) {
+            return false;
+        }
+        *out = text(pose->solvers[size_t(object)].path);
+        return true;
+    case fb::StepKind::SolverCommit:
+    case fb::StepKind::Constraint:
+    case fb::StepKind::CommitDelta:
+    case fb::StepKind::PropagateChunk:
+    case fb::StepKind::CommitApply: {
+        if (!pose || !_Has(pose->commits, object)) {
+            return false;
+        }
+        // An empty mover path is a batch of commits with no one mover.
+        const std::string mover =
+            text(pose->commits[size_t(object)].moverPath);
+        *out = mover.empty() ? "batch " + std::to_string(object) : mover;
+        return true;
+    }
+    case fb::StepKind::ProviderMatrix:
+        if (!meta || !_Has(meta->paths, object)) {
+            return false;
+        }
+        *out = text(meta->paths[size_t(object)]) +
+               (step.part ? " final" : " base");
+        return true;
+    case fb::StepKind::SnapshotFinals:
+        *out = "every provider";
+        return true;
+    case fb::StepKind::FrameMatrix: {
+        if (!pose || !_Has(pose->frameRecords, object)) {
+            *out = "record " + std::to_string(object);
+            return true;
+        }
+        const fb::FrameRecord &record = pose->frameRecords[size_t(object)];
+        *out = (meta && _Has(meta->paths, int64_t(record.slot()))
+                    ? text(meta->paths[size_t(record.slot())])
+                    : "slot " + std::to_string(record.slot())) +
+               " after " + text(record.moverLabel());
+        return true;
+    }
+    case fb::StepKind::PoseInterpolator:
+        if (!pose || !_Has(pose->poseInterpolators, object)) {
+            return false;
+        }
+        *out = text(pose->poseInterpolators[size_t(object)].path);
+        return true;
+    case fb::StepKind::VolumePlacements:
+        // part 1 places one volume, at slot `object`; any other form has
+        // no slot to name.
+        if (step.part == 1 && meta && _Has(meta->paths, object)) {
+            *out = text(meta->paths[size_t(object)]);
+        } else {
+            *out = "every volume weight";
+        }
+        return true;
+    case fb::StepKind::WeightPacket:
+        if (!geometry || !_Has(geometry->weightObjects, object)) {
+            return false;
+        }
+        *out = text(geometry->weightObjects[size_t(object)].path);
+        return true;
+    case fb::StepKind::InfluenceFold:
+    case fb::StepKind::RevisionStatic:
+    case fb::StepKind::RevisionChunk:
+    case fb::StepKind::RevisionFuse: {
+        if (!geometry || !_Has(geometry->revisionIndex, object)) {
+            return false;
+        }
+        const RigExecWireIntPair &entry =
+            geometry->revisionIndex[size_t(object)];
+        if (!_Has(geometry->chains, entry.first) ||
+            !_Has(geometry->chains[size_t(entry.first)].revisions,
+                  entry.second)) {
+            return false;
+        }
+        *out = text(geometry->chains[size_t(entry.first)]
+                        .revisions[size_t(entry.second)]
+                        .moverPath);
+        return true;
+    }
+    case fb::StepKind::ChainStatus:
+        if (!geometry || !_Has(geometry->chains, object)) {
+            return false;
+        }
+        *out = text(geometry->chains[size_t(object)].target);
+        return true;
+    case fb::StepKind::Derived: {
+        if (!geometry || !_Has(geometry->derivedIndex, object)) {
+            return false;
+        }
+        const RigExecWireIntPair &entry =
+            geometry->derivedIndex[size_t(object)];
+        if (!_Has(geometry->chains, entry.first) ||
+            !_Has(geometry->chains[size_t(entry.first)].derived,
+                  entry.second)) {
+            return false;
+        }
+        *out = text(geometry->chains[size_t(entry.first)]
+                        .derived[size_t(entry.second)]
+                        .target);
+        return true;
+    }
+    }
+    out->clear();
+    return true;
+}
+
+}  // namespace
+
+std::string
+RigExecFormatStepLabel(const fb::RigExecWireFile &file, size_t step)
+{
+    if (step >= file.steps.size()) {
+        return std::to_string(step);
+    }
+    const fb::RigExecWireStep &wire = file.steps[step];
+    std::string object;
+    if (!_StepObject(file, wire, &object)) {
+        object = std::to_string(wire.object);
+    }
+    return std::string(_StepKindName(wire.kind)) + " " + object;
+}
+
 bool
 RigExecFormatSparseTopology(const std::vector<int32_t> &indices,
                             const std::vector<float> &weights,
@@ -2677,12 +3880,55 @@ RigExecFormatSparseTopology(const std::vector<int32_t> &indices,
     return true;
 }
 
+bool
+RigExecFormatTopology(const std::vector<int32_t> &indices,
+                      const std::vector<float> &weights, int32_t elementSize,
+                      uint64_t pointCount, uint64_t influenceCount,
+                      bool validated, fb::RigExecWireSkinTopology *out,
+                      std::string *error)
+{
+    if (_SparseCanHold(indices.size(), weights.size(), elementSize)) {
+        return RigExecFormatSparseTopology(indices, weights, elementSize,
+                                           pointCount, influenceCount,
+                                           validated, out, error);
+    }
+    if (!out) {
+        return _Fail(error, "no skin topology to write into");
+    }
+    const uint64_t points =
+        _RowCount(indices.size(), weights.size(), elementSize);
+    if (pointCount != points) {
+        return _Fail(error, "skin topology: " + _N(indices.size()) +
+                                " indices and " + _N(weights.size()) +
+                                " weights at element size " +
+                                std::to_string(elementSize) + " hold " +
+                                std::to_string(points) + " point(s), not " +
+                                std::to_string(pointCount));
+    }
+    // The validator holds validated to the evaluator's layout rules.
+    fb::RigExecWireSkinTopology t;
+    t.elementSize = elementSize;
+    t.pointCount = pointCount;
+    t.influenceCount = influenceCount;
+    t.validated = validated;
+    t.raw = true;
+    t.rawIndices = indices;
+    t.rawWeights = weights;
+    *out = std::move(t);
+    return true;
+}
+
 void
 RigExecFormatExpandTopology(const fb::RigExecWireSkinTopology &topology,
                             std::vector<int32_t> *indices,
                             std::vector<float> *weights)
 {
     if (!indices || !weights) {
+        return;
+    }
+    if (topology.raw) {
+        *indices = topology.rawIndices;
+        *weights = topology.rawWeights;
         return;
     }
     // Bounded by the stored vectors, so a topology the validator refused

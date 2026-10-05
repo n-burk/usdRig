@@ -8,11 +8,16 @@
 // truncated tail and the named defects, and survives every single-byte
 // flip, vtable flips and many random multi-byte corruptions; writing is
 // deterministic; the validator refuses a smoke set of rule violations, a
-// step or cluster graph playback could not walk, space switches out of
-// resolution order, a failed plugin assembly holding frame bytes, and a
-// presentation without its identifier, orders listed inputs as their
-// composed texts, and handles a path tree 100000 prims deep; sparse skin
-// topologies encode canonically and expand back to the dense rows.
+// step or cluster graph playback could not walk, the retired snapshot
+// step and domain, space switches out of resolution order, VolumePlacements
+// steps that do not place one volume each, a failed plugin assembly
+// holding frame bytes, and a presentation without its identifier, orders
+// listed inputs as their composed texts, and handles a path tree 100000
+// prims deep; step labels match the program's; sparse skin topologies
+// encode canonically and expand back to the dense rows, every layout the
+// sparse form cannot hold is stored raw and verbatim, and the validated
+// flag holds to the evaluator's rules in both directions, in either form;
+// chunk tables hold to the shape the bake cuts.
 // USD-free, like the format.
 #include "rigExecBinary/format.h"
 
@@ -1194,22 +1199,32 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    // The format version, named before any other table is read: earlier
-    // and later versions are refused with a rebake message, the current
-    // one opens.
+    // The format version, named before any other table is read: the
+    // previous version, which cannot hold a raw skin layout, is refused
+    // with a re-export message, every other one with a rebake message, and
+    // the current one opens.
     RigExecWireFile versioned = _RichFile();
-    for (const uint32_t version : {3u, 4u, RigExecFormatVersion + 1}) {
+    for (const uint32_t version :
+         {3u, 4u, 5u, 6u, RigExecFormatVersion + 1}) {
         _context = "open refusals: version " + std::to_string(version);
         versioned.formatVersion = version;
+        const bool previous = version == 6u;
         CHECK(!_Open(_PackUnchecked(versioned), &why) &&
               _Contains(why, "format version " + std::to_string(version)) &&
-              _Contains(why, "rebake"));
+              _Contains(why, previous ? "re-export: raw skin layouts"
+                                      : "rebake"));
+        CHECK(previous || !_Contains(why, "re-export"));
     }
     _context = "open refusals";
+    versioned.formatVersion = 6;
+    CHECK(!_Open(_PackUnchecked(versioned), &why) &&
+          why == "unsupported .rigexec format version 6 (this reader reads "
+                 "7); re-export: raw skin layouts");
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
     CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
-    std::printf("format versions: 3, 4 and %u refused, %u writes and opens\n",
+    std::printf("format versions: 3, 4, 5 and %u refused with a rebake, 6 "
+                "with a re-export message; %u writes and opens\n",
                 RigExecFormatVersion + 1, RigExecFormatVersion);
 
     // A verified buffer that breaks a rule.
@@ -1493,6 +1508,24 @@ TestValidationSmoke()
     expect("partition identity", "partition_same_as_topology", [](F &f) {
         f.geometry->chains[0].revisions[0].partitionTopology =
             std::make_unique<fb::RigExecWireSkinTopology>();
+    });
+    expect("validated index range",
+           "topology: validated, but kept entry 0 indexes influence 3 of 3",
+           [](F &f) {
+               fb::RigExecWireSkinTopology &t =
+                   *f.geometry->chains[0].revisions[0].topology;
+               t.validated = true;
+               t.influenceCount = 3;
+           });
+    expect("raw arrays on a sparse layout", "raw_indices or raw_weights",
+           [](F &f) {
+               f.geometry->chains[0].revisions[0].topology->rawWeights = {
+                   1.0f};
+           });
+    expect("chunked with one chunk", "chunked with 1 chunk(s)", [](F &f) {
+        f.geometry->chains[0].revisions[0].chunked = true;
+        f.geometry->chains[0].revisions[0].chunks.resize(1);
+        f.geometry->revisionChunkCount = {1};
     });
     // Weight objects.
     expect("weight dependency order", "base",
@@ -1785,8 +1818,6 @@ TestStepGraph()
         file.steps[3].reads.push_back(
             fb::SlotRange(fb::SlotDomain::Avars, 0, 11));
         file.steps[3].reads.push_back(
-            fb::SlotRange(fb::SlotDomain::Snapshots, 0, 3));
-        file.steps[3].reads.push_back(
             fb::SlotRange(fb::SlotDomain::ChainBase, 0, 1));
         why.clear();
         CHECK(RigExecFormatValidate(file, &why));
@@ -1794,6 +1825,30 @@ TestStepGraph()
             std::printf("  source reads refused: %s\n", why.c_str());
         }
     }
+    // The reserved values: the retired snapshot store is no source any
+    // more, and neither its domain nor its step may appear at all.
+    const auto finals = [](F &f) {
+        f.steps[2].kind = fb::StepKind::SnapshotFinals;
+    };
+    expect("Snapshots read", "step 3 declares the retired Snapshots domain",
+           [](F &f) {
+               f.steps[3].reads.push_back(
+                   fb::SlotRange(fb::SlotDomain::Snapshots, 0, 3));
+           });
+    expect("Snapshots write", "step 1 declares the retired Snapshots domain",
+           [](F &f) {
+               f.steps[1].writes.push_back(
+                   fb::SlotRange(fb::SlotDomain::Snapshots, 0, 1));
+           });
+    expect("empty Snapshots range",
+           "step 0 declares the retired Snapshots domain", [](F &f) {
+               f.steps[0].reads.push_back(
+                   fb::SlotRange(fb::SlotDomain::Snapshots, 0, 0));
+           });
+    expect("SnapshotFinals step", "step 2 is a retired SnapshotFinals step",
+           finals);
+    expectOpen("SnapshotFinals step",
+               "step 2 is a retired SnapshotFinals step", finals);
     std::printf("step graph: %d violations refused\n", cases);
 }
 
@@ -2048,7 +2103,939 @@ TestSwitchOrder()
                 cases);
 }
 
-/// Every field of two sparse layouts, weights bit for bit.
+/// The rich file with slot 0 a volume and slot 1 (/Rig/Slot0) not, and the
+/// volume's VolumePlacements step after the compose: step 1, part 1,
+/// reading PoseFin[0] and writing WeightFrames[0], in cluster 0.
+RigExecWireFile
+_VolumeFile()
+{
+    RigExecWireFile f = _RichFile();
+    _AddSlots(f, 1);
+    f.constants->noScaleAvars = {1, 0};
+    fb::RigExecWireStep place;
+    place.kind = fb::StepKind::VolumePlacements;
+    place.object = 0;
+    place.part = 1;
+    place.cluster = 0;
+    place.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
+    place.writes = {fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 1)};
+    place.preds = {0};
+    f.steps[0].succs = {1};
+    f.steps.push_back(std::move(place));
+    f.clustering->clusters[0].members = {0, 1};
+    f.clustering->clusterOf = {0, 0};
+    return f;
+}
+
+/// Appends \p step to \p f in cluster 0, with no edges.
+void
+_AppendStep(RigExecWireFile &f, fb::RigExecWireStep step)
+{
+    step.cluster = 0;
+    step.preds.clear();
+    step.succs.clear();
+    f.clustering->clusters[0].members.push_back(int32_t(f.steps.size()));
+    f.clustering->clusterOf.push_back(0);
+    f.steps.push_back(std::move(step));
+}
+
+/// One VolumePlacements step per volume slot, each placing its own slot
+/// alone: the per-volume form is accepted and round-trips; the whole-map
+/// form, a step of a slot that is no volume, a write other than its own
+/// WeightFrames slot, a second step of one volume, a volume with no step,
+/// another kind writing WeightFrames and a reader of a placement ahead of
+/// its step are refused, each naming the step.
+void
+TestVolumePlacementSteps()
+{
+    _context = "volume placements";
+    std::string why;
+    const RigExecWireFile valid = _VolumeFile();
+    CHECK(RigExecFormatValidate(valid, &why));
+    if (!why.empty()) {
+        std::printf("  volume file refused: %s\n", why.c_str());
+    }
+    std::vector<uint8_t> bytes;
+    CHECK(_Write(valid, &bytes));
+    const auto opened = _Open(bytes, &why);
+    CHECK(opened && opened->steps.size() == 2 &&
+          opened->steps[1].kind == fb::StepKind::VolumePlacements &&
+          opened->steps[1].object == 0 && opened->steps[1].part == 1);
+    std::vector<uint8_t> again;
+    CHECK(opened && _Write(*opened, &again) && again == bytes);
+
+    using F = RigExecWireFile;
+    int cases = 0;
+    const auto expect = [&](const char *name, const std::string &text,
+                            const std::function<void(F &)> &mutate) {
+        _context = std::string("volume placements: ") + name;
+        ++cases;
+        F file = _VolumeFile();
+        mutate(file);
+        const bool ok = RigExecFormatValidate(file, &why);
+        CHECK(!ok && why == text);
+        if (ok || why != text) {
+            std::printf("  got '%s', expected '%s'\n",
+                        ok ? "(accepted)" : why.c_str(), text.c_str());
+        }
+    };
+    const auto wholeMap = [](F &f) { f.steps[1].part = -1; };
+    const std::string retired = "step 1 (VolumePlacements every volume "
+                                "weight) is the retired whole-map placement "
+                                "(part -1)";
+    expect("whole-map form", retired, wholeMap);
+    {
+        _context = "volume placements open: whole-map form";
+        ++cases;
+        F file = _VolumeFile();
+        wholeMap(file);
+        CHECK(!_Open(_PackUnchecked(file), &why) &&
+              why == "invalid .rigexec: " + retired);
+    }
+    expect("another part",
+           "step 1 (VolumePlacements every volume weight) has part 0, "
+           "which is no VolumePlacements form",
+           [](F &f) { f.steps[1].part = 0; });
+    expect("no volume slot",
+           "step 1 (VolumePlacements /Rig/Slot0) places slot 1, which is no "
+           "volume slot",
+           [](F &f) {
+               f.steps[1].object = 1;
+               f.steps[1].reads = {
+                   fb::SlotRange(fb::SlotDomain::PoseFin, 1, 2)};
+               f.steps[1].writes = {
+                   fb::SlotRange(fb::SlotDomain::WeightFrames, 1, 2)};
+           });
+    expect("slot past the slots",
+           "step 1 (VolumePlacements every volume weight) places slot 2, "
+           "which is no volume slot",
+           [](F &f) { f.steps[1].object = 2; });
+    expect("another volume's slot",
+           "step 1 (VolumePlacements /Rig/Ctl) writes other than "
+           "WeightFrames[0]",
+           [](F &f) {
+               f.steps[1].writes = {
+                   fb::SlotRange(fb::SlotDomain::WeightFrames, 1, 2)};
+           });
+    expect("more than its slot",
+           "step 1 (VolumePlacements /Rig/Ctl) writes other than "
+           "WeightFrames[0]",
+           [](F &f) {
+               f.steps[1].writes = {
+                   fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 2)};
+           });
+    expect("no write",
+           "step 1 (VolumePlacements /Rig/Ctl) writes other than "
+           "WeightFrames[0]",
+           [](F &f) { f.steps[1].writes.clear(); });
+    expect("a second step of one volume",
+           "step 2 (VolumePlacements /Rig/Ctl) places volume slot 0 again; "
+           "step 1 (VolumePlacements /Rig/Ctl) already does",
+           [](F &f) { _AppendStep(f, f.steps[1]); });
+    expect("a volume with no step",
+           "volume slot 1 (/Rig/Slot0) has no VolumePlacements step",
+           [](F &f) { f.constants->noScaleAvars[1] = 1; });
+    // A retired kind is named as one ahead of the WeightFrames rule its
+    // write would break.
+    expect("a placement step of the retired kind",
+           "step 1 is a retired SnapshotFinals step",
+           [](F &f) { f.steps[1].kind = fb::StepKind::SnapshotFinals; });
+    expect("a weight packet writing WeightFrames",
+           "step 2 (WeightPacket /Rig/W) writes WeightFrames, which only a "
+           "VolumePlacements step writes",
+           [](F &f) {
+               fb::RigExecWireStep packet;
+               packet.kind = fb::StepKind::WeightPacket;
+               packet.object = 0;
+               packet.writes = {
+                   fb::SlotRange(fb::SlotDomain::WeightPacket, 0, 1),
+                   fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 1)};
+               _AppendStep(f, std::move(packet));
+           });
+
+    // A reader of a volume's placement: after its step it reads what the
+    // step wrote; ahead of it, the producer check refuses it.
+    fb::RigExecWireStep reader;
+    reader.kind = fb::StepKind::WeightPacket;
+    reader.object = 0;
+    reader.reads = {fb::SlotRange(fb::SlotDomain::WeightFrames, 0, 1)};
+    reader.writes = {fb::SlotRange(fb::SlotDomain::WeightPacket, 0, 1)};
+    {
+        _context = "volume placements: reader after its step";
+        F file = _VolumeFile();
+        _AppendStep(file, reader);
+        why.clear();
+        CHECK(RigExecFormatValidate(file, &why));
+        if (!why.empty()) {
+            std::printf("  reader after its step refused: %s\n", why.c_str());
+        }
+    }
+    expect("reader ahead of its step",
+           "step 1 reads WeightFrames slots [0, 1), which no earlier step "
+           "writes",
+           [&reader](F &f) {
+               _AppendStep(f, reader);
+               // Swap the two last steps: the reader runs before the
+               // placement it reads.
+               std::swap(f.steps[1], f.steps[2]);
+               f.steps[0].succs = {2};
+               f.steps[1].cluster = f.steps[2].cluster = 0;
+               f.steps[1].preds.clear();
+               f.steps[2].preds = {0};
+           });
+    std::printf("volume placements: the per-volume form accepted, %d "
+                "violations refused\n",
+                cases);
+}
+
+/// The label of each step kind, as the baked program spells it, from the
+/// tables alone, including the out-of-range forms.
+void
+TestStepLabels()
+{
+    _context = "step labels";
+    // The rich file's compose step names a group the file does not hold.
+    const RigExecWireFile rich = _RichFile();
+    CHECK(RigExecFormatStepLabel(rich, 0) == "ComposeSubtree 0");
+    CHECK(RigExecFormatStepLabel(rich, 1) == "1");
+    const RigExecWireFile volume = _VolumeFile();
+    CHECK(RigExecFormatStepLabel(volume, 1) == "VolumePlacements /Rig/Ctl");
+
+    size_t checked = 3;
+    const auto label = [&](const char *want,
+                           const std::function<void(RigExecWireFile &)>
+                               &mutate) {
+        RigExecWireFile file = _Copy(rich);
+        mutate(file);
+        const std::string got = RigExecFormatStepLabel(file, 0);
+        ++checked;
+        CHECK(got == want);
+        if (got != want) {
+            std::printf("  label '%s', expected '%s'\n", got.c_str(), want);
+        }
+    };
+    using fb::StepKind;
+    label("VolumePlacements every volume weight", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::VolumePlacements;
+        f.steps[0].part = -1;
+    });
+    const auto group = [](RigExecWireFile &f) {
+        f.pose->composeGroups.resize(1);
+        f.pose->composeGroups[0].begin = 0;
+        f.pose->composeGroups[0].end = 1;
+    };
+    label("ComposeSubtree /Rig/Ctl", group);
+    label("ComposeSubtree 7", [&group](RigExecWireFile &f) {
+        group(f);
+        f.steps[0].object = 7;
+    });
+    label("Solve /Rig/Ctl",
+          [](RigExecWireFile &f) { f.steps[0].kind = StepKind::Solve; });
+    label("Constraint /Rig/Ctl", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::Constraint;
+    });
+    label("CommitApply batch 0", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::CommitApply;
+        f.pose->commits[0].moverPath = 0;
+    });
+    label("ProviderMatrix /Rig/Ctl final", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::ProviderMatrix;
+        f.steps[0].part = 1;
+    });
+    label("ProviderMatrix /Rig/Ctl base", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::ProviderMatrix;
+        f.steps[0].part = 0;
+    });
+    label("SnapshotFinals every provider", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::SnapshotFinals;
+    });
+    label("PoseInterpolator /Rig/Ctl", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::PoseInterpolator;
+    });
+    label("WeightPacket /Rig/W", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::WeightPacket;
+    });
+    label("RevisionFuse /Rig/Mover", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::RevisionFuse;
+    });
+    label("ChainStatus /Rig/Mesh.points", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::ChainStatus;
+    });
+    label("Derived /Rig/Mesh.points", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::Derived;
+    });
+    label("InfluenceFold 3", [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::InfluenceFold;
+        f.steps[0].object = 3;
+    });
+    // A frame record names its provider and the writer it records after;
+    // an object past the records and a provider past the slots keep their
+    // numbers.
+    const auto record = [](RigExecWireFile &f) {
+        f.steps[0].kind = StepKind::FrameMatrix;
+        f.pose->frameRecords = {fb::FrameRecord(0, 0, 0, -1, 1, _pMover)};
+    };
+    label("FrameMatrix /Rig/Ctl after /Rig/Mover", record);
+    label("FrameMatrix record 1", [&record](RigExecWireFile &f) {
+        record(f);
+        f.steps[0].object = 1;
+    });
+    label("FrameMatrix record -1", [&record](RigExecWireFile &f) {
+        record(f);
+        f.steps[0].object = -1;
+    });
+    label("FrameMatrix slot 4 after /Rig/Mover",
+          [](RigExecWireFile &f) {
+              f.steps[0].kind = StepKind::FrameMatrix;
+              f.pose->frameRecords = {
+                  fb::FrameRecord(4, 0, -1, 0, 1, _pMover)};
+          });
+    std::printf("step labels: %zu checked\n", checked);
+}
+
+/// The rich file with a second slot, /Rig/Slot0, both composed by step 0
+/// (compose group [0, 2), so PoseFin versions 0 and 1 are the composes);
+/// commit 0 writes slot 0's last version, 2, in step 1; and frame record 0
+/// of slot 0 after commit 0 reads version 2 in step 2, which declares
+/// PoseFin[0] and CommitTable[0] and writes FrameMatrix[0]. \p solver makes
+/// commit 0 a solver batch over both slots (versions 2 and 3), step 1 its
+/// SolverCommit, and the record a solver's at position 0.
+RigExecWireFile
+_RecordFile(bool solver = false)
+{
+    RigExecWireFile f = _RichFile();
+    _AddSlots(f, 1);
+    f.pose->composeGroups.resize(1);
+    f.pose->composeGroups[0].begin = 0;
+    f.pose->composeGroups[0].end = 2;
+    f.steps[0].writes = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 2)};
+    fb::RigExecWireCommit &commit = f.pose->commits[0];
+    commit.solverOutput = solver;
+    commit.slots = solver ? std::vector<int32_t>{0, 1}
+                          : std::vector<int32_t>{0};
+    commit.slotWrites = solver ? std::vector<uint32_t>{2, 3}
+                               : std::vector<uint32_t>{2};
+    fb::RigExecWireStep writer;
+    writer.kind = solver ? fb::StepKind::SolverCommit
+                         : fb::StepKind::Constraint;
+    writer.object = 0;
+    writer.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
+    writer.writes = {fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1)};
+    _AppendStep(f, std::move(writer));
+    fb::RigExecWireStep frame;
+    frame.kind = fb::StepKind::FrameMatrix;
+    frame.object = 0;
+    frame.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1),
+                   fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1)};
+    frame.writes = {fb::SlotRange(fb::SlotDomain::FrameMatrix, 0, 1)};
+    _AppendStep(f, std::move(frame));
+    f.pose->frameRecords = {
+        fb::FrameRecord(0, 0, solver ? -1 : 0, solver ? 0 : -1, 2, _pCtl)};
+    return f;
+}
+
+/// Removes step \p step from \p f, which has one cluster and no edges.
+void
+_DropStep(RigExecWireFile &f, size_t step)
+{
+    f.steps.erase(f.steps.begin() + std::ptrdiff_t(step));
+    f.clustering->clusterOf.pop_back();
+    std::vector<int32_t> &members = f.clustering->clusters[0].members;
+    members.pop_back();
+}
+
+/// The record file with the rich revision's transform phase AtPrim at
+/// /Rig/Ctl, provider slot 0, record 0 listed for its transform and its one
+/// influence (slot 0); its phased input /Rig/Mesh.points and its blend
+/// sample both read chain 0's published points (Final). Step 3 folds
+/// revision 0, declaring FrameMatrix[0]; step 4, chain 0's status, writes
+/// ChainPoints[0]; step 5, the revision's RevisionStatic, declares it.
+RigExecWireFile
+_PhaseFile()
+{
+    RigExecWireFile f = _RecordFile();
+    fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
+    r.binding->transformPhase.kind = uint8_t(fb::ReadPhaseKind::AtPrim);
+    r.binding->transformPhase.prim = _pCtl;
+    r.transformSlot = 0;
+    r.transformRecords = {0};
+    r.influenceSlots = {0};
+    r.influenceRecords.resize(1);
+    r.influenceRecords[0].v = {0};
+    RigExecWireReadPhase final;
+    final.kind = uint8_t(fb::ReadPhaseKind::Final);
+    r.binding->phaseInputs = {_pMeshPoints};
+    r.binding->phases = {final};
+    RigExecWirePointsBinding published;
+    published.inputPath = _pMeshPoints;
+    published.phase = final;
+    published.candidates = {fb::PointVersion(0, 1)};
+    published.finalRead = true;
+    published.diagnoseMiss = true;
+    r.pointBindings = {published};
+    fb::RigExecWireBlendSample &sample = r.blendChannels[0].samples[0];
+    sample.pointsPath = _pMeshPoints;
+    sample.phase = final;
+    published.diagnoseMiss = false;
+    sample.pointBinding =
+        std::make_unique<RigExecWirePointsBinding>(published);
+    fb::RigExecWireStep fold;
+    fold.kind = fb::StepKind::InfluenceFold;
+    fold.object = 0;
+    fold.reads = {fb::SlotRange(fb::SlotDomain::FrameMatrix, 0, 1)};
+    fold.writes = {fb::SlotRange(fb::SlotDomain::RevisionTransforms, 0, 1)};
+    _AppendStep(f, std::move(fold));
+    fb::RigExecWireStep status;
+    status.kind = fb::StepKind::ChainStatus;
+    status.object = 0;
+    status.reads = {fb::SlotRange(fb::SlotDomain::ChainBase, 0, 1)};
+    status.writes = {fb::SlotRange(fb::SlotDomain::ChainPoints, 0, 1)};
+    _AppendStep(f, std::move(status));
+    fb::RigExecWireStep reader;
+    reader.kind = fb::StepKind::RevisionStatic;
+    reader.object = 0;
+    reader.reads = {fb::SlotRange(fb::SlotDomain::RevisionTransforms, 0, 1),
+                    fb::SlotRange(fb::SlotDomain::ChainPoints, 0, 1)};
+    reader.writes = {fb::SlotRange(fb::SlotDomain::RevisionPacket, 0, 1)};
+    _AppendStep(f, std::move(reader));
+    return f;
+}
+
+bool
+_Same(const fb::FrameRecord &a, const fb::FrameRecord &b)
+{
+    return a.slot() == b.slot() && a.commit() == b.commit() &&
+           a.target() == b.target() && a.position() == b.position() &&
+           a.version() == b.version() && a.moverLabel() == b.moverLabel();
+}
+
+bool
+_Same(const RigExecWirePointsBinding &a, const RigExecWirePointsBinding &b)
+{
+    if (a.inputPath != b.inputPath || a.phase.kind != b.phase.kind ||
+        a.phase.prim != b.phase.prim || a.finalRead != b.finalRead ||
+        a.diagnoseMiss != b.diagnoseMiss ||
+        a.candidates.size() != b.candidates.size()) {
+        return false;
+    }
+    for (size_t k = 0; k < a.candidates.size(); ++k) {
+        if (a.candidates[k].chain() != b.candidates[k].chain() ||
+            a.candidates[k].version() != b.candidates[k].version()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Frame records, the record lists of an AtPrim transform phase and point
+/// bindings: a constraint's and a solver's record, a revision's lists, a
+/// phased input's and a blend sample's binding, a version read and a
+/// derived reader are accepted and survive Write -> Open -> Write field for
+/// field; each rule refuses its violation with its exact text, naming the
+/// step, ahead of the step graph's producer check.
+void
+TestPhaseTables()
+{
+    _context = "phase tables";
+    std::string why;
+    const auto accepted = [&](const char *name, const RigExecWireFile &file) {
+        _context = std::string("phase tables: ") + name;
+        const bool ok = RigExecFormatValidate(file, &why);
+        CHECK(ok);
+        if (!ok) {
+            std::printf("  %s refused: %s\n", name, why.c_str());
+        }
+        return ok;
+    };
+    const RigExecWireFile phase = _PhaseFile();
+    if (accepted("phase file", phase)) {
+        std::vector<uint8_t> bytes;
+        CHECK(_Write(phase, &bytes));
+        const auto o = _Open(bytes, &why);
+        CHECK(o != nullptr);
+        if (o) {
+            std::vector<uint8_t> again;
+            CHECK(_Write(*o, &again) && again == bytes);
+            CHECK(o->pose->frameRecords.size() == 1 &&
+                  _Same(o->pose->frameRecords[0],
+                        phase.pose->frameRecords[0]));
+            const fb::RigExecWireRevision &want =
+                phase.geometry->chains[0].revisions[0];
+            const fb::RigExecWireRevision &got =
+                o->geometry->chains[0].revisions[0];
+            CHECK(got.transformRecords == std::vector<uint32_t>({0}));
+            CHECK(got.influenceRecords.size() == 1 &&
+                  got.influenceRecords[0].v == std::vector<uint32_t>({0}));
+            CHECK(got.pointBindings.size() == 1 &&
+                  _Same(got.pointBindings[0], want.pointBindings[0]));
+            const auto &sample = got.blendChannels[0].samples[0];
+            CHECK(sample.pointBinding &&
+                  _Same(*sample.pointBinding,
+                        *want.blendChannels[0].samples[0].pointBinding));
+            CHECK(!o->geometry->chains[0].derived[0].revision->pointBindings
+                       .size());
+        }
+    }
+    const RigExecWireFile solver = _RecordFile(true);
+    if (accepted("solver record", solver)) {
+        std::vector<uint8_t> bytes;
+        const auto o = _Write(solver, &bytes) ? _Open(bytes, &why) : nullptr;
+        CHECK(o && o->pose->frameRecords.size() == 1 &&
+              _Same(o->pose->frameRecords[0], solver.pose->frameRecords[0]));
+    }
+
+    using F = RigExecWireFile;
+    // A record reading a version its commit read rather than wrote: the
+    // compose's, written before the record's step.
+    const auto composeVersion = [](F &f) {
+        f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 0, _pCtl);
+    };
+    {
+        F file = _RecordFile();
+        composeVersion(file);
+        accepted("record of a read version", file);
+    }
+    // A second commit, /Rig/Mover, writing slot 0's last version (2) in
+    // step 3, after the record's step; commit 0 writes version 4 before it.
+    const auto laterCommit = [](F &f) {
+        fb::RigExecWireCommit later;
+        later.moverPath = _pMover;
+        later.slots = {0};
+        later.slotWrites = {2};
+        f.pose->commits[0].slotWrites = {4};
+        f.pose->commits.push_back(std::move(later));
+        fb::RigExecWireStep step;
+        step.kind = fb::StepKind::Constraint;
+        step.object = 1;
+        step.reads = {fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
+        step.writes = {fb::SlotRange(fb::SlotDomain::CommitTable, 1, 2)};
+        _AppendStep(f, std::move(step));
+        f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 4, _pCtl);
+    };
+    {
+        F file = _RecordFile();
+        laterCommit(file);
+        accepted("record before a later commit", file);
+    }
+    // A non-final version: the binding reads what revision 0's fuse, step
+    // 6, left (version 1), through RevisionDone[0] and ChainDirty[0].
+    const auto version = [](F &f) {
+        fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
+        RigExecWireReadPhase atPrim;
+        atPrim.kind = uint8_t(fb::ReadPhaseKind::AtPrim);
+        atPrim.prim = _pMover;
+        r.binding->phases = {atPrim};
+        r.pointBindings[0].phase = atPrim;
+        r.pointBindings[0].finalRead = false;
+        fb::RigExecWireStep fuse;
+        fuse.kind = fb::StepKind::RevisionFuse;
+        fuse.object = 0;
+        fuse.writes = {fb::SlotRange(fb::SlotDomain::RevisionDone, 0, 1),
+                       fb::SlotRange(fb::SlotDomain::ChainDirty, 0, 1)};
+        _AppendStep(f, std::move(fuse));
+        fb::RigExecWireStep reader = f.steps[5];
+        reader.reads.push_back(
+            fb::SlotRange(fb::SlotDomain::RevisionDone, 0, 1));
+        reader.reads.push_back(
+            fb::SlotRange(fb::SlotDomain::ChainDirty, 0, 1));
+        _DropStep(f, 5);
+        _AppendStep(f, std::move(reader));
+    };
+    {
+        F file = _PhaseFile();
+        version(file);
+        accepted("version read", file);
+    }
+    // A derived target reading its chain's published points.
+    const auto derivedReader = [](F &f) {
+        fb::RigExecWireRevision &d = *f.geometry->chains[0].derived[0].revision;
+        RigExecWireReadPhase final;
+        final.kind = uint8_t(fb::ReadPhaseKind::Final);
+        d.binding->phaseInputs = {_pMeshPoints};
+        d.binding->phases = {final};
+        RigExecWirePointsBinding published;
+        published.inputPath = _pMeshPoints;
+        published.phase = final;
+        published.candidates = {fb::PointVersion(0, 1)};
+        published.finalRead = true;
+        published.diagnoseMiss = true;
+        d.pointBindings = {published};
+        fb::RigExecWireStep step;
+        step.kind = fb::StepKind::Derived;
+        step.object = 0;
+        step.reads = {fb::SlotRange(fb::SlotDomain::ChainPoints, 0, 1)};
+        step.writes = {fb::SlotRange(fb::SlotDomain::DerivedOut, 0, 1)};
+        _AppendStep(f, std::move(step));
+    };
+    {
+        F file = _PhaseFile();
+        derivedReader(file);
+        accepted("derived reader", file);
+    }
+
+    int cases = 0;
+    const auto expect = [&](const char *name, const std::string &text,
+                            const std::function<F()> &make) {
+        _context = std::string("phase tables: ") + name;
+        ++cases;
+        const F file = make();
+        const bool ok = RigExecFormatValidate(file, &why);
+        CHECK(!ok && why == text);
+        if (ok || why != text) {
+            std::printf("  got '%s', expected '%s'\n",
+                        ok ? "(accepted)" : why.c_str(), text.c_str());
+        }
+    };
+    const auto record = [](const std::function<void(F &)> &mutate,
+                           bool solverForm = false) {
+        return [mutate, solverForm] {
+            F f = _RecordFile(solverForm);
+            mutate(f);
+            return f;
+        };
+    };
+    const auto phased = [](const std::function<void(F &)> &mutate) {
+        return [mutate] {
+            F f = _PhaseFile();
+            mutate(f);
+            return f;
+        };
+    };
+    const std::string frame = "step 2 (FrameMatrix /Rig/Ctl after /Rig/Ctl)";
+    const std::string fold = "step 3 (InfluenceFold /Rig/Mover)";
+    const std::string reader = "step 5 (RevisionStatic /Rig/Mover)";
+
+    // The records and their FrameMatrix steps.
+    expect("version a later commit writes",
+           frame + " is bound to PoseFin version 2 of /Rig/Ctl, which step 3 "
+                   "(Constraint /Rig/Mover) writes at or after it",
+           record([&](F &f) {
+               laterCommit(f);
+               f.pose->frameRecords[0] =
+                   fb::FrameRecord(0, 0, 0, -1, 2, _pCtl);
+           }));
+    expect("version of another slot",
+           frame + " is bound to PoseFin version 1 of /Rig/Slot0, not of the "
+                   "provider it records",
+           record([](F &f) {
+               f.pose->frameRecords[0] =
+                   fb::FrameRecord(0, 0, 0, -1, 1, _pCtl);
+           }));
+    expect("version no step writes",
+           frame + " is bound to PoseFin version 3, which no step writes",
+           record([](F &f) {
+               f.pose->frameRecords[0] =
+                   fb::FrameRecord(0, 0, 0, -1, 3, _pCtl);
+           }));
+    expect("solver position of another slot",
+           frame + " reads position 1 of commit 0, which is not the provider "
+                   "it records",
+           record(
+               [](F &f) {
+                   f.pose->frameRecords[0] =
+                       fb::FrameRecord(0, 0, -1, 1, 2, _pCtl);
+               },
+               true));
+    expect("solver position past the slots",
+           frame + " reads position 2 of commit 0, which is not the provider "
+                   "it records",
+           record(
+               [](F &f) {
+                   f.pose->frameRecords[0] =
+                       fb::FrameRecord(0, 0, -1, 2, 2, _pCtl);
+               },
+               true));
+    expect("solver record with a target",
+           frame + " records commit 0, a solver's, at target 0; a solver's "
+                   "record has target -1",
+           record(
+               [](F &f) {
+                   f.pose->frameRecords[0] =
+                       fb::FrameRecord(0, 0, 0, 0, 2, _pCtl);
+               },
+               true));
+    expect("constraint record with a position",
+           frame + " records commit 0, a constraint's, at target 0 and "
+                   "position 0; a constraint's record has a target and "
+                   "position -1",
+           record([](F &f) {
+               f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, 0, 2, _pCtl);
+           }));
+    expect("record with no step",
+           "frame record 0 of /Rig/Ctl after /Rig/Ctl has no FrameMatrix step",
+           record([](F &f) { _DropStep(f, 2); }));
+    expect("two steps for one record",
+           "step 3 (FrameMatrix /Rig/Ctl after /Rig/Ctl) evaluates the same "
+           "frame record as " + frame,
+           record([](F &f) { _AppendStep(f, f.steps[2]); }));
+    expect("object past the records",
+           "step 2 (FrameMatrix record 1) names frame record 1 of 1",
+           record([](F &f) { f.steps[2].object = 1; }));
+    // A record's own fields out of range: named by its FrameMatrix step,
+    // and by the record's row only when no step evaluates it.
+    expect("record past the slots",
+           "step 2 (FrameMatrix slot 2 after /Rig/Ctl) names slot 2 of 2",
+           record([](F &f) {
+               f.pose->frameRecords[0] = fb::FrameRecord(2, 0, 0, -1, 2, _pCtl);
+           }));
+    expect("record commit past the commits",
+           frame + " names commit 5 of " +
+               std::to_string(_RecordFile(false).pose->commits.size()),
+           record([](F &f) {
+               f.pose->frameRecords[0] = fb::FrameRecord(0, 5, 0, -1, 2, _pCtl);
+           }));
+    expect("record version past the pool",
+           frame + " is bound to PoseFin version 4, which no step writes",
+           record([](F &f) {
+               f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 4, _pCtl);
+           }));
+    expect("record mover label past the paths",
+           "step 2 (FrameMatrix /Rig/Ctl after ) names mover label path id "
+           "999 of " +
+               std::to_string(_RecordFile(false).paths.size()),
+           record([](F &f) {
+               f.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 2, 999);
+           }));
+    expect("record with no step past the slots",
+           "pose.frame_records[0].slot: 2 out of range (2)", record([](F &f) {
+               _DropStep(f, 2);
+               f.pose->frameRecords[0] = fb::FrameRecord(2, 0, 0, -1, 2, _pCtl);
+           }));
+    expect("no CommitTable read",
+           frame + " does not declare CommitTable[0]", record([](F &f) {
+               f.steps[2].reads = {
+                   fb::SlotRange(fb::SlotDomain::PoseFin, 0, 1)};
+           }));
+    expect("no PoseFin read", frame + " does not declare PoseFin[0]",
+           record([](F &f) {
+               f.steps[2].reads = {
+                   fb::SlotRange(fb::SlotDomain::CommitTable, 0, 1)};
+           }));
+    // Ahead of its commit: the version is the compose's, so only the
+    // commit's table is unwritten; with the commit's step gone, no step
+    // writes it. Either way the producer check would name an unproduced
+    // CommitTable read instead.
+    expect("ahead of its commit",
+           "step 1 (FrameMatrix /Rig/Ctl after /Rig/Ctl) reads the exit of "
+           "commit 0, which step 2 (Constraint /Rig/Ctl) writes at or after "
+           "it",
+           record([&](F &f) {
+               composeVersion(f);
+               std::swap(f.steps[1], f.steps[2]);
+           }));
+    expect("commit with no step",
+           "step 1 (FrameMatrix /Rig/Ctl after /Rig/Ctl) reads the exit of "
+           "commit 0, which no step writes",
+           record([&](F &f) {
+               composeVersion(f);
+               _DropStep(f, 1);
+           }));
+    // A retired kind is named as one ahead of the frame-record rule a
+    // commit missing its first step would break.
+    expect("a commit step of the retired kind",
+           "step 1 is a retired SnapshotFinals step", record([](F &f) {
+               f.steps[1].kind = fb::StepKind::SnapshotFinals;
+           }));
+    expect("another kind writing FrameMatrix",
+           "step 1 (Constraint /Rig/Ctl) writes FrameMatrix, which only a "
+           "FrameMatrix step writes",
+           record([](F &f) {
+               f.steps[1].writes.push_back(
+                   fb::SlotRange(fb::SlotDomain::FrameMatrix, 0, 1));
+           }));
+    expect("FrameMatrix writing more than its record",
+           frame + " writes other than FrameMatrix[0]", record([](F &f) {
+               f.steps[2].writes = {
+                   fb::SlotRange(fb::SlotDomain::FrameMatrix, 0, 2)};
+           }));
+    expect("two composes of one version",
+           "step 3 (ComposeSubtree /Rig/Ctl) writes PoseFin version 0, which "
+           "step 0 (ComposeSubtree /Rig/Ctl) writes too",
+           record([](F &f) {
+               fb::RigExecWireStep again = f.steps[0];
+               again.overrideInputs.clear();
+               _AppendStep(f, std::move(again));
+           }));
+
+    // The record lists an AtPrim transform phase folds.
+    expect("transform record past the records",
+           fold + " reads frame record 1 of 1", phased([](F &f) {
+               f.geometry->chains[0].revisions[0].transformRecords = {1};
+           }));
+    expect("influence lists of another count",
+           fold + " holds 2 influence record lists for 1 influence slots",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].influenceRecords.resize(2);
+           }));
+    expect("record of another provider",
+           fold + " reads frame record 0 of /Rig/Ctl for its transform, "
+                  "whose provider is /Rig/Slot0",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].transformSlot = 1;
+           }));
+    expect("influence record of another provider",
+           fold + " reads frame record 0 of /Rig/Ctl for influence 0, whose "
+                  "provider is /Rig/Slot0",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].influenceSlots = {1};
+           }));
+    expect("records without an AtPrim phase",
+           fold + " holds frame records for a transform phase that is not "
+                  "AtPrim",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].binding->transformPhase.kind =
+                   uint8_t(fb::ReadPhaseKind::Preceding);
+           }));
+    expect("fold without its FrameMatrix read",
+           fold + " does not declare FrameMatrix[0]",
+           phased([](F &f) { f.steps[3].reads.clear(); }));
+    expect("records with no fold",
+           "geometry.chains[0].revisions[0]: frame records with no "
+           "InfluenceFold step to read them",
+           phased([](F &f) { f.steps[3].kind = fb::StepKind::RevisionChunk; }));
+
+    // Point bindings.
+    expect("candidate chain past the chains",
+           reader + " binds /Rig/Mesh.points to chain 1 of 1",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].pointBindings[0].candidates =
+                   {fb::PointVersion(1, 1)};
+           }));
+    expect("candidate version past the revisions",
+           reader + " binds /Rig/Mesh.points to version 2 of chain 0, past "
+                    "its last version 1",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].pointBindings[0].candidates =
+                   {fb::PointVersion(0, 2)};
+           }));
+    expect("negative candidate version",
+           reader + " binds /Rig/Mesh.points to version -1 of chain 0, which "
+                    "is no version",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].pointBindings[0].candidates =
+                   {fb::PointVersion(0, -1)};
+           }));
+    expect("final read of an earlier version",
+           reader + " binds /Rig/Mesh.points as a final read of version 0 of "
+                    "chain 0, not its last version 1",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].pointBindings[0].candidates =
+                   {fb::PointVersion(0, 0)};
+           }));
+    expect("final read of two candidates",
+           reader + " binds /Rig/Mesh.points as a final read of 2 "
+                    "candidates; a final read has one",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].pointBindings[0].candidates =
+                   {fb::PointVersion(0, 1), fb::PointVersion(0, 1)};
+           }));
+    expect("bindings of another count",
+           reader + " holds 2 point bindings for 1 phased inputs",
+           phased([](F &f) {
+               auto &bindings =
+                   f.geometry->chains[0].revisions[0].pointBindings;
+               bindings.push_back(bindings[0]);
+           }));
+    expect("binding of another input",
+           reader + " binds /Rig/Ctl.tx for phased input 0, which is "
+                    "/Rig/Mesh.points",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].pointBindings[0].inputPath =
+                   _pCtlTx;
+           }));
+    expect("binding at another phase",
+           reader + " binds /Rig/Mesh.points at a phase other than the one "
+                    "it declares",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].pointBindings[0].phase.kind =
+                   uint8_t(fb::ReadPhaseKind::Preceding);
+           }));
+    expect("reader without its ChainPoints read",
+           reader + " does not declare ChainPoints[0] for /Rig/Mesh.points",
+           phased([](F &f) {
+               f.steps[5].reads = {fb::SlotRange(
+                   fb::SlotDomain::RevisionTransforms, 0, 1)};
+           }));
+    expect("version reader without its ChainDirty read",
+           "step 6 (RevisionStatic /Rig/Mover) does not declare "
+           "ChainDirty[0] for /Rig/Mesh.points",
+           phased([&](F &f) {
+               version(f);
+               f.steps[6].reads.pop_back();
+           }));
+    expect("derived reader without its ChainPoints read",
+           "step 6 (Derived /Rig/Mesh.points) does not declare ChainPoints[0] "
+           "for /Rig/Mesh.points",
+           phased([&](F &f) {
+               derivedReader(f);
+               f.steps[6].reads.clear();
+           }));
+    expect("bindings with no reader",
+           "geometry.chains[0].revisions[0]: point bindings with no "
+           "RevisionStatic step to read them",
+           phased([](F &f) { f.steps[5].kind = fb::StepKind::RevisionChunk; }));
+    // A blend sample's binding.
+    const std::string sample = "blend_channels[0].samples[0]";
+    expect("sample binding on a base-phase sample",
+           reader + " binds " + sample + ", which reads no phased points",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+                   .phase = RigExecWireReadPhase();
+           }));
+    expect("sample binding on a blend shape",
+           reader + " binds " + sample + ", which reads no phased points",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+                   .blendShape = _pMesh;
+           }));
+    expect("phased sample without its binding",
+           reader + " leaves " + sample + " unbound, though it reads phased "
+                                          "points",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+                   .pointBinding.reset();
+           }));
+    expect("sample binding of another input",
+           reader + " binds " + sample + " to /Rig/Ctl.tx, not to its points "
+                                         "/Rig/Mesh.points",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+                   .pointBinding->inputPath = _pCtlTx;
+           }));
+    expect("sample binding with a miss diagnostic",
+           reader + " binds " + sample + " with a miss diagnostic, which a "
+                                         "blend sample never emits",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+                   .pointBinding->diagnoseMiss = true;
+           }));
+    expect("sample candidate past the revisions",
+           reader + " binds /Rig/Mesh.points to version 3 of chain 0, past "
+                    "its last version 1",
+           phased([](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0].samples[0]
+                   .pointBinding->candidates = {fb::PointVersion(0, 3)};
+           }));
+
+    // Open refuses with the same words.
+    {
+        _context = "phase tables open: version a later commit writes";
+        ++cases;
+        F file = _RecordFile();
+        laterCommit(file);
+        file.pose->frameRecords[0] = fb::FrameRecord(0, 0, 0, -1, 2, _pCtl);
+        CHECK(!_Open(_PackUnchecked(file), &why) &&
+              why == "invalid .rigexec: " + frame +
+                         " is bound to PoseFin version 2 of /Rig/Ctl, which "
+                         "step 3 (Constraint /Rig/Mover) writes at or after "
+                         "it");
+    }
+    std::printf("phase tables: records, lists and bindings accepted and "
+                "round-tripped, %d violations refused\n",
+                cases);
+}
+
+/// Every field of two skin layouts, weights bit for bit.
 bool
 _Same(const fb::RigExecWireSkinTopology &a,
       const fb::RigExecWireSkinTopology &b)
@@ -2058,7 +3045,31 @@ _Same(const fb::RigExecWireSkinTopology &a,
            a.validated == b.validated && a.counts8 == b.counts8 &&
            a.counts16 == b.counts16 && a.indexWidth == b.indexWidth &&
            a.indices8 == b.indices8 && a.indices16 == b.indices16 &&
-           a.indices32 == b.indices32 && _Same(a.weights, b.weights);
+           a.indices32 == b.indices32 && _Same(a.weights, b.weights) &&
+           a.raw == b.raw && a.rawIndices == b.rawIndices &&
+           _Same(a.rawWeights, b.rawWeights);
+}
+
+/// The evaluator's layout rules (RigExecResolveSkinTopology), from their
+/// definition: rows of an element size of at least 1, at least one
+/// influence, every index in [0, influenceCount) and every weight finite
+/// and not negative.
+bool
+_EvaluatorValidates(const std::vector<int32_t> &indices,
+                    const std::vector<float> &weights, int32_t elementSize,
+                    uint64_t influenceCount)
+{
+    if (elementSize < 1 || indices.size() != weights.size() ||
+        indices.size() % size_t(elementSize) != 0 || influenceCount == 0) {
+        return false;
+    }
+    for (size_t k = 0; k < indices.size(); ++k) {
+        if (indices[k] < 0 || uint64_t(indices[k]) >= influenceCount ||
+            !std::isfinite(weights[k]) || weights[k] < 0.0f) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// The canonical dense form, from the definition: each row's entries other
@@ -2095,19 +3106,23 @@ TestSparseTopology()
 {
     _context = "sparse topology";
     std::string why;
-    size_t encoded = 0;
+    size_t encoded = 0, unvalidated = 0, passing = 0;
 
-    // Encodes \p indices x \p weights, checks the encoding validates inside
-    // the rich file, survives Write -> Open, re-encodes identically from
-    // its expansion, and expands to the canonical dense form bit for bit.
+    // Encodes \p indices x \p weights over 7 influences, validated as the
+    // evaluator would leave it, checks the encoding validates inside the
+    // rich file, survives Write -> Open, re-encodes identically from its
+    // expansion, and expands to the canonical dense form bit for bit. The
+    // same encoding with its validated flag flipped is refused.
     const auto encode = [&](const std::string &label,
                             const std::vector<int32_t> &indices,
                             const std::vector<float> &weights,
                             int32_t elementSize, uint64_t pointCount) {
         _context = "sparse topology: " + label;
+        const bool validated =
+            _EvaluatorValidates(indices, weights, elementSize, 7);
         fb::RigExecWireSkinTopology sparse;
         const bool ok = RigExecFormatSparseTopology(
-            indices, weights, elementSize, pointCount, 7, true, &sparse,
+            indices, weights, elementSize, pointCount, 7, validated, &sparse,
             &why);
         CHECK(ok);
         if (!ok) {
@@ -2117,7 +3132,9 @@ TestSparseTopology()
         ++encoded;
         CHECK(sparse.elementSize == elementSize &&
               sparse.pointCount == pointCount &&
-              sparse.influenceCount == 7 && sparse.validated);
+              sparse.influenceCount == 7 && sparse.validated == validated &&
+              !sparse.raw && sparse.rawIndices.empty() &&
+              sparse.rawWeights.empty());
         std::vector<int32_t> wantIndices, gotIndices;
         std::vector<float> wantWeights, gotWeights;
         _CanonicalDense(indices, weights, size_t(elementSize), &wantIndices,
@@ -2127,8 +3144,13 @@ TestSparseTopology()
 
         fb::RigExecWireSkinTopology again;
         CHECK(RigExecFormatSparseTopology(gotIndices, gotWeights,
-                                          elementSize, pointCount, 7, true,
-                                          &again, &why) &&
+                                          elementSize, pointCount, 7,
+                                          validated, &again, &why) &&
+              _Same(again, sparse));
+        // The writer picks the sparse form for every layout it holds.
+        CHECK(RigExecFormatTopology(indices, weights, elementSize,
+                                    pointCount, 7, validated, &again,
+                                    &why) &&
               _Same(again, sparse));
 
         RigExecWireFile file = _RichFile();
@@ -2138,6 +3160,21 @@ TestSparseTopology()
         CHECK(RigExecFormatValidate(file, &why));
         if (!why.empty()) {
             std::printf("  file refused: %s\n", why.c_str());
+        }
+        {
+            RigExecWireFile flipped = _RichFile();
+            flipped.geometry->chains[0].revisions[0].topology =
+                std::make_unique<fb::RigExecWireSkinTopology>(sparse);
+            flipped.geometry->chains[0].revisions[0].topology->validated =
+                !validated;
+            CHECK(!RigExecFormatValidate(flipped, &why) &&
+                  _Contains(why,
+                            std::string("geometry.chains[0].revisions[0]."
+                                        "topology: ") +
+                                (validated ? "not validated, but its layout "
+                                             "passes the evaluator's rules"
+                                           : "validated")));
+            ++(validated ? passing : unvalidated);
         }
         std::vector<uint8_t> bytes;
         std::unique_ptr<RigExecWireFile> o;
@@ -2292,9 +3329,542 @@ TestSparseTopology()
         CHECK(RigExecFormatValidate(handMade(width, nan), &why));
     }
     std::printf("sparse topology: %zu layouts encoded canonically, "
-                "validated and expanded; 6 malformed layouts and 6 kept "
-                "(0, +-0) entries refused\n",
-                encoded);
+                "validated and expanded, each refused with its validated "
+                "flag flipped (%zu the evaluator's rules fail, %zu they "
+                "pass); 6 malformed layouts and 6 kept (0, +-0) entries "
+                "refused\n",
+                encoded, unvalidated, passing);
+    CHECK(encoded == 10 && unvalidated == 9 && passing == 1);
+}
+
+/// Raw skin layouts: RigExecFormatTopology stores verbatim every layout the
+/// sparse form cannot hold -- indices and weights of different lengths,
+/// entries short of a whole row, entries at element size 0, a negative
+/// element size with and without entries, and an element size past 65535
+/// over a partial row, no entries and one row, the last both passing and
+/// failing the evaluator's rules -- with the evaluator's point count and
+/// validation. Each validates inside the rich file, survives Write -> Open
+/// bit for bit (a -0 and a NaN payload among the weights), expands to its
+/// own arrays and is refused with its validated flag flipped. The
+/// validator refuses each way a layout breaks its form or carries a
+/// validated flag the evaluator's rules would not give it, in either form
+/// and as a partition layout.
+void
+TestRawTopology()
+{
+    _context = "raw topology";
+    std::string why;
+    size_t stored = 0, unvalidated = 0, passing = 0;
+    const float nan = _F(0x7fc12345u);
+    const std::string row = "geometry.chains[0].revisions[0].topology";
+
+    // The point count the evaluator gives a layout, from its definition.
+    const auto pointsOf = [](const std::vector<int32_t> &indices,
+                             const std::vector<float> &weights,
+                             int32_t elementSize) -> uint64_t {
+        return elementSize >= 1 && indices.size() == weights.size() &&
+                       indices.size() % size_t(elementSize) == 0
+                   ? indices.size() / size_t(elementSize)
+                   : 0;
+    };
+    const auto store = [&](const std::string &label,
+                           const std::vector<int32_t> &indices,
+                           const std::vector<float> &weights,
+                           int32_t elementSize, uint64_t influences) {
+        _context = "raw topology: " + label;
+        const uint64_t points = pointsOf(indices, weights, elementSize);
+        const bool validated =
+            _EvaluatorValidates(indices, weights, elementSize, influences);
+        fb::RigExecWireSkinTopology raw;
+        const bool ok =
+            RigExecFormatTopology(indices, weights, elementSize, points,
+                                  influences, validated, &raw, &why);
+        CHECK(ok);
+        if (!ok) {
+            std::printf("  refused: %s\n", why.c_str());
+            return raw;
+        }
+        CHECK(raw.raw && raw.rawIndices == indices &&
+              _Same(raw.rawWeights, weights) &&
+              raw.elementSize == elementSize && raw.pointCount == points &&
+              raw.influenceCount == influences &&
+              raw.validated == validated);
+        CHECK(raw.indexWidth == 0 && raw.counts8.empty() &&
+              raw.counts16.empty() && raw.indices8.empty() &&
+              raw.indices16.empty() && raw.indices32.empty() &&
+              raw.weights.empty());
+        // The sparse form cannot hold it, which is why it is raw.
+        fb::RigExecWireSkinTopology sparse;
+        CHECK(!RigExecFormatSparseTopology(indices, weights, elementSize,
+                                           points, influences, validated,
+                                           &sparse, &why));
+        std::vector<int32_t> gotIndices;
+        std::vector<float> gotWeights;
+        RigExecFormatExpandTopology(raw, &gotIndices, &gotWeights);
+        CHECK(gotIndices == indices && _Same(gotWeights, weights));
+        fb::RigExecWireSkinTopology again;
+        CHECK(RigExecFormatTopology(gotIndices, gotWeights, elementSize,
+                                    points, influences, validated, &again,
+                                    &why) &&
+              _Same(again, raw));
+        // A point count the evaluator would not give it is refused, the
+        // output untouched.
+        again.elementSize = 12345;
+        CHECK(!RigExecFormatTopology(indices, weights, elementSize,
+                                     points + 1, influences, validated,
+                                     &again, &why) &&
+              _Contains(why, "hold " + std::to_string(points) +
+                                 " point(s), not " +
+                                 std::to_string(points + 1)) &&
+              again.elementSize == 12345);
+
+        RigExecWireFile file = _RichFile();
+        file.geometry->chains[0].revisions[0].topology =
+            std::make_unique<fb::RigExecWireSkinTopology>(raw);
+        why.clear();
+        CHECK(RigExecFormatValidate(file, &why));
+        if (!why.empty()) {
+            std::printf("  file refused: %s\n", why.c_str());
+        }
+        {
+            RigExecWireFile flipped = _RichFile();
+            flipped.geometry->chains[0].revisions[0].topology =
+                std::make_unique<fb::RigExecWireSkinTopology>(raw);
+            flipped.geometry->chains[0].revisions[0].topology->validated =
+                !validated;
+            CHECK(!RigExecFormatValidate(flipped, &why) &&
+                  _Contains(why, row + ": " +
+                                     (validated
+                                          ? "not validated, but its layout "
+                                            "passes the evaluator's rules"
+                                          : "validated")));
+            ++(validated ? passing : unvalidated);
+        }
+        std::vector<uint8_t> bytes;
+        std::unique_ptr<RigExecWireFile> o;
+        if (_Write(file, &bytes, &why)) {
+            o = _Open(bytes, &why);
+        }
+        CHECK(o && o->geometry->chains[0].revisions[0].topology);
+        if (o && o->geometry->chains[0].revisions[0].topology) {
+            const fb::RigExecWireSkinTopology &read =
+                *o->geometry->chains[0].revisions[0].topology;
+            CHECK(_Same(read, raw));
+            RigExecFormatExpandTopology(read, &gotIndices, &gotWeights);
+            CHECK(gotIndices == indices && _Same(gotWeights, weights));
+            std::vector<uint8_t> rewritten;
+            CHECK(_Write(*o, &rewritten) && rewritten == bytes);
+        }
+        ++stored;
+        return raw;
+    };
+
+    const fb::RigExecWireSkinTopology odd =
+        store("not rows", {1, 0, 0, 1, 0}, {0.5f, 0.0f, 1.0f, nan, -0.0f}, 2,
+              2);
+    store("weights short", {1, 0, 2}, {0.5f, -0.0f}, 1, 3);
+    store("entries at element size 0", {2}, {0.25f}, 0, 3);
+    store("negative element size", {0}, {1.0f}, -1, 1);
+    store("negative element size, no entries", {}, {}, -1, 1);
+    store("element size 70000, a partial row", {0, 1, 1, 0, 1},
+          {1.0f, 0.5f, 0.25f, 0.0f, 1.0f}, 70000, 2);
+    const fb::RigExecWireSkinTopology wideEmpty =
+        store("element size 65536, no entries", {}, {}, 65536, 2);
+    CHECK(wideEmpty.validated && wideEmpty.pointCount == 0);
+    std::vector<int32_t> wideIndices(70000, 1);
+    std::vector<float> wideWeights(70000, 0.5f);
+    wideWeights[0] = -0.0f;
+    const fb::RigExecWireSkinTopology wideRow = store(
+        "element size 70000, one row", wideIndices, wideWeights, 70000, 2);
+    CHECK(wideRow.validated && wideRow.pointCount == 1);
+    std::vector<int32_t> pastIndices = wideIndices;
+    pastIndices[0] = 2;
+    const fb::RigExecWireSkinTopology wideRowPast =
+        store("element size 70000, one row past the influences",
+              pastIndices, wideWeights, 70000, 2);
+    CHECK(!wideRowPast.validated && wideRowPast.pointCount == 1);
+    CHECK(!odd.validated && odd.pointCount == 0);
+
+    // Refusals, each with its exact message, on the rich file's topology,
+    // or on a partition layout beside it.
+    int refused = 0;
+    const auto refuse = [&](const char *label,
+                            const fb::RigExecWireSkinTopology &t,
+                            const std::string &expected,
+                            bool partition = false) {
+        _context = std::string("raw topology refuses: ") + label;
+        RigExecWireFile file = _RichFile();
+        fb::RigExecWireRevision &revision =
+            file.geometry->chains[0].revisions[0];
+        if (partition) {
+            revision.partitionSameAsTopology = false;
+            revision.partitionTopology =
+                std::make_unique<fb::RigExecWireSkinTopology>(t);
+        } else {
+            revision.topology =
+                std::make_unique<fb::RigExecWireSkinTopology>(t);
+        }
+        why.clear();
+        const bool ok = RigExecFormatValidate(file, &why);
+        CHECK(!ok && why == expected);
+        if (ok || why != expected) {
+            std::printf("  got '%s', expected '%s'\n",
+                        ok ? "(accepted)" : why.c_str(), expected.c_str());
+        }
+        // Open says the same through the bytes.
+        std::string opened;
+        CHECK(!_Open(_PackUnchecked(file), &opened) &&
+              opened == "invalid .rigexec: " + expected);
+        ++refused;
+    };
+    const auto edited = [](fb::RigExecWireSkinTopology t,
+                           const std::function<void(
+                               fb::RigExecWireSkinTopology &)> &edit) {
+        edit(t);
+        return t;
+    };
+    using T = fb::RigExecWireSkinTopology;
+    const std::string sparseVectors =
+        row + ": a raw layout with sparse vectors or an index_width";
+    refuse("raw with counts",
+           edited(odd, [](T &t) { t.counts8 = {1}; }), sparseVectors);
+    refuse("raw with kept weights",
+           edited(odd, [](T &t) { t.weights = {0.5f}; }), sparseVectors);
+    refuse("raw with indices",
+           edited(odd, [](T &t) { t.indices32 = {1}; }), sparseVectors);
+    refuse("raw with an index width",
+           edited(odd, [](T &t) { t.indexWidth = 1; }), sparseVectors);
+    refuse("raw rows the sparse form holds", edited(odd, [](T &t) {
+               t.rawIndices.pop_back();
+               t.rawWeights.pop_back();
+           }),
+           row + ": a raw layout of 4 indices and 4 weights at element_size "
+                 "2, which the sparse form holds");
+    refuse("raw and empty at element size 0", edited(odd, [](T &t) {
+               t.elementSize = 0;
+               t.rawIndices.clear();
+               t.rawWeights.clear();
+           }),
+           row + ": a raw layout of 0 indices and 0 weights at element_size "
+                 "0, which the sparse form holds");
+    refuse("raw point count",
+           edited(odd, [](T &t) { t.pointCount = 2; }),
+           row + ": point_count 2, but its raw layout holds 0 point(s)");
+    refuse("raw rows, point count",
+           edited(wideRow, [](T &t) { t.pointCount = 2; }),
+           row + ": point_count 2, but its raw layout holds 1 point(s)");
+    refuse("raw validated, not rows",
+           edited(odd, [](T &t) { t.validated = true; }),
+           row + ": validated, but its raw layout is not rows of "
+                 "element_size");
+    refuse("raw validated without influences",
+           edited(wideEmpty, [](T &t) { t.influenceCount = 0; }),
+           row + ": validated with element_size 65536 and 0 influence(s)");
+    refuse("raw validated, index past the influences",
+           edited(wideRow, [](T &t) { t.rawIndices[69999] = 2; }),
+           row + ": validated, but raw entry 69999 indexes influence 2 of 2");
+    refuse("raw validated, negative index",
+           edited(wideRow, [](T &t) { t.rawIndices[3] = -1; }),
+           row + ": validated, but raw entry 3 indexes influence -1 of 2");
+    refuse("raw validated, NaN weight",
+           edited(wideRow, [nan](T &t) { t.rawWeights[5] = nan; }),
+           row + ": validated, but raw entry 5 has a negative or non-finite "
+                 "weight");
+    refuse("raw validated, negative weight",
+           edited(wideRow, [](T &t) { t.rawWeights[6] = -0.25f; }),
+           row + ": validated, but raw entry 6 has a negative or non-finite "
+                 "weight");
+    refuse("raw rows not validated, the rules pass",
+           edited(wideRow, [](T &t) { t.validated = false; }),
+           row + ": not validated, but its layout passes the evaluator's "
+                 "rules");
+
+    // The sparse form: no raw arrays, and validated exactly when the
+    // evaluator's rules pass.
+    fb::RigExecWireSkinTopology sparse;
+    CHECK(RigExecFormatSparseTopology({1, 2}, {0.5f, 0.5f}, 2, 1, 3, true,
+                                      &sparse, &why));
+    refuse("sparse with raw indices",
+           edited(sparse, [](T &t) { t.rawIndices = {1, 2}; }),
+           row + ": raw_indices or raw_weights on a sparse layout");
+    refuse("sparse with raw weights",
+           edited(sparse, [](T &t) { t.rawWeights = {0.5f}; }),
+           row + ": raw_indices or raw_weights on a sparse layout");
+    refuse("sparse validated at element size 0", edited(sparse, [](T &t) {
+               t.elementSize = 0;
+               t.counts8 = {0};
+               t.indices8.clear();
+               t.weights.clear();
+           }),
+           row + ": validated with element_size 0 and 3 influence(s)");
+    refuse("sparse validated without influences",
+           edited(sparse, [](T &t) { t.influenceCount = 0; }),
+           row + ": validated with element_size 2 and 0 influence(s)");
+    for (const uint8_t width : {uint8_t(1), uint8_t(2), uint8_t(4)}) {
+        const T past = edited(sparse, [width](T &t) {
+            t.indexWidth = width;
+            t.indices8.clear();
+            if (width == 1) {
+                t.indices8 = {1, 3};
+            } else if (width == 2) {
+                t.indices16 = {1, 3};
+            } else {
+                t.indices32 = {1, 3};
+            }
+        });
+        refuse(("sparse validated, index past the influences at width " +
+                std::to_string(width))
+                   .c_str(),
+               past,
+               row + ": validated, but kept entry 1 indexes influence 3 of "
+                     "3");
+    }
+    refuse("sparse validated, negative index", edited(sparse, [](T &t) {
+               t.indexWidth = 4;
+               t.indices8.clear();
+               t.indices32 = {1, -1};
+           }),
+           row + ": validated, but kept entry 1 indexes influence -1 of 3");
+    refuse("sparse validated, NaN weight",
+           edited(sparse, [nan](T &t) { t.weights[1] = nan; }),
+           row + ": validated, but kept entry 1 has a negative or non-finite "
+                 "weight");
+    refuse("sparse validated, negative weight",
+           edited(sparse, [](T &t) { t.weights[0] = -0.5f; }),
+           row + ": validated, but kept entry 0 has a negative or non-finite "
+                 "weight");
+    refuse("sparse not validated, the rules pass",
+           edited(sparse, [](T &t) { t.validated = false; }),
+           row + ": not validated, but its layout passes the evaluator's "
+                 "rules");
+
+    // The same rules on a partition layout.
+    const std::string partition =
+        "geometry.chains[0].revisions[0].partition_topology";
+    refuse("partition raw validated, not rows",
+           edited(odd, [](T &t) { t.validated = true; }),
+           partition + ": validated, but its raw layout is not rows of "
+                       "element_size",
+           true);
+    refuse("partition sparse validated, index past the influences",
+           edited(sparse, [](T &t) { t.indices8 = {1, 3}; }),
+           partition + ": validated, but kept entry 1 indexes influence 3 "
+                       "of 3",
+           true);
+    refuse("partition sparse with raw weights",
+           edited(sparse, [](T &t) { t.rawWeights = {0.5f}; }),
+           partition + ": raw_indices or raw_weights on a sparse layout",
+           true);
+    refuse("partition sparse not validated, the rules pass",
+           edited(sparse, [](T &t) { t.validated = false; }),
+           partition + ": not validated, but its layout passes the "
+                       "evaluator's rules",
+           true);
+    refuse("partition raw rows not validated, the rules pass",
+           edited(wideEmpty, [](T &t) { t.validated = false; }),
+           partition + ": not validated, but its layout passes the "
+                       "evaluator's rules",
+           true);
+
+    // A validated layout's -0 weight is a zero weight, which the rules
+    // admit, and a raw layout serves as a partition layout.
+    _context = "raw topology: accepted";
+    {
+        RigExecWireFile file = _RichFile();
+        fb::RigExecWireRevision &revision =
+            file.geometry->chains[0].revisions[0];
+        revision.topology = std::make_unique<T>(edited(
+            sparse, [](T &t) { t.weights[0] = -0.0f; }));
+        revision.partitionSameAsTopology = false;
+        revision.partitionTopology = std::make_unique<T>(odd);
+        why.clear();
+        CHECK(RigExecFormatValidate(file, &why));
+        if (!why.empty()) {
+            std::printf("  refused: %s\n", why.c_str());
+        }
+    }
+    std::printf("raw topology: %zu layouts stored raw, validated, "
+                "round-tripped and expanded bit for bit, each refused with "
+                "its validated flag flipped (%zu the evaluator's rules fail, "
+                "%zu they pass); %d layouts refused by the validator\n",
+                stored, unvalidated, passing, refused);
+    CHECK(stored == 9 && unvalidated == 7 && passing == 2 && refused == 31);
+}
+
+/// The vertex partition of a main revision: a chunked skin revision whose
+/// ranges tile its partition's points, keyed by ascending influence
+/// positions, over a partition layout of its element size and index count,
+/// is accepted, also over a raw partition layout; each way a table breaks
+/// the shape the bake cuts is refused with its exact message.
+void
+TestChunkTables()
+{
+    _context = "chunk tables";
+    std::string why;
+    const std::string row = "geometry.chains[0].revisions[0]";
+    // The rich revision cut into two chunks over its 2-point topology of
+    // element size 2.
+    const auto chunked = [] {
+        RigExecWireFile f = _RichFile();
+        fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
+        r.op = uint8_t(fb::RevisionOp::Skin);
+        r.skinTopologyFixed = true;
+        r.influenceSlots = {0, 0};
+        r.chunked = true;
+        r.chunks.resize(2);
+        r.chunks[0].begin = 0;
+        r.chunks[0].end = 1;
+        r.chunks[0].key = {0};
+        r.chunks[1].begin = 1;
+        r.chunks[1].end = 2;
+        r.chunks[1].key = {0, 1};
+        r.partitionElementSize = 2;
+        r.partitionIndexCount = 4;
+        r.partitionPointCount = 2;
+        f.geometry->revisionChunkCount = {2};
+        return f;
+    };
+    {
+        _context = "chunk tables: accepted";
+        const RigExecWireFile f = chunked();
+        why.clear();
+        CHECK(RigExecFormatValidate(f, &why));
+        if (!why.empty()) {
+            std::printf("  refused: %s\n", why.c_str());
+        }
+        std::vector<uint8_t> bytes;
+        CHECK(_Write(f, &bytes, &why) && _Open(bytes, &why) != nullptr);
+    }
+    {
+        // A raw partition layout of the partition's element size and
+        // index count: 5 entries at element size 2 hold 2 rows.
+        _context = "chunk tables: raw partition accepted";
+        RigExecWireFile f = chunked();
+        fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
+        fb::RigExecWireSkinTopology raw;
+        CHECK(RigExecFormatTopology({1, 0, 0, 1, 0},
+                                    {0.5f, 0.0f, 1.0f, 0.25f, -0.0f}, 2, 0,
+                                    2, false, &raw, &why));
+        r.partitionSameAsTopology = false;
+        r.partitionTopology =
+            std::make_unique<fb::RigExecWireSkinTopology>(raw);
+        r.partitionIndexCount = 5;
+        why.clear();
+        CHECK(RigExecFormatValidate(f, &why));
+        if (!why.empty()) {
+            std::printf("  refused: %s\n", why.c_str());
+        }
+    }
+
+    int refused = 0;
+    using F = RigExecWireFile;
+    using R = fb::RigExecWireRevision;
+    const auto refuse = [&](const char *label,
+                            const std::function<void(F &, R &)> &edit,
+                            const std::string &expected) {
+        _context = std::string("chunk tables refuse: ") + label;
+        F f = chunked();
+        edit(f, f.geometry->chains[0].revisions[0]);
+        f.geometry->revisionChunkCount = {
+            int32_t(f.geometry->chains[0].revisions[0].chunks.size())};
+        why.clear();
+        const bool ok = RigExecFormatValidate(f, &why);
+        CHECK(!ok && why == expected);
+        if (ok || why != expected) {
+            std::printf("  got '%s', expected '%s'\n",
+                        ok ? "(accepted)" : why.c_str(), expected.c_str());
+        }
+        ++refused;
+    };
+    refuse("one chunk", [](F &, R &r) {
+        r.chunks.pop_back();
+        r.chunks[0].end = 2;
+    }, row + ": chunked with 1 chunk(s)");
+    refuse("a matrix revision",
+           [](F &, R &r) { r.op = uint8_t(fb::RevisionOp::Matrix); },
+           row + ": chunked, but not a skin whose layout the epoch fixes");
+    refuse("a layout the epoch does not fix",
+           [](F &, R &r) { r.skinTopologyFixed = false; },
+           row + ": chunked, but not a skin whose layout the epoch fixes");
+    refuse("two chunks, unchunked", [](F &, R &r) {
+        r.chunked = false;
+        r.chunks[0].key.clear();
+        r.chunks[1].key.clear();
+    }, row + ": 2 chunks, but not chunked");
+    refuse("a key on an unchunked revision", [](F &, R &r) {
+        r.chunked = false;
+        r.chunks.pop_back();
+    }, row + ".chunks[0]: a key on an unchunked revision");
+    refuse("a gap", [](F &, R &r) { r.chunks[1].begin = 2; },
+           row + ".chunks[1]: vertex range [2, 2) does not continue the "
+                 "partition at 1");
+    refuse("an overlap", [](F &, R &r) { r.chunks[1].begin = 0; },
+           row + ".chunks[1]: vertex range [0, 2) does not continue the "
+                 "partition at 1");
+    refuse("a first range off 0", [](F &, R &r) { r.chunks[0].begin = 1; },
+           row + ".chunks[0]: vertex range [1, 1) does not continue the "
+                 "partition at 0");
+    refuse("an end before its begin", [](F &, R &r) { r.chunks[0].end = -1; },
+           row + ".chunks[0]: vertex range [0, -1) ends before it begins");
+    refuse("the last range short", [](F &, R &r) { r.chunks[1].end = 1; },
+           row + ".chunks[1]: the last range ends at 1, not at the "
+                 "partition's 2 point(s)");
+    refuse("a descending key", [](F &, R &r) { r.chunks[1].key = {1, 0}; },
+           row + ".chunks[1].key[1]: 0 is not an ascending influence "
+                 "position below 2");
+    refuse("a repeated key", [](F &, R &r) { r.chunks[1].key = {1, 1}; },
+           row + ".chunks[1].key[1]: 1 is not an ascending influence "
+                 "position below 2");
+    refuse("a key past the influences",
+           [](F &, R &r) { r.chunks[1].key = {0, 2}; },
+           row + ".chunks[1].key[1]: 2 is not an ascending influence "
+                 "position below 2");
+    refuse("a negative key", [](F &, R &r) { r.chunks[0].key = {-1}; },
+           row + ".chunks[0].key[0]: -1 is not an ascending influence "
+                 "position below 2");
+    refuse("a partition point count off by one",
+           [](F &, R &r) { r.partitionPointCount = 3; },
+           row + ": partition_point_count 3, but partition_index_count 4 is "
+                 "2 row(s) of partition_element_size 2");
+    refuse("a partition point count at element size 0", [](F &, R &r) {
+        r.partitionElementSize = 0;
+    }, row + ": partition_point_count 2, but partition_index_count 4 is 0 "
+             "row(s) of partition_element_size 0");
+    refuse("a partition point count on an unchunked revision",
+           [](F &, R &r) {
+               r.chunked = false;
+               r.chunks.assign(1, fb::RigExecWireChunk());
+               r.partitionPointCount = 1;
+           },
+           row + ": partition_point_count 1, but partition_index_count 4 is "
+                 "2 row(s) of partition_element_size 2");
+    refuse("the partition's element size", [](F &, R &r) {
+        r.partitionElementSize = 1;
+        r.partitionPointCount = 4;
+        r.chunks[1].end = 4;
+    }, row + ": the partition's element_size and index_count are not its "
+             "layout's");
+    refuse("the partition's index count", [](F &, R &r) {
+        r.partitionIndexCount = 6;
+        r.partitionPointCount = 3;
+        r.chunks[1].end = 3;
+    }, row + ": the partition's element_size and index_count are not its "
+             "layout's");
+    refuse("a raw partition's index count", [&why](F &, R &r) {
+        fb::RigExecWireSkinTopology raw;
+        RigExecFormatTopology({1, 0, 0, 1, 0},
+                              {0.5f, 0.0f, 1.0f, 0.25f, -0.0f}, 2, 0, 2,
+                              false, &raw, &why);
+        r.partitionSameAsTopology = false;
+        r.partitionTopology =
+            std::make_unique<fb::RigExecWireSkinTopology>(raw);
+    }, row + ": the partition's element_size and index_count are not its "
+             "layout's");
+    std::printf("chunk tables: a chunked skin revision accepted over a "
+                "sparse and a raw partition layout; %d chunk table "
+                "violations refused\n",
+                refused);
+    CHECK(refused == 20);
 }
 
 /// Offsets a test builds by hand in place of what Pack would write.
@@ -2697,6 +4267,19 @@ TestCorruptionList()
     refused("topology sum", "kept entries", [](F &f) {
         f.geometry->chains[0].revisions[0].topology->counts8 = {2, 2};
     });
+    refused("validated index range",
+            "topology: validated, but kept entry 0 indexes influence 3 of 3",
+            [](F &f) {
+                fb::RigExecWireSkinTopology &t =
+                    *f.geometry->chains[0].revisions[0].topology;
+                t.validated = true;
+                t.influenceCount = 3;
+            });
+    refused("raw arrays on a sparse layout", "raw_indices or raw_weights",
+            [](F &f) {
+                f.geometry->chains[0].revisions[0].topology->rawIndices = {
+                    0};
+            });
 
     _context = "corruption list: vtables";
     std::vector<uint64_t> aligned((bytes.size() + 7) / 8);
@@ -2821,7 +4404,12 @@ main()
     TestPresentationIdentifier();
     TestExternalMovers();
     TestSwitchOrder();
+    TestVolumePlacementSteps();
+    TestStepLabels();
+    TestPhaseTables();
     TestSparseTopology();
+    TestRawTopology();
+    TestChunkTables();
     TestBoundedOpen();
     TestPathOrder();
     TestDeepPaths();

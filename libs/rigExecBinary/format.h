@@ -433,11 +433,14 @@ using RigExecWirePropertyRevision = fb::RigExecWirePropertyRevision;
 using RigExecWirePropertyChain = fb::RigExecWirePropertyChain;
 using RigExecWirePhasedConsumer = fb::RigExecWirePhasedConsumer;
 using RigExecWireExternalMover = fb::RigExecWireExternalMover;
+using RigExecWirePointsBinding = fb::RigExecWirePointsBinding;
 
 // The schema's index structs, read through accessors (domain(), name()).
 using RigExecWireSlotRange = fb::SlotRange;
 using RigExecWirePathNode = fb::PathNode;
 using RigExecWireInputSlot = fb::InputSlot;
+using RigExecWireFrameRecord = fb::FrameRecord;
+using RigExecWirePointVersion = fb::PointVersion;
 
 // The schema's enums, whose enumerators keep their names.
 using RigExecWireStepKind = fb::StepKind;
@@ -460,9 +463,11 @@ inline constexpr uint8_t RigExecWireConstraintWorldUpRotationOnly =
 inline constexpr uint8_t RigExecWireConstraintRadialBlend =
     uint8_t(fb::ConstraintFlags::RadialBlend);
 
-/// The format version this code reads and writes. Any other value is
-/// refused with a rebake message, so every change to rigexec.fbs bumps it.
-inline constexpr uint32_t RigExecFormatVersion = 5;
+/// The format version this code reads and writes; every change to
+/// rigexec.fbs bumps it. Open refuses any other value: the previous
+/// version with a re-export message naming what it lacks, every other one
+/// with a rebake message.
+inline constexpr uint32_t RigExecFormatVersion = 7;
 
 /// The file identifier, bytes 4-7 of every .rigexec file.
 inline constexpr char RigExecFormatIdentifier[] = "REXB";
@@ -499,6 +504,15 @@ bool RigExecFormatWrite(const fb::RigExecWireFile &file,
 std::string RigExecFormatPathText(const fb::RigExecWireFile &file,
                                   uint32_t id);
 
+/// Step \p step's label, as the baked program spells it
+/// (RigExecBakedStepKindName and StepLabel): the kind, a space, then the
+/// path of the object the step works on. Built from the tables, which it
+/// range-checks, so it is safe on a file the validator has not accepted: a
+/// step past the steps is its number, and an object past its table is the
+/// kind and the object's number.
+std::string RigExecFormatStepLabel(const fb::RigExecWireFile &file,
+                                   size_t step);
+
 /// The canonical sparse form of a dense skin layout: \p indices and
 /// \p weights hold \p pointCount rows of \p elementSize entries each. Every
 /// entry is kept, in order, except one whose index is 0 and whose weight
@@ -514,8 +528,25 @@ bool RigExecFormatSparseTopology(const std::vector<int32_t> &indices,
                                  fb::RigExecWireSkinTopology *out,
                                  std::string *error);
 
-/// The dense rows a sparse layout the validator accepts stands for: each
-/// point's kept entries in order, then (0, +0.0f) up to element_size.
+/// The canonical form of a skin layout the evaluators resolved: the sparse
+/// form (RigExecFormatSparseTopology) when \p indices and \p weights are
+/// rows of an element size in [0, 65535] (none at element size 0), else
+/// the raw form, which holds the arrays verbatim with \p validated as
+/// given. False with the reason, and \p out untouched, when the sparse form
+/// refuses, or when \p pointCount is not what the evaluators give a raw
+/// layout: its rows when it is rows of an element size of at least 1, else
+/// 0. RigExecFormatValidate holds validated to the evaluator's layout
+/// rules in either form.
+bool RigExecFormatTopology(const std::vector<int32_t> &indices,
+                           const std::vector<float> &weights,
+                           int32_t elementSize, uint64_t pointCount,
+                           uint64_t influenceCount, bool validated,
+                           fb::RigExecWireSkinTopology *out,
+                           std::string *error);
+
+/// The arrays a layout the validator accepts stands for: a raw layout's
+/// own, verbatim; a sparse layout's dense rows, each point's kept entries
+/// in order, then (0, +0.0f) up to element_size.
 void RigExecFormatExpandTopology(const fb::RigExecWireSkinTopology &topology,
                                  std::vector<int32_t> *indices,
                                  std::vector<float> *weights);

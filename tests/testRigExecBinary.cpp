@@ -290,13 +290,19 @@ TestExternalMoversWire(const std::vector<uint8_t> &bytes)
     CHECK(failedBack && !failedBack->externalMovers[0].v2FrameValid &&
           failedBack->externalMovers[0].v2Frame.empty());
 
-    // A phased input of the revision's binding takes a pooled fallback.
+    // A phased input of the revision's binding takes a pooled fallback, and
+    // its point binding: a base phase, which binds no version.
     fb::RigExecWireFile phased(plugin);
     {
-        fb::RigExecWireRevisionBinding &binding =
-            *phased.geometry->chains[0].revisions[0].binding;
+        fb::RigExecWireRevision &revision =
+            phased.geometry->chains[0].revisions[0];
+        fb::RigExecWireRevisionBinding &binding = *revision.binding;
         binding.phaseInputs.push_back(binding.target);
         binding.phases.push_back(RigExecWireReadPhase());
+        RigExecWirePointsBinding unbound;
+        unbound.inputPath = binding.target;
+        unbound.diagnoseMiss = true;
+        revision.pointBindings.push_back(std::move(unbound));
         phased.externalMovers[0].phasedFallback.push_back(0);
     }
     CHECK(_RoundTrip(phased, &out) != nullptr);
@@ -1217,6 +1223,148 @@ _BakeAndCompare(RigExecRigEvaluator &evaluator, double time,
     return file;
 }
 
+// The phase fixtures and 13_ReadPhases: two bakes from fresh evaluators are
+// the same bytes, and the file holds the program's frame records, record
+// lists and point bindings. The record fixtures carry records, the example
+// a bound phased input, and the blend fixture, baked where its lifts have
+// moved the shape, two blend samples whose bindings answer.
+static void
+TestPhaseBindingBakes()
+{
+    const std::filesystem::path fixtures =
+        std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
+        "fixtures";
+    struct Row {
+        std::string stage;
+        double time;
+        bool records;
+        bool bindings;
+        bool samples = false;
+    };
+    const Row rows[] = {
+        {(fixtures / "frame_record_fallbacks.usda").string(), 1.0, true,
+         false},
+        {(fixtures / "solver_checkpoint.usda").string(), 1.0, true, false},
+        {(fixtures / "volume_placements.usda").string(), 1.0, false, false},
+        {(std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / "13_ReadPhases.usda")
+             .string(),
+         1001.0, false, true},
+        {(fixtures / "phased_blend_samples.usda").string(), 3.0, false,
+         false, true},
+    };
+    for (const Row &row : rows) {
+        const UsdStageRefPtr stage = UsdStage::Open(row.stage);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const SdfPath rigPath = FindRig(stage);
+        std::vector<uint8_t> first;
+        _BinaryCompareStats stats;
+        const int failuresBefore = failures;
+        bool same = false;
+        for (int pass = 0; pass < 2; ++pass) {
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+            RigExecBakeOpts opts;
+            opts.time = row.time;
+            RigExecBakeResult result;
+            std::string error;
+            const bool baked =
+                RigExecBakeToBinary(evaluator, opts, &result, &error);
+            CHECK(baked);
+            if (!baked) {
+                std::printf("%s bake diagnostic: %s\n", row.stage.c_str(),
+                            error.c_str());
+                break;
+            }
+            if (pass == 1) {
+                same = result.bytes == first;
+                CHECK(same);
+                continue;
+            }
+            first = result.bytes;
+            CHECK(_BinaryCompareProgram(evaluator, result.bytes, row.stage,
+                                        &stats));
+        }
+        std::printf("phase tables %s: %zu records, %zu record lists, %zu "
+                    "bindings, %zu sample bindings (%zu answered); %zu "
+                    "bytes, %s; %d failures\n",
+                    row.stage.c_str(), stats.frameRecords, stats.recordLists,
+                    stats.pointBindings, stats.sampleBindings,
+                    stats.answeredSamples, first.size(),
+                    same ? "two bakes identical" : "BAKES DIFFER",
+                    failures - failuresBefore);
+        if (row.records) {
+            CHECK(stats.frameRecords > 0 && stats.recordLists > 0);
+        }
+        if (row.bindings) {
+            CHECK(stats.pointBindings > 0);
+        }
+        if (row.samples) {
+            CHECK(stats.sampleBindings > 0 &&
+                  stats.answeredSamples == stats.sampleBindings);
+        }
+    }
+}
+
+// tests/fixtures/raw_skin_layouts.usda baked at time 1: three skin layouts
+// the sparse form cannot hold are stored raw, two sparse, each against the
+// program's own arrays; two bakes are identical, and the file writes back
+// to its bytes.
+static void
+TestRawSkinLayoutBake()
+{
+    const std::string fixture =
+        (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
+         "fixtures" / "raw_skin_layouts.usda")
+            .string();
+    const UsdStageRefPtr stage = UsdStage::Open(fixture);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = FindRig(stage);
+    std::vector<uint8_t> first;
+    _BinaryCompareStats stats;
+    const int failuresBefore = failures;
+    bool same = false;
+    for (int pass = 0; pass < 2; ++pass) {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.time = 1.0;
+        RigExecBakeResult result;
+        std::string error;
+        const bool baked =
+            RigExecBakeToBinary(evaluator, opts, &result, &error);
+        CHECK(baked);
+        if (!baked) {
+            std::printf("raw skin layouts bake diagnostic: %s\n",
+                        error.c_str());
+            return;
+        }
+        if (pass == 1) {
+            same = result.bytes == first;
+            CHECK(same);
+            continue;
+        }
+        first = result.bytes;
+        const std::unique_ptr<_BinaryFile> file =
+            _BinaryCompareProgram(evaluator, result.bytes, fixture, &stats);
+        CHECK(file);
+        std::vector<uint8_t> rewritten;
+        CHECK(file && RigExecFormatWrite(*file, &rewritten, &error) &&
+              rewritten == result.bytes);
+    }
+    std::printf("raw skin layouts: %zu topologies, %zu of them raw; %zu "
+                "bytes, %s; %d failures\n",
+                stats.topologies, stats.rawTopologies, first.size(),
+                same ? "two bakes identical" : "BAKES DIFFER",
+                failures - failuresBefore);
+    CHECK(stats.topologies == 5 && stats.rawTopologies == 3);
+}
+
 // Two transform constraints whose envelopes no mover binds: a StaticWeight
 // at 0.5 and a DynamicWeight whose driver connects to an animated double.
 // Both become envelope-only entries read the Resolved way, and the oracle's
@@ -1917,6 +2065,84 @@ TestStaticReportRevisionReads()
                 entries.size() == 1 ? "y" : "ies");
 }
 
+// The static report names a phased dense blend sample's points only when
+// its binding can never answer, since playback then reads the points the
+// bake held. On tests/fixtures/phased_blend_samples.usda with Shape.points
+// keyed, both samples are phased and bound to a version of Shape's chain,
+// whose base reads at every time, so the report names the chain base and
+// no sample points: an answering binding reads the version, not the held
+// points.
+static void
+TestStaticReportAnsweredBlendSamples()
+{
+    const std::string path =
+        (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
+         "fixtures" / "phased_blend_samples.usda")
+            .string();
+    const UsdStageRefPtr stage = UsdStage::Open(path);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath shape("/Asset/Geom/Shape.points");
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        const UsdAttribute attribute = stage->GetAttributeAtPath(shape);
+        VtVec3fArray value = {GfVec3f(0, 0, 2), GfVec3f(1, 0, 2),
+                              GfVec3f(1, 1, 2), GfVec3f(0, 1, 2)};
+        CHECK(attribute.Set(value, UsdTimeCode(1.0)));
+        for (GfVec3f &point : value) {
+            point[2] += 1.0f;
+        }
+        CHECK(attribute.Set(value, UsdTimeCode(9.0)));
+    }
+    std::vector<RigExecBakeStaticEntry> entries;
+    size_t bound = 0;
+    {
+        RigExecRigEvaluator evaluator(stage, rig);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        std::string error;
+        const bool ok = RigExecBakeStaticReport(evaluator, &entries, &error);
+        CHECK(ok);
+        if (!ok) {
+            std::printf("  static report: %s\n", error.c_str());
+        }
+        if (ok && evaluator.GetBakedProgram()) {
+            const RigExecBakedProgramImpl &B =
+                evaluator.GetBakedProgram()->GetStepGraph();
+            for (const auto &chain : B.chains) {
+                for (const auto &revision : chain.revisions) {
+                    for (const auto &channel : revision.blendChannels) {
+                        for (const auto &sample : channel.samples) {
+                            bound += !sample.phase.IsBase() &&
+                                     sample.pointBinding.id >= 0 &&
+                                     !sample.pointBinding.candidates.empty();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    stage->GetSessionLayer()->Clear();
+    bool chainBase = false;
+    size_t samplePoints = 0;
+    for (const RigExecBakeStaticEntry &entry : entries) {
+        std::printf("  static %s: %s\n", entry.field.c_str(),
+                    entry.source.c_str());
+        chainBase = chainBase ||
+                    (entry.field == "chain base " + shape.GetString() &&
+                     entry.source == shape.GetString());
+        samplePoints += entry.field.rfind("blend sample points ", 0) == 0;
+    }
+    CHECK(bound == 2);
+    CHECK(chainBase);
+    CHECK(samplePoints == 0);
+    std::printf("static report: %zu phased sample(s) bound to a version, "
+                "the chain base %s, %zu sample point source(s) named\n",
+                bound, chainBase ? "named" : "NOT named", samplePoints);
+}
+
 /// A presentation with one control naming \p input, finished with
 /// \p identifier.
 static std::vector<uint8_t>
@@ -2283,8 +2509,11 @@ main(int argc, char **argv)
     TestComputedEnvelopeBake();
     TestComputedCurrentPhaseBake();
     TestComputedChainBake();
+    TestPhaseBindingBakes();
+    TestRawSkinLayoutBake();
     TestEnumeratedReadThroughPropertyResult();
     TestStaticReportRevisionReads();
+    TestStaticReportAnsweredBlendSamples();
     TestBakeOptions(tail, "/TailAsset/Rig/Controls/Tail2.avars:rz");
     auto BakeOne = [&](const std::string &stage,
                        const std::vector<double> &frames,
