@@ -43,16 +43,18 @@ enum class RigExecBakedScheduleMode {
 RigExecBakedScheduleMode RigExecBakedScheduleModeFromEnvironment();
 
 /// Computes the edges between \p program's steps from their declared slot
-/// ranges, and checks that every one of them points forward.
+/// ranges.
 ///
 /// Once, at Build, in program order: for each read range, an edge from every
 /// step still holding the last write of any slot in it; for each write
 /// range, an edge from those writers (write-after-write) and from every step
-/// that has read any slot of it since the program started (write-after-read,
-/// which is why the reader lists are seeded from program start and not from
-/// the previous write -- a step reading a slot no earlier step wrote is
-/// reading last run's value, and the step that overwrites it must still
-/// follow).
+/// that has read any slot of it since the program started (write-after-read;
+/// the reader lists are seeded from program start and not from the previous
+/// write so that a read of a source-domain slot, the provisional Aggregate
+/// among them, still precedes any later writer of it). Every edge points
+/// forward by construction; a read whose only producer is later raises no
+/// edge at all, which is why Build refuses such a program
+/// (RigExecBakedValidateStepGraph).
 ///
 /// \p sweep carries the edge sweep Build started over the pose half; this
 /// extends it over the steps appended since (see RigExecBakedEdgeSweep).
@@ -92,8 +94,7 @@ struct RigExecBakedEdgeSweep {
     int swept = 0;
 };
 
-/// The edge sweep over the steps appended since \p sweep last ran, and
-/// checks that every new edge points forward.
+/// The edge sweep over the steps appended since \p sweep last ran.
 ///
 /// Run twice by Build, over one \p sweep: once over the pose half by
 /// itself, so that the vertex partition can ask what LEVEL a chunk's joints
@@ -103,6 +104,24 @@ struct RigExecBakedEdgeSweep {
 /// one sweep.
 void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
                                 RigExecBakedEdgeSweep *sweep);
+
+/// Whether \p program's step graph is one every executor may trust, which
+/// Build asks before it hands the program out and refuses it when not.
+///
+/// Three checks. The edges: `preds` and `succs` sorted, unique, pointing
+/// backward and forward respectively, and each the inverse of the other.
+/// The producers: every slot a step reads in a domain the prologue does not
+/// fill has a writer at a strictly lower index (Snapshots, whose reads are a
+/// declared prefix of the program, only has to end at the reader), and every
+/// pose version a commit, a solve or a last-version reader is bound to was
+/// written by an earlier step. The clusters: a partition of the steps with
+/// members in program order, cluster edges that cover the step edges, and a
+/// topological order naming every cluster once.
+///
+/// On failure \p error receives the first violation, naming the steps, the
+/// domain and the slot, and how many more there were.
+bool RigExecBakedValidateStepGraph(const RigExecBakedProgramImpl &program,
+                                   std::string *error);
 
 /// Assigns every step from \p firstStep on its size, its cost and its
 /// longest-path level.

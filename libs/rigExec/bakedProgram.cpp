@@ -3228,6 +3228,16 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // RigExecBakedBuildSchedule marks its own parts.
     graphPhases.Close();
     RigExecBakedBuildSchedule(&B, &sweep);
+    // The edges cannot show a read whose producer is later or missing, so a
+    // program with one would run on a stale value; refuse it instead.
+    {
+        std::string invalid;
+        if (!RigExecBakedValidateStepGraph(B, &invalid)) {
+            refuse("the baked step graph is invalid: " + invalid,
+                   E._rigPath);
+            return nullptr;
+        }
+    }
     if (RigExecBakedScheduleReportRequested()) {
         const std::string report = RigExecBakedScheduleReport(B);
         std::fwrite(report.data(), 1, report.size(), stderr);

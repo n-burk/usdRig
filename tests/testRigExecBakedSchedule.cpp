@@ -17,7 +17,9 @@
 //   * a step that read-modify-writes a slot declares the READ as well, so no
 //     cone can skip it in a generation that moved the slot;
 //   * the report is deterministic, so a schedule can be diffed between two
-//     builds of the same stage and a change in it is a change someone made.
+//     builds of the same stage and a change in it is a change someone made;
+//   * the validator Build refuses programs with accepts every rig here and
+//     rejects, by name, each malformed graph the edge sweep cannot see.
 // The geometry section below asks the two questions the vertex partition
 // adds: that the chunks of a skin revision cover every vertex exactly once
 // and that no chunk is missing an influence one of its own vertices names --
@@ -2395,6 +2397,421 @@ TestANonFiniteValueIsNotAConeMismatch(const std::string &stagePath,
                 RigExecBakedVerifyConesRequested() ? "on" : "off");
 }
 
+/// An acceptance check that repeats Build's own: Build already refuses a
+/// program the validator rejects, so a rig that baked passes this by
+/// construction, and a rejected one arrives here as "did not bake" with the
+/// reason in BuildStage's "not bakeable" line.
+void
+TestTheValidatorAcceptsTheProgram(const BuiltProgram &built, const char *name)
+{
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        std::printf("FAIL %s: did not bake\n", name);
+        return;
+    }
+    std::string error;
+    const bool valid =
+        RigExecBakedValidateStepGraph(built.program->GetStepGraph(), &error);
+    CHECK(valid);
+    if (!valid) {
+        std::printf("FAIL %s: %s\n", name, error.c_str());
+    }
+}
+
+/// A step that reads or writes \p ranges, with a kind whose label names no
+/// table, so a program of them needs nothing but its steps.
+RigExecBakedStep
+HandStep(std::vector<RigExecBakedSlotRange> reads,
+         std::vector<RigExecBakedSlotRange> writes)
+{
+    RigExecBakedStep step;
+    step.kind = RigExecBakedStepKind::VolumePlacements;
+    step.object = 0;
+    step.reads = std::move(reads);
+    step.writes = std::move(writes);
+    return step;
+}
+
+/// Edges, levels and a one-step-per-cluster schedule for a hand-built
+/// program, the way Build derives them.
+void
+ScheduleByHand(RigExecBakedProgramImpl *B)
+{
+    RigExecBakedEdgeSweep sweep;
+    RigExecBakedBuildStepEdges(B, &sweep);
+    RigExecBakedAssignStepCosts(B);
+    B->clustering = RigExecBakedBuildClusters(*B, 0.0);
+    for (size_t index = 0; index < B->steps.size(); ++index) {
+        B->steps[index].cluster = B->clustering.clusterOf[index];
+    }
+    B->clustering.topologicalOrder =
+        RigExecBakedClusterTopologicalOrder(B->clustering);
+}
+
+/// Whether the validator rejects \p B with an error holding every one of
+/// \p expected.
+void
+ExpectRejected(const RigExecBakedProgramImpl &B, const char *what,
+               const std::vector<std::string> &expected)
+{
+    std::string error;
+    const bool valid = RigExecBakedValidateStepGraph(B, &error);
+    if (valid) {
+        ++failures;
+        std::printf("FAIL %s: the validator accepted it\n", what);
+        return;
+    }
+    for (const std::string &text : expected) {
+        if (error.find(text) == std::string::npos) {
+            ++failures;
+            std::printf("FAIL %s: \"%s\" is not in \"%s\"\n", what,
+                        text.c_str(), error.c_str());
+        }
+    }
+    std::printf("  %s: %s\n", what, error.c_str());
+}
+
+/// The shapes the edge sweep cannot see, each of which the validator must
+/// refuse by name: a read whose producer is later, missing or the reader
+/// itself; a phased-read prefix that reaches past its reader; edges that
+/// point backward or disagree; and a cluster order that is incomplete or
+/// out of order.
+void
+TestTheValidatorRejectsAMalformedGraph()
+{
+    using D = RigExecBakedSlotDomain;
+    {
+        // The well-formed control: step 1 reads what step 0 wrote.
+        RigExecBakedProgramImpl B;
+        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::WeightPacket, 0)}));
+        B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket, 0)},
+                                   {RigExecBakedOne(D::WeightPacket, 1)}));
+        ScheduleByHand(&B);
+        std::string error;
+        CHECK(RigExecBakedValidateStepGraph(B, &error));
+        CHECK(error.empty());
+        CHECK(B.steps[1].preds == std::vector<int>{0});
+    }
+    {
+        // The sweep raises no edge for it, so step 0 would read last run's
+        // packet.
+        RigExecBakedProgramImpl B;
+        B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket, 1)},
+                                   {RigExecBakedOne(D::WeightPacket, 0)}));
+        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::WeightPacket, 1)}));
+        ScheduleByHand(&B);
+        CHECK(B.steps[0].preds.empty());
+        ExpectRejected(B, "a later producer",
+                       {"step 0 (VolumePlacements every volume weight) reads "
+                        "WeightPacket[1]",
+                        "no step before it writes",
+                        "the first writer is step 1"});
+    }
+    {
+        RigExecBakedProgramImpl B;
+        B.steps.push_back(HandStep({}, {RigExecBakedOne(D::CommitTable, 0)}));
+        B.steps.push_back(HandStep(
+            {RigExecBakedRange(D::CommitTable, 0, 4)}, {}));
+        ScheduleByHand(&B);
+        ExpectRejected(B, "a range only partly produced",
+                       {"step 1", "reads CommitTable[1], which no step writes",
+                        "3 slots of CommitTable[0,4) are unproduced"});
+    }
+    {
+        // Read-modify-write with no earlier writer reads its own last run.
+        RigExecBakedProgramImpl B;
+        B.steps.push_back(HandStep({RigExecBakedOne(D::Candidates, 2)},
+                                   {RigExecBakedOne(D::Candidates, 2)}));
+        ScheduleByHand(&B);
+        ExpectRejected(B, "a step that is its own only producer",
+                       {"step 0", "reads Candidates[2]",
+                        "the first writer is step 0"});
+    }
+    {
+        // A source domain needs no producer; Snapshots needs only to end at
+        // the reader.
+        RigExecBakedProgramImpl B;
+        B.steps.push_back(HandStep({RigExecBakedOne(D::SolverPoints, 0),
+                                    RigExecBakedOne(D::ChainBase, 0)},
+                                   {RigExecBakedOne(D::Snapshots, 0)}));
+        B.steps.push_back(HandStep({RigExecBakedRange(D::Snapshots, 0, 1)},
+                                   {}));
+        ScheduleByHand(&B);
+        std::string error;
+        CHECK(RigExecBakedValidateStepGraph(B, &error));
+        B.steps[1].reads = {RigExecBakedRange(D::Snapshots, 0, 2)};
+        ExpectRejected(B, "a phased read past its reader",
+                       {"step 1", "Snapshots[0,2)",
+                        "the records of steps at or after it"});
+    }
+    // A three-step chain, valid as built; each case below breaks one thing.
+    const auto chain = [](RigExecBakedProgramImpl *B) {
+        B->steps.push_back(
+            HandStep({}, {RigExecBakedOne(D::WeightPacket, 0)}));
+        B->steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket, 0)},
+                                    {RigExecBakedOne(D::WeightPacket, 1)}));
+        B->steps.push_back(
+            HandStep({RigExecBakedOne(D::WeightPacket, 1)}, {}));
+        ScheduleByHand(B);
+    };
+    {
+        RigExecBakedProgramImpl B;
+        chain(&B);
+        B.steps[0].preds = {1};
+        B.steps[1].succs = {0, 2};
+        ExpectRejected(B, "a backward predecessor",
+                       {"step 0 (VolumePlacements every volume weight) "
+                        "depends on step 1",
+                        "not earlier in program order"});
+    }
+    {
+        RigExecBakedProgramImpl B;
+        chain(&B);
+        B.steps[0].succs.clear();
+        ExpectRejected(B, "a predecessor that does not know its successor",
+                       {"step 1", "depends on step 0",
+                        "does not list it as a successor"});
+    }
+    {
+        RigExecBakedProgramImpl B;
+        chain(&B);
+        CHECK(B.clustering.clusters.size() == 3);
+        std::reverse(B.clustering.topologicalOrder.begin(),
+                     B.clustering.topologicalOrder.end());
+        ExpectRejected(B, "a reversed cluster order",
+                       {"the cluster order puts cluster",
+                        "before its predecessor"});
+    }
+    {
+        RigExecBakedProgramImpl B;
+        chain(&B);
+        B.clustering.topologicalOrder.pop_back();
+        ExpectRejected(B, "an incomplete cluster order",
+                       {"the cluster order holds 2 of 3 clusters"});
+    }
+    {
+        RigExecBakedProgramImpl B;
+        chain(&B);
+        const int last = B.clustering.clusterOf[2];
+        const int middle = B.clustering.clusterOf[1];
+        B.clustering.clusters[size_t(last)].preds.clear();
+        B.clustering.clusters[size_t(middle)].succs.clear();
+        ExpectRejected(B, "a cluster edge missing under a step edge",
+                       {"step 2", "depends on step 1",
+                        "does not depend on cluster"});
+    }
+    {
+        RigExecBakedProgramImpl B;
+        chain(&B);
+        std::swap(B.clustering.clusters[0].members,
+                  B.clustering.clusters[1].members);
+        ExpectRejected(B, "members filed under the wrong cluster",
+                       {"holds step", "which the clustering puts elsewhere"});
+    }
+}
+
+/// Pose bindings on stacked_solvers (FK solve, its commit, IK solve, its
+/// commit, then the matrices), each edited to name a version that is written
+/// later, twice or never. Every pose slot's first writer is its compose, so
+/// the slot check passes all of these; only the version binding catches
+/// them. Each case restores what it broke, and the restored program must
+/// pass again.
+void
+TestTheValidatorRejectsALaterPoseVersion()
+{
+    BuiltProgram built = BuildStage(MakeStackedSolversStage());
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    // The program is this test's own, so it may be edited in place.
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    CHECK(B.commits.size() >= 2);
+    if (B.commits.size() < 2 || B.commits.front().slotReads.empty() ||
+        B.commits.front().slotCarry.empty() ||
+        B.commits.front().slotWrites.empty() ||
+        B.commits.back().slotWrites.empty()) {
+        ++failures;
+        std::printf("FAIL stacked_solvers: no two commits to bind across\n");
+        return;
+    }
+    std::string error;
+    CHECK(RigExecBakedValidateStepGraph(B, &error));
+    RigExecBakedCommit &first = B.commits.front();
+    const uint32_t later = B.commits.back().slotWrites.front();
+    const auto passes = [&](const char *what) {
+        std::string restored;
+        if (!RigExecBakedValidateStepGraph(B, &restored)) {
+            ++failures;
+            std::printf("FAIL %s: rejected after the restore: %s\n", what,
+                        restored.c_str());
+        }
+    };
+
+    {
+        const uint32_t bound = first.slotReads.front();
+        first.slotReads.front() = later;
+        ExpectRejected(B, "a commit read of a later commit's version",
+                       {"(SolverCommit batch 0) is bound to PoseFin version",
+                        "/Asset/Rig/Joints/", "writes at or after it"});
+        first.slotReads.front() = bound;
+        passes("a commit read of a later commit's version");
+    }
+    {
+        // Both solves precede the last commit, so either one's control read
+        // bound to its write-back is a read of the future.
+        RigExecBakedProgramImpl::Solver *solver = nullptr;
+        for (RigExecBakedProgramImpl::Solver &candidate : B.solvers) {
+            if (!candidate.controlReads.empty()) {
+                solver = &candidate;
+                break;
+            }
+        }
+        CHECK(solver != nullptr);
+        if (solver) {
+            const uint32_t bound = solver->controlReads.front();
+            solver->controlReads.front() = later;
+            ExpectRejected(B, "a solver control read of a later version",
+                           {"(Solve /Asset/Rig/Solvers/",
+                            "is bound to PoseFin version",
+                            "writes at or after it"});
+            solver->controlReads.front() = bound;
+            passes("a solver control read of a later version");
+        }
+    }
+    {
+        // A carry may name its own commit's write-back -- a slot that is a
+        // candidate and a descendant carries the first write into the
+        // second -- but not another commit's later one.
+        const uint32_t carried = first.slotCarry.front();
+        first.slotCarry.front() = later;
+        ExpectRejected(B, "a carry of another commit's later version",
+                       {"(SolverCommit batch 0) is bound to PoseFin version",
+                        "writes at or after it"});
+        first.slotCarry.front() = first.slotWrites.front();
+        std::string own;
+        CHECK(RigExecBakedValidateStepGraph(B, &own));
+        if (!own.empty()) {
+            std::printf("FAIL a carry of its own commit's version: %s\n",
+                        own.c_str());
+        }
+        first.slotCarry.front() = carried;
+        passes("a carry of another commit's later version");
+    }
+    {
+        // Every matrix runs after the whole walk, so no version here is
+        // later than one; a last-version entry nothing writes is the same
+        // stale read.
+        int matrix = -1;
+        uint32_t slot = 0;
+        for (size_t index = 0; index < B.steps.size() && matrix < 0;
+             ++index) {
+            if (B.steps[index].kind != RigExecBakedStepKind::ProviderMatrix) {
+                continue;
+            }
+            for (const RigExecBakedSlotRange &read : B.steps[index].reads) {
+                if (read.domain == RigExecBakedSlotDomain::PoseFin &&
+                    !read.IsEmpty()) {
+                    matrix = int(index);
+                    slot = read.begin;
+                    break;
+                }
+            }
+        }
+        CHECK(matrix >= 0 && slot < B.finLast.size());
+        if (matrix >= 0 && slot < B.finLast.size()) {
+            const uint32_t last = B.finLast[slot];
+            const uint32_t unwritten = uint32_t(B.fin.size());
+            B.finLast[slot] = unwritten;
+            ExpectRejected(B, "a last-version read of an unwritten version",
+                           {"step " + std::to_string(matrix) +
+                                " (ProviderMatrix ",
+                            "is bound to PoseFin version " +
+                                std::to_string(unwritten),
+                            "which no step writes"});
+            B.finLast[slot] = last;
+            passes("a last-version read of an unwritten version");
+        }
+    }
+    {
+        // BindPoseVersions hands each entry to one writer; a second hides
+        // the first's write from every reader bound to it.
+        const uint32_t own = first.slotWrites.front();
+        first.slotWrites.front() = later;
+        ExpectRejected(B, "two commits writing one version",
+                       {"(SolverCommit batch 1) writes PoseFin version " +
+                            std::to_string(later),
+                        "(SolverCommit batch 0) writes too"});
+        first.slotWrites.front() = own;
+        passes("two commits writing one version");
+    }
+    {
+        const uint32_t last = B.finLast.back();
+        B.finLast.pop_back();
+        ExpectRejected(B, "a last-version table one slot short",
+                       {"the last-version table holds " +
+                        std::to_string(B.finLast.size()) + " PoseFin and " +
+                        std::to_string(B.baseLast.size()) +
+                        " PoseBase entries for " +
+                        std::to_string(B.paths.size()) + " pose slots"});
+        B.finLast.push_back(last);
+        passes("a last-version table one slot short");
+    }
+}
+
+/// Two root controls switched into each other's space: each compose group
+/// reads the other's last version, so no emission order is valid and Build
+/// must refuse the program. The compile rejects every such rig before a
+/// bake, so no stage reaches Build's refusal; this pins both refusals it
+/// would meet: the composeCycle flag, and the validator, which sees the
+/// group emitted first read a PosedM slot only the second writes. One switch
+/// alone is the control: its source's group is moved ahead of it instead.
+void
+TestASwitchCycleIsDetectedNotEmitted()
+{
+    using Switch = RigExecBakedProgramImpl::SpaceSwitch;
+    const auto program = [](RigExecBakedProgramImpl *B, bool both) {
+        B->paths = {SdfPath("/Rig/A"), SdfPath("/Rig/B")};
+        B->parent = {-1, -1};
+        B->propParent = {-1, -1};
+        B->slotKind.assign(2, RigExecBakedSlotKind::FirstFramePose);
+        B->spaceSwitchBySlot = {0, both ? 1 : -1};
+        for (int slot = 0; slot < (both ? 2 : 1); ++slot) {
+            Switch sw;
+            sw.slot = slot;
+            sw.sourceSlots = {1 - slot};
+            Switch::FrameVersion read;
+            read.anchor = 1 - slot;
+            sw.sourceReads = {read};
+            B->spaceSwitches.push_back(sw);
+        }
+        RigExecBakedBuildPoseSteps(B);
+    };
+    {
+        RigExecBakedProgramImpl B;
+        program(&B, /*both=*/false);
+        CHECK(!B.composeCycle);
+        // B's group is emitted first, because A's switch reads it.
+        std::vector<int> composed;
+        for (const RigExecBakedStep &step : B.steps) {
+            if (step.kind == RigExecBakedStepKind::ComposeSubtree) {
+                composed.push_back(B.composeGroups[size_t(step.object)].begin);
+            }
+        }
+        CHECK(composed == std::vector<int>({1, 0}));
+    }
+    {
+        RigExecBakedProgramImpl B;
+        program(&B, /*both=*/true);
+        CHECK(B.composeCycle);
+        ScheduleByHand(&B);
+        ExpectRejected(B, "a switch cycle left in slot order",
+                       {"step 0", "reads PosedM[1]",
+                        "the first writer is step 1"});
+    }
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -2439,6 +2856,19 @@ main(int argc, char **argv)
     TestTheGraphDescribesTheProgram(spider, "spider_legs");
     TestTheGraphDescribesTheProgram(stacked, "stacked_revisions");
     TestTheGraphDescribesTheProgram(stackedSolvers, "stacked_solvers");
+    TestTheValidatorAcceptsTheProgram(biped, "Biped");
+    TestTheValidatorAcceptsTheProgram(animated, "Biped_anim");
+    TestTheValidatorAcceptsTheProgram(spider, "spider_legs");
+    TestTheValidatorAcceptsTheProgram(stacked, "stacked_revisions");
+    TestTheValidatorAcceptsTheProgram(stackedSolvers, "stacked_solvers");
+    TestTheValidatorAcceptsTheProgram(
+        Build(examplesDir + "/04_BlendShapeFace.usda"), "04_BlendShapeFace");
+    TestTheValidatorAcceptsTheProgram(
+        Build(examplesDir + "/../tests/fixtures/oneloop_cross_domain.usda"),
+        "oneloop_cross_domain");
+    TestTheValidatorRejectsAMalformedGraph();
+    TestTheValidatorRejectsALaterPoseVersion();
+    TestASwitchCycleIsDetectedNotEmitted();
     TestTheClusteringIsSound(biped, "Biped");
     TestTheClusteringIsSound(spider, "spider_legs");
     TestTheClusteringIsSound(stacked, "stacked_revisions");

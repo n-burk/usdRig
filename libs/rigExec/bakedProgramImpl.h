@@ -528,13 +528,9 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
 /// The name of \p domain, for the schedule report.
 const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
 
-/// Whether the prologue, and not a step, fills \p domain.
-///
-/// These are the graph's SOURCES: a read of one with no writer in the graph
-/// is well formed. Every other domain's storage is written by a step, and a
-/// read of it with no writer is either a bug or the loop-carried read of
-/// Aggregate that BlendPointFrames makes when its input solver runs in no
-/// earlier batch (the reader list is therefore seeded from program start).
+/// Whether the prologue, and not a step, fills \p domain: a read of one needs
+/// no producer in the graph. Aggregate is one only provisionally, while a
+/// blend's input solver is not yet required to run before the blend.
 ///
 /// Snapshots is deliberately NOT one of them although the prologue empties
 /// the store: every record in it is written by a step, so a read of it must
@@ -546,6 +542,7 @@ RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
     return domain == RigExecBakedSlotDomain::Avars ||
            domain == RigExecBakedSlotDomain::PropertyResult ||
            domain == RigExecBakedSlotDomain::ChainBase ||
+           domain == RigExecBakedSlotDomain::SolverPoints ||
            domain == RigExecBakedSlotDomain::Aggregate;
 }
 

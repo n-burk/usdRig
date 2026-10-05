@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -898,14 +899,9 @@ RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
         std::sort(step.preds.begin(), step.preds.end());
         step.preds.erase(std::unique(step.preds.begin(), step.preds.end()),
                          step.preds.end());
-        // The invariant the whole design rests on: an edge only ever leaves a
-        // step the sweep has already passed, so a cluster running its members
-        // in increasing program index is always in topological order.
-        for (const int pred : step.preds) {
-            TF_VERIFY(pred < index,
-                      "rigExec: baked step %d depends on later step %d",
-                      index, pred);
-        }
+        // Every pred is below `index` by construction: the tables hold only
+        // steps the sweep has passed. Whether a read had a producer at all is
+        // RigExecBakedValidateStepGraph's question, not this sweep's.
     }
     // Successors are appended in increasing successor index, so an earlier
     // step's list, extended by this pass, is the list one sweep over the
@@ -965,6 +961,530 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program,
     RigExecBakedDeclareInputDependencies(&B);
     phases.Next("Bake.the_step_graph.cones");
     RigExecBakedBuildCones(&B);
+}
+
+// Validation.
+// The sweep sees only writers it has already passed, so a read whose
+// producer comes later, or never, leaves no trace in the edges. Build asks
+// here instead, once, before any executor is handed the program.
+
+namespace {
+
+/// What the validator found: the first violation in full, and how many.
+struct GraphViolations {
+    std::string first;
+    size_t count = 0;
+
+    void Add(std::string line) {
+        if (count++ == 0) {
+            first = std::move(line);
+        }
+    }
+};
+
+std::string
+NameStep(const RigExecBakedProgramImpl &B, int index)
+{
+    std::string out = "step " + std::to_string(index);
+    if (index >= 0 && size_t(index) < B.steps.size() &&
+        !B.steps[size_t(index)].label.empty()) {
+        out += " (" + B.steps[size_t(index)].label + ")";
+    }
+    return out;
+}
+
+bool
+SortedUnique(const std::vector<int> &values)
+{
+    return std::adjacent_find(values.begin(), values.end(),
+                              std::greater_equal<int>()) == values.end();
+}
+
+bool
+SortedContains(const std::vector<int> &values, int value)
+{
+    return std::binary_search(values.begin(), values.end(), value);
+}
+
+bool
+IsCommitStep(RigExecBakedStepKind kind)
+{
+    switch (kind) {
+    case RigExecBakedStepKind::SolverCommit:
+    case RigExecBakedStepKind::Constraint:
+    case RigExecBakedStepKind::CommitDelta:
+    case RigExecBakedStepKind::PropagateChunk:
+    case RigExecBakedStepKind::CommitApply:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// preds point backward and succs forward, each sorted, unique and the
+/// inverse of the other.
+void
+ValidateStepEdges(const RigExecBakedProgramImpl &B, GraphViolations *out)
+{
+    const int count = int(B.steps.size());
+    for (int index = 0; index < count; ++index) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        if (!SortedUnique(step.preds) || !SortedUnique(step.succs)) {
+            out->Add(NameStep(B, index) +
+                     " lists an edge out of order or twice");
+            continue;
+        }
+        for (const int pred : step.preds) {
+            if (pred < 0 || pred >= index) {
+                out->Add(NameStep(B, index) + " depends on " +
+                         NameStep(B, pred) +
+                         ", which is not earlier in program order");
+            } else if (!SortedContains(B.steps[size_t(pred)].succs, index)) {
+                out->Add(NameStep(B, index) + " depends on " +
+                         NameStep(B, pred) +
+                         ", which does not list it as a successor");
+            }
+        }
+        for (const int succ : step.succs) {
+            if (succ <= index || succ >= count) {
+                out->Add(NameStep(B, index) + " names successor " +
+                         NameStep(B, succ) +
+                         ", which is not later in program order");
+            } else if (!SortedContains(B.steps[size_t(succ)].preds, index)) {
+                out->Add(NameStep(B, index) + " names successor " +
+                         NameStep(B, succ) + ", which does not depend on it");
+            }
+        }
+    }
+}
+
+/// Every slot read in a domain the prologue does not fill has a writer at a
+/// strictly lower index. Snapshots is the exception: a read of it names every
+/// step before the reader, recorder or not, so only its extent is checked.
+void
+ValidateSlotProducers(const RigExecBakedProgramImpl &B, GraphViolations *out)
+{
+    const auto checked = [](RigExecBakedSlotDomain domain) {
+        return !RigExecBakedIsSourceDomain(domain) &&
+               domain != RigExecBakedSlotDomain::Snapshots;
+    };
+    // The lowest step whose declared writes cover each slot; -1 for none.
+    std::array<std::vector<int>, RigExecBakedSlotDomainCount> firstWriter;
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        for (const RigExecBakedSlotRange &write :
+                 B.steps[size_t(index)].writes) {
+            if (!checked(write.domain) || write.IsEmpty()) {
+                continue;
+            }
+            std::vector<int> &table = firstWriter[size_t(write.domain)];
+            if (table.size() < write.end) {
+                table.resize(write.end, -1);
+            }
+            for (uint32_t slot = write.begin; slot < write.end; ++slot) {
+                if (table[slot] < 0) {
+                    table[slot] = index;
+                }
+            }
+        }
+    }
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        for (const RigExecBakedSlotRange &read :
+                 B.steps[size_t(index)].reads) {
+            if (read.IsEmpty()) {
+                continue;
+            }
+            // Formatted only for a violation: this runs over every read of
+            // every step at each Build.
+            const auto range = [&read]() {
+                return std::string(RigExecBakedSlotDomainName(read.domain)) +
+                       "[" + std::to_string(read.begin) + "," +
+                       std::to_string(read.end) + ")";
+            };
+            if (read.domain == RigExecBakedSlotDomain::Snapshots) {
+                if (read.end > uint32_t(index)) {
+                    out->Add(NameStep(B, index) + " reads " + range() +
+                             ", the records of steps at or after it");
+                }
+                continue;
+            }
+            if (!checked(read.domain)) {
+                continue;
+            }
+            const std::vector<int> &table = firstWriter[size_t(read.domain)];
+            uint32_t bad = 0, firstBad = 0;
+            int badWriter = -1;
+            for (uint32_t slot = read.begin; slot < read.end; ++slot) {
+                const int writer = slot < table.size() ? table[slot] : -1;
+                if (writer >= 0 && writer < index) {
+                    continue;
+                }
+                if (bad++ == 0) {
+                    firstBad = slot;
+                    badWriter = writer;
+                }
+            }
+            if (bad == 0) {
+                continue;
+            }
+            std::string line = NameStep(B, index) + " reads " +
+                               RigExecBakedSlotDomainName(read.domain) + "[" +
+                               std::to_string(firstBad) + "]";
+            line += badWriter < 0
+                        ? ", which no step writes"
+                        : ", which no step before it writes (the first "
+                          "writer is " + NameStep(B, badWriter) + ")";
+            if (bad > 1) {
+                line += "; " + std::to_string(bad) + " slots of " + range() +
+                        " are unproduced";
+            }
+            out->Add(line);
+        }
+    }
+}
+
+/// Every pose version a reader is bound to (BindPoseVersions) was written by
+/// an earlier step. The slot check cannot see this: a pose slot's first
+/// writer is its compose, ahead of every commit, so a binding to a version a
+/// LATER commit writes passes it.
+void
+ValidatePoseVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
+{
+    const size_t n = B.paths.size();
+    if (n == 0) {
+        return;  // No pose slots, so nothing is bound.
+    }
+    if (B.finLast.size() != n || B.baseLast.size() != n) {
+        out->Add("the last-version table holds " +
+                 std::to_string(B.finLast.size()) + " PoseFin and " +
+                 std::to_string(B.baseLast.size()) + " PoseBase entries for " +
+                 std::to_string(n) + " pose slots");
+        return;
+    }
+    constexpr RigExecBakedSlotDomain kFin = RigExecBakedSlotDomain::PoseFin;
+    constexpr RigExecBakedSlotDomain kBase = RigExecBakedSlotDomain::PoseBase;
+    // Which step writes each entry, and which slot it is a version of. Entry
+    // i < n is slot i's compose; the others are commit write-backs, each
+    // written by its commit's last step. BindPoseVersions hands every entry
+    // to one writer at most.
+    std::vector<int> finWriter(B.fin.size(), -1), baseWriter(B.base.size(), -1);
+    std::vector<int> finSlot(B.fin.size(), -1), baseSlot(B.base.size(), -1);
+    std::vector<int> commitFirst(B.commits.size(), -1),
+        commitLast(B.commits.size(), -1);
+    std::vector<int> solveStep(B.solvers.size(), -1);
+    const auto record = [&](RigExecBakedSlotDomain domain, uint32_t entry,
+                            int step, int slot) {
+        std::vector<int> &writer = domain == kFin ? finWriter : baseWriter;
+        std::vector<int> &slotOf = domain == kFin ? finSlot : baseSlot;
+        const auto what = [&]() {
+            return NameStep(B, step) + " writes " +
+                   RigExecBakedSlotDomainName(domain) + " version " +
+                   std::to_string(entry);
+        };
+        if (entry >= writer.size()) {
+            out->Add(what() + ", past the table's " +
+                     std::to_string(writer.size()) + " entries");
+        } else if (writer[entry] >= 0) {
+            out->Add(what() + ", which " + NameStep(B, writer[entry]) +
+                     " writes too");
+        } else {
+            writer[entry] = step;
+            slotOf[entry] = slot;
+        }
+    };
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        if (step.object < 0) {
+            continue;
+        }
+        const size_t object = size_t(step.object);
+        if (step.kind == RigExecBakedStepKind::ComposeSubtree &&
+            object < B.composeGroups.size()) {
+            const RigExecBakedComposeGroup &group = B.composeGroups[object];
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                record(kFin, uint32_t(slot), index, slot);
+                record(kBase, uint32_t(slot), index, slot);
+            }
+        } else if (step.kind == RigExecBakedStepKind::Solve &&
+                   object < B.solvers.size()) {
+            solveStep[object] = index;
+        } else if (IsCommitStep(step.kind) && object < B.commits.size()) {
+            if (commitFirst[object] < 0) {
+                commitFirst[object] = index;
+            }
+            commitLast[object] = index;
+        }
+    }
+    for (size_t w = 0; w < B.commits.size(); ++w) {
+        const RigExecBakedCommit &commit = B.commits[w];
+        const int writer = commitLast[w];
+        if (writer < 0) {
+            continue;
+        }
+        for (size_t k = 0; k < commit.slots.size(); ++k) {
+            if (k < commit.slotWrites.size()) {
+                record(kFin, commit.slotWrites[k], writer, commit.slots[k]);
+            }
+            if (k < commit.slotBaseWrites.size()) {
+                record(kBase, commit.slotBaseWrites[k], writer,
+                       commit.slots[k]);
+            }
+        }
+        for (size_t k = 0; k < commit.propagate.size(); ++k) {
+            if (k < commit.descendantWrites.size()) {
+                record(kFin, commit.descendantWrites[k], writer,
+                       commit.propagate[k].first);
+            }
+            if (k < commit.descendantBaseWrites.size()) {
+                record(kBase, commit.descendantBaseWrites[k], writer,
+                       commit.propagate[k].first);
+            }
+        }
+    }
+
+    // `own` is the reader's own writing step, which a carry may name: a slot
+    // that is both a candidate and a descendant carries its first write into
+    // its second.
+    const auto check = [&](RigExecBakedSlotDomain domain, uint32_t entry,
+                           int reader, int own) {
+        const std::vector<int> &writers =
+            domain == kFin ? finWriter : baseWriter;
+        const int writer = entry < writers.size() ? writers[entry] : -1;
+        if (writer >= 0 && (writer < reader || writer == own)) {
+            return;
+        }
+        const std::vector<int> &slots = domain == kFin ? finSlot : baseSlot;
+        const int slot = entry < slots.size() ? slots[entry] : -1;
+        std::string line = NameStep(B, reader) + " is bound to " +
+                           RigExecBakedSlotDomainName(domain) + " version " +
+                           std::to_string(entry);
+        if (slot >= 0 && size_t(slot) < n) {
+            line += " of " + B.paths[size_t(slot)].GetString();
+        }
+        line += writer < 0 ? std::string(", which no step writes")
+                           : ", which " + NameStep(B, writer) +
+                                 " writes at or after it";
+        out->Add(line);
+    };
+
+    for (size_t w = 0; w < B.commits.size(); ++w) {
+        const int reader = commitFirst[w];
+        if (reader < 0) {
+            continue;
+        }
+        const RigExecBakedCommit &commit = B.commits[w];
+        for (const std::vector<uint32_t> *reads :
+                 {&commit.slotReads, &commit.descendantReads,
+                  &commit.closestReads, &commit.sourceReads,
+                  &commit.targetReads, &commit.poleReads}) {
+            for (const uint32_t entry : *reads) {
+                check(kFin, entry, reader, -1);
+            }
+        }
+        for (const uint32_t entry :
+                 {commit.worldUpRead, commit.targetRead, commit.effectorRead}) {
+            check(kFin, entry, reader, -1);
+        }
+        const auto ancestors =
+            [&](const std::vector<RigExecBakedCommit::AncestorRead> &reads) {
+            for (const RigExecBakedCommit::AncestorRead &read : reads) {
+                check(kFin, read.fin, reader, -1);
+                check(kBase, read.base, reader, -1);
+            }
+        };
+        for (const auto &reads : commit.sourceAncestors) {
+            ancestors(reads);
+        }
+        for (const auto &reads : commit.poleAncestors) {
+            ancestors(reads);
+        }
+        ancestors(commit.worldUpAncestors);
+        ancestors(commit.effectorAncestors);
+        for (const std::vector<uint32_t> *carries :
+                 {&commit.slotCarry, &commit.descendantCarry}) {
+            for (const uint32_t entry : *carries) {
+                check(kFin, entry, reader, commitLast[w]);
+            }
+        }
+        for (const std::vector<uint32_t> *carries :
+                 {&commit.slotBaseCarry, &commit.descendantBaseCarry}) {
+            for (const uint32_t entry : *carries) {
+                check(kBase, entry, reader, commitLast[w]);
+            }
+        }
+    }
+    for (size_t si = 0; si < B.solvers.size(); ++si) {
+        const int reader = solveStep[si];
+        if (reader < 0) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::Solver &solver = B.solvers[si];
+        for (const uint32_t entry : solver.controlReads) {
+            check(kFin, entry, reader, -1);
+        }
+        for (const uint32_t entry : {solver.startRead, solver.rootRead,
+                                     solver.midRead, solver.endRead,
+                                     solver.poleRead}) {
+            check(kFin, entry, reader, -1);
+        }
+        if (solver.spaceRead >= 0) {
+            check(kFin, uint32_t(solver.spaceRead), reader, -1);
+        }
+        for (size_t k = 0; k < solver.restReads.size(); ++k) {
+            if (k < solver.restIsLive.size() && solver.restIsLive[k]) {
+                check(kFin, solver.restReads[k], reader, -1);
+            }
+        }
+    }
+    // Every other pose reader reads the slot's last version.
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        if (step.kind == RigExecBakedStepKind::ComposeSubtree ||
+            step.kind == RigExecBakedStepKind::Solve ||
+            IsCommitStep(step.kind)) {
+            continue;
+        }
+        for (const RigExecBakedSlotRange &read : step.reads) {
+            if (read.domain != kFin && read.domain != kBase) {
+                continue;
+            }
+            const std::vector<uint32_t> &last =
+                read.domain == kFin ? B.finLast : B.baseLast;
+            for (uint32_t slot = read.begin; slot < read.end && slot < n;
+                 ++slot) {
+                check(read.domain, last[slot], index, -1);
+            }
+        }
+    }
+}
+
+/// The clusters partition the steps with members in program order, their
+/// edges are mutual inverses covering every step edge between two clusters,
+/// and the topological order names each cluster once, after its
+/// predecessors.
+void
+ValidateClusters(const RigExecBakedProgramImpl &B, GraphViolations *out)
+{
+    const RigExecBakedClustering &C = B.clustering;
+    const int steps = int(B.steps.size());
+    const int clusters = int(C.clusters.size());
+    const auto name = [](int c) { return "cluster " + std::to_string(c); };
+    if (C.clusterOf.size() != B.steps.size()) {
+        out->Add("the clustering assigns " +
+                 std::to_string(C.clusterOf.size()) + " of " +
+                 std::to_string(steps) + " steps");
+        return;
+    }
+    for (int index = 0; index < steps; ++index) {
+        const int cluster = C.clusterOf[size_t(index)];
+        if (cluster < 0 || cluster >= clusters ||
+            B.steps[size_t(index)].cluster != cluster) {
+            out->Add(NameStep(B, index) + " is in " +
+                     name(B.steps[size_t(index)].cluster) +
+                     " but the clustering puts it in " + name(cluster));
+            return;
+        }
+    }
+    size_t members = 0;
+    for (int c = 0; c < clusters; ++c) {
+        const RigExecBakedCluster &cluster = C.clusters[size_t(c)];
+        members += cluster.members.size();
+        if (!SortedUnique(cluster.members)) {
+            out->Add(name(c) + " does not hold its members in program order");
+        }
+        for (const int member : cluster.members) {
+            if (member < 0 || member >= steps ||
+                C.clusterOf[size_t(member)] != c) {
+                out->Add(name(c) + " holds " + NameStep(B, member) +
+                         ", which the clustering puts elsewhere");
+            }
+        }
+        if (!SortedUnique(cluster.preds) || !SortedUnique(cluster.succs)) {
+            out->Add(name(c) + " lists an edge out of order or twice");
+            continue;
+        }
+        for (const int pred : cluster.preds) {
+            if (pred < 0 || pred >= clusters || pred == c ||
+                !SortedContains(C.clusters[size_t(pred)].succs, c)) {
+                out->Add(name(c) + " depends on " + name(pred) +
+                         ", which does not list it as a successor");
+            }
+        }
+        for (const int succ : cluster.succs) {
+            if (succ < 0 || succ >= clusters || succ == c ||
+                !SortedContains(C.clusters[size_t(succ)].preds, c)) {
+                out->Add(name(c) + " names successor " + name(succ) +
+                         ", which does not depend on it");
+            }
+        }
+    }
+    if (members != B.steps.size()) {
+        out->Add("the clusters hold " + std::to_string(members) +
+                 " members for " + std::to_string(steps) + " steps");
+    }
+    for (int index = 0; index < steps; ++index) {
+        const int to = C.clusterOf[size_t(index)];
+        for (const int pred : B.steps[size_t(index)].preds) {
+            if (pred < 0 || pred >= steps) {
+                continue;  // ValidateStepEdges reports it.
+            }
+            const int from = C.clusterOf[size_t(pred)];
+            if (from != to &&
+                !SortedContains(C.clusters[size_t(to)].preds, from)) {
+                out->Add(NameStep(B, index) + " depends on " +
+                         NameStep(B, pred) + ", but " + name(to) +
+                         " does not depend on " + name(from));
+            }
+        }
+    }
+    std::vector<int> position(size_t(clusters), -1);
+    for (size_t k = 0; k < C.topologicalOrder.size(); ++k) {
+        const int c = C.topologicalOrder[k];
+        if (c < 0 || c >= clusters || position[size_t(c)] >= 0) {
+            out->Add("the cluster order names " + name(c) +
+                     " out of range or twice");
+            return;
+        }
+        position[size_t(c)] = int(k);
+    }
+    if (C.topologicalOrder.size() != C.clusters.size()) {
+        out->Add("the cluster order holds " +
+                 std::to_string(C.topologicalOrder.size()) + " of " +
+                 std::to_string(clusters) + " clusters");
+        return;
+    }
+    for (int c = 0; c < clusters; ++c) {
+        for (const int pred : C.clusters[size_t(c)].preds) {
+            if (pred >= 0 && pred < clusters &&
+                position[size_t(pred)] > position[size_t(c)]) {
+                out->Add("the cluster order puts " + name(c) +
+                         " before its predecessor " + name(pred));
+            }
+        }
+    }
+}
+
+}  // namespace
+
+bool
+RigExecBakedValidateStepGraph(const RigExecBakedProgramImpl &program,
+                              std::string *error)
+{
+    GraphViolations violations;
+    ValidateStepEdges(program, &violations);
+    ValidateSlotProducers(program, &violations);
+    ValidatePoseVersions(program, &violations);
+    ValidateClusters(program, &violations);
+    if (violations.count == 0) {
+        return true;
+    }
+    if (error) {
+        *error = violations.first;
+        if (violations.count > 1) {
+            *error += " (and " + std::to_string(violations.count - 1) +
+                      " more)";
+        }
+    }
+    return false;
 }
 
 // Cone re-execution (§7).
