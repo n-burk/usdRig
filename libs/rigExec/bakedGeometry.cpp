@@ -684,6 +684,29 @@ DeclareMatrixReads(const RigExecBakedProgramImpl::GeomRevision &revision,
     }
 }
 
+/// Declares a read of point version \p version: the authored base for 0, and
+/// otherwise the RevisionDone and ChainDirty slots of revision
+/// first + version - 1, whose only writer is that revision's fuse. The buffer
+/// the version resolves to is not declared: whichever earlier chunk or fuse
+/// filled it precedes that fuse.
+void
+DeclarePointVersionRead(const RigExecBakedProgramImpl &B,
+                        RigExecBakedPointVersion version,
+                        std::vector<RigExecBakedSlotRange> *reads)
+{
+    if (version.version == 0) {
+        reads->push_back(RigExecBakedOne(RigExecBakedSlotDomain::ChainBase,
+                                         version.chain));
+        return;
+    }
+    const int revision =
+        B.chainRevisionBegin[size_t(version.chain)] + version.version - 1;
+    reads->push_back(
+        RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone, revision));
+    reads->push_back(
+        RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, revision));
+}
+
 }  // namespace
 
 namespace {
@@ -795,11 +818,10 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
     for (size_t c = 0; c < B.chains.size(); ++c) {
         RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
         // Revision ids are handed out chain by chain, so one chain's
-        // revisions are a contiguous RANGE: "the buffers this chain has
-        // produced so far" -- which is what a revision reads its preceding
-        // points from and what the status sweep reads at the end -- is then
-        // one declared range rather than a list. The chunk ids inside them
-        // are contiguous for the same reason and at the same grain.
+        // revisions are a contiguous RANGE: point version v of the chain is
+        // revision first + v - 1's, and the status sweep reads the whole
+        // chain as one declared range. The chunk ids inside them are
+        // contiguous for the same reason and at the same grain.
         B.chainRevisionBegin[c] = int(B.revisionIndex.size());
         B.chainChunkBegin[c] = nextChunk;
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
@@ -808,11 +830,14 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
         B.chainRevisionEnd[c] = int(B.revisionIndex.size());
         const int first = B.chainRevisionBegin[c];
         const int last = B.chainRevisionEnd[c];
-        const int chunkFirst = B.chainChunkBegin[c];
+        B.revisionFuseStep.resize(size_t(last), -1);
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             RigExecBakedProgramImpl::GeomRevision &revision =
                 chain.revisions[r];
             const int id = first + int(r);
+            // The points entering this revision, which its chunks, its fuse
+            // and a current-phase assemble read.
+            const RigExecBakedPointVersion entering{int(c), int(r)};
             const bool skin = revision.op == RigExecRevisionOp::Skin;
             revision.influences.assign(revision.influenceSlots.size(),
                                        GfMatrix4d(1.0));
@@ -891,25 +916,14 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
                 if (revision.weightCurrentPhase) {
                     // A current-phase field is measured against the points
-                    // ENTERING this revision, so the assemble of a revision
-                    // that would otherwise read nothing but the stage now
-                    // waits for every buffer this chain has filled before
-                    // it -- and for the indirection that says which of them
-                    // holds the running value, exactly as a chunk does.
-                    // The placement the oracle reads comes from the walk, so
-                    // it waits for that too.
+                    // ENTERING this revision, so the assemble reads that
+                    // version exactly as a chunk does. The placement the
+                    // oracle reads comes from the walk, so it waits for that
+                    // too.
                     assemble.maxDiagnostics += 1;
                     assemble.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::WeightFrames, 0));
-                    if (id > first) {
-                        assemble.reads.push_back(RigExecBakedRange(
-                            RigExecBakedSlotDomain::RevisionOut, chunkFirst,
-                            revision.chunkBase));
-                        assemble.reads.push_back(RigExecBakedRange(
-                            RigExecBakedSlotDomain::RevisionDone, first, id));
-                        assemble.reads.push_back(RigExecBakedOne(
-                            RigExecBakedSlotDomain::ChainDirty, id - 1));
-                    }
+                    DeclarePointVersionRead(B, entering, &assemble.reads);
                 }
                 if (revision.driverFramesSolver >= 0) {
                     assemble.reads.push_back(
@@ -984,26 +998,9 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     chunk.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::RevisionTransforms, id));
                 }
-                // Which earlier buffer holds the preceding points is a
-                // runtime indirection, so the declaration is the upper
-                // bound: every chunk this chain has filled before it -- AND
-                // the indirection itself, which is the `currentSource` each
-                // earlier fuse published into RevisionDone. Declaring the
-                // buffers alone left a chunk free to run before the fuse that
-                // decides which of them to read, which a serial order hides
-                // and one cluster per step finds immediately. The whole
-                // RevisionDone range, not just the last one: the buffers are
-                // indexed by chunk now, so the range that names them cannot
-                // also name the revisions whose fuses chose among them.
-                if (id > first) {
-                    chunk.reads.push_back(RigExecBakedRange(
-                        RigExecBakedSlotDomain::RevisionOut, chunkFirst,
-                        revision.chunkBase));
-                    chunk.reads.push_back(RigExecBakedRange(
-                        RigExecBakedSlotDomain::RevisionDone, first, id));
-                    chunk.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::ChainDirty, id - 1));
-                }
+                // Which buffer holds the entering points is decided by the
+                // previous fuse, so the read is that fuse's version.
+                DeclarePointVersionRead(B, entering, &chunk.reads);
                 chunk.writes.push_back(
                     RigExecBakedOne(RigExecBakedSlotDomain::RevisionOut,
                                     revision.chunkBase + int(k)));
@@ -1031,15 +1028,13 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                         RigExecBakedSlotDomain::WeightPacket,
                         revision.weightObject));
                 }
+                // Its own chunks' ranges. The entering points, which the
+                // whole-revision fallback and a pass-through read, are a
+                // version like a chunk's.
                 fuse.reads.push_back(RigExecBakedRange(
-                    RigExecBakedSlotDomain::RevisionOut, chunkFirst,
+                    RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
                     revision.chunkBase + int(revision.chunks.size())));
-                if (id > first) {
-                    fuse.reads.push_back(RigExecBakedRange(
-                        RigExecBakedSlotDomain::RevisionDone, first, id));
-                    fuse.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::ChainDirty, id - 1));
-                }
+                DeclarePointVersionRead(B, entering, &fuse.reads);
                 fuse.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionDone, id));
                 fuse.writes.push_back(RigExecBakedOne(
@@ -1055,6 +1050,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                         RigExecBakedOne(RigExecBakedSlotDomain::Snapshots,
                                         int(B.steps.size()) - 1));
                 }
+                B.revisionFuseStep[size_t(id)] = int(B.steps.size()) - 1;
             }
         }
         B.chainChunkEnd[c] = nextChunk;
@@ -1066,12 +1062,11 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             status.maxDiagnostics = chain.revisions.size();
             status.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainBase, int(c)));
+            // Every revision's published status; the last one's
+            // `currentSource` among them names version n, the final points.
             if (last > first) {
                 status.reads.push_back(RigExecBakedRange(
                     RigExecBakedSlotDomain::RevisionDone, first, last));
-                status.reads.push_back(RigExecBakedRange(
-                    RigExecBakedSlotDomain::RevisionOut, chunkFirst,
-                    nextChunk));
             }
             status.writes.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainPoints, int(c)));
@@ -1134,33 +1129,18 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
 
 namespace {
 
-/// The points the chain holds BEFORE revision \p r.
+/// The points of version \p version of \p chain (RigExecBakedPointVersion):
+/// 0 is the authored base, v > 0 what revision v - 1's fuse left.
 ///
-/// Not a buffer of its own: `currentSource` names the revision whose output
-/// buffer last held the running value, which is -1 for the authored base. It
-/// is the indirection that replaces today's `revision.output = current` copy
-/// of a revision that applied nothing.
+/// Not a buffer of its own: revision v - 1's `currentSource` names the
+/// revision whose output buffer holds the value, so a pass-through version
+/// names an earlier revision's buffer, or the base when it is -1.
 void
-PointsBefore(const RigExecBakedProgramImpl::GeomChain &chain, size_t r,
-             const GfVec3f **points, size_t *count)
+PointsAt(const RigExecBakedProgramImpl::GeomChain &chain, size_t version,
+         const GfVec3f **points, size_t *count)
 {
     const int source =
-        r == 0 ? -1 : chain.revisions[r - 1].currentSource;
-    if (source < 0) {
-        *points = chain.lastBase.cdata();
-        *count = chain.lastBase.size();
-        return;
-    }
-    *points = chain.revisions[size_t(source)].output.data();
-    *count = chain.revisions[size_t(source)].output.size();
-}
-
-/// The points the chain holds AFTER revision \p r.
-void
-PointsAfter(const RigExecBakedProgramImpl::GeomChain &chain, size_t r,
-            const GfVec3f **points, size_t *count)
-{
-    const int source = chain.revisions[r].currentSource;
+        version == 0 ? -1 : chain.revisions[version - 1].currentSource;
     if (source < 0) {
         *points = chain.lastBase.cdata();
         *count = chain.lastBase.size();
@@ -1685,7 +1665,7 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
 {
     const GfVec3f *points = nullptr;
     size_t count = 0;
-    PointsBefore(chain, revisionIndex, &points, &count);
+    PointsAt(chain, revisionIndex, &points, &count);
     if (!revision->layoutUsable || !revision->envelopeOk ||
         count != revision->precedingCount ||
         revision->output.size() != count) {
@@ -2065,11 +2045,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                     "through");
             }
         }
-        const GfVec3f *points = chain.lastBase.cdata();
-        size_t count = chain.lastBase.size();
-        if (!chain.revisions.empty()) {
-            PointsAfter(chain, chain.revisions.size() - 1, &points, &count);
-        }
+        // Version n, the chain's final points; a chain of no revisions
+        // publishes its base.
+        const GfVec3f *points = nullptr;
+        size_t count = 0;
+        PointsAt(chain, chain.revisions.size(), &points, &count);
         // Double-buffered: publication is a refcount bump for the consumer
         // and the array one may still hold from last frame is never the one
         // being written.
@@ -2095,11 +2075,14 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     const bool skin = revision.op == RigExecRevisionOp::Skin;
     // The chain's sticky dirty bit as of the PRECEDING revision: once a
     // revision executed, every later one does, and the chain's own base is
-    // where it starts.
-    const bool chainDirty =
-        revisionIndex == 0
-            ? chain.baseDirty
-            : chain.revisions[size_t(revisionIndex) - 1].executed;
+    // where it starts. Only the chunk and the fuse read it. The fold and an
+    // assemble that is not current-phase do not declare version r, so they
+    // may run beside the fuse that writes it.
+    const auto chainDirtyBefore = [&chain, revisionIndex = revisionIndex] {
+        return revisionIndex == 0
+                   ? chain.baseDirty
+                   : chain.revisions[size_t(revisionIndex) - 1].executed;
+    };
     switch (step->kind) {
     case RigExecBakedStepKind::InfluenceFold: {
         revision.influencesChanged = FoldInfluences(B, &revision);
@@ -2142,8 +2125,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 B.weightPackets[size_t(revision.weightObject)];
             const GfVec3f *entering = nullptr;
             size_t enteringCount = 0;
-            PointsBefore(chain, size_t(revisionIndex), &entering,
-                         &enteringCount);
+            PointsAt(chain, size_t(revisionIndex), &entering,
+                     &enteringCount);
             const std::vector<GfVec3f> current(entering,
                                                entering + enteringCount);
             std::vector<float> field;
@@ -2300,7 +2283,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             revision.chunks[size_t(step->part)];
         const GfVec3f *points = nullptr;
         size_t count = 0;
-        PointsBefore(chain, size_t(revisionIndex), &points, &count);
+        PointsAt(chain, size_t(revisionIndex), &points, &count);
+        const bool chainDirty = chainDirtyBefore();
         const bool sized = count == revision.precedingCount &&
                            revision.output.size() == count;
 
@@ -2408,7 +2392,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 ": rigExec:weightObject produced an invalid common "
                 "envelope; revision passed through");
         }
-        revision.executed = chainDirty || revision.staticDirty ||
+        revision.executed = chainDirtyBefore() || revision.staticDirty ||
                             (skin && revision.influencesChanged);
         step->counters.revisionsExecuted = revision.executed ? 1 : 0;
         if (revision.executed) {
@@ -2451,7 +2435,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         if (revision.snapshotAfter) {
             const GfVec3f *points = nullptr;
             size_t count = 0;
-            PointsAfter(chain, size_t(revisionIndex), &points, &count);
+            PointsAt(chain, size_t(revisionIndex) + 1, &points, &count);
             step->snapshots.Record(
                 chain.target, revision.moverPath,
                 VtValue(VtVec3fArray(points, points + count)));

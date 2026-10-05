@@ -1463,6 +1463,131 @@ ValidateClusters(const RigExecBakedProgramImpl &B, GraphViolations *out)
     }
 }
 
+/// Every point-chain reader declares the version it reads, and that
+/// version's producer precedes it. Version v > 0 of a chain is addressed by
+/// RevisionDone and ChainDirty of revision first + v - 1, and the only writer
+/// of either is that revision's fuse (revisionFuseStep). The declaration is
+/// checked from the revision tables rather than from the sweep, so a version
+/// read the builder dropped is reported even though no edge is missing for it.
+void
+ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
+{
+    const size_t revisions = B.revisionIndex.size();
+    if (B.revisionFuseStep.size() != revisions) {
+        out->Add("the program records " +
+                 std::to_string(B.revisionFuseStep.size()) +
+                 " fuse steps for " + std::to_string(revisions) +
+                 " revisions");
+        return;
+    }
+    const int count = int(B.steps.size());
+    for (size_t r = 0; r < revisions; ++r) {
+        const int fuse = B.revisionFuseStep[r];
+        if (fuse < 0 || fuse >= count ||
+            B.steps[size_t(fuse)].kind != RigExecBakedStepKind::RevisionFuse ||
+            B.steps[size_t(fuse)].object != int(r)) {
+            out->Add("revision " + std::to_string(r) + "'s fuse is recorded "
+                     "as " + NameStep(B, fuse) + ", which is not its fuse");
+            return;
+        }
+    }
+    const auto chainDomain = [](RigExecBakedSlotDomain domain) {
+        return domain == RigExecBakedSlotDomain::RevisionDone ||
+               domain == RigExecBakedSlotDomain::ChainDirty;
+    };
+    const auto covers = [](const std::vector<RigExecBakedSlotRange> &ranges,
+                           RigExecBakedSlotDomain domain, int slot) {
+        for (const RigExecBakedSlotRange &range : ranges) {
+            if (range.domain == domain && range.begin <= uint32_t(slot) &&
+                uint32_t(slot) < range.end) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (int index = 0; index < count; ++index) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        // The producer: one writer per version slot, the revision's fuse.
+        for (const RigExecBakedSlotRange &write : step.writes) {
+            if (!chainDomain(write.domain)) {
+                continue;
+            }
+            if (!write.IsEmpty() && write.end > revisions) {
+                out->Add(NameStep(B, index) + " writes " +
+                         RigExecBakedSlotDomainName(write.domain) + "[" +
+                         std::to_string(write.end - 1) + "], past the " +
+                         "table's " + std::to_string(revisions) +
+                         " revisions");
+            }
+            for (uint32_t slot = write.begin;
+                 slot < write.end && slot < revisions; ++slot) {
+                if (B.revisionFuseStep[slot] != index) {
+                    out->Add(NameStep(B, index) + " writes " +
+                             RigExecBakedSlotDomainName(write.domain) + "[" +
+                             std::to_string(slot) + "], which only " +
+                             NameStep(B, B.revisionFuseStep[slot]) +
+                             " may write");
+                }
+            }
+        }
+        // Every reader of a version slot is ordered after its fuse.
+        for (const RigExecBakedSlotRange &read : step.reads) {
+            if (!chainDomain(read.domain)) {
+                continue;
+            }
+            if (!read.IsEmpty() && read.end > revisions) {
+                out->Add(NameStep(B, index) + " reads " +
+                         RigExecBakedSlotDomainName(read.domain) + "[" +
+                         std::to_string(read.end - 1) + "], past the " +
+                         "table's " + std::to_string(revisions) +
+                         " revisions");
+            }
+            for (uint32_t slot = read.begin;
+                 slot < read.end && slot < revisions; ++slot) {
+                const int fuse = B.revisionFuseStep[slot];
+                if (!SortedContains(step.preds, fuse)) {
+                    out->Add(NameStep(B, index) + " reads " +
+                             RigExecBakedSlotDomainName(read.domain) + "[" +
+                             std::to_string(slot) + "] without an edge from "
+                             "its producer " + NameStep(B, fuse));
+                }
+            }
+        }
+        // The declaration: the steps that read the points entering revision
+        // r name version r.
+        const bool entering =
+            step.kind == RigExecBakedStepKind::RevisionChunk ||
+            step.kind == RigExecBakedStepKind::RevisionFuse ||
+            step.kind == RigExecBakedStepKind::RevisionStatic;
+        if (!entering || step.object < 0 ||
+            size_t(step.object) >= revisions) {
+            continue;
+        }
+        const auto &[chain, r] = B.revisionIndex[size_t(step.object)];
+        if (step.kind == RigExecBakedStepKind::RevisionStatic &&
+            !B.chains[size_t(chain)]
+                 .revisions[size_t(r)]
+                 .weightCurrentPhase) {
+            continue;
+        }
+        // Version 0 is the source ChainBase, which every chain step reads
+        // whether or not it reads points, so there is nothing to check.
+        if (r == 0) {
+            continue;
+        }
+        const bool declared =
+            covers(step.reads, RigExecBakedSlotDomain::RevisionDone,
+                   step.object - 1) &&
+            covers(step.reads, RigExecBakedSlotDomain::ChainDirty,
+                   step.object - 1);
+        if (!declared) {
+            out->Add(NameStep(B, index) + " reads point version " +
+                     std::to_string(r) + " of chain " +
+                     std::to_string(chain) + " without declaring it");
+        }
+    }
+}
+
 }  // namespace
 
 bool
@@ -1473,6 +1598,7 @@ RigExecBakedValidateStepGraph(const RigExecBakedProgramImpl &program,
     ValidateStepEdges(program, &violations);
     ValidateSlotProducers(program, &violations);
     ValidatePoseVersions(program, &violations);
+    ValidatePointVersions(program, &violations);
     ValidateClusters(program, &violations);
     if (violations.count == 0) {
         return true;

@@ -525,6 +525,13 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
     return RigExecBakedRange(domain, index, index + 1);
 }
 
+/// One version of a chain's running points: 0 is the authored base, v > 0
+/// what the fuse of the chain's revision v - 1 left.
+struct RigExecBakedPointVersion {
+    int chain = -1;
+    int version = 0;
+};
+
 /// The name of \p domain, for the schedule report.
 const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
 
@@ -1955,6 +1962,10 @@ struct RigExecBakedProgramImpl {
     /// by revision, so one chain's chunks are a contiguous range too.
     std::vector<int> revisionChunkBase, revisionChunkCount;
     std::vector<int> chainChunkBegin, chainChunkEnd;
+    /// The RevisionFuse step of each revision id: the only writer of its
+    /// RevisionDone and ChainDirty slots, and so the producer of point
+    /// version r + 1 of its chain (RigExecBakedPointVersion).
+    std::vector<int> revisionFuseStep;
 
     /// The partition of `steps` the parallel executor runs, chosen once at
     /// Build. Its grain comes from the cost model and the machine's

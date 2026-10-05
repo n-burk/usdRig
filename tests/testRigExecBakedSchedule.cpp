@@ -456,7 +456,9 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
     // vertex partition rewrites, and a declaration dropped in that rewrite
     // must fail a test rather than wait for someone to re-run the dumps at
     // grain 0. A revision this step writes RevisionDone for is its own fuse
-    // deciding the indirection, and is excluded.
+    // deciding the indirection, and is excluded. Chain readers declare a
+    // point version, not buffers; this rule catches a buffer read that
+    // appears without its version read.
     // RevisionOut is indexed by CHUNK and RevisionDone by REVISION, so the
     // rule is stated over revisions and the buffer slots are mapped back to
     // the revision that owns them: a chunk of revision r reading any earlier
@@ -2812,6 +2814,400 @@ TestASwitchCycleIsDetectedNotEmitted()
     }
 }
 
+/// Every reader of a chain's running points names exactly the version it
+/// reads (RigExecBakedPointVersion): the RevisionDone and ChainDirty slots of
+/// the revision below it, or the base for the chain's first revision, and no
+/// other revision's buffer or flag. The fuse reads its own chunks' buffers
+/// besides; ChainStatus reads every revision's status and no buffer.
+/// Version 0 is the source ChainBase, which every chain step reads anyway,
+/// so at the first revision only the absence of other versions is checked.
+/// Returns how many readers past the first revision belong to a revision cut
+/// into more than one chunk: the speculative chunks and the fuse whose
+/// RevisionOut read spans several buffers.
+size_t
+TestEachChainReaderBindsOneVersion(const BuiltProgram &built,
+                                   const char *name)
+{
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return 0;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    const size_t revisions = B.revisionIndex.size();
+    CHECK(B.revisionFuseStep.size() == revisions);
+    if (B.revisionFuseStep.size() != revisions) {
+        return 0;
+    }
+    for (size_t id = 0; id < revisions; ++id) {
+        const int fuse = B.revisionFuseStep[id];
+        CHECK(fuse >= 0 && size_t(fuse) < B.steps.size() &&
+              B.steps[size_t(fuse)].kind ==
+                  RigExecBakedStepKind::RevisionFuse &&
+              B.steps[size_t(fuse)].object == int(id));
+    }
+    // The slots of \p domain that \p ranges name, in order.
+    const auto slots = [](const std::vector<RigExecBakedSlotRange> &ranges,
+                          RigExecBakedSlotDomain domain) {
+        std::vector<int> out;
+        for (const RigExecBakedSlotRange &range : ranges) {
+            if (range.domain == domain) {
+                for (uint32_t slot = range.begin; slot < range.end; ++slot) {
+                    out.push_back(int(slot));
+                }
+            }
+        }
+        return out;
+    };
+    size_t checked = 0, stacked = 0, stackedChunked = 0;
+    for (size_t index = 0; index < B.steps.size(); ++index) {
+        const RigExecBakedStep &step = B.steps[index];
+        const std::vector<int> done =
+            slots(step.reads, RigExecBakedSlotDomain::RevisionDone);
+        const std::vector<int> dirty =
+            slots(step.reads, RigExecBakedSlotDomain::ChainDirty);
+        const std::vector<int> out =
+            slots(step.reads, RigExecBakedSlotDomain::RevisionOut);
+        if (step.kind == RigExecBakedStepKind::ChainStatus) {
+            const int c = step.object;
+            std::vector<int> all;
+            for (int id = B.chainRevisionBegin[size_t(c)];
+                 id < B.chainRevisionEnd[size_t(c)]; ++id) {
+                all.push_back(id);
+            }
+            CHECK(done == all);
+            CHECK(out.empty());
+            continue;
+        }
+        if (step.kind != RigExecBakedStepKind::RevisionChunk &&
+            step.kind != RigExecBakedStepKind::RevisionFuse &&
+            step.kind != RigExecBakedStepKind::RevisionStatic) {
+            continue;
+        }
+        const int id = step.object;
+        const auto &[c, r] = B.revisionIndex[size_t(id)];
+        const bool reader =
+            step.kind != RigExecBakedStepKind::RevisionStatic ||
+            B.chains[size_t(c)].revisions[size_t(r)].weightCurrentPhase;
+        std::vector<int> ownChunks;
+        if (step.kind == RigExecBakedStepKind::RevisionFuse) {
+            for (int k = 0; k < B.revisionChunkCount[size_t(id)]; ++k) {
+                ownChunks.push_back(B.revisionChunkBase[size_t(id)] + k);
+            }
+        }
+        CHECK(out == ownChunks);
+        if (!reader) {
+            CHECK(done.empty() && dirty.empty());
+            continue;
+        }
+        ++checked;
+        if (r == 0) {
+            CHECK(done.empty() && dirty.empty());
+            continue;
+        }
+        ++stacked;
+        if (B.revisionChunkCount[size_t(id)] > 1) {
+            ++stackedChunked;
+        }
+        const bool bound = done == std::vector<int>{id - 1} &&
+                           dirty == std::vector<int>{id - 1};
+        CHECK(bound);
+        const int producer = B.revisionFuseStep[size_t(id - 1)];
+        const bool ordered =
+            std::binary_search(step.preds.begin(), step.preds.end(),
+                               producer);
+        CHECK(ordered);
+        if (!bound || !ordered) {
+            std::printf("FAIL %s: step %zu (%s) does not read version %d of "
+                        "chain %d from step %d alone\n", name, index,
+                        step.label.c_str(), r, c, producer);
+        }
+    }
+    std::printf("  %s: %zu chain readers, %zu past the first revision "
+                "(%zu of a multi-chunk revision)\n",
+                name, checked, stacked, stackedChunked);
+    return stackedChunked;
+}
+
+/// The upper-bound chain reads, rebuilt from the revision tables as the
+/// reference the version reads must order identically to: each chunk, fuse
+/// and current-phase assemble of revision id > first reads RevisionOut of
+/// every earlier chunk of its chain, RevisionDone[first, id) and
+/// ChainDirty(id - 1), the fuse reads every chunk of its chain up to its
+/// own, and ChainStatus reads every chunk of its chain.
+std::vector<RigExecBakedSlotRange>
+OverApproximateChainReads(const RigExecBakedProgramImpl &B,
+                          const RigExecBakedStep &step)
+{
+    std::vector<RigExecBakedSlotRange> reads;
+    if (step.kind == RigExecBakedStepKind::ChainStatus) {
+        const size_t c = size_t(step.object);
+        if (B.chainRevisionEnd[c] > B.chainRevisionBegin[c]) {
+            reads.push_back(RigExecBakedRange(
+                RigExecBakedSlotDomain::RevisionDone, B.chainRevisionBegin[c],
+                B.chainRevisionEnd[c]));
+            reads.push_back(RigExecBakedRange(
+                RigExecBakedSlotDomain::RevisionOut, B.chainChunkBegin[c],
+                B.chainChunkEnd[c]));
+        }
+        return reads;
+    }
+    if (step.kind != RigExecBakedStepKind::RevisionChunk &&
+        step.kind != RigExecBakedStepKind::RevisionFuse &&
+        step.kind != RigExecBakedStepKind::RevisionStatic) {
+        return reads;
+    }
+    const int id = step.object;
+    const auto &[c, r] = B.revisionIndex[size_t(id)];
+    if (step.kind == RigExecBakedStepKind::RevisionStatic &&
+        !B.chains[size_t(c)].revisions[size_t(r)].weightCurrentPhase) {
+        return reads;
+    }
+    const int first = B.chainRevisionBegin[size_t(c)];
+    const int chunkFirst = B.chainChunkBegin[size_t(c)];
+    const int chunkBase = B.revisionChunkBase[size_t(id)];
+    if (step.kind == RigExecBakedStepKind::RevisionFuse) {
+        reads.push_back(RigExecBakedRange(
+            RigExecBakedSlotDomain::RevisionOut, chunkFirst,
+            chunkBase + B.revisionChunkCount[size_t(id)]));
+    } else if (id > first) {
+        reads.push_back(RigExecBakedRange(RigExecBakedSlotDomain::RevisionOut,
+                                          chunkFirst, chunkBase));
+    }
+    if (id > first) {
+        reads.push_back(RigExecBakedRange(RigExecBakedSlotDomain::RevisionDone,
+                                          first, id));
+        reads.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, id - 1));
+    }
+    return reads;
+}
+
+/// The transitive closure of the slot-conflict relation over \p reads and
+/// \p writes, one bit row per step: step j depends on an earlier step i when
+/// j reads what i writes, when both write one slot, or when j writes what i
+/// read in a domain that is not versioned. That is the relation the edge
+/// sweep raises, before it drops the edges a later writer implies, so its
+/// closure is the closure of the sweep's `preds`.
+std::vector<uint64_t>
+ConflictClosure(const std::vector<std::vector<RigExecBakedSlotRange>> &reads,
+                const std::vector<std::vector<RigExecBakedSlotRange>> &writes,
+                size_t *words)
+{
+    const size_t count = reads.size();
+    *words = (count + 63) / 64;
+    std::vector<uint64_t> bits(count * *words, 0);
+    struct Use {
+        size_t step;
+        uint32_t begin, end;
+        bool write;
+    };
+    std::vector<std::vector<Use>> byDomain(RigExecBakedSlotDomainCount);
+    for (size_t step = 0; step < count; ++step) {
+        for (const RigExecBakedSlotRange &range : reads[step]) {
+            if (!range.IsEmpty()) {
+                byDomain[size_t(range.domain)].push_back(
+                    {step, range.begin, range.end, false});
+            }
+        }
+        for (const RigExecBakedSlotRange &range : writes[step]) {
+            if (!range.IsEmpty()) {
+                byDomain[size_t(range.domain)].push_back(
+                    {step, range.begin, range.end, true});
+            }
+        }
+    }
+    for (size_t domain = 0; domain < byDomain.size(); ++domain) {
+        const bool versioned = RigExecBakedIsVersionedDomain(
+            RigExecBakedSlotDomain(domain));
+        const std::vector<Use> &uses = byDomain[domain];
+        for (const Use &later : uses) {
+            uint64_t *row = &bits[later.step * *words];
+            for (const Use &earlier : uses) {
+                if (earlier.step >= later.step ||
+                    earlier.begin >= later.end ||
+                    later.begin >= earlier.end) {
+                    continue;
+                }
+                if (earlier.write || (later.write && !versioned)) {
+                    row[earlier.step / 64] |= uint64_t(1)
+                                              << (earlier.step % 64);
+                }
+            }
+        }
+    }
+    // Program order is a topological order of the relation.
+    for (size_t step = 0; step < count; ++step) {
+        uint64_t *row = &bits[step * *words];
+        for (size_t pred = 0; pred < step; ++pred) {
+            if ((row[pred / 64] >> (pred % 64)) & uint64_t(1)) {
+                const uint64_t *closed = &bits[pred * *words];
+                for (size_t w = 0; w < *words; ++w) {
+                    row[w] |= closed[w];
+                }
+            }
+        }
+    }
+    return bits;
+}
+
+/// One version read per chain reader orders the steps exactly as the
+/// upper-bound chain reads would: the transitive closure of the program's
+/// `preds` equals the closure of the conflict relation with
+/// OverApproximateChainReads added back. The same closure over the current
+/// declarations is checked first, which is what makes the conflict relation
+/// a fair stand-in for the sweep.
+void
+TestThePointVersionsKeepTheOrder(const BuiltProgram &built, const char *name)
+{
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    const size_t count = B.steps.size();
+    const Reachability actual(B.steps);
+    std::vector<std::vector<RigExecBakedSlotRange>> reads(count), writes(count);
+    for (size_t index = 0; index < count; ++index) {
+        reads[index] = B.steps[index].reads;
+        writes[index] = B.steps[index].writes;
+    }
+    const auto compare = [&](const char *what) {
+        size_t words = 0;
+        const std::vector<uint64_t> bits =
+            ConflictClosure(reads, writes, &words);
+        size_t differ = 0;
+        for (size_t later = 0; later < count; ++later) {
+            for (size_t earlier = 0; earlier < later; ++earlier) {
+                const bool expected =
+                    (bits[later * words + earlier / 64] >> (earlier % 64)) &
+                    uint64_t(1);
+                if (expected == actual.Ordered(earlier, later)) {
+                    continue;
+                }
+                if (differ++ < 5) {
+                    std::printf("FAIL %s (%s): step %zu (%s) -> step %zu "
+                                "(%s) is %s\n", name, what, earlier,
+                                B.steps[earlier].label.c_str(), later,
+                                B.steps[later].label.c_str(),
+                                expected ? "missing" : "new");
+                }
+            }
+        }
+        CHECK(differ == 0);
+    };
+    compare("current declarations");
+    size_t added = 0;
+    for (size_t index = 0; index < count; ++index) {
+        for (const RigExecBakedSlotRange &range :
+                 OverApproximateChainReads(B, B.steps[index])) {
+            reads[index].push_back(range);
+            ++added;
+        }
+    }
+    compare("over-approximate declarations");
+    size_t edges = 0;
+    for (const RigExecBakedStep &step : B.steps) {
+        edges += step.preds.size();
+    }
+    std::printf("  %s: %zu steps, %zu edges, closure unchanged by %zu "
+                "over-approximate chain reads\n", name, count, edges, added);
+}
+
+/// A chain reader whose version read is missing, or whose producer is not
+/// the fuse, is refused by name even though the sweep raised every edge the
+/// old reads did. Each case restores what it broke.
+void
+TestTheValidatorRejectsAnUnboundPointVersion()
+{
+    BuiltProgram built = BuildStage(MakeStackedChainStage());
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    // The program is this test's own, so it may be edited in place.
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    CHECK(B.revisionIndex.size() == 3);
+    int chunk = -1;
+    for (size_t index = 0; index < B.steps.size(); ++index) {
+        if (B.steps[index].kind == RigExecBakedStepKind::RevisionChunk &&
+            B.steps[index].object == 2) {
+            chunk = int(index);
+        }
+    }
+    CHECK(chunk >= 0);
+    if (chunk < 0 || B.revisionIndex.size() != 3) {
+        return;
+    }
+    RigExecBakedStep &reader = B.steps[size_t(chunk)];
+    const int producer = B.revisionFuseStep[1];
+    const auto passes = [&](const char *what) {
+        std::string restored;
+        if (!RigExecBakedValidateStepGraph(B, &restored)) {
+            ++failures;
+            std::printf("FAIL %s: rejected after the restore: %s\n", what,
+                        restored.c_str());
+        }
+    };
+    std::string error;
+    CHECK(RigExecBakedValidateStepGraph(B, &error));
+    {
+        const std::vector<RigExecBakedSlotRange> reads = reader.reads;
+        reader.reads.erase(
+            std::remove(reader.reads.begin(), reader.reads.end(),
+                        RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone,
+                                        1)),
+            reader.reads.end());
+        CHECK(reader.reads.size() + 1 == reads.size());
+        ExpectRejected(B, "a chunk without its version read",
+                       {"(RevisionChunk", "reads point version 2 of chain 0",
+                        "without declaring it"});
+        reader.reads = reads;
+        passes("a chunk without its version read");
+    }
+    {
+        B.revisionFuseStep[1] = chunk;
+        ExpectRejected(B, "a fuse table naming a chunk",
+                       {"revision 1's fuse is recorded as",
+                        "(RevisionChunk", "which is not its fuse"});
+        B.revisionFuseStep[1] = producer;
+        passes("a fuse table naming a chunk");
+    }
+    {
+        reader.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::ChainDirty, 1));
+        ExpectRejected(B, "a second writer of a version",
+                       {"(RevisionChunk", "writes ChainDirty[1]",
+                        "which only", "(RevisionFuse", "may write"});
+        reader.writes.pop_back();
+        passes("a second writer of a version");
+    }
+    {
+        reader.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::RevisionDone, 3));
+        ExpectRejected(B, "a version written past the revision table",
+                       {"(RevisionChunk", "writes RevisionDone[3]",
+                        "past the table's 3 revisions"});
+        reader.writes.pop_back();
+        passes("a version written past the revision table");
+    }
+    {
+        // The edge alone, both directions, so the edge check stays quiet.
+        std::vector<int> &preds = reader.preds;
+        std::vector<int> &succs = B.steps[size_t(producer)].succs;
+        preds.erase(std::find(preds.begin(), preds.end(), producer));
+        succs.erase(std::find(succs.begin(), succs.end(), chunk));
+        ExpectRejected(B, "a version read without its producer's edge",
+                       {"(RevisionChunk", "reads RevisionDone[1] without an "
+                        "edge from its producer", "(RevisionFuse"});
+        preds.insert(std::lower_bound(preds.begin(), preds.end(), producer),
+                     producer);
+        succs.insert(std::lower_bound(succs.begin(), succs.end(), chunk),
+                     chunk);
+        passes("a version read without its producer's edge");
+    }
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -2868,6 +3264,35 @@ main(int argc, char **argv)
         "oneloop_cross_domain");
     TestTheValidatorRejectsAMalformedGraph();
     TestTheValidatorRejectsALaterPoseVersion();
+    TestTheValidatorRejectsAnUnboundPointVersion();
+    {
+        // The chain fixtures: one revision per chain (Biped, spider_legs),
+        // three on one chain (stacked_revisions), many stacked chains
+        // (Biped_stack), current-phase weights over a skinned chain
+        // (oneloop_cross_domain, computed_weights), and blend shapes
+        // (04_BlendShapeFace).
+        const std::string fixtures = examplesDir + "/../tests/fixtures";
+        const BuiltProgram bipedStack =
+            Build(examplesDir + "/biped/Biped_stack.usda");
+        const BuiltProgram face = Build(examplesDir + "/04_BlendShapeFace.usda");
+        const BuiltProgram crossDomain =
+            Build(fixtures + "/oneloop_cross_domain.usda");
+        const BuiltProgram computedWeights =
+            Build(fixtures + "/computed_weights.usda");
+        const std::pair<const BuiltProgram *, const char *> chains[] = {
+            {&biped, "Biped"},
+            {&spider, "spider_legs"},
+            {&stacked, "stacked_revisions"},
+            {&bipedStack, "Biped_stack"},
+            {&face, "04_BlendShapeFace"},
+            {&crossDomain, "oneloop_cross_domain"},
+            {&computedWeights, "computed_weights"},
+        };
+        for (const auto &[built, name] : chains) {
+            TestEachChainReaderBindsOneVersion(*built, name);
+            TestThePointVersionsKeepTheOrder(*built, name);
+        }
+    }
     TestASwitchCycleIsDetectedNotEmitted();
     TestTheClusteringIsSound(biped, "Biped");
     TestTheClusteringIsSound(spider, "spider_legs");
@@ -2914,6 +3339,28 @@ main(int argc, char **argv)
         examplesDir + "/biped/Biped.usda");
     TestAStalePartitionRunsTheRevisionWhole(
         examplesDir + "/biped/Biped.usda");
+    {
+        // Chunked revisions: a fuse reads several chunks of its own, and in
+        // oneloop_cross_domain the smooth reads the version a chunked skin's
+        // fuse left.
+        const BuiltProgram chunked = Build(examplesDir + "/biped/Biped.usda");
+        TestEachChainReaderBindsOneVersion(chunked, "Biped (chunked)");
+        TestThePointVersionsKeepTheOrder(chunked, "Biped (chunked)");
+        const BuiltProgram crossDomain = Build(
+            examplesDir + "/../tests/fixtures/oneloop_cross_domain.usda");
+        TestEachChainReaderBindsOneVersion(crossDomain,
+                                           "oneloop_cross_domain (chunked)");
+        TestThePointVersionsKeepTheOrder(crossDomain,
+                                         "oneloop_cross_domain (chunked)");
+        // The one shape where speculative chunks read version r > 0 and a
+        // fuse's own RevisionOut read spans several buffers.
+        const BuiltProgram bipedStack =
+            Build(examplesDir + "/biped/Biped_stack.usda");
+        const size_t stackedChunked = TestEachChainReaderBindsOneVersion(
+            bipedStack, "Biped_stack (chunked)");
+        CHECK(stackedChunked > 0);
+        TestThePointVersionsKeepTheOrder(bipedStack, "Biped_stack (chunked)");
+    }
     TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
     TestTheDerivedCompareAgreesWithTheElementwiseOne(
         examplesDir + "/biped/Biped.usda");

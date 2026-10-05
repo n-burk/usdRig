@@ -112,9 +112,11 @@ void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
 /// backward and forward respectively, and each the inverse of the other.
 /// The producers: every slot a step reads in a domain the prologue does not
 /// fill has a writer at a strictly lower index (Snapshots, whose reads are a
-/// declared prefix of the program, only has to end at the reader), and every
+/// declared prefix of the program, only has to end at the reader); every
 /// pose version a commit, a solve or a last-version reader is bound to was
-/// written by an earlier step. The clusters: a partition of the steps with
+/// written by an earlier step; and every reader of a chain's points declares
+/// the version it reads, whose only producer is one revision's fuse and is
+/// among the reader's preds. The clusters: a partition of the steps with
 /// members in program order, cluster edges that cover the step edges, and a
 /// topological order naming every cluster once.
 ///
