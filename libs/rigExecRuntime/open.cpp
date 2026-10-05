@@ -309,6 +309,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                 &bytesOut)) {
         RigExecWireReader cursor(data, bytesOut);
         if (!RigExecWireDecodeSpaceSwitches(&cursor,
+                                            self->_slotMeta.parent,
                                             &self->_poses.spaceSwitches,
                                             error) ||
             !cursor.Exhausted()) {
@@ -458,6 +459,24 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     // per slot. Left empty when the rig has no switch, which is the
     // branch the compose tests first.
     if (!self->_poses.spaceSwitches.empty()) {
+        const RigExecWireSlotMeta &meta = self->_slotMeta;
+        // A version the compose reads: its anchor's posedM (or identity),
+        // then each recompose slot composed from its avars and ladder.
+        const auto versionInRange = [&](const RigExecWireFrameVersion &read) {
+            if (read.anchor < -1 ||
+                (read.anchor >= 0 && size_t(read.anchor) >= slots)) {
+                return false;
+            }
+            for (const int32_t at : read.recompose) {
+                if (at < 0 || size_t(at) >= slots ||
+                    size_t(at) >= meta.slotKind.size() ||
+                    meta.slotKind[size_t(at)] !=
+                        RigExecWireSlotKind::FirstFramePose) {
+                    return false;
+                }
+            }
+            return true;
+        };
         program.spaceSwitchBySlot.assign(slots, -1);
         for (size_t i = 0; i < self->_poses.spaceSwitches.size(); ++i) {
             const RigExecWireSpaceSwitch &sw =
@@ -469,6 +488,35 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                 if (source >= 0 && size_t(source) >= slots) {
                     return fail("space switch names no source slot");
                 }
+            }
+            if (sw.spaceSlot >= 0 && size_t(sw.spaceSlot) >= slots) {
+                return fail("space switch names no space slot");
+            }
+            if (sw.sourceReads.size() != sw.sourceSlots.size() ||
+                !versionInRange(sw.parentRead) ||
+                !versionInRange(sw.spaceRead)) {
+                return fail("space switch reads a version of no slot");
+            }
+            for (const RigExecWireFrameVersion &read : sw.sourceReads) {
+                if (!versionInRange(read)) {
+                    return fail("space switch reads a version of no slot");
+                }
+            }
+            // A world source and a missing space are never read; the
+            // program leaves their versions at {-1, {}}.
+            const auto unread = [](const RigExecWireFrameVersion &read) {
+                return read.anchor == -1 && read.recompose.empty();
+            };
+            bool versionWithoutSlot =
+                sw.spaceSlot < 0 && !unread(sw.spaceRead);
+            for (size_t k = 0; k < sw.sourceSlots.size(); ++k) {
+                versionWithoutSlot =
+                    versionWithoutSlot ||
+                    (sw.sourceSlots[k] < 0 && !unread(sw.sourceReads[k]));
+            }
+            if (versionWithoutSlot) {
+                return fail("space switch reads a version of a world source "
+                            "or a missing space");
             }
             program.spaceSwitchBySlot[size_t(sw.slot)] = int32_t(i);
         }
@@ -648,6 +696,59 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     for (const RigExecWireStep &step : self->_steps) {
         if (step.cluster < 0 || size_t(step.cluster) >= clusters) {
             return fail("a step names no cluster");
+        }
+    }
+    // The clusters the dirty sources name, which the closure sets blindly.
+    // The program fills every one from a step's cluster.
+    const auto clusterInRange = [clusters](int32_t cluster) {
+        return cluster >= 0 && size_t(cluster) < clusters;
+    };
+    bool coneClustersInRange =
+        std::all_of(cones.avarCluster.begin(), cones.avarCluster.end(),
+                    clusterInRange) &&
+        std::all_of(cones.revisionStaticCluster.begin(),
+                    cones.revisionStaticCluster.end(), clusterInRange);
+    for (const std::vector<std::vector<int32_t>> *lists :
+         {&cones.chainBaseClusters, &cones.solverPointsClusters,
+          &cones.revisionClusters, &cones.nativeSourceClusters,
+          &cones.deltaBaseClusters, &cones.constraintArrayClusters}) {
+        for (const std::vector<int32_t> &list : *lists) {
+            coneClustersInRange =
+                coneClustersInRange &&
+                std::all_of(list.begin(), list.end(), clusterInRange);
+        }
+    }
+    if (!coneClustersInRange) {
+        return fail("a cone lookup table names no cluster");
+    }
+    // A compose step's Avars reads outside its own group: the slots a
+    // switch recomposes an earlier version of (RigExecBakedCones::
+    // avarVersionSteps, built from the same reads).
+    for (const RigExecWireStep &step : self->_steps) {
+        if (step.kind != RigExecWireStepKind::ComposeSubtree ||
+            step.object < 0 ||
+            size_t(step.object) >= self->_poses.composeGroups.size()) {
+            continue;
+        }
+        const RigExecWireComposeGroup &group =
+            self->_poses.composeGroups[size_t(step.object)];
+        for (const RigExecWireSlotRange &range : step.reads) {
+            if (range.domain != RigExecWireSlotDomain::Avars) {
+                continue;
+            }
+            for (uint64_t slot = range.begin / 11;
+                 slot < (uint64_t(range.end) + 10) / 11 && slot < slots;
+                 ++slot) {
+                if (int64_t(slot) >= group.begin &&
+                    int64_t(slot) < group.end) {
+                    continue;
+                }
+                if (program.avarVersionClusters.empty()) {
+                    program.avarVersionClusters.assign(slots, {});
+                }
+                program.avarVersionClusters[size_t(slot)].push_back(
+                    step.cluster);
+            }
         }
     }
     for (int index : cones.varyingSteps) {

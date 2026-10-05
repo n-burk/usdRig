@@ -276,6 +276,12 @@ struct RrProgram {
     // Open so the compose pays one array lookup per slot and a rig with
     // no switch pays nothing at all. Empty when the binary carries none.
     std::vector<int32_t> spaceSwitchBySlot;
+    // Per provider slot: the clusters of the other compose steps that
+    // recompose an earlier version of it from its avars, i.e. that declare
+    // its Avars outside their own group. Derived at Open from the step
+    // reads; the closure dirties them beside avarCluster. Empty when no
+    // step recomposes.
+    std::vector<std::vector<int32_t>> avarVersionClusters;
     std::vector<std::array<int32_t, RrSolverFieldCount>> solverRead;
     std::vector<std::array<int32_t, RrConstraintFieldCount>> constraintRead;
     std::vector<std::array<int32_t, RrWeightFieldCount>> weightRead;

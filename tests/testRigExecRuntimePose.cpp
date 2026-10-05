@@ -11,16 +11,19 @@
 #include "rigExecRuntime/runtime.h"
 #include "rigExecExampleFixtures.h"
 
+#include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -3950,6 +3953,827 @@ TestRegisteredReadRefusals()
     std::printf("%s: checked\n", name);
 }
 
+// tests/fixtures/<file>.
+static std::string
+_FixturePath(const char *file)
+{
+    return (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
+            "fixtures" / file)
+        .string();
+}
+
+// \p bytes' section \p tag, decoded by \p decode; false when absent or
+// malformed.
+template <class T, class Decode>
+static bool
+_DecodeSection(const std::vector<uint8_t> &bytes, RigExecBinarySection tag,
+               T *out, Decode decode)
+{
+    std::string error;
+    const std::unique_ptr<RigExecBinaryReader> reader =
+        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+    if (!reader || !reader->FindSection(tag, &data, &size)) {
+        return false;
+    }
+    RigExecWireReader cursor(data, size);
+    return decode(&cursor, out, &error) && cursor.Exhausted();
+}
+
+// The provider slot \p path names in \p bytes' slot inventory, or -1.
+static int
+_SlotOfPath(const std::vector<uint8_t> &bytes, const std::string &path,
+            RigExecWireSlotMeta *meta)
+{
+    std::string error;
+    const std::unique_ptr<RigExecBinaryReader> reader =
+        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
+    if (!reader ||
+        !_DecodeSection(bytes, RigExecBinarySection::SlotMeta, meta,
+                        RigExecWireDecodeSlotMeta)) {
+        return -1;
+    }
+    std::string text;
+    for (size_t i = 0; i < meta->paths.size(); ++i) {
+        if (reader->GetString(meta->paths[i], &text) && text == path) {
+            return int(i);
+        }
+    }
+    return -1;
+}
+
+static bool
+_SameVersion(const RigExecWireFrameVersion &read, int anchor,
+             const std::vector<int32_t> &recompose)
+{
+    return read.anchor == anchor && read.recompose == recompose;
+}
+
+// Space switches nested under switched controls, read at the versions the
+// program bound at Build: each fixture's version pools, joints and
+// diagnostics equal the baked program's bit for bit at every frame, with
+// the record cross-check on. In the nested fixture S reads P recomposed
+// from its avars before P's switch, so its parent version is {-1, {P}}.
+// In the carry fixture P hangs under G and S's space Q under P, so S
+// reads {G, {P}} for its parent and {G, {P, Q}} for its space.
+// The dial fixture's indices are keyed with no default: each is a live
+// input whose record holds its key at every frame, the runtime's read of
+// it matches that record, and the playback reads it from its slot rather
+// than replaying the record.
+static void
+TestSpaceSwitchVersionFixtures()
+{
+    const std::vector<double> frames = {0.0, 1.0, 2.0, 3.0};
+    for (const char *file :
+         {"space_switch_nested.usda", "space_switch_same_round.usda",
+          "space_switch_dial.usda", "space_switch_carry.usda"}) {
+        _TestFixture(file, _FixturePath(file), frames);
+    }
+
+    const auto bake = [&](const char *file, RigExecBakeResult *result) {
+        const UsdStageRefPtr stage = UsdStage::Open(_FixturePath(file));
+        CHECK(stage);
+        if (!stage) {
+            return false;
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.frames = frames;
+        std::string error;
+        const bool ok = RigExecBakeToBinary(evaluator, opts, result, &error);
+        CHECK(ok);
+        return ok;
+    };
+
+    RigExecBakeResult nested;
+    if (bake("space_switch_nested.usda", &nested)) {
+        RigExecWireSlotMeta meta;
+        const int p = _SlotOfPath(nested.bytes, "/Rig/Controls/P", &meta);
+        const int s = _SlotOfPath(nested.bytes, "/Rig/Controls/P/S", &meta);
+        const int c =
+            _SlotOfPath(nested.bytes, "/Rig/Controls/P/S/C", &meta);
+        std::vector<RigExecWireSpaceSwitch> switches;
+        CHECK(p >= 0 && s >= 0 && c >= 0 &&
+              _DecodeSection(
+                  nested.bytes, RigExecBinarySection::SpaceSwitch,
+                  &switches,
+                  [&](RigExecWireReader *cursor,
+                      std::vector<RigExecWireSpaceSwitch> *out,
+                      std::string *error) {
+                      return RigExecWireDecodeSpaceSwitches(
+                          cursor, meta.parent, out, error);
+                  }));
+        CHECK(switches.size() == 2);
+        for (const RigExecWireSpaceSwitch &sw : switches) {
+            if (sw.slot == s) {
+                // P resolves after S: S reads it before its switch.
+                CHECK(_SameVersion(sw.parentRead, -1, {p}));
+            } else {
+                // C, under S, resolves before P: its last version.
+                CHECK(sw.slot == p && sw.sourceReads.size() == 2 &&
+                      _SameVersion(sw.sourceReads[0], c, {}));
+            }
+        }
+    }
+
+    RigExecBakeResult carry;
+    if (bake("space_switch_carry.usda", &carry)) {
+        RigExecWireSlotMeta meta;
+        const auto slot = [&](const char *path) {
+            return _SlotOfPath(carry.bytes, path, &meta);
+        };
+        const int other = slot("/Rig/Controls/Other");
+        const int g = slot("/Rig/Controls/G");
+        const int p = slot("/Rig/Controls/G/P");
+        const int q = slot("/Rig/Controls/G/P/Q");
+        const int s = slot("/Rig/Controls/G/P/S");
+        const int c = slot("/Rig/Controls/G/P/S/C");
+        std::vector<RigExecWireSpaceSwitch> switches;
+        CHECK(other >= 0 && g >= 0 && p >= 0 && q >= 0 && s >= 0 &&
+              c >= 0 &&
+              _DecodeSection(
+                  carry.bytes, RigExecBinarySection::SpaceSwitch, &switches,
+                  [&](RigExecWireReader *cursor,
+                      std::vector<RigExecWireSpaceSwitch> *out,
+                      std::string *error) {
+                      return RigExecWireDecodeSpaceSwitches(
+                          cursor, meta.parent, out, error);
+                  }));
+        CHECK(switches.size() == 2);
+        for (const RigExecWireSpaceSwitch &sw : switches) {
+            CHECK(sw.sourceReads.size() == 2);
+            if (sw.sourceReads.size() != 2) {
+                continue;
+            }
+            if (sw.slot == s) {
+                // P resolves after S: P recomposed on G, then Q on that.
+                CHECK(_SameVersion(sw.parentRead, g, {p}));
+                CHECK(sw.spaceSlot == q &&
+                      _SameVersion(sw.spaceRead, g, {p, q}));
+                CHECK(_SameVersion(sw.sourceReads[0], other, {}));
+                CHECK(_SameVersion(sw.sourceReads[1], -1, {}));
+            } else {
+                CHECK(sw.slot == p && _SameVersion(sw.parentRead, g, {}) &&
+                      _SameVersion(sw.sourceReads[0], c, {}) &&
+                      _SameVersion(sw.spaceRead, -1, {}));
+            }
+        }
+    }
+
+    RigExecBakeResult dial;
+    if (!bake("space_switch_dial.usda", &dial)) {
+        return;
+    }
+    std::string error;
+    const std::unique_ptr<RigExecBinaryReader> binary =
+        RigExecBinaryReader::Open(dial.bytes.data(), dial.bytes.size(),
+                                  &error);
+    RigExecWireInputTable table;
+    CHECK(binary && _DecodeInputTable(dial.bytes, &table));
+    if (!binary || table.frames.size() != frames.size()) {
+        CHECK(false);
+        return;
+    }
+    struct Dial {
+        const char *path;
+        std::array<double, 4> keys;
+        int64_t uid;
+    };
+    std::vector<Dial> dials = {
+        {"/Rig/Controls/P.spaces:active", {0.0, 1.0, 0.5, 0.0}, -1},
+        {"/Rig/Controls/P/S.spaces:active", {0.5, 0.0, 1.0, 0.5}, -1}};
+    std::string text;
+    for (Dial &entry : dials) {
+        for (size_t k = 0; k < table.directory.size(); ++k) {
+            if (binary->GetString(table.directory[k].head, &text) &&
+                text == entry.path) {
+                CHECK(entry.uid < 0);
+                CHECK(table.directory[k].tag ==
+                      RigExecWireInput::Tag::Double);
+                entry.uid = int64_t(k);
+            }
+        }
+        // Live: listed in the directory, and recorded at every frame at
+        // its key.
+        CHECK(entry.uid >= 0);
+        for (size_t f = 0; f < table.frames.size() && entry.uid >= 0; ++f) {
+            const RigExecWireFrameInputs &record = table.frames[f];
+            bool held = false;
+            for (size_t k = 0; k < record.uids.size(); ++k) {
+                if (record.uids[k] == uint32_t(entry.uid)) {
+                    held = true;
+                    CHECK(record.values[k].f64 == entry.keys[f]);
+                }
+            }
+            CHECK(held);
+        }
+    }
+    if (dials[0].uid < 0) {
+        return;
+    }
+    std::vector<_PlayedFrame> untouched;
+    CHECK(_PlayFrames(dial.bytes, frames, true, &untouched, &error));
+    // P's recorded dial at frame 1 moved: the cross-check names it.
+    for (size_t k = 0; k < table.frames[1].uids.size(); ++k) {
+        if (table.frames[1].uids[k] == uint32_t(dials[0].uid)) {
+            table.frames[1].values[k].f64 = 0.25;
+        }
+    }
+    std::vector<uint8_t> payload;
+    CHECK(RigExecWireEncodeInputTable(table, &payload));
+    const std::vector<uint8_t> tampered = _ReplaceSection(
+        dial.bytes, RigExecBinarySection::InputTable, payload);
+    std::vector<_PlayedFrame> ignored, replayed;
+    CHECK(!_PlayFrames(tampered, frames, true, &ignored, &error));
+    CHECK(error.find("registered reads: cross-check mismatch at "
+                     "spaceSwitches[") != std::string::npos &&
+          error.find("].active (uid " + std::to_string(dials[0].uid) +
+                     ", " + dials[0].path + ")") != std::string::npos);
+    std::printf("space switch dial, tampered record: %s\n", error.c_str());
+    // The switch reads its dial through the slot: the record moves nothing.
+    CHECK(_PlayFrames(tampered, frames, false, &replayed, &error));
+    CHECK(replayed.size() == untouched.size());
+    for (size_t f = 0; f < replayed.size() && f < untouched.size(); ++f) {
+        CHECK(replayed[f].fin == untouched[f].fin);
+    }
+    std::printf("space switch version fixtures: checked\n");
+}
+
+// Switch reads set by hand. S, under P under G, switches between Arm
+// (under G) and world; the program binds its parent read to P's last
+// version and its source read to Arm's. The SpaceSwitch section is
+// rewritten so S reads its parent as {anchor -1, recompose {P}} -- P
+// composed from its avars against identity instead of G's frame -- and
+// then also Arm as {-1, {Arm}}. No binding of this rig produces either.
+// The runtime playing the rewritten section and the program with the same
+// versions on its switch, its compose steps run through
+// RigExecBakedRunPoseStep, agree bit for bit on every version-pool frame.
+// The parent enters a switched compose only through the round trip of
+// `local`, so it moves S in the last digits; the source moves S outright.
+// A third rewrite anchors the parent read on G, {G, {P}}: what a switch on
+// P resolving in S's round or later binds. P has no switch here, so the
+// recompose reproduces P's last version and S does not move at all.
+static void
+TestHandBuiltSwitchReads()
+{
+    const char *const name = "hand-built switch reads";
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    UsdGeomXform::Define(stage, SdfPath("/Asset"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *path, double degrees,
+                             const GfVec3d &offset) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        GfMatrix4d rest(1.0);
+        rest.SetRotate(GfRotation(GfVec3d(0, 0, 1), degrees));
+        rest.SetTranslateOnly(offset);
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(rest);
+        return prim;
+    };
+    const auto key = [](const UsdPrim &prim, const char *avar,
+                        const std::array<double, 3> &values) {
+        const UsdAttribute attribute = prim.CreateAttribute(
+            TfToken(avar), SdfValueTypeNames->Double);
+        for (size_t f = 0; f < values.size(); ++f) {
+            attribute.Set(values[f], UsdTimeCode(double(f + 1)));
+        }
+    };
+    const UsdPrim g =
+        control("/Asset/Rig/Controls/G", 0.0, GfVec3d(0, 100, 0));
+    const UsdPrim arm =
+        control("/Asset/Rig/Controls/G/Arm", 0.0, GfVec3d(-20, 0.5, 0));
+    const UsdPrim p =
+        control("/Asset/Rig/Controls/G/P", 30.0, GfVec3d(10.5, 0.25, 0));
+    const UsdPrim target =
+        control("/Asset/Rig/Controls/G/P/S", 0.0, GfVec3d(5.5, 0, 0));
+    control("/Asset/Rig/Controls/G/P/S/C", 0.0, GfVec3d(5, 0, 0));
+    key(g, "avars:rz", {10.0, 25.0, -15.0});
+    key(g, "avars:tx", {1.0, -2.0, 3.0});
+    key(arm, "avars:tx", {0.0, 10.0, 20.0});
+    key(arm, "avars:rz", {-5.0, 12.0, 40.0});
+    key(p, "avars:rz", {5.0, -20.0, 30.0});
+    key(target, "avars:rz", {7.0, -13.0, 21.0});
+    key(target, "avars:ty", {0.3, -0.7, 1.1});
+    const UsdPrim sw = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/sSpaces"), TfToken("RigExecSpaceSwitch"));
+    sw.CreateRelationship(TfToken("rigExec:target"))
+        .SetTargets({target.GetPath()});
+    sw.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({arm.GetPath(), SdfPath("/Asset/Rig")});
+    key(sw, "inputs:activeSpace", {0.0, 0.5, 0.25});
+
+    const SdfPath rigPath("/Asset/Rig");
+    const std::vector<double> frames = {1.0, 2.0, 3.0};
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    RigExecWireSlotMeta meta;
+    const int pSlot =
+        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G/P", &meta);
+    const int sSlot =
+        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G/P/S", &meta);
+    const int armSlot =
+        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G/Arm", &meta);
+    const int gSlot =
+        _SlotOfPath(result.bytes, "/Asset/Rig/Controls/G", &meta);
+    std::vector<RigExecWireSpaceSwitch> switches;
+    CHECK(pSlot >= 0 && sSlot >= 0 && armSlot >= 0 && gSlot >= 0 &&
+          _DecodeSection(result.bytes, RigExecBinarySection::SpaceSwitch,
+                         &switches,
+                         [&](RigExecWireReader *cursor,
+                             std::vector<RigExecWireSpaceSwitch> *out,
+                             std::string *why) {
+                             return RigExecWireDecodeSpaceSwitches(
+                                 cursor, meta.parent, out, why);
+                         }));
+    CHECK(switches.size() == 1);
+    if (pSlot < 0 || sSlot < 0 || armSlot < 0 || gSlot < 0 ||
+        switches.size() != 1 ||
+        switches[0].slot != sSlot || switches[0].sourceReads.size() != 2) {
+        std::printf("%s: FAILED (no switch on S)\n", name);
+        CHECK(false);
+        return;
+    }
+    // Nothing above S is switched: the program reads last versions.
+    CHECK(_SameVersion(switches[0].parentRead, pSlot, {}));
+    CHECK(_SameVersion(switches[0].sourceReads[0], armSlot, {}));
+
+    enum class Rewrite { Parent, ParentAndSource, AnchoredParent };
+    for (const Rewrite rewrite :
+         {Rewrite::Parent, Rewrite::ParentAndSource,
+          Rewrite::AnchoredParent}) {
+        const bool rewriteSource = rewrite == Rewrite::ParentAndSource;
+        const int anchor = rewrite == Rewrite::AnchoredParent ? gSlot : -1;
+        const char *const what =
+            rewrite == Rewrite::Parent            ? "parent read"
+            : rewrite == Rewrite::ParentAndSource ? "parent and source read"
+                                                  : "anchored parent read";
+        std::vector<RigExecWireSpaceSwitch> handBuilt = switches;
+        handBuilt[0].parentRead = RigExecWireFrameVersion{anchor, {pSlot}};
+        if (rewriteSource) {
+            handBuilt[0].sourceReads[0] =
+                RigExecWireFrameVersion{-1, {armSlot}};
+        }
+        std::vector<uint8_t> payload;
+        CHECK(RigExecWireEncodeSpaceSwitches(handBuilt, &payload));
+        const std::vector<uint8_t> bytes = _ReplaceSection(
+            result.bytes, RigExecBinarySection::SpaceSwitch, payload);
+        size_t movedFrames = 0;
+        double largest = 0.0;
+        for (const double frame : frames) {
+            // A fresh program and reader per frame: every compose step
+            // runs.
+            RigExecRigEvaluator program(stage, rigPath);
+            program.SetEvaluationMode(RigExecEvaluationMode::Baked);
+            const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
+            const RigExecBakedProgram *baked = program.GetBakedProgram();
+            CHECK(pose.valid && baked);
+            if (!pose.valid || !baked) {
+                return;
+            }
+            RigExecBakedProgramImpl &B =
+                const_cast<RigExecBakedProgramImpl &>(baked->GetStepGraph());
+            CHECK(B.paths.size() == meta.paths.size() &&
+                  B.paths[size_t(pSlot)] == p.GetPath() &&
+                  B.paths[size_t(armSlot)] == arm.GetPath() &&
+                  B.spaceSwitches.size() == 1 &&
+                  B.spaceSwitches[0].slot == sSlot);
+            if (B.spaceSwitches.size() != 1 ||
+                B.spaceSwitches[0].sourceReads.size() != 2) {
+                return;
+            }
+            const std::vector<RigExecPointFrame> natural = B.fin;
+            RigExecBakedProgramImpl::SpaceSwitch &bakedSwitch =
+                B.spaceSwitches[0];
+            bakedSwitch.parentRead.anchor = anchor;
+            bakedSwitch.parentRead.recompose = {pSlot};
+            if (rewriteSource) {
+                bakedSwitch.sourceReads[0].anchor = -1;
+                bakedSwitch.sourceReads[0].recompose = {armSlot};
+            }
+            for (RigExecBakedStep &step : B.steps) {
+                if (step.kind == RigExecBakedStepKind::ComposeSubtree) {
+                    RigExecBakedRunPoseStep(&B, &step, UsdTimeCode(frame));
+                }
+            }
+            const std::unique_ptr<RigExecRuntimeReader> reader =
+                RigExecRuntimeReader::Open(bytes.data(), bytes.size(),
+                                           &error);
+            CHECK(reader);
+            if (!reader || !reader->SetFrame(frame, &error) ||
+                !reader->Execute(&error)) {
+                std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
+                            error.c_str());
+                CHECK(false);
+                return;
+            }
+            CHECK(_SamePools(what, frame, *reader, B));
+            const RrPointFrame &got = reader->GetFinFrames()[size_t(sSlot)];
+            const RigExecPointFrame &bound = natural[size_t(sSlot)];
+            if (!_FramesEqual(bound, got)) {
+                ++movedFrames;
+            }
+            for (size_t k = 0; k < 4; ++k) {
+                for (size_t c = 0; c < 3; ++c) {
+                    largest = std::max(largest,
+                                       std::abs(bound.points[k][c] -
+                                                got.points[k][c]));
+                }
+            }
+        }
+        std::printf("%s, %s: S differs from the bound read at %zu of %zu "
+                    "frames, by up to %.17g\n",
+                    name, what, movedFrames, frames.size(), largest);
+        if (rewrite == Rewrite::ParentAndSource) {
+            CHECK(movedFrames == frames.size() && largest > 1e-3);
+        } else if (rewrite == Rewrite::Parent) {
+            CHECK(movedFrames > 0 && largest < 1e-9);
+        } else {
+            CHECK(movedFrames == 0);
+        }
+    }
+    std::printf("%s: checked\n", name);
+}
+
+// The nested fixture with both switch indices connected to a Dial
+// control's avars (tx for P's, ty for S's), so SetAvar reaches them. A
+// drag of both indices held over every frame, then released; then, at
+// one frame, a drag on P's rz alone. S's switch reads P only recomposed
+// from those avars, and its compose step is emitted before P's, so only
+// the closure's dirtying of the steps that recompose P re-runs it. Every
+// frame's version pools equal the baked program's under the same
+// overrides bit for bit, and the baked program agrees with the dynamic
+// evaluator.
+static void
+TestSpaceSwitchIndexDrag()
+{
+    const char *const name = "space switch index drag";
+    const UsdStageRefPtr stage =
+        UsdStage::Open(_FixturePath("space_switch_nested.usda"));
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim dial = stage->DefinePrim(
+        SdfPath("/Rig/Controls/Dial"), TfToken("RigExecControl"));
+    dial.CreateAttribute(TfToken("rest:space"), SdfValueTypeNames->Matrix4d)
+        .Set(GfMatrix4d(1.0));
+    const UsdAttribute pIndex =
+        dial.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
+    pIndex.Set(0.0);
+    const UsdAttribute sIndex =
+        dial.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double);
+    sIndex.Set(0.5);
+    stage->GetAttributeAtPath(SdfPath("/Rig/Movers/pSpaces.inputs:activeSpace"))
+        .SetConnections({pIndex.GetPath()});
+    stage->GetAttributeAtPath(SdfPath("/Rig/Movers/sSpaces.inputs:activeSpace"))
+        .SetConnections({sIndex.GetPath()});
+
+    const SdfPath rigPath("/Rig");
+    const std::vector<double> frames = {0.0, 1.0, 2.0, 3.0};
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = frames;
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader);
+    if (!reader) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        return;
+    }
+    reader->SetCrossCheckForTesting(true);
+    RigExecRigEvaluator program(stage, rigPath);
+    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    const auto run = [&](const char *what, double frame,
+                         std::vector<std::vector<RrPointFrame>> *fin) {
+        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid && pose.bakedParityMismatches == 0);
+        const RigExecBakedProgram *baked = program.GetBakedProgram();
+        CHECK(baked);
+        if (!pose.valid || !baked) {
+            return false;
+        }
+        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+            std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
+                        error.c_str());
+            CHECK(false);
+            return false;
+        }
+        fin->push_back(reader->GetFinFrames());
+        return _SamePools(what, frame, *reader, baked->GetStepGraph());
+    };
+    const auto pass = [&](const char *what,
+                          std::vector<std::vector<RrPointFrame>> *fin) {
+        bool same = true;
+        for (const double frame : frames) {
+            same = run(what, frame, fin) && same;
+        }
+        return same;
+    };
+    const auto overrideOf = [](const SdfPath &prim, const char *avar,
+                               double value) {
+        return RigExecValueOverride{prim, TfToken(), TfToken(avar),
+                                    VtValue(value)};
+    };
+    std::vector<std::vector<RrPointFrame>> undragged, dragged, released;
+    CHECK(pass("undragged", &undragged));
+    CHECK(reader->SetAvar(pIndex.GetPath().GetString(), 0.25, &error));
+    CHECK(reader->SetAvar(sIndex.GetPath().GetString(), 0.75, &error));
+    program.SetInteractiveOverrides(
+        {overrideOf(dial.GetPath(), "avars:tx", 0.25),
+         overrideOf(dial.GetPath(), "avars:ty", 0.75)});
+    CHECK(pass("indices held", &dragged));
+    CHECK(dragged.size() == frames.size() &&
+          undragged.size() == frames.size());
+    for (size_t f = 0; f < dragged.size() && f < undragged.size(); ++f) {
+        CHECK(dragged[f] != undragged[f]);
+    }
+    reader->ClearAvars();
+    program.ClearInteractiveOverrides();
+    CHECK(pass("indices released", &released));
+    CHECK(released == undragged);
+
+    // At one frame, only P's avars move.
+    const double frame = 2.0;
+    const SdfPath pPath("/Rig/Controls/P");
+    std::vector<std::vector<RrPointFrame>> still, turned, back;
+    CHECK(run("before the rz drag", frame, &still));
+    CHECK(run("before the rz drag, again", frame, &still));
+    CHECK(reader->SetAvar("/Rig/Controls/P.avars:rz", 40.0, &error));
+    program.SetInteractiveOverrides({overrideOf(pPath, "avars:rz", 40.0)});
+    CHECK(run("rz dragged", frame, &turned));
+    reader->ClearAvars();
+    program.ClearInteractiveOverrides();
+    CHECK(run("rz released", frame, &back));
+    CHECK(still.size() == 2 && turned.size() == 1 && back.size() == 1);
+    if (still.size() == 2 && turned.size() == 1 && back.size() == 1) {
+        CHECK(turned[0] != still[1]);
+        CHECK(back[0] == still[1]);
+    }
+    std::printf("%s: checked\n", name);
+}
+
+// Open refuses a SpaceSwitch section that reads a slot the inventory does
+// not hold, a recompose through a slot the compose has no avars for, and a
+// version bound to a world source or a missing space; and refuses a cone
+// lookup table naming a cluster that is not there. Each is cut into the
+// carry fixture's bake, whose S switch reads {G, {P}} and {G, {P, Q}}.
+static void
+TestSpaceSwitchOpenRefusals()
+{
+    const char *const name = "space switch open refusals";
+    const UsdStageRefPtr stage =
+        UsdStage::Open(_FixturePath("space_switch_carry.usda"));
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = {0.0, 1.0};
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    CHECK(_OpenError(result.bytes).empty());
+    RigExecWireSlotMeta meta;
+    const int g = _SlotOfPath(result.bytes, "/Rig/Controls/G", &meta);
+    const int p = _SlotOfPath(result.bytes, "/Rig/Controls/G/P", &meta);
+    const int s = _SlotOfPath(result.bytes, "/Rig/Controls/G/P/S", &meta);
+    std::vector<RigExecWireSpaceSwitch> switches;
+    RigExecWireCones cones;
+    CHECK(g >= 0 && p >= 0 && s >= 0 &&
+          _DecodeSection(result.bytes, RigExecBinarySection::SpaceSwitch,
+                         &switches,
+                         [&](RigExecWireReader *cursor,
+                             std::vector<RigExecWireSpaceSwitch> *out,
+                             std::string *why) {
+                             return RigExecWireDecodeSpaceSwitches(
+                                 cursor, meta.parent, out, why);
+                         }) &&
+          _DecodeSection(result.bytes, RigExecBinarySection::Cones, &cones,
+                         RigExecWireDecodeCones));
+    size_t at = switches.size();
+    for (size_t k = 0; k < switches.size(); ++k) {
+        if (switches[k].slot == s) {
+            at = k;
+        }
+    }
+    if (g < 0 || p < 0 || s < 0 || at == switches.size() ||
+        switches[at].sourceReads.size() != 2 ||
+        switches[at].sourceSlots[1] != -1 || switches[at].spaceSlot < 0 ||
+        size_t(s) >= cones.avarCluster.size()) {
+        std::printf("%s: FAILED (no switch on S)\n", name);
+        CHECK(false);
+        return;
+    }
+    const int32_t slots = int32_t(meta.paths.size());
+    const auto expect = [&](const char *what,
+                            const std::vector<uint8_t> &bytes,
+                            const std::string &text) {
+        const std::string got = _OpenError(bytes);
+        if (got != text) {
+            std::printf("%s, %s: open said '%s', expected '%s'\n", name,
+                        what, got.c_str(), text.c_str());
+            CHECK(false);
+        }
+    };
+    const auto withSwitch =
+        [&](const std::function<void(RigExecWireSpaceSwitch &)> &edit) {
+            std::vector<RigExecWireSpaceSwitch> edited = switches;
+            edit(edited[at]);
+            std::vector<uint8_t> payload;
+            CHECK(RigExecWireEncodeSpaceSwitches(edited, &payload));
+            return _ReplaceSection(result.bytes,
+                                   RigExecBinarySection::SpaceSwitch,
+                                   payload);
+        };
+    const std::string noSlot = "space switch reads a version of no slot";
+    const std::string unread =
+        "space switch reads a version of a world source or a missing space";
+    expect("parent anchor past the slots",
+           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+               sw.parentRead.anchor = slots;
+           }),
+           noSlot);
+    expect("source anchor past the slots",
+           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+               sw.sourceReads[0].anchor = slots;
+           }),
+           noSlot);
+    expect("space recompose past the slots",
+           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+               sw.spaceRead.recompose.push_back(slots);
+           }),
+           noSlot);
+    expect("space slot past the slots",
+           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+               sw.spaceSlot = slots;
+           }),
+           "space switch names no space slot");
+    expect("world source with a version",
+           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+               sw.sourceReads[1] = RigExecWireFrameVersion{g, {}};
+           }),
+           unread);
+    expect("world source with a recompose",
+           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+               sw.sourceReads[1] = RigExecWireFrameVersion{-1, {p}};
+           }),
+           unread);
+    expect("missing space with a version",
+           withSwitch([&](RigExecWireSpaceSwitch &sw) {
+               sw.spaceSlot = -1;
+           }),
+           unread);
+    {
+        // P, which both of S's versions recompose, without the avars and
+        // ladder a recompose composes from.
+        RigExecWireSlotMeta flipped = meta;
+        flipped.slotKind[size_t(p)] = RigExecWireSlotKind::XformDerived;
+        std::vector<uint8_t> payload;
+        CHECK(RigExecWireEncodeSlotMeta(flipped, &payload));
+        expect("recompose of a slot that is not FirstFramePose",
+               _ReplaceSection(result.bytes, RigExecBinarySection::SlotMeta,
+                               payload),
+               noSlot);
+    }
+    const int32_t clusters = int32_t(cones.cone.size());
+    for (const int32_t cluster : {int32_t(-1), clusters}) {
+        RigExecWireCones edited = cones;
+        edited.avarCluster[size_t(s)] = cluster;
+        std::vector<uint8_t> payload;
+        CHECK(RigExecWireEncodeCones(edited, &payload));
+        expect(cluster < 0 ? "avar cluster -1" : "avar cluster past the end",
+               _ReplaceSection(result.bytes, RigExecBinarySection::Cones,
+                               payload),
+               "a cone lookup table names no cluster");
+    }
+    std::printf("%s: checked\n", name);
+}
+
+// The carry fixture, at a frame where S blends Other (twist-filtered) with
+// world and at one where S is at world. S's space reads Q recomposed
+// through P and Q on G's frame, so a drag of G's, P's or Q's avars alone
+// moves S outright. P's and Q's reach S's compose step only through the
+// closure's dirtying of the steps that recompose them; G's through S's
+// read of its posedM. Each drag and its release match the baked program's
+// version pools bit for bit, with parity against the dynamic walk.
+static void
+TestSpaceSwitchCarryDrag()
+{
+    const char *const name = "space switch carry drag";
+    const UsdStageRefPtr stage =
+        UsdStage::Open(_FixturePath("space_switch_carry.usda"));
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath("/Rig");
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.frames = {0.0, 1.0, 2.0, 3.0};
+    RigExecBakeResult result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    RigExecWireSlotMeta meta;
+    const int s = _SlotOfPath(result.bytes, "/Rig/Controls/G/P/S", &meta);
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
+                                   &error);
+    CHECK(reader && s >= 0);
+    if (!reader || s < 0) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        return;
+    }
+    reader->SetCrossCheckForTesting(true);
+    RigExecRigEvaluator program(stage, rigPath);
+    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    const auto run = [&](const std::string &what, double frame,
+                         std::vector<std::vector<RrPointFrame>> *fin) {
+        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid && pose.bakedParityMismatches == 0);
+        const RigExecBakedProgram *baked = program.GetBakedProgram();
+        CHECK(baked);
+        if (!pose.valid || !baked) {
+            return false;
+        }
+        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+            std::printf("%s, %s frame %.17g: %s\n", name, what.c_str(),
+                        frame, error.c_str());
+            CHECK(false);
+            return false;
+        }
+        fin->push_back(reader->GetFinFrames());
+        return _SamePools(what.c_str(), frame, *reader,
+                          baked->GetStepGraph());
+    };
+    struct Drag {
+        const char *prim;
+        const char *avar;
+        double value;
+    };
+    const Drag drags[] = {{"/Rig/Controls/G/P", "avars:rz", 40.0},
+                          {"/Rig/Controls/G/P/Q", "avars:tx", 6.0},
+                          {"/Rig/Controls/G/P/Q", "avars:rz", -30.0},
+                          {"/Rig/Controls/G", "avars:rz", 35.0}};
+    for (const double frame : {0.0, 2.0}) {
+        for (const Drag &drag : drags) {
+            const std::string what =
+                std::string(drag.prim) + "." + drag.avar;
+            std::vector<std::vector<RrPointFrame>> still, turned, back;
+            CHECK(run(what + " before", frame, &still));
+            CHECK(run(what + " before, again", frame, &still));
+            CHECK(reader->SetAvar(what, drag.value, &error));
+            program.SetInteractiveOverrides(
+                {RigExecValueOverride{SdfPath(drag.prim), TfToken(),
+                                      TfToken(drag.avar),
+                                      VtValue(drag.value)}});
+            CHECK(run(what + " dragged", frame, &turned));
+            reader->ClearAvars();
+            program.ClearInteractiveOverrides();
+            CHECK(run(what + " released", frame, &back));
+            CHECK(still.size() == 2 && turned.size() == 1 &&
+                  back.size() == 1);
+            if (still.size() != 2 || turned.size() != 1 ||
+                back.size() != 1 || size_t(s) >= still[1].size() ||
+                size_t(s) >= turned[0].size()) {
+                continue;
+            }
+            double moved = 0.0;
+            for (size_t k = 0; k < 4; ++k) {
+                for (size_t c = 0; c < 3; ++c) {
+                    moved = std::max(
+                        moved, std::abs(turned[0][size_t(s)].points[k][c] -
+                                        still[1][size_t(s)].points[k][c]));
+                }
+            }
+            std::printf("%s, %s at frame %g: S moves by %.17g\n", name,
+                        what.c_str(), frame, moved);
+            CHECK(moved > 1e-3);
+            CHECK(back[0] == still[1]);
+        }
+    }
+    std::printf("%s: checked\n", name);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3983,6 +4807,11 @@ main(int argc, char **argv)
     TestSetAvarOnChainInput();
     TestSetAvarOnChainTarget();
     TestRegisteredReadRefusals();
+    TestSpaceSwitchVersionFixtures();
+    TestHandBuiltSwitchReads();
+    TestSpaceSwitchIndexDrag();
+    TestSpaceSwitchOpenRefusals();
+    TestSpaceSwitchCarryDrag();
     bool sawBaking = false;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
         if (!fixture.bakesToday) {

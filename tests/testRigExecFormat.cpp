@@ -638,6 +638,14 @@ _RichFile()
     sw.sourceSlots = {-1};
     sw.filters = {2};
     sw.twistAxis = _V3d(5);
+    // A recomposed parent version, a world source, the space at its last
+    // version.
+    sw.spaceSlot = 0;
+    sw.parentRead = std::make_unique<fb::RigExecWireFrameVersion>();
+    sw.parentRead->recompose = {0};
+    sw.sourceReads.resize(1);
+    sw.spaceRead = std::make_unique<fb::RigExecWireFrameVersion>();
+    sw.spaceRead->anchor = 0;
     sw.active = _In(InputTag::Double);
     sw.affectTranslation = {{true, false, true}};
     sw.affectRotation = {{false, true, false}};
@@ -1030,6 +1038,12 @@ TestBitExactness()
     CHECK(sw.affectTranslation == file.pose->spaceSwitches[0].affectTranslation &&
           sw.affectRotation == file.pose->spaceSwitches[0].affectRotation &&
           sw.affectScale == file.pose->spaceSwitches[0].affectScale);
+    CHECK(sw.parentRead && sw.parentRead->anchor == -1 &&
+          sw.parentRead->recompose == std::vector<int32_t>{0});
+    CHECK(sw.sourceReads.size() == 1 && sw.sourceReads[0].anchor == -1 &&
+          sw.sourceReads[0].recompose.empty());
+    CHECK(sw.spaceRead && sw.spaceRead->anchor == 0 &&
+          sw.spaceRead->recompose.empty());
     const fb::RigExecWireRevision &r = o->geometry->chains[0].revisions[0];
     const fb::RigExecWireRevision &r0 = file.geometry->chains[0].revisions[0];
     CHECK(_Same(r.packetInfluences, r0.packetInfluences));
@@ -1360,6 +1374,30 @@ TestValidationSmoke()
     expect("switch filters", "filters", [](F &f) {
         f.pose->spaceSwitches[0].filters = {0, 1};
     });
+    expect("switch parent read missing", "parent_read: missing",
+           [](F &f) { f.pose->spaceSwitches[0].parentRead.reset(); });
+    expect("switch space read missing", "space_read: missing",
+           [](F &f) { f.pose->spaceSwitches[0].spaceRead.reset(); });
+    expect("switch source reads", "source_reads",
+           [](F &f) { f.pose->spaceSwitches[0].sourceReads.clear(); });
+    expect("switch read anchor", "parent_read.anchor",
+           [](F &f) { f.pose->spaceSwitches[0].parentRead->anchor = 1; });
+    expect("switch recompose slot", "source_reads[0].recompose[0]",
+           [](F &f) {
+               f.pose->spaceSwitches[0].sourceReads[0].recompose = {1};
+           });
+    expect("switch recompose kind", "not a FirstFramePose slot", [](F &f) {
+        f.slotMeta->slotKind[0] = fb::SlotKind::XformDerived;
+    });
+    // A world source and a missing space carry the unread version.
+    expect("switch world source anchor", "source_reads[0]: reads no slot",
+           [](F &f) { f.pose->spaceSwitches[0].sourceReads[0].anchor = 0; });
+    expect("switch world source recompose",
+           "source_reads[0]: reads no slot", [](F &f) {
+               f.pose->spaceSwitches[0].sourceReads[0].recompose = {0};
+           });
+    expect("switch missing space read", "space_read: reads no slot",
+           [](F &f) { f.pose->spaceSwitches[0].spaceSlot = -1; });
     // Commits and constraint arrays.
     expect("version pools", "version pools",
            [](F &f) { f.pose->commits[0].slotWrites = {2}; });

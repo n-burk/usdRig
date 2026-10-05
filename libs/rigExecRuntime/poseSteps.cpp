@@ -136,6 +136,105 @@ _RrRecordFrame(RrProgram *program, size_t step,
     return true;
 }
 
+// Whether slot \p i's avars and ladder rows are there to compose.
+bool
+_RrComposable(const RrProgram &program, const RrPoseScratch &scratch,
+              size_t i)
+{
+    return i * 11 + 11 <= program.store.avars.size() &&
+           i < scratch.noScaleAvars.size() && i < scratch.rotOrder.size() &&
+           i < scratch.selfD.size() && i < scratch.parentDinv.size() &&
+           i < scratch.posedAuthored.size() &&
+           i < scratch.posedAuthoredM.size();
+}
+
+// Slot \p i's avars as one matrix, as the program composes them
+// (_ComposeAvarsOf, bakedPose.cpp).
+RrMat4d
+_RrComposeAvarsOf(const RrProgram &program, const RrPoseScratch &scratch,
+                  size_t i)
+{
+    const double *a = &program.store.avars[i * 11];
+    const double units = a[10];
+    const bool noScale = scratch.noScaleAvars[i] != 0;
+    // avars:rotationSign, applied to the avar where the other two paths
+    // apply it (computations.cpp, bakedPose.cpp).
+    const unsigned sign =
+        i < scratch.rotationSign.size() ? scratch.rotationSign[i] : 0u;
+    const double signX = _RrRotationSign(sign, 0);
+    return _RrComposeAvars(
+        a[0] * units, a[1] * units, a[2] * units, noScale ? 1.0 : a[3],
+        noScale ? 1.0 : a[4], noScale ? 1.0 : a[5], a[6] * signX,
+        a[7] * _RrRotationSign(sign, 1), a[8] * _RrRotationSign(sign, 2),
+        a[9] * signX, program.TextOrEmpty(scratch.rotOrder[i]));
+}
+
+// The ordinary compose of slot \p i against \p parentPosed
+// (_ComposeUnswitched). An authored posed:space is the pose: it reads
+// neither the avars nor the parent.
+RrPointFrame
+_RrComposeUnswitched(const RrProgram &program, const RrPoseScratch &scratch,
+                     size_t i, const RrMat4d &parentPosed)
+{
+    if (scratch.posedAuthored[i]) {
+        return RrFrameFromMatrix(scratch.posedAuthoredM[i]);
+    }
+    return RrFrameFromMatrix(_RrComposeAvarsOf(program, scratch, i) *
+                             scratch.selfD[i] * scratch.parentDinv[i] *
+                             parentPosed);
+}
+
+// _SpaceOfFrame: an unusable frame selects the NaN sentinel, so the
+// failure survives into every descendant instead of being scrubbed into a
+// plausible identity.
+RrMat4d
+_RrSpaceOfFrame(const RrPointFrame &frame)
+{
+    RrMat4d space = _RrIdentity();
+    if (!frame.IsValid() || frame.IsDegenerate() ||
+        !RrPointsToMatrix(RrIdentityLandmarks(), frame.points, &space)) {
+        space = _RrIdentity();
+        space[3][0] = std::numeric_limits<double>::quiet_NaN();
+    }
+    return space;
+}
+
+// Whether every slot \p read names is there to read or recompose.
+bool
+_RrVersionReadable(const RrProgram &program, const RrPoseScratch &scratch,
+                   const RigExecWireFrameVersion &read)
+{
+    if (read.anchor >= 0 &&
+        size_t(read.anchor) >= program.store.posedM.size()) {
+        return false;
+    }
+    for (const int32_t at : read.recompose) {
+        if (at < 0 || !_RrComposable(program, scratch, size_t(at))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The frame a switch reads at its bound version (_ReadFrameVersion,
+// bakedPose.cpp): the anchor's last version, or identity, composed
+// unswitched through each recompose slot top down. Recomposes into locals
+// only: the slots on the way keep their last versions for every other
+// reader.
+RrMat4d
+_RrReadFrameVersion(const RrProgram &program, const RrPoseScratch &scratch,
+                    const RigExecWireFrameVersion &read)
+{
+    RrMat4d posed = read.anchor >= 0
+                        ? program.store.posedM[size_t(read.anchor)]
+                        : _RrIdentity();
+    for (const int32_t at : read.recompose) {
+        posed = _RrSpaceOfFrame(
+            _RrComposeUnswitched(program, scratch, size_t(at), posed));
+    }
+    return posed;
+}
+
 } // namespace
 
 namespace runtimePoseDetail {
@@ -546,17 +645,19 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
         const RigExecWireComposeGroup &group =
             program->poses->composeGroups[size_t(wire.object)];
         const RigExecWireSlotMeta &meta = *program->slotMeta;
+        const auto noSlot = [&]() {
+            if (error) {
+                *error = _RrStepHead(program, step) + " names no slot";
+            }
+            return false;
+        };
         for (int i = group.begin; i < group.end; ++i) {
             if (i < 0 || size_t(i) >= meta.slotKind.size() ||
                 size_t(i) >= store.base.size() ||
                 size_t(i) >= store.fin.size() ||
                 size_t(i) >= store.posedM.size() ||
                 size_t(i) >= scratch->restM.size()) {
-                if (error) {
-                    *error = _RrStepHead(program, step) +
-                             " names no slot";
-                }
-                return false;
+                return noSlot();
             }
             if (meta.slotKind[size_t(i)] !=
                 RigExecWireSlotKind::FirstFramePose) {
@@ -566,72 +667,60 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                 store.base[size_t(i)] = RrFrameFromMatrix(
                     scratch->posedAuthoredM[size_t(i)]);
             } else {
-                if (size_t(i) * 11 + 11 > store.avars.size() ||
-                    size_t(i) >= scratch->noScaleAvars.size() ||
-                    size_t(i) >= scratch->rotOrder.size() ||
-                    size_t(i) >= scratch->selfD.size() ||
-                    size_t(i) >= scratch->parentDinv.size() ||
+                if (!_RrComposable(*program, *scratch, size_t(i)) ||
                     size_t(i) >= scratch->defaultRoundTrip.size() ||
                     size_t(i) >= meta.parent.size()) {
-                    if (error) {
-                        *error = _RrStepHead(program, step) +
-                                 " names no slot";
-                    }
-                    return false;
+                    return noSlot();
                 }
-                const double *a = &store.avars[size_t(i) * 11];
-                const double units = a[10];
-                const bool noScale =
-                    scratch->noScaleAvars[size_t(i)] != 0;
-                // avars:rotationSign, applied to the avar where the other
-                // two paths apply it (computations.cpp, bakedPose.cpp).
-                const unsigned sign =
-                    size_t(i) < scratch->rotationSign.size()
-                        ? scratch->rotationSign[size_t(i)] : 0u;
-                const double signX = _RrRotationSign(sign, 0);
-                const RrMat4d avars = _RrComposeAvars(
-                    a[0] * units, a[1] * units, a[2] * units,
-                    noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
-                    noScale ? 1.0 : a[5], a[6] * signX,
-                    a[7] * _RrRotationSign(sign, 1),
-                    a[8] * _RrRotationSign(sign, 2),
-                    a[9] * signX,
-                    program->TextOrEmpty(
-                        scratch->rotOrder[size_t(i)]));
+                const RrMat4d avars =
+                    _RrComposeAvarsOf(*program, *scratch, size_t(i));
                 const int parent = meta.parent[size_t(i)];
-                if (parent >= 0 &&
-                    size_t(parent) >= store.posedM.size()) {
-                    if (error) {
-                        *error = _RrStepHead(program, step) +
-                                 " names no slot";
-                    }
-                    return false;
-                }
-                const RrMat4d parentPosed =
-                    parent >= 0 ? store.posedM[size_t(parent)]
-                                : _RrIdentity();
                 // One int per slot, and only on a rig that has a switch
                 // at all: the ordinary compose falls straight through.
                 const int switchIndex =
                     program->spaceSwitchBySlot.empty()
                         ? -1
                         : program->spaceSwitchBySlot[size_t(i)];
-                if (switchIndex >= 0) {
+                if (switchIndex < 0) {
+                    if (parent >= 0 &&
+                        size_t(parent) >= store.posedM.size()) {
+                        return noSlot();
+                    }
+                    const RrMat4d parentPosed =
+                        parent >= 0 ? store.posedM[size_t(parent)]
+                                    : _RrIdentity();
+                    store.base[size_t(i)] = RrFrameFromMatrix(
+                        avars * scratch->selfD[size_t(i)] *
+                        scratch->parentDinv[size_t(i)] * parentPosed);
+                } else {
                     // A switched slot composes against the SELECTED
                     // source's pair of spaces instead of its namespace
                     // parent's. Both halves come from one source, so at
                     // rest they cancel and no space moves the rig
-                    // standing still.
+                    // standing still. Every provider frame it reads is
+                    // read at the version the program bound at Build,
+                    // never as whatever the slot holds now: the step
+                    // order does not place the namespace parent's
+                    // posedM before this step.
                     const RigExecWireSpaceSwitch &sw =
                         program->poses->spaceSwitches[size_t(switchIndex)];
-                    if (parent >= 0 &&
-                        size_t(parent) >=
-                            scratch->defaultRoundTrip.size()) {
-                        if (error) {
-                            *error = _RrStepHead(program, step) +
-                                     " names no slot";
-                        }
-                        return false;
+                    bool readable =
+                        sw.sourceReads.size() == sw.sourceSlots.size() &&
+                        _RrVersionReadable(*program, *scratch,
+                                           sw.parentRead) &&
+                        _RrVersionReadable(*program, *scratch,
+                                           sw.spaceRead);
+                    for (const RigExecWireFrameVersion &read :
+                         sw.sourceReads) {
+                        readable = readable &&
+                                   _RrVersionReadable(*program, *scratch,
+                                                      read);
+                    }
+                    if (!readable ||
+                        (parent >= 0 &&
+                         size_t(parent) >=
+                             scratch->defaultRoundTrip.size())) {
+                        return noSlot();
                     }
                     // `local` is avars * default:space reached the long
                     // way round -- compose the UNSWITCHED world, then
@@ -640,7 +729,12 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                     // exact arithmetic and NOT the same in doubles. The
                     // program can only reach it this way, the two answers
                     // are compared bit for bit, and 4e-15 of disagreement
-                    // here propagates to every descendant.
+                    // here propagates to every descendant. The parent is
+                    // read before its own switch when that resolves in
+                    // this switch's round or later.
+                    const RrMat4d parentPosed =
+                        _RrReadFrameVersion(*program, *scratch,
+                                            sw.parentRead);
                     const RrMat4d parentDefault =
                         parent >= 0
                             ? scratch->defaultRoundTrip[size_t(parent)]
@@ -689,7 +783,8 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                     if (hasCarry) {
                         carry = scratch->defaultRoundTrip[size_t(sw.spaceSlot)]
                                     .GetInverse() *
-                                store.posedM[size_t(sw.spaceSlot)];
+                                _RrReadFrameVersion(*program, *scratch,
+                                                    sw.spaceRead);
                         carryInverse = carry.GetInverse();
                     }
                     const auto rawDeltaOf = [&](int index) {
@@ -716,8 +811,11 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                                 : RrRotationFilter(sw.filters[size_t(index)]);
                         const RrVec3d axis =
                             sourceDefault.TransformDir(twistAxis);
-                        const RrMat4d moved = sourceDefault.GetInverse() *
-                                              store.posedM[size_t(slot)];
+                        const RrMat4d moved =
+                            sourceDefault.GetInverse() *
+                            _RrReadFrameVersion(
+                                *program, *scratch,
+                                sw.sourceReads[size_t(index)]);
                         const RrMat4d motion =
                             hasCarry
                                 ? RrFilterSpaceRotation(moved * carryInverse,
@@ -748,10 +846,6 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                                             sw.affectScale);
                     store.base[size_t(i)] =
                         RrFrameFromMatrix(delta * local);
-                } else {
-                    store.base[size_t(i)] = RrFrameFromMatrix(
-                        avars * scratch->selfD[size_t(i)] *
-                        scratch->parentDinv[size_t(i)] * parentPosed);
                 }
             }
             // An auto clavicle on this slot: the composed (and switched)
@@ -875,16 +969,7 @@ RrRunPoseStep(RrProgram *program, size_t step, double time,
                 }
             }
             store.fin[size_t(i)] = store.base[size_t(i)];
-            RrMat4d space = _RrIdentity();
-            if (!store.base[size_t(i)].IsValid() ||
-                store.base[size_t(i)].IsDegenerate() ||
-                !RrPointsToMatrix(RrIdentityLandmarks(),
-                                  store.base[size_t(i)].points,
-                                  &space)) {
-                space = _RrIdentity();
-                space[3][0] = std::numeric_limits<double>::quiet_NaN();
-            }
-            store.posedM[size_t(i)] = space;
+            store.posedM[size_t(i)] = _RrSpaceOfFrame(store.base[size_t(i)]);
         }
         return true;
     }

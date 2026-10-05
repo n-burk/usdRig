@@ -374,6 +374,15 @@ struct RigExecWireComposeGroup {
     std::vector<int32_t> parentSlots;
 };
 
+/// Which version of one provider frame a space switch reads
+/// (RigExecBakedProgramImpl::SpaceSwitch::FrameVersion): `anchor`'s last
+/// version (identity at -1), composed unswitched through `recompose`, top
+/// down. An empty `recompose` reads the anchor as it stands.
+struct RigExecWireFrameVersion {
+    int32_t anchor = -1;
+    std::vector<int32_t> recompose;
+};
+
 /// One RigExecSpaceSwitch: the switched provider slot, the slots of its
 /// labelled sources (-1 is world), and the channels the resulting delta is
 /// allowed to reach. `active` is the fractional selector, read per frame.
@@ -394,51 +403,19 @@ struct RigExecWireSpaceSwitch {
     /// on every switch, which is the behaviour those files were baked
     /// from. See RigExecWireDecodeSpaceSwitches.
     int32_t spaceSlot = -1;
+    /// The versions the compose reads: the namespace parent's, which
+    /// `local` is divided back out of; each source's, parallel to
+    /// sourceSlots ({-1, {}} at a world source); and spaceSlot's, for the
+    /// carry ({-1, {}} when none is named). A second trailing block after
+    /// the space slots: a binary without it decodes with every read at
+    /// that slot's last version, which is what it was baked from.
+    RigExecWireFrameVersion parentRead;
+    std::vector<RigExecWireFrameVersion> sourceReads;
+    RigExecWireFrameVersion spaceRead;
     RigExecWireInput active;
     bool affectTranslation[3] = {true, true, true};
     bool affectRotation[3] = {true, true, true};
     bool affectScale[3] = {true, true, true};
-};
-
-/// One RigExecAutoClavicle: the slots it reads, the two per-frame channels
-/// and the solved pose constants RigExecAutoClavicleShift takes. Memory
-/// only on RigExecWireDomainPose: these travel in the optional
-/// AutoClavicle section.
-struct RigExecWireAutoClavicle {
-    int32_t slot = -1;
-    int32_t pivotSlot = -1;
-    int32_t anchorSlot = -1;
-    int32_t fkSlot[3] = {-1, -1, -1};
-    int32_t ikTargetSlot = -1;
-    int32_t poleSlot = -1;
-    RigExecWireInput ikBlend;
-    RigExecWireInput amount;
-    double basis[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    double ikValue = 1.0;
-    double gain = 0.4;
-    uint8_t kernel = 0;
-    uint8_t normalize = 1;
-    std::vector<double> swings;
-    std::vector<double> widths;
-    std::vector<double> gains;
-    std::vector<double> weights;
-};
-
-/// A solver's limb options (RigExecTwoBoneIk stretchPolicy softDistance and
-/// segmentScale, RigExecFkChain segmentScale): the per-frame limb inputs and
-/// the constants beside them. Memory only on RigExecWireDomainPose: these
-/// travel in the optional LimbSolvers section, and a solver with no record
-/// solves as it did before the section existed.
-struct RigExecWireLimbSolver {
-    int32_t solver = -1;
-    /// bit 0: stretchPolicy softDistance; bit 1: segmentScale toChild.
-    uint8_t flags = 0;
-    double scaleCalibration = 0.0;
-    RigExecWireInput pin;
-    RigExecWireInput upperScale;
-    RigExecWireInput lowerScale;
-    RigExecWireInput softDistance;
-    RigExecWireInput twist;
 };
 
 /// The DomainPose section: every table the pose-half steps index, plus the
@@ -467,12 +444,9 @@ struct RigExecWireDomainPose {
     bool phasedReads = false;
     bool publishWeightFields = true;
     /// Memory only: the SpaceSwitch section carries these (see bake.cpp).
-    /// Sparse -- one entry per switched provider, in slot order.
+    /// Sparse -- one entry per switched provider, in program order
+    /// (resolution round, then discovery).
     std::vector<RigExecWireSpaceSwitch> spaceSwitches;
-    /// Memory only: the AutoClavicle section carries these.
-    std::vector<RigExecWireAutoClavicle> autoClavicles;
-    /// Memory only: the LimbSolvers section carries these.
-    std::vector<RigExecWireLimbSolver> limbSolvers;
 };
 
 void RigExecWirePutInput(std::vector<uint8_t> *out,
@@ -516,24 +490,17 @@ bool RigExecWireDecodePoseNumerics(
     RigExecWireReader *reader,
     std::vector<RigExecWirePoseNumeric> *numerics, std::string *error);
 
+/// False when a switch's sourceReads is not parallel to its sourceSlots.
 bool RigExecWireEncodeSpaceSwitches(
     const std::vector<RigExecWireSpaceSwitch> &switches,
     std::vector<uint8_t> *out);
-bool RigExecWireEncodeLimbSolvers(
-    const std::vector<RigExecWireLimbSolver> &records,
-    std::vector<uint8_t> *out);
-bool RigExecWireDecodeLimbSolvers(
-    RigExecWireReader *reader,
-    std::vector<RigExecWireLimbSolver> *records, std::string *error);
-
-bool RigExecWireEncodeAutoClavicles(
-    const std::vector<RigExecWireAutoClavicle> &records,
-    std::vector<uint8_t> *out);
-bool RigExecWireDecodeAutoClavicles(
-    RigExecWireReader *reader,
-    std::vector<RigExecWireAutoClavicle> *records, std::string *error);
+/// \p slotParent is the slot inventory's namespace parent per slot
+/// (RigExecWireSlotMeta::parent). A section without the read-version
+/// block gives each switch {slotParent[slot], {}} as its parent read, each
+/// source and the space their own slot with no recompose; a switch slot
+/// outside \p slotParent then fails the decode.
 bool RigExecWireDecodeSpaceSwitches(
-    RigExecWireReader *reader,
+    RigExecWireReader *reader, const std::vector<int32_t> &slotParent,
     std::vector<RigExecWireSpaceSwitch> *switches, std::string *error);
 
 }  // namespace rigExec

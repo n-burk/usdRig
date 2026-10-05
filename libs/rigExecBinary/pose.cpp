@@ -546,6 +546,33 @@ _Fail(std::string *error)
     return false;
 }
 
+void
+_PutFrameVersion(std::vector<uint8_t> *out,
+                 const RigExecWireFrameVersion &read)
+{
+    RigExecWirePutI32(out, read.anchor);
+    _PutI32s(out, read.recompose);
+}
+
+// An anchor of -1 (identity) or a slot, then the recompose slots. Their
+// range against the slot count is the reader's to check.
+bool
+_ReadFrameVersion(RigExecWireReader *reader, RigExecWireFrameVersion *read)
+{
+    uint32_t count = 0;
+    if (!reader->ReadI32(&read->anchor) || read->anchor < -1 ||
+        !reader->ReadU32(&count) || size_t(count) > reader->Remaining() / 4) {
+        return false;
+    }
+    read->recompose.resize(count);
+    for (int32_t &slot : read->recompose) {
+        if (!reader->ReadI32(&slot) || slot < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool
@@ -1434,12 +1461,25 @@ RigExecWireEncodeSpaceSwitches(
     for (const RigExecWireSpaceSwitch &sw : switches) {
         RigExecWirePutI32(out, sw.spaceSlot);
     }
+    // The read versions, as a second trailing block for the same reason:
+    // per switch the parent's, a counted run of the sources', the space's.
+    for (const RigExecWireSpaceSwitch &sw : switches) {
+        if (sw.sourceReads.size() != sw.sourceSlots.size()) {
+            return false;
+        }
+        _PutFrameVersion(out, sw.parentRead);
+        RigExecWirePutU32(out, uint32_t(sw.sourceReads.size()));
+        for (const RigExecWireFrameVersion &read : sw.sourceReads) {
+            _PutFrameVersion(out, read);
+        }
+        _PutFrameVersion(out, sw.spaceRead);
+    }
     return true;
 }
 
 bool
 RigExecWireDecodeSpaceSwitches(
-    RigExecWireReader *reader,
+    RigExecWireReader *reader, const std::vector<int32_t> &slotParent,
     std::vector<RigExecWireSpaceSwitch> *switches, std::string *error)
 {
     const auto readMask = [&](bool mask[3]) {
@@ -1483,6 +1523,43 @@ RigExecWireDecodeSpaceSwitches(
             if (!reader->ReadI32(&(*switches)[i].spaceSlot)) {
                 return _Fail(error);
             }
+        }
+    }
+    // The optional read-version block. Absent, every read is its slot's
+    // last version: what a binary baked before versioned reads composes.
+    if (reader->Exhausted()) {
+        for (RigExecWireSpaceSwitch &sw : *switches) {
+            if (sw.slot < 0 || size_t(sw.slot) >= slotParent.size()) {
+                return _Fail(error);
+            }
+            const int32_t parent = slotParent[size_t(sw.slot)];
+            sw.parentRead = RigExecWireFrameVersion{parent < 0 ? -1 : parent,
+                                                    {}};
+            sw.sourceReads.clear();
+            for (const int32_t source : sw.sourceSlots) {
+                sw.sourceReads.push_back(
+                    RigExecWireFrameVersion{source < 0 ? -1 : source, {}});
+            }
+            sw.spaceRead = RigExecWireFrameVersion{
+                sw.spaceSlot < 0 ? -1 : sw.spaceSlot, {}};
+        }
+        return true;
+    }
+    for (RigExecWireSpaceSwitch &sw : *switches) {
+        uint32_t sources = 0;
+        if (!_ReadFrameVersion(reader, &sw.parentRead) ||
+            !reader->ReadU32(&sources) ||
+            size_t(sources) != sw.sourceSlots.size()) {
+            return _Fail(error);
+        }
+        sw.sourceReads.resize(sources);
+        for (RigExecWireFrameVersion &read : sw.sourceReads) {
+            if (!_ReadFrameVersion(reader, &read)) {
+                return _Fail(error);
+            }
+        }
+        if (!_ReadFrameVersion(reader, &sw.spaceRead)) {
+            return _Fail(error);
         }
     }
     if (!reader->Exhausted()) {

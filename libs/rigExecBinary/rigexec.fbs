@@ -18,8 +18,9 @@
 //    PropertyChain.target, PhasedConsumer.consumer and PhasedConsumer.hops
 //    hold them.
 //    Provider slots index slot_meta.paths: SpaceSwitch.slot,
-//    AncestorRead.slot, Commit.slots, every *_slot and *_slots field, and
-//    the solver's start, root, mid, end, pole, in_a, in_b and controls.
+//    AncestorRead.slot, FrameVersion.anchor and recompose, Commit.slots,
+//    every *_slot and *_slots field, and the solver's start, root, mid,
+//    end, pole, in_a, in_b and controls.
 //    The exceptions: PoseInterpolator.pose_slots and disabled_slots index
 //    the pose weights (pose.pose_weight_paths), as weight_begin and
 //    weight_end do, and Commit's slot_* vectors hold fin or base version
@@ -663,6 +664,14 @@ table NativeSource {
 }
 /// One contiguous provider-slot group the compose pass runs as one step.
 table ComposeGroup { begin: int; end: int; parent_slots: [int]; }
+/// Which version of one provider frame a space switch reads: `anchor`'s
+/// last version (identity at -1), composed unswitched through `recompose`
+/// (FirstFramePose slots), top down. An empty `recompose` reads the anchor
+/// as it stands.
+table FrameVersion {
+  anchor: int = -1;
+  recompose: [int];
+}
 /// One RigExecSpaceSwitch: the switched provider slot, its labelled sources
 /// (-1 is world), and the channels the resulting delta may reach.
 table SpaceSwitch {
@@ -673,6 +682,13 @@ table SpaceSwitch {
   twist_axis: Vec3d (native_inline);
   /// rigExec:space, or -1.
   space_slot: int = -1;
+  /// The namespace parent's version, which the switched compose divides
+  /// back out of.
+  parent_read: FrameVersion (required);
+  /// One per source_slots entry; {-1, []} at a world source.
+  source_reads: [FrameVersion] (native_inline);
+  /// space_slot's version, for the carry; {-1, []} when space_slot is -1.
+  space_read: FrameVersion (required);
   /// The fractional selector.
   active: Input (required);
   affect_translation: Bool3 (native_inline);

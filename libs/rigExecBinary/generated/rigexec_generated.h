@@ -176,6 +176,10 @@ struct ComposeGroup;
 struct ComposeGroupBuilder;
 struct RigExecWireComposeGroup;
 
+struct FrameVersion;
+struct FrameVersionBuilder;
+struct RigExecWireFrameVersion;
+
 struct SpaceSwitch;
 struct SpaceSwitchBuilder;
 struct RigExecWireSpaceSwitch;
@@ -361,6 +365,8 @@ inline const ::flatbuffers::TypeTable *ConstraintArraysTypeTable();
 inline const ::flatbuffers::TypeTable *NativeSourceTypeTable();
 
 inline const ::flatbuffers::TypeTable *ComposeGroupTypeTable();
+
+inline const ::flatbuffers::TypeTable *FrameVersionTypeTable();
 
 inline const ::flatbuffers::TypeTable *SpaceSwitchTypeTable();
 
@@ -8378,6 +8384,95 @@ inline ::flatbuffers::Offset<ComposeGroup> CreateComposeGroupDirect(
 
 ::flatbuffers::Offset<ComposeGroup> CreateComposeGroup(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireComposeGroup *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct RigExecWireFrameVersion : public ::flatbuffers::NativeTable {
+  typedef FrameVersion TableType;
+  int32_t anchor = -1;
+  std::vector<int32_t> recompose{};
+};
+
+/// Which version of one provider frame a space switch reads: `anchor`'s
+/// last version (identity at -1), composed unswitched through `recompose`
+/// (FirstFramePose slots), top down. An empty `recompose` reads the anchor
+/// as it stands.
+struct FrameVersion FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef RigExecWireFrameVersion NativeTableType;
+  typedef FrameVersionBuilder Builder;
+  struct Traits;
+  static const ::flatbuffers::TypeTable *MiniReflectTypeTable() {
+    return FrameVersionTypeTable();
+  }
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_ANCHOR = 4,
+    VT_RECOMPOSE = 6
+  };
+  int32_t anchor() const {
+    return GetField<int32_t>(VT_ANCHOR, -1);
+  }
+  const ::flatbuffers::Vector<int32_t> *recompose() const {
+    return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_RECOMPOSE);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int32_t>(verifier, VT_ANCHOR, 4) &&
+           VerifyOffset(verifier, VT_RECOMPOSE) &&
+           verifier.VerifyVector(recompose()) &&
+           verifier.EndTable();
+  }
+  RigExecWireFrameVersion *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(RigExecWireFrameVersion *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<FrameVersion> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireFrameVersion* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct FrameVersionBuilder {
+  typedef FrameVersion Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_anchor(int32_t anchor) {
+    fbb_.AddElement<int32_t>(FrameVersion::VT_ANCHOR, anchor, -1);
+  }
+  void add_recompose(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> recompose) {
+    fbb_.AddOffset(FrameVersion::VT_RECOMPOSE, recompose);
+  }
+  explicit FrameVersionBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<FrameVersion> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<FrameVersion>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<FrameVersion> CreateFrameVersion(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t anchor = -1,
+    ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> recompose = 0) {
+  FrameVersionBuilder builder_(_fbb);
+  builder_.add_recompose(recompose);
+  builder_.add_anchor(anchor);
+  return builder_.Finish();
+}
+
+struct FrameVersion::Traits {
+  using type = FrameVersion;
+  static auto constexpr Create = CreateFrameVersion;
+};
+
+inline ::flatbuffers::Offset<FrameVersion> CreateFrameVersionDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t anchor = -1,
+    const std::vector<int32_t> *recompose = nullptr) {
+  auto recompose__ = recompose ? _fbb.CreateVector<int32_t>(*recompose) : 0;
+  return rigExec::fb::CreateFrameVersion(
+      _fbb,
+      anchor,
+      recompose__);
+}
+
+::flatbuffers::Offset<FrameVersion> CreateFrameVersion(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireFrameVersion *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct RigExecWireSpaceSwitch : public ::flatbuffers::NativeTable {
   typedef SpaceSwitch TableType;
   int32_t slot = -1;
@@ -8385,6 +8480,9 @@ struct RigExecWireSpaceSwitch : public ::flatbuffers::NativeTable {
   std::vector<uint8_t> filters{};
   ::rigExec::RigExecWireVec3d twistAxis{};
   int32_t spaceSlot = -1;
+  std::unique_ptr<rigExec::fb::RigExecWireFrameVersion> parentRead{};
+  std::vector<rigExec::fb::RigExecWireFrameVersion> sourceReads{};
+  std::unique_ptr<rigExec::fb::RigExecWireFrameVersion> spaceRead{};
   std::unique_ptr<rigExec::fb::RigExecWireInput> active{};
   ::rigExec::RigExecWireBool3 affectTranslation{};
   ::rigExec::RigExecWireBool3 affectRotation{};
@@ -8410,10 +8508,13 @@ struct SpaceSwitch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_FILTERS = 8,
     VT_TWISTAXIS = 10,
     VT_SPACESLOT = 12,
-    VT_ACTIVE = 14,
-    VT_AFFECTTRANSLATION = 16,
-    VT_AFFECTROTATION = 18,
-    VT_AFFECTSCALE = 20
+    VT_PARENTREAD = 14,
+    VT_SOURCEREADS = 16,
+    VT_SPACEREAD = 18,
+    VT_ACTIVE = 20,
+    VT_AFFECTTRANSLATION = 22,
+    VT_AFFECTROTATION = 24,
+    VT_AFFECTSCALE = 26
   };
   int32_t slot() const {
     return GetField<int32_t>(VT_SLOT, -1);
@@ -8431,6 +8532,19 @@ struct SpaceSwitch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// rigExec:space, or -1.
   int32_t spaceSlot() const {
     return GetField<int32_t>(VT_SPACESLOT, -1);
+  }
+  /// The namespace parent's version, which the switched compose divides
+  /// back out of.
+  const rigExec::fb::FrameVersion *parentRead() const {
+    return GetPointer<const rigExec::fb::FrameVersion *>(VT_PARENTREAD);
+  }
+  /// One per source_slots entry; {-1, []} at a world source.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::FrameVersion>> *sourceReads() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::FrameVersion>> *>(VT_SOURCEREADS);
+  }
+  /// space_slot's version, for the carry; {-1, []} when space_slot is -1.
+  const rigExec::fb::FrameVersion *spaceRead() const {
+    return GetPointer<const rigExec::fb::FrameVersion *>(VT_SPACEREAD);
   }
   /// The fractional selector.
   const rigExec::fb::Input *active() const {
@@ -8455,6 +8569,13 @@ struct SpaceSwitch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(filters()) &&
            VerifyField<rigExec::fb::Vec3d>(verifier, VT_TWISTAXIS, 8) &&
            VerifyField<int32_t>(verifier, VT_SPACESLOT, 4) &&
+           VerifyOffsetRequired(verifier, VT_PARENTREAD) &&
+           verifier.VerifyTable(parentRead()) &&
+           VerifyOffset(verifier, VT_SOURCEREADS) &&
+           verifier.VerifyVector(sourceReads()) &&
+           verifier.VerifyVectorOfTables(sourceReads()) &&
+           VerifyOffsetRequired(verifier, VT_SPACEREAD) &&
+           verifier.VerifyTable(spaceRead()) &&
            VerifyOffsetRequired(verifier, VT_ACTIVE) &&
            verifier.VerifyTable(active()) &&
            VerifyField<rigExec::fb::Bool3>(verifier, VT_AFFECTTRANSLATION, 1) &&
@@ -8486,6 +8607,15 @@ struct SpaceSwitchBuilder {
   void add_spaceSlot(int32_t spaceSlot) {
     fbb_.AddElement<int32_t>(SpaceSwitch::VT_SPACESLOT, spaceSlot, -1);
   }
+  void add_parentRead(::flatbuffers::Offset<rigExec::fb::FrameVersion> parentRead) {
+    fbb_.AddOffset(SpaceSwitch::VT_PARENTREAD, parentRead);
+  }
+  void add_sourceReads(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::FrameVersion>>> sourceReads) {
+    fbb_.AddOffset(SpaceSwitch::VT_SOURCEREADS, sourceReads);
+  }
+  void add_spaceRead(::flatbuffers::Offset<rigExec::fb::FrameVersion> spaceRead) {
+    fbb_.AddOffset(SpaceSwitch::VT_SPACEREAD, spaceRead);
+  }
   void add_active(::flatbuffers::Offset<rigExec::fb::Input> active) {
     fbb_.AddOffset(SpaceSwitch::VT_ACTIVE, active);
   }
@@ -8505,6 +8635,8 @@ struct SpaceSwitchBuilder {
   ::flatbuffers::Offset<SpaceSwitch> Finish() {
     const auto end = fbb_.EndTable(start_);
     auto o = ::flatbuffers::Offset<SpaceSwitch>(end);
+    fbb_.Required(o, SpaceSwitch::VT_PARENTREAD);
+    fbb_.Required(o, SpaceSwitch::VT_SPACEREAD);
     fbb_.Required(o, SpaceSwitch::VT_ACTIVE);
     return o;
   }
@@ -8517,6 +8649,9 @@ inline ::flatbuffers::Offset<SpaceSwitch> CreateSpaceSwitch(
     ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> filters = 0,
     const rigExec::fb::Vec3d *twistAxis = nullptr,
     int32_t spaceSlot = -1,
+    ::flatbuffers::Offset<rigExec::fb::FrameVersion> parentRead = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::FrameVersion>>> sourceReads = 0,
+    ::flatbuffers::Offset<rigExec::fb::FrameVersion> spaceRead = 0,
     ::flatbuffers::Offset<rigExec::fb::Input> active = 0,
     const rigExec::fb::Bool3 *affectTranslation = nullptr,
     const rigExec::fb::Bool3 *affectRotation = nullptr,
@@ -8526,6 +8661,9 @@ inline ::flatbuffers::Offset<SpaceSwitch> CreateSpaceSwitch(
   builder_.add_affectRotation(affectRotation);
   builder_.add_affectTranslation(affectTranslation);
   builder_.add_active(active);
+  builder_.add_spaceRead(spaceRead);
+  builder_.add_sourceReads(sourceReads);
+  builder_.add_parentRead(parentRead);
   builder_.add_spaceSlot(spaceSlot);
   builder_.add_twistAxis(twistAxis);
   builder_.add_filters(filters);
@@ -8546,12 +8684,16 @@ inline ::flatbuffers::Offset<SpaceSwitch> CreateSpaceSwitchDirect(
     const std::vector<uint8_t> *filters = nullptr,
     const rigExec::fb::Vec3d *twistAxis = nullptr,
     int32_t spaceSlot = -1,
+    ::flatbuffers::Offset<rigExec::fb::FrameVersion> parentRead = 0,
+    const std::vector<::flatbuffers::Offset<rigExec::fb::FrameVersion>> *sourceReads = nullptr,
+    ::flatbuffers::Offset<rigExec::fb::FrameVersion> spaceRead = 0,
     ::flatbuffers::Offset<rigExec::fb::Input> active = 0,
     const rigExec::fb::Bool3 *affectTranslation = nullptr,
     const rigExec::fb::Bool3 *affectRotation = nullptr,
     const rigExec::fb::Bool3 *affectScale = nullptr) {
   auto sourceSlots__ = sourceSlots ? _fbb.CreateVector<int32_t>(*sourceSlots) : 0;
   auto filters__ = filters ? _fbb.CreateVector<uint8_t>(*filters) : 0;
+  auto sourceReads__ = sourceReads ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::FrameVersion>>(*sourceReads) : 0;
   return rigExec::fb::CreateSpaceSwitch(
       _fbb,
       slot,
@@ -8559,6 +8701,9 @@ inline ::flatbuffers::Offset<SpaceSwitch> CreateSpaceSwitchDirect(
       filters__,
       twistAxis,
       spaceSlot,
+      parentRead,
+      sourceReads__,
+      spaceRead,
       active,
       affectTranslation,
       affectRotation,
@@ -15626,12 +15771,44 @@ inline ::flatbuffers::Offset<ComposeGroup> ComposeGroup::Pack(::flatbuffers::Fla
       _parentSlots);
 }
 
+inline RigExecWireFrameVersion *FrameVersion::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::make_unique<RigExecWireFrameVersion>();
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void FrameVersion::UnPackTo(RigExecWireFrameVersion *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = anchor(); _o->anchor = _e; }
+  { auto _e = recompose(); if (_e) { _o->recompose.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->recompose[_i] = _e->Get(_i); } } else { _o->recompose.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<FrameVersion> CreateFrameVersion(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireFrameVersion *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return FrameVersion::Pack(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<FrameVersion> FrameVersion::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireFrameVersion* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RigExecWireFrameVersion* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _anchor = _o->anchor;
+  auto _recompose = _o->recompose.size() ? _fbb.CreateVector(_o->recompose) : 0;
+  return rigExec::fb::CreateFrameVersion(
+      _fbb,
+      _anchor,
+      _recompose);
+}
+
 inline RigExecWireSpaceSwitch::RigExecWireSpaceSwitch(const RigExecWireSpaceSwitch &o)
       : slot(o.slot),
         sourceSlots(o.sourceSlots),
         filters(o.filters),
         twistAxis(o.twistAxis),
         spaceSlot(o.spaceSlot),
+        parentRead((o.parentRead) ? new rigExec::fb::RigExecWireFrameVersion(*o.parentRead) : nullptr),
+        sourceReads(o.sourceReads),
+        spaceRead((o.spaceRead) ? new rigExec::fb::RigExecWireFrameVersion(*o.spaceRead) : nullptr),
         active((o.active) ? new rigExec::fb::RigExecWireInput(*o.active) : nullptr),
         affectTranslation(o.affectTranslation),
         affectRotation(o.affectRotation),
@@ -15644,6 +15821,9 @@ inline RigExecWireSpaceSwitch &RigExecWireSpaceSwitch::operator=(RigExecWireSpac
   std::swap(filters, o.filters);
   std::swap(twistAxis, o.twistAxis);
   std::swap(spaceSlot, o.spaceSlot);
+  std::swap(parentRead, o.parentRead);
+  std::swap(sourceReads, o.sourceReads);
+  std::swap(spaceRead, o.spaceRead);
   std::swap(active, o.active);
   std::swap(affectTranslation, o.affectTranslation);
   std::swap(affectRotation, o.affectRotation);
@@ -15665,6 +15845,9 @@ inline void SpaceSwitch::UnPackTo(RigExecWireSpaceSwitch *_o, const ::flatbuffer
   { auto _e = filters(); if (_e) { _o->filters.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->filters.begin()); } }
   { auto _e = twistAxis(); if (_e) _o->twistAxis = ::flatbuffers::UnPackVec3d(*_e); }
   { auto _e = spaceSlot(); _o->spaceSlot = _e; }
+  { auto _e = parentRead(); if (_e) { if(_o->parentRead) { _e->UnPackTo(_o->parentRead.get(), _resolver); } else { _o->parentRead = std::unique_ptr<rigExec::fb::RigExecWireFrameVersion>(_e->UnPack(_resolver)); } } else if (_o->parentRead) { _o->parentRead.reset(); } }
+  { auto _e = sourceReads(); if (_e) { _o->sourceReads.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->sourceReads[_i] = *std::unique_ptr<rigExec::fb::RigExecWireFrameVersion>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->sourceReads.resize(0); } }
+  { auto _e = spaceRead(); if (_e) { if(_o->spaceRead) { _e->UnPackTo(_o->spaceRead.get(), _resolver); } else { _o->spaceRead = std::unique_ptr<rigExec::fb::RigExecWireFrameVersion>(_e->UnPack(_resolver)); } } else if (_o->spaceRead) { _o->spaceRead.reset(); } }
   { auto _e = active(); if (_e) { if(_o->active) { _e->UnPackTo(_o->active.get(), _resolver); } else { _o->active = std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->UnPack(_resolver)); } } else if (_o->active) { _o->active.reset(); } }
   { auto _e = affectTranslation(); if (_e) _o->affectTranslation = ::flatbuffers::UnPackBool3(*_e); }
   { auto _e = affectRotation(); if (_e) _o->affectRotation = ::flatbuffers::UnPackBool3(*_e); }
@@ -15684,6 +15867,9 @@ inline ::flatbuffers::Offset<SpaceSwitch> SpaceSwitch::Pack(::flatbuffers::FlatB
   auto _filters = _o->filters.size() ? _fbb.CreateVector(_o->filters) : 0;
   auto _twistAxis = ::flatbuffers::PackVec3d(_o->twistAxis);
   auto _spaceSlot = _o->spaceSlot;
+  auto _parentRead = _o->parentRead ? CreateFrameVersion(_fbb, _o->parentRead.get(), _rehasher) : 0;
+  auto _sourceReads = _o->sourceReads.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::FrameVersion>> (_o->sourceReads.size(), [](size_t i, _VectorArgs *__va) { return CreateFrameVersion(*__va->__fbb, &(__va->__o->sourceReads[i]), __va->__rehasher); }, &_va ) : 0;
+  auto _spaceRead = _o->spaceRead ? CreateFrameVersion(_fbb, _o->spaceRead.get(), _rehasher) : 0;
   auto _active = _o->active ? CreateInput(_fbb, _o->active.get(), _rehasher) : 0;
   auto _affectTranslation = ::flatbuffers::PackBool3(_o->affectTranslation);
   auto _affectRotation = ::flatbuffers::PackBool3(_o->affectRotation);
@@ -15695,6 +15881,9 @@ inline ::flatbuffers::Offset<SpaceSwitch> SpaceSwitch::Pack(::flatbuffers::FlatB
       _filters,
       &_twistAxis,
       _spaceSlot,
+      _parentRead,
+      _sourceReads,
+      _spaceRead,
       _active,
       &_affectTranslation,
       &_affectRotation,
@@ -18709,6 +18898,17 @@ inline const ::flatbuffers::TypeTable *ComposeGroupTypeTable() {
   return &tt;
 }
 
+inline const ::flatbuffers::TypeTable *FrameVersionTypeTable() {
+  static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_INT, 1, -1 }
+  };
+  static const ::flatbuffers::TypeTable tt = {
+    ::flatbuffers::ST_TABLE, 2, type_codes, nullptr, nullptr, nullptr, nullptr
+  };
+  return &tt;
+}
+
 inline const ::flatbuffers::TypeTable *SpaceSwitchTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
     { ::flatbuffers::ET_INT, 0, -1 },
@@ -18717,17 +18917,21 @@ inline const ::flatbuffers::TypeTable *SpaceSwitchTypeTable() {
     { ::flatbuffers::ET_SEQUENCE, 0, 0 },
     { ::flatbuffers::ET_INT, 0, -1 },
     { ::flatbuffers::ET_SEQUENCE, 0, 1 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 1 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 1 },
     { ::flatbuffers::ET_SEQUENCE, 0, 2 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 2 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 2 }
+    { ::flatbuffers::ET_SEQUENCE, 0, 3 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 3 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 3 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::Vec3dTypeTable,
+    rigExec::fb::FrameVersionTypeTable,
     rigExec::fb::InputTypeTable,
     rigExec::fb::Bool3TypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 9, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 12, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }

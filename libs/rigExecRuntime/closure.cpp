@@ -137,6 +137,18 @@ RrComputeClosure(RrProgram *program, double time, bool force)
         }
     } else {
         _RrUnionWords(&dirty, cones.always.words);
+        // A provider's own compose cluster, and every cluster that
+        // recomposes an earlier version of it from the same avars and
+        // ladder.
+        const auto dirtyAvarReaders = [&](size_t slot) {
+            _RrSet(&dirty, size_t(cones.avarCluster[slot]));
+            if (slot < program->avarVersionClusters.size()) {
+                for (const int32_t cluster :
+                     program->avarVersionClusters[slot]) {
+                    _RrSet(&dirty, size_t(cluster));
+                }
+            }
+        };
         const size_t slots = program->slotMeta->paths.size();
         for (size_t i = 0; i < slots; ++i) {
             const size_t base = i * 11;
@@ -145,17 +157,16 @@ RrComputeClosure(RrProgram *program, double time, bool force)
                 moved = store.avars[base + k] != store.lastAvars[base + k];
             }
             if (moved) {
-                _RrSet(&dirty, size_t(cones.avarCluster[i]));
+                dirtyAvarReaders(i);
             }
         }
         for (size_t k = 0; k < program->slotMeta->xformSlots.size(); ++k) {
             if (store.xformBase[k] != store.lastXformBase[k]) {
-                _RrSet(&dirty, size_t(cones.avarCluster[size_t(
-                                           program->slotMeta->xformSlots[k])]));
+                dirtyAvarReaders(size_t(program->slotMeta->xformSlots[k]));
             }
         }
         for (int slot : store.ladderMovedSlots) {
-            _RrSet(&dirty, size_t(cones.avarCluster[size_t(slot)]));
+            dirtyAvarReaders(size_t(slot));
         }
         for (size_t k = 0; k < store.arrays.size(); ++k) {
             const RrConstraintArraysLive &arrays = store.arrays[k];

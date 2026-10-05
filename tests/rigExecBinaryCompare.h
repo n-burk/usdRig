@@ -354,6 +354,40 @@ void _BinaryCompareTableStatic(
     const std::vector<_BinaryOracleInput> &oracle,
     const rigExec::RigExecBinaryReader &reader);
 
+/// The SpaceSwitch section against the program's switches: slots,
+/// sources, space and every read version exactly as Build bound them.
+void
+_BinaryCompareSpaceSwitches(
+    const rigExec::RigExecBakedProgramImpl &program,
+    const std::vector<rigExec::RigExecWireSpaceSwitch> &switches)
+{
+    using Version =
+        rigExec::RigExecBakedProgramImpl::SpaceSwitch::FrameVersion;
+    const auto same = [](const Version &live,
+                         const rigExec::RigExecWireFrameVersion &wire) {
+        CHECK(live.anchor == wire.anchor);
+        _BinaryCheckEqual(live.recompose, wire.recompose);
+    };
+    CHECK(switches.size() == program.spaceSwitches.size());
+    for (size_t i = 0;
+         i < switches.size() && i < program.spaceSwitches.size(); ++i) {
+        const rigExec::RigExecBakedProgramImpl::SpaceSwitch &live =
+            program.spaceSwitches[i];
+        const rigExec::RigExecWireSpaceSwitch &wire = switches[i];
+        CHECK(live.slot == wire.slot);
+        CHECK(live.spaceSlot == wire.spaceSlot);
+        _BinaryCheckEqual(live.sourceSlots, wire.sourceSlots);
+        same(live.parentRead, wire.parentRead);
+        same(live.spaceRead, wire.spaceRead);
+        CHECK(live.sourceReads.size() == wire.sourceReads.size());
+        for (size_t k = 0; k < live.sourceReads.size() &&
+                           k < wire.sourceReads.size();
+             ++k) {
+            same(live.sourceReads[k], wire.sourceReads[k]);
+        }
+    }
+}
+
 void
 _BinaryCompareProgram(rigExec::RigExecRigEvaluator &evaluator,
                       const std::vector<uint8_t> &bytes)
@@ -425,6 +459,17 @@ _BinaryCompareProgram(rigExec::RigExecRigEvaluator &evaluator,
         rigExec::RigExecWireDomainPose pose;
         CHECK(rigExec::RigExecWireDecodeDomainPose(&cursor, &pose, &error));
         _BinaryCompareDomainPose(program, pose, *reader);
+    }
+    CHECK(reader->FindSection(rigExec::RigExecBinarySection::SpaceSwitch,
+                              &data, &size));
+    {
+        rigExec::RigExecWireReader cursor(data, size);
+        const std::vector<int32_t> parents(program.parent.begin(),
+                                           program.parent.end());
+        std::vector<rigExec::RigExecWireSpaceSwitch> switches;
+        CHECK(rigExec::RigExecWireDecodeSpaceSwitches(&cursor, parents,
+                                                      &switches, &error));
+        _BinaryCompareSpaceSwitches(program, switches);
     }
     CHECK(reader->FindSection(rigExec::RigExecBinarySection::DomainGeometry,
                               &data, &size));

@@ -754,6 +754,18 @@ rigexec_add_verify_binary_test(NAME computed_path_reads
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_path_reads.usda"
     FRAMES 1,4,7,10 MIN_PATH_READS 52 MIN_DEFAULT_WEIGHTS 4)
 
+# Space switches nested under switched controls, whose compose reads an
+# ancestor recomposed before that ancestor's own switch: the nested pair,
+# a pair resolved in one round, the nested pair reading keyed dials that
+# hold no default, and a switch whose parent and rigExec:space are
+# recomposed on a control above them.
+foreach(_switch_fixture IN ITEMS space_switch_nested space_switch_same_round
+        space_switch_dial space_switch_carry)
+    rigexec_add_verify_binary_test(NAME ${_switch_fixture}
+        STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/${_switch_fixture}.usda"
+        FRAMES 0,1,2,3)
+endforeach()
+
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
 target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecPack PRIVATE ${_rigexec_schema_resource_define})

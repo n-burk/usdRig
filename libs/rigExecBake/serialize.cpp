@@ -855,8 +855,9 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         pose.composeGroups.push_back(std::move(out));
     }
     // Memory only: the SpaceSwitch section carries these (see bake.cpp).
-    // The program holds them in slot order already, which is the order the
-    // capture traversal walks.
+    // In program order -- resolution round, then discovery, which is not
+    // slot order once switches nest -- the order the capture traversal
+    // walks and the registered reads index.
     pose.spaceSwitches.reserve(program.spaceSwitches.size());
     for (const RigExecBakedProgramImpl::SpaceSwitch &sw :
          program.spaceSwitches) {
@@ -869,6 +870,18 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
         }
         out.twistAxis = _ToVec3d(sw.twistAxis);
         out.spaceSlot = int32_t(sw.spaceSlot);
+        // The versions bound at Build, as the compose reads them.
+        using Version = RigExecBakedProgramImpl::SpaceSwitch::FrameVersion;
+        const auto version = [](const Version &read) {
+            return RigExecWireFrameVersion{int32_t(read.anchor),
+                                           _ToI32s(read.recompose)};
+        };
+        out.parentRead = version(sw.parentRead);
+        out.sourceReads.reserve(sw.sourceReads.size());
+        for (const auto &read : sw.sourceReads) {
+            out.sourceReads.push_back(version(read));
+        }
+        out.spaceRead = version(sw.spaceRead);
         out.active = _ToInput(sw.activeInput, writer);
         for (int axis = 0; axis < 3; ++axis) {
             out.affectTranslation[axis] = sw.affectTranslation[axis];

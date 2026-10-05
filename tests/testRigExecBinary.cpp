@@ -833,6 +833,132 @@ TestSolverSpaceWire()
     }
 }
 
+// The SpaceSwitch section's trailing read-version block: each switch's
+// parent, source and space versions survive the trip; a section that ends
+// before the block decodes with every read at its slot's last version (the
+// namespace parent, the source, the space); a section that ends inside it,
+// an anchor below -1, a negative recompose slot and a source count that
+// disagrees with the sources are refused.
+static void
+TestSpaceSwitchVersionWire()
+{
+    // Slots: 0 Other, 1 P, 2 S (under P), 3 C (under S).
+    const std::vector<int32_t> parents = {-1, -1, 1, 2};
+    std::vector<RigExecWireSpaceSwitch> switches(2);
+    switches[0].slot = 1;
+    switches[0].sourceSlots = {3, -1};
+    switches[0].sourceReads = {RigExecWireFrameVersion{3, {}},
+                               RigExecWireFrameVersion{}};
+    switches[1].slot = 2;
+    switches[1].sourceSlots = {0, -1};
+    switches[1].spaceSlot = 0;
+    switches[1].parentRead = RigExecWireFrameVersion{-1, {1}};
+    switches[1].sourceReads = {RigExecWireFrameVersion{0, {}},
+                               RigExecWireFrameVersion{}};
+    switches[1].spaceRead = RigExecWireFrameVersion{0, {}};
+    switches[0].parentRead = RigExecWireFrameVersion{-1, {}};
+    std::vector<uint8_t> bytes;
+    std::string error;
+    CHECK(RigExecWireEncodeSpaceSwitches(switches, &bytes));
+    const auto same = [](const RigExecWireFrameVersion &a,
+                         const RigExecWireFrameVersion &b) {
+        return a.anchor == b.anchor && a.recompose == b.recompose;
+    };
+    {
+        RigExecWireReader cursor(bytes.data(), bytes.size());
+        std::vector<RigExecWireSpaceSwitch> got;
+        CHECK(RigExecWireDecodeSpaceSwitches(&cursor, parents, &got,
+                                             &error));
+        CHECK(got.size() == 2);
+        for (size_t i = 0; i < got.size() && i < switches.size(); ++i) {
+            CHECK(same(got[i].parentRead, switches[i].parentRead));
+            CHECK(same(got[i].spaceRead, switches[i].spaceRead));
+            CHECK(got[i].sourceReads.size() == 2);
+            for (size_t k = 0; k < got[i].sourceReads.size() && k < 2;
+                 ++k) {
+                CHECK(same(got[i].sourceReads[k],
+                           switches[i].sourceReads[k]));
+            }
+        }
+    }
+    // Per switch: anchor, count, recompose; source count, two versions;
+    // the space's version.
+    size_t block = 0;
+    for (const RigExecWireSpaceSwitch &sw : switches) {
+        block += 8 + 4 * sw.parentRead.recompose.size() + 4;
+        for (const RigExecWireFrameVersion &read : sw.sourceReads) {
+            block += 8 + 4 * read.recompose.size();
+        }
+        block += 8 + 4 * sw.spaceRead.recompose.size();
+    }
+    CHECK(bytes.size() > block);
+    if (bytes.size() <= block) {
+        return;
+    }
+    const size_t start = bytes.size() - block;
+    {
+        RigExecWireReader cursor(bytes.data(), start);
+        std::vector<RigExecWireSpaceSwitch> older;
+        CHECK(RigExecWireDecodeSpaceSwitches(&cursor, parents, &older,
+                                             &error));
+        CHECK(older.size() == 2);
+        if (older.size() == 2) {
+            CHECK(same(older[0].parentRead, RigExecWireFrameVersion{-1, {}}));
+            CHECK(same(older[1].parentRead, RigExecWireFrameVersion{1, {}}));
+            CHECK(older[1].sourceReads.size() == 2 &&
+                  same(older[1].sourceReads[0],
+                       RigExecWireFrameVersion{0, {}}) &&
+                  same(older[1].sourceReads[1], RigExecWireFrameVersion{}));
+            CHECK(same(older[1].spaceRead, RigExecWireFrameVersion{0, {}}));
+            CHECK(same(older[0].spaceRead, RigExecWireFrameVersion{}));
+        }
+        // The defaults name the namespace parent: a switch slot the slot
+        // inventory does not cover cannot be given one.
+        RigExecWireReader again(bytes.data(), start);
+        CHECK(!RigExecWireDecodeSpaceSwitches(&again, {-1, -1}, &older,
+                                              &error));
+    }
+    for (size_t size = start + 1; size < bytes.size(); ++size) {
+        RigExecWireReader prefix(bytes.data(), size);
+        std::vector<RigExecWireSpaceSwitch> partial;
+        CHECK(!RigExecWireDecodeSpaceSwitches(&prefix, parents, &partial,
+                                              &error));
+    }
+    const auto refused = [&](std::vector<RigExecWireSpaceSwitch> edited) {
+        std::vector<uint8_t> out;
+        if (!RigExecWireEncodeSpaceSwitches(edited, &out)) {
+            return true;
+        }
+        RigExecWireReader cursor(out.data(), out.size());
+        std::vector<RigExecWireSpaceSwitch> decoded;
+        return !RigExecWireDecodeSpaceSwitches(&cursor, parents, &decoded,
+                                               &error);
+    };
+    std::vector<RigExecWireSpaceSwitch> edited = switches;
+    edited[1].parentRead.anchor = -2;
+    CHECK(refused(edited));
+    edited = switches;
+    edited[1].spaceRead.recompose = {-1};
+    CHECK(refused(edited));
+    // The encoder refuses a source run that is not parallel to the
+    // sources; so does the decoder, given one.
+    edited = switches;
+    edited[0].sourceReads.pop_back();
+    std::vector<uint8_t> unused;
+    CHECK(!RigExecWireEncodeSpaceSwitches(edited, &unused));
+    std::vector<uint8_t> miscounted = bytes;
+    const size_t countAt =
+        start + 8 + 4 * switches[0].parentRead.recompose.size();
+    const uint32_t three = 3;
+    std::memcpy(&miscounted[countAt], &three, sizeof(three));
+    {
+        RigExecWireReader cursor(miscounted.data(), miscounted.size());
+        std::vector<RigExecWireSpaceSwitch> decoded;
+        CHECK(!RigExecWireDecodeSpaceSwitches(&cursor, parents, &decoded,
+                                              &error));
+    }
+}
+
 static void
 TestContainerRoundTrip()
 {
@@ -2581,6 +2707,7 @@ main(int argc, char **argv)
     TestExternalMoversWire();
     TestComputedWire();
     TestSolverSpaceWire();
+    TestSpaceSwitchVersionWire();
     TestComputedEnvelopeBake();
     TestComputedCurrentPhaseBake();
     TestComputedChainBake();

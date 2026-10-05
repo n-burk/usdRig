@@ -533,6 +533,40 @@ private:
         return _PathId(phase.prim, _AnyPath, row, field, index);
     }
 
+    /// A space switch's read version: present, its anchor -1 or a slot,
+    /// and each recompose entry a slot the compose has avars for.
+    bool _FrameVersion(const fb::RigExecWireFrameVersion *read,
+                       const std::string &where)
+    {
+        if (!read) {
+            return _Bad(where + ": missing");
+        }
+        if (!_Index(read->anchor, _slots, true, where, "anchor") ||
+            !_Indices(read->recompose, _slots, false, where, "recompose")) {
+            return false;
+        }
+        for (size_t k = 0; k < read->recompose.size(); ++k) {
+            if (_f.slotMeta->slotKind[size_t(read->recompose[k])] !=
+                fb::SlotKind::FirstFramePose) {
+                return _Bad(_At(where, "recompose", long(k)) +
+                            ": not a FirstFramePose slot");
+            }
+        }
+        return true;
+    }
+
+    /// The version of a world source or of a missing space: the compose
+    /// never reads it, and the program leaves it at {-1, []}.
+    bool _UnreadVersion(const fb::RigExecWireFrameVersion &read,
+                        const std::string &where)
+    {
+        if (read.anchor != -1 || !read.recompose.empty()) {
+            return _Bad(where + ": reads no slot, so its version is "
+                                "{-1, []}");
+        }
+        return true;
+    }
+
     bool _ClusterSet(const fb::RigExecWireClusterSet *set,
                      const std::string &where)
     {
@@ -1161,6 +1195,22 @@ private:
                 if (sw.filters[k] > uint8_t(fb::RotationFilter::MAX)) {
                     return _Bad(_At(row, "filters", long(k)) +
                                 ": out of range");
+                }
+            }
+            if (!_FrameVersion(sw.parentRead.get(), row + ".parent_read") ||
+                !_FrameVersion(sw.spaceRead.get(), row + ".space_read") ||
+                (sw.spaceSlot == -1 &&
+                 !_UnreadVersion(*sw.spaceRead, row + ".space_read")) ||
+                !_Size(sw.sourceReads.size(), sw.sourceSlots.size(), row,
+                       "source_reads")) {
+                return false;
+            }
+            for (size_t k = 0; k < sw.sourceReads.size(); ++k) {
+                const std::string at = _At(row, "source_reads", long(k));
+                if (!_FrameVersion(&sw.sourceReads[k], at) ||
+                    (sw.sourceSlots[k] == -1 &&
+                     !_UnreadVersion(sw.sourceReads[k], at))) {
+                    return false;
                 }
             }
         }
