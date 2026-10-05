@@ -965,8 +965,15 @@ add_executable(testRigExecSolverBake tests/testRigExecSolverBake.cpp)
 target_link_libraries(testRigExecSolverBake PRIVATE rigExec)
 target_compile_definitions(testRigExecSolverBake
     PRIVATE ${_rigexec_schema_resource_define})
+target_include_directories(testRigExecSolverBake PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
 add_test(NAME testRigExecSolverBake COMMAND testRigExecSolverBake
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# Lists the solvers whose space rest can move after Build, and those whose
+# space slot sits under one of their own joints (the refresh's candidates).
+add_test(NAME testRigExecSolverBakeSpaceRestCandidates
+    COMMAND testRigExecSolverBake "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+    --space-rest-candidates)
 rigexec_add_baked_parity_test(testRigExecSolverBake REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 

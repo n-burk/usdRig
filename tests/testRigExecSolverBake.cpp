@@ -13,6 +13,9 @@
 // refusal. No shipped example is malformed, so these are the only rigs in
 // the tree where that agreement is checked at all.
 // argv[1] = path to the examples directory (for the schema plugin).
+// argv[2] = --space-rest-candidates lists the space-rest refresh's
+// candidate solvers instead of running the suite.
+#include "rigExecExampleFixtures.h"
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
@@ -26,6 +29,7 @@
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
@@ -1220,6 +1224,11 @@ CompareRestDescription(const SolverDesc &held, const SolverDesc &refreshed,
                              refreshed.ikParams.lowerLength),
                     scalar(held.ikParams.lowerLength,
                            refreshed.ikParams.lowerLength));
+        if (held.spaceSlot >= 0) {
+            diff->Field("spaceRest", false,
+                        SameBits(held.spaceRest, refreshed.spaceRest),
+                        points(held.spaceRest, refreshed.spaceRest));
+        }
     } else if (held.type == "RigExecSplineIk") {
         bool anyLive = false;
         diff->Field("splineJointRests.size", false,
@@ -1266,6 +1275,11 @@ CompareRestDescription(const SolverDesc &held, const SolverDesc &refreshed,
                     SameBits(held.splineRest, refreshed.splineRest),
                     scalar(held.splineRest.restArcLength,
                            refreshed.splineRest.restArcLength));
+        if (held.spaceSlot >= 0) {
+            diff->Field("spaceRest", false,
+                        SameBits(held.spaceRest, refreshed.spaceRest),
+                        points(held.spaceRest, refreshed.spaceRest));
+        }
     } else if (held.type == "RigExecTwistDistribution") {
         diff->Field("twistStartRest", false,
                     SameBits(held.twistStartRest, refreshed.twistStartRest),
@@ -1507,6 +1521,417 @@ TestRefreshSolverRestsOnBuildStateIsIdentity(const char *what,
     return counts.sinceBuildRecomposed;
 }
 
+/// The rigs whose solvers measure from a rest, R0's table.
+std::vector<std::pair<std::string, MakeStage>>
+RestFixtureRigs(const std::string &examples)
+{
+    const std::string fixtures = examples + "/../tests/fixtures";
+    const auto file = [](const std::string &path) -> MakeStage {
+        return [path] { return UsdStage::Open(path); };
+    };
+    return {
+        {"biped", file(examples + "/biped/Biped.usda")},
+        {"01 fk chain tail", file(examples + "/01_FkChainTail.usda")},
+        {"02 two-bone ik leg", file(examples + "/02_TwoBoneIkLeg.usda")},
+        {"03 ik/fk blend clamp", file(examples + "/03_IkFkBlendClamp.usda")},
+        {"05 twist ribbon spine",
+         file(examples + "/05_TwistRibbonSpine.usda")},
+        {"13 read phases", file(examples + "/13_ReadPhases.usda")},
+        {"arm rig", file(examples + "/ArmRig.usda")},
+        {"rubberhose", file(examples + "/2d/rubberhose/rubberhose_rig.usda")},
+        {"bust", file(examples + "/2d/bust/bust_rig.usda")},
+        {"solver_checkpoint", file(fixtures + "/solver_checkpoint.usda")},
+        {"oneloop_two_limbs", file(fixtures + "/oneloop_two_limbs.usda")},
+        {"oneloop_cross_domain",
+         file(fixtures + "/oneloop_cross_domain.usda")},
+        {"computed_ik_space", file(fixtures + "/computed_ik_space.usda")},
+        {"preceding_own_chain", file(fixtures + "/preceding_own_chain.usda")},
+        {"volume_placements", file(fixtures + "/volume_placements.usda")},
+        {"two-bone ik rig", MakeTwoBoneIkRig},
+        {"spline ik rig", MakeSplineIkRig},
+        {"twist distribution rig", MakeTwistRig},
+        {"ik/fk blend rig", MakeBlendRig},
+    };
+}
+
+// TestASpaceRestMoveReachesTheSolve.
+//
+// A TwoBoneIk or SplineIk that names rigExec:space measures the space delta
+// from its space slot's rest (Solver::spaceRest). Dynamic reads that rest
+// from the space target's computeRestFrame on every evaluation, so the baked
+// refresh has to rewrite it whenever the ladder moves it. computed_ik_space's
+// arm and tail both name the Master control, whose rest is moved here by
+// keyed rest channels, by a drag on one and by authored edits.
+
+const SdfPath kIkSpaceMaster("/IkSpaceAsset/Rig/Controls/Master");
+const SdfPath kIkSpaceWrist("/IkSpaceAsset/Rig/Joints/Shoulder/Elbow/Wrist");
+const SdfPath kIkSpaceTailEnd(
+    "/IkSpaceAsset/Rig/Joints/Tail0/Tail1/Tail2/Tail3/Tail4");
+
+/// A reference and a baked evaluator, each over its own stage.
+struct EvaluatorPair {
+    UsdStageRefPtr referenceStage;
+    UsdStageRefPtr bakedStage;
+    std::unique_ptr<RigExecRigEvaluator> reference;
+    std::unique_ptr<RigExecRigEvaluator> baked;
+};
+
+bool
+MakeEvaluatorPair(const char *what, const MakeStage &make,
+                  EvaluatorPair *pair)
+{
+    pair->referenceStage = make();
+    pair->bakedStage = make();
+    pair->reference = CompileFixture(what, pair->referenceStage);
+    pair->baked = CompileFixture(what, pair->bakedStage);
+    if (!pair->reference || !pair->baked) return false;
+    pair->reference->SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    pair->baked->SetEvaluationMode(
+        RigExecEvaluationMode::BakedWithParityCheck);
+    return true;
+}
+
+/// Evaluates one generation on each side of \p pair at \p frame and
+/// compares them the way CheckParity does. Returns whether they agreed;
+/// \p dynamic receives the reference generation.
+bool
+GenerationsAgree(const std::string &where, EvaluatorPair *pair, double frame,
+                 RigExecRigPose *dynamic)
+{
+    const int before = failures;
+    const size_t generations = pair->baked->GetBakedGenerationCount();
+    *dynamic = pair->reference->Evaluate(UsdTimeCode(frame));
+    const RigExecRigPose b = pair->baked->Evaluate(UsdTimeCode(frame));
+    CHECK(dynamic->valid && b.valid);
+    if (b.bakedParityMismatches) {
+        ++failures;
+        std::printf("FAIL %s: %zu baked parity mismatch(es)\n", where.c_str(),
+                    b.bakedParityMismatches);
+        for (const std::string &line : b.diagnostics) {
+            std::printf("    %s\n", line.c_str());
+        }
+    }
+    rigExecTest::ComparePose(&failures, where, *dynamic, b);
+    if (pair->baked->GetBakedGenerationCount() != generations + 1) {
+        ++failures;
+        std::printf("FAIL %s: the generation did not come from the program\n",
+                    where.c_str());
+    }
+    return failures == before;
+}
+
+/// Fails unless \p joint's final frame differs between \p a and \p b.
+void
+RequireJointMoved(const char *what, const RigExecRigPose &a,
+                  const RigExecRigPose &b, const SdfPath &joint)
+{
+    const auto x = a.jointFramesFinal.find(joint);
+    const auto y = b.jointFramesFinal.find(joint);
+    if (x == a.jointFramesFinal.end() || y == b.jointFramesFinal.end() ||
+        rigExecTest::SameFrame(x->second, y->second)) {
+        ++failures;
+        std::printf("FAIL %s: the space rest move did not move %s on the "
+                    "dynamic path\n",
+                    what, joint.GetText());
+    }
+}
+
+void
+TestASpaceRestMoveReachesTheSolve(const std::string &examples)
+{
+    const std::string file =
+        examples + "/../tests/fixtures/computed_ik_space.usda";
+    const MakeStage plain = [file] { return UsdStage::Open(file); };
+    const MakeStage keyed = [file] {
+        const UsdStageRefPtr stage = UsdStage::Open(file);
+        if (!stage) return stage;
+        UsdEditContext session(stage, stage->GetSessionLayer());
+        const UsdPrim master = stage->GetPrimAtPath(kIkSpaceMaster);
+        const auto key = [&master](const char *name, double last) {
+            UsdAttribute a = master.CreateAttribute(
+                TfToken(name), SdfValueTypeNames->Double);
+            a.Set(0.0, UsdTimeCode(1.0));
+            a.Set(last, UsdTimeCode(10.0));
+        };
+        key("rest:ry", 20.0);
+        key("rest:tx", 3.0);
+        return stage;
+    };
+    size_t generations = 0;
+    size_t disagreeing = 0;
+    const auto compare = [&](const std::string &where, EvaluatorPair *pair,
+                             double frame, RigExecRigPose *dynamic) {
+        ++generations;
+        if (!GenerationsAgree(where, pair, frame, dynamic)) ++disagreeing;
+    };
+
+    // Keyed: frame 1 is Build's rest, 5 and 10 are not.
+    {
+        const char *what = "a keyed space rest";
+        EvaluatorPair pair;
+        if (MakeEvaluatorPair(what, keyed, &pair)) {
+            RigExecRigPose dynamic;
+            for (const double frame : {1.0, 5.0, 10.0}) {
+                compare(std::string(what) + " frame " +
+                            std::to_string(int(frame)),
+                        &pair, frame, &dynamic);
+            }
+            // Against the unkeyed rig at frame 10, or both halves agree
+            // about a rest nothing moved.
+            const UsdStageRefPtr stillStage = plain();
+            const auto still = CompileFixture(what, stillStage);
+            if (still) {
+                still->SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+                const RigExecRigPose unmoved =
+                    still->Evaluate(UsdTimeCode(10.0));
+                RequireJointMoved(what, dynamic, unmoved, kIkSpaceWrist);
+                RequireJointMoved(what, dynamic, unmoved, kIkSpaceTailEnd);
+            }
+        }
+    }
+
+    // Dragged at a held frame: two drag values, then the release.
+    {
+        const char *what = "a dragged space rest";
+        EvaluatorPair pair;
+        if (MakeEvaluatorPair(what, plain, &pair)) {
+            const double frame = 5.0;
+            RigExecRigPose settled, dragged, other;
+            compare(std::string(what) + " settled", &pair, frame, &settled);
+            const auto drag = [&](double degrees) {
+                const std::vector<RigExecValueOverride> overrides{
+                    RigExecValueOverride{kIkSpaceMaster, TfToken(),
+                                         TfToken("rest:ry"),
+                                         VtValue(degrees)}};
+                pair.reference->SetInteractiveOverrides(overrides);
+                pair.baked->SetInteractiveOverrides(overrides);
+            };
+            drag(15.0);
+            compare(std::string(what) + " at 15", &pair, frame, &dragged);
+            drag(25.0);
+            compare(std::string(what) + " at 25", &pair, frame, &other);
+            pair.reference->ClearInteractiveOverrides();
+            pair.baked->ClearInteractiveOverrides();
+            compare(std::string(what) + " released", &pair, frame, &other);
+            RequireJointMoved(what, dragged, settled, kIkSpaceWrist);
+            RequireJointMoved(what, dragged, settled, kIkSpaceTailEnd);
+        }
+    }
+
+    // Edited at a held frame: an authored rest:tx change on the space slot,
+    // on a keyed ladder (the edit is routed to the ladder) and on a static
+    // one (the program answers it however the notice is classified).
+    for (const bool keyedLadder : {true, false}) {
+        const std::string what = std::string("an edited space rest (") +
+                                 (keyedLadder ? "keyed" : "static") + ")";
+        EvaluatorPair pair;
+        if (!MakeEvaluatorPair(what.c_str(), keyedLadder ? keyed : plain,
+                               &pair)) {
+            continue;
+        }
+        const double frame = 5.0;
+        RigExecRigPose before, after;
+        compare(what + " before", &pair, frame, &before);
+        for (const UsdStageRefPtr &stage :
+             {pair.referenceStage, pair.bakedStage}) {
+            UsdEditContext session(stage, stage->GetSessionLayer());
+            UsdAttribute a =
+                stage->GetPrimAtPath(kIkSpaceMaster)
+                    .CreateAttribute(TfToken("rest:tx"),
+                                     SdfValueTypeNames->Double);
+            if (keyedLadder) {
+                a.Set(6.0, UsdTimeCode(10.0));
+            } else {
+                a.Set(1.5);
+            }
+        }
+        compare(what + " after", &pair, frame, &after);
+        RequireJointMoved(what.c_str(), after, before, kIkSpaceWrist);
+        RequireJointMoved(what.c_str(), after, before, kIkSpaceTailEnd);
+    }
+    std::printf("a moved space rest: %zu of %zu generation(s) disagreed\n",
+                disagreeing, generations);
+}
+
+// The space-rest candidates. The refresh writes Solver::spaceRest from
+// B.restPts[spaceSlot], so it changes a value only where that rest moves
+// after Build: a varying, connected or dragged rest channel on the space
+// slot or a ladder ancestor, seen here both from the channels and from what
+// the runs leave in restPts. Listed apart: solvers whose space slot is at or
+// under one of their own joints, where dynamic's computeRestFrame overrides
+// (rigEvaluatorDynamic.cpp, restInputs) can move the space rest and baked's
+// ladder does not; that gap is outside the refresh.
+
+struct CandidateRig {
+    std::string name;
+    MakeStage make;
+    std::vector<double> frames;
+    /// The registered control drag, or empty.
+    SdfPath dragPrim;
+    std::string dragAttribute;
+};
+
+std::vector<double>
+ParseFrames(const std::string &text)
+{
+    std::vector<double> frames;
+    size_t at = 0;
+    while (at < text.size()) {
+        const size_t comma = text.find(',', at);
+        const std::string item = text.substr(
+            at, comma == std::string::npos ? std::string::npos : comma - at);
+        if (!item.empty()) frames.push_back(std::stod(item));
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+    }
+    return frames;
+}
+
+void
+ListSpaceRestCandidates(const std::vector<CandidateRig> &rigs)
+{
+    size_t spaced = 0;
+    std::vector<std::string> moving;
+    std::vector<std::string> underJoint;
+    for (const CandidateRig &rig : rigs) {
+        const UsdStageRefPtr stage = rig.make();
+        if (!stage) {
+            ++failures;
+            std::printf("FAIL %s: the stage does not open\n",
+                        rig.name.c_str());
+            continue;
+        }
+        SdfPathVector roots;
+        for (const UsdPrim &prim : stage->Traverse()) {
+            if (prim.GetTypeName() == "RigExecRoot") {
+                roots.push_back(prim.GetPath());
+            }
+        }
+        for (const SdfPath &root : roots) {
+            const std::string where = rig.name + " " + root.GetString();
+            RigExecRigEvaluator evaluator(stage, root);
+            std::vector<std::string> errors;
+            if (!evaluator.Compile(&errors)) {
+                std::printf("%s: does not compile, not listed\n",
+                            where.c_str());
+                continue;
+            }
+            std::vector<std::string> reasons;
+            const std::unique_ptr<RigExecBakedProgram> built =
+                RigExecBakedProgram::Build(&evaluator, &reasons);
+            if (!built) {
+                std::printf("%s: does not bake, not listed\n", where.c_str());
+                continue;
+            }
+            const RigExecBakedProgramImpl &build = built->GetStepGraph();
+            std::vector<size_t> spaceSolvers;
+            for (size_t i = 0; i < build.solvers.size(); ++i) {
+                if (build.solvers[i].spaceSlot >= 0) spaceSolvers.push_back(i);
+            }
+            if (spaceSolvers.empty()) continue;
+            spaced += spaceSolvers.size();
+
+            std::vector<std::string> why(build.solvers.size());
+            for (const size_t i : spaceSolvers) {
+                for (int slot = build.solvers[i].spaceSlot; slot >= 0;
+                     slot = build.parent[size_t(slot)]) {
+                    const SdfPath &path = build.paths[size_t(slot)];
+                    const UsdPrim prim = stage->GetPrimAtPath(path);
+                    if (!prim) continue;
+                    for (const UsdAttribute &a : prim.GetAttributes()) {
+                        const std::string name = a.GetName().GetString();
+                        if (name.rfind("rest:", 0) != 0) continue;
+                        if (a.ValueMightBeTimeVarying()) {
+                            why[i] += " " + a.GetPath().GetString() +
+                                      " varies;";
+                        }
+                        if (a.HasAuthoredConnections()) {
+                            why[i] += " " + a.GetPath().GetString() +
+                                      " is connected;";
+                        }
+                        if (path == rig.dragPrim &&
+                            name == rig.dragAttribute) {
+                            why[i] += " " + a.GetPath().GetString() +
+                                      " is the registered drag;";
+                        }
+                    }
+                }
+            }
+            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+            std::vector<bool> moved(build.solvers.size(), false);
+            for (const double frame : rig.frames) {
+                evaluator.Evaluate(UsdTimeCode(frame));
+                const RigExecBakedProgram *program =
+                    evaluator.GetBakedProgram();
+                if (!program) continue;
+                const RigExecBakedProgramImpl &B = program->GetStepGraph();
+                if (B.paths != build.paths) {
+                    ++failures;
+                    std::printf("FAIL %s: the run's program numbers its "
+                                "slots differently from Build's\n",
+                                where.c_str());
+                    break;
+                }
+                for (const size_t i : spaceSolvers) {
+                    const size_t slot = size_t(build.solvers[i].spaceSlot);
+                    if (moved[i] ||
+                        SameBits(B.restPts[slot], build.restPts[slot])) {
+                        continue;
+                    }
+                    moved[i] = true;
+                    char text[64];
+                    std::snprintf(text, sizeof(text), "%g", frame);
+                    why[i] += std::string(" its rest differs from Build's "
+                                          "at frame ") +
+                              text + ";";
+                }
+            }
+
+            for (const size_t i : spaceSolvers) {
+                const SolverDesc &s = build.solvers[i];
+                const SdfPath &space = build.paths[size_t(s.spaceSlot)];
+                const std::string solver = where + " " + s.path.GetString() +
+                                           " (space " + space.GetString() +
+                                           ")";
+                std::printf("%s: names a space\n", solver.c_str());
+                if (!why[i].empty()) moving.push_back(solver + ":" + why[i]);
+                SdfPathVector named;
+                if (const UsdPrim prim = stage->GetPrimAtPath(s.path)) {
+                    if (const UsdRelationship rel = prim.GetRelationship(
+                            TfToken("rigExec:joints"))) {
+                        rel.GetTargets(&named);
+                    }
+                }
+                for (const SdfPath &joint : named) {
+                    if (space.HasPrefix(joint.GetPrimPath())) {
+                        underJoint.push_back(
+                            solver + ": at or under " + joint.GetString() +
+                            (s.hasLiveRest ? " (live rest)"
+                                           : " (no live rest)"));
+                    }
+                }
+            }
+        }
+    }
+    std::printf("space-rest candidates: %zu solver(s) name a space\n",
+                spaced);
+    std::printf("whose space rest can move after Build: %zu\n",
+                moving.size());
+    for (const std::string &line : moving) {
+        std::printf("    %s\n", line.c_str());
+    }
+    std::printf("whose space slot is at or under one of their joints: %zu\n",
+                underJoint.size());
+    for (const std::string &line : underJoint) {
+        std::printf("    %s\n", line.c_str());
+    }
+    if (spaced == 0) {
+        ++failures;
+        std::printf("FAIL no rig names a solver space, so the list says "
+                    "nothing\n");
+    }
+}
+
 }  // namespace
 
 static std::string
@@ -1532,6 +1957,41 @@ main(int argc, char **argv)
         std::printf("FATAL: no schema plugin found at %s\n",
                     resources.c_str());
         return 2;
+    }
+
+    // The affected-fixture candidates for the space-rest refresh, listed
+    // by their own ctest entry.
+    if (argc > 2 && std::string(argv[2]) == "--space-rest-candidates") {
+        std::vector<CandidateRig> rigs;
+        for (const auto &[what, make] : RestFixtureRigs(argv[1])) {
+            std::vector<double> frames{1, 3, 7};
+            if (const UsdStageRefPtr stage = make()) {
+                if (stage->HasAuthoredTimeCodeRange()) {
+                    const double start = stage->GetStartTimeCode();
+                    const double end = stage->GetEndTimeCode();
+                    frames = {start, 0.5 * (start + end), end};
+                }
+            }
+            rigs.push_back({what, make, frames, SdfPath(), std::string()});
+        }
+        for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
+            const std::string path =
+                std::string(argv[1]) + "/" + fixture.stage;
+            rigs.push_back(
+                {std::string("example ") + fixture.stage,
+                 [path] { return UsdStage::Open(path); },
+                 ParseFrames(fixture.frames),
+                 *fixture.controlPrim ? SdfPath(fixture.controlPrim)
+                                      : SdfPath(),
+                 fixture.controlAvar});
+        }
+        ListSpaceRestCandidates(rigs);
+        if (failures) {
+            std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);
+            return 1;
+        }
+        std::printf("testRigExecSolverBake: all tests passed\n");
+        return 0;
     }
 
     const std::vector<double> frames{1, 2, 3, 4, 5};
@@ -1650,41 +2110,10 @@ main(int argc, char **argv)
 
     // Every fixture whose solvers measure from a rest.
     {
-        const std::string examples = argv[1];
-        const std::string fixtures = examples + "/../tests/fixtures";
-        const auto file = [](const std::string &path) -> MakeStage {
-            return [path] { return UsdStage::Open(path); };
-        };
-        const std::pair<const char *, MakeStage> rigs[] = {
-            {"biped", file(examples + "/biped/Biped.usda")},
-            {"01 fk chain tail", file(examples + "/01_FkChainTail.usda")},
-            {"02 two-bone ik leg", file(examples + "/02_TwoBoneIkLeg.usda")},
-            {"03 ik/fk blend clamp",
-             file(examples + "/03_IkFkBlendClamp.usda")},
-            {"05 twist ribbon spine",
-             file(examples + "/05_TwistRibbonSpine.usda")},
-            {"13 read phases", file(examples + "/13_ReadPhases.usda")},
-            {"arm rig", file(examples + "/ArmRig.usda")},
-            {"rubberhose",
-             file(examples + "/2d/rubberhose/rubberhose_rig.usda")},
-            {"bust", file(examples + "/2d/bust/bust_rig.usda")},
-            {"solver_checkpoint", file(fixtures + "/solver_checkpoint.usda")},
-            {"oneloop_two_limbs", file(fixtures + "/oneloop_two_limbs.usda")},
-            {"oneloop_cross_domain",
-             file(fixtures + "/oneloop_cross_domain.usda")},
-            {"computed_ik_space", file(fixtures + "/computed_ik_space.usda")},
-            {"preceding_own_chain",
-             file(fixtures + "/preceding_own_chain.usda")},
-            {"volume_placements", file(fixtures + "/volume_placements.usda")},
-            {"two-bone ik rig", MakeTwoBoneIkRig},
-            {"spline ik rig", MakeSplineIkRig},
-            {"twist distribution rig", MakeTwistRig},
-            {"ik/fk blend rig", MakeBlendRig},
-        };
         size_t recomposed = 0;
-        for (const auto &[what, make] : rigs) {
-            recomposed +=
-                TestRefreshSolverRestsOnBuildStateIsIdentity(what, make);
+        for (const auto &[what, make] : RestFixtureRigs(argv[1])) {
+            recomposed += TestRefreshSolverRestsOnBuildStateIsIdentity(
+                what.c_str(), make);
         }
         // A skipped refresh while another solver's rests recompose is the
         // case the gate exists for, so it has to have been exercised.
@@ -1694,6 +2123,8 @@ main(int argc, char **argv)
                         "recomposed the ladder\n");
         }
     }
+
+    TestASpaceRestMoveReachesTheSolve(argv[1]);
 
     if (failures) {
         std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);

@@ -3189,6 +3189,12 @@ RefreshSolverRests(const RigExecBakedProgramImpl &B,
                                 s.lowerOffset.constant,
                                 &s.ikParams.upperLength,
                                 &s.ikParams.lowerLength);
+        // The space target's computeRestFrame, read where Build read it.
+        // Never live: a live ref is a joint rest, and Build reads the space
+        // slot's rest without one.
+        if (s.spaceSlot >= 0) {
+            s.spaceRest = B.restPts[size_t(s.spaceSlot)];
+        }
     } else if (s.type == "RigExecSplineIk") {
         std::vector<RigExecPointFrame> restJoints(s.splineCount);
         for (size_t k = 0; k < s.restRefs.size(); ++k) {
@@ -3209,6 +3215,10 @@ RefreshSolverRests(const RigExecBakedProgramImpl &B,
         s.splineRest = RigExecSplineIkMakeRest(
             restJoints, s.splineRootRest, s.splineMidRest, s.splineEndRest,
             s.splineRestWeights, s.splineRestMode);
+        // As for the TwoBoneIk above.
+        if (s.spaceSlot >= 0) {
+            s.spaceRest = B.restPts[size_t(s.spaceSlot)];
+        }
     } else if (s.type == "RigExecTwistDistribution") {
         if (s.root >= 0 && s.end >= 0) {
             s.twistStartRest = B.restPts[size_t(s.root)];
