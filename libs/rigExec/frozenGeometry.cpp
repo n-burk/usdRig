@@ -84,14 +84,13 @@ _AssembleDerivedPacket(const RigExecBakedProgramImpl::GeomRevision &revision,
     return true;
 }
 
-// The frozen RevisionStatic: bakedGeometry.cpp:2195's body with the
 // The frozen weight-object step: RigExecBakedWeightPacket restated over
 // patched scalar inputs (the _ForEachPatchableInput walker covers them)
 // and sampled point arrays (the synthetic keys _SampleWeightArrays
 // writes). The builders are the shared pure kernels; only the reads
 // differ, because the worker cannot touch the stage or the oracle.
-// Volume placements write the worker's own program table, as the live
-// VolumePlacements step does.
+// Volume placements go through RigExecVolumePlacement and write the
+// worker's own program table, as the live VolumePlacements step does.
 bool
 _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
                   const std::map<SdfPath, size_t> &index,
@@ -100,20 +99,13 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
     RigExecBakedProgramImpl &B = worker->B;
     if (step->kind == RigExecBakedStepKind::VolumePlacements) {
         // This step's no-scale provider, placed or identity, from the frame
-        // the walk ended with. This gate is IsValid + IsDegenerate only, with
-        // no finite check (RigExecVolumePlacement has one): a non-finite
-        // final frame places at a NaN matrix here and at the identity live.
+        // the walk ended with.
         const size_t slot = size_t(step->object);
         if (slot >= B.noScaleAvars.size() || !B.noScaleAvars[slot]) {
             return false;
         }
-        GfMatrix4d placement(1.0);
-        const RigExecPointFrame &frame = B.fin[size_t(B.finLast[slot])];
-        if (frame.IsValid() && !frame.IsDegenerate()) {
-            RigExecPointsToMatrix(RigExecIdentityLandmarks(), frame.points,
-                                  &placement);
-        }
-        B.volumePlacement[slot] = placement;
+        B.volumePlacement[slot] =
+            RigExecVolumePlacement(B.fin[size_t(B.finLast[slot])]);
         return true;
     }
     const int id = step->object;
@@ -1074,6 +1066,8 @@ _FrozenAssembleEmitGuidePoints(
     return true;
 }
 
+// The frozen RevisionStatic: the RevisionStatic arm of
+// RigExecBakedRunGeometryStep (bakedGeometry.cpp) with the
 // worker-side derived assembly (normals/extent), and the mover-prim
 // defaultWeight read replaced by its sample. Everything else -- status,
 // dirty compare, publication sizing, layout and envelope decisions -- is the

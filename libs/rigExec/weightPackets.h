@@ -95,10 +95,10 @@ bool RigExecRigidWorldToLocal(
 /// measures its field in: the map taking the identity landmarks to the
 /// volume's FINAL frame, scale and shear kept. Identity unless the frame is
 /// valid, non-degenerate and finite. The dynamic walk's refresh and the
-/// baked program's VolumePlacements steps place a volume through this one
-/// function; the frozen worker keeps its own gate, which has no finite
-/// check. The exec packet path above places against the BASE frame
-/// instead, and the two differ for a volume a constraint revises.
+/// baked program's VolumePlacements steps, live and frozen, place a volume
+/// through this one function. The exec packet path above places against
+/// the BASE frame instead, and the two differ for a volume a constraint
+/// revises.
 GfMatrix4d RigExecVolumePlacement(const RigExecPointFrame &final);
 
 /// The resolved inputs of a volumetric weight object.

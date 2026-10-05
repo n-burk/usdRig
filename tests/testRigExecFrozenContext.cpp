@@ -22,6 +22,7 @@
 // USD handle cannot be -- and the purity audit names every unit the frozen
 // path was checked against.
 #include "rigExec/frozenContext.h"
+#include "rigExec/frozenContextInternal.h"
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/frameCache.h"
@@ -43,6 +44,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
@@ -4769,6 +4773,141 @@ TestVolumePlacementsFixtureFreezes(const std::string &examplesDir)
     }
 }
 
+// The frozen VolumePlacements step places through the shared gate
+// (RigExecVolumePlacement): a final frame flagged valid and non-degenerate
+// but holding a NaN point places at the identity, and frozen publishes what
+// the live step publishes for the same frame. The step bodies run on clones
+// of 11_VolumeWeights' program whose fin entry for one volume is poisoned
+// directly, so the step reads exactly a frame flagged valid and
+// non-degenerate yet non-finite, independent of what upstream compose and
+// commit steps would make of a non-finite authored value.
+void
+TestFrozenVolumePlacementUsesTheSharedGate(const std::string &examplesDir)
+{
+    const char *label = "frozen volume placement gate";
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/11_VolumeWeights.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    SdfPath rig;
+    for (const UsdPrim &prim : stage->TraverseAll()) {
+        if (prim.GetTypeName() == "RigExecRoot") {
+            rig = prim.GetPath();
+            break;
+        }
+    }
+    CHECK(!rig.IsEmpty());
+    if (rig.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
+    const UsdTimeCode time(1012.0);
+    const RigExecRigPose live = evaluator.Evaluate(time);
+    CHECK(live.valid);
+    const RigExecBakedProgramImpl &B =
+        evaluator.GetBakedProgram()->GetStepGraph();
+
+    // The first published volume and its VolumePlacements step.
+    size_t slot = B.placedVolumes.size();
+    for (size_t i = 0; i < B.placedVolumes.size(); ++i) {
+        if (B.placedVolumes[i]) {
+            slot = i;
+            break;
+        }
+    }
+    size_t stepIndex = B.steps.size();
+    for (size_t k = 0; k < B.steps.size(); ++k) {
+        if (B.steps[k].kind == RigExecBakedStepKind::VolumePlacements &&
+            B.steps[k].object == int(slot)) {
+            stepIndex = k;
+        }
+    }
+    CHECK(slot < B.placedVolumes.size() && stepIndex < B.steps.size() &&
+          slot < B.finLast.size());
+    if (slot >= B.placedVolumes.size() || stepIndex >= B.steps.size() ||
+        slot >= B.finLast.size()) {
+        return;
+    }
+    const SdfPath volume = B.paths[slot];
+    const size_t finIndex = size_t(B.finLast[slot]);
+    // Not vacuous: live places this volume away from the identity.
+    const auto published = live.weightFrames.find(volume);
+    CHECK(published != live.weightFrames.end() &&
+          published->second != GfMatrix4d(1.0));
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(evaluator, time, {}, &inputs, &error));
+    if (!frozen) {
+        std::printf("FAIL %s: freeze refused: %s\n", label, error.c_str());
+        ++failures;
+        return;
+    }
+
+    // One coordinate made non-finite, once as a NaN and once as +inf, so
+    // both halves of the finite check are exercised.
+    struct Poison {
+        double value;
+        const char *what;
+    };
+    const Poison poisons[] = {
+        {std::numeric_limits<double>::quiet_NaN(), "a NaN final frame"},
+        {std::numeric_limits<double>::infinity(), "an infinite final frame"},
+    };
+    for (const Poison &poison : poisons) {
+        // The frozen worker, as a job clones it, with the poisoned final
+        // frame.
+        auto worker = std::make_unique<frozenDetail::_FrozenWorker>();
+        frozenDetail::_CloneImpl(frozen->program, &worker->B);
+        CHECK(finIndex < worker->B.fin.size() &&
+              stepIndex < worker->B.steps.size());
+        if (finIndex >= worker->B.fin.size() ||
+            stepIndex >= worker->B.steps.size()) {
+            return;
+        }
+        RigExecPointFrame poisoned = worker->B.fin[finIndex];
+        poisoned.points[1][0] = poison.value;
+        // The flags pass a validity-only gate, which would place at a
+        // non-finite matrix.
+        CHECK(poisoned.IsValid() && !poisoned.IsDegenerate());
+        worker->B.fin[finIndex] = poisoned;
+        const std::map<SdfPath, size_t> index;
+        CHECK(frozenDetail::_FrozenStepBody(worker.get(),
+                                            &worker->B.steps[stepIndex],
+                                            index, inputs, time));
+        std::map<SdfPath, GfMatrix4d> frozenFrames;
+        RigExecBakedPublishVolumePlacements(worker->B, &frozenFrames);
+        const auto frozenEntry = frozenFrames.find(volume);
+        CHECK(frozenEntry != frozenFrames.end());
+        if (frozenEntry != frozenFrames.end() &&
+            frozenEntry->second != GfMatrix4d(1.0)) {
+            std::printf("FAIL %s: %s publishes a non-identity placement for "
+                        "%s\n",
+                        label, volume.GetText(), poison.what);
+            ++failures;
+        }
+
+        // Live's step body and publication over the same frame.
+        auto liveCopy = std::make_unique<RigExecBakedProgramImpl>();
+        frozenDetail::_CloneImpl(B, liveCopy.get());
+        liveCopy->fin[finIndex] = poisoned;
+        RigExecBakedRunWeightStep(liveCopy.get(),
+                                  &liveCopy->steps[stepIndex], time);
+        std::map<SdfPath, GfMatrix4d> liveFrames;
+        RigExecBakedPublishVolumePlacements(*liveCopy, &liveFrames);
+        CHECK(liveFrames.count(volume) == 1 &&
+              liveFrames.at(volume) == GfMatrix4d(1.0));
+        CheckWeightFramesEqual(label, poison.what, liveFrames, frozenFrames);
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4826,6 +4965,7 @@ main(int argc, char **argv)
         TestUnresolvableTargetDeclinesSampling(argv[1]);
         TestProjectorSpacesMatchDynamic(argv[1]);
         TestVolumePlacementsFixtureFreezes(argv[1]);
+        TestFrozenVolumePlacementUsesTheSharedGate(argv[1]);
         TestFrameRecordFallbacksFreeze(argv[1]);
         TestSolverCheckpointFreezes(argv[1]);
     } else {
