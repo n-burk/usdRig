@@ -191,7 +191,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.resolveWeights = {};
     D.volumePlacement = src.volumePlacement;
     D.placedVolumes = src.placedVolumes;
-    D.volumePlacementKeys = src.volumePlacementKeys;
     D.currentPhaseWeights = src.currentPhaseWeights;
     D.falloffLuts = src.falloffLuts;
     // Sized but empty: every packet is rebuilt by its step during the run

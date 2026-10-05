@@ -1651,13 +1651,14 @@ TestVolumeWeightsBurstMatchesPlain(const std::string &examplesDir)
     }
 }
 
-// The paths of every volume slot (noScaleAvars) of \p B.
+// The paths of every volume slot the walk places (placedVolumes) of \p B.
 static std::set<SdfPath>
-EveryVolumeSlot(const RigExecBakedProgramImpl &B)
+PlacedVolumeSlots(const RigExecBakedProgramImpl &B)
 {
     std::set<SdfPath> paths;
-    for (size_t i = 0; i < B.noScaleAvars.size() && i < B.paths.size(); ++i) {
-        if (B.noScaleAvars[i]) {
+    for (size_t i = 0; i < B.placedVolumes.size() && i < B.paths.size();
+         ++i) {
+        if (B.placedVolumes[i]) {
             paths.insert(B.paths[i]);
         }
     }
@@ -1674,20 +1675,8 @@ KeysOf(const std::map<SdfPath, GfMatrix4d> &frames)
     return keys;
 }
 
-// The cluster of \p B's first VolumePlacements step (there is one per
-// volume), or -1.
-static int
-VolumePlacementsCluster(const RigExecBakedProgramImpl &B)
-{
-    for (const RigExecBakedStep &step : B.steps) {
-        if (step.kind == RigExecBakedStepKind::VolumePlacements) {
-            return step.cluster;
-        }
-    }
-    return -1;
-}
-
-// The clusters of every VolumePlacements step of \p B, in program order.
+// The clusters of every VolumePlacements step of \p B (one per volume
+// slot), in program order.
 static std::vector<int>
 VolumePlacementsClusters(const RigExecBakedProgramImpl &B)
 {
@@ -1700,24 +1689,37 @@ VolumePlacementsClusters(const RigExecBakedProgramImpl &B)
     return clusters;
 }
 
-// What a frozen job publishes as weightFrames, from live state at \p time:
-//  - a partial cone with an empty plan restores the live program's slots and
-//    publishes live's map unchanged (live's keys, live's bits);
-//  - a partial cone that runs every cluster runs VolumePlacements and
-//    publishes every volume slot; an empty-plan cone restored from ITS slots
-//    publishes the same map;
-//  - a whole frozen job that runs VolumePlacements publishes that map too.
-// Returns the every-slot map.
-static std::map<SdfPath, GfMatrix4d>
-CheckFrozenWeightFrameKeys(RigExecRigEvaluator *evaluator,
-                           const SdfPath &rig, UsdTimeCode time,
-                           const char *what)
+// Frozen weightFrames must equal live's, keys and bits.
+static void
+CheckWeightFramesEqual(const char *what, const char *path,
+                       const std::map<SdfPath, GfMatrix4d> &live,
+                       const std::map<SdfPath, GfMatrix4d> &frozen)
+{
+    if (frozen == live) {
+        return;
+    }
+    std::printf("FAIL %s: %s publishes %zu weight frame(s), live %zu%s\n",
+                what, path, frozen.size(), live.size(),
+                KeysOf(frozen) == KeysOf(live) ? " (values differ)" : "");
+    ++failures;
+}
+
+// Every frozen path publishes live's weightFrames at \p time: an empty-plan
+// cone restored from live slots, a cone that runs every cluster (every
+// VolumePlacements step included), an empty-plan cone chained from that
+// cone's slots, and a whole job. Returns the slots the all-cluster cone
+// left.
+static std::shared_ptr<const void>
+CheckFrozenWeightFramesMatchLive(RigExecRigEvaluator *evaluator,
+                                 const SdfPath &rig, UsdTimeCode time,
+                                 const char *what)
 {
     const RigExecRigPose live = evaluator->Evaluate(time);
     CHECK(live.valid);
     CHECK(!live.weightFrames.empty());
     const RigExecBakedProgramImpl &B =
         evaluator->GetBakedProgram()->GetStepGraph();
+    CHECK(KeysOf(live.weightFrames) == PlacedVolumeSlots(B));
     std::shared_ptr<const void> slots;
     size_t slotBytes = 0;
     CHECK(RigExecCapturePartialSlots(B, &slots, &slotBytes));
@@ -1744,11 +1746,8 @@ CheckFrozenWeightFrameKeys(RigExecRigEvaluator *evaluator,
         RigExecRunPartialCone(*frozen, inputs, slots, live, none, 0);
     CHECK(skipped.completed);
     CHECK(skipped.executedClusters.empty());
-    if (skipped.pose.weightFrames != live.weightFrames) {
-        std::printf("FAIL %s: an empty-plan cone from live slots does not "
-                    "publish live's weightFrames\n", what);
-        ++failures;
-    }
+    CheckWeightFramesEqual(what, "an empty-plan cone from live slots",
+                           live.weightFrames, skipped.pose.weightFrames);
 
     RigExecBakedClusterSet all;
     all.SetAll(clusters);
@@ -1760,30 +1759,19 @@ CheckFrozenWeightFrameKeys(RigExecRigEvaluator *evaluator,
                         ran.executedClusters.end(),
                         placement) != ran.executedClusters.end());
     }
-    if (KeysOf(ran.pose.weightFrames) != EveryVolumeSlot(B)) {
-        std::printf("FAIL %s: a cone that ran VolumePlacements does not "
-                    "publish every volume slot\n", what);
-        ++failures;
-    }
-    for (const auto &[path, frame] : live.weightFrames) {
-        const auto found = ran.pose.weightFrames.find(path);
-        const bool same =
-            found != ran.pose.weightFrames.end() && found->second == frame;
-        if (!same) {
-            std::printf("FAIL %s: frozen weightFrames at %s differ from "
-                        "live\n", what, path.GetText());
-            ++failures;
-        }
-    }
+    CheckWeightFramesEqual(what, "a cone that ran VolumePlacements",
+                           live.weightFrames, ran.pose.weightFrames);
     const RigExecPartialRunResult chained =
         RigExecRunPartialCone(*frozen, inputs, ran.slots, ran.pose, none, 0);
     CHECK(chained.completed);
     CHECK(chained.executedClusters.empty());
-    CHECK(chained.pose.weightFrames == ran.pose.weightFrames);
+    CheckWeightFramesEqual(what, "an empty-plan cone from frozen slots",
+                           live.weightFrames, chained.pose.weightFrames);
 
     // On these rigs every VolumePlacements step shares its cluster with
-    // steps that read outside the program, so a whole job always runs each
-    // of them and publishes every volume slot.
+    // steps that read outside the program, so a whole job runs each of
+    // them. TestFrozenWholeRunSkippingVolumePlacementsPublishesLive covers
+    // the job that skips them.
     for (const int placement : placements) {
         CHECK(placement >= 0 && B.cones.always.Test(placement));
     }
@@ -1792,19 +1780,17 @@ CheckFrozenWeightFrameKeys(RigExecRigEvaluator *evaluator,
     const RigExecRigPose whole =
         RunWarmingJob(evaluator, rig, frozen, inputs, &scheduler, &wholeRan);
     CHECK(wholeRan);
-    CHECK(whole.weightFrames == ran.pose.weightFrames);
-    return ran.pose.weightFrames;
+    CheckWeightFramesEqual(what, "a whole job", live.weightFrames,
+                           whole.weightFrames);
+    return ran.slots;
 }
 
-// A frozen job publishes the volumes its placements were written for:
-// live's key set when it restored live state and placed nothing, every
-// volume slot once a frozen VolumePlacements step ran in it or in the job it
-// restored from. On 11_VolumeWeights the two sets are equal; on
+// Frozen publishes exactly live's weightFrames on every path. On
 // 14_VolumeConstrainedSweep with a volume outside the rig that only a
-// constraint names, live omits that volume and a frozen job that placed
-// volumes publishes it.
+// constraint names, that volume has a slot and a placement step, which the
+// frozen cone runs, and neither live nor frozen publishes it.
 void
-TestFrozenWeightFramesKeepTheirKeySets(const std::string &examplesDir)
+TestFrozenWeightFramesMatchLive(const std::string &examplesDir)
 {
     const auto open = [](const std::string &path, SdfPath *rig) {
         UsdStageRefPtr stage = UsdStage::Open(path);
@@ -1831,8 +1817,8 @@ TestFrozenWeightFramesKeepTheirKeySets(const std::string &examplesDir)
         CHECK(evaluator.Compile());
         evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
-        CheckFrozenWeightFrameKeys(&evaluator, rig, UsdTimeCode(1012.0),
-                                   "11_VolumeWeights");
+        CheckFrozenWeightFramesMatchLive(&evaluator, rig, UsdTimeCode(1012.0),
+                                         "11_VolumeWeights");
     }
     SdfPath rig;
     UsdStageRefPtr stage =
@@ -1859,29 +1845,45 @@ TestFrozenWeightFramesKeepTheirKeySets(const std::string &examplesDir)
     CHECK(evaluator.Compile());
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(evaluator.Evaluate(UsdTimeCode(1001.0)).valid);
-    const std::map<SdfPath, GfMatrix4d> every = CheckFrozenWeightFrameKeys(
-        &evaluator, rig, UsdTimeCode(1024.0), "untapped volume source");
-    CHECK(!evaluator.Evaluate(UsdTimeCode(1024.0)).weightFrames.count(
-        outsidePath));
-    const auto found = every.find(outsidePath);
-    CHECK(found != every.end());
-    if (found != every.end()) {
-        CHECK(found->second.ExtractTranslation()[1] == 5.0);
+    const std::shared_ptr<const void> ranSlots =
+        CheckFrozenWeightFramesMatchLive(&evaluator, rig, UsdTimeCode(1024.0),
+                                         "untapped volume source");
+    // Not vacuous: the untapped volume is a volume slot, and the cone that
+    // ran its placement step placed it (ty = 5) without publishing it.
+    const RigExecBakedProgramImpl &B =
+        evaluator.GetBakedProgram()->GetStepGraph();
+    const auto slot = B.index.find(outsidePath);
+    CHECK(slot != B.index.end());
+    if (slot == B.index.end() || !ranSlots) {
+        return;
+    }
+    const size_t i = size_t(slot->second);
+    CHECK(i < B.noScaleAvars.size() && B.noScaleAvars[i] == 1);
+    CHECK(i < B.placedVolumes.size() && B.placedVolumes[i] == 0);
+    // RigExecPartialSlots holds the volume slots only, in slot order.
+    size_t compact = 0;
+    for (size_t k = 0; k < i && k < B.noScaleAvars.size(); ++k) {
+        compact += B.noScaleAvars[k] ? 1 : 0;
+    }
+    const RigExecPartialSlots &held =
+        *std::static_pointer_cast<const RigExecPartialSlots>(ranSlots);
+    CHECK(compact < held.volumePlacement.size());
+    if (compact < held.volumePlacement.size()) {
+        CHECK(held.volumePlacement[compact].ExtractTranslation()[1] == 5.0);
     }
 }
 
-// A whole frozen job publishes only the volumes its own VolumePlacements
-// step placed; it does not publish the clone's table. A frozen job runs
-// whole clusters, so the step is skipped only when its cluster is clean.
-// Here nothing in the rig reads outside the program (no mover, so no
-// RevisionStatic), and the only volume is a static guide. A job at 3,
-// cloned from live at 2, has no dirty input (rz is held after 2), so the
-// job runs nothing and publishes no volume. Live at 3 still publishes its
-// map, and this test pins that frozen/live difference. A job at 1 changes
-// rz, runs the cluster, and publishes the guide. An empty-plan cone restored
-// from the skipping job's slots publishes no volume either.
+// A whole frozen job whose closure skips VolumePlacements publishes live's
+// weightFrames from the placements its clone kept. A frozen job runs whole
+// clusters, so the step is skipped only when its cluster is clean. Here
+// nothing in the rig reads outside the program (no mover, so no
+// RevisionStatic), and the only volume is a static guide bound to nothing,
+// so its placement cluster is not always run. A job at 3, cloned from live
+// at 2, has no dirty input (rz is held after 2). The skip is shown by
+// poisoning the guide's placement in a second snapshot: the job at 3
+// publishes the poison, and the job at 1 (rz changes) overwrites it.
 void
-TestFrozenWholeRunSkippingVolumePlacementsPublishesNoVolume()
+TestFrozenWholeRunSkippingVolumePlacementsPublishesLive()
 {
     const char *label = "whole frozen run skips VolumePlacements";
     const UsdStageRefPtr stage = UsdStage::CreateInMemory();
@@ -1934,60 +1936,93 @@ def Xform "Asset"
     if (!program) {
         return;
     }
-    // The setup: the program has a VolumePlacements step, and no step reads
-    // outside the program, so no cluster runs on every frame.
+    // The setup: the program has one VolumePlacements step, whose cluster is
+    // not always run, and no step reads outside the program.
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
-    const int placements = VolumePlacementsCluster(B);
-    CHECK(placements >= 0);
+    const std::vector<int> placements = VolumePlacementsClusters(B);
+    CHECK(placements.size() == 1);
+    for (const int placement : placements) {
+        CHECK(placement >= 0 && !B.cones.always.Test(placement));
+    }
     for (const RigExecBakedStep &step : B.steps) {
         CHECK(!step.externalReads);
     }
+    const auto guideSlot = B.index.find(guide);
+    CHECK(guideSlot != B.index.end());
+    if (guideSlot == B.index.end()) {
+        return;
+    }
 
-    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::shared_ptr<const RigExecFrozenProgram> frozen, poisoned;
     std::string error;
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(RigExecFreezeProgram(evaluator, &poisoned, &error));
     RigExecFrameInputs held, moved;
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3), {}, &held,
                                    &error));
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(1), {}, &moved,
                                    &error));
-    if (!frozen) {
+    if (!frozen || !poisoned) {
         std::printf("FAIL %s: no snapshot (%s)\n", label, error.c_str());
         ++failures;
         return;
     }
+    // RigExecFreezeProgram allocates the snapshot non-const, and no job is
+    // running on it.
+    GfMatrix4d poison(1.0);
+    poison.SetTranslate(GfVec3d(0, 100, 0));
+    const_cast<RigExecFrozenProgram &>(*poisoned)
+        .program.volumePlacement[size_t(guideSlot->second)] = poison;
+
     RigExecBackgroundScheduler scheduler;
     bool ran = false;
+    const RigExecRigPose poisonedHeld =
+        RunWarmingJob(&evaluator, rig, poisoned, held, &scheduler, &ran);
+    CHECK(ran);
+    const auto poisonAt3 = poisonedHeld.weightFrames.find(guide);
+    if (poisonAt3 == poisonedHeld.weightFrames.end() ||
+        poisonAt3->second != poison) {
+        std::printf("FAIL %s: the job at 3 does not publish the clone's "
+                    "placement (it ran VolumePlacements or omits the guide)\n",
+                    label);
+        ++failures;
+    }
+    ran = false;
+    const RigExecRigPose poisonedMoved =
+        RunWarmingJob(&evaluator, rig, poisoned, moved, &scheduler, &ran);
+    CHECK(ran);
+    const auto poisonAt1 = poisonedMoved.weightFrames.find(guide);
+    CHECK(poisonAt1 != poisonedMoved.weightFrames.end() &&
+          poisonAt1->second.ExtractTranslation()[1] == 3.0);
+
+    ran = false;
     const RigExecRigPose skipped =
         RunWarmingJob(&evaluator, rig, frozen, held, &scheduler, &ran);
     CHECK(ran);
     std::shared_ptr<const void> skippedSlots;
     size_t skippedSlotBytes = 0;
     CHECK(RigExecTakeLastFrozenSlots(&skippedSlots, &skippedSlotBytes));
-    if (!skipped.weightFrames.empty()) {
-        std::printf("FAIL %s: published %zu volume(s)\n", label,
-                    skipped.weightFrames.size());
-        ++failures;
-    }
-
     ran = false;
     const RigExecRigPose placed =
         RunWarmingJob(&evaluator, rig, frozen, moved, &scheduler, &ran);
     CHECK(ran);
-    const auto guideAt1 = placed.weightFrames.find(guide);
-    CHECK(placed.weightFrames.size() == 1);
-    CHECK(guideAt1 != placed.weightFrames.end() &&
-          guideAt1->second.ExtractTranslation()[1] == 3.0);
 
     evaluator.ClearProfile();
-    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3));
-    CHECK(live.valid);
+    const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3));
+    CHECK(live3.valid);
     for (const RigExecOpTraceEntry &entry : evaluator.GetLastOpTrace()) {
         CHECK(entry.kind != "VolumePlacements");
     }
-    const auto guideLive = live.weightFrames.find(guide);
-    CHECK(guideLive != live.weightFrames.end() &&
+    const auto guideLive = live3.weightFrames.find(guide);
+    CHECK(live3.weightFrames.size() == 1);
+    CHECK(guideLive != live3.weightFrames.end() &&
           guideLive->second.ExtractTranslation()[1] == 3.0);
+    CheckWeightFramesEqual(label, "the job at 3", live3.weightFrames,
+                           skipped.weightFrames);
+    const RigExecRigPose live1 = evaluator.Evaluate(UsdTimeCode(1));
+    CHECK(live1.valid);
+    CheckWeightFramesEqual(label, "the job at 1", live1.weightFrames,
+                           placed.weightFrames);
 
     if (!skippedSlots) {
         return;
@@ -1998,7 +2033,8 @@ def Xform "Asset"
         RigExecRunPartialCone(*frozen, held, skippedSlots, skipped, none, 0);
     CHECK(chained.completed);
     CHECK(chained.executedClusters.empty());
-    CHECK(chained.pose.weightFrames.empty());
+    CheckWeightFramesEqual(label, "an empty-plan cone from the job at 3",
+                           live3.weightFrames, chained.pose.weightFrames);
 }
 
 // Poses warmed from burst-cached vectors are bit-identical to live: freeze
@@ -4618,7 +4654,8 @@ TestSolverCheckpointFreezes(const std::string &examplesDir)
 // which the freeze refuses by name. With SphereA's read phase set to `base`
 // the rig freezes, and a warming job matches live baked and the dynamic walk
 // bit for bit, including both volumes' weightFrames: SphereB's is the final
-// placement BAim leaves, which differs from its base.
+// placement BAim leaves, which differs from its base. Every frozen path
+// publishes live's weightFrames, two placement steps and both phases.
 void
 TestVolumePlacementsFixtureFreezes(const std::string &examplesDir)
 {
@@ -4709,11 +4746,27 @@ TestVolumePlacementsFixtureFreezes(const std::string &examplesDir)
         CHECK(warmed.weightFrames.count(sphereA) == 1);
         CHECK(warmed.weightFrames.count(sphereB) == 1);
     }
-    // The key sets with two placement steps: each step's cluster is always
-    // run, so a whole job publishes both volumes.
-    const std::map<SdfPath, GfMatrix4d> every = CheckFrozenWeightFrameKeys(
-        &evaluator, rig, UsdTimeCode(7.0), "volume placements, base phase");
-    CHECK(every.size() == 2);
+    for (const double frame : {3.0, 7.0}) {
+        const std::string where =
+            TfStringPrintf("%s, base phase, frame %g", label, frame);
+        CheckFrozenWeightFramesMatchLive(&evaluator, rig, UsdTimeCode(frame),
+                                         where.c_str());
+        // Not vacuous: SphereB publishes its final placement, which is not
+        // the placement of its base frame.
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        const RigExecBakedProgramImpl &B =
+            evaluator.GetBakedProgram()->GetStepGraph();
+        const auto slot = B.index.find(sphereB);
+        const auto published = live.weightFrames.find(sphereB);
+        CHECK(slot != B.index.end() && published != live.weightFrames.end());
+        if (slot == B.index.end() || published == live.weightFrames.end() ||
+            size_t(slot->second) >= B.baseLast.size()) {
+            continue;
+        }
+        const GfMatrix4d basePlacement = RigExecVolumePlacement(
+            B.base[size_t(B.baseLast[size_t(slot->second)])]);
+        CHECK(published->second != basePlacement);
+    }
 }
 
 int
@@ -4769,7 +4822,7 @@ main(int argc, char **argv)
         TestAFrozenRewarmAfterAFallbackCarriesTheEdit(argv[1]);
         TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(argv[1]);
         TestVolumeWeightsBurstMatchesPlain(argv[1]);
-        TestFrozenWeightFramesKeepTheirKeySets(argv[1]);
+        TestFrozenWeightFramesMatchLive(argv[1]);
         TestUnresolvableTargetDeclinesSampling(argv[1]);
         TestProjectorSpacesMatchDynamic(argv[1]);
         TestVolumePlacementsFixtureFreezes(argv[1]);
@@ -4780,7 +4833,7 @@ main(int argc, char **argv)
     }
     Test9MeshWarmsBitIdentical();
     TestIterativeMoversWarmBitIdentical();
-    TestFrozenWholeRunSkippingVolumePlacementsPublishesNoVolume();
+    TestFrozenWholeRunSkippingVolumePlacementsPublishesLive();
     Test9MeshWarmsBitIdenticalAtSweepDistance();
     TestProductionRunnerDeclinesWithoutProof();
     TestFrozenRunIsBitIdentical();

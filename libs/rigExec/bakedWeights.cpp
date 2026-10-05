@@ -509,8 +509,7 @@ RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
     RigExecBakedProgramImpl &B = *program;
     if (step->kind == RigExecBakedStepKind::VolumePlacements) {
         // This step's volume slot, from the frame the walk ended with, as
-        // the dynamic refresh places it. Live readers mask by placedVolumes
-        // and leave volumePlacementKeys at Placed.
+        // the dynamic refresh places it. Readers mask by placedVolumes.
         const size_t slot = size_t(step->object);
         B.volumePlacement[slot] =
             RigExecVolumePlacement(B.fin[size_t(B.finLast[slot])]);
@@ -545,23 +544,10 @@ RigExecBakedPublishVolumePlacements(const RigExecBakedProgramImpl &program,
                                     std::map<SdfPath, GfMatrix4d> *frames)
 {
     frames->clear();
-    const std::vector<char> *slots = nullptr;
-    switch (program.volumePlacementKeys) {
-    case RigExecVolumePlacementKeys::None:
-        return;
-    case RigExecVolumePlacementKeys::Placed:
-        slots = &program.placedVolumes;
-        break;
-    case RigExecVolumePlacementKeys::Every:
-        slots = &program.noScaleAvars;
-        break;
-    }
-    if (!slots) {
-        return;
-    }
-    for (size_t i = 0; i < slots->size() && i < program.paths.size() &&
+    const std::vector<char> &slots = program.placedVolumes;
+    for (size_t i = 0; i < slots.size() && i < program.paths.size() &&
                        i < program.volumePlacement.size(); ++i) {
-        if ((*slots)[i]) {
+        if (slots[i]) {
             // Slots are in path order, so each entry lands at the end.
             frames->emplace_hint(frames->end(), program.paths[i],
                                  program.volumePlacement[i]);

@@ -1238,13 +1238,6 @@ enum class RigExecBakedPropagateOutcome : uint8_t {
     InvalidResult,      ///< the propagated frame is unusable
 };
 
-/// The volume slots a pose.weightFrames publication holds.
-enum class RigExecVolumePlacementKeys : uint8_t {
-    None,   ///< no volume
-    Placed, ///< placedVolumes: the volumes the dynamic walk places
-    Every,  ///< noScaleAvars: every volume slot
-};
-
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
@@ -2720,12 +2713,11 @@ struct RigExecBakedProgramImpl {
     /// Per provider slot, where the volume at that slot is placed: the
     /// output of that slot's VolumePlacements step (WeightFrames[slot]), read
     /// by the oracle and by pose.weightFrames. Every noScaleAvars slot has
-    /// a live and a frozen step; the live oracle reads only the placedVolumes
-    /// slots, and each publication reads the slots volumePlacementKeys
-    /// names. Non-volume slots stay identity and are never read. Kept across
-    /// runs like deltaValues, and carried by a frozen clone and
-    /// RigExecPartialSlots: a cone that skipped a step left the placement
-    /// it would compute again.
+    /// a live and a frozen step; the oracle and every publication (live and
+    /// frozen) read only the placedVolumes slots. Non-volume slots stay
+    /// identity and are never read. Kept across runs like deltaValues, and
+    /// carried by a frozen clone and RigExecPartialSlots: a cone that
+    /// skipped a step keeps its last run's placement; its inputs are unchanged.
     std::vector<GfMatrix4d> volumePlacement;
     /// Per provider slot: 1 where the dynamic walk places this volume (a key
     /// of the evaluator's _volumeWeightMatrixTaps). A subset of
@@ -2733,15 +2725,6 @@ struct RigExecBakedProgramImpl {
     /// is a provider but is not tapped, so the walk neither places nor
     /// publishes it, and neither do the oracle view and pose.weightFrames.
     std::vector<char> placedVolumes;
-    /// The slots pose.weightFrames publishes: the key set of the placements
-    /// this job and the jobs it restored state from have written. The live
-    /// program is always Placed. A frozen job differs: _RunFrozen starts at
-    /// None, so a whole frozen run that skips every VolumePlacements step
-    /// publishes no volume; a partial cone takes the value
-    /// RigExecPartialSlots restores (Placed from a live capture); any frozen
-    /// VolumePlacements step sets Every.
-    RigExecVolumePlacementKeys volumePlacementKeys =
-        RigExecVolumePlacementKeys::Placed;
     /// Weight objects whose field is measured against the points AS THEY
     /// STAND at the revision that binds them, rather than the authored base
     /// (the evaluator's _currentPhaseWeights). A combine is in here when
@@ -3461,8 +3444,9 @@ void RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program);
 void RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
                                RigExecBakedStep *step, UsdTimeCode time);
 
-/// Replaces \p frames (pose.weightFrames) with one entry per volume slot
-/// that the program's volumePlacementKeys names, from volumePlacement.
+/// Replaces \p frames (pose.weightFrames) with one entry per placedVolumes
+/// slot, from volumePlacement: the dynamic walk's key set, for live and
+/// frozen runs alike, whichever placement steps this run's closure held.
 void RigExecBakedPublishVolumePlacements(
     const RigExecBakedProgramImpl &program,
     std::map<SdfPath, GfMatrix4d> *frames);

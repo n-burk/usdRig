@@ -926,8 +926,6 @@ struct RigExecPartialSlots {
     /// re-run skips reads it.
     std::vector<GfMatrix4d> frameMatrix;
     std::vector<char> frameMatrixValid;
-    RigExecVolumePlacementKeys volumePlacementKeys =
-        RigExecVolumePlacementKeys::None;
     void Capture(const RigExecBakedProgramImpl &program);
     bool Restore(RigExecBakedProgramImpl *program) const;
     size_t Bytes() const;

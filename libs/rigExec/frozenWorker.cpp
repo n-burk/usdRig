@@ -779,9 +779,6 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     _FrozenWorker worker;
     _CloneImpl(snapshot.program, &worker.B);
     RigExecBakedProgramImpl &B = worker.B;
-    // A whole frozen job publishes only once one of its own VolumePlacements
-    // steps runs; the clone's table is not its publication.
-    B.volumePlacementKeys = RigExecVolumePlacementKeys::None;
     B.resolvedInputs = &worker.resolved;
     B.chainSnapshots = &worker.chainSnapshots;
     B.profiler = &worker.profiler;
@@ -849,10 +846,8 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
                                 solverPath, B.aggregates[size_t(si)].frames);
         }
     }
-    // No volume when the closure skipped every VolumePlacements step;
-    // otherwise every volume slot (noScaleAvars), including a volume that
-    // only a constraint names as a source, which the walk and the live
-    // program do not publish.
+    // Live's key set (placedVolumes). A placement step the closure skipped
+    // kept the clone's placement; its inputs are unchanged.
     RigExecBakedPublishVolumePlacements(B, &working.weightFrames);
     _FrozenPublishGeometry(B, &working);
     working.solverOverrideRounds += B.solverOverrideRounds;
@@ -896,7 +891,6 @@ RigExecPartialSlots::Capture(const RigExecBakedProgramImpl &program)
     deltaPresent = program.deltaPresent;
     frameMatrix = program.frameMatrix;
     frameMatrixValid = program.frameMatrixValid;
-    volumePlacementKeys = program.volumePlacementKeys;
     // Volume slots only, in slot order: the table is provider-sized and
     // almost every slot of a large rig is not a volume.
     volumePlacement.clear();
@@ -967,7 +961,6 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
     B.deltaPresent = deltaPresent;
     B.frameMatrix = frameMatrix;
     B.frameMatrixValid = frameMatrixValid;
-    B.volumePlacementKeys = volumePlacementKeys;
     for (size_t i = 0, v = 0; i < B.noScaleAvars.size(); ++i) {
         if (B.noScaleAvars[i]) {
             B.volumePlacement[i] = volumePlacement[v++];
@@ -1187,9 +1180,8 @@ RigExecRunPartialCone(
                                 solverPath, B.aggregates[size_t(si)].frames);
         }
     }
-    // The restored key set (the live program's volumes when the slots came
-    // from a live run), or every volume slot once this cone or a job it
-    // restored from ran a VolumePlacements step.
+    // Live's key set (placedVolumes), whichever placement steps this cone
+    // ran. A skipped step kept the restored placement.
     RigExecBakedPublishVolumePlacements(B, &working.weightFrames);
     _FrozenPublishGeometry(B, &working);
     for (const RigExecBakedStep &step : B.steps) {

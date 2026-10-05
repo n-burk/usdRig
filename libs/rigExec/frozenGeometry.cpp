@@ -114,10 +114,6 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
                                   &placement);
         }
         B.volumePlacement[slot] = placement;
-        // Any one placement step that ran publishes every volume slot: a
-        // slot whose step the cone skipped keeps the placement it would
-        // compute again (from the clone or the restored slots).
-        B.volumePlacementKeys = RigExecVolumePlacementKeys::Every;
         return true;
     }
     const int id = step->object;
