@@ -99,7 +99,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.finLast = src.finLast;
     D.baseLast = src.baseLast;
     D.propertyResults = src.propertyResults;
-    D.runSnapshots = src.runSnapshots;
     D.frameRecords = src.frameRecords;
     D.frameMatrix = src.frameMatrix;
     D.frameMatrixValid = src.frameMatrixValid;

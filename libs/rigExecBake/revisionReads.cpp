@@ -332,15 +332,18 @@ _Revision(const RigExecBakedProgramImpl &program,
         return;
     }
     // A revision that declares read phases reads through its own overlay:
-    // the generation's plus what each phase resolved to in the run's
-    // snapshot store (AssembleRevision, bakedGeometry.cpp).
+    // the generation's plus what each point binding resolves to
+    // (RigExecBakedOverlayPointReads, bakedGeometry.cpp).
     RigExecResolvedInputs phased;
     if (!binding.phases.empty()) {
         phased = overlay;
-        for (const auto &[inputPath, phase] : binding.phases) {
-            if (const VtValue *recorded = program.runSnapshots.Lookup(
-                    inputPath, phase, revision.moverPath)) {
-                phased.SetProperty(inputPath, *recorded);
+        for (const RigExecBakedPointsBinding &bound :
+             revision.pointBindings) {
+            const GfVec3f *points = nullptr;
+            size_t count = 0;
+            if (RigExecBakedResolvePoints(program, bound, &points, &count)) {
+                phased.SetProperty(
+                    bound.input, VtValue(VtVec3fArray(points, points + count)));
             }
         }
         E.resolved = &phased;

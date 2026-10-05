@@ -612,10 +612,6 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.frameMatrix = frameMatrix;
     B.frameMatrixValid = frameMatrixValid;
     B.avarsDisturbed = avarsDisturbed;
-    // Run-local by construction: the prologue empties it, so a second run
-    // over one frame has to start with it empty too or every record lands in
-    // it twice.
-    B.runSnapshots.Clear();
 
     for (size_t s = 0; s < B.solvers.size() && s < solvers.size(); ++s) {
         B.solvers[s].outFrames = solvers[s].outFrames;

@@ -110,12 +110,11 @@ void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
 /// Three checks. The edges: `preds` and `succs` sorted, unique, pointing
 /// backward and forward respectively, and each the inverse of the other.
 /// The producers: every slot a step reads in a domain the prologue does not
-/// fill has a writer at a strictly lower index (Snapshots, whose reads are a
-/// declared prefix of the program, only has to end at the reader); every
-/// pose version a commit, a solve or a last-version reader is bound to was
-/// written by an earlier step; and every reader of a chain's points declares
-/// the version it reads, whose only producer is one revision's fuse and is
-/// among the reader's preds. The clusters: a partition of the steps with
+/// fill has a writer at a strictly lower index, and no step names the retired
+/// Snapshots domain; every pose version a commit, a solve or a last-version
+/// reader is bound to was written by an earlier step; and every reader of a
+/// chain's points declares the version it reads, whose only producer is one
+/// revision's fuse and is among the reader's preds. The clusters: a partition of the steps with
 /// members in program order, cluster edges that cover the step edges, and a
 /// topological order naming every cluster once.
 ///
@@ -208,10 +207,8 @@ void RigExecBakedClearRunStamps(RigExecBakedProgramImpl *program);
 /// Runs every step of \p program, returning false when one of them gave the
 /// generation back.
 ///
-/// Nothing here touches the pose: a step writes its diagnostics, its counter
-/// deltas and its phased-read records into itself, and this merges the
-/// records into the run's store in step order. The epilogue replays the
-/// rest.
+/// Nothing here touches the pose: a step writes its diagnostics and its
+/// counter deltas into itself, and the epilogue replays them.
 /// \p force asks for every cluster, which is what a first run, a bumped
 /// program stamp and the verifier's second pass all need.
 bool RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,

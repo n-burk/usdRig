@@ -14,11 +14,13 @@
       R5  Constrain (C3)          after C3
       RB  base                    the base matrix
     R2's defaultWeight is connected to Dial, so a drag on Dial moves R2 and
-    no other reader. testRigExecPhaseBindings holds dynamic and baked to
-    each other and to the run's store at frames 1, 4 and 8 and under that
-    drag (also with CONE_VERIFY), checks the record lists with and without
-    R1, and rebinds one record to show the fold reads the records and not
-    the store; testRigExecFrozenContext holds frozen to both.
+    no other reader; Late is C3's source, so a drag on it re-runs C3's
+    record alone. testRigExecPhaseBindings holds dynamic and baked to each
+    other and to the dynamic walk's store at frames 1, 4 and 8 and under
+    both drags (also with CONE_VERIFY), checks which record steps each drag
+    re-runs, checks the record lists with and without R1, and rebinds one
+    record to show the fold reads the records; testRigExecFrozenContext
+    holds frozen to both.
     """
     defaultPrim = "RecordAsset"
     endTimeCode = 8

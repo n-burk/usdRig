@@ -2,21 +2,24 @@
 //
 // A baked point read declared at a phase -- an input's rigExecReadPhase, or a
 // blend sample's -- resolves through a RigExecBakedPointsBinding: the chain
-// versions the run's phased-read store would have answered from, then the
-// resolved input. The store is still filled, so every case here holds the
-// binding to it exactly: inside the reader, at the moment it reads, the
-// store's answer is captured beside the binding's, because the store at the
-// end of the run holds records the reader never saw. Each generation also
-// runs in BakedWithParityCheck, so the baked answer is held to the dynamic
-// walk's bit for bit. An AtPrim read phase on a transform resolves through
-// RigExecBakedFrameRecord lists the same way, held to the store at the end of
-// the run, where every pose record is already made.
+// versions the dynamic walk's phased-read store would answer from, then the
+// resolved input. The program keeps no store. Each generation runs in
+// BakedWithParityCheck, so the baked answer is held to the dynamic walk's bit
+// for bit, and the walk -- which runs after the program over the same
+// evaluator -- leaves its store behind: a read of an earlier chain, complete
+// before any reader of a later one runs, is held to that store directly. The
+// binding's answer is also captured inside the reader and held to its
+// diagnostic. An AtPrim read phase on a transform resolves through
+// RigExecBakedFrameRecord lists, held to the walk's store the same way.
+// Phased rigs run under cones like any other, so a reader the cone leaves
+// clean keeps last run's answer (TestAPhasedRigSkipsOnRepeat).
 //
 // argv[1] = path to the examples directory.
 #include "rigExecFrameRecordCheck.h"
 
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
+#include "rigExec/bakedTrace.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
@@ -76,6 +79,9 @@ struct BindingRef {
     size_t readerChain = 0;
     bool derived = false;
     bool sample = false;
+    /// The step that reads it: the revision's RevisionStatic, or the derived
+    /// target's Derived step.
+    int step = -1;
 };
 
 std::vector<BindingRef>
@@ -84,26 +90,46 @@ Bindings(const RigExecBakedProgramImpl &B)
     std::vector<BindingRef> out;
     const auto add = [&out](const RigExecBakedProgramImpl::GeomRevision &r,
                             const SdfPath &target, size_t chain,
-                            bool derived) {
+                            bool derived, int step) {
         for (const RigExecBakedPointsBinding &binding : r.pointBindings) {
             out.push_back({&binding, r.moverPath, target, chain, derived,
-                           false});
+                           false, step});
         }
         for (const auto &channel : r.blendChannels) {
             for (const auto &sample : channel.samples) {
                 if (sample.pointBinding.id >= 0) {
                     out.push_back({&sample.pointBinding, r.moverPath, target,
-                                   chain, derived, true});
+                                   chain, derived, true, step});
                 }
             }
         }
     };
-    for (size_t c = 0; c < B.chains.size(); ++c) {
-        for (const auto &revision : B.chains[c].revisions) {
-            add(revision, B.chains[c].target, c, false);
+    const auto readerStep = [&B](RigExecBakedStepKind kind, size_t chain,
+                                 size_t index) {
+        for (size_t s = 0; s < B.steps.size(); ++s) {
+            const RigExecBakedStep &step = B.steps[s];
+            if (step.kind != kind || step.object < 0) {
+                continue;
+            }
+            const auto [c, i] =
+                kind == RigExecBakedStepKind::Derived
+                    ? B.derivedIndex[size_t(step.object)]
+                    : B.revisionIndex[size_t(step.object)];
+            if (size_t(c) == chain && size_t(i) == index) {
+                return int(s);
+            }
         }
-        for (const auto &derived : B.chains[c].derived) {
-            add(derived.revision, derived.target, c, true);
+        return -1;
+    };
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        for (size_t r = 0; r < B.chains[c].revisions.size(); ++r) {
+            add(B.chains[c].revisions[r], B.chains[c].target, c, false,
+                readerStep(RigExecBakedStepKind::RevisionStatic, c, r));
+        }
+        for (size_t d = 0; d < B.chains[c].derived.size(); ++d) {
+            const auto &derived = B.chains[c].derived[d];
+            add(derived.revision, derived.target, c, true,
+                readerStep(RigExecBakedStepKind::Derived, c, d));
         }
     }
     return out;
@@ -144,10 +170,12 @@ struct Tally {
     size_t tails = 0;
 };
 
-/// Holds every binding of \p evaluator's program to the store: the answer
-/// captured inside the reader (when \p captured), and, for a read of an
-/// earlier chain -- complete before any reader of a later one runs -- the
-/// store at the end of the run as well.
+/// Holds every binding of \p evaluator's program: the answer captured inside
+/// the reader (when \p captured) to the binding's resolution after the run
+/// -- nothing after a reader writes a version it names -- and to the
+/// reader's diagnostic; and, for a read of an earlier chain, complete before
+/// any reader of a later one runs, the binding to the store the dynamic
+/// walk of this BakedWithParityCheck generation left in the evaluator.
 Tally
 CheckBindings(const std::string &where, const RigExecRigEvaluator &evaluator,
               const RigExecRigPose &pose, bool captured)
@@ -159,6 +187,13 @@ CheckBindings(const std::string &where, const RigExecRigEvaluator &evaluator,
         return tally;
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK_AT(where, evaluator.GetEvaluationMode() ==
+                        RigExecEvaluationMode::BakedWithParityCheck);
+    CHECK_AT(where, B.chainSnapshots != nullptr);
+    if (!B.chainSnapshots) {
+        return tally;
+    }
+    const RigExecChainSnapshots &walk = *B.chainSnapshots;
     std::map<SdfPath, size_t> chainOf;
     for (size_t c = 0; c < B.chains.size(); ++c) {
         chainOf.emplace(B.chains[c].target, c);
@@ -169,6 +204,9 @@ CheckBindings(const std::string &where, const RigExecRigEvaluator &evaluator,
                                ref.readerTarget.GetString() + " reading " +
                                binding.input.GetString() + " at " +
                                binding.phase.GetAsString();
+        // A point reader's step is a source or reads outside the program, so
+        // it runs every run and the cone never leaves one clean.
+        CHECK_AT(at, ref.step >= 0 && B.steps[size_t(ref.step)].runSeq != 0);
         if (captured) {
             CHECK_AT(at, size_t(binding.id) < B.pointCaptures.size());
             if (size_t(binding.id) >= B.pointCaptures.size()) {
@@ -181,8 +219,15 @@ CheckBindings(const std::string &where, const RigExecRigEvaluator &evaluator,
                 CHECK_AT(at, !B.chains[ref.readerChain].haveBase);
             } else {
                 ++tally.read;
-                CHECK_AT(at, capture.storeAnswered == capture.bindingAnswered);
-                CHECK_AT(at, capture.store == capture.bound);
+                const GfVec3f *points = nullptr;
+                size_t count = 0;
+                const bool answered =
+                    RigExecBakedResolvePoints(B, binding, &points, &count);
+                CHECK_AT(at, capture.bindingAnswered == answered);
+                CHECK_AT(at, capture.bound ==
+                                 (answered ? VtVec3fArray(points,
+                                                          points + count)
+                                           : VtVec3fArray()));
                 if (capture.bindingAnswered) {
                     ++tally.answered;
                 } else {
@@ -190,7 +235,7 @@ CheckBindings(const std::string &where, const RigExecRigEvaluator &evaluator,
                 }
                 if (binding.diagnoseMiss) {
                     CHECK_AT(at, Mentions(pose.diagnostics, MissLine(ref)) ==
-                                     !capture.storeAnswered);
+                                     !capture.bindingAnswered);
                 } else {
                     CHECK_AT(at, !Mentions(pose.diagnostics, MissLine(ref)));
                 }
@@ -198,8 +243,8 @@ CheckBindings(const std::string &where, const RigExecRigEvaluator &evaluator,
         }
         const auto source = chainOf.find(binding.input);
         if (source != chainOf.end() && source->second < ref.readerChain) {
-            const VtValue *recorded = B.runSnapshots.Lookup(
-                binding.input, binding.phase, ref.reader);
+            const VtValue *recorded =
+                walk.Lookup(binding.input, binding.phase, ref.reader);
             const GfVec3f *points = nullptr;
             size_t count = 0;
             const bool answered =
@@ -231,7 +276,8 @@ MakeEvaluator(const UsdStageRefPtr &stage, const SdfPath &rig,
     return compiled ? std::move(evaluator) : nullptr;
 }
 
-/// One baked generation with the store captured inside every reader.
+/// One baked generation with every binding's answer captured inside its
+/// reader.
 RigExecRigPose
 EvaluateCaptured(const std::string &where, RigExecRigEvaluator *evaluator,
                  UsdTimeCode time, Tally *tally)
@@ -251,7 +297,7 @@ EvaluateCaptured(const std::string &where, RigExecRigEvaluator *evaluator,
         }
     }
     // The capture is serial-only; the parallel registrations still hold
-    // the end-of-run reads and the parity comparison.
+    // the end-of-run reads to the walk's store and the parity comparison.
     if (captured && !evaluator->GetBakedProgram()) {
         captured = false;
     }
@@ -525,7 +571,7 @@ TestPointBindingsMatchTheStore(const std::string &examples)
 }
 
 // A mover that writes two chains reads the other one at `preceding`. The
-// store answers only when the reader's own revision on that chain was
+// walk's store answers only when the reader's own revision on that chain was
 // recorded, which takes a second reader naming it; otherwise the read is the
 // authored base, silently. On the reader's own chain `preceding` never
 // resolves (TestPrecedingOnTheOwnChainReadsTheBase).
@@ -603,8 +649,8 @@ TestPrecedingAcrossChains(const std::string &examples)
                 B.pointCaptures[size_t(across->binding->id)];
             const RigExecBakedPointCapture &o =
                 B.pointCaptures[size_t(own->binding->id)];
-            CHECK_AT(where, a.read && a.storeAnswered == named);
-            CHECK_AT(where, o.read && !o.storeAnswered);
+            CHECK_AT(where, a.read && a.bindingAnswered == named);
+            CHECK_AT(where, o.read && !o.bindingAnswered);
         }
     }
     // Resolving moves Other: the fallback is not the answer.
@@ -929,7 +975,8 @@ using rigExecTest::FirstValidRecord;
 using rigExecTest::RecordMovers;
 
 /// Holds every AtPrim transform reader of \p evaluator's program to the
-/// run's store at the end of the run. Returns the readers a record answered.
+/// dynamic walk's phased-read store at the end of the run. Returns the
+/// readers a record answered.
 size_t
 CheckFrameRecords(const std::string &where,
                   const RigExecRigEvaluator &evaluator)
@@ -1029,6 +1076,45 @@ CheckFrameRecordSteps(const std::string &where,
     if (!error.empty()) {
         std::printf("  %s\n", error.c_str());
     }
+}
+
+/// Which steps the last generation ran, held to the cone: exactly the
+/// FrameMatrix steps of the records whose constraint is in \p movers, and
+/// the InfluenceFold of \p folded, when named.
+void
+CheckRecordStepsRan(const std::string &where,
+                    const RigExecRigEvaluator &evaluator,
+                    const std::vector<SdfPath> &movers, const char *folded)
+{
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK_AT(where, program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const auto moverOf = [&B](const RigExecBakedStep &step) {
+        const auto [c, r] = B.revisionIndex[size_t(step.object)];
+        return B.chains[size_t(c)].revisions[size_t(r)].moverPath;
+    };
+    size_t frameSteps = 0;
+    bool foldRan = false;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind == RigExecBakedStepKind::FrameMatrix) {
+            ++frameSteps;
+            const SdfPath &mover = B.frameRecords[size_t(step.object)].mover;
+            const bool expected =
+                std::find(movers.begin(), movers.end(), mover) !=
+                movers.end();
+            CHECK_AT(where + ": FrameMatrix " + step.label,
+                     (step.runSeq != 0) == expected);
+        } else if (*folded &&
+                   step.kind == RigExecBakedStepKind::InfluenceFold &&
+                   moverOf(step) == RecordReader(folded)) {
+            foldRan = step.runSeq != 0;
+        }
+    }
+    CHECK_AT(where, frameSteps == B.frameRecords.size());
+    CHECK_AT(where, !*folded || foldRan);
 }
 
 bool
@@ -1170,11 +1256,9 @@ TestFrameRecordsMatchTheStore(const std::string &examples)
             }
         }
         // Dial weights R2 alone: the drag moves R2's points and no other
-        // reader's, and the release restores them. A rig with phased reads
-        // still runs whole on every run (`full` in
-        // RigExecBakedComputeClosure), so every constraint and FrameMatrix
-        // step re-runs here too; which steps a cone leaves clean is not
-        // checked until that gate goes.
+        // reader's, and the release restores them. Under the cone it runs no
+        // FrameMatrix step: the fold's table is the one the kept records gave
+        // last run.
         const RecordReads before = ReadRecordPoints(
             evaluator->Evaluate(UsdTimeCode(8.0)), withR1);
         evaluator->SetInteractiveOverrides({RigExecValueOverride{
@@ -1184,6 +1268,7 @@ TestFrameRecordsMatchTheStore(const std::string &examples)
         CHECK_AT(label + " dragged", CheckFrameRecords(label + " dragged",
                                                        *evaluator) ==
                                          (withR1 ? 4 : 3));
+        CheckRecordStepsRan(label + " dragged", *evaluator, {}, "");
         const RecordReads moved = ReadRecordPoints(dragged, withR1);
         CHECK_AT(label + " dragged", !Near(moved.r2, before.r2));
         CHECK_AT(label + " dragged", moved.r4 == before.r4);
@@ -1193,15 +1278,39 @@ TestFrameRecordsMatchTheStore(const std::string &examples)
             label + " released", evaluator.get(), UsdTimeCode(8.0), &tally);
         CHECK_AT(label + " released",
                  ReadRecordPoints(released, withR1).r2 == before.r2);
+        // Late is C3's source: the drag re-runs C3's record and R5's fold,
+        // which reads it beside C2's and C1's records, both kept from the
+        // last run. Every reader is held to the walk's store and to the
+        // dynamic walk's points.
+        evaluator->SetInteractiveOverrides({RigExecValueOverride{
+            SdfPath("/RecordAsset/Rig/Controls/Late"), TfToken(),
+            TfToken("avars:tz"), VtValue(0.25)}});
+        const RigExecRigPose late = EvaluateCaptured(
+            label + " Late dragged", evaluator.get(), UsdTimeCode(8.0),
+            &tally);
+        CHECK_AT(label + " Late dragged",
+                 CheckFrameRecords(label + " Late dragged", *evaluator) ==
+                     (withR1 ? 4 : 3));
+        CheckRecordStepsRan(label + " Late dragged", *evaluator, {kRecordC3},
+                            "R5");
+        const RecordReads lateReads = ReadRecordPoints(late, withR1);
+        CHECK_AT(label + " Late dragged", !Near(lateReads.r5, before.r5));
+        CHECK_AT(label + " Late dragged", lateReads.r2 == before.r2);
+        CHECK_AT(label + " Late dragged", lateReads.r4 == before.r4);
+        evaluator->ClearInteractiveOverrides();
+        const RigExecRigPose lateReleased = EvaluateCaptured(
+            label + " Late released", evaluator.get(), UsdTimeCode(8.0),
+            &tally);
+        CHECK_AT(label + " Late released",
+                 ReadRecordPoints(lateReleased, withR1).r5 == before.r5);
     }
 }
 
-// The fold reads the FrameMatrix records it declares, not the run's store:
-// C3's record rebound to C1's version of X moves R5 onto R1, while the store,
-// still filled by the walk's recorder, answers C3's matrix for R5. The
-// validator accepts the rebinding (a version of the record's own slot,
-// written before the step), so only the fold's source decides R5. Plain
-// Baked, since the dynamic walk is not rebound.
+// The fold reads the FrameMatrix records it declares: C3's record rebound to
+// C1's version of X moves R5 onto R1, while the dynamic walk still answers
+// C3's matrix for R5. The validator accepts the rebinding (a version of the
+// record's own slot, written before the step), so only the fold's source
+// decides R5. Plain Baked, since the dynamic walk is not rebound.
 void
 TestTheFoldReadsItsRecords(const std::string &examples)
 {
@@ -1260,16 +1369,188 @@ TestTheFoldReadsItsRecords(const std::string &examples)
     CHECK_AT(where, reads.r5 == reads.r1);
     CHECK_AT(where, reads.r1 == before.r1);
     CHECK_AT(where, reads.r2 == before.r2);
-    const VtValue *stored = B.runSnapshots.Lookup(
-        kRecordJoint, r5->binding.transformPhase, r5->moverPath);
-    CHECK_AT(where, stored && stored->IsHolding<GfMatrix4d>() &&
-                        stored->UncheckedGet<GfMatrix4d>() == afterC3);
+    auto reference =
+        MakeEvaluator(stage, kRecordRig, RigExecEvaluationMode::ExecReference);
+    if (reference) {
+        const RigExecRigPose walked = reference->Evaluate(UsdTimeCode(8.0));
+        CHECK_AT(where, walked.valid);
+        CHECK_AT(where, ReadRecordPoints(walked, true).r5 == before.r5);
+        CHECK_AT(where, reads.r5 != before.r5);
+    }
 
     B.frameRecords[2].version = bound;
     CHECK_AT(where, evaluator->Evaluate(UsdTimeCode(1.0)).valid);
     CHECK_AT(where,
              ReadRecordPoints(evaluator->Evaluate(UsdTimeCode(8.0)), true)
                      .r5 == before.r5);
+}
+
+// 13_ReadPhases plus an unrelated chain: Other, moved by a matrix mover on a
+// joint FreeCtl drives, which reaches neither the cage nor the slab. A phased
+// rig runs under the cone like any other: an unchanged repeat runs no pose
+// step, and a drag of FreeCtl leaves the cage's providers clean. The kept
+// answers equal a fresh walk's under the same drag. (A RevisionStatic that
+// reads another step's slots is dirty every run whatever its phases, so the
+// lattice's assemble itself still runs; that is the cone's rule for every
+// rig, ArmRig included.)
+const char *const kFreeChain = R"(#usda 1.0
+over "ReadPhaseAsset"
+{
+    over "Rig"
+    {
+        over "Controls"
+        {
+            def RigExecControl "FreeCtl" (prepend apiSchemas = ["RigExecControlAPI"])
+            {
+                double avars:ty = 0
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+        over "Solvers"
+        {
+            def RigExecFkChain "FreeChain"
+            {
+                rel rigExec:controls = </ReadPhaseAsset/Rig/Controls/FreeCtl>
+                rel rigExec:joints = </ReadPhaseAsset/Rig/Joints/Free>
+            }
+        }
+        over "Joints"
+        {
+            def RigExecJoint "Free"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+        over "Movers"
+        {
+            over "Geometry"
+            {
+                def RigExecMatrixMover "OtherLift" (prepend apiSchemas = ["RigExecMoverAPI"])
+                {
+                    rel rigExec:transform = </ReadPhaseAsset/Rig/Joints/Free> (rigExecReadPhase = "final")
+                    rel rigExec:weightObject = </ReadPhaseAsset/Rig/Weights/OtherW>
+                    rel rigExec:moves = </ReadPhaseAsset/Geom/Other.points>
+                }
+            }
+        }
+        over "Weights"
+        {
+            def RigExecStaticWeight "OtherW"
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </ReadPhaseAsset/Geom/Other.points>
+            }
+        }
+    }
+    over "Geom"
+    {
+        def Points "Other"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        }
+    }
+}
+)";
+
+void
+TestAPhasedRigSkipsOnRepeat(const std::string &examples)
+{
+    const std::string where = "phased rig under the cone";
+    const UsdStageRefPtr stage = OpenReadPhases(examples);
+    if (!stage) {
+        return;
+    }
+    CHECK_AT(where, stage->GetSessionLayer()->ImportFromString(kFreeChain));
+    auto baked =
+        MakeEvaluator(stage, kReadPhaseRig, RigExecEvaluationMode::Baked);
+    if (!baked) {
+        return;
+    }
+    const UsdTimeCode time(1007);
+    const RigExecRigPose first = baked->Evaluate(time);
+    CHECK_AT(where, first.valid);
+    const RigExecBakedProgram *program = baked->GetBakedProgram();
+    CHECK_AT(where, program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    CHECK_AT(where, B.phasedReads);
+    const auto providerMatrices = [&B](const char *joint) {
+        std::vector<int> out;
+        const SdfPath path =
+            SdfPath("/ReadPhaseAsset/Rig/Joints").AppendChild(TfToken(joint));
+        for (size_t s = 0; s < B.steps.size(); ++s) {
+            const RigExecBakedStep &step = B.steps[s];
+            if (step.kind == RigExecBakedStepKind::ProviderMatrix &&
+                B.paths[size_t(step.object)] == path) {
+                out.push_back(int(s));
+            }
+        }
+        return out;
+    };
+    const std::vector<int> lift = providerMatrices("Lift");
+    const std::vector<int> twist = providerMatrices("Twist");
+    const std::vector<int> free = providerMatrices("Free");
+    CHECK_AT(where, !lift.empty() && !twist.empty() && !free.empty());
+    const auto anyRan = [&B](const std::vector<int> &steps) {
+        for (const int step : steps) {
+            if (B.steps[size_t(step)].runSeq != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto poseRan = [&B]() {
+        size_t count = 0;
+        for (const RigExecBakedStep &step : B.steps) {
+            count += step.runSeq != 0 &&
+                             std::string(RigExecBakedStepDomainName(
+                                 step.kind)) == "pose"
+                         ? 1
+                         : 0;
+        }
+        return count;
+    };
+    CHECK_AT(where + " first", anyRan(lift) && anyRan(free));
+
+    // The same time again: nothing in the pose half moved, so none of it
+    // runs -- before, a phased rig ran every step of every run.
+    const RigExecRigPose repeat = baked->Evaluate(time);
+    CHECK_AT(where + " repeat", repeat.valid);
+    CHECK_AT(where + " repeat", repeat.moverGraphRevisionsExecuted == 0);
+    CHECK_AT(where + " repeat", poseRan() == 0);
+    for (const SdfPath &target : {kSlab, kCage, kOther}) {
+        CHECK_AT(where + " repeat " + target.GetString(),
+                 Moved(repeat, target) == Moved(first, target));
+    }
+
+    // FreeCtl reaches Other only: Lift's and Twist's matrices stay clean,
+    // and the cage the lattice reads at `final` is the one they left.
+    const std::vector<RigExecValueOverride> drag{RigExecValueOverride{
+        SdfPath("/ReadPhaseAsset/Rig/Controls/FreeCtl"), TfToken(),
+        TfToken("avars:ty"), VtValue(0.75)}};
+    baked->SetInteractiveOverrides(drag);
+    const RigExecRigPose dragged = baked->Evaluate(time);
+    CHECK_AT(where + " dragged", dragged.valid);
+    CHECK_AT(where + " dragged", anyRan(free));
+    CHECK_AT(where + " dragged", !anyRan(lift) && !anyRan(twist));
+    CHECK_AT(where + " dragged",
+             Moved(dragged, kOther) != Moved(first, kOther));
+    auto reference = MakeEvaluator(stage, kReadPhaseRig,
+                                   RigExecEvaluationMode::ExecReference);
+    if (!reference) {
+        return;
+    }
+    reference->SetInteractiveOverrides(drag);
+    const RigExecRigPose walked = reference->Evaluate(time);
+    CHECK_AT(where + " dragged", walked.valid);
+    for (const SdfPath &target : {kSlab, kCage, kOther}) {
+        CHECK_AT(where + " dragged " + target.GetString(),
+                 Moved(dragged, target) == Moved(walked, target));
+    }
 }
 
 // RigExecBakedEvalFrameRecord's gates on a hand-built program, including
@@ -1375,6 +1656,7 @@ main(int argc, char **argv)
     TestBlendSamplesBindToVersions();
     TestFrameRecordsMatchTheStore(examples);
     TestTheFoldReadsItsRecords(examples);
+    TestAPhasedRigSkipsOnRepeat(examples);
     TestFrameRecordGates();
 
     if (failures) {

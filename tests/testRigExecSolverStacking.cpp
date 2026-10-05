@@ -1613,8 +1613,8 @@ TestReadPhasesOverTheUnifiedStack()
     CHECK(!Near(GfVec3d(fedMovers), GfVec3d(fedFinal), 1e-4));
 }
 
-/// The AtPrim(Movers) probe held to the run's phased-read store, baked, in
-/// both rig orders. Movers holds the constraint, while the IK writing the
+/// The AtPrim(Movers) probe held to the dynamic walk's phased-read store,
+/// baked, in both rig orders. Movers holds the constraint, while the IK writing the
 /// same knee sits in Solvers, so the probe's list is KneeMove's record alone
 /// whether the record lands after the IK's write or before it.
 void

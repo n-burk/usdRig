@@ -143,7 +143,7 @@ RigExecBakedScheduleReportRequested()
 //   CommitApply      candidate slots + propagation pairs
 //   ProviderMatrix   one matrix; the whole step is its fixed term
 //   FrameMatrix      one matrix, like ProviderMatrix
-//   SnapshotFinals   provider slots
+//   SnapshotFinals   provider slots (reserved: no longer emitted)
 //   InfluenceFold    influences -- NOT vertices; the fold is O(joints)
 //   RevisionStatic   the target's vertices (ResolveAll of the envelope)
 //   RevisionChunk    vertices x elementSize, NOT x influences: elementSize IS
@@ -194,7 +194,7 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0324, 0.016869},   // PropagateChunk    4
     {0.0000, 0.004088},   // CommitApply       2
     {0.0000, 0.051952},   // ProviderMatrix  252
-    {0.0000, 0.077140},   // SnapshotFinals    1 -- 13_ReadPhases
+    {0.0000, 0.077140},   // SnapshotFinals    1 -- 13_ReadPhases; retired
     {0.2000, 0.020000},   // PoseInterpolator  unfitted -- see below
     {0.0000, 0.143880},   // VolumePlacements  1 -- 11_VolumeWeights
     {0.0000, 0.066481},   // WeightPacket      5 -- 11_VolumeWeights
@@ -827,28 +827,6 @@ RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
     // Where the previous pass stopped. Everything below walks only the steps
     // from here on; the tables carry what the earlier ones contributed.
     const int first = sweep->swept;
-    if (B.phasedReads) {
-        // The run's phased-read store is ONE container, and a step's records
-        // reach it through a fold the executor performs. Slot-per-step
-        // declarations order each record against the steps that read it, but
-        // they leave two RECORDERS free to run at once -- and two folds into
-        // one store at once is a race whatever the slots say. So on a rig
-        // that can look a record up, every recorder declares the whole store
-        // up to its own point, which makes the recorders a chain in program
-        // order and leaves the readers where they were. Declared writes are
-        // an upper bound, so widening one is always sound; it is only ever
-        // paid for by a rig that declares a read phase, and nothing else
-        // about the schedule changes.
-        for (int index = first; index < int(B.steps.size()); ++index) {
-            for (RigExecBakedSlotRange &range :
-                     B.steps[size_t(index)].writes) {
-                if (range.domain == RigExecBakedSlotDomain::Snapshots) {
-                    range.begin = 0;
-                    range.end = uint32_t(index) + 1;
-                }
-            }
-        }
-    }
     std::array<std::vector<SlotInterval>, RigExecBakedSlotDomainCount>
         &writers = sweep->writers, &readers = sweep->readers;
     for (int index = first; index < int(B.steps.size()); ++index) {
@@ -1064,15 +1042,25 @@ ValidateStepEdges(const RigExecBakedProgramImpl &B, GraphViolations *out)
 }
 
 /// Every slot read in a domain the prologue does not fill has a writer at a
-/// strictly lower index. Snapshots is the exception: a read of it names every
-/// step before the reader, recorder or not, so only its extent is checked.
+/// strictly lower index. No step may name the retired Snapshots domain: its
+/// store is gone, so a read of it would order against nothing.
 void
 ValidateSlotProducers(const RigExecBakedProgramImpl &B, GraphViolations *out)
 {
     const auto checked = [](RigExecBakedSlotDomain domain) {
-        return !RigExecBakedIsSourceDomain(domain) &&
-               domain != RigExecBakedSlotDomain::Snapshots;
+        return !RigExecBakedIsSourceDomain(domain);
     };
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        for (const auto *ranges : {&step.reads, &step.writes}) {
+            for (const RigExecBakedSlotRange &range : *ranges) {
+                if (range.domain == RigExecBakedSlotDomain::Snapshots) {
+                    out->Add(NameStep(B, index) +
+                             " declares the retired Snapshots domain");
+                }
+            }
+        }
+    }
     // The lowest step whose declared writes cover each slot; -1 for none.
     std::array<std::vector<int>, RigExecBakedSlotDomainCount> firstWriter;
     for (int index = 0; index < int(B.steps.size()); ++index) {
@@ -1105,14 +1093,8 @@ ValidateSlotProducers(const RigExecBakedProgramImpl &B, GraphViolations *out)
                        "[" + std::to_string(read.begin) + "," +
                        std::to_string(read.end) + ")";
             };
-            if (read.domain == RigExecBakedSlotDomain::Snapshots) {
-                if (read.end > uint32_t(index)) {
-                    out->Add(NameStep(B, index) + " reads " + range() +
-                             ", the records of steps at or after it");
-                }
-                continue;
-            }
-            if (!checked(read.domain)) {
+            if (!checked(read.domain) ||
+                read.domain == RigExecBakedSlotDomain::Snapshots) {
                 continue;
             }
             const std::vector<int> &table = firstWriter[size_t(read.domain)];
@@ -2076,14 +2058,12 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     dirty.Resize(stepCount);
 
     // What makes a run trust NOTHING it holds: the caller forcing one (the
-    // cone verifier's second pass); a program stamp that moved, which is the
-    // evaluator saying a notice changed something the index does not name;
-    // and a rig that can LOOK UP a phased read, because the store the
-    // records land in is emptied at the head of every run and a skipped
-    // recorder leaves a hole in it rather than last run's answer. The first
-    // run of a program is NOT one of them -- it has its own dirty set below.
-    bool full = force || B.phasedReads ||
-                B.programStamp != B.lastProgramStamp;
+    // cone verifier's second pass), and a program stamp that moved, which is
+    // the evaluator saying a notice changed something the index does not
+    // name. A phased read is not one: it reads versions and frame records
+    // that persist across runs like every other slot. The first run of a
+    // program is NOT one of them either -- it has its own dirty set below.
+    bool full = force || B.programStamp != B.lastProgramStamp;
     // A chain's result reaches a step through the generation's resolved
     // inputs, which no slot names, so every step that reads one has to run
     // when a result moved. That is the steps flagged as reading resolved
@@ -2487,10 +2467,10 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
         // The two modes' step times are read against each other (it is the
         // whole reason a step time is interesting), so they have to measure
         // the same thing: a boundary that rolled from the last executed
-        // step would charge serial for the snapshot merge below and for the
-        // scan over every step skipped since, and make the comparison
-        // flatter than the frame is. Affordable because nothing reads a
-        // clock here unless a calibration or a step timing asked.
+        // step would charge serial for the scan over every step skipped
+        // since, and make the comparison flatter than the frame is.
+        // Affordable because nothing reads a clock here unless a calibration
+        // or a step timing asked.
         const uint64_t beganNs = calibrating ? NowNs() : 0;
         RunStepBody(&B, &step, time);
         StampRunSeq(&B, &step);
@@ -2511,13 +2491,6 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
             step.startUs = mark;
             step.endUs = now;
             mark = now;
-        }
-        // The phased-read records this step made, folded into the run's store
-        // in step order -- which is what lets a step record into a store
-        // nobody else can see and still leave the walk's order deciding what
-        // the store ends up holding.
-        if (!step.snapshots.IsEmpty()) {
-            B.runSnapshots.Merge(std::move(step.snapshots));
         }
         if (step.bail) {
             // The generation is going back to the dynamic path, so nothing
@@ -2550,10 +2523,6 @@ struct ParallelRun {
     /// Whether each step adds its own nanoseconds to its own accumulator.
     /// See RigExecBakedStepTimingRequested for why this is off by default.
     bool measuring = false;
-    /// Whether a step's phased-read records are folded into the run's store
-    /// as the region goes. See RunStepsParallel for why that is safe only
-    /// when the program has a reader for them.
-    bool mergeInline = false;
 
     void RunFrom(int cluster);
 };
@@ -2609,9 +2578,6 @@ ParallelRun::RunFrom(int start)
                 // lock-free.
                 step.startUs = began;
                 step.endUs = RigExecProfiler::NowUs();
-            }
-            if (mergeInline && !step.snapshots.IsEmpty()) {
-                B.runSnapshots.Merge(std::move(step.snapshots));
             }
             if (step.bail) {
                 bailed.store(true, std::memory_order_relaxed);
@@ -2677,15 +2643,6 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
                     !B.measurementSuspended;
     run.timing = run.profiling || RigExecBakedScheduleReportRequested();
     B.clustering.lastRunTimed = run.timing;
-    // The run's phased-read store is one container, and folding a step's
-    // records into it is a write to it. When some revision declares a read
-    // phase the graph orders every writer and reader of the store against
-    // each other (see the widening in RigExecBakedBuildSchedule), so the
-    // fold may happen where the serial executor does it. When nothing
-    // declares one, nothing can LOOK a record up before the epilogue, so the
-    // folds all wait until after the region -- in step order, which is the
-    // order that decides what the store ends up holding.
-    run.mergeInline = B.phasedReads;
 
     std::vector<int> seeds;
     const uint64_t opened = run.timing ? RigExecProfiler::NowUs() : 0;
@@ -2731,14 +2688,6 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
         }
         dispatcher.Wait();
     });
-
-    if (!run.mergeInline) {
-        for (RigExecBakedStep &step : B.steps) {
-            if (!step.snapshots.IsEmpty()) {
-                B.runSnapshots.Merge(std::move(step.snapshots));
-            }
-        }
-    }
     return !run.bailed.load(std::memory_order_relaxed);
 }
 

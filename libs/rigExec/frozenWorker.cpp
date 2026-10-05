@@ -168,7 +168,6 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     }
     B.propertyResults.clear();
     B.resolvedInputs->Clear();
-    B.runSnapshots.Clear();
     B.chainSnapshots->Clear();
     // The override placement, replicated from
     // _ApplyInteractiveOverridesToResolved: every attribute override stands
@@ -613,9 +612,6 @@ _FrozenRunSteps(_FrozenWorker *worker,
             if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
                 return false;
             }
-            if (!step.snapshots.IsEmpty()) {
-                B.runSnapshots.Merge(std::move(step.snapshots));
-            }
             if (step.bail) {
                 return false;
             }
@@ -639,9 +635,6 @@ _FrozenRunSteps(_FrozenWorker *worker,
         if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
             return false;
         }
-        if (!step.snapshots.IsEmpty()) {
-            B.runSnapshots.Merge(std::move(step.snapshots));
-        }
         if (step.bail) {
             return false;
         }
@@ -654,7 +647,7 @@ _FrozenRunSteps(_FrozenWorker *worker,
 // slots into -- plus the retained handle it was rebound from, into the
 // rebind context RigExecRunSparsePlan executes. One cluster runs through
 // _FrozenStepBody, the exact per-step body _FrozenRunSteps dispatches,
-// with the same snapshot merge and bail handling; the program parameter
+// with the same bail handling; the program parameter
 // must name the bound clone (a foreign program declines rather than run
 // against state the runner does not own). File-local beside the dispatch
 // it shares: _FrozenStepBody takes the worker, so no header surface can
@@ -686,9 +679,6 @@ _MakeProductionClusterRunner(
                 }
                 if (!_FrozenStepBody(worker, &step, index, inputs, time)) {
                     return false;
-                }
-                if (!step.snapshots.IsEmpty()) {
-                    owned.runSnapshots.Merge(std::move(step.snapshots));
                 }
                 if (step.bail) {
                     return false;
@@ -1005,7 +995,6 @@ RigExecPartialSlots::Restore(RigExecBakedProgramImpl *program) const
         B.steps[k].counters = steps[k].counters;
         B.steps[k].bail = steps[k].bail;
     }
-    B.runSnapshots.Clear();
     return true;
 }
 

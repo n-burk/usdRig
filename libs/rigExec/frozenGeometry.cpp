@@ -1434,8 +1434,6 @@ _FrozenStepBody(_FrozenWorker *worker, RigExecBakedStep *step,
         step->kind == RigExecBakedStepKind::VolumePlacements) {
         return _FrozenWeightStep(worker, step, index, inputs, time);
     }
-    // SnapshotFinals rides the shared pose runner below: pure slot math
-    // over provider finals (bakedPose.cpp), no stage reads.
     if (step->kind == RigExecBakedStepKind::RevisionStatic) {
         return _FrozenRevisionStatic(worker, step, index, inputs);
     }

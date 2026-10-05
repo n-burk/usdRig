@@ -59,15 +59,16 @@ namespace rigExec {
 
 namespace {
 
-/// Binds every phased point read of the program to the store records it can
-/// see (RigExecBakedPointsBinding).
+/// Binds every phased point read of the program to the chain versions the
+/// dynamic walk's phased-read store would answer it from
+/// (RigExecBakedPointsBinding).
 ///
 /// "Before the reader" is program order, which RigExecBakedBuildGeometrySteps
 /// emits chain by chain in `chains` order: every step of an earlier chain,
 /// and on the reader's own chain the fuses of the revisions before it -- or,
-/// for a derived reader, every fuse and the chain's status step. The store
+/// for a derived reader, every fuse and the chain's status step. The walk
 /// records a revision only where `snapshotAfter` is set and a chain's final
-/// in its status step, and both only when the chain read a base this run.
+/// after its status sweep, and both only when the chain read a base.
 void
 BindPointReads(RigExecBakedProgramImpl *program)
 {
@@ -209,10 +210,10 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         }
         // Some phased read, of any of the THREE kinds the dynamic walk has:
         // the per-input phases, an AtPrim transform, and a blend sample whose
-        // points carry a phase. `phasedReads` gates the store's recording
-        // and forces whole runs, and the exporter reads both flags; the
-        // program's own point reads resolve through their bindings
-        // (BindPointReads).
+        // points carry a phase. `phasedReads` and `readsSnapshots` are
+        // exported for the .rigexec runtime's own store; nothing in
+        // libs/rigExec reads them. The program's reads resolve through their
+        // bindings (BindPointReads) and frame records.
         bool phased = !r.binding.phases.empty() ||
                       r.binding.transformPhase.kind ==
                           RigExecReadPhaseKind::AtPrim;
@@ -1237,11 +1238,6 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 fuse.writes.push_back(RigExecBakedRange(
                     RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
                     revision.chunkBase + int(revision.chunks.size())));
-                if (revision.snapshotAfter) {
-                    fuse.writes.push_back(
-                        RigExecBakedOne(RigExecBakedSlotDomain::Snapshots,
-                                        int(B.steps.size()) - 1));
-                }
                 B.revisionFuseStep[size_t(id)] = int(B.steps.size()) - 1;
             }
         }
@@ -1262,8 +1258,6 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             }
             status.writes.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainPoints, int(c)));
-            status.writes.push_back(RigExecBakedOne(
-                RigExecBakedSlotDomain::Snapshots, int(B.steps.size()) - 1));
         }
         for (size_t d = 0; d < chain.derived.size(); ++d) {
             RigExecBakedProgramImpl::GeomChain::Derived &derived =
@@ -1632,15 +1626,12 @@ SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
     return true;
 }
 
-/// The test capture (RigExecBakedProgramTesting::CapturePointReads): the run
-/// store's answer for \p binding as \p reader sees it at this moment, beside
-/// the binding's own answer. Only in the serial schedule, where no record is
-/// folded into the store while a step body runs.
+/// The test capture (RigExecBakedProgramTesting::CapturePointReads): the
+/// binding's answer for \p binding as its reader took it this run.
 void
 CapturePointRead(RigExecBakedProgramImpl *program,
                  const RigExecBakedPointsBinding &binding,
-                 const SdfPath &reader, const GfVec3f *points, size_t count,
-                 bool answered)
+                 const GfVec3f *points, size_t count, bool answered)
 {
     RigExecBakedProgramImpl &B = *program;
     if (!B.capturePointReads || binding.id < 0 ||
@@ -1649,12 +1640,6 @@ CapturePointRead(RigExecBakedProgramImpl *program,
     }
     RigExecBakedPointCapture &capture = B.pointCaptures[size_t(binding.id)];
     capture.read = true;
-    const VtValue *recorded =
-        B.runSnapshots.Lookup(binding.input, binding.phase, reader);
-    capture.storeAnswered = recorded && recorded->IsHolding<VtVec3fArray>();
-    capture.store = capture.storeAnswered
-                        ? recorded->UncheckedGet<VtVec3fArray>()
-                        : VtVec3fArray();
     capture.bindingAnswered = answered;
     capture.bound =
         answered ? VtVec3fArray(points, points + count) : VtVec3fArray();
@@ -1700,11 +1685,10 @@ RigExecBakedOverlayPointReads(RigExecBakedProgramImpl *program,
         size_t count = 0;
         const bool answered =
             RigExecBakedResolvePoints(B, binding, &points, &count);
-        CapturePointRead(&B, binding, revision->moverPath, points, count,
-                         answered);
+        CapturePointRead(&B, binding, points, count, answered);
         if (answered) {
             // A final read shares the chain's published buffer, as the
-            // store's record of it did.
+            // walk's record of it does.
             revision->revisionInputs.SetProperty(
                 binding.input,
                 binding.finalRead
@@ -1869,8 +1853,7 @@ AssembleRevision(RigExecBakedProgramImpl &B,
                     RigExecBakedResolvePoints(B, boundSample.pointBinding,
                                               &phased, &phasedCount);
                 if (boundSample.pointBinding.id >= 0) {
-                    CapturePointRead(&B, boundSample.pointBinding,
-                                     revision->moverPath, phased,
+                    CapturePointRead(&B, boundSample.pointBinding, phased,
                                      phasedCount, answered);
                 }
                 if (answered) {
@@ -2317,9 +2300,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         std::copy(points, points + count, chain.spare.data());
         chain.result.swap(chain.spare);
         chain.haveResult = true;
-        // `final` costs nothing extra: this is the value the chain
-        // publishes.
-        step->snapshots.RecordFinal(chain.target, VtValue(chain.result));
         step->counters.chainsBuilt = 1;
         return;
     }
@@ -2688,17 +2668,6 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             revision.lastParameters = revision.parameters;
             revision.lastStatus = revision.status;
             revision.ran = true;
-        }
-        // Snapshot only where a phased read named this revision, which is the
-        // whole cost of the feature for a rig that uses it and nothing at all
-        // for one that does not.
-        if (revision.snapshotAfter) {
-            const GfVec3f *points = nullptr;
-            size_t count = 0;
-            PointsAt(chain, size_t(revisionIndex) + 1, &points, &count);
-            step->snapshots.Record(
-                chain.target, revision.moverPath,
-                VtValue(VtVec3fArray(points, points + count)));
         }
         return;
     }

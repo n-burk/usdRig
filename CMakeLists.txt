@@ -1028,13 +1028,12 @@ foreach(_entry testRigExecVolumeWeightsBakedParity
         "RIGEXEC_TEST_BAKED_PATH=1")
 endforeach()
 
-# Phased point reads bound to chain versions, held to the run's store as the
-# reader sees it (captured in the serial schedule) and to the dynamic walk,
-# and AtPrim transform phases read through frame records
-# (tests/fixtures/frame_record_fallbacks.usda at frames 1, 4 and 8 and under
-# a drag), held to the store and to the dynamic walk. CONE_VERIFY re-runs the
-# cases under the cone verifier in both schedules; a rig with phased reads
-# still runs whole, so no step is skipped there yet.
+# Phased point reads bound to chain versions, and AtPrim transform phases read
+# through frame records (tests/fixtures/frame_record_fallbacks.usda at frames
+# 1, 4 and 8 and under drags), held to the dynamic walk's phased-read store
+# (BakedWithParityCheck) and to output parity. CONE_VERIFY runs the cases
+# under the cone verifier in both schedules; a phased rig skips its clean
+# steps there like any other rig.
 add_executable(testRigExecPhaseBindings tests/testRigExecPhaseBindings.cpp)
 target_link_libraries(testRigExecPhaseBindings PRIVATE rigExec)
 target_compile_definitions(testRigExecPhaseBindings PRIVATE ${_rigexec_schema_resource_define})

@@ -2343,9 +2343,9 @@ TestAReadPhaseOnTheTransformIsExact()
     CHECK(atPrim != base);
 }
 
-// The same AtPrim read held to the run's phased-read store: Slide's list is
-// A's record alone, and it answers exactly what the store does at the end of
-// every run.
+// The same AtPrim read held to the dynamic walk's phased-read store: Slide's
+// list is A's record alone, and it answers exactly what that store does at
+// the end of every run.
 static void
 TestAPoseWalkReadPhaseMatchesTheStore()
 {

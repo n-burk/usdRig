@@ -2176,11 +2176,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             }
             declarePropagation(&commitStep, /* writes = */ true);
             declareCarryReads(&commitStep);
-            if (!walk.solverBatch) {
-                commitStep.writes.push_back(RigExecBakedOne(
-                    RigExecBakedSlotDomain::Snapshots,
-                    int(B.steps.size()) - 1));
-            }
             addFrameRecordSteps(w);
             continue;
         }
@@ -2231,11 +2226,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 commit.stagingBase + int(commit.propagate.size())));
             declarePropagation(&apply, /* writes = */ true);
             declareCarryReads(&apply);
-            if (!walk.solverBatch) {
-                apply.writes.push_back(
-                    RigExecBakedOne(RigExecBakedSlotDomain::Snapshots,
-                                    int(B.steps.size()) - 1));
-            }
         }
         addFrameRecordSteps(w);
     }
@@ -2357,11 +2347,11 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         }
     }
 
-    // After the matrices and before the store's record, which is where the
-    // dynamic path's phase sits: it reads the FINAL pose, every constraint
-    // included, and writes what the geometry chains consume. One step per
-    // interpolator, reading the last version of its driver's slot and of the
-    // parent's, writing its own range of weights.
+    // After the matrices, which is where the dynamic path's phase sits: it
+    // reads the FINAL pose, every constraint included, and writes what the
+    // geometry chains consume. One step per interpolator, reading the last
+    // version of its driver's slot and of the parent's, writing its own range
+    // of weights.
     for (size_t k = 0; k < B.poseInterpolators.size(); ++k) {
         const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
             B.poseInterpolators[k];
@@ -2383,19 +2373,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseWeight, interpolator.weightBegin,
             interpolator.weightEnd));
-    }
-
-    // The store's other pose-half record: every provider's rest -> final
-    // matrix, which is what a `final` phase on a provider resolves to. Only
-    // a rig that declares a phase can look one up, so only such a rig pays
-    // for the step at all.
-    if (B.phasedReads) {
-        RigExecBakedStep &step =
-            AddStep(&B, RigExecBakedStepKind::SnapshotFinals, 0);
-        step.reads.push_back(
-            RigExecBakedRange(RigExecBakedSlotDomain::PoseFin, 0, N));
-        step.writes.push_back(RigExecBakedOne(
-            RigExecBakedSlotDomain::Snapshots, int(B.steps.size()) - 1));
     }
 }
 
@@ -2910,62 +2887,6 @@ StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
     }
 }
 
-/// The phased-read store's pose-half record: a provider's rest -> final
-/// matrix as it stood immediately AFTER one constraint. Mirrors the dynamic
-/// walk's recordFrame, including which frames it declines to record; the
-/// Snapshot membership it tests per call was decided at bake, so a rig
-/// that declares no phase pays one branch per constraint. No step reads
-/// these records: the fold reads the FrameMatrix steps' (same gates,
-/// RigExecBakedEvalFrameRecord), and tests hold the two to each other.
-void
-RecordFrame(const RigExecBakedProgramImpl &B,
-            const RigExecBakedProgramImpl::Constraint &constraint,
-            const RigExecBakedCommit &commit, RigExecBakedStep *step)
-{
-    if (!constraint.snapshotAfter) {
-        return;
-    }
-    // Every target, or just the first: which one this exit is was decided
-    // by the step, because the dynamic walk decides it per exit (see
-    // RigExecBakedCommit::recordEveryTarget).
-    const size_t count =
-        commit.recordEveryTarget
-            ? constraint.targetSlots.size()
-            : std::min<size_t>(1, constraint.targetSlots.size());
-    for (size_t k = 0; k < count; ++k) {
-        if (!constraint.snapshotTargets[k]) {
-            continue;
-        }
-        const size_t slot = size_t(constraint.targetSlots[k]);
-        // The target as THIS commit left it: the commit's own version of the
-        // slot when it declared one -- whether it revised it or carried the
-        // one it found -- and otherwise the version it read, which is where
-        // a geometry-domain constraint leaves its target. A phase names a
-        // point in the walk, and a constraint that passed through still
-        // leaves its target standing at that point.
-        const auto found = std::lower_bound(commit.slots.begin(),
-                                            commit.slots.end(),
-                                            constraint.targetSlots[k]);
-        const uint32_t version =
-            found != commit.slots.end() &&
-                    *found == constraint.targetSlots[k]
-                ? commit.slotWrites[size_t(found - commit.slots.begin())]
-                : commit.targetReads[k];
-        const RigExecPointFrame &frame = B.fin[size_t(version)];
-        if (!frame.IsValid()) {
-            continue;
-        }
-        const RigExecPointFrame &rest = B.restFrames[slot];
-        const std::array<GfVec3d, 4> landmarks =
-            rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
-        GfMatrix4d matrix(1.0);
-        if (RigExecPointsToMatrix(landmarks, frame.points, &matrix)) {
-            step->snapshots.Record(B.paths[slot], constraint.path,
-                                   VtValue(matrix));
-        }
-    }
-}
-
 /// Decides \p commit and writes it back, or says why it passed through.
 ///
 /// The first pair that neither staged nor was stepped over decides, which is
@@ -2977,11 +2898,6 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
              RigExecBakedCommit *commit)
 {
     RigExecBakedProgramImpl &B = *program;
-    const RigExecBakedProgramImpl::Constraint *constraint =
-        commit->solverOutput
-            ? nullptr
-            : &B.constraints[size_t(
-                  B.walkSteps[size_t(step->object)].index)];
     // What a write site that does not write leaves behind: the version this
     // commit found, copied into the storage this commit owns, so that a
     // reader bound to the commit's version reads the value the one frame map
@@ -3016,14 +2932,8 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
             carry(0, k, /* candidates = */ false, /* descendants = */ true);
         }
     };
-    const auto record = [&] {
-        if (constraint && commit->recordAfter) {
-            RecordFrame(B, *constraint, *commit, step);
-        }
-    };
     if (commit->abandoned) {
         carryEverything();
-        record();
         return;
     }
     // Spelled only for a diagnostic: this runs on every commit of every
@@ -3063,7 +2973,6 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
             break;
         }
         carryEverything();
-        record();
         return;
     }
     // In slot order for the candidates -- which is the order the dense table
@@ -3091,7 +3000,6 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
                 commit->staged[k];
         }
     }
-    record();
 }
 
 /// Translates an auto clavicle's target slot, whose base the compose has
@@ -3866,14 +3774,14 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // other step names.
         RigExecBakedProgramImpl::Constraint &c =
             B.constraints[size_t(B.walkSteps[size_t(step->object)].index)];
-        // Every exit below records the target's frame, because the dynamic
-        // walk does: a phase names a POINT in the walk, and a constraint that
-        // passed through still leaves its target standing at that point.
-        // FinishCommit is the recorder, so that a split commit records after
-        // its write-back rather than before it.
+        // Every exit below leaves `recordAfter`/`recordEveryTarget` saying
+        // whether the dynamic walk records the target's frame there; the
+        // commit's FrameMatrix steps, which run after its write-back, read
+        // them. A constraint that passed through still leaves its target
+        // standing at the point a phase names.
         const auto finish = [&] {
             if (commit.split) {
-                return;  // CommitApply finishes, and records
+                return;  // CommitApply finishes
             }
             if (!commit.abandoned) {
                 ComputeCommitDeltas(B, &commit);
@@ -4511,26 +4419,6 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             RigExecBakedEvalFrameRecord(B, B.frameRecords[record], &matrix);
         B.frameMatrix[record] = matrix;
         B.frameMatrixValid[record] = valid ? 1 : 0;
-        return;
-    }
-
-    case RigExecBakedStepKind::SnapshotFinals: {
-        // The dynamic walk fills this for every provider it holds a usable
-        // rest and frame for; the program does the same, but only when
-        // something can look it up, because filling it otherwise would
-        // compute a matrix per slot per frame that no step reads.
-        for (size_t i = 0; i < B.paths.size(); ++i) {
-            const RigExecPointFrame &frame = B.fin[size_t(B.finLast[i])];
-            if (!RigExecBakedUsable(B.restFrames[i]) ||
-                !RigExecBakedUsable(frame)) {
-                continue;
-            }
-            GfMatrix4d matrix(1.0);
-            if (RigExecPointsToMatrix(B.restPts[i], frame.points,
-                                      &matrix)) {
-                step->snapshots.RecordFinal(B.paths[i], VtValue(matrix));
-            }
-        }
         return;
     }
 

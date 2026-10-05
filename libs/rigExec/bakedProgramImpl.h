@@ -465,7 +465,9 @@ enum class RigExecBakedSlotDomain : uint8_t {
     WeightPacket,        ///< one weight object's packet for this frame
     WeightFrames,        ///< where one volume weight is placed, by provider slot
     PoseWeight,          ///< poseWeights[k]: one pose interpolator's weights
-    Snapshots,           ///< the phased-read records one step made
+    /// Reserved: the wire value of the retired phased-read store. Never
+    /// declared; the step-graph validator refuses a step that names it.
+    Snapshots,
     /// frameMatrix[k] and frameMatrixValid[k]: one RigExecBakedFrameRecord.
     /// Appended after Snapshots, so every earlier enumerator keeps its
     /// exported value.
@@ -536,8 +538,8 @@ struct RigExecBakedPointVersion {
     int version = 0;
 };
 
-/// A phased point read, bound at Build to the versions the run's phased-read
-/// store would have answered from: the records of the revisions some phase
+/// A phased point read, bound at Build to the versions the dynamic walk's
+/// phased-read store would have answered from: the records of the revisions some phase
 /// names (`snapshotAfter`) whose fuse -- or, for `final`, whose chain's
 /// status step -- runs before the reader, matched to the phase as
 /// RigExecChainSnapshots::Lookup matches them, newest first. The reader
@@ -581,13 +583,11 @@ struct RigExecBakedFrameRecord {
     SdfPath mover;
 };
 
-/// Test-only: what the run's phased-read store answered for one point
-/// binding, taken by the reader beside its own resolution of the binding
-/// (RigExecBakedProgramTesting::CapturePointReads).
+/// Test-only: one point binding's answer as its reader took it this run
+/// (RigExecBakedProgramTesting::CapturePointReads). `read` is false when the
+/// reader did not run.
 struct RigExecBakedPointCapture {
     bool read = false;
-    bool storeAnswered = false;
-    VtVec3fArray store;
     bool bindingAnswered = false;
     VtVec3fArray bound;
 };
@@ -598,11 +598,6 @@ const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
 /// Whether the prologue, and not a step, fills \p domain: a read of one needs
 /// no producer in the graph. Aggregate is not one: a blend reads its inputs'
 /// aggregates from this run, so their Solve steps must precede it.
-///
-/// Snapshots is deliberately NOT one of them although the prologue empties
-/// the store: every record in it is written by a step, so a read of it must
-/// name the steps it reads, and calling the domain a source would excuse the
-/// one declaration the verifier exists to check.
 inline bool
 RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
 {
@@ -636,7 +631,8 @@ enum class RigExecBakedStepKind {
     PropagateChunk,   ///< a split commit's staged descendant frames
     CommitApply,      ///< a split commit's decision and write-back
     ProviderMatrix,   ///< one provider's rest -> final or rest -> base matrix
-    SnapshotFinals,   ///< every provider's final matrix, for a phased read
+    /// Reserved: the wire value of a retired step. Never emitted.
+    SnapshotFinals,
     PoseInterpolator, ///< one pose interpolator's weights, from the final pose
     VolumePlacements, ///< one volume weight's placement, from the walk
     WeightPacket,     ///< one weight object's packet, built once per frame
@@ -709,7 +705,7 @@ struct RigExecBakedStep {
     ///   SolverCommit/Constraint/CommitDelta/
     ///     PropagateChunk/CommitApply                index into commits
     ///   ProviderMatrix                              provider slot
-    ///   SnapshotFinals                              unused
+    ///   SnapshotFinals                              never emitted
     ///   PoseInterpolator                            index into poseInterpolators
     ///   VolumePlacements                            provider slot (part 1)
     ///   WeightPacket                                index into weightObjects
@@ -785,9 +781,6 @@ struct RigExecBakedStep {
     std::vector<std::string> diagnostics;
     size_t maxDiagnostics = RigExecBakedMaxStepDiagnostics;
     RigExecBakedStepCounters counters;
-    /// The phased-read records this step made, merged into the run's store
-    /// by the executor in step order.
-    RigExecChainSnapshots snapshots;
     /// The step gave the generation back: the baked propagation pairs no
     /// longer describe the walk. Nothing after it runs.
     bool bail = false;
@@ -810,7 +803,6 @@ struct RigExecBakedStep {
     void BeginRun() {
         diagnostics.clear();
         counters.Clear();
-        snapshots.Clear();
         bail = false;
         runSeq = 0;
     }
@@ -1219,7 +1211,9 @@ struct RigExecBakedCommit {
     /// its two late exits, unusable sources and the ordinary one, record
     /// targets[0] alone. Only a multi-target NON-IK constraint can tell the
     /// two apart, and no rig in the tree is one -- but the program must not
-    /// invent a snapshot the reference path never published.
+    /// invent a snapshot the reference path never published. Both flags are
+    /// what a FrameMatrix step reads through CommitTable (and what the
+    /// exporter carries).
     bool recordEveryTarget = true;
     /// Parallel to `sources`, and empty for a source the walk holds a frame
     /// for: the ancestor slots of a native source, in increasing depth.
@@ -1263,11 +1257,9 @@ struct RigExecBakedProgramImpl {
     RigExecResolvedInputs *resolvedInputs = nullptr;
     /// The evaluator's phased-read store, EMPTIED at the head of a run
     /// exactly as the dynamic walk empties it at the head of its own, so the
-    /// two paths leave the evaluator in the same state. Nothing is ever
-    /// recorded into it: in a parity generation the baked run precedes the
-    /// dynamic one over the same evaluator, and a record left here would be
-    /// read back by the dynamic walk as if its own pose walk had produced it.
-    /// The program records into `runSnapshots` below instead.
+    /// two paths leave the evaluator in the same state. The program neither
+    /// records into it nor reads it: its phased reads are bound at Build
+    /// (RigExecBakedPointsBinding, `frameRecords`).
     RigExecChainSnapshots *chainSnapshots = nullptr;
     RigExecSkinTopologyCache *skinTopologies = nullptr;
     /// The evaluator's per-epoch blend sample shapes, resolved in the
@@ -1582,15 +1574,6 @@ struct RigExecBakedProgramImpl {
     /// be handed different maps.
     std::map<SdfPath, VtValue> propertyResults;
 
-    /// This run's phased-read store: what each chain held at each point of
-    /// the walk, and what each provider's matrix was after each constraint
-    /// that named it. Run-local by design (see `chainSnapshots` above); the
-    /// evaluator's holds the previous generation's dynamic records. No step
-    /// looks it up: point reads resolve through their Build-time bindings
-    /// (RigExecBakedPointsBinding) and an AtPrim transform phase through
-    /// `frameRecords`. Still filled, so tests can hold both to it.
-    RigExecChainSnapshots runSnapshots;
-
     /// Every record an AtPrim transform phase can read, in walk order (by
     /// `commit`, then `target`), and what each one's FrameMatrix step wrote
     /// this run. Kept across runs like deltaValues: a step the cone skipped
@@ -1607,11 +1590,9 @@ struct RigExecBakedProgramImpl {
     bool capturePointReads = false;
     std::vector<RigExecBakedPointCapture> pointCaptures;
 
-    /// True when some revision of this epoch declares a read phase, which is
-    /// the only thing that can LOOK the store up. While it is false nothing
-    /// can observe a record, so the pose half does not pay to fill it -- and
-    /// in particular the rest -> final matrix of a provider no step reads is
-    /// still never computed, which is the lazy set this program keeps.
+    /// True when some revision of this epoch declares a read phase. Exported
+    /// for the .rigexec runtime, which records its own phased-read store and
+    /// runs whole when it is set; nothing in libs/rigExec reads it.
     bool phasedReads = false;
 
     // What computeMatrix publishes, over dense slots: the whole
@@ -1884,8 +1865,8 @@ struct RigExecBakedProgramImpl {
         /// rigExec:weightBlend == "radial" on a transform-domain
         /// RigExecMatrixMover, compiled.
         bool radialBlend = false;
-        /// True when any target wants a record, which is the one branch a
-        /// rig with no read phase pays per constraint.
+        /// True when any target wants a record. Exported for the .rigexec
+        /// runtime's own store; EnumerateFrameRecords uses it as a shortcut.
         bool snapshotAfter = false;
 
         // The one multi-target built-in: it revises its whole inferred joint
@@ -2373,8 +2354,10 @@ struct RigExecBakedProgramImpl {
         RigExecMoverStatus lastStatus;
         bool ran = false;
         /// A read phase named this revision as the point in the chain it
-        /// wants the target's points from, so the chain records them after
-        /// it. Decided at bake out of the evaluator's _chainPlan.snapshots.
+        /// wants the target's points from (the dynamic walk records them
+        /// after it). Decided at bake out of the evaluator's
+        /// _chainPlan.snapshots; BindPointReads binds to it, and the
+        /// exporter carries it.
         bool snapshotAfter = false;
         /// A declared input phase (`binding.phases`), an AtPrim transform
         /// phase, or a blend sample whose target shape carries a phase.
@@ -3827,13 +3810,11 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    arrays after runs that agree exactly about the published one, which is
 ///    `result` -- the buffer is storage, and only what `result` names in it
 ///    is an answer.
-///  * the snapshot stores: `RigExecBakedProgramImpl::runSnapshots` and each
-///    step's `snapshots`. A program in which any step records one sets
-///    `phasedReads`, and `phasedReads` forces every run whole (§7), so a
-///    program that fills them has no cone for this mode to check. Each
-///    revision's `revisionInputs` overlay is captured and restored for the
-///    same reason turned around -- it costs nothing and it keeps the second
-///    pass starting from exactly the first's state -- but not compared.
+///  * each revision's `revisionInputs` overlay, which its RevisionStatic
+///    writes and reads within the one body, so no other step can see a
+///    stale one. It is captured and restored -- it costs nothing and it
+///    keeps the second pass starting from exactly the first's state -- but
+///    not compared.
 ///  * the RUN STATISTICS, which are restored rather than compared, because
 ///    the second pass is forced and so writes different ones by
 ///    construction: `lastClosedClusters`, `lastClosedSteps`, the
@@ -4003,10 +3984,9 @@ struct RigExecBakedProgramTesting {
     static void SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
                                         const GfMatrix4d &matrix);
     /// Clears \p program's point captures and has every later run record,
-    /// per point binding, the run store's answer beside the binding's, both
-    /// taken inside the reader. Returns false and captures nothing under the
-    /// parallel schedule, where a later step may fold a record into the
-    /// store while a reader looks it up.
+    /// per point binding, the binding's answer as its reader took it.
+    /// Returns false and captures nothing under the parallel schedule: the
+    /// capture is a test aid and stays off the parallel executor.
     static bool CapturePointReads(const RigExecBakedProgram &program);
 };
 

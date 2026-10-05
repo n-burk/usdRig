@@ -399,10 +399,11 @@ void TestExport()
 }
 
 // The plugin mover's `final` reference is a phased point read like any
-// other: bound at Build to the reference chain's published points,
-// and, inside the reader, equal to what the run's phased-read store holds.
-// Playback takes the same answer through its own overlay (TestExport), so
-// the runtime's "have" flag for it is this binding's first candidate.
+// other: bound at Build to the reference chain's published points, which
+// are what the dynamic walk's phased-read store holds for it (the walk runs
+// after the program in this mode, over the same evaluator). Playback takes
+// the same answer through its own overlay (TestExport), so the runtime's
+// "have" flag for it is this binding's first candidate.
 void TestPhasedReferenceIsBound()
 {
     const auto stage = MakeExportRig("ExternalQuadraticMover");
@@ -437,11 +438,20 @@ void TestPhasedReferenceIsBound()
         CHECK(RigExecBakedResolvePoints(B, *binding, &points, &count));
         CHECK(VtVec3fArray(points, points + count) ==
               pose.movedProperties.at(kReference).Get<VtVec3fArray>());
+        CHECK(B.chainSnapshots != nullptr);
+        const VtValue *walked =
+            binding && B.chainSnapshots
+                ? B.chainSnapshots->Lookup(binding->input, binding->phase,
+                                           SdfPath("/Rig/External"))
+                : nullptr;
+        CHECK(walked && walked->IsHolding<VtVec3fArray>() &&
+              walked->UncheckedGet<VtVec3fArray>() ==
+                  VtVec3fArray(points, points + count));
         if (captured) {
             const RigExecBakedPointCapture &capture =
                 B.pointCaptures.at(size_t(binding->id));
-            CHECK(capture.read && capture.storeAnswered &&
-                  capture.bindingAnswered && capture.store == capture.bound);
+            CHECK(capture.read && capture.bindingAnswered &&
+                  capture.bound == VtVec3fArray(points, points + count));
         }
     }
 }

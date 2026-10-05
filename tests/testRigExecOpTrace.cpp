@@ -265,10 +265,8 @@ TestStage(const std::string &examplesDir, const std::string &file,
     CheckTraceMatchesClosure(E, trace2, file + " repeated trace");
     CHECK(trace2.size() <= trace1.size());
     // The step-grain form of the cone suite's "ran fewer clusters than the
-    // program holds". A program with a phased read runs whole every time.
-    if (!E.GetBakedProgram()->GetStepGraph().phasedReads) {
-        CHECK(trace2.size() < trace0.size());
-    }
+    // program holds", phased reads included.
+    CHECK(trace2.size() < trace0.size());
 
     std::printf("  %s: %zu step(s); first run %zu (%zu pose, %zu weight, "
                 "%zu geometry), t=%g ran %zu, repeat ran %zu (%zu geometry), "

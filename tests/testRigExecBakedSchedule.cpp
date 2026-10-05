@@ -2553,21 +2553,25 @@ TestTheValidatorRejectsAMalformedGraph()
                         "the first writer is step 0"});
     }
     {
-        // A source domain needs no producer; Snapshots needs only to end at
-        // the reader.
+        // A source domain needs no producer; the retired Snapshots domain
+        // may be neither written nor read.
         RigExecBakedProgramImpl B;
         B.steps.push_back(HandStep({RigExecBakedOne(D::SolverPoints, 0),
                                     RigExecBakedOne(D::ChainBase, 0)},
-                                   {RigExecBakedOne(D::Snapshots, 0)}));
-        B.steps.push_back(HandStep({RigExecBakedRange(D::Snapshots, 0, 1)},
+                                   {RigExecBakedOne(D::WeightPacket, 0)}));
+        B.steps.push_back(HandStep({RigExecBakedOne(D::WeightPacket, 0)},
                                    {}));
         ScheduleByHand(&B);
         std::string error;
         CHECK(RigExecBakedValidateStepGraph(B, &error));
-        B.steps[1].reads = {RigExecBakedRange(D::Snapshots, 0, 2)};
-        ExpectRejected(B, "a phased read past its reader",
-                       {"step 1", "Snapshots[0,2)",
-                        "the records of steps at or after it"});
+        CHECK(error.empty());
+        B.steps[0].writes.push_back(RigExecBakedOne(D::Snapshots, 0));
+        ExpectRejected(B, "a write of the retired store",
+                       {"step 0", "declares the retired Snapshots domain"});
+        B.steps[0].writes.pop_back();
+        B.steps[1].reads.push_back(RigExecBakedOne(D::Snapshots, 0));
+        ExpectRejected(B, "a read of the retired store",
+                       {"step 1", "declares the retired Snapshots domain"});
     }
     // A three-step chain, valid as built; each case below breaks one thing.
     const auto chain = [](RigExecBakedProgramImpl *B) {

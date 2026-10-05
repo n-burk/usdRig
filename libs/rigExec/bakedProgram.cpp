@@ -3494,7 +3494,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // delta. That was the hazard §7 named; keeping them across runs the
         // way a slot is kept is the answer it offered.
         B.resolvedInputs->Clear();
-        B.runSnapshots.Clear();
         B.chainSnapshots->Clear();
         // Interactive overrides are applied before the property chains, as
         // _EvaluateDynamic applies them: a drag on a chain's target is its

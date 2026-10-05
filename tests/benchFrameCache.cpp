@@ -482,10 +482,7 @@ MeasureArenaBytes(const RigExecBakedProgramImpl &B, const char *rig)
         std::printf("  %-22s %10zu bytes  (epoch-constant, excluded)\n",
                     "ladder tables", ladderBytes);
     }
-    std::printf("  (%srunSnapshots %s; revision inputs unsized: counts "
-                "unavailable)\n",
-                B.runSnapshots.IsEmpty() ? "" : "NON-EMPTY ",
-                B.runSnapshots.IsEmpty() ? "empty" : "held");
+    std::printf("  (revision inputs unsized: counts unavailable)\n");
     std::printf("  %-22s %10zu bytes  (%zu revisions)\n", "ARENA TOTAL", total,
                 revisionCount);
     if (unknownTypes) {

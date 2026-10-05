@@ -2101,13 +2101,13 @@ _BinaryCompareTableFrame(const rigExec::RigExecBakedProgramImpl &program,
                                   wirePoints[c][s][p][2]);
                         }
                         VtVec3fArray points;
-                        const VtValue *phased =
-                            program.runSnapshots.Lookup(
-                                boundSample.pointsPath, boundSample.phase,
-                                revision.moverPath);
-                        if (phased &&
-                            phased->IsHolding<VtVec3fArray>()) {
-                            points = phased->UncheckedGet<VtVec3fArray>();
+                        const GfVec3f *phased = nullptr;
+                        size_t phasedCount = 0;
+                        if (boundSample.pointBinding.id >= 0 &&
+                            RigExecBakedResolvePoints(
+                                program, boundSample.pointBinding, &phased,
+                                &phasedCount)) {
+                            points.assign(phased, phased + phasedCount);
                         } else {
                             blendReads.GetAttribute(boundSample.points,
                                                     blendTime, &points);

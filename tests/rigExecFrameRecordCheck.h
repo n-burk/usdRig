@@ -1,10 +1,12 @@
-// AtPrim transform reads held to the run's phased-read store, for the tests.
-// The baked program answers an AtPrim read phase on rigExec:transform (and
-// on a matrix mover's reference influences) from a list of frame records
-// bound at Build; the run's store still records what the dynamic walk
-// would answer. The store holds every pose record before any geometry
-// reader runs, so at the end of a run each list's first valid record must
-// equal the store's answer, in presence and bit for bit.
+// AtPrim transform reads held to the dynamic walk's phased-read store, for
+// the tests. The baked program answers an AtPrim read phase on
+// rigExec:transform (and on a matrix mover's reference influences) from a
+// list of frame records bound at Build and keeps no store of its own. In a
+// BakedWithParityCheck generation the dynamic walk runs after the program
+// over the same evaluator, so the evaluator's store (the program's
+// `chainSnapshots`) then holds the walk's records. It holds every pose
+// record before any geometry reader runs, so each list's first valid record
+// must equal the store's answer, in presence and bit for bit.
 // Reports through a caller-owned failure counter, like rigExecPoseCompare.h.
 #ifndef RIGEXEC_TESTS_FRAME_RECORD_CHECK_H
 #define RIGEXEC_TESTS_FRAME_RECORD_CHECK_H
@@ -67,8 +69,8 @@ FirstValidRecord(const rigExec::RigExecBakedProgramImpl &B,
 }
 
 /// Holds every AtPrim transform reader of \p evaluator's program to the
-/// run's store at the end of the run, and every other reader to an empty
-/// list. Returns the readers a record answered.
+/// dynamic walk's store after a BakedWithParityCheck generation, and every
+/// other reader to an empty list. Returns the readers a record answered.
 inline size_t
 CheckFrameRecords(int *failures, const std::string &where,
                   const rigExec::RigExecRigEvaluator &evaluator)
@@ -87,6 +89,15 @@ CheckFrameRecords(int *failures, const std::string &where,
         return answered;
     }
     const rigExec::RigExecBakedProgramImpl &B = program->GetStepGraph();
+    expect(where,
+           evaluator.GetEvaluationMode() ==
+               rigExec::RigExecEvaluationMode::BakedWithParityCheck,
+           "the walk ran beside the program");
+    expect(where, B.chainSnapshots != nullptr, "the evaluator's store");
+    if (!B.chainSnapshots) {
+        return answered;
+    }
+    const rigExec::RigExecChainSnapshots &walk = *B.chainSnapshots;
     expect(where, B.frameMatrix.size() == B.frameRecords.size(),
            "one frameMatrix per record");
     expect(where, B.frameMatrixValid.size() == B.frameRecords.size(),
@@ -96,9 +107,8 @@ CheckFrameRecords(int *failures, const std::string &where,
             const rigExec::RigExecBakedProgramImpl::GeomRevision &r,
             const std::vector<int> &records) {
         const VtValue *stored =
-            slot >= 0 ? B.runSnapshots.Lookup(B.paths[size_t(slot)],
-                                              r.binding.transformPhase,
-                                              r.moverPath)
+            slot >= 0 ? walk.Lookup(B.paths[size_t(slot)],
+                                    r.binding.transformPhase, r.moverPath)
                       : nullptr;
         const bool storeAnswered = stored && stored->IsHolding<GfMatrix4d>();
         GfMatrix4d bound(1.0);
