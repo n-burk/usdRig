@@ -16,6 +16,7 @@
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/tapSet.h"
 
@@ -26,12 +27,16 @@
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1012,6 +1017,496 @@ CheckRibbonPointsEdit(const char *what, bool editDefault)
     }
 }
 
+// TestRefreshSolverRestsOnBuildStateIsIdentity.
+//
+// The Solve step rebuilds a solver's rest description (RefreshSolverRests)
+// only on a run that recomposed the ladder. Skipping it is sound only if a
+// refresh over unchanged rests reproduces, bit for bit, the description the
+// solver already holds. Each refresh is compared with the description the
+// solver holds now and, wherever the solver's rests are bit-identical to the
+// ones Build measured from, with the Build description. A run that already
+// refreshed the solver makes the first comparison a determinism check only;
+// the second is the one a per-solver skip relies on, including on a run that
+// recomposed the ladder for another solver's rests. A rest ref read LIVE
+// from `fin` differs from Build's authored rest by design and refreshes
+// every run, so each field fed by one is excluded.
+
+using SolverDesc = RigExecBakedProgramImpl::Solver;
+using RestPoints = std::array<GfVec3d, 4>;
+
+bool
+SameBits(double a, double b)
+{
+    uint64_t x = 0, y = 0;
+    std::memcpy(&x, &a, sizeof(x));
+    std::memcpy(&y, &b, sizeof(y));
+    return x == y;
+}
+
+bool
+SameBits(const GfVec3d &a, const GfVec3d &b)
+{
+    return SameBits(a[0], b[0]) && SameBits(a[1], b[1]) &&
+           SameBits(a[2], b[2]);
+}
+
+bool
+SameBits(const RestPoints &a, const RestPoints &b)
+{
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (!SameBits(a[i], b[i])) return false;
+    }
+    return true;
+}
+
+bool
+SameBits(const RigExecPointFrame &a, const RigExecPointFrame &b)
+{
+    return a.flags == b.flags && SameBits(a.points, b.points);
+}
+
+template <class T>
+bool
+SameBits(const std::vector<T> &a, const std::vector<T> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (!SameBits(a[i], b[i])) return false;
+    }
+    return true;
+}
+
+bool
+SameBits(const RigExecSplineIkRest &a, const RigExecSplineIkRest &b)
+{
+    return SameBits(std::vector<GfVec3d>(a.cvs.begin(), a.cvs.end()),
+                    std::vector<GfVec3d>(b.cvs.begin(), b.cvs.end())) &&
+           SameBits(a.rootControl, b.rootControl) &&
+           SameBits(a.midControl, b.midControl) &&
+           SameBits(a.endControl, b.endControl) &&
+           SameBits(a.joints, b.joints) &&
+           SameBits(a.segmentLengths, b.segmentLengths) &&
+           SameBits(a.restArcLength, b.restArcLength) &&
+           SameBits(a.volumeWeights, b.volumeWeights);
+}
+
+std::string
+Describe(double v)
+{
+    char text[64];
+    std::snprintf(text, sizeof(text), "%.17g (%a)", v, v);
+    return text;
+}
+
+std::string
+Describe(const RestPoints &p)
+{
+    std::string out;
+    for (const GfVec3d &v : p) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "(%.17g %.17g %.17g)", v[0], v[1],
+                      v[2]);
+        out += text;
+    }
+    return out;
+}
+
+/// Field-by-field comparison of one held description with its refresh.
+struct RestDiff {
+    std::string where;
+    /// False counts mismatches without failing the test.
+    bool report = true;
+    size_t compared = 0;
+    size_t excluded = 0;
+    size_t differing = 0;
+
+    /// \p live excludes the field; \p detail is printed only on a mismatch.
+    void Field(const std::string &field, bool live, bool same,
+               const std::function<std::string()> &detail = {})
+    {
+        if (live) {
+            ++excluded;
+            return;
+        }
+        ++compared;
+        if (same) return;
+        ++differing;
+        if (!report) return;
+        ++failures;
+        std::printf("FAIL %s: %s differs from the refresh%s%s\n",
+                    where.c_str(), field.c_str(), detail ? ": " : "",
+                    detail ? detail().c_str() : "");
+    }
+};
+
+/// Compares every field RefreshSolverRests writes, over \p held and
+/// \p refreshed, into \p diff.
+void
+CompareRestDescription(const SolverDesc &held, const SolverDesc &refreshed,
+                       RestDiff *diff)
+{
+    const auto liveRef = [&held](size_t k) {
+        return k < held.restIsLive.size() && held.restIsLive[k];
+    };
+    // Whether a live ref feeds element \p e of an element-remapped table.
+    const auto liveElement = [&](int e) {
+        for (size_t k = 0; k < held.restRefs.size(); ++k) {
+            if (held.restRefs[k].second == e && liveRef(k)) return true;
+        }
+        return false;
+    };
+    const auto points = [](const RestPoints &a, const RestPoints &b) {
+        return [&a, &b] {
+            return "held " + Describe(a) + " refreshed " + Describe(b);
+        };
+    };
+    const auto scalar = [](double a, double b) {
+        return [a, b] {
+            return "held " + Describe(a) + " refreshed " + Describe(b);
+        };
+    };
+
+    diff->Field("jointRests.size", false,
+                held.jointRests.size() == refreshed.jointRests.size());
+    for (size_t k = 0; k < held.jointRests.size() &&
+                       k < refreshed.jointRests.size();
+         ++k) {
+        diff->Field("jointRests[" + std::to_string(k) + "]", liveRef(k),
+                    SameBits(held.jointRests[k], refreshed.jointRests[k]),
+                    points(held.jointRests[k], refreshed.jointRests[k]));
+    }
+
+    if (held.type == "RigExecFkChain") {
+        diff->Field("controlRests.size", false,
+                    held.controlRests.size() ==
+                        refreshed.controlRests.size());
+        for (size_t k = 0; k < held.controlRests.size() &&
+                           k < refreshed.controlRests.size();
+             ++k) {
+            diff->Field("controlRests[" + std::to_string(k) + "]", false,
+                        SameBits(held.controlRests[k],
+                                 refreshed.controlRests[k]),
+                        points(held.controlRests[k],
+                               refreshed.controlRests[k]));
+        }
+        diff->Field("startRest", false,
+                    SameBits(held.startRest, refreshed.startRest),
+                    points(held.startRest, refreshed.startRest));
+    } else if (held.type == "RigExecTwoBoneIk") {
+        bool anyLive = false;
+        for (int e = 0; e < 3; ++e) {
+            const bool live = liveElement(e);
+            anyLive = anyLive || live;
+            diff->Field("ikRests[" + std::to_string(e) + "]", live,
+                        SameBits(held.ikRests[size_t(e)],
+                                 refreshed.ikRests[size_t(e)]),
+                        points(held.ikRests[size_t(e)],
+                               refreshed.ikRests[size_t(e)]));
+        }
+        // Measured from ikRests, so a live element excludes them too.
+        diff->Field("upperLengthBase", anyLive,
+                    SameBits(held.upperLengthBase, refreshed.upperLengthBase),
+                    scalar(held.upperLengthBase, refreshed.upperLengthBase));
+        diff->Field("lowerLengthBase", anyLive,
+                    SameBits(held.lowerLengthBase, refreshed.lowerLengthBase),
+                    scalar(held.lowerLengthBase, refreshed.lowerLengthBase));
+        diff->Field("ikParams.upperLength", anyLive,
+                    SameBits(held.ikParams.upperLength,
+                             refreshed.ikParams.upperLength),
+                    scalar(held.ikParams.upperLength,
+                           refreshed.ikParams.upperLength));
+        diff->Field("ikParams.lowerLength", anyLive,
+                    SameBits(held.ikParams.lowerLength,
+                             refreshed.ikParams.lowerLength),
+                    scalar(held.ikParams.lowerLength,
+                           refreshed.ikParams.lowerLength));
+    } else if (held.type == "RigExecSplineIk") {
+        bool anyLive = false;
+        diff->Field("splineJointRests.size", false,
+                    held.splineJointRests.size() ==
+                        refreshed.splineJointRests.size());
+        diff->Field("splineRestFrames.size", false,
+                    held.splineRestFrames.size() ==
+                        refreshed.splineRestFrames.size());
+        for (size_t e = 0; e < held.splineJointRests.size() &&
+                           e < refreshed.splineJointRests.size();
+             ++e) {
+            const bool live = liveElement(int(e));
+            anyLive = anyLive || live;
+            diff->Field("splineJointRests[" + std::to_string(e) + "]", live,
+                        SameBits(held.splineJointRests[e],
+                                 refreshed.splineJointRests[e]),
+                        points(held.splineJointRests[e],
+                               refreshed.splineJointRests[e]));
+        }
+        for (size_t e = 0; e < held.splineRestFrames.size() &&
+                           e < refreshed.splineRestFrames.size();
+             ++e) {
+            diff->Field("splineRestFrames[" + std::to_string(e) + "]",
+                        liveElement(int(e)),
+                        SameBits(held.splineRestFrames[e],
+                                 refreshed.splineRestFrames[e]),
+                        points(held.splineRestFrames[e].points,
+                               refreshed.splineRestFrames[e].points));
+        }
+        diff->Field("splineRootRest", false,
+                    SameBits(held.splineRootRest, refreshed.splineRootRest),
+                    points(held.splineRootRest.points,
+                           refreshed.splineRootRest.points));
+        diff->Field("splineMidRest", false,
+                    SameBits(held.splineMidRest, refreshed.splineMidRest),
+                    points(held.splineMidRest.points,
+                           refreshed.splineMidRest.points));
+        diff->Field("splineEndRest", false,
+                    SameBits(held.splineEndRest, refreshed.splineEndRest),
+                    points(held.splineEndRest.points,
+                           refreshed.splineEndRest.points));
+        // Built from the joint rest frames, so a live element excludes it.
+        diff->Field("splineRest", anyLive,
+                    SameBits(held.splineRest, refreshed.splineRest),
+                    scalar(held.splineRest.restArcLength,
+                           refreshed.splineRest.restArcLength));
+    } else if (held.type == "RigExecTwistDistribution") {
+        diff->Field("twistStartRest", false,
+                    SameBits(held.twistStartRest, refreshed.twistStartRest),
+                    points(held.twistStartRest, refreshed.twistStartRest));
+        diff->Field("twistEndRest", false,
+                    SameBits(held.twistEndRest, refreshed.twistEndRest),
+                    points(held.twistEndRest, refreshed.twistEndRest));
+    }
+}
+
+/// Field counts over one fixture.
+struct RestCounts {
+    /// Against the description the solver holds.
+    size_t compared = 0;
+    size_t excluded = 0;
+    /// Against the Build description, where the rests are Build's.
+    size_t sinceBuild = 0;
+    /// The subset of `sinceBuild` on a run that recomposed the ladder.
+    size_t sinceBuildRecomposed = 0;
+};
+
+/// Whether \p s measures from bit-identical rests in \p a and \p b. Both
+/// programs must number their slots alike.
+bool
+SameRestInputs(const SolverDesc &s, const RigExecBakedProgramImpl &a,
+               const RigExecBakedProgramImpl &b)
+{
+    for (const int slot : s.restSlots) {
+        if (!SameBits(a.restPts[size_t(slot)], b.restPts[size_t(slot)]) ||
+            !SameBits(a.restFrames[size_t(slot)],
+                      b.restFrames[size_t(slot)])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Compares the refresh of every solver of \p program that measures from a
+/// rest with the description it holds and, where its rests are still
+/// \p build's, with \p build's description. Returns how many solvers it
+/// compared.
+size_t
+CompareProgramRests(const std::string &where,
+                    const RigExecBakedProgram &program,
+                    const RigExecBakedProgramImpl *build, RestCounts *counts)
+{
+    const RigExecBakedProgramImpl &B = program.GetStepGraph();
+    size_t solvers = 0;
+    for (size_t i = 0; i < B.solvers.size(); ++i) {
+        const SolverDesc &held = B.solvers[i];
+        if (held.restSlots.empty()) continue;
+        ++solvers;
+        const std::string name = where + " " + held.path.GetString() + " (" +
+                                 held.type.GetString() + ")";
+        const SolverDesc refreshed =
+            RigExecBakedProgramTesting::RefreshedSolverRests(program, i);
+        RestDiff diff;
+        diff.where = name;
+        CompareRestDescription(held, refreshed, &diff);
+        counts->compared += diff.compared;
+        counts->excluded += diff.excluded;
+        if (!build) continue;
+        if (i >= build->solvers.size() ||
+            build->solvers[i].path != held.path ||
+            build->solvers[i].restSlots != held.restSlots ||
+            build->paths != B.paths) {
+            ++failures;
+            std::printf("FAIL %s: the run's program and the Build reference "
+                        "disagree about the solver or its slots\n",
+                        name.c_str());
+            continue;
+        }
+        if (!SameRestInputs(held, B, *build)) continue;
+        RestDiff since;
+        since.where = name + " against Build";
+        CompareRestDescription(build->solvers[i], refreshed, &since);
+        counts->sinceBuild += since.compared;
+        if (B.ladderRecomputed) {
+            counts->sinceBuildRecomposed += since.compared;
+        }
+    }
+    return solvers;
+}
+
+SdfPath
+FindRigRoot(const UsdStageRefPtr &stage)
+{
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (prim.GetTypeName() == "RigExecRoot") return prim.GetPath();
+    }
+    return SdfPath();
+}
+
+/// A compiled evaluator over \p stage's rig; null on failure.
+std::unique_ptr<RigExecRigEvaluator>
+CompileFixture(const char *what, const UsdStageRefPtr &stage)
+{
+    const SdfPath rig = stage ? FindRigRoot(stage) : SdfPath();
+    if (rig.IsEmpty()) {
+        ++failures;
+        std::printf("FAIL %s: no stage or no RigExecRoot\n", what);
+        return nullptr;
+    }
+    auto evaluator = std::make_unique<RigExecRigEvaluator>(stage, rig);
+    std::vector<std::string> errors;
+    if (!evaluator->Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        return nullptr;
+    }
+    return evaluator;
+}
+
+/// Returns the fields compared against the Build description on a run
+/// that recomposed the ladder.
+size_t
+TestRefreshSolverRestsOnBuildStateIsIdentity(const char *what,
+                                             const MakeStage &make)
+{
+    RestCounts counts;
+
+    // After Build, before any run: against the Build-path description. The
+    // program stays as the reference for the runs below.
+    const UsdStageRefPtr buildStage = make();
+    const auto buildEvaluator = CompileFixture(what, buildStage);
+    if (!buildEvaluator) return 0;
+    std::vector<std::string> reasons;
+    const std::unique_ptr<RigExecBakedProgram> built =
+        RigExecBakedProgram::Build(buildEvaluator.get(), &reasons);
+    if (!built) {
+        ++failures;
+        std::printf("FAIL %s: the rig does not bake\n", what);
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+        return 0;
+    }
+    if (CompareProgramRests(std::string(what) + " after Build", *built,
+                            nullptr, &counts) == 0) {
+        ++failures;
+        std::printf("FAIL %s: no solver measures from a rest\n", what);
+        return 0;
+    }
+    const RigExecBakedProgramImpl &build = built->GetStepGraph();
+
+    // After runs: settled, under a drag on a rest channel, and released.
+    const UsdStageRefPtr stage = make();
+    const auto evaluator = CompileFixture(what, stage);
+    if (!evaluator) return 0;
+    evaluator->SetEvaluationMode(RigExecEvaluationMode::Baked);
+    const std::vector<double> frames{1, 3, 7};
+    const auto runAndCompare = [&](const std::string &phase) {
+        for (const double frame : frames) {
+            const std::string where = std::string(what) + " " + phase +
+                                      " frame " +
+                                      std::to_string(int(frame));
+            const size_t before = evaluator->GetBakedGenerationCount();
+            const RigExecRigPose pose =
+                evaluator->Evaluate(UsdTimeCode(frame));
+            const RigExecBakedProgram *program =
+                evaluator->GetBakedProgram();
+            if (!pose.valid || !program ||
+                evaluator->GetBakedGenerationCount() != before + 1) {
+                ++failures;
+                std::printf("FAIL %s: the generation did not come from the "
+                            "program\n",
+                            where.c_str());
+                continue;
+            }
+            CompareProgramRests(where, *program, &build, &counts);
+        }
+    };
+    runAndCompare("settled");
+
+    // The drag lands on a rest slot the first such solver reads from its
+    // authored rest, not through a live ref.
+    const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+    size_t draggedSolver = 0;
+    int slot = -1;
+    if (program) {
+        const auto &solvers = program->GetStepGraph().solvers;
+        for (size_t i = 0; i < solvers.size() && slot < 0; ++i) {
+            const SolverDesc &s = solvers[i];
+            std::set<int> live;
+            for (size_t k = 0;
+                 k < s.restRefs.size() && k < s.restIsLive.size(); ++k) {
+                if (s.restIsLive[k]) live.insert(s.restRefs[k].first);
+            }
+            for (const int candidate : s.restSlots) {
+                if (!live.count(candidate)) {
+                    slot = candidate;
+                    draggedSolver = i;
+                    break;
+                }
+            }
+        }
+    }
+    if (slot < 0) {
+        ++failures;
+        std::printf("FAIL %s: no authored solver rest to drag\n", what);
+        return counts.sinceBuildRecomposed;
+    }
+    const SdfPath dragged = program->GetStepGraph().paths[size_t(slot)];
+    double authored = 0.0;
+    if (const UsdAttribute a = stage->GetPrimAtPath(dragged).GetAttribute(
+            TfToken("rest:tx"))) {
+        a.Get(&authored, UsdTimeCode(frames.front()));
+    }
+    evaluator->SetInteractiveOverrides({RigExecValueOverride{
+        dragged, TfToken(), TfToken("rest:tx"), VtValue(authored + 0.5)}});
+    runAndCompare("dragging " + dragged.GetString() + ".rest:tx");
+    // The drag has to reach the dragged solver's description, or its half
+    // is vacuous.
+    program = evaluator->GetBakedProgram();
+    RestDiff moved;
+    moved.report = false;
+    if (program) {
+        CompareRestDescription(
+            build.solvers[draggedSolver],
+            program->GetStepGraph().solvers[draggedSolver], &moved);
+    }
+    if (moved.differing == 0) {
+        ++failures;
+        std::printf("FAIL %s: the drag on %s.rest:tx moved no rest of %s\n",
+                    what, dragged.GetString().c_str(),
+                    build.solvers[draggedSolver].path.GetText());
+    }
+    evaluator->ClearInteractiveOverrides();
+    runAndCompare("released");
+
+    std::printf("%s: %zu rest field(s) compared with the held description, "
+                "%zu live field(s) excluded, %zu compared with Build's "
+                "(%zu on a recomposed ladder); the drag moved %zu field(s)\n",
+                what, counts.compared, counts.excluded, counts.sinceBuild,
+                counts.sinceBuildRecomposed, moved.differing);
+    return counts.sinceBuildRecomposed;
+}
+
 }  // namespace
 
 static std::string
@@ -1152,6 +1647,53 @@ main(int argc, char **argv)
     CheckRibbonPointsEdit("an edit to a driver curve time sample",
                           /* editDefault = */ false);
     CheckRibbonPointsCreatedAfterTheBake();
+
+    // Every fixture whose solvers measure from a rest.
+    {
+        const std::string examples = argv[1];
+        const std::string fixtures = examples + "/../tests/fixtures";
+        const auto file = [](const std::string &path) -> MakeStage {
+            return [path] { return UsdStage::Open(path); };
+        };
+        const std::pair<const char *, MakeStage> rigs[] = {
+            {"biped", file(examples + "/biped/Biped.usda")},
+            {"01 fk chain tail", file(examples + "/01_FkChainTail.usda")},
+            {"02 two-bone ik leg", file(examples + "/02_TwoBoneIkLeg.usda")},
+            {"03 ik/fk blend clamp",
+             file(examples + "/03_IkFkBlendClamp.usda")},
+            {"05 twist ribbon spine",
+             file(examples + "/05_TwistRibbonSpine.usda")},
+            {"13 read phases", file(examples + "/13_ReadPhases.usda")},
+            {"arm rig", file(examples + "/ArmRig.usda")},
+            {"rubberhose",
+             file(examples + "/2d/rubberhose/rubberhose_rig.usda")},
+            {"bust", file(examples + "/2d/bust/bust_rig.usda")},
+            {"solver_checkpoint", file(fixtures + "/solver_checkpoint.usda")},
+            {"oneloop_two_limbs", file(fixtures + "/oneloop_two_limbs.usda")},
+            {"oneloop_cross_domain",
+             file(fixtures + "/oneloop_cross_domain.usda")},
+            {"computed_ik_space", file(fixtures + "/computed_ik_space.usda")},
+            {"preceding_own_chain",
+             file(fixtures + "/preceding_own_chain.usda")},
+            {"volume_placements", file(fixtures + "/volume_placements.usda")},
+            {"two-bone ik rig", MakeTwoBoneIkRig},
+            {"spline ik rig", MakeSplineIkRig},
+            {"twist distribution rig", MakeTwistRig},
+            {"ik/fk blend rig", MakeBlendRig},
+        };
+        size_t recomposed = 0;
+        for (const auto &[what, make] : rigs) {
+            recomposed +=
+                TestRefreshSolverRestsOnBuildStateIsIdentity(what, make);
+        }
+        // A skipped refresh while another solver's rests recompose is the
+        // case the gate exists for, so it has to have been exercised.
+        if (recomposed == 0) {
+            ++failures;
+            std::printf("FAIL no solver kept Build's rests on a run that "
+                        "recomposed the ladder\n");
+        }
+    }
 
     if (failures) {
         std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);

@@ -3136,7 +3136,7 @@ ApplyAutoClavicle(RigExecBakedProgramImpl &B,
 /// from the same B.restPts/B.restFrames the bake read, so the two cannot
 /// disagree about anything but which rests were in the arrays.
 void
-RefreshSolverRests(RigExecBakedProgramImpl &B,
+RefreshSolverRests(const RigExecBakedProgramImpl &B,
                    RigExecBakedProgramImpl::Solver *solver)
 {
     RigExecBakedProgramImpl::Solver &s = *solver;
@@ -3297,6 +3297,16 @@ _ReadFrameVersion(
 }
 
 }  // namespace
+
+RigExecBakedProgramImpl::Solver
+RigExecBakedProgramTesting::RefreshedSolverRests(
+    const RigExecBakedProgram &program, size_t index)
+{
+    const RigExecBakedProgramImpl &B = *program._impl;
+    RigExecBakedProgramImpl::Solver copy = B.solvers[index];
+    RefreshSolverRests(B, &copy);
+    return copy;
+}
 
 bool
 RigExecBakedEvalFrameRecord(const RigExecBakedProgramImpl &B,
