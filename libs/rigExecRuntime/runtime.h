@@ -10,7 +10,7 @@
 // shipped examples.
 // Threading (D2): Execute is serial over clusters; the consumer may run
 // clusters in parallel when the cluster DAG allows (the OpenUSD side
-// keeps its dispatcher; a host may use its own pool). The reader holds
+// keeps its dispatcher, Godot uses WorkerThreadPool). The reader holds
 // no locks: one reader per thread, or external synchronization.
 #ifndef RIGEXEC_RUNTIME_H
 #define RIGEXEC_RUNTIME_H

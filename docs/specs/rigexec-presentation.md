@@ -10,6 +10,8 @@ The producer is `libs/rigExecBake`; binary records are defined in
 Keep all three compatible when changing record layouts. Unsupported data
 must be diagnosed during export or loading rather than silently discarded.
 
-The [rolling-ball tutorial](../concepts/tutorial-rolling-ball.md) includes a
-free variant that bakes as a self-contained asset. Verify assets with the
-matching runtime version before deployment.
+The [Godot tutorial](../concepts/tutorial-godot-baked-rig.md) demonstrates a
+self-contained rolling-ball asset. That tutorial's platform binaries and
+external addon source have their own dependency and licensing requirements.
+Use source builds for other platforms and verify assets with the matching
+runtime version before deployment.

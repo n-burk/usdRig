@@ -18,11 +18,11 @@ and continuous equatorial stripe. They pause for 4.5 seconds and retain the
 native UI resolution; open them directly to read the attributes. The finished stage is
 [`docs/examples/tutorial_rolling_ball.usda`](../examples/tutorial_rolling_ball.usda)
 and the snippets below describe its composed `travelX` mode. The asset also
-has a `free` mode, described at the end of this page.
+has a `free` mode for the interactive Godot game described below.
 
 [Download the USD source, texture and icons together](../examples/usdview_rolling_ball.zip).
 Extract the entire archive, then open `docs/examples/tutorial_rolling_ball.usda`.
-The `tutorial_rolling_ball_free.usda` wrapper uses the same textured mesh.
+The `tutorial_rolling_ball_free.usda` wrapper uses the same textured mesh for Godot.
 
 ## What you start with
 
@@ -464,7 +464,7 @@ frames. Editing the `.usda` and reloading (**File ▸ Reload All Layers**)
 does the same job, and `docs/examples/tutorial_rolling_ball.usda` already
 has every one of them.
 
-## Free rolling
+## Free rolling in the Godot game
 
 The tutorial asset now exposes **`rollMode`** on `/BallAsset`:
 
@@ -475,14 +475,68 @@ The tutorial asset now exposes **`rollMode`** on `/BallAsset`:
   The centre pivot and `Move → Squash → Roll → Spin` hierarchy stay intact.
 
 Open [`tutorial_rolling_ball_free.usda`](../examples/tutorial_rolling_ball_free.usda)
-for that variant. It references the same tutorial rig, uses one
+for the game-ready variant. It references the same tutorial rig, uses one
 unit as one metre (radius one), and is baked at frame 1001. Changing the
 variant in usdview also lets you pose all three rotation channels manually.
 Selecting `free` does not automatically integrate travel inside USD; its
 rotation channels are driven by the application or authored animation.
 
+The sibling `godot_rigExec/demo/project.godot` now opens **Roll / Collect**,
+a small course with six rings, obstacles, a ramp, hopping, a finish pad and
+fall recovery. Use WASD / arrows to move, Space to hop, Shift to brake and
+R to restart. Run `python demo/setup_rolling.py --build` from that plugin
+checkout to rebuild the native plugin and bake this asset, then run
+`godot --path demo`.
+
+The game stores orientation as a normalized quaternion. On contact with a
+surface, project the **actual collision-constrained displacement** into its
+tangent plane, then accumulate a world-space increment:
+
+```text
+tangent = displacement - normal * dot(normal, displacement)
+axis = normalize(cross(normal, tangent))
+angle = length(tangent) / radius
+orientation = normalize(quaternion(axis, angle) * orientation)
+```
+
+Skip the increment for zero displacement. This handles diagonal travel,
+reversals and changing surface normals. It retains path history: a square
+lap can return the ball to its starting position with a different orientation.
+In the air the game preserves angular velocity, and resumes contact rolling
+on landing. The no-slip calculation assumes a spherical ball of fixed radius;
+squash is left at one in the game.
+
+Only at the rig boundary is the quaternion decomposed to degree avars.
+USD's row-vector XYZ composition corresponds to Godot's `EULER_ORDER_ZYX`.
+`RigExecPlayer.set_avar()` drives Move translation and Roll rotation, then
+`evaluate()` executes the compiled FK program and `apply_to_skeleton()`
+updates the skeleton. `rolling_ball.tscn` is a reusable Godot object containing
+the collision body, skeleton, mesh, material and `rolling_ball.gd` controller.
+The level instantiates it and manages the course. Other controllers can feed
+`drive(direction, delta, braking)` instead of keyboard input.
+
+Its mesh is exported from `/BallAsset/Geom/Ball` with the original face-varying
+UVs, refined by OpenSubdiv and attached to Spin. The exported shader preserves
+the bound USD material's texture, diffuse and emission scales, roughness,
+metallic and specular values. The export corrects the source's inward winding
+for Godot culling while preserving corner UVs. No generic Godot sphere or
+substitute UV mapping is used. The visible mesh has no separately animated
+rotation. Godot lighting and tone mapping can differ from usdview.
+
+The plugin distinguishes skinning deltas from bone poses: the existing
+`get_joint_transforms()` returns rest-to-posed deltas, while
+`get_joint_pose_transforms()` returns posed frames and
+`get_joint_rest_transforms()` supplies skeleton rests. Applying a delta as
+a bone pose would make this ball orbit instead of turning about its centre.
+
+Run `godot --headless --path demo --script verify_rolling.gd` in the plugin
+checkout to verify multi-axis FK, no-slip signs, blocked movement, resets
+and the game loop against the native extension.
+
 ## Where to go next
 
+* [Godot and baked rigs](../concepts/tutorial-godot-baked-rig.md) — package this
+  ball as a reusable game object and drive its controls in Godot, with gameplay GIFs.
 * [Baked and dynamic evaluation](baked-vs-dynamic.md) — the same rig, two
   ways to compute it.
 * [Two-Bone IK](../nodes/two_bone_ik.md) — the next solver up, and the one

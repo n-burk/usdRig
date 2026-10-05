@@ -173,3 +173,9 @@ dynamically and keeps working.
 
 See [architecture](../specs/spec.md), [bake APIs](../specs/python-bake-inverse.md),
 `libs/rigExec/bakedProgram.cpp`, and `tests/testRigExecBakedSchedule.cpp`.
+
+## Run a baked rig in Godot
+
+[Godot and baked rigs](../concepts/tutorial-godot-baked-rig.md) walks through
+a self-contained `.rigexec` asset with embedded visuals and exposed controllers, and a reusable rolling-ball
+game object. It includes live gameplay GIFs and the commands to run the example.

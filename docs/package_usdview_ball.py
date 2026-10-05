@@ -32,9 +32,9 @@ with ZipFile(archive_path, "w", ZIP_DEFLATED, compresslevel=9) as archive:
 Extract the entire archive. Keep docs/ and icons/ beside one another.
 Open docs/examples/tutorial_rolling_ball.usda in a usdRig-enabled usdview.
 Scrub 1001-1049 for travel-driven rolling.
-Open docs/examples/tutorial_rolling_ball_free.usda for the free-mode bake source.
+Open docs/examples/tutorial_rolling_ball_free.usda for the Godot bake source.
 
-The PNG and face-varying UVs are shared by both variants.
+The PNG and face-varying UVs are shared by both variants and the Godot bake.
 The +Y cap uses a planar star island; the equatorial stripe wraps continuously.
 Only the render presentation of the rig guides is hidden in the tutorial captures.
 The stage's rig, controllers and material remain editable.
