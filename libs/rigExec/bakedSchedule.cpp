@@ -1613,6 +1613,83 @@ ValidatePointVersions(const RigExecBakedProgramImpl &B, GraphViolations *out)
                 }
             }
         }
+        // Every point-binding candidate of the revision a step assembles (or
+        // of a derived step's revision) is a slot that step declares: the
+        // version's RevisionDone and ChainDirty, ChainBase for version 0, and
+        // ChainPoints for a final read. That covers an own-chain `preceding`
+        // binding, which reads version r without a current-phase field.
+        const RigExecBakedProgramImpl::GeomRevision *bound = nullptr;
+        if (step.kind == RigExecBakedStepKind::RevisionStatic &&
+            step.object >= 0 && size_t(step.object) < revisions) {
+            const auto &[chain, r] = B.revisionIndex[size_t(step.object)];
+            bound = &B.chains[size_t(chain)].revisions[size_t(r)];
+        } else if (step.kind == RigExecBakedStepKind::Derived &&
+                   step.object >= 0 &&
+                   size_t(step.object) < B.derivedIndex.size()) {
+            const auto &[chain, d] = B.derivedIndex[size_t(step.object)];
+            bound = &B.chains[size_t(chain)].derived[size_t(d)].revision;
+        }
+        if (bound) {
+            const auto checkBinding =
+                [&](const RigExecBakedPointsBinding &binding) {
+                for (const RigExecBakedPointVersion &candidate :
+                         binding.candidates) {
+                    const std::string what =
+                        " point version " + std::to_string(candidate.version) +
+                        " of chain " + std::to_string(candidate.chain);
+                    if (candidate.chain < 0 ||
+                        size_t(candidate.chain) >=
+                            B.chainRevisionBegin.size()) {
+                        out->Add(NameStep(B, index) + " binds" + what +
+                                 ", which is not a chain");
+                        continue;
+                    }
+                    const int first =
+                        B.chainRevisionBegin[size_t(candidate.chain)];
+                    const int last =
+                        B.chainRevisionEnd[size_t(candidate.chain)];
+                    bool declared = false;
+                    if (binding.finalRead) {
+                        declared = covers(step.reads,
+                                          RigExecBakedSlotDomain::ChainPoints,
+                                          candidate.chain);
+                    } else if (candidate.version == 0) {
+                        declared = covers(step.reads,
+                                          RigExecBakedSlotDomain::ChainBase,
+                                          candidate.chain);
+                    } else if (candidate.version < 0 ||
+                               first + candidate.version - 1 >= last) {
+                        out->Add(NameStep(B, index) + " binds" + what +
+                                 ", past the chain's " +
+                                 std::to_string(last - first) +
+                                 " revisions");
+                        continue;
+                    } else {
+                        const int slot = first + candidate.version - 1;
+                        declared =
+                            covers(step.reads,
+                                   RigExecBakedSlotDomain::RevisionDone,
+                                   slot) &&
+                            covers(step.reads,
+                                   RigExecBakedSlotDomain::ChainDirty, slot);
+                    }
+                    if (!declared) {
+                        out->Add(NameStep(B, index) + " binds" + what +
+                                 " without declaring it");
+                    }
+                }
+            };
+            for (const RigExecBakedPointsBinding &binding :
+                     bound->pointBindings) {
+                checkBinding(binding);
+            }
+            for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
+                     bound->blendChannels) {
+                for (const auto &sample : channel.samples) {
+                    checkBinding(sample.pointBinding);
+                }
+            }
+        }
         // The declaration: the steps that read the points entering revision
         // r name version r.
         const bool entering =

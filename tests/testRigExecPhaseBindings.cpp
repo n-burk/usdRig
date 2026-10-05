@@ -416,6 +416,38 @@ DefineProjector(const UsdStageRefPtr &stage, const char *name,
 const std::vector<UsdTimeCode> kFrames{UsdTimeCode(1001), UsdTimeCode(1003),
                                        UsdTimeCode(1007)};
 
+/// The dynamic walk under the scalar oracle (cpuParityMode), which reads
+/// every phase itself and refuses to publish a generation it disagrees
+/// with: each of \p times publishes, with no mismatch and at least one
+/// point chain compared.
+std::vector<RigExecRigPose>
+EvaluateUnderTheOracle(const std::string &where, const UsdStageRefPtr &stage,
+                       const SdfPath &rig,
+                       const std::vector<UsdTimeCode> &times)
+{
+    std::vector<RigExecRigPose> poses;
+    auto oracle = MakeEvaluator(stage, rig, RigExecEvaluationMode::Dynamic);
+    if (!oracle) {
+        return poses;
+    }
+    oracle->cpuParityMode = true;
+    for (const UsdTimeCode &time : times) {
+        const std::string at =
+            where + " oracle at " + std::to_string(time.GetValue());
+        RigExecRigPose pose = oracle->Evaluate(time);
+        for (const std::string &line : pose.diagnostics) {
+            if (!pose.valid && line.find("parity") != std::string::npos) {
+                std::printf("  %s: %s\n", at.c_str(), line.c_str());
+            }
+        }
+        CHECK_AT(at, pose.valid);
+        CHECK_AT(at, pose.moverGraphParityMismatches == 0);
+        CHECK_AT(at, pose.moverGraphParityAgreements > 0);
+        poses.push_back(std::move(pose));
+    }
+    return poses;
+}
+
 /// The frames, then a drag on the cage's lift control at the last one.
 Tally
 RunFramesAndDrag(const std::string &where, RigExecRigEvaluator *evaluator)
@@ -574,8 +606,9 @@ TestPointBindingsMatchTheStore(const std::string &examples)
 // A mover that writes two chains reads the other one at `preceding`. The
 // walk's store answers only when the reader's own revision on that chain was
 // recorded, which takes a second reader naming it; otherwise the read is the
-// authored base, silently. On the reader's own chain `preceding` never
-// resolves (TestPrecedingOnTheOwnChainReadsTheBase).
+// authored base, silently. On the reader's own chain `preceding` reads the
+// points entering the reader whether or not anything names it
+// (TestPrecedingOnTheOwnChainReadsTheEnteringPoints).
 //
 // Dual projects Other and the slab itself onto the slab at `preceding`, after
 // SlabLattice on the slab's chain; in the named variant Probe projects Third
@@ -622,6 +655,12 @@ TestPrecedingAcrossChains(const std::string &examples)
                 evaluator.get(), time, &tally);
         }
         others.push_back(Moved(pose, kOther));
+        const std::vector<RigExecRigPose> checked =
+            EvaluateUnderTheOracle(where, stage, kReadPhaseRig, kFrames);
+        if (checked.size() == kFrames.size() && checked.back().valid) {
+            CHECK_AT(where, Moved(checked.back(), kOther) == others.back());
+            CHECK_AT(where, Moved(checked.back(), kSlab) == Moved(pose, kSlab));
+        }
         if (!evaluator->GetBakedProgram()) {
             CHECK_AT(where, !"the rig bakes");
             continue;
@@ -635,7 +674,15 @@ TestPrecedingAcrossChains(const std::string &examples)
             continue;
         }
         CHECK_AT(where, !across->binding->diagnoseMiss);
-        CHECK_AT(where, own->binding->candidates.empty());
+        CHECK_AT(where, !own->binding->diagnoseMiss);
+        // On the slab's chain Dual reads the slab entering it: version 1,
+        // after SlabLattice.
+        CHECK_AT(where, own->binding->candidates.size() == 1);
+        if (own->binding->candidates.size() == 1) {
+            CHECK_AT(where, own->binding->candidates[0].chain ==
+                                int(own->readerChain));
+            CHECK_AT(where, own->binding->candidates[0].version == 1);
+        }
         // Named: the record before Dual's own on the slab's chain, which is
         // SlabLattice's, version 1.
         CHECK_AT(where, across->binding->candidates.size() ==
@@ -651,19 +698,20 @@ TestPrecedingAcrossChains(const std::string &examples)
             const RigExecBakedPointCapture &o =
                 B.pointCaptures[size_t(own->binding->id)];
             CHECK_AT(where, a.read && a.bindingAnswered == named);
-            CHECK_AT(where, o.read && !o.bindingAnswered);
+            CHECK_AT(where, o.read && o.bindingAnswered);
         }
     }
     // Resolving moves Other: the fallback is not the answer.
     CHECK(others.size() == 2 && others[0] != others[1]);
 }
 
-// `preceding` on the reader's own chain reads the authored base in every
-// backend: the reader's record is made after it reads. A lattice over the
-// cage it deforms gives the same cage and slab as one reading the cage at
-// `base`, while naming the revision before it (CageTwist) does not.
+// `preceding` on the reader's own chain reads the points entering the
+// reader, in the program, the dynamic walk and the scalar oracle alike. A
+// lattice over the cage it deforms, after CageLift and CageTwist, gives the
+// same cage and slab as one naming CageTwist, the revision before it, and
+// not those of one reading the cage at `base`.
 void
-TestPrecedingOnTheOwnChainReadsTheBase(const std::string &examples)
+TestPrecedingOnTheOwnChainReadsTheEnteringPoints(const std::string &examples)
 {
     std::map<std::string, std::vector<VtVec3fArray>> answers;
     for (const char *phase :
@@ -695,11 +743,172 @@ TestPrecedingOnTheOwnChainReadsTheBase(const std::string &examples)
                 answers[phase].push_back(Moved(pose, kSlab));
             }
         }
+        // The ExecReference run's answers, cage and slab per frame.
+        std::vector<VtVec3fArray> checked;
+        for (const RigExecRigPose &pose :
+             EvaluateUnderTheOracle(where, stage, kReadPhaseRig, kFrames)) {
+            checked.push_back(Moved(pose, kCage));
+            checked.push_back(Moved(pose, kSlab));
+        }
+        const auto &walked = answers[phase];
+        CHECK_AT(where, walked.size() == 4 * kFrames.size() &&
+                            checked == std::vector<VtVec3fArray>(
+                                           walked.begin() + walked.size() / 2,
+                                           walked.end()));
     }
     const auto &base = answers["base"];
+    const auto &twist = answers["/ReadPhaseAsset/Rig/Movers/Cage/CageTwist"];
     CHECK(!base.empty());
-    CHECK(answers["preceding"] == base);
-    CHECK(answers["/ReadPhaseAsset/Rig/Movers/Cage/CageTwist"] != base);
+    CHECK(answers["preceding"] == twist);
+    CHECK(twist != base);
+}
+
+// tests/fixtures/preceding_own_chain.usda: Echo, a lattice whose cage is the
+// box it deforms, reads that cage at `preceding`. Its binding is the one
+// version entering it (2: after Lift and Settle), answered at every run, and
+// the box it leaves equals the box with the cage read at Settle, the
+// revision before it, in the program and the dynamic walk alike, at frames
+// 1, 5 and 9 and under a drag on LiftCtl. Reading `base` leaves another box.
+// The scalar oracle (cpuParityMode) reads the phase the same way: the walk
+// it checks publishes, with no mismatch, and the oracle's box is the walk's.
+void
+TestPrecedingOwnChainFixture(const std::string &examples)
+{
+    const SdfPath rig("/PrecedingAsset/Rig");
+    const SdfPath box("/PrecedingAsset/Geom/Box.points");
+    const SdfPath echo("/PrecedingAsset/Rig/Movers/Echo");
+    const SdfPath liftCtl("/PrecedingAsset/Rig/Controls/LiftCtl");
+    const std::string settle = "/PrecedingAsset/Rig/Movers/Settle";
+    std::map<std::string, std::vector<VtVec3fArray>> answers;
+    std::map<std::string, std::vector<VtVec3fArray>> oracleAnswers;
+    for (const std::string phase : {std::string("preceding"), settle,
+                                    std::string("base")}) {
+        const UsdStageRefPtr stage = UsdStage::Open(
+            examples + "/../tests/fixtures/preceding_own_chain.usda");
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        stage->SetEditTarget(stage->GetSessionLayer());
+        SetPhase(stage, echo, "rigExec:cage", phase);
+        const std::string where = "preceding_own_chain, cage at " + phase;
+        for (const RigExecEvaluationMode mode :
+             {RigExecEvaluationMode::BakedWithParityCheck,
+              RigExecEvaluationMode::ExecReference}) {
+            auto evaluator = MakeEvaluator(stage, rig, mode);
+            if (!evaluator) {
+                return;
+            }
+            const bool baked =
+                mode == RigExecEvaluationMode::BakedWithParityCheck;
+            Tally tally;
+            const auto evaluate = [&](const std::string &at,
+                                      UsdTimeCode time) {
+                const RigExecRigPose pose =
+                    baked ? EvaluateCaptured(at, evaluator.get(), time,
+                                             &tally)
+                          : evaluator->Evaluate(time);
+                CHECK_AT(at, pose.valid);
+                answers[phase].push_back(Moved(pose, box));
+            };
+            for (const double frame : {1.0, 5.0, 9.0}) {
+                evaluate(where + " at " + std::to_string(frame),
+                         UsdTimeCode(frame));
+            }
+            evaluator->SetInteractiveOverrides({RigExecValueOverride{
+                liftCtl, TfToken(), TfToken("avars:ty"), VtValue(0.75)}});
+            evaluate(where + " dragged", UsdTimeCode(9.0));
+            evaluator->ClearInteractiveOverrides();
+            evaluate(where + " released", UsdTimeCode(9.0));
+            if (!baked || phase != "preceding") {
+                continue;
+            }
+            const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+            CHECK_AT(where, program != nullptr);
+            if (!program) {
+                continue;
+            }
+            const std::vector<BindingRef> refs =
+                Bindings(program->GetStepGraph());
+            const BindingRef *own = Find(refs, echo, box, box);
+            CHECK_AT(where, own != nullptr);
+            if (!own) {
+                continue;
+            }
+            CHECK_AT(where, !own->binding->diagnoseMiss);
+            CHECK_AT(where, own->binding->candidates.size() == 1);
+            if (own->binding->candidates.size() == 1) {
+                CHECK_AT(where, own->binding->candidates[0].chain ==
+                                    int(own->readerChain));
+                CHECK_AT(where, own->binding->candidates[0].version == 2);
+            }
+            // The validator holds the assemble to that read: Echo's weight
+            // field is not current-phase, so only the binding names
+            // version 2, and dropping its RevisionDone read is refused.
+            RigExecBakedProgramImpl &B = const_cast<RigExecBakedProgramImpl &>(
+                program->GetStepGraph());
+            CHECK_AT(where, own->step >= 0);
+            if (own->step >= 0 && own->binding->candidates.size() == 1) {
+                RigExecBakedStep &assemble = B.steps[size_t(own->step)];
+                CHECK_AT(where, assemble.kind ==
+                                    RigExecBakedStepKind::RevisionStatic);
+                const auto &[chain, r] =
+                    B.revisionIndex[size_t(assemble.object)];
+                CHECK_AT(where, !B.chains[size_t(chain)]
+                                     .revisions[size_t(r)]
+                                     .weightCurrentPhase);
+                const RigExecBakedSlotRange done = RigExecBakedOne(
+                    RigExecBakedSlotDomain::RevisionDone,
+                    B.chainRevisionBegin[own->readerChain] + 1);
+                const std::vector<RigExecBakedSlotRange> reads =
+                    assemble.reads;
+                assemble.reads.erase(std::remove(assemble.reads.begin(),
+                                                 assemble.reads.end(), done),
+                                     assemble.reads.end());
+                CHECK_AT(where, assemble.reads.size() + 1 == reads.size());
+                std::string error;
+                CHECK_AT(where, !RigExecBakedValidateStepGraph(B, &error));
+                const std::string expected =
+                    "binds point version 2 of chain " +
+                    std::to_string(own->readerChain) +
+                    " without declaring it";
+                CHECK_AT(where + ": " + error,
+                         error.find("(RevisionStatic") != std::string::npos &&
+                             error.find(expected) != std::string::npos);
+                assemble.reads = reads;
+                error.clear();
+                CHECK_AT(where + ": " + error,
+                         RigExecBakedValidateStepGraph(B, &error));
+            }
+            if (SerialSchedule()) {
+                CHECK_AT(where, tally.read == 5);
+                CHECK_AT(where, tally.answered == 5);
+            }
+        }
+        for (const RigExecRigPose &pose : EvaluateUnderTheOracle(
+                 where, stage, rig,
+                 {UsdTimeCode(1.0), UsdTimeCode(5.0), UsdTimeCode(9.0)})) {
+            if (!pose.valid) {
+                continue;
+            }
+            // The one point chain, compared and published as the oracle's.
+            CHECK_AT(where, pose.moverGraphParityAgreements == 1);
+            const auto cpu = pose.movedPropertiesCpu.find(box);
+            CHECK_AT(where, cpu != pose.movedPropertiesCpu.end() &&
+                                cpu->second == VtValue(Moved(pose, box)));
+            oracleAnswers[phase].push_back(Moved(pose, box));
+        }
+        // The ExecReference run's frames 1, 5 and 9.
+        const auto &walked = answers[phase];
+        CHECK_AT(where, walked.size() == 10 &&
+                            oracleAnswers[phase] ==
+                                std::vector<VtVec3fArray>(
+                                    walked.begin() + 5, walked.begin() + 8));
+    }
+    const auto &preceding = answers["preceding"];
+    CHECK(preceding.size() == 10);
+    CHECK(preceding == answers[settle]);
+    CHECK(preceding != answers["base"]);
 }
 
 // A chain that reads no base records nothing, so a `final` read of it falls
@@ -1762,7 +1971,8 @@ main(int argc, char **argv)
     const std::string examples = argv[1];
     TestPointBindingsMatchTheStore(examples);
     TestPrecedingAcrossChains(examples);
-    TestPrecedingOnTheOwnChainReadsTheBase(examples);
+    TestPrecedingOnTheOwnChainReadsTheEnteringPoints(examples);
+    TestPrecedingOwnChainFixture(examples);
     TestAChainWithoutABaseFallsThrough(examples);
     TestBlendSamplesBindToVersions();
     TestFrameRecordsMatchTheStore(examples);

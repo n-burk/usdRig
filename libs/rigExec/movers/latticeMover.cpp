@@ -116,8 +116,7 @@ _OracleLatticeMover(const rigExec::RigExecMoverOracleContext &ctx)
         a.Get(&restCage, UsdTimeCode::Default());
     }
     rigExec::RigExecReadPhasedPoints(
-        stage, ctx.snapshots, time, prim, "rigExec:cage", cagePoints,
-        moverPath, &posedCage);
+        ctx, "rigExec:cage", cagePoints, &posedCage);
     if (UsdAttribute a = stage->GetAttributeAtPath(target)) {
         a.Get(&base, time);
     }

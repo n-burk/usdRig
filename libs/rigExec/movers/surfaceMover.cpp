@@ -93,9 +93,8 @@ _OracleSurfaceMover(const rigExec::RigExecMoverOracleContext &ctx)
     VtVec3fArray surfacePoints;
     VtIntArray counts, indices;
     rigExec::RigExecReadPhasedPoints(
-        stage, ctx.snapshots, time, prim, "rigExec:surface",
-        surfacePrim.AppendProperty(TfToken("points")), moverPath,
-        &surfacePoints);
+        ctx, "rigExec:surface",
+        surfacePrim.AppendProperty(TfToken("points")), &surfacePoints);
     if (const UsdPrim s = stage->GetPrimAtPath(surfacePrim)) {
         s.GetAttribute(TfToken("faceVertexCounts")).Get(&counts, time);
         s.GetAttribute(TfToken("faceVertexIndices"))

@@ -524,6 +524,14 @@ rigexec_add_example_parity_test(NAME solver_checkpoint
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/solver_checkpoint.usda"
     FRAMES 1,5,9 GUIDES)
 
+# A lattice whose cage is its own target, read at `preceding`: it sees the
+# points the movers before it left. This checks dynamic/baked parity only;
+# testRigExecPhaseBindings pins the values. No verify_binary entry until the
+# runtime port: exported, Echo plays back as a MoverFailed pass-through.
+rigexec_add_example_parity_test(NAME preceding_own_chain
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/preceding_own_chain.usda"
+    FRAMES 1,5,9 GUIDES)
+
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.h.in"
                "${CMAKE_CURRENT_BINARY_DIR}/tests/rigExecExampleFixtures.h"
                @ONLY)
@@ -1036,10 +1044,13 @@ foreach(_entry testRigExecVolumeWeightsBakedParity
         "RIGEXEC_TEST_BAKED_PATH=1")
 endforeach()
 
-# Phased point reads bound to chain versions, and AtPrim transform phases read
-# through frame records (tests/fixtures/frame_record_fallbacks.usda at frames
-# 1, 4 and 8 and under drags), held to the dynamic walk's phased-read store
-# (BakedWithParityCheck) and to output parity. CONE_VERIFY runs the cases
+# Phased point reads bound to chain versions (among them
+# tests/fixtures/preceding_own_chain.usda at frames 1, 5 and 9 and under a
+# drag), and AtPrim transform phases read through frame records
+# (tests/fixtures/frame_record_fallbacks.usda at frames 1, 4 and 8 and under
+# drags), held to the dynamic walk (its phased-read store for other
+# chains, the points entering the reader for own-chain `preceding`)
+# through BakedWithParityCheck and output parity. CONE_VERIFY runs the cases
 # under the cone verifier in both schedules; a phased rig skips its clean
 # steps there like any other rig.
 add_executable(testRigExecPhaseBindings tests/testRigExecPhaseBindings.cpp)

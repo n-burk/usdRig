@@ -60,8 +60,9 @@ namespace rigExec {
 namespace {
 
 /// Binds every phased point read of the program to the chain versions the
-/// dynamic walk's phased-read store would answer it from
-/// (RigExecBakedPointsBinding).
+/// dynamic walk answers it from (RigExecBakedPointsBinding): its phased-read
+/// store, or for `preceding` on the reader's own chain the points entering
+/// the reader.
 ///
 /// "Before the reader" is program order, which RigExecBakedBuildGeometrySteps
 /// emits chain by chain in `chains` order: every step of an earlier chain,
@@ -107,8 +108,18 @@ BindPointReads(RigExecBakedProgramImpl *program)
             }
             break;
         case RigExecReadPhaseKind::Preceding: {
-            // The record before the reader's own, among the records made so
-            // far; none when the reader's own is not among them yet.
+            if (c == readerChain && !afterStatus) {
+                // The reader's own chain: the points entering it, version
+                // `before`. A first revision reads the resolved input, as
+                // the walk does.
+                if (before > 0) {
+                    out.candidates.push_back({int(c), int(before)});
+                }
+                break;
+            }
+            // Another chain the reader writes: the record before the
+            // reader's own, among the records made so far; none when the
+            // reader's own is not among them yet.
             int previous = -1;
             for (size_t r = 0; r < recorded; ++r) {
                 if (!revisions[r].snapshotAfter) {
@@ -2315,9 +2326,10 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     const bool skin = revision.op == RigExecRevisionOp::Skin;
     // The chain's sticky dirty bit as of the PRECEDING revision: once a
     // revision executed, every later one does, and the chain's own base is
-    // where it starts. Only the chunk and the fuse read it. The fold and an
-    // assemble that is not current-phase do not declare version r, so they
-    // may run beside the fuse that writes it.
+    // where it starts. Only the chunk and the fuse read it. The fold, and an
+    // assemble that neither measures a current-phase field nor reads its own
+    // chain at `preceding`, do not declare version r, so they may run beside
+    // the fuse that writes it.
     const auto chainDirtyBefore = [&chain, revisionIndex = revisionIndex] {
         return revisionIndex == 0
                    ? chain.baseDirty

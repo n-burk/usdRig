@@ -542,7 +542,9 @@ struct RigExecBakedPointVersion {
 /// phased-read store would have answered from: the records of the revisions some phase
 /// names (`snapshotAfter`) whose fuse -- or, for `final`, whose chain's
 /// status step -- runs before the reader, matched to the phase as
-/// RigExecChainSnapshots::Lookup matches them, newest first. The reader
+/// RigExecChainSnapshots::Lookup matches them, newest first. `preceding` on
+/// the reader's own chain is instead the one version entering the reader,
+/// which the walk reads off the chain built so far. The reader
 /// takes the first candidate whose chain read a base this run -- every
 /// record of a chain is written exactly then -- and otherwise the tail: the
 /// resolved input, with the "resolved to nothing" line when `diagnoseMiss`.
@@ -2360,7 +2362,10 @@ struct RigExecBakedProgramImpl {
         /// wants the target's points from (the dynamic walk records them
         /// after it). Decided at bake out of the evaluator's
         /// _chainPlan.snapshots; BindPointReads binds to it, and the
-        /// exporter carries it.
+        /// exporter carries it. The plan still names the predecessor of an
+        /// own-chain `preceding` reader, so the flag is set and exported for
+        /// it, but that read binds to the version entering the reader and
+        /// reads no record.
         bool snapshotAfter = false;
         /// A declared input phase (`binding.phases`), an AtPrim transform
         /// phase, or a blend sample whose target shape carries a phase.

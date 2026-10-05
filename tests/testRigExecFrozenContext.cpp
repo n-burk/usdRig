@@ -4653,6 +4653,232 @@ TestSolverCheckpointFreezes(const std::string &examplesDir)
     }
 }
 
+// tests/fixtures/preceding_own_chain.usda, frozen: Echo reads its own
+// chain at `preceding`, bound to the version entering it (2, after Lift and
+// Settle) in the frozen program as in the live one. Warming jobs at frames 5
+// and 9 match live baked and the dynamic walk bit for bit. So does a
+// partial cone that runs Echo and the box's status sweep but not Settle's
+// fuse: frozen with LiftCtl raised, it re-runs Echo for a drag on Echo's
+// own weight, reading the version Settle left in the snapshot.
+void
+TestPrecedingOwnChainFreezes(const std::string &examplesDir)
+{
+    const char *label = "preceding own chain";
+    const std::string stagePath =
+        examplesDir + "/../tests/fixtures/preceding_own_chain.usda";
+    const SdfPath rig("/PrecedingAsset/Rig");
+    const SdfPath box("/PrecedingAsset/Geom/Box.points");
+    const SdfPath echo("/PrecedingAsset/Rig/Movers/Echo");
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    std::vector<std::string> errors;
+    std::string error;
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecRigEvaluator walk(stage, rig);
+    CHECK(walk.Compile(&errors));
+    walk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(walk.Evaluate(UsdTimeCode(1.0)).valid);
+
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {5.0, 9.0}) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("FAIL %s: freeze refused: %s\n", label,
+                        error.c_str());
+            ++failures;
+            return;
+        }
+        int bound = 0;
+        for (size_t c = 0; c < frozen->program.chains.size(); ++c) {
+            const auto &chain = frozen->program.chains[c];
+            if (chain.target != box) {
+                continue;
+            }
+            for (const auto &revision : chain.revisions) {
+                if (revision.moverPath != echo) {
+                    continue;
+                }
+                for (const RigExecBakedPointsBinding &binding :
+                         revision.pointBindings) {
+                    CHECK(binding.input == box);
+                    CHECK(binding.candidates.size() == 1);
+                    if (binding.candidates.size() == 1) {
+                        CHECK(binding.candidates[0].chain == int(c));
+                        CHECK(binding.candidates[0].version == 2);
+                    }
+                    ++bound;
+                }
+            }
+        }
+        CHECK(bound == 1);
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        bool ran = false;
+        const RigExecRigPose warmed =
+            RunWarmingJob(&evaluator, rig, frozen, inputs, &scheduler, &ran);
+        CHECK(ran);
+        const size_t before = evaluator.GetBakedGenerationCount();
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(evaluator.GetBakedGenerationCount() == before + 1);
+        const RigExecRigPose dynamic = walk.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid && dynamic.valid);
+        const std::string where = TfStringPrintf("%s frame %g", label, frame);
+        CheckPosesBitIdentical((where + " warmed").c_str(), dynamic, warmed);
+        CheckPosesBitIdentical((where + " baked").c_str(), dynamic, live);
+    }
+
+    // The box's points, compared by their bits.
+    const auto sameBox = [&](const char *what, const RigExecRigPose &expected,
+                             const RigExecRigPose &got) {
+        const auto e = expected.movedProperties.find(box);
+        const auto g = got.movedProperties.find(box);
+        const bool same =
+            got.valid && e != expected.movedProperties.end() &&
+            g != got.movedProperties.end() &&
+            e->second.IsHolding<VtVec3fArray>() &&
+            g->second.IsHolding<VtVec3fArray>() &&
+            e->second.UncheckedGet<VtVec3fArray>().size() ==
+                g->second.UncheckedGet<VtVec3fArray>().size() &&
+            std::memcmp(e->second.UncheckedGet<VtVec3fArray>().cdata(),
+                        g->second.UncheckedGet<VtVec3fArray>().cdata(),
+                        e->second.UncheckedGet<VtVec3fArray>().size() *
+                            sizeof(GfVec3f)) == 0;
+        if (!same) {
+            std::printf("FAIL %s: %s publishes another box than live\n",
+                        label, what);
+            ++failures;
+        }
+    };
+    // A partial cone declines a vector with chain-resolved samples, which
+    // LiftCtl's spline gives; here it is a constant, raised, in the session
+    // layer.
+    const SdfPath settle("/PrecedingAsset/Rig/Movers/Settle");
+    UsdStageRefPtr raised = UsdStage::Open(stagePath);
+    CHECK(raised);
+    if (!raised) {
+        return;
+    }
+    raised->SetEditTarget(raised->GetSessionLayer());
+    CHECK(raised->GetAttributeAtPath(
+                    SdfPath("/PrecedingAsset/Rig/Controls/LiftCtl.avars:ty"))
+              .Set(0.75));
+    RigExecRigEvaluator coned(raised, rig);
+    CHECK(coned.Compile(&errors));
+    coned.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecRigEvaluator coneWalk(raised, rig);
+    CHECK(coneWalk.Compile(&errors));
+    coneWalk.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    RigExecValueOverride weight;
+    weight.prim = echo;
+    weight.attribute = TfToken("inputs:defaultWeight");
+    weight.value = VtValue(0.5f);
+    const UsdTimeCode at9(9.0);
+    const RigExecRigPose lifted = coned.Evaluate(at9);
+    CheckPosesBitIdentical("preceding own chain lifted baked",
+                           coneWalk.Evaluate(at9), lifted);
+    if (!coned.GetBakedProgram()) {
+        std::printf("FAIL %s: the raised rig does not bake\n", label);
+        ++failures;
+        return;
+    }
+    const RigExecBakedProgramImpl &B =
+        coned.GetBakedProgram()->GetStepGraph();
+    std::shared_ptr<const void> liftedSlots;
+    size_t slotBytes = 0;
+    CHECK(RigExecCapturePartialSlots(B, &liftedSlots, &slotBytes));
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    CHECK(RigExecFreezeProgram(coned, &frozen, &error));
+    RigExecFrameInputs liftedInputs, weightedInputs;
+    CHECK(RigExecSampleFrameInputs(coned, at9, noOverrides, &liftedInputs,
+                                   &error));
+    CHECK(RigExecSampleFrameInputs(coned, at9, {weight}, &weightedInputs,
+                                   &error));
+    CHECK(!liftedInputs.HasChainResolvedInputs());
+    CHECK(!weightedInputs.HasChainResolvedInputs());
+    if (!frozen || !liftedSlots) {
+        std::printf("FAIL %s: no snapshot (%s)\n", label, error.c_str());
+        ++failures;
+        return;
+    }
+    const size_t clusters = B.clustering.clusters.size();
+    RigExecBakedClusterSet all;
+    all.SetAll(clusters);
+    const RigExecPartialRunResult full = RigExecRunPartialCone(
+        *frozen, liftedInputs, liftedSlots, lifted, all, 0);
+    CHECK(full.completed);
+    sameBox("an every-cluster cone under the lift", lifted, full.pose);
+
+    // Echo's steps and the box's status sweep, and where Settle's fuse is.
+    RigExecBakedClusterSet plan;
+    plan.Resize(clusters);
+    std::vector<int> echoClusters;
+    int settleFuse = -1;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind == RigExecBakedStepKind::ChainStatus) {
+            if (B.chains[size_t(step.object)].target == box) {
+                CHECK(step.cluster >= 0);
+                plan.Set(step.cluster);
+            }
+            continue;
+        }
+        if (step.kind != RigExecBakedStepKind::InfluenceFold &&
+            step.kind != RigExecBakedStepKind::RevisionStatic &&
+            step.kind != RigExecBakedStepKind::RevisionChunk &&
+            step.kind != RigExecBakedStepKind::RevisionFuse) {
+            continue;
+        }
+        const auto &[c, r] = B.revisionIndex[size_t(step.object)];
+        const SdfPath &mover = B.chains[size_t(c)].revisions[size_t(r)].moverPath;
+        if (mover == echo) {
+            CHECK(step.cluster >= 0);
+            plan.Set(step.cluster);
+            echoClusters.push_back(step.cluster);
+        } else if (mover == settle &&
+                   step.kind == RigExecBakedStepKind::RevisionFuse) {
+            settleFuse = step.cluster;
+        }
+    }
+    CHECK(!echoClusters.empty());
+    if (settleFuse < 0 || plan.Test(settleFuse)) {
+        std::printf("FAIL %s: Settle's fuse (cluster %d) is not outside the "
+                    "cone\n", label, settleFuse);
+        ++failures;
+        return;
+    }
+    coned.SetInteractiveOverrides({weight});
+    coneWalk.SetInteractiveOverrides({weight});
+    const RigExecRigPose weighted = coned.Evaluate(at9);
+    CheckPosesBitIdentical("preceding own chain weighted baked",
+                           coneWalk.Evaluate(at9), weighted);
+    const RigExecPartialRunResult cone = RigExecRunPartialCone(
+        *frozen, weightedInputs, full.slots, full.pose, plan, 0);
+    CHECK(cone.completed);
+    for (const int cluster : echoClusters) {
+        CHECK(std::find(cone.executedClusters.begin(),
+                        cone.executedClusters.end(),
+                        cluster) != cone.executedClusters.end());
+    }
+    CHECK(std::find(cone.executedClusters.begin(),
+                    cone.executedClusters.end(),
+                    settleFuse) == cone.executedClusters.end());
+    sameBox("a cone over Echo alone", weighted, cone.pose);
+    // The weight moved the box, so the cone ran Echo rather than keeping
+    // what the snapshot held.
+    CHECK(weighted.movedProperties.count(box) &&
+          lifted.movedProperties.count(box) &&
+          weighted.movedProperties.at(box) != lifted.movedProperties.at(box));
+}
+
 // tests/fixtures/volume_placements.usda, frozen. As shipped, StripSmooth's
 // field is current-phase (SphereA reads its weightTarget at `preceding`),
 // which the freeze refuses by name. With SphereA's read phase set to `base`
@@ -4968,6 +5194,7 @@ main(int argc, char **argv)
         TestFrozenVolumePlacementUsesTheSharedGate(argv[1]);
         TestFrameRecordFallbacksFreeze(argv[1]);
         TestSolverCheckpointFreezes(argv[1]);
+        TestPrecedingOwnChainFreezes(argv[1]);
     } else {
         std::printf("skipping the biped (no examples directory given)\n");
     }

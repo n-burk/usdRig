@@ -228,27 +228,30 @@ RigExecPhasedConsumerValue(const VtValue &chainValue,
 
 void
 RigExecReadPhasedPoints(
-    const UsdStageRefPtr &stage,
-    const RigExecChainSnapshots &snapshots,
-    UsdTimeCode time,
-    const UsdPrim &prim,
+    const RigExecMoverOracleContext &ctx,
     const char *relName,
     const SdfPath &pointsPath,
-    const SdfPath &readerMover,
     VtVec3fArray *out)
 {
-    const RigExecReadPhase phase = RigExecPhaseForInput(prim, relName);
+    const RigExecReadPhase phase = RigExecPhaseForInput(ctx.prim, relName);
+    // The reader's own record is made after it reads, so no snapshot holds
+    // `preceding` on its own chain; the points entering it are that value.
+    if (phase.kind == RigExecReadPhaseKind::Preceding &&
+        pointsPath == ctx.target && ctx.entering) {
+        *out = *ctx.entering;
+        return;
+    }
     if (!phase.IsBase()) {
-        if (const VtValue *v = snapshots.Lookup(
-                pointsPath, phase, readerMover)) {
+        if (const VtValue *v = ctx.snapshots.Lookup(
+                pointsPath, phase, ctx.moverPath)) {
             if (v->IsHolding<VtVec3fArray>()) {
                 *out = v->UncheckedGet<VtVec3fArray>();
                 return;
             }
         }
     }
-    if (const UsdAttribute a = stage->GetAttributeAtPath(pointsPath)) {
-        a.Get(out, time);
+    if (const UsdAttribute a = ctx.stage->GetAttributeAtPath(pointsPath)) {
+        a.Get(out, ctx.time);
     }
 }
 

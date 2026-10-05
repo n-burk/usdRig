@@ -80,6 +80,11 @@ struct RigExecMoverOracleContext {
     /// so the oracle needs no evaluator compile state.
     std::function<const VtValue *(const SdfPath &, const SdfPath &)>
         sampleSnapshot;
+    /// The points entering this mover: the chain built so far, or null on
+    /// the chain's first mover. A side input naming `target` at `preceding`
+    /// reads these (RigExecReadPhasedPoints). Last, so the members before
+    /// it keep their offsets.
+    const VtVec3fArray *entering = nullptr;
 };
 
 struct RigExecMoverHandler;
@@ -197,7 +202,9 @@ struct RigExecMoverHandler {
 /// Info.RigExecMoverPlugin in their OpenUSD plugInfo.json. Plugins must also
 /// use the same compiler, USD build, and RigExec SDK as the host.
 /// Version 2 added encodeExternal and runtimeKernel to the handler.
-inline constexpr int RigExecMoverPluginApiVersion = 2;
+/// Version 3 passes the oracle context to RigExecReadPhasedPoints and adds
+/// RigExecMoverOracleContext::entering.
+inline constexpr int RigExecMoverPluginApiVersion = 3;
 
 /// Registers one mover, retaining an immutable copy and its schema name.
 /// Duplicate schema names and incomplete external callbacks are rejected.
@@ -287,20 +294,17 @@ RigExecReadPhase RigExecPhaseForInput(
 VtValue RigExecPhasedConsumerValue(
     const VtValue &chainValue, const SdfValueTypeName &consumerType);
 
-/// The oracle's phased read, as a free function: resolves the phase for
-/// the input \p relName names and reads the recorded snapshot for it, or
-/// the authored stage value when the phase is Base or no snapshot was
-/// recorded. Deliberately independent of RigExecResolveRevisionBinding
-/// (that independence is what makes parity a real check) while sharing
-/// the authored intent.
+/// The oracle's phased read of \p pointsPath, the input \p relName names
+/// on \p ctx's mover: resolves the phase and reads `ctx.entering` for
+/// `preceding` on the oracle's own chain past its first mover, otherwise
+/// the recorded snapshot, or the authored stage value when the phase is
+/// Base or no snapshot was recorded. Deliberately independent of
+/// RigExecResolveRevisionBinding (that independence is what makes parity a
+/// real check) while sharing the authored intent.
 void RigExecReadPhasedPoints(
-    const UsdStageRefPtr &stage,
-    const RigExecChainSnapshots &snapshots,
-    UsdTimeCode time,
-    const UsdPrim &prim,
+    const RigExecMoverOracleContext &ctx,
     const char *relName,
     const SdfPath &pointsPath,
-    const SdfPath &readerMover,
     VtVec3fArray *out);
 
 /// A bare prim path names the transform domain -- except on a PointBased

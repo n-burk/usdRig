@@ -11,10 +11,15 @@ callback and a points computation; no changes to RigExec's built-in mover list
 are required.
 
 Use the same compiler, architecture, build configuration, OpenUSD installation,
-and RigExec SDK as the host. Plugin API version 2 identifies the callback
+and RigExec SDK as the host. Plugin API version 3 identifies the callback
 contract; it does not provide binary compatibility across different SDK builds.
 Version 2 added the `.rigexec` export and playback callbacks below, so a library
-built for version 1 must be rebuilt.
+built for version 1 must be rebuilt. Version 3 changed the oracle's phased read:
+`RigExecReadPhasedPoints(ctx, relName, pointsPath, out)` takes the oracle
+context, and `RigExecMoverOracleContext::entering` holds the points entering
+the mover, or null on the chain's first mover. A library built for version 2
+must be rebuilt, and an oracle that calls `RigExecReadPhasedPoints` must be
+edited to the new signature.
 
 ## Build a mover repository
 
@@ -311,7 +316,7 @@ Windows and colons on Linux/macOS. Keep the host's existing schema and imaging
 plugin paths as well.
 
 The generated `plugInfo.json` marks the library with
-`"Info": {"RigExecMoverPlugin": 2}`. RigExec loads discoverable mover libraries
+`"Info": {"RigExecMoverPlugin": 3}`. RigExec loads discoverable mover libraries
 on the first unknown handler lookup. Hosts can call
 `RigExecLoadMoverPlugins(&diagnostics)` explicitly to inspect version or load
 errors. After adding search locations with

@@ -89,7 +89,15 @@ attribute for it. With none authored the input reads `base`.
   folded in, through that solver's rest reference.
 - `preceding` — the value standing immediately before this one mover's own
   application in the point stack. It is only meaningful to a mover that has a
-  place in that stack.
+  place in that stack. On the points of the chain this revision moves, such
+  as a lattice whose `rigExec:cage` is its own target, that is the points as
+  the movers before it left them; on the stack's first mover it is the
+  authored points. A mover with several targets is a known limitation: its
+  revision on one target reading another chain it also moves at `preceding`
+  gets that chain's points from just before its own revision there only when
+  another reader's phase on that chain makes the evaluator keep that record,
+  and otherwise the authored points. One relationship can therefore resolve
+  to different points for the mover's different targets.
 - `final` — the top of the chain, after every writer of that target.
 - **a checkpoint** — an absolute prim path in place of a token, meaning "the
   provider as it stood right after that named step". Naming the `Solvers` scope

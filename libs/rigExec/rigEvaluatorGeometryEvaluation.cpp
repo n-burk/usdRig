@@ -295,14 +295,29 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 resolved = &*revisionInputs;
             }
             for (const auto &[inputPath, phase] : revision.binding.phases) {
+                // `preceding` on the chain this revision is on: the points
+                // entering it, which is the chain built so far. No record
+                // can answer it, because the reader's own is made after
+                // its assemble. A first revision falls through to the
+                // resolved input below, which is that chain's base.
+                if (phase.kind == RigExecReadPhaseKind::Preceding &&
+                    inputPath == target && revisionIndex > 0) {
+                    revisionInputs->SetProperty(
+                        inputPath, VtValue(graph.Evaluate(head)));
+                    continue;
+                }
                 if (const VtValue *v = lookupChainSnapshot(
                         inputPath, phase, revision.moverPath)) {
                     revisionInputs->SetProperty(inputPath, *v);
                 } else if (phase.kind != RigExecReadPhaseKind::Preceding) {
-                    // Preceding falling through to the stage is correct (the
-                    // reader is the chain's first revision, so its preceding
-                    // value IS the base). Anything else means the phase named
-                    // something that produced nothing.
+                    // Preceding falling through to the stage is silent: on
+                    // the reader's own chain only a first revision gets
+                    // here, and its preceding value IS the base; on another
+                    // chain the reader writes, a miss (no reader named its
+                    // revision there, so none was recorded) reads the
+                    // authored base, as the program's tail does. Anything
+                    // else means the phase named something that produced
+                    // nothing.
                     work.diagnostics.push_back(
                         "diag " + revision.moverPath.GetString() +
                         ": read phase '" + phase.GetAsString() + "' for " +

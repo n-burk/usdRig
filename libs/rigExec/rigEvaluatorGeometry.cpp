@@ -803,7 +803,8 @@ RigExecRigEvaluator::_EvaluateChain(
     }
     const VtVec3fArray basePoints = points;
 
-    for (const RigExecMoverRecord *mover : chain) {
+    for (size_t index = 0; index < chain.size(); ++index) {
+        const RigExecMoverRecord *mover = chain[index];
         const UsdPrim prim = _stage->GetPrimAtPath(mover->moverPath);
         if (!prim || !_IsEnabled(prim, time)) {
             continue;  // pass-through (spec §4.2)
@@ -900,7 +901,8 @@ RigExecRigEvaluator::_EvaluateChain(
                     diagnostics,
                     &points,
                     basePoints,
-                    sampleSnapshot};
+                    sampleSnapshot,
+                    index > 0 ? &preceding : nullptr};
                 if (oracleHandler->oracle(oracleCtx) ==
                     RigExecOracleResult::PassThrough) {
                     continue;

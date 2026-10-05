@@ -197,6 +197,9 @@ RigExecRigEvaluator::_CompileChainPlan(
                                 " does not write " + inputPath.GetString() +
                                 "; there is no preceding revision to name", {revision.moverPath});
                         }
+                        // On the reader's own chain the walk reads the
+                        // entering points; the record serves a reader on
+                        // another chain the mover also writes.
                         if (at != movers.begin()) {
                             plan->snapshots[inputPath].insert(*(at - 1));
                         }
@@ -298,15 +301,16 @@ RigExecRigEvaluator::_IsChainLevelParallelSafe(
             // Defence in depth against a future edge type, not a hazard the
             // dependency graph can currently produce: a phased read is an
             // edge addEdge already records, so a phased reader and the chain
-            // that produces what it reads land in different levels, and a
-            // phase read WITHIN a chain is served from that task's own
-            // snapshots. No level the partition builds today holds a phased
-            // read across its own chains. It stays because the cost is one
-            // level's parallelism on a rig that has any phased read at all,
-            // and the alternative is that a new edge kind -- one addEdge does
-            // not know to record -- would make a level silently read the
-            // chain-snapshot store mid-level, where what this level's chains
-            // have recorded has not arrived yet.
+            // that produces what it reads land in different levels, an
+            // AtPrim read WITHIN a chain is served from that task's own
+            // snapshots, and a `preceding` read on the reader's own chain
+            // reads the chain built so far. No level the partition builds
+            // today holds a phased read across its own chains. It stays
+            // because the cost is one level's parallelism on a rig that has
+            // any phased read at all, and the alternative is that a new edge
+            // kind -- one addEdge does not know to record -- would make a
+            // level silently read the chain-snapshot store mid-level, where
+            // what this level's chains have recorded has not arrived yet.
             if (!revision.binding.phases.empty()) {
                 return false;
             }

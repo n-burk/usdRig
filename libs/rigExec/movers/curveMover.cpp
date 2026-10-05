@@ -214,9 +214,8 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
         }
         if (driverTransforms.empty()) {
             rigExec::RigExecReadPhasedPoints(
-                stage, ctx.snapshots, time, prim, "rigExec:driverCurve",
-                curvePrim.AppendProperty(TfToken("points")), moverPath,
-                &posedCvs);
+                ctx, "rigExec:driverCurve",
+                curvePrim.AppendProperty(TfToken("points")), &posedCvs);
         }
         VtIntArray order;
         VtDoubleArray knots;
