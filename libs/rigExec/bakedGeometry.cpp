@@ -219,28 +219,6 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                 break;
             }
         }
-        // Some phased read, of any of the THREE kinds the dynamic walk has:
-        // the per-input phases, an AtPrim transform, and a blend sample whose
-        // points carry a phase. `phasedReads` and `readsSnapshots` are
-        // exported for the .rigexec runtime's own store; nothing in
-        // libs/rigExec reads them. The program's reads resolve through their
-        // bindings (BindPointReads) and frame records.
-        bool phased = !r.binding.phases.empty() ||
-                      r.binding.transformPhase.kind ==
-                          RigExecReadPhaseKind::AtPrim;
-        for (const auto &[input, samples] : r.binding.blendSamples) {
-            for (const RigExecBlendSampleBinding &sample : samples) {
-                phased = phased || !sample.phase.IsBase();
-                out.readsSnapshots =
-                    out.readsSnapshots || !sample.phase.IsBase();
-            }
-        }
-        out.readsSnapshots =
-            out.readsSnapshots || !r.binding.phases.empty() ||
-            r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim;
-        if (phased) {
-            B.phasedReads = true;
-        }
         if (!out.moverPrim) {
             refuse("mover prim is missing", r.moverPath);
         }

@@ -1579,11 +1579,6 @@ struct RigExecBakedProgramImpl {
     bool capturePointReads = false;
     std::vector<RigExecBakedPointCapture> pointCaptures;
 
-    /// True when some revision of this epoch declares a read phase. Exported
-    /// for the .rigexec runtime, which records its own phased-read store and
-    /// runs whole when it is set; nothing in libs/rigExec reads it.
-    bool phasedReads = false;
-
     // What computeMatrix publishes, over dense slots: the whole
     // AuthoritativeSnapshot request is a re-derivation of values the walk
     // already holds. Program-owned rather than a per-frame allocation,
@@ -1858,9 +1853,6 @@ struct RigExecBakedProgramImpl {
         /// rigExec:weightBlend == "radial" on a transform-domain
         /// RigExecMatrixMover, compiled.
         bool radialBlend = false;
-        /// True when any target wants a record. Exported for the .rigexec
-        /// runtime's own store; EnumerateFrameRecords uses it as a shortcut.
-        bool snapshotAfter = false;
 
         // The one multi-target built-in: it revises its whole inferred joint
         // chain atomically, so `targetSlots` IS the chain and the commit
@@ -2343,19 +2335,11 @@ struct RigExecBakedProgramImpl {
         /// A read phase named this revision as the point in the chain it
         /// wants the target's points from (the dynamic walk records them
         /// after it). Decided at bake out of the evaluator's
-        /// _chainPlan.snapshots; BindPointReads binds to it, and the
-        /// exporter carries it. The plan still names the predecessor of an
-        /// own-chain `preceding` reader, so the flag is set and exported for
-        /// it, but that read binds to the version entering the reader and
-        /// reads no record.
+        /// _chainPlan.snapshots; BindPointReads binds `preceding` reads of
+        /// another chain and AtPrim reads to it. The plan also names the
+        /// predecessor of an own-chain `preceding` reader, but that read
+        /// binds to the version entering the reader and reads no record.
         bool snapshotAfter = false;
-        /// A declared input phase (`binding.phases`), an AtPrim transform
-        /// phase, or a blend sample whose target shape carries a phase.
-        /// Exported for the .rigexec runtime, which answers those reads out
-        /// of its own store; nothing in libs/rigExec reads it. The program's
-        /// point reads go through `pointBindings` and the samples' own
-        /// bindings, and the transform phase is the fold's.
-        bool readsSnapshots = false;
         /// One per `binding.phases` entry, in the map's order.
         std::vector<RigExecBakedPointsBinding> pointBindings;
         /// For an AtPrim `binding.transformPhase` only: the `frameRecords`

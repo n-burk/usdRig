@@ -1687,7 +1687,31 @@ TestAPhasedRigSkipsOnRepeat(const std::string &examples)
         return;
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
-    CHECK_AT(where, B.phasedReads);
+    // Some revision declares a read phase: an input phase, an AtPrim
+    // transform, or a phased blend sample.
+    const auto declaresPhase =
+        [](const RigExecBakedProgramImpl::GeomRevision &revision) {
+            const RigExecRevisionBinding &binding = revision.binding;
+            bool phased =
+                !binding.phases.empty() ||
+                binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim;
+            for (const auto &[input, samples] : binding.blendSamples) {
+                for (const RigExecBlendSampleBinding &sample : samples) {
+                    phased = phased || !sample.phase.IsBase();
+                }
+            }
+            return phased;
+        };
+    bool phasedRig = false;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const auto &revision : chain.revisions) {
+            phasedRig = phasedRig || declaresPhase(revision);
+        }
+        for (const auto &derived : chain.derived) {
+            phasedRig = phasedRig || declaresPhase(derived.revision);
+        }
+    }
+    CHECK_AT(where, phasedRig);
     const auto providerMatrices = [&B](const char *joint) {
         std::vector<int> out;
         const SdfPath path =

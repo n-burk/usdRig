@@ -682,7 +682,6 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             c.targetSlots.push_back(slot);
             c.snapshotTargets.push_back(
                 k < fc.snapshotTargets.size() ? fc.snapshotTargets[k] : 0);
-            c.snapshotAfter = c.snapshotAfter || c.snapshotTargets.back();
         }
         c.target = c.targetSlots.empty() ? -1 : c.targetSlots[0];
         for (size_t k = 0; k < fc.sources.size(); ++k) {
@@ -1325,9 +1324,6 @@ EnumerateFrameRecords(RigExecBakedProgramImpl *program)
         }
         const RigExecBakedProgramImpl::Constraint &constraint =
             B.constraints[size_t(walk.index)];
-        if (!constraint.snapshotAfter) {
-            continue;
-        }
         for (size_t k = 0; k < constraint.targetSlots.size(); ++k) {
             if (k < constraint.snapshotTargets.size() &&
                 constraint.snapshotTargets[k] &&
