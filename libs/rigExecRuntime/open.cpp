@@ -430,10 +430,15 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     }
     // Playback walks the steps in index order and dirties whole clusters
     // without reading an edge, so the file's own graph must make that walk
-    // a topological order before anything is sized from it.
+    // a topological order, with every read produced before it, before
+    // anything is sized from it.
     {
-        const std::string why =
-            RigExecStepGraphError(self->_steps, self->_clustering);
+        const std::string why = RigExecStepGraphError(
+            self->_steps, self->_clustering,
+            [](const RigExecWireSlotRange &range) {
+                return RigExecStepGraphRange{uint8_t(range.domain),
+                                             range.begin, range.end};
+            });
         if (!why.empty()) {
             return fail(why);
         }

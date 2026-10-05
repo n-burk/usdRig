@@ -1,24 +1,57 @@
 // The step and cluster graph a .rigexec carries, checked once per load.
 // Playback walks the steps in index order (source steps first, in index
 // order) and dirties whole clusters, so a file is refused unless that walk
-// is a topological order of its step graph and its cluster graph is an
-// acyclic quotient of the step graph. Whether each slot a step reads has
-// an earlier writer is not checked here. The current wire reader and the
-// FlatBuffer validator both call RigExecStepGraphError, whose step and
-// cluster types share their field names, so the two refuse a bad graph in
-// the same words. USD-free and header-only. On a valid file it allocates
-// only the cluster sort's two count-sized vectors.
+// is a topological order of its step graph, every slot a step reads has
+// been written by then, and its cluster graph is an acyclic quotient of
+// the step graph. The current wire reader and the FlatBuffer validator both
+// call RigExecStepGraphError, whose step and cluster types share their
+// field names, so the two refuse a bad graph in the same words. USD-free
+// and header-only. On a valid file it allocates the cluster sort's two
+// count-sized vectors, the walk order, and one map node per run of written
+// slots.
 #ifndef RIGEXEC_BINARY_STEP_GRAPH_H
 #define RIGEXEC_BINARY_STEP_GRAPH_H
+
+#include "rigExecBinary/program.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <map>
 #include <string>
 #include <type_traits>
 #include <vector>
 
 namespace rigExec {
+
+/// A slot range as either reader's range type holds it; the domain is a
+/// RigExecWireSlotDomain value, which the FlatBuffer SlotDomain mirrors.
+struct RigExecStepGraphRange {
+    uint8_t domain = 0;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+};
+
+/// Whether a domain's slots hold a value before any step of a run writes
+/// them, so a step may read them with no producer: the sources the
+/// prologue fills (avars, property-chain results, chain bases and solver
+/// points; RigExecBakedIsSourceDomain), and the snapshot store, whose read
+/// names every earlier step whether or not it recorded.
+inline bool
+RigExecStepGraphDomainHoldsValue(uint8_t domain)
+{
+    switch (RigExecWireSlotDomain(domain)) {
+    case RigExecWireSlotDomain::Avars:
+    case RigExecWireSlotDomain::PropertyResult:
+    case RigExecWireSlotDomain::ChainBase:
+    case RigExecWireSlotDomain::SolverPoints:
+    case RigExecWireSlotDomain::Snapshots:
+        return true;
+    default:
+        return false;
+    }
+}
 
 namespace rigExecStepGraphDetail {
 
@@ -27,6 +60,94 @@ Text(int64_t value)
 {
     return std::to_string(value);
 }
+
+inline std::string
+DomainName(uint8_t domain)
+{
+    switch (RigExecWireSlotDomain(domain)) {
+    case RigExecWireSlotDomain::Avars: return "Avars";
+    case RigExecWireSlotDomain::PoseBase: return "PoseBase";
+    case RigExecWireSlotDomain::PoseFin: return "PoseFin";
+    case RigExecWireSlotDomain::PosedM: return "PosedM";
+    case RigExecWireSlotDomain::FinalMatrix: return "FinalMatrix";
+    case RigExecWireSlotDomain::BaseMatrix: return "BaseMatrix";
+    case RigExecWireSlotDomain::Aggregate: return "Aggregate";
+    case RigExecWireSlotDomain::SolverPoints: return "SolverPoints";
+    case RigExecWireSlotDomain::Candidates: return "Candidates";
+    case RigExecWireSlotDomain::CommitTable: return "CommitTable";
+    case RigExecWireSlotDomain::CommitDelta: return "CommitDelta";
+    case RigExecWireSlotDomain::CommitStaging: return "CommitStaging";
+    case RigExecWireSlotDomain::ConstraintDelta: return "ConstraintDelta";
+    case RigExecWireSlotDomain::PropertyResult: return "PropertyResult";
+    case RigExecWireSlotDomain::ChainBase: return "ChainBase";
+    case RigExecWireSlotDomain::RevisionPacket: return "RevisionPacket";
+    case RigExecWireSlotDomain::RevisionTransforms:
+        return "RevisionTransforms";
+    case RigExecWireSlotDomain::RevisionOut: return "RevisionOut";
+    case RigExecWireSlotDomain::RevisionDone: return "RevisionDone";
+    case RigExecWireSlotDomain::ChainDirty: return "ChainDirty";
+    case RigExecWireSlotDomain::ChainPoints: return "ChainPoints";
+    case RigExecWireSlotDomain::DerivedOut: return "DerivedOut";
+    case RigExecWireSlotDomain::WeightPacket: return "WeightPacket";
+    case RigExecWireSlotDomain::WeightFrames: return "WeightFrames";
+    case RigExecWireSlotDomain::PoseWeight: return "PoseWeight";
+    case RigExecWireSlotDomain::Snapshots: return "Snapshots";
+    }
+    return "domain " + Text(domain);
+}
+
+/// The written slots of every domain as disjoint, non-touching runs,
+/// keyed by domain and first slot.
+class WrittenRuns {
+public:
+    /// Whether [range.begin, range.end) lies inside one run.
+    bool Covers(const RigExecStepGraphRange &range) const
+    {
+        auto at = _runs.upper_bound(_Key(range.domain, range.begin));
+        if (at == _runs.begin()) {
+            return false;
+        }
+        --at;
+        return _Domain(at->first) == range.domain && at->second >= range.end;
+    }
+
+    /// Adds [range.begin, range.end), merging the runs it overlaps or
+    /// touches.
+    void Add(const RigExecStepGraphRange &range)
+    {
+        if (range.begin >= range.end) {
+            return;
+        }
+        uint64_t first = _Key(range.domain, range.begin);
+        uint32_t end = range.end;
+        auto at = _runs.upper_bound(first);
+        if (at != _runs.begin()) {
+            const auto before = std::prev(at);
+            if (_Domain(before->first) == range.domain &&
+                before->second >= range.begin) {
+                first = before->first;
+                end = std::max(end, before->second);
+                at = _runs.erase(before);
+            }
+        }
+        while (at != _runs.end() && _Domain(at->first) == range.domain &&
+               uint32_t(at->first) <= end) {
+            end = std::max(end, at->second);
+            at = _runs.erase(at);
+        }
+        _runs.emplace_hint(at, first, end);
+    }
+
+private:
+    static uint64_t _Key(uint8_t domain, uint32_t begin)
+    {
+        return (uint64_t(domain) << 32) | begin;
+    }
+    static uint8_t _Domain(uint64_t key) { return uint8_t(key >> 32); }
+
+    /// First slot (under the domain) -> one past the last slot.
+    std::map<uint64_t, uint32_t> _runs;
+};
 
 /// Whether the increasing \p list holds \p value.
 template <class List>
@@ -98,10 +219,14 @@ InverseError(const Nodes &nodes, Forward forward, Backward backward,
 
 /// Empty when \p steps and \p clustering form a graph playback may walk;
 /// otherwise the first violation found. Every index is range-checked
-/// before it is followed. Checked, in order:
+/// before it is followed. \p rangeOf turns a step's read or write range
+/// into a RigExecStepGraphRange. Checked, in order:
 ///  - each step's preds are increasing, unique and earlier than it, its
 ///    succs increasing, unique and later, and the two are inverses;
 ///  - a step that runs in the source pass depends only on source steps;
+///  - every slot a step reads is written by a step playback runs before
+///    it, unless its domain holds a value before the run
+///    (RigExecStepGraphDomainHoldsValue);
 ///  - clusterOf names a cluster for every step and agrees with each
 ///    step's own cluster;
 ///  - each cluster's members are increasing, belong to it, and together
@@ -109,10 +234,10 @@ InverseError(const Nodes &nodes, Forward forward, Backward backward,
 ///  - cluster preds and succs are increasing, unique, free of self-edges
 ///    and inverses, and every step edge across clusters is a cluster edge;
 ///  - a Kahn sort over the cluster preds orders every cluster.
-template <class Step, class Clustering>
+template <class Step, class Clustering, class RangeOf>
 std::string
 RigExecStepGraphError(const std::vector<Step> &steps,
-                      const Clustering &clustering)
+                      const Clustering &clustering, RangeOf rangeOf)
 {
     namespace detail = rigExecStepGraphDetail;
     using detail::Contains;
@@ -164,6 +289,38 @@ RigExecStepGraphError(const std::vector<Step> &steps,
             if (!steps[size_t(p)].isSource) {
                 return "source " + stepName(s) + " depends on step " +
                        Text(int64_t(p)) + ", which is not a source";
+            }
+        }
+    }
+
+    // Producers, in playback order: the source pass in index order, then
+    // every other step in index order. A step's reads see the writes of
+    // the steps before it, not its own.
+    {
+        std::vector<size_t> order;
+        order.reserve(stepCount);
+        for (const bool sourcePass : {true, false}) {
+            for (size_t s = 0; s < stepCount; ++s) {
+                if (bool(steps[s].isSource) == sourcePass) {
+                    order.push_back(s);
+                }
+            }
+        }
+        detail::WrittenRuns written;
+        for (const size_t s : order) {
+            for (const auto &read : steps[s].reads) {
+                const RigExecStepGraphRange range = rangeOf(read);
+                if (range.begin < range.end &&
+                    !RigExecStepGraphDomainHoldsValue(range.domain) &&
+                    !written.Covers(range)) {
+                    return stepName(s) + " reads " +
+                           detail::DomainName(range.domain) + " slots [" +
+                           Text(range.begin) + ", " + Text(range.end) +
+                           "), which no earlier step writes";
+                }
+            }
+            for (const auto &write : steps[s].writes) {
+                written.Add(rangeOf(write));
             }
         }
     }

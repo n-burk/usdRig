@@ -123,6 +123,7 @@ _OpenError(const std::vector<uint8_t> &bytes)
 static int stepGraphFlips = 0;
 static int stepGraphRanges = 0;
 static int stepGraphCycles = 0;
+static int stepGraphProducers = 0;
 
 // Open refuses \p bytes with section \p tag replaced by \p payload, saying
 // exactly \p expected.
@@ -193,6 +194,27 @@ _TestStepGraphRefusals(const std::string &name,
         ++stepGraphFlips;
         ++stepGraphRanges;
         break;
+    }
+    // A read past every slot, in a pose domain and in Aggregate, which
+    // the blend reads from the same run: nothing writes either.
+    if (count > 0) {
+        const uint32_t past = uint32_t(1) << 30;
+        const std::string last = std::to_string(count - 1);
+        const std::pair<RigExecWireSlotDomain, const char *> domains[] = {
+            {RigExecWireSlotDomain::PosedM, "PosedM"},
+            {RigExecWireSlotDomain::Aggregate, "Aggregate"}};
+        for (const auto &[domain, text] : domains) {
+            std::vector<RigExecWireStep> edited = steps;
+            edited.back().reads.push_back({domain, past, past + 1});
+            _ExpectRefusal(name, "read nothing writes", bytes,
+                           RigExecBinarySection::Steps,
+                           _StepsPayload(edited),
+                           "step " + last + " reads " + text + " slots [" +
+                               std::to_string(past) + ", " +
+                               std::to_string(past + 1) +
+                               "), which no earlier step writes");
+            ++stepGraphProducers;
+        }
     }
     if (count > 0 && !clusters.empty()) {
         std::vector<RigExecWireStep> editedSteps = steps;
@@ -416,8 +438,10 @@ main(int argc, char **argv)
     // predecessor, a cluster and a cluster edge, which some fixture must
     // have.
     std::printf("step graph refusals: %d flipped predecessor(s), %d index "
-                "range(s), %d cluster cycle(s)\n",
-                stepGraphFlips, stepGraphRanges, stepGraphCycles);
+                "range(s), %d cluster cycle(s), %d unproduced read(s)\n",
+                stepGraphFlips, stepGraphRanges, stepGraphCycles,
+                stepGraphProducers);
+    CHECK(stepGraphProducers > 0);
     CHECK(stepGraphFlips > 0);
     CHECK(stepGraphRanges > 0);
     CHECK(stepGraphCycles > 0);

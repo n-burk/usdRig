@@ -53,7 +53,8 @@ Playback runs the steps in index order, source steps first, and never reads
 their edges. `Open` therefore refuses a file whose step graph that order does
 not satisfy: a predecessor at or after its step, predecessor and successor
 lists that disagree, or a source step that depends on a step outside the
-source pass. It also refuses a cluster graph that is not an acyclic quotient
-of the step graph. It does not check that each slot a step reads has an
-earlier writer. The rules live in `rigExecBinary/stepGraph.h`, which the
-FlatBuffer validator shares.
+source pass. It also refuses a read of a slot that no step running before
+the reader writes, except in the domains a run fills before any step (avars,
+property-chain results, chain bases, solver points and snapshots), and a
+cluster graph that is not an acyclic quotient of the step graph. The rules
+live in `rigExecBinary/stepGraph.h`, which the FlatBuffer validator shares.

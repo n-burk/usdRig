@@ -991,11 +991,14 @@ private:
                                   "step-backed weight object");
             }
         }
-        // Every step and cluster index, edge order, membership, the
-        // partition and the acyclic cluster graph: the rules the runtime's
-        // reader applies, in its words.
-        const std::string why =
-            RigExecStepGraphError(_f.steps, *_f.clustering);
+        // Every step and cluster index, edge order, producers, membership,
+        // the partition and the acyclic cluster graph: the rules the
+        // runtime's reader applies, in its words.
+        const std::string why = RigExecStepGraphError(
+            _f.steps, *_f.clustering, [](const fb::SlotRange &range) {
+                return RigExecStepGraphRange{uint8_t(range.domain()),
+                                             range.begin(), range.end()};
+            });
         return why.empty() || _Bad(why);
     }
 

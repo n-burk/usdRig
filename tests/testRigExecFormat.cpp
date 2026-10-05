@@ -1653,6 +1653,54 @@ TestStepGraph()
                f.clustering->clusters[0].succs.clear();
                f.clustering->clusters[1].preds.clear();
            });
+    // Producers, in playback order.
+    const auto unproduced = [](F &f) {
+        f.steps[3].reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 3)};
+    };
+    expect("read nothing writes",
+           "step 3 reads PosedM slots [0, 3), which no earlier step writes",
+           unproduced);
+    expectOpen("read nothing writes",
+               "step 3 reads PosedM slots [0, 3), which no earlier step "
+               "writes",
+               unproduced);
+    expect("read before its writer",
+           "step 1 reads PosedM slots [1, 2), which no earlier step writes",
+           [](F &f) {
+               f.steps[1].reads = {fb::SlotRange(fb::SlotDomain::PosedM, 1, 2)};
+           });
+    expect("aggregate nothing writes",
+           "step 3 reads Aggregate slots [0, 1), which no earlier step writes",
+           [](F &f) {
+               f.steps[3].reads.push_back(
+                   fb::SlotRange(fb::SlotDomain::Aggregate, 0, 1));
+           });
+    // Step 2 becomes a source with no predecessor. It still reads step 1's
+    // write, which index order would have produced, but the source pass
+    // runs it before step 1.
+    expect("source reads a later-running write",
+           "step 2 reads PosedM slots [0, 1), which no earlier step writes",
+           [](F &f) {
+               f.steps[1].succs.clear();
+               f.steps[2].preds.clear();
+               f.steps[2].isSource = true;
+               f.steps[2].reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 1)};
+           });
+    // The domains a run holds before any step writes them need no producer.
+    {
+        _context = "step graph: unproduced source reads";
+        F file = _GraphFile();
+        file.steps[3].reads.push_back(
+            fb::SlotRange(fb::SlotDomain::Avars, 0, 11));
+        file.steps[3].reads.push_back(
+            fb::SlotRange(fb::SlotDomain::Snapshots, 0, 3));
+        file.steps[3].reads.push_back(
+            fb::SlotRange(fb::SlotDomain::ChainBase, 0, 1));
+        CHECK(RigExecFormatValidate(file, &why));
+        if (!why.empty()) {
+            std::printf("  source reads refused: %s\n", why.c_str());
+        }
+    }
     std::printf("step graph: %d violations refused\n", cases);
 }
 
