@@ -1,15 +1,15 @@
 #
 # RigExec usdview view axis: orientation math, with no Qt.
 #
-# A navigation axis gizmo in the style of Blender's: the world X, Y and Z
+# A navigation axis gizmo: the world X, Y and Z
 # axes as coloured balls around a circle, drawn back to front, with the
 # negative axes as fainter balls opposite them. Clicking a ball looks
 # down that axis, dragging anywhere inside the circle tumbles the view.
 #
-# The layout follows Blender's published behaviour (sizes relative to an
-# 80 px gizmo, the depth fade toward the viewport background, the ball
-# growing slightly toward the viewer, the current axis's ball switching
-# to its opposite); the code here is our own. Every axis is WORLD space,
+# Sizes are relative to an 80 px gizmo: the depth fade toward the
+# viewport background, the ball growing slightly toward the viewer, the
+# current axis's ball switching to its opposite. The code here is our
+# own. Every axis is WORLD space,
 # read straight off the camera's frustum, so the gizmo agrees with the
 # stage's own axes and with the manipulators whatever the up axis.
 #
@@ -177,6 +177,6 @@ def ViewDirectionForHandle(handle):
     """The world direction from the orbit centre to the camera.
 
     Clicking +X puts the camera on +X looking back toward the origin, so
-    the view is down -X: the "right" view, as in Blender.
+    the view is down -X: the "right" view.
     """
     return Gf.Vec3d(handle.direction)

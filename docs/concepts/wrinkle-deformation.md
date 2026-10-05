@@ -43,9 +43,7 @@ fold. Stretched links can also pull points together. These lengths determine
 fixed target edge vectors for the current pose; the solve approaches those
 vectors with a configurable strength.
 
-The public [SideFX Wrinkle Deformer documentation](https://www.sidefx.com/docs/houdini/nodes/sop/wrinkledeformer.html)
-is a behavior reference for rest-distance controls, constraint neighborhoods,
-pins, and tangent-plane collision. The ideas of position projection and bounded
+The ideas of position projection and bounded
 wrinkle offsets are described in
 [Position Based Dynamics](https://matthias-research.github.io/pages/publications/posBasedDyn.pdf)
 and [Wrinkle Meshes](https://matthias-research.github.io/pages/publications/wrinkleMeshes.pdf).

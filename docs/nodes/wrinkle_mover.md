@@ -23,8 +23,7 @@ Adds fine folds after skinning or other mesh deformation by
 comparing the posed mesh with its reference lengths. A deterministic fold guide
 keeps the wrinkle pattern consistent as compression changes. Each pose solves
 independently, so forward playback, reverse playback, and direct frame seeking
-give the same result. Its artist controls follow the quasistatic workflow of
-Houdini's Wrinkle Deformer.
+give the same result.
 See [Wrinkle deformation](../concepts/wrinkle-deformation.md) for the supported
 method and [algorithm references](../references.md) for its sources.
 

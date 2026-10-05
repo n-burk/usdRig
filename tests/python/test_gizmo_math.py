@@ -2218,7 +2218,7 @@ def _Group(stage, prims, time, channels=None):
 def TestGroupPivotAndFrame():
     """
     The pivot is the centroid of the members' evaluated origins,
-    oriented like the LEAD (last-selected) control -- the usual DCC
+    oriented like the LEAD (last-selected) control -- the usual
     convention.
     """
     stage, root, mid, tip, side, _ = _GroupStage()
@@ -2564,7 +2564,7 @@ def _Centroid3(points):
 def TestGroupPivotModes():
     """
     WHERE a group turns: the CENTRE by default, and the two other
-    answers a DCC offers.
+    pivot answers.
 
     The default is the point of the option. "Rotate these together"
     means about their middle -- the centroid has to come out of the
@@ -2678,7 +2678,7 @@ def TestGroupRotateTurnsEveryoneWhateverThePivot():
     selected control turns about itself, so a control that hangs off
     another selected control gets its own turn AND its ancestor's: Mid
     and Side turn 30 degrees, and Tip -- a child of Mid -- turns 60.
-    That is Blender's behaviour for this mode, and it is the reason an
+    That is this mode's behaviour, and it is the reason an
     animator reaches for it: selecting a finger chain and dragging the
     ring CURLS the finger instead of swinging it rigidly.
     """
