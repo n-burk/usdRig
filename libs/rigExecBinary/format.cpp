@@ -3545,6 +3545,7 @@ RigExecFormatOpen(const uint8_t *bytes, size_t size,
         return _Fail(error, "malformed .rigexec: " + _N(size) +
                                 " bytes is past the FlatBuffers limit");
     }
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
     // Allocation failures (the aligned copy, UnPack, the validator) refuse
     // the file rather than escape.
     try {
@@ -3554,6 +3555,11 @@ RigExecFormatOpen(const uint8_t *bytes, size_t size,
         return _Fail(error, "cannot open .rigexec: out of memory (" +
                                 _N(size) + " bytes)");
     }
+#else
+    // Built without exceptions (game engines), an allocation failure ends
+    // the process as every other allocation there does.
+    return _OpenAligned(bytes, size, file, error);
+#endif
 }
 
 bool
