@@ -3,8 +3,10 @@
 // store: the input reads each table field binds, the SSA version pool
 // sizes and last-version maps (scanning the commit writes), and the store
 // sizing. Cross-references that do not close are Open errors naming the
-// table.
+// table, and so is a step or cluster graph the index walk cannot follow.
 #include "rigExecRuntime/runtime.h"
+
+#include "rigExecBinary/stepGraph.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -426,6 +428,16 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             return fail(*error);
         }
     }
+    // Playback walks the steps in index order and dirties whole clusters
+    // without reading an edge, so the file's own graph must make that walk
+    // a topological order before anything is sized from it.
+    {
+        const std::string why =
+            RigExecStepGraphError(self->_steps, self->_clustering);
+        if (!why.empty()) {
+            return fail(why);
+        }
+    }
 
     RrProgram &program = self->_program;
     program.steps = &self->_steps;
@@ -691,11 +703,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     for (const RigExecWireClusterSet &set : cones.cone) {
         if (set.words.size() != words) {
             return fail("a cone closure has the wrong word count");
-        }
-    }
-    for (const RigExecWireStep &step : self->_steps) {
-        if (step.cluster < 0 || size_t(step.cluster) >= clusters) {
-            return fail("a step names no cluster");
         }
     }
     // The clusters the dirty sources name, which the closure sets blindly.

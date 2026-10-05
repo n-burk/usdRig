@@ -6,9 +6,10 @@
 // other format versions, and buffers whose objects are shared or overlap,
 // takes bytes at any address and keeps none of them, and survives every
 // single-byte and many random multi-byte corruptions; writing is
-// deterministic; the validator refuses a smoke set of rule violations and
-// a presentation without its identifier, orders listed inputs as their
-// composed texts, and handles a path tree 100000 prims deep.
+// deterministic; the validator refuses a smoke set of rule violations, a
+// step or cluster graph playback could not walk, and a presentation
+// without its identifier, orders listed inputs as their composed texts,
+// and handles a path tree 100000 prims deep.
 // USD-free, like the format.
 #include "rigExecBinary/format.h"
 
@@ -1355,7 +1356,7 @@ TestValidationSmoke()
     expect("rotation sign", "rotation_sign",
            [](F &f) { f.constants->rotationSign = {8}; });
     // Steps, clusters, cones.
-    expect("step cluster", "steps[0].cluster",
+    expect("step cluster", "step 0 names cluster 1, which is no cluster",
            [](F &f) { f.steps[0].cluster = 1; });
     expect("cone list cluster", "chain_base_clusters[0]",
            [](F &f) { f.cones->chainBaseClusters[0].v = {1}; });
@@ -1478,6 +1479,181 @@ TestValidationSmoke()
     plugin.externalMovers.push_back(plugin.externalMovers[0]);
     CHECK(!RigExecFormatValidate(plugin, &why) &&
           _Contains(why, "external_movers[1]"));
+}
+
+/// The rich file with four steps in two clusters: 0 -> 1 -> 2 -> 3 and
+/// 0 -> 3, steps 0 and 1 in cluster 0, steps 2 and 3 in cluster 1, so
+/// cluster 0 -> cluster 1. Steps 1 and 2 write PosedM slots 0 and 1, and
+/// step 3 reads both.
+RigExecWireFile
+_GraphFile()
+{
+    RigExecWireFile f = _RichFile();
+    fb::RigExecWireStep later = f.steps[0];
+    later.reads.clear();
+    later.writes.clear();
+    later.overrideInputs.clear();
+    f.steps.resize(4, later);
+    f.steps[1].writes = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 1)};
+    f.steps[2].writes = {fb::SlotRange(fb::SlotDomain::PosedM, 1, 2)};
+    f.steps[3].reads = {fb::SlotRange(fb::SlotDomain::PosedM, 0, 2)};
+    const std::vector<std::vector<int32_t>> preds = {{}, {0}, {1}, {0, 2}};
+    const std::vector<std::vector<int32_t>> succs = {{1, 3}, {2}, {3}, {}};
+    f.clustering->clusterOf = {0, 0, 1, 1};
+    for (size_t s = 0; s < 4; ++s) {
+        f.steps[s].preds = preds[s];
+        f.steps[s].succs = succs[s];
+        f.steps[s].cluster = f.clustering->clusterOf[s];
+    }
+    f.clustering->clusters.resize(2, f.clustering->clusters[0]);
+    f.clustering->clusters[0].members = {0, 1};
+    f.clustering->clusters[0].succs = {1};
+    f.clustering->clusters[1].members = {2, 3};
+    f.clustering->clusters[1].preds = {0};
+    fb::RigExecWireClusterSet set;
+    set.clusters = 2;
+    set.words = {3};
+    f.cones->cone = {set, set};
+    f.cones->cone[1].words = {2};
+    f.cones->always->clusters = 2;
+    f.cones->poseClusters->clusters = 2;
+    f.cones->poseClusters->words = {3};
+    return f;
+}
+
+/// The step and cluster graph: each rule of the shared step-graph check
+/// refuses its violation of the graph file with its exact message, both
+/// from the validator and, for the two the runtime's index walk and
+/// cluster sort depend on most, from Open.
+void
+TestStepGraph()
+{
+    _context = "step graph";
+    std::string why;
+    const RigExecWireFile valid = _GraphFile();
+    CHECK(RigExecFormatValidate(valid, &why));
+    if (!why.empty()) {
+        std::printf("  graph file refused: %s\n", why.c_str());
+    }
+    std::vector<uint8_t> bytes;
+    CHECK(_Write(valid, &bytes) && _Open(bytes) != nullptr);
+
+    using F = RigExecWireFile;
+    int cases = 0;
+    const auto expect = [&](const char *name, const std::string &text,
+                            const std::function<void(F &)> &mutate) {
+        _context = std::string("step graph: ") + name;
+        ++cases;
+        F file = _GraphFile();
+        mutate(file);
+        const bool ok = RigExecFormatValidate(file, &why);
+        CHECK(!ok && why == text);
+        if (ok || why != text) {
+            std::printf("  got '%s', expected '%s'\n",
+                        ok ? "(accepted)" : why.c_str(), text.c_str());
+        }
+    };
+    const auto expectOpen = [&](const char *name, const std::string &text,
+                                const std::function<void(F &)> &mutate) {
+        _context = std::string("step graph open: ") + name;
+        ++cases;
+        F file = _GraphFile();
+        mutate(file);
+        const bool opened = _Open(_PackUnchecked(file), &why) != nullptr;
+        CHECK(!opened && why == "invalid .rigexec: " + text);
+        if (opened || why != "invalid .rigexec: " + text) {
+            std::printf("  got '%s', expected 'invalid .rigexec: %s'\n",
+                        opened ? "(opened)" : why.c_str(), text.c_str());
+        }
+    };
+    // The two the runtime relies on most: a predecessor flipped to a later
+    // step, and a two-cluster cycle.
+    const auto flipped = [](F &f) { f.steps[1].preds = {2}; };
+    const auto cycle = [](F &f) {
+        f.clustering->clusters[0].preds = {1};
+        f.clustering->clusters[1].succs = {0};
+    };
+    expect("pred flipped later", "step 1 depends on later step 2", flipped);
+    expectOpen("pred flipped later", "step 1 depends on later step 2",
+               flipped);
+    expect("two-cluster cycle",
+           "the cluster graph has a cycle through cluster 0", cycle);
+    expectOpen("two-cluster cycle",
+               "the cluster graph has a cycle through cluster 0", cycle);
+    // Step edges.
+    expect("pred on itself", "step 1 depends on itself",
+           [](F &f) { f.steps[1].preds = {1}; });
+    expect("preds unsorted", "step 3 lists its predecessors out of order "
+                             "or twice",
+           [](F &f) { f.steps[3].preds = {2, 0}; });
+    expect("preds repeated", "step 3 lists its predecessors out of order "
+                             "or twice",
+           [](F &f) { f.steps[3].preds = {0, 0}; });
+    expect("succ earlier", "step 2 names earlier step 1 as a successor",
+           [](F &f) { f.steps[2].succs = {1, 3}; });
+    expect("pred without succ",
+           "step 3 names predecessor 0, which does not name it as a "
+           "successor",
+           [](F &f) { f.steps[0].succs = {1}; });
+    expect("succ without pred",
+           "step 1 names successor 3, which does not name it as a "
+           "predecessor",
+           [](F &f) { f.steps[1].succs = {2, 3}; });
+    expect("source after a step",
+           "source step 1 depends on step 0, which is not a source",
+           [](F &f) { f.steps[1].isSource = true; });
+    // Indices past their tables, refused before they are followed.
+    expect("pred past the steps",
+           "step 3 names predecessor 4, which is no step",
+           [](F &f) { f.steps[3].preds = {0, 4}; });
+    expect("negative pred", "step 1 names predecessor -1, which is no step",
+           [](F &f) { f.steps[1].preds = {-1}; });
+    expect("succ past the steps", "step 2 names successor 4, which is no step",
+           [](F &f) { f.steps[2].succs = {3, 4}; });
+    expect("cluster past the clusters",
+           "step 2 names cluster 2, which is no cluster",
+           [](F &f) { f.steps[2].cluster = 2; });
+    expect("cluster_of short", "the clustering places 3 steps; the file has 4",
+           [](F &f) { f.clustering->clusterOf.pop_back(); });
+    expect("member past the steps",
+           "cluster 1 names member 4, which is no step",
+           [](F &f) { f.clustering->clusters[1].members = {2, 3, 4}; });
+    expect("cluster pred past the clusters",
+           "cluster 1 names predecessor 2, which is no cluster",
+           [](F &f) { f.clustering->clusters[1].preds = {0, 2}; });
+    // Membership.
+    expect("cluster_of disagrees",
+           "step 1 names cluster 0, but the clustering places it in "
+           "cluster 1",
+           [](F &f) { f.clustering->clusterOf[1] = 1; });
+    expect("members unsorted", "cluster 0 lists its members out of order "
+                               "or twice",
+           [](F &f) { f.clustering->clusters[0].members = {1, 0}; });
+    expect("member of another cluster",
+           "cluster 0 names member 2, which the clustering places in "
+           "cluster 1",
+           [](F &f) { f.clustering->clusters[0].members = {0, 1, 2}; });
+    expect("member missing", "step 3 is not a member of cluster 1",
+           [](F &f) { f.clustering->clusters[1].members = {2}; });
+    // Cluster edges.
+    expect("cluster on itself", "cluster 1 depends on itself",
+           [](F &f) { f.clustering->clusters[1].preds = {0, 1}; });
+    expect("cluster pred without succ",
+           "cluster 1 names predecessor 0, which does not name it as a "
+           "successor",
+           [](F &f) { f.clustering->clusters[0].succs.clear(); });
+    expect("cluster succ without pred",
+           "cluster 0 names successor 1, which does not name it as a "
+           "predecessor",
+           [](F &f) { f.clustering->clusters[1].preds.clear(); });
+    expect("step edge across no cluster edge",
+           "step 2 in cluster 1 depends on step 1 in cluster 0, which "
+           "cluster 1 does not depend on",
+           [](F &f) {
+               f.clustering->clusters[0].succs.clear();
+               f.clustering->clusters[1].preds.clear();
+           });
+    std::printf("step graph: %d violations refused\n", cases);
 }
 
 /// The nested presentation must carry the REXP identifier: a presentation
@@ -1892,6 +2068,7 @@ main()
     TestWriteRefuses();
     TestPathText();
     TestValidationSmoke();
+    TestStepGraph();
     TestPresentationIdentifier();
     TestBoundedOpen();
     TestPathOrder();

@@ -47,6 +47,8 @@ static int fullModeFixtures = 0;
         }                                                               \
     } while (0)
 
+#include "rigExecSectionEdit.h"
+
 static SdfPath
 _FindRig(const UsdStageRefPtr &stage)
 {
@@ -410,41 +412,6 @@ _TestFixture(const std::string &name, const std::string &stagePath,
         return;
     }
     _TestStage(name, stage, bakeFrames);
-}
-
-// \p bytes with section \p tag replaced by \p payload; the string table and
-// every other section are copied unchanged.
-static std::vector<uint8_t>
-_ReplaceSection(const std::vector<uint8_t> &bytes, RigExecBinarySection tag,
-                const std::vector<uint8_t> &payload)
-{
-    std::string error;
-    const std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    CHECK(reader);
-    if (!reader) {
-        return {};
-    }
-    RigExecBinaryWriter writer;
-    std::string text;
-    for (uint32_t id = 1; reader->GetString(id, &text); ++id) {
-        CHECK(writer.AddString(text) == id);
-    }
-    for (uint32_t t = uint32_t(RigExecBinarySection::Manifest);
-         t <= uint32_t(RigExecBinarySection::Computed); ++t) {
-        const RigExecBinarySection section = RigExecBinarySection(t);
-        const uint8_t *data = nullptr;
-        size_t size = 0;
-        if (!reader->FindSection(section, &data, &size)) {
-            continue;
-        }
-        if (section == tag) {
-            writer.AddSection(section, payload);
-        } else {
-            writer.AddSection(section, data, size);
-        }
-    }
-    return writer.Finish();
 }
 
 static bool

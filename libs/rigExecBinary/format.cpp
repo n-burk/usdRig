@@ -3,6 +3,8 @@
 // file must satisfy that the file alone can decide.
 #include "rigExecBinary/format.h"
 
+#include "rigExecBinary/stepGraph.h"
+
 #include <algorithm>
 #include <cstring>
 #include <new>
@@ -971,10 +973,7 @@ private:
             if (step.kind > fb::StepKind::MAX) {
                 return _Bad(row + ": kind out of range");
             }
-            if (!_Index(step.cluster, _clusters, false, row, "cluster") ||
-                !_Indices(step.preds, _steps, false, row, "preds") ||
-                !_Indices(step.succs, _steps, false, row, "succs") ||
-                !_Indices(step.overrideInputs, _overrideCount, false, row,
+            if (!_Indices(step.overrideInputs, _overrideCount, false, row,
                           "override_inputs")) {
                 return false;
             }
@@ -992,39 +991,12 @@ private:
                                   "step-backed weight object");
             }
         }
-        const fb::RigExecWireClustering &c = *_f.clustering;
-        if (!_Size(c.clusterOf.size(), _steps, "clustering", "cluster_of")) {
-            return false;
-        }
-        for (size_t i = 0; i < _steps; ++i) {
-            if (c.clusterOf[i] != _f.steps[i].cluster) {
-                return _Bad("clustering.cluster_of[" + _N(i) +
-                            "] differs from the step's cluster");
-            }
-        }
-        size_t members = 0;
-        for (size_t k = 0; k < c.clusters.size(); ++k) {
-            const fb::RigExecWireCluster &cluster = c.clusters[k];
-            const std::string row = "clustering.clusters[" + _N(k) + "]";
-            if (!_Indices(cluster.members, _steps, false, row, "members") ||
-                !_Indices(cluster.preds, _clusters, false, row, "preds") ||
-                !_Indices(cluster.succs, _clusters, false, row, "succs")) {
-                return false;
-            }
-            for (size_t m = 0; m < cluster.members.size(); ++m) {
-                if (c.clusterOf[size_t(cluster.members[m])] != int32_t(k) ||
-                    (m > 0 && cluster.members[m] <= cluster.members[m - 1])) {
-                    return _Bad(_At(row, "members", long(m)) +
-                                ": not an ascending member of this cluster");
-                }
-            }
-            members += cluster.members.size();
-        }
-        if (members != _steps) {
-            return _Bad("clustering: the clusters do not partition the "
-                        "steps");
-        }
-        return true;
+        // Every step and cluster index, edge order, membership, the
+        // partition and the acyclic cluster graph: the rules the runtime's
+        // reader applies, in its words.
+        const std::string why =
+            RigExecStepGraphError(_f.steps, *_f.clustering);
+        return why.empty() || _Bad(why);
     }
 
     bool _Cones()
