@@ -3,7 +3,8 @@
 // SSA fin/base version pools, matrices, aggregates, commit scratch, the
 // prologue's retained arrays and their lasts, snapshots, step outputs and
 // the override flags. Every input a step reads is evaluated over the
-// input slots (inputs.h). Family .cpps own their private scratch
+// input slots (inputs.h); every other stage value it reads is static data
+// the bake captured, read through RrStatic. Family .cpps own their private scratch
 // (solver live rests, revision packets, weight oracles) behind the three
 // extension points on RrProgram, and implement the pipeline functions
 // declared here. The framework implements Open/closure/walk/publish.
@@ -211,7 +212,8 @@ struct RrStore {
     std::map<uint32_t, RrMat4d> weightFrames;
     std::vector<float> poseWeights;
     // One flag per override number (RigExecBakedProgramImpl::overridden),
-    // set while an interactive override stands on the read's walk.
+    // set while an input on the read's walk that is not Animated holds
+    // other than its default, so the read walks the slots.
     std::vector<char> overridden, lastOverridden;
     bool anyOverridden = false;
     std::map<uint32_t, RrMat4d> providerXforms, providerBaseXforms;
@@ -227,8 +229,112 @@ struct RrStore {
     std::vector<RrStepOutput> stepOutputs;
     std::vector<uint64_t> closedWords;
     bool everRan = false;
-    double lastTime = 0;
+    // An Animated input was set, or the caller said time moved
+    // (RigExecRuntimeReader::TouchAnimatedInputs): the next closure dirties
+    // what a change of time dirties in the program, then clears it.
+    bool animatedTouched = false;
     size_t lastClosedClusters = 0;
+};
+
+// The static data the steps read besides the tables and the input slots:
+// stage values the bake captured once, at the bake time (xform bases,
+// native sources, constraint arrays, ribbon driver points, chain and
+// derived bases, the assemblers' stage reads, refused blend layouts, dense
+// blend sample points, plugin movers' frame bytes). Held today by the
+// InputTable's one record. Every read of them goes through these
+// accessors; Open checks the sizes of the tables they index blindly.
+struct RrStatic {
+    const RigExecWireFrameInputs *record = nullptr;
+    /// The ExternalMovers section, or null.
+    const RigExecWireExternalMovers *external = nullptr;
+
+    /// Solver \p solver's live ribbon driver points.
+    const std::vector<RigExecWireVec3f> &RibbonPoints(size_t solver) const
+    {
+        return record->solverRibbonPoints[solver];
+    }
+    /// The base matrix of xform-derived slot entry \p k.
+    const RigExecWireMatrix4d &XformBase(size_t k) const
+    {
+        return record->xformBase[k];
+    }
+    /// Native source \p k's frame.
+    const RigExecWireFrame &NativeFrame(size_t k) const
+    {
+        return record->nativeFrames[k];
+    }
+    /// Geometry-domain constraint delta base \p k and whether it resolved.
+    const RigExecWireMatrix4d &DeltaBase(size_t k) const
+    {
+        return record->deltaBaseMatrix[k];
+    }
+    bool DeltaBaseOk(size_t k) const { return record->deltaBaseOk[k] != 0; }
+    /// Constraint array \p k's authored tables.
+    const std::vector<double> &ArrayWeights(size_t k) const
+    {
+        return record->arrayWeights[k];
+    }
+    const std::vector<RigExecWireVec3d> &ArrayTranslationOffsets(
+        size_t k) const
+    {
+        return record->arrayTranslationOffsets[k];
+    }
+    const std::vector<RigExecWireVec3d> &ArrayRotationOffsets(size_t k) const
+    {
+        return record->arrayRotationOffsets[k];
+    }
+    bool ArrayOk(size_t k) const { return record->arrayOk[k] != 0; }
+    const std::vector<double> &ArrayPoleWeights(size_t k) const
+    {
+        return record->arrayPoleWeights[k];
+    }
+    bool ArrayPoleOk(size_t k) const { return record->arrayPoleOk[k] != 0; }
+    /// Geometry chain \p chain's base points, or null when it has none.
+    const std::vector<RigExecWireVec3f> *ChainBase(size_t chain) const
+    {
+        return record->chainHaveBase[chain] != 0 ? &record->chainBases[chain]
+                                                 : nullptr;
+    }
+    /// Derived target \p id's base points, or null when it has none.
+    const std::vector<RigExecWireVec3f> *DerivedBase(size_t id) const
+    {
+        return record->derivedHaveBase[id] != 0 ? &record->derivedBases[id]
+                                                : nullptr;
+    }
+    /// The assemblers' stage reads, in (path, was-Default) order.
+    const std::vector<RigExecWirePathRead> &PathReads() const
+    {
+        return record->pathReads;
+    }
+    /// The blend sample layouts the bake refused to cache.
+    const std::vector<RigExecWireRefusedLayout> &RefusedLayouts() const
+    {
+        return record->refusedLayouts;
+    }
+    /// The dense points blend channel \p channel's sample \p sample of
+    /// chain \p chain's revision (or derived target) \p revision consumed,
+    /// or null when none are held.
+    const std::vector<RigExecWireVec3f> *BlendPoints(size_t chain,
+                                                     size_t revision,
+                                                     bool derived,
+                                                     size_t channel,
+                                                     size_t sample) const
+    {
+        const auto &points =
+            derived ? record->derivedBlendPoints : record->blendPoints;
+        if (chain >= points.size() || revision >= points[chain].size() ||
+            channel >= points[chain][revision].size() ||
+            sample >= points[chain][revision][channel].size()) {
+            return nullptr;
+        }
+        return &points[chain][revision][channel][sample];
+    }
+    /// Plugin revision entry \p k's frame-bytes blob index, or
+    /// RigExecWireExternalNoFrame.
+    uint32_t ExternalFrame(size_t k) const
+    {
+        return external->frames[0][k];
+    }
 };
 
 // The decoded program plus its working state. The wire tables borrow
@@ -246,9 +352,8 @@ struct RrProgram {
     /// The ExternalMovers section, or null when the file has no plugin
     /// mover.
     const RigExecWireExternalMovers *external = nullptr;
-    /// The InputTable frame Execute is running, which also selects each
-    /// plugin mover's frame bytes.
-    size_t frameIndex = 0;
+    /// The static data every run reads, plugin movers' bytes included.
+    RrStatic statics;
 
     /// One plugin revision's playback state, in ExternalMovers order. No
     /// prepared state means no kernel here: the revision passes through.
@@ -310,34 +415,25 @@ struct RrProgram {
     // The input slots and their values this run (inputs.h).
     RrInputState inputState;
 
-    // Test-only: a step that computes what the frame record also carries
-    // (constraint envelopes, current-phase weight packets, the reads a
-    // revision's assembly consumes) compares the two bit for bit, fails
-    // naming the field and index on a mismatch, and counts each comparison
-    // in its RrStepOutput::crossChecked. Execute compares the property
-    // chains' results and the registered and mover-scalar reads the same
-    // way.
-    bool crossCheck = false;
-
-    // The cross-check applies to a run with no interactive override
-    // standing: the frame record holds the inputs as the bake read them,
-    // and a drag is an input it never saw.
-    bool CrossCheckThisRun() const
-    {
-        return crossCheck && inputState.overrides.empty();
-    }
-
+    // String-table text, or token text an input set interned
+    // (RrExtraTokenBase and up).
     bool GetText(uint32_t id, std::string *out) const
     {
+        if (id >= RrExtraTokenBase) {
+            const size_t k = size_t(id - RrExtraTokenBase);
+            if (k >= inputState.extraTokens.size()) {
+                return false;
+            }
+            *out = inputState.extraTokens[k];
+            return true;
+        }
         return strings && strings->GetString(id, out);
     }
 
     std::string TextOrEmpty(uint32_t id) const
     {
         std::string out;
-        if (strings) {
-            strings->GetString(id, &out);
-        }
+        GetText(id, &out);
         return out;
     }
 
@@ -416,79 +512,29 @@ bool RrWeightSizeScratch(RrProgram *program, std::string *error);
 bool RrPropertySizeScratch(RrProgram *program, std::string *error);
 
 /// The property chains (RigExecRigEvaluator::_EvaluatePropertyChains,
-/// rigEvaluatorProperties.cpp) over this run's slot values and standing
-/// overrides, in dependency order, before every prologue: each published
-/// result lands in RrStore::propertyResults at once, so a later chain or
-/// any read crossing the target sees it. A phased reader with an override
-/// on its consumer or a hop stands aside and publishes nothing.
-/// Diagnostics are appended to \p poseDiagnostics in chain order. False
-/// only when the section and the classified chains disagree.
+/// rigEvaluatorProperties.cpp) over this run's slot values, in dependency
+/// order, before every prologue: each published result lands in
+/// RrStore::propertyResults at once, so a later chain or any read crossing
+/// the target sees it. Diagnostics are appended to \p poseDiagnostics in
+/// chain order. False only when the section and the classified chains
+/// disagree.
 bool RrRunPropertyChains(RrProgram *program,
                          std::vector<std::string> *poseDiagnostics);
 
-/// Cross-check (RrProgram::CrossCheckThisRun): this run's property results
-/// against \p record's, path set, tag and bits. False naming the field,
-/// e.g. "propertyValues[/Rig/Channels/Dial.rigExec:amount]"; otherwise adds
-/// the number of values compared to \p compared.
-bool RrCrossCheckPropertyResults(const RrProgram *program,
-                                 const RigExecWireFrameInputs &record,
-                                 uint64_t *compared, std::string *error);
-
-/// Cross-check (RrProgram::CrossCheckThisRun), after the chains: each
-/// registered read that crosses a property-chain target (the Computed
-/// section's chainReads), evaluated by RrReadInput, against the value
-/// \p record holds for its uid, where it holds one. A mismatch fails
-/// naming the field, e.g. "values[uid 12,
-/// /Rig/Movers/Follow.inputs:defaultWeight]"; otherwise the number compared
-/// is added to \p compared.
-bool RrCrossCheckChainReads(const RrProgram *program,
-                            const RigExecWireFrameInputs &record,
-                            uint64_t *compared, std::string *error);
-
-/// Cross-check (RrProgram::CrossCheckThisRun), after the chains and before
-/// every prologue: each registered read the chain-read check does not
-/// cover, evaluated by RrReadInput, against the value \p record holds for
-/// its uid, or where it holds none, against the table input's constant (an
-/// avar binding's: the avar table's) -- a read made per run is compared
-/// only at the frames \p record holds its uid; and each
-/// connection-following mover scalar against the value \p record holds
-/// under its head's path, where a forced live read put one. A mismatch
-/// fails naming the field, e.g. "registered reads: ... at solvers[0].bend
-/// (uid 3, /Rig/Solvers/Ik.rigExec:preferredBendRadians)"; otherwise
-/// each comparison is added to \p counts under its kind.
-bool RrCrossCheckReads(const RrProgram *program,
-                       const RigExecWireFrameInputs &record,
-                       RrCrossCheckCounts *counts, std::string *error);
-
-/// Cross-check of the reads geometry chain \p chain's revision \p revision
-/// (derived target \p revision when \p derived) consumed this run against
-/// \p record: its blend channel weights and, for a chain revision, its
-/// inputs:defaultWeight, as RrReadBlendWeight and RrReadDefaultWeight read
-/// them. Counted in \p output; false naming the field.
-bool RrCrossCheckRevisionReads(const RrProgram *program,
-                               const RigExecWireFrameInputs *record,
-                               size_t chain, size_t revision, bool derived,
-                               RrStepOutput *output, std::string *error);
-
-// Prologues. `poseDiagnostics` carries lines published straight into
-// the generation, after the property chains' own; false names the
-// failure.
+// Prologues, over this run's slots and RrProgram::statics.
+// `poseDiagnostics` carries lines published straight into the generation,
+// after the property chains' own; false names the failure.
 bool RrProloguePose(RrProgram *program,
-                    const RigExecWireFrameInputs &record,
                     std::vector<std::string> *poseDiagnostics,
                     std::string *error);
-bool RrPrologueGeometry(RrProgram *program, double time,
-                        const RigExecWireFrameInputs &record,
+bool RrPrologueGeometry(RrProgram *program,
                         std::vector<std::string> *poseDiagnostics,
                         std::string *error);
 
 // Step bodies by family.
-bool RrRunPoseStep(RrProgram *program, size_t step, double time,
-                   std::string *error);
-bool RrRunGeometryStep(RrProgram *program, size_t step, double time,
-                       std::string *error);
-bool RrRunWeightStep(RrProgram *program, size_t step, double time,
-                     std::string *error);
+bool RrRunPoseStep(RrProgram *program, size_t step, std::string *error);
+bool RrRunGeometryStep(RrProgram *program, size_t step, std::string *error);
+bool RrRunWeightStep(RrProgram *program, size_t step, std::string *error);
 void RrSkipGeometryStep(RrProgram *program, size_t step);
 
 /// RigExecRigEvaluator::_ResolveWeights (rigEvaluatorGeometry.cpp) over the
@@ -503,15 +549,15 @@ bool RrResolveWeightOracle(const RrProgram *program, size_t object,
                            size_t count, const std::vector<RrVec3f> *current,
                            std::vector<float> *weights, std::string *error);
 
-// Executor and epilogue (framework).
-void RrComputeClosure(RrProgram *program, double time, bool force);
-bool RrRunSteps(RrProgram *program, double time, bool force,
-                std::string *error);
+// Executor and epilogue (framework). The closure dirties what the inputs
+// set since the last run reach; RrStore::animatedTouched stands for a
+// change of time.
+void RrComputeClosure(RrProgram *program, bool force);
+bool RrRunSteps(RrProgram *program, bool force, std::string *error);
 bool RrPublishPose(RrProgram *program,
                    std::vector<std::string> *poseDiagnostics,
                    std::string *error);
 void RrPublishGeometry(RrProgram *program,
-                       const RigExecWireFrameInputs &record,
                        std::vector<std::string> *poseDiagnostics);
 
 // Bit-identical ports of the point-frame kernels every family reads:

@@ -191,7 +191,6 @@ RrPublishPose(RrProgram *program,
 
 void
 RrPublishGeometry(RrProgram *program,
-                  const RigExecWireFrameInputs &record,
                   std::vector<std::string> *poseDiagnostics)
 {
     RrStore &store = program->store;

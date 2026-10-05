@@ -21,18 +21,23 @@
 //   * NO movedFloats: the runtime publishes no scalar moved properties,
 //     so tool reads of RigExecImaging_GetMovedFloats find nothing on a
 //     playback session rather than a recomputed guess.
-// Time maps to the nearest baked frame, ties to the lower one: scrubbing
-// between two baked frames holds the nearer pose, deterministically.
-// UsdTimeCode::Default reads as 0.0 for the mapping. Stage edits never
-// dirty a playback session -- the binary is static -- so changing the
-// asset, or the file it names, needs a re-activation, the same rule as
-// a rig authored into an already-active stage.
+// Each generation plays the binary over the stage's values at the
+// requested time: the inputs the file marks Animated are read from the
+// stage there (RigExecInputSampler), every other input keeps the value it
+// had at the bake time. UsdTimeCode::Default is a time like any other; a
+// keyed input with no default value holds no value there, as on the stage,
+// and so does one whose sample is blocked. Stage edits never dirty a
+// playback session, so an edit is read only at the next change of time,
+// and only on an Animated input; changing the asset, or the file it names,
+// needs a re-activation, the same rule as a rig authored into an
+// already-active stage.
 #ifndef RIGEXEC_IMAGING_PLAYBACK_H
 #define RIGEXEC_IMAGING_PLAYBACK_H
 
 #include "bridge.h"
 
 #include "rigExecRuntime/runtime.h"
+#include "rigExecSampler/inputSampler.h"
 
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/stage.h"
@@ -53,20 +58,22 @@ public:
         const UsdStageRefPtr &stage, const SdfPath &rigPath,
         std::shared_ptr<RigExecSnapshotStore> store);
 
-    /// Opens the .rigexec at \p resolvedPath. False with the reason when
-    /// the file cannot be read or parsed, or when it carries no baked
-    /// frames (an unplayable binary falls back to live evaluation at
-    /// activation, like an unreadable one, rather than failing it).
+    /// Opens the .rigexec at \p resolvedPath and binds its inputs to the
+    /// stage (an input the stage lacks keeps its bake-time value, with a
+    /// warning). False with the reason when the file cannot be read or
+    /// parsed (an unplayable binary falls back to live evaluation at
+    /// activation rather than failing it).
     bool Open(const std::string &resolvedPath, std::string *error);
 
     /// The opened file, empty until Open succeeds.
     const std::string &GetAssetPath() const { return _assetPath; }
 
-    /// Replays the baked frame nearest \p time and publishes the complete
-    /// generation, without notifying any scene index; the caller forwards
-    /// the result to its chains. A frame the binary refuses clears the
-    /// store (the bridge's rule: an unevaluated result is recoverable, a
-    /// plausible wrong one is not) and returns ok == false.
+    /// Plays the binary over the stage's input values at \p time and
+    /// publishes the complete generation, without notifying any scene
+    /// index; the caller forwards the result to its chains. A run the
+    /// binary refuses clears the store (the bridge's rule: an unevaluated
+    /// result is recoverable, a plausible wrong one is not) and returns
+    /// ok == false.
     RigExecImagingBridge::PublishResult EvaluateAndPublishResult(
         UsdTimeCode time);
 
@@ -87,16 +94,13 @@ public:
 
     const SdfPath &GetWeightOverlay() const { return _weightOverlay; }
 
-    /// The baked frame \p time plays: the nearest frame time, ties to the
-    /// lower one. Default reads as 0.0. Exposed for tests.
-    double MapTimeToFrame(UsdTimeCode time) const;
-
 private:
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
     SdfPath _assetRoot;
     std::shared_ptr<RigExecSnapshotStore> _store;
     std::unique_ptr<RigExecRuntimeReader> _reader;
+    RigExecInputSampler _sampler;
     std::string _assetPath;
     uint64_t _epochDigest = 0;
     SdfPath _weightOverlay;

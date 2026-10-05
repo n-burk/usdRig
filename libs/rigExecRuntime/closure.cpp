@@ -2,7 +2,9 @@
 // A port of the serial half of bakedSchedule.cpp: RigExecBakedComputeClosure
 // and the serial step walk of RigExecBakedRunSteps. The runtime never
 // rebuilds, so revision `ran` starts false and the program stamp never
-// moves; everything else is the same value comparisons in the same order.
+// moves, and it holds no time: where the program compares the time with
+// the last run's, the closure reads RrStore::animatedTouched. Everything
+// else is the same value comparisons in the same order.
 #include "rigExecRuntime/store.h"
 
 namespace rigExec {
@@ -81,13 +83,14 @@ _RrCount(const std::vector<uint64_t> &words)
 }  // namespace
 
 void
-RrComputeClosure(RrProgram *program, double time, bool force)
+RrComputeClosure(RrProgram *program, bool force)
 {
     RrStore &store = program->store;
     const RigExecWireCones &cones = *program->cones;
     const size_t count = program->clustering->clusters.size();
     store.closedWords.assign((count + 63) / 64, 0);
     if (count == 0) {
+        store.animatedTouched = false;
         return;
     }
     std::vector<uint64_t> dirty((count + 63) / 64, 0);
@@ -230,7 +233,9 @@ RrComputeClosure(RrProgram *program, double time, bool force)
                 }
             }
         }
-        if (time != store.lastTime) {
+        // An Animated input set, or time said to move: what the program
+        // dirties when time moves.
+        if (store.animatedTouched) {
             for (int index : cones.varyingSteps) {
                 _RrSet(&dirty,
                        size_t((*program->steps)[size_t(index)].cluster));
@@ -285,13 +290,13 @@ RrComputeClosure(RrProgram *program, double time, bool force)
     for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
         store.lastHaveBase[c] = store.chainHaveBase[c];
     }
-    store.lastTime = time;
+    store.animatedTouched = false;
     store.everRan = true;
     store.lastClosedClusters = _RrCount(store.closedWords);
 }
 
 bool
-RrRunSteps(RrProgram *program, double time, bool force, std::string *error)
+RrRunSteps(RrProgram *program, bool force, std::string *error)
 {
     RrStore &store = program->store;
     const std::vector<RigExecWireStep> &steps = *program->steps;
@@ -308,17 +313,17 @@ RrRunSteps(RrProgram *program, double time, bool force, std::string *error)
         const RigExecWireStepKind kind = steps[i].kind;
         bool ok = true;
         if (_RrIsWeightKind(kind)) {
-            ok = RrRunWeightStep(program, i, time, error);
+            ok = RrRunWeightStep(program, i, error);
         } else if (_RrIsGeometryKind(kind)) {
-            ok = RrRunGeometryStep(program, i, time, error);
+            ok = RrRunGeometryStep(program, i, error);
         } else {
-            ok = RrRunPoseStep(program, i, time, error);
+            ok = RrRunPoseStep(program, i, error);
         }
         if (!ok) {
             return false;
         }
     }
-    RrComputeClosure(program, time, force);
+    RrComputeClosure(program, force);
     for (size_t i = 0; i < steps.size(); ++i) {
         if (steps[i].isSource ||
             _RrTest(store.closedWords, size_t(steps[i].cluster))) {
@@ -347,11 +352,11 @@ RrRunSteps(RrProgram *program, double time, bool force, std::string *error)
         const RigExecWireStepKind kind = steps[i].kind;
         bool ok = true;
         if (_RrIsWeightKind(kind)) {
-            ok = RrRunWeightStep(program, i, time, error);
+            ok = RrRunWeightStep(program, i, error);
         } else if (_RrIsGeometryKind(kind)) {
-            ok = RrRunGeometryStep(program, i, time, error);
+            ok = RrRunGeometryStep(program, i, error);
         } else {
-            ok = RrRunPoseStep(program, i, time, error);
+            ok = RrRunPoseStep(program, i, error);
         }
         if (!ok) {
             return false;

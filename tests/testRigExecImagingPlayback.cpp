@@ -1,16 +1,20 @@
 // testRigExecImagingPlayback (M2b): a rig played from its .rigexec file
 // publishes the same geometry the live bridge does.
-// For every baking fixture: bake in process, publish each frame through a
-// live RigExecImagingBridge and through a RigExecBakedPlayback, and compare
-// the two generations leaf by leaf -- points, normals, extents and driven
-// transforms, bitwise. Guide payloads and movedFloats are playback's two
-// documented v1 gaps (see playback.h) and are not compared: the assertion
-// is that every geometry leaf the live path owns, playback owns with the
-// same value, and that playback owns no geometry leaf the live path lacks.
-// Also covered: nearest-frame time mapping (ties to the lower frame),
-// Open() refusing an unreadable file, and registry selection -- a stage
-// whose rig names rigExec:asset activates into a guideless playback
-// generation, while the same stage without the attribute draws guides.
+// For every baking fixture: bake in process at the table's first frame,
+// publish through a live RigExecImagingBridge and through a
+// RigExecBakedPlayback (which samples the stage's Animated inputs at each
+// time), and compare the two generations leaf by leaf -- points, normals,
+// extents and driven transforms, bitwise. An `inputs` row is compared at
+// every table frame and at the midpoint of each consecutive pair, times the
+// file never held; a `static` row, whose binary holds an animated source as
+// static data, at the bake time alone. Guide payloads and movedFloats are
+// playback's two documented v1 gaps (see playback.h) and are not compared:
+// the assertion is that every geometry leaf the live path owns, playback
+// owns with the same value, and that playback owns no geometry leaf the
+// live path lacks. Also covered: Open() refusing an unreadable file, and
+// registry selection -- a stage whose rig names rigExec:asset activates
+// into a guideless playback generation, while the same stage without the
+// attribute draws guides.
 #include "rigExecBake/bake.h"
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/playback.h"
@@ -182,9 +186,12 @@ _CompareGenerations(const RigExecImagingSnapshot &live,
     }
 }
 
+static int comparedRows = 0;
+static int comparedTimes = 0;
+
 static void
 _TestFixture(const std::string &stagePath, const std::string &frameText,
-             const std::string &operatorPrim,
+             const std::string &operatorPrim, const std::string &animation,
              const std::filesystem::path &scratch)
 {
     const UsdStageRefPtr stage = UsdStage::Open(stagePath);
@@ -199,17 +206,33 @@ _TestFixture(const std::string &stagePath, const std::string &frameText,
     }
     const std::vector<double> frames = _ParseFrames(frameText);
     CHECK(!frames.empty());
+    if (frames.empty()) {
+        return;
+    }
 
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = frames;
+    opts.time = frames.front();
     RigExecBakeResult baked;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &baked, &error));
     if (baked.bytes.empty()) {
         std::printf("bake diagnostic: %s\n", error.c_str());
         return;
+    }
+    // The times played: an inputs row's table frames with each midpoint
+    // between them, a static row's bake time.
+    std::vector<double> times;
+    if (animation == "static") {
+        times.push_back(frames.front());
+    } else {
+        for (size_t i = 0; i < frames.size(); ++i) {
+            if (i > 0) {
+                times.push_back(0.5 * (frames[i - 1] + frames[i]));
+            }
+            times.push_back(frames[i]);
+        }
     }
     std::string flat = stagePath;
     for (char &c : flat) {
@@ -242,7 +265,7 @@ _TestFixture(const std::string &stagePath, const std::string &frameText,
         live.SetWeightOverlay(SdfPath(operatorPrim));
         play.SetWeightOverlay(SdfPath(operatorPrim));
     }
-    for (double frame : frames) {
+    for (double frame : times) {
         const UsdTimeCode time(frame);
         const RigExecImagingBridge::PublishResult liveResult =
             live.EvaluateAndPublishResult(time);
@@ -264,20 +287,12 @@ _TestFixture(const std::string &stagePath, const std::string &frameText,
         CHECK(b->Describes(UsdStageWeakPtr(stage), time));
         _CompareGenerations(*a, *b,
                             stagePath + " frame " + std::to_string(frame));
+        ++comparedTimes;
     }
-
-    // Nearest-frame mapping on this binary's own frame list.
-    if (frames.size() >= 2) {
-        const double first = frames.front();
-        const double second = frames[1];
-        CHECK(play.MapTimeToFrame(UsdTimeCode(first)) == first);
-        CHECK(play.MapTimeToFrame(UsdTimeCode(second)) == second);
-        const double mid = 0.5 * (first + second);
-        CHECK(play.MapTimeToFrame(UsdTimeCode(mid)) == first);
-        CHECK(play.MapTimeToFrame(UsdTimeCode(first - 100000.0)) == first);
-        CHECK(play.MapTimeToFrame(UsdTimeCode(frames.back() + 100000.0)) ==
-              frames.back());
-    }
+    std::printf("  %s: %zu time(s) compared, baked at %g (%s)\n",
+                stagePath.c_str(), times.size(), frames.front(),
+                animation.c_str());
+    ++comparedRows;
 }
 
 // Registry selection: the same rig with rigExec:asset authored plays its
@@ -350,7 +365,7 @@ _TestSelection(const std::string &stagePath, const std::string &frameText,
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = frames;
+    opts.time = frames.front();
     RigExecBakeResult baked;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &baked, &error));
@@ -411,19 +426,25 @@ main(int argc, char **argv)
         CHECK(!error.empty());
     }
     bool selectionDone = false;
+    int bakingRows = 0;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
         if (!fixture.bakesToday) {
             continue;
         }
+        ++bakingRows;
         const std::string stage =
             (std::filesystem::path(argv[1]) / fixture.stage).string();
         std::printf("playback conformance: %s\n", stage.c_str());
-        _TestFixture(stage, fixture.frames, fixture.operatorPrim, scratch);
+        _TestFixture(stage, fixture.frames, fixture.operatorPrim,
+                     fixture.animation, scratch);
         if (!selectionDone) {
             _TestSelection(stage, fixture.frames, scratch);
             selectionDone = true;
         }
     }
+    std::printf("playback: %d of %d baking row(s) compared at %d time(s)\n",
+                comparedRows, bakingRows, comparedTimes);
+    CHECK(comparedRows == bakingRows);
     if (failures == 0) {
         std::printf("testRigExecImagingPlayback: all tests passed\n");
     } else {

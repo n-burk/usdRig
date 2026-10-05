@@ -10,6 +10,7 @@
 #include "pxr/base/vt/array.h"
 
 #include <cstdio>
+#include <cstring>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -65,7 +66,133 @@ _FormatFrame(double frame)
     return std::string(buffer);
 }
 
+template <class T>
+bool
+_SameBytes(const T &a, const T &b)
+{
+    return std::memcmp(&a, &b, sizeof(T)) == 0;
+}
+
+template <class T>
+bool
+_SameBytes(const std::vector<T> &a, const std::vector<T> &b)
+{
+    return a.size() == b.size() &&
+           (a.empty() ||
+            std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+
 }  // namespace
+
+bool
+RigExecBakeEncodePathValue(
+    const VtValue &held,
+    const std::function<uint32_t(const std::string &)> &intern,
+    RigExecWirePathValue *out)
+{
+    RigExecWirePathValue &value = *out;
+    if (held.IsEmpty()) {
+        value.tag = RigExecWirePathValue::Tag::Absent;
+    } else if (held.IsHolding<bool>()) {
+        value.tag = RigExecWirePathValue::Tag::Bool;
+        value.boolean = held.UncheckedGet<bool>();
+    } else if (held.IsHolding<int>()) {
+        value.tag = RigExecWirePathValue::Tag::Int;
+        value.i32 = int32_t(held.UncheckedGet<int>());
+    } else if (held.IsHolding<float>()) {
+        value.tag = RigExecWirePathValue::Tag::Float;
+        value.f32 = held.UncheckedGet<float>();
+    } else if (held.IsHolding<double>()) {
+        value.tag = RigExecWirePathValue::Tag::Double;
+        value.f64 = held.UncheckedGet<double>();
+    } else if (held.IsHolding<TfToken>()) {
+        value.tag = RigExecWirePathValue::Tag::Token;
+        value.token = intern(held.UncheckedGet<TfToken>().GetString());
+    } else if (held.IsHolding<GfMatrix4d>()) {
+        value.tag = RigExecWirePathValue::Tag::Matrix4d;
+        value.matrix = _ToMatrix(held.UncheckedGet<GfMatrix4d>());
+    } else if (held.IsHolding<GfVec3d>()) {
+        value.tag = RigExecWirePathValue::Tag::Vec3d;
+        value.vec = _ToVec3d(held.UncheckedGet<GfVec3d>());
+    } else if (held.IsHolding<VtIntArray>()) {
+        value.tag = RigExecWirePathValue::Tag::IntArray;
+        const VtIntArray &array = held.UncheckedGet<VtIntArray>();
+        value.ints.reserve(array.size());
+        for (int v : array) {
+            value.ints.push_back(int32_t(v));
+        }
+    } else if (held.IsHolding<VtFloatArray>()) {
+        value.tag = RigExecWirePathValue::Tag::FloatArray;
+        const VtFloatArray &array = held.UncheckedGet<VtFloatArray>();
+        value.floats.assign(array.begin(), array.end());
+    } else if (held.IsHolding<VtArray<GfVec2f>>()) {
+        value.tag = RigExecWirePathValue::Tag::Vec2fArray;
+        const VtArray<GfVec2f> &array = held.UncheckedGet<VtArray<GfVec2f>>();
+        value.vec2s.reserve(array.size());
+        for (const GfVec2f &v : array) {
+            value.vec2s.push_back(_ToVec2f(v));
+        }
+    } else if (held.IsHolding<VtVec3fArray>()) {
+        value.tag = RigExecWirePathValue::Tag::Vec3fArray;
+        const VtVec3fArray &array = held.UncheckedGet<VtVec3fArray>();
+        value.vec3s.reserve(array.size());
+        for (const GfVec3f &v : array) {
+            value.vec3s.push_back(_ToVec3f(v));
+        }
+    } else if (held.IsHolding<GfVec3i>()) {
+        value.tag = RigExecWirePathValue::Tag::Vec3i;
+        const GfVec3i &v = held.UncheckedGet<GfVec3i>();
+        value.vec3i = {{int32_t(v[0]), int32_t(v[1]), int32_t(v[2])}};
+    } else if (held.IsHolding<VtDoubleArray>()) {
+        value.tag = RigExecWirePathValue::Tag::DoubleArray;
+        const VtDoubleArray &array = held.UncheckedGet<VtDoubleArray>();
+        value.doubles.assign(array.begin(), array.end());
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool
+RigExecBakeSamePathValue(const RigExecWirePathValue &a,
+                         const RigExecWirePathValue &b)
+{
+    using Tag = RigExecWirePathValue::Tag;
+    if (a.tag != b.tag) {
+        return false;
+    }
+    switch (a.tag) {
+    case Tag::Absent:
+        return true;
+    case Tag::Bool:
+        return a.boolean == b.boolean;
+    case Tag::Int:
+        return a.i32 == b.i32;
+    case Tag::Float:
+        return _SameBytes(a.f32, b.f32);
+    case Tag::Double:
+        return _SameBytes(a.f64, b.f64);
+    case Tag::Token:
+        return a.token == b.token;
+    case Tag::Matrix4d:
+        return _SameBytes(a.matrix, b.matrix);
+    case Tag::Vec3d:
+        return _SameBytes(a.vec, b.vec);
+    case Tag::IntArray:
+        return a.ints == b.ints;
+    case Tag::FloatArray:
+        return _SameBytes(a.floats, b.floats);
+    case Tag::Vec2fArray:
+        return _SameBytes(a.vec2s, b.vec2s);
+    case Tag::Vec3fArray:
+        return _SameBytes(a.vec3s, b.vec3s);
+    case Tag::Vec3i:
+        return a.vec3i == b.vec3i;
+    case Tag::DoubleArray:
+        return _SameBytes(a.doubles, b.doubles);
+    }
+    return false;
+}
 
 RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
                                        RigExecBinaryWriter *writer,
@@ -667,71 +794,12 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
             read.forceFrame =
                 entry.second.forceFrame ? uint8_t(1) : uint8_t(0);
             const VtValue &held = entry.second.value;
-            RigExecWirePathValue &value = read.value;
-            if (held.IsEmpty()) {
-                value.tag = RigExecWirePathValue::Tag::Absent;
-            } else if (held.IsHolding<bool>()) {
-                value.tag = RigExecWirePathValue::Tag::Bool;
-                value.boolean = held.UncheckedGet<bool>();
-            } else if (held.IsHolding<int>()) {
-                value.tag = RigExecWirePathValue::Tag::Int;
-                value.i32 = int32_t(held.UncheckedGet<int>());
-            } else if (held.IsHolding<float>()) {
-                value.tag = RigExecWirePathValue::Tag::Float;
-                value.f32 = held.UncheckedGet<float>();
-            } else if (held.IsHolding<double>()) {
-                value.tag = RigExecWirePathValue::Tag::Double;
-                value.f64 = held.UncheckedGet<double>();
-            } else if (held.IsHolding<TfToken>()) {
-                value.tag = RigExecWirePathValue::Tag::Token;
-                value.token = _writer->AddString(
-                    held.UncheckedGet<TfToken>().GetString());
-            } else if (held.IsHolding<GfMatrix4d>()) {
-                value.tag = RigExecWirePathValue::Tag::Matrix4d;
-                value.matrix = _ToMatrix(held.UncheckedGet<GfMatrix4d>());
-            } else if (held.IsHolding<GfVec3d>()) {
-                value.tag = RigExecWirePathValue::Tag::Vec3d;
-                value.vec = _ToVec3d(held.UncheckedGet<GfVec3d>());
-            } else if (held.IsHolding<VtIntArray>()) {
-                value.tag = RigExecWirePathValue::Tag::IntArray;
-                const VtIntArray &array =
-                    held.UncheckedGet<VtIntArray>();
-                value.ints.reserve(array.size());
-                for (int v : array) {
-                    value.ints.push_back(int32_t(v));
-                }
-            } else if (held.IsHolding<VtFloatArray>()) {
-                value.tag = RigExecWirePathValue::Tag::FloatArray;
-                const VtFloatArray &array =
-                    held.UncheckedGet<VtFloatArray>();
-                value.floats.assign(array.begin(), array.end());
-            } else if (held.IsHolding<VtArray<GfVec2f>>()) {
-                value.tag = RigExecWirePathValue::Tag::Vec2fArray;
-                const VtArray<GfVec2f> &array =
-                    held.UncheckedGet<VtArray<GfVec2f>>();
-                value.vec2s.reserve(array.size());
-                for (const GfVec2f &v : array) {
-                    value.vec2s.push_back(_ToVec2f(v));
-                }
-            } else if (held.IsHolding<VtVec3fArray>()) {
-                value.tag = RigExecWirePathValue::Tag::Vec3fArray;
-                const VtVec3fArray &array =
-                    held.UncheckedGet<VtVec3fArray>();
-                value.vec3s.reserve(array.size());
-                for (const GfVec3f &v : array) {
-                    value.vec3s.push_back(_ToVec3f(v));
-                }
-            } else if (held.IsHolding<GfVec3i>()) {
-                value.tag = RigExecWirePathValue::Tag::Vec3i;
-                const GfVec3i &v = held.UncheckedGet<GfVec3i>();
-                value.vec3i = {{int32_t(v[0]), int32_t(v[1]),
-                                int32_t(v[2])}};
-            } else if (held.IsHolding<VtDoubleArray>()) {
-                value.tag = RigExecWirePathValue::Tag::DoubleArray;
-                const VtDoubleArray &array =
-                    held.UncheckedGet<VtDoubleArray>();
-                value.doubles.assign(array.begin(), array.end());
-            } else {
+            if (!RigExecBakeEncodePathValue(
+                    held,
+                    [this](const std::string &text) {
+                        return _writer->AddString(text);
+                    },
+                    &read.value)) {
                 return Fail(std::string("unencodable path read of type ") +
                             held.GetTypeName() + " at " +
                             entry.first.first.GetString());

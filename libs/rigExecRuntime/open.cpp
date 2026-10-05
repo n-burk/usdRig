@@ -1,41 +1,69 @@
 // rigExecRuntime Open (M2 framework).
-// Decodes every section, then derives what the file implies but does not
-// store: the input reads each table field binds, the SSA version pool
-// sizes and last-version maps (scanning the commit writes), and the store
-// sizing. Cross-references that do not close are Open errors naming the
-// table, and so is a step or cluster graph the index walk cannot follow.
+// Decodes every section, checks that the input table holds the one static
+// record and that its tables match the program, then derives what the file
+// implies but does not store: the input reads each table field binds, the
+// SSA version pool sizes and last-version maps (scanning the commit
+// writes), and the store sizing. Cross-references that do not close are
+// Open errors naming the table, and so is a step or cluster graph the
+// index walk cannot follow.
 #include "rigExecRuntime/runtime.h"
 
 #include "rigExecBinary/stepGraph.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <cstring>
 #include <set>
 
 namespace rigExec {
 
 namespace {
 
-/// RIGEXEC_RUNTIME_CROSSCHECK, read once per Open: set to anything but
-/// empty or "0" turns the record cross-check on.
-bool
-_CrossCheckFromEnvironment()
+// The static tables the prologues index blindly against the program they
+// serve, each one entry per program row; empty when they match, else the
+// reason.
+std::string
+_StaticRecordError(const RigExecWireFrameInputs &record,
+                   const RigExecWireSlotMeta &meta,
+                   const RigExecWireDomainPose &poses,
+                   const RigExecWireDomainGeometry &geometry, size_t slots)
 {
-    const char *name = "RIGEXEC_RUNTIME_CROSSCHECK";
-#ifdef _MSC_VER
-    char *value = nullptr;
-    size_t length = 0;
-    if (_dupenv_s(&value, &length, name) != 0 || !value) {
-        return false;
+    if (record.solverRibbonPoints.size() != poses.solvers.size()) {
+        return "the static record's ribbon tables do not match the solvers";
     }
-    const bool on = value[0] != '\0' && std::strcmp(value, "0") != 0;
-    std::free(value);
-    return on;
-#else
-    const char *value = std::getenv(name);
-    return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
-#endif
+    if (record.xformBase.size() != meta.xformSlots.size()) {
+        return "the static record's xform tables do not match the slots";
+    }
+    for (const int slot : meta.xformSlots) {
+        if (slot < 0 || size_t(slot) >= slots) {
+            return "an xform-derived slot names no slot";
+        }
+    }
+    if (record.nativeFrames.size() != poses.nativeSources.size()) {
+        return "the static record's native frames do not match the sources";
+    }
+    if (record.deltaBaseMatrix.size() != geometry.deltaBasePaths.size() ||
+        record.deltaBaseOk.size() != geometry.deltaBasePaths.size()) {
+        return "the static record's delta tables do not match the paths";
+    }
+    const size_t arrays = poses.constraintArrays.size();
+    if (record.arrayWeights.size() != arrays ||
+        record.arrayTranslationOffsets.size() != arrays ||
+        record.arrayRotationOffsets.size() != arrays ||
+        record.arrayOk.size() != arrays ||
+        record.arrayPoleWeights.size() != arrays ||
+        record.arrayPoleOk.size() != arrays) {
+        return "the static record's array tables do not match the "
+               "constraints";
+    }
+    if (record.chainHaveBase.size() != geometry.chains.size() ||
+        record.chainBases.size() != geometry.chains.size()) {
+        return "the static record's chain bases do not match the chains";
+    }
+    if (record.derivedHaveBase.size() != geometry.derivedIndex.size() ||
+        record.derivedBases.size() != geometry.derivedIndex.size()) {
+        return "the static record's derived bases do not match the derived "
+               "targets";
+    }
+    return std::string();
 }
 
 // Minimal manifest reader for the "compileDiagnostics" string array. The
@@ -208,7 +236,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed steps section");
         }
-        self->_hasSteps = true;
     }
     if (section(RigExecBinarySection::Clusters, "clusters", &data,
                 &bytesOut)) {
@@ -218,7 +245,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed clusters section");
         }
-        self->_hasClusters = true;
     }
     if (section(RigExecBinarySection::Cones, "cones", &data, &bytesOut)) {
         RigExecWireReader cursor(data, bytesOut);
@@ -226,7 +252,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed cones section");
         }
-        self->_hasCones = true;
     }
     if (section(RigExecBinarySection::SlotMeta, "slot inventory", &data,
                 &bytesOut)) {
@@ -235,7 +260,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed slot inventory section");
         }
-        self->_hasSlotMeta = true;
     }
     if (section(RigExecBinarySection::Constants, "constants", &data,
                 &bytesOut)) {
@@ -245,7 +269,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed constants section");
         }
-        self->_hasConstants = true;
     }
     if (section(RigExecBinarySection::DomainPose, "pose domain", &data,
                 &bytesOut)) {
@@ -254,7 +277,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed pose-domain section");
         }
-        self->_hasPoses = true;
     }
     // Optional since major 1 minor 1: absent in older binaries, which load with
     // every chain absolute. Present but dangling or malformed: fail.
@@ -326,7 +348,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed geometry-domain section");
         }
-        self->_hasGeometry = true;
     }
     if (!section(RigExecBinarySection::InputTable, "input table", &data,
                  &bytesOut)) {
@@ -338,7 +359,23 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             !cursor.Exhausted()) {
             return fail("malformed input-table section");
         }
-        self->_hasInputTable = true;
+    }
+    // The one record holds the static data every run reads (RrStatic),
+    // captured at the bake time; a file of several records is an animation
+    // capture, which nothing plays.
+    if (self->_inputs.frames.size() != 1) {
+        return fail("the input table holds " +
+                    std::to_string(self->_inputs.frames.size()) +
+                    " frame records; a .rigexec holds one static record: "
+                    "rebake");
+    }
+    {
+        const std::string why = _StaticRecordError(
+            self->_inputs.frames[0], self->_slotMeta, self->_poses,
+            self->_geometry, self->_slotMeta.paths.size());
+        if (!why.empty()) {
+            return fail(why);
+        }
     }
     // The Computed section (temporary): the input slots every read the
     // steps make is evaluated over, and the weight objects and property
@@ -360,8 +397,8 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         hasComputed = true;
     }
     // Plugin movers' bytes, since minor 3. Every op-16 revision needs its
-    // entry and every entry an op-16 revision, with one frame row per
-    // InputTable frame; anything else is a file that does not close.
+    // entry and every entry an op-16 revision, with one frame row for the
+    // static record; anything else is a file that does not close.
     bool hasExternal = false;
     if (reader.FindSection(RigExecBinarySection::ExternalMovers, &data,
                            &bytesOut)) {
@@ -415,6 +452,8 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             }
         }
         program.external = hasExternal ? &self->_external : nullptr;
+        program.statics.record = &self->_inputs.frames[0];
+        program.statics.external = program.external;
     }
     // The manifest is advisory except for its compile-diagnostics seed,
     // which the first Execute replays. Absent (or seedless) in binaries
@@ -454,7 +493,6 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     program.geometry = &self->_geometry;
     program.inputs = &self->_inputs;
     program.strings = self->_reader.get();
-    program.crossCheck = _CrossCheckFromEnvironment();
     const size_t slots = self->_slotMeta.paths.size();
     const size_t clusters = self->_clustering.clusters.size();
     const size_t revisions = self->_geometry.revisionIndex.size();
@@ -909,6 +947,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     store.overridden.assign(size_t(maxOverride + 1), 0);
     store.lastOverridden.assign(size_t(maxOverride + 1), 0);
     store.anyOverridden = false;
+    program.inputState.valueOverridden.assign(store.overridden.size(), 0);
 
     if (!RrPoseSizeScratch(&program, error)) {
         return fail(error ? *error : std::string("pose sizing failed"));

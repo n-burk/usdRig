@@ -34,6 +34,11 @@ struct RigExecExampleFixture {
     /// When it does not bake, the operator group whose refusal IsBakeable
     /// reports first; "" when it bakes.
     const char *blockedBy;
+    /// "inputs" when every animated source of the stage is an input of its
+    /// .rigexec, so the binary follows the stage at every frame; "static"
+    /// when one is static data held at the bake time, so the binary matches
+    /// at the bake time and under input drags only.
+    const char *animation;
 };
 
 static const RigExecExampleFixture kRigExecExampleFixtures[] = {

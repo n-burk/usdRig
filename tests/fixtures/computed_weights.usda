@@ -9,8 +9,8 @@
     float math mover clamps)
     and a geometry-domain constraint whose weight object is a `preceding`
     sphere following a control through a connection, with a keyed
-    inputs:falloffMax. Baked and played by verify_binary_computed_weights
-    with the record cross-check on."""
+    inputs:falloffMax. Baked at frame 1 and played at frames 1, 3, 5, 7 and
+    10 by verify_binary_computed_weights."""
     defaultPrim = "Asset"
     endTimeCode = 10
     framesPerSecond = 24

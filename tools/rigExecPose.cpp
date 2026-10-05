@@ -56,14 +56,25 @@
 // --pose-out writes every published domain of every evaluated generation in
 // a canonical text form (%.17g doubles, %.9g floats), so two runs -- two
 // builds, two modes -- can be compared byte for byte with `cmp`.
-// --verify-binary <file.rigexec> gates the zero-USD runtime: every frame is
-// evaluated in parity mode (dynamic==baked, enforced internally) and replayed
-// from the binary, and the two generations are compared bit for bit over
-// joint matrices, moved points, weight frames and fields, diagnostics and
-// work counters. With no --frames it verifies the binary's own frame list.
-// It implies --require-baked, replaces the reporting loop, and still honors
-// --pose-out/--joints-out (from the parity poses); --repeat/--drag/--profile
-// are ignored with a note.
+// --verify-binary <file.rigexec> gates the zero-USD runtime against the
+// evaluator in parity mode (dynamic==baked, enforced internally), bit for bit
+// over joint matrices, moved points, matrix primvars, weight frames and
+// fields, provider transforms, diagnostics and work counters. It needs
+// --frames. First the binary's defaults: a fresh reader's run against the
+// generation at the bake time. Then every frame: the binary's Animated
+// inputs take the stage's values at that time (RigExecInputSampler), the
+// binary runs, and each sampled value is also checked against the program's
+// own read of that attribute. Then, at the bake time, each
+// --drag-input <prim>.<attr> (repeatable) is set on the binary to its
+// default + 0.25 and then - 0.5, against a fresh evaluator compiled on the
+// stage and then handed the same value authored in the session layer:
+// outputs and diagnostics, but not the counters its first run moves (nor
+// what a rebuild adds to the diagnostics); the session layer is then put
+// back as it was. Every generation must come from the
+// program, as with --require-baked. It replaces the reporting loop and still
+// honors --pose-out/--joints-out (from the parity poses of the frames);
+// --repeat/--drag/--profile are ignored with a note, and --drag-input
+// outside it likewise.
 // --joints-out writes the evaluated joint frames, as asset-space matrices
 // sampled at every requested frame, to a plain USD layer. It is deliberately
 // schema-neutral -- a joint path list and a parallel matrix array per time
@@ -71,11 +82,14 @@
 // something that is not RigExec: a converter to another skinning schema, or a
 // comparison against one. It is a diagnostic export of what the evaluator
 // computed, not a baked character.
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/frameExtraction.h"
+#include "rigExec/frozenContextInternal.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecRuntime/runtime.h"
+#include "rigExecSampler/inputSampler.h"
 
 #include "pxr/base/arch/env.h"
 #include "pxr/base/gf/matrix4d.h"
@@ -83,23 +97,29 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/tf/stringUtils.h"
+#include "pxr/base/tf/type.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3d.h"
 // usd/stage.h only forward-declares UsdAttribute and UsdPrim.
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -542,9 +562,9 @@ ModeSourceName(rigExec::RigExecEvaluationModeSource source)
 }
 
 
-// The zero-USD runtime gate: every frame runs in parity mode (so a
-// dynamic==baked disagreement already fails the frame) and replays from
-// the binary, and the two generations are compared bit for bit.
+// The zero-USD runtime gate: every generation runs in parity mode (so a
+// dynamic==baked disagreement already fails it) and the binary's run is
+// compared with it bit for bit.
 
 std::string
 _FormatDouble(double value)
@@ -851,7 +871,8 @@ _VerifyDiagnostics(const std::vector<std::string> &baked,
                                 std::to_string(baked.size()) + " binary " +
                                 std::to_string(rt.size()));
     }
-    for (size_t i = 0; i < std::min(baked.size(), rt.size()); ++i) {
+    const size_t common = std::min(baked.size(), rt.size());
+    for (size_t i = 0; i < common; ++i) {
         if (baked[i] != rt[i]) {
             _VerifyPush(diffs, "diagnostic " + std::to_string(i) +
                                     " baked [" + baked[i].substr(0, 160) +
@@ -859,11 +880,283 @@ _VerifyDiagnostics(const std::vector<std::string> &baked,
                                     "]");
         }
     }
+    // The first line only one side has.
+    if (baked.size() > common) {
+        _VerifyPush(diffs, "diagnostic " + std::to_string(common) +
+                               " baked [" + baked[common].substr(0, 160) +
+                               "] binary (none)");
+    } else if (rt.size() > common) {
+        _VerifyPush(diffs, "diagnostic " + std::to_string(common) +
+                               " baked (none) binary [" +
+                               rt[common].substr(0, 160) + "]");
+    }
+}
+
+// The seven output domains of one generation against the binary's last
+// run: joints, moved points, matrix primvars, weight frames and fields, and
+// provider transforms. Diagnostics and counters are compared by the caller.
+void
+_VerifyOutputs(const rigExec::RigExecRigPose &pose,
+               const rigExec::RigExecRuntimeReader &reader,
+               std::vector<std::string> *diffs, size_t *skippedScalars)
+{
+    _VerifyJoints(pose.jointMatricesFinal, reader.GetJointMatrices(), diffs);
+    _VerifyMoved(pose.movedProperties, reader.GetPoints(), diffs,
+                 skippedScalars);
+    _VerifyMatrixPrimvars(pose.movedProperties, reader.GetMatrixPrimvars(),
+                          diffs);
+    _VerifyWeightFrames(pose.weightFrames, reader.GetWeightFrames(), diffs);
+    _VerifyWeightFields(pose.weightFields, reader.GetWeightFields(), diffs);
+    _VerifyProviderXforms(pose.providerXforms, pose.providerBaseXforms,
+                          reader.GetProviderXforms(), diffs);
+}
+
+void
+_VerifyCounters(const rigExec::RigExecRigPose &pose,
+                const rigExec::RigExecRuntimeReader &reader,
+                std::vector<std::string> *diffs)
+{
+    const rigExec::RigExecRuntimeCounters counters = reader.GetCounters();
+    if (pose.moverGraphRevisionsExecuted != counters.revisionsExecuted ||
+        pose.moverGraphRevisionsCreated != counters.revisionsCreated ||
+        pose.moverGraphSchedulesBuilt != counters.schedulesBuilt) {
+        _VerifyPush(diffs, "work counters differ");
+    }
+}
+
+bool
+_InvalidLeg(const rigExec::RigExecRigPose &pose)
+{
+    return !pose.valid || pose.moverGraphParityMismatches ||
+           pose.bakedParityMismatches;
+}
+
+// An input value as FormatValue prints the stage's: type, then value.
+std::string
+_FormatInput(const rigExec::RrInputValue &value,
+             const rigExec::RigExecRuntimeReader &reader)
+{
+    switch (value.tag) {
+    case rigExec::RrInputTag::Double:
+        return "double " + FormatD(value.f64);
+    case rigExec::RrInputTag::Float:
+        return "float " + FormatF(value.f32);
+    case rigExec::RrInputTag::Bool:
+        return value.boolean ? "bool 1" : "bool 0";
+    case rigExec::RrInputTag::Int:
+        return "int " + std::to_string(value.i32);
+    case rigExec::RrInputTag::Matrix4d: {
+        std::string out = "matrix4d";
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                out += " " + FormatD(value.matrix[r][c]);
+            }
+        }
+        return out;
+    }
+    case rigExec::RrInputTag::Token:
+        return "token " + reader.GetTokenText(value.token);
+    case rigExec::RrInputTag::Vec3d:
+        return "vec3d " + FormatD(value.vec[0]) + " " + FormatD(value.vec[1]) +
+               " " + FormatD(value.vec[2]);
+    case rigExec::RrInputTag::Vec3f:
+        return "vec3f " + FormatF(value.vec3f[0]) + " " +
+               FormatF(value.vec3f[1]) + " " + FormatF(value.vec3f[2]);
+    }
+    return "unknown";
+}
+
+template <class T>
+bool
+_SameBits(const T &a, const T &b)
+{
+    return std::memcmp(&a, &b, sizeof(T)) == 0;
+}
+
+// The program's read of an attribute against the binary's input value of
+// it, bit for bit, in the input's type.
+bool
+_SameSampled(const VtValue &read, const rigExec::RrInputValue &value,
+             const rigExec::RigExecRuntimeReader &reader)
+{
+    switch (value.tag) {
+    case rigExec::RrInputTag::Double:
+        return read.IsHolding<double>() &&
+               _SameBits(read.UncheckedGet<double>(), value.f64);
+    case rigExec::RrInputTag::Float:
+        return read.IsHolding<float>() &&
+               _SameBits(read.UncheckedGet<float>(), value.f32);
+    case rigExec::RrInputTag::Bool:
+        return read.IsHolding<bool>() &&
+               read.UncheckedGet<bool>() == value.boolean;
+    case rigExec::RrInputTag::Int:
+        return read.IsHolding<int>() &&
+               read.UncheckedGet<int>() == value.i32;
+    case rigExec::RrInputTag::Matrix4d:
+        if (!read.IsHolding<GfMatrix4d>()) {
+            return false;
+        }
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (!_SameBits(read.UncheckedGet<GfMatrix4d>()[r][c],
+                               value.matrix[r][c])) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    case rigExec::RrInputTag::Token:
+        return read.IsHolding<TfToken>() &&
+               read.UncheckedGet<TfToken>().GetString() ==
+                   reader.GetTokenText(value.token);
+    case rigExec::RrInputTag::Vec3d:
+        if (!read.IsHolding<GfVec3d>()) {
+            return false;
+        }
+        for (int i = 0; i < 3; ++i) {
+            if (!_SameBits(read.UncheckedGet<GfVec3d>()[i], value.vec[i])) {
+                return false;
+            }
+        }
+        return true;
+    case rigExec::RrInputTag::Vec3f:
+        if (!read.IsHolding<GfVec3f>()) {
+            return false;
+        }
+        for (int i = 0; i < 3; ++i) {
+            if (!_SameBits(read.UncheckedGet<GfVec3f>()[i], value.vec3f[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// What one frame's check of the sampled inputs compared and matched.
+struct _SampledCheck {
+    size_t compared = 0;
+    size_t matched = 0;
+    // Animated inputs no program input read: compared with their own
+    // attribute.
+    size_t own = 0;
+};
+
+// The sampler against the program: every program input whose read at
+// \p time lands on an Animated input of the binary reads there exactly the
+// value the sampler set. An input pinned to one attribute (a valid query)
+// reads it through the query; one read the long way (a spline, a selection
+// that moves) reads the attribute its walk selects at \p time, the way the
+// program classifies it; one that crosses a property chain reads the
+// chain's result and is left out. Every Animated input no program input
+// read that way (one a geometry assembly or the computed section reads) is
+// compared with its own attribute's typed value at \p time.
+_SampledCheck
+_VerifySampledInputs(const rigExec::RigExecRigEvaluator &evaluator,
+                     const rigExec::RigExecRuntimeReader &reader,
+                     UsdTimeCode time, std::vector<std::string> *diffs)
+{
+    _SampledCheck check;
+    const rigExec::RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (!program) {
+        _VerifyPush(diffs, "no baked program to check the sampled inputs "
+                           "against");
+        return check;
+    }
+    const rigExec::RigExecBakedProgramImpl &graph = program->GetStepGraph();
+    std::vector<char> visited(reader.GetInputCount(), 0);
+    const auto compare = [&](const std::string &name, size_t index,
+                             bool answered, const VtValue &read) {
+        ++check.compared;
+        const rigExec::RrInputValue &value = reader.GetInputValue(index);
+        if (answered && _SameSampled(read, value, reader)) {
+            ++check.matched;
+            return;
+        }
+        _VerifyPush(diffs, "input " + name + " sampled " +
+                               _FormatInput(value, reader) + " program " +
+                               (answered ? FormatValue(read)
+                                         : std::string("no value")));
+    };
+    rigExec::frozenDetail::_ForEachPatchableInput(
+        graph, [&](const auto &input) {
+            using T = std::decay_t<decltype(input.constant)>;
+            UsdAttribute attribute;
+            if (input.query.IsValid()) {
+                attribute = input.query.GetAttribute();
+            } else if (input.resolvedAttr) {
+                bool viaChain = false;
+                bool varying = false;
+                rigExec::RigExecBakedClassifyInput<T>(
+                    input.resolvedAttr, time, graph.chainTargets, &viaChain,
+                    &varying, &attribute);
+                if (viaChain) {
+                    return;
+                }
+            }
+            if (!attribute) {
+                return;
+            }
+            const std::string name = attribute.GetPath().GetString();
+            size_t index = 0;
+            if (!reader.FindInput(name, &index) ||
+                !reader.GetInputInfo(index).animated) {
+                return;
+            }
+            visited[index] = 1;
+            VtValue read;
+            const bool answered = input.query.IsValid()
+                                      ? input.query.Get(&read, time)
+                                      : attribute.Get(&read, time);
+            compare(name, index, answered, read);
+        });
+    for (size_t index = 0; index < visited.size(); ++index) {
+        const rigExec::RigExecRuntimeInputInfo &info =
+            reader.GetInputInfo(index);
+        if (visited[index] || !info.animated) {
+            continue;
+        }
+        const UsdAttribute attribute =
+            SdfPath::IsValidPathString(info.name)
+                ? graph.stage->GetAttributeAtPath(SdfPath(info.name))
+                : UsdAttribute();
+        VtValue read;
+        const bool answered = attribute && attribute.Get(&read, time);
+        ++check.own;
+        compare(info.name, index, answered, read);
+    }
+    return check;
+}
+
+// A drag's diagnostics: without the summary line, whose counters the
+// reference's first run moves, and without what an edit the evaluator
+// takes for structural adds ahead of the generation's own lines -- its
+// compile notices again and the rebuild's announcement -- since the binary
+// never rebuilds (and replays its notices once, on its first run).
+std::vector<std::string>
+_DragDiagnostics(std::vector<std::string> lines,
+                 const std::vector<std::string> &notices)
+{
+    if (!notices.empty() && lines.size() >= notices.size() &&
+        std::equal(notices.begin(), notices.end(), lines.begin())) {
+        lines.erase(lines.begin(),
+                    lines.begin() + std::ptrdiff_t(notices.size()));
+    }
+    if (!lines.empty() && lines.front() == "structural edit: epoch rebuilt") {
+        lines.erase(lines.begin());
+    }
+    lines.erase(std::remove_if(lines.begin(), lines.end(),
+                               [](const std::string &line) {
+                                   return line.rfind("mover graph:", 0) == 0;
+                               }),
+                lines.end());
+    return lines;
 }
 
 int
 RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
-                const std::vector<UsdTimeCode> &askedFrames,
+                const std::vector<UsdTimeCode> &frames,
+                const std::vector<std::string> &dragInputs,
                 const std::string &binaryPath, const std::string &poseOut,
                 const std::string &jointsOut, bool solverGuides)
 {
@@ -883,16 +1176,6 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
     if (!reader) {
         std::printf("  FATAL: cannot open %s: %s\n", binaryPath.c_str(),
                     error.c_str());
-        return 2;
-    }
-    std::vector<UsdTimeCode> frames = askedFrames;
-    if (frames.empty()) {
-        for (double t : reader->GetFrameTimes()) {
-            frames.push_back(UsdTimeCode(t));
-        }
-    }
-    if (frames.empty()) {
-        std::printf("  FATAL: no frames to verify\n");
         return 2;
     }
 
@@ -916,6 +1199,19 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
         }
         return 1;
     }
+    int status = 0;
+    rigExec::RigExecInputSampler sampler;
+    if (!sampler.Bind(stage, *reader, &error)) {
+        std::printf("  FAIL: %s\n", error.c_str());
+        return 1;
+    }
+    // The stage is the one the binary was baked from: every input resolves.
+    for (const std::string &warning : sampler.GetWarnings()) {
+        std::printf("  sampler: FAIL: %s\n", warning.c_str());
+        status = 1;
+    }
+    std::printf("  sampler: %zu input(s), %zu sampled per frame\n",
+                reader->GetInputCount(), sampler.GetAnimatedCount());
 
     FILE *poseDump = nullptr;
     if (!poseOut.empty()) {
@@ -926,68 +1222,100 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
         }
     }
     JointExport jointExport;
-    int status = 0;
-    size_t matched = 0;
     size_t skippedScalars = 0;
     // The explicit Compile above consumed what a fresh session's first
     // generation would have settled: notices (inert movers, purpose
     // warnings) the runtime replays ahead of its first Execute. They are
-    // re-attached to the first compared frame below, restoring exactly
-    // the no-precompile flow. Keyed off the first comparison rather than
-    // the first loop frame, so a skipped frame cannot desync the
-    // runtime's drain-once replay.
+    // attached to the first run the runtime completes, restoring exactly
+    // the no-precompile flow.
     bool seedAttached = errors.empty();
+    const auto expectedDiagnostics =
+        [&](const rigExec::RigExecRigPose &pose) {
+            std::vector<std::string> expected = pose.diagnostics;
+            if (!seedAttached) {
+                seedAttached = true;
+                expected.insert(expected.begin(), errors.begin(),
+                                errors.end());
+            }
+            return expected;
+        };
+
+    // The defaults: a fresh reader's run is the bake time's generation, in
+    // every output, the diagnostics and the counters. Not counted below.
+    const double bakeTime = reader->GetBakeTime();
+    // What the drags are measured against: whether a value moved anything.
+    rigExec::RigExecRigPose defaultsPose;
+    {
+        const rigExec::RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode(bakeTime));
+        defaultsPose = pose;
+        if (_InvalidLeg(pose)) {
+            std::printf("  defaults t=%g: parity leg INVALID "
+                        "(dynamic==baked failed)\n",
+                        bakeTime);
+            status = 1;
+        } else if (!reader->Execute(&error)) {
+            std::printf("  defaults t=%g: FAIL: %s\n", bakeTime,
+                        error.c_str());
+            status = 1;
+        } else {
+            std::vector<std::string> diffs;
+            size_t scalars = 0;
+            _VerifyOutputs(pose, *reader, &diffs, &scalars);
+            _VerifyDiagnostics(expectedDiagnostics(pose),
+                               reader->GetDiagnostics(), &diffs);
+            _VerifyCounters(pose, *reader, &diffs);
+            if (diffs.empty()) {
+                std::printf("  defaults t=%g: binary==baked (%zu joints, "
+                            "%zu moved, %zu weight frames, %zu fields, "
+                            "%zu provider xforms, %zu diagnostics)\n",
+                            bakeTime, reader->GetJointMatrices().size(),
+                            reader->GetPoints().size(),
+                            reader->GetWeightFrames().size(),
+                            reader->GetWeightFields().size(),
+                            reader->GetProviderXforms().size(),
+                            reader->GetDiagnostics().size());
+            } else {
+                std::printf("  defaults t=%g: MISMATCH (%zu differences)\n",
+                            bakeTime, diffs.size());
+                for (const std::string &line : diffs) {
+                    std::printf("    %s\n", line.c_str());
+                }
+                status = 1;
+            }
+        }
+    }
+
+    // Every frame: the stage's values of the binary's Animated inputs at
+    // t, then the run, against the parity evaluator's generation at t.
+    size_t matched = 0;
+    _SampledCheck sampled;
     for (UsdTimeCode frame : frames) {
         const double t = frame.GetValue();
         const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
-        if (!pose.valid || pose.moverGraphParityMismatches ||
-            pose.bakedParityMismatches) {
+        if (_InvalidLeg(pose)) {
             std::printf("\n  frame %g: parity leg INVALID "
                         "(dynamic==baked failed)\n",
                         t);
             status = 1;
             continue;
         }
-        if (!reader->SetFrame(t, &error)) {
-            std::printf("\n  frame %g: FAIL: %s\n", t, error.c_str());
-            status = 1;
-            continue;
-        }
-        if (!reader->Execute(&error)) {
+        if (!sampler.Apply(frame, reader.get(), &error) ||
+            !reader->Execute(&error)) {
             std::printf("\n  frame %g: FAIL: %s\n", t, error.c_str());
             status = 1;
             continue;
         }
         std::vector<std::string> diffs;
-        _VerifyJoints(pose.jointMatricesFinal, reader->GetJointMatrices(),
-                      &diffs);
-        _VerifyMoved(pose.movedProperties, reader->GetPoints(), &diffs,
-                     &skippedScalars);
-        _VerifyMatrixPrimvars(pose.movedProperties,
-                              reader->GetMatrixPrimvars(), &diffs);
-        _VerifyWeightFrames(pose.weightFrames, reader->GetWeightFrames(),
-                             &diffs);
-        _VerifyWeightFields(pose.weightFields, reader->GetWeightFields(),
-                             &diffs);
-        _VerifyProviderXforms(pose.providerXforms, pose.providerBaseXforms,
-                              reader->GetProviderXforms(), &diffs);
-        std::vector<std::string> expectedDiagnostics = pose.diagnostics;
-        if (!seedAttached) {
-            seedAttached = true;
-            expectedDiagnostics.insert(expectedDiagnostics.begin(),
-                                       errors.begin(), errors.end());
-        }
-        _VerifyDiagnostics(expectedDiagnostics,
-                           reader->GetDiagnostics(),
-                           &diffs);
-        const rigExec::RigExecRuntimeCounters counters =
-            reader->GetCounters();
-        if (pose.moverGraphRevisionsExecuted !=
-                counters.revisionsExecuted ||
-            pose.moverGraphRevisionsCreated != counters.revisionsCreated ||
-            pose.moverGraphSchedulesBuilt != counters.schedulesBuilt) {
-            _VerifyPush(&diffs, "work counters differ");
-        }
+        _VerifyOutputs(pose, *reader, &diffs, &skippedScalars);
+        _VerifyDiagnostics(expectedDiagnostics(pose),
+                           reader->GetDiagnostics(), &diffs);
+        _VerifyCounters(pose, *reader, &diffs);
+        const _SampledCheck frameSampled =
+            _VerifySampledInputs(evaluator, *reader, frame, &diffs);
+        sampled.compared += frameSampled.compared;
+        sampled.matched += frameSampled.matched;
+        sampled.own += frameSampled.own;
         if (diffs.empty()) {
             ++matched;
             std::printf("  frame %g: binary==baked (%zu joints, "
@@ -1023,36 +1351,157 @@ RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
             status = 1;
         }
     }
-    if (evaluator.GetBakedGenerationCount() != frames.size()) {
-        std::printf("  FAIL: only %zu of %zu generation(s) came from the "
-                    "program\n",
-                    evaluator.GetBakedGenerationCount(), frames.size());
-        status = 1;
-    }
     std::printf("  verify-binary: %zu of %zu frame(s) match\n", matched,
                 frames.size());
-    if (reader->GetCrossCheckForTesting()) {
-        const auto count = [&](rigExec::RrCrossCheckKind kind) {
-            return static_cast<unsigned long long>(
-                reader->GetCrossCheckCountForTesting(kind));
-        };
-        std::printf("  cross-check: %llu computed value(s) matched the "
-                    "frame records (%llu envelope(s), %llu current-phase "
-                    "packet(s), %llu property value(s), %llu chain "
-                    "read(s), %llu registered read(s), %llu blend "
-                    "weight(s), %llu default weight(s), %llu path "
-                    "read(s), %llu blend activation(s))\n",
-                    static_cast<unsigned long long>(
-                        reader->GetCrossCheckCountForTesting()),
-                    count(rigExec::RrCrossCheckEnvelope),
-                    count(rigExec::RrCrossCheckPhasePacket),
-                    count(rigExec::RrCrossCheckPropertyValue),
-                    count(rigExec::RrCrossCheckChainRead),
-                    count(rigExec::RrCrossCheckRegisteredRead),
-                    count(rigExec::RrCrossCheckBlendWeight),
-                    count(rigExec::RrCrossCheckDefaultWeight),
-                    count(rigExec::RrCrossCheckPathRead),
-                    count(rigExec::RrCrossCheckBlendActivation));
+    std::printf("  sampler: %zu of %zu sampled input value(s) match the "
+                "program's reads (%zu read through no program input, "
+                "compared with their own attribute)\n",
+                sampled.matched, sampled.compared, sampled.own);
+
+    // The drags, at the bake time: the binary's input set to a value
+    // against the same value authored in the session layer, then both put
+    // back. The runtime first returns to the bake time's samples. Each
+    // value's reference is a fresh evaluator compiled before the edit, so
+    // it answers the first edit after a compile, as the binary answers a
+    // set on its bake, whatever drags came before.
+    const UsdTimeCode dragTime(bakeTime);
+    size_t dragsMatched = 0;
+    size_t dragsTried = 0;
+    size_t dragsMoved = 0;
+    size_t dragGenerations = 0;
+    if (!dragInputs.empty() &&
+        !sampler.Apply(dragTime, reader.get(), &error)) {
+        std::printf("  drag: FAIL: %s\n", error.c_str());
+        status = 1;
+    }
+    // Each drag puts the session layer back exactly as it was, not merely
+    // cleared: a spec left behind changes how the evaluator takes the next
+    // edit.
+    const SdfLayerHandle session = stage->GetSessionLayer();
+    const SdfLayerRefPtr sessionBefore = SdfLayer::CreateAnonymous();
+    sessionBefore->TransferContent(session);
+    for (const std::string &name : dragInputs) {
+        size_t index = 0;
+        const UsdAttribute attribute =
+            SdfPath::IsValidPathString(name)
+                ? stage->GetAttributeAtPath(SdfPath(name))
+                : UsdAttribute();
+        const bool found = reader->FindInput(name, &index);
+        const rigExec::RigExecRuntimeInputInfo &info =
+            reader->GetInputInfo(index);
+        const bool isFloat =
+            attribute &&
+            attribute.GetTypeName().GetType() == TfType::Find<float>();
+        const bool isDouble =
+            attribute &&
+            attribute.GetTypeName().GetType() == TfType::Find<double>();
+        if (!found || !attribute || (!isFloat && !isDouble) ||
+            (info.type != rigExec::RrInputTag::Double &&
+             info.type != rigExec::RrInputTag::Float)) {
+            std::printf("  drag %s: FAIL: %s\n", name.c_str(),
+                        !found       ? "no input of the binary"
+                        : !attribute ? "no attribute on the stage"
+                                     : "not a double or float input");
+            dragsTried += 2;
+            status = 1;
+            continue;
+        }
+        const double base = info.type == rigExec::RrInputTag::Float
+                                ? double(info.defaultValue.f32)
+                                : info.defaultValue.f64;
+        for (const double bump : {0.25, -0.5}) {
+            ++dragsTried;
+            const double value = base + bump;
+            bool authored = false;
+            bool compiled = false;
+            std::vector<std::string> notices;
+            rigExec::RigExecRigPose pose;
+            {
+                // Compiled on the stage as baked, then handed the value as
+                // an edit, as the binary is.
+                rigExec::RigExecRigEvaluator reference(stage, rigPath);
+                reference.SetSolverGuidesEnabled(solverGuides);
+                reference.SetEvaluationMode(
+                    rigExec::RigExecEvaluationMode::BakedWithParityCheck);
+                compiled = reference.Compile(&notices);
+                {
+                    UsdEditContext context(stage, stage->GetSessionLayer());
+                    authored = isFloat ? attribute.Set(float(value))
+                                       : attribute.Set(value);
+                }
+                pose = reference.Evaluate(dragTime);
+                dragGenerations += reference.GetBakedGenerationCount();
+            }
+            std::vector<std::string> diffs;
+            if (!compiled) {
+                _VerifyPush(&diffs, "the reference did not compile");
+            }
+            if (!authored) {
+                _VerifyPush(&diffs, "the session layer refused the value");
+            }
+            if (_InvalidLeg(pose)) {
+                _VerifyPush(&diffs,
+                            TfStringPrintf(
+                                "parity leg INVALID (valid=%d, %zu parity "
+                                "mismatch(es), %zu baked-parity "
+                                "mismatch(es))",
+                                int(pose.valid),
+                                pose.moverGraphParityMismatches,
+                                pose.bakedParityMismatches));
+                for (const std::string &line : pose.diagnostics) {
+                    _VerifyPush(&diffs, "  " + line.substr(0, 200));
+                }
+            } else if (!reader->SetInput(name, value, &error) ||
+                       !reader->Execute(&error)) {
+                _VerifyPush(&diffs, error);
+            } else {
+                size_t scalars = 0;
+                _VerifyOutputs(pose, *reader, &diffs, &scalars);
+                _VerifyDiagnostics(
+                    _DragDiagnostics(pose.diagnostics, notices),
+                    _DragDiagnostics(reader->GetDiagnostics(), {}), &diffs);
+            }
+            // Reported, not required: a drag that moves nothing compares
+            // two copies of the defaults.
+            std::vector<std::string> fromDefaults;
+            size_t ignored = 0;
+            _VerifyOutputs(defaultsPose, *reader, &fromDefaults, &ignored);
+            const bool moved = !fromDefaults.empty();
+            session->TransferContent(sessionBefore);
+            reader->ResetInput(name, nullptr);
+            if (diffs.empty()) {
+                ++dragsMatched;
+                dragsMoved += moved ? 1 : 0;
+                std::printf("  drag %s = %.17g: binary==baked, %s\n",
+                            name.c_str(), value,
+                            moved ? "moved" : "outputs unmoved");
+            } else {
+                std::printf("  drag %s = %.17g: MISMATCH (%zu differences)\n",
+                            name.c_str(), value, diffs.size());
+                for (const std::string &line : diffs) {
+                    std::printf("    %s\n", line.c_str());
+                }
+                status = 1;
+            }
+        }
+    }
+    std::printf("  verify-binary: %zu of %zu drag(s) match\n", dragsMatched,
+                dragsTried);
+    if (dragsTried > 0) {
+        std::printf("  drags: %zu of %zu matching value(s) moved the "
+                    "outputs off the defaults\n",
+                    dragsMoved, dragsMatched);
+    }
+
+    // One generation for the defaults, one per frame, two per drag input.
+    const size_t generations = frames.size() + 1 + 2 * dragInputs.size();
+    const size_t fromProgram =
+        evaluator.GetBakedGenerationCount() + dragGenerations;
+    if (fromProgram != generations) {
+        std::printf("  FAIL: %zu of %zu generation(s) came from the "
+                    "program\n",
+                    fromProgram, generations);
+        status = 1;
     }
     if (skippedScalars > 0) {
         std::printf("  note: %zu scalar moved propert%s skipped "
@@ -1076,7 +1525,8 @@ main(int argc, char **argv)
             "[--mode dynamic|baked|parity|reference] "
             "[--guides] [--require-baked] "
             "[--drag <prim> <attr> <steps>] "
-            "[--verify-binary <file.rigexec>]\n");
+            "[--verify-binary <file.rigexec> --frames a,b,c "
+            "[--drag-input <prim.attr>]...]\n");
         return 2;
     }
     std::string stagePath = argv[1];
@@ -1094,6 +1544,7 @@ main(int argc, char **argv)
         rigExec::RigExecEvaluationMode::Dynamic;
     bool modeGiven = false;
     std::vector<UsdTimeCode> frames;
+    std::vector<std::string> dragInputs;
     std::string dragPrim, dragAttr;
     int dragSteps = 0;
     int repeat = 1;
@@ -1137,6 +1588,8 @@ main(int argc, char **argv)
             profileOut = argv[++i];
         } else if (arg == "--verify-binary" && i + 1 < argc) {
             verifyBinary = argv[++i];
+        } else if (arg == "--drag-input" && i + 1 < argc) {
+            dragInputs.push_back(argv[++i]);
         } else if (arg == "--mode" && i + 1 < argc) {
             const std::string value = argv[++i];
             modeGiven = true;
@@ -1158,6 +1611,13 @@ main(int argc, char **argv)
             std::printf("unknown argument: %s\n", arg.c_str());
             return 2;
         }
+    }
+
+    // The binary holds one time; the frames to verify it at are the
+    // caller's to name.
+    if (!verifyBinary.empty() && frames.empty()) {
+        std::printf("FATAL: --verify-binary needs --frames\n");
+        return 2;
     }
 
     // The evaluator reads RIGEXEC_BAKE_REQUIRED once, into a function-local
@@ -1282,8 +1742,13 @@ main(int argc, char **argv)
             std::printf("  note: --verify-binary ignores "
                         "--repeat/--drag/--profile\n");
         }
-        return RunVerifyBinary(stage, rigPath, frames, verifyBinary,
-                               poseOut, jointsOut, solverGuides);
+        return RunVerifyBinary(stage, rigPath, frames, dragInputs,
+                               verifyBinary, poseOut, jointsOut,
+                               solverGuides);
+    }
+    if (!dragInputs.empty()) {
+        std::printf("  note: --drag-input applies to --verify-binary "
+                    "only; ignored\n");
     }
 
     if (frames.empty()) {

@@ -241,6 +241,8 @@ struct RigExecBakeComputedCapture::_State {
     /// Paths each override number was registered under (the inverse of
     /// RigExecBakedProgramImpl::overridableInputs).
     std::vector<std::set<SdfPath>> registered;
+    std::vector<RigExecBakeTimeVaryingFact> timeVaryingFacts;
+    std::vector<std::string> listedNames;
 
     uint32_t Intern(const v4::RigExecWireValue &value)
     {
@@ -553,7 +555,7 @@ struct RigExecBakeComputedCapture::_State {
 
 RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     RigExecRigEvaluator &evaluator, const RigExecBakeCapture &records,
-    RigExecBinaryWriter *writer, std::string *error)
+    double time, RigExecBinaryWriter *writer, std::string *error)
     : _state(std::make_unique<_State>())
 {
     auto Fail = [&](const std::string &what) {
@@ -571,7 +573,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     S.writer = writer;
     S.stage = B.stage;
     S.chainTargets = &B.chainTargets;
-    S.bakeTime = RigExecBakedProbeTime(B.stage);
+    S.bakeTime = UsdTimeCode(time);
     RigExecWireComputed &C = S.computed;
     C.bakeTime = S.bakeTime.GetValue();
     S.Intern(_Double(0.0));
@@ -1198,9 +1200,9 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
 
     // The facts hold one time's answer, so an object the runtime resolves
     // -- a constraint or property-mover envelope, a current-phase field,
-    // and every object either composes -- must not read an animated one.
-    // Composition points below the entry, so one descending pass closes the
-    // set.
+    // and every object either composes -- that reads an animated one holds
+    // it at the bake time only. Composition points below the entry, so one
+    // descending pass closes the set.
     std::vector<char> resolved(C.weightObjects.size(), 0);
     for (int32_t index : C.constraintWeightObjectIndex) {
         if (index >= 0) {
@@ -1228,11 +1230,8 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             continue;
         }
         if (!timeVarying[i].IsEmpty()) {
-            Fail("weight object " + objectPaths[i].GetString() + " reads " +
-                 timeVarying[i].GetString() +
-                 " at every frame, which is animated; the computed section "
-                 "holds its value at one time only");
-            return;
+            S.timeVaryingFacts.push_back(
+                {objectPaths[i].GetString(), timeVarying[i].GetString()});
         }
         const v4::RigExecWireWeightObject &wire = C.weightObjects[i];
         if (wire.base >= 0) {
@@ -1324,6 +1323,10 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         C.inputs.push_back(slot);
     }
     C.listedInputs = uint32_t(C.inputs.size());
+    S.listedNames.reserve(order.size());
+    for (const uint32_t at : order) {
+        S.listedNames.push_back(names[at]);
+    }
     // Each slot names the chain it is the target of and the phased consumer
     // publishing at it; one of each at most.
     for (size_t c = 0; c < C.propertyChains.size(); ++c) {
@@ -1378,6 +1381,18 @@ const RigExecWireComputed &
 RigExecBakeComputedCapture::GetComputed() const
 {
     return _state->computed;
+}
+
+const std::vector<RigExecBakeTimeVaryingFact> &
+RigExecBakeComputedCapture::GetTimeVaryingFacts() const
+{
+    return _state->timeVaryingFacts;
+}
+
+const std::vector<std::string> &
+RigExecBakeComputedCapture::GetListedInputNames() const
+{
+    return _state->listedNames;
 }
 
 }  // namespace rigExec

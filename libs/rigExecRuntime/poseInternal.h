@@ -22,6 +22,10 @@ struct RrPoseSolverState;
 
 struct RrPoseScratch;
 
+/// The rest frames the pose scratch holds per slot: the constants until a
+/// prologue recomposes the ladder, then what it composed.
+const std::vector<RrPointFrame> &RrPoseRestFrames(const RrProgram *program);
+
 namespace runtimePoseDetail {
 
 RrMat4d
@@ -290,11 +294,6 @@ struct RrPoseScratch {
     // Constraint envelope scratch, one step's own storage.
     std::vector<std::vector<float>> weightScratch;
     std::vector<std::string> weightError;
-    // The frame record's constraint envelopes, copied by the prologue only
-    // for the cross-check (RrProgram::CrossCheckThisRun) to compare
-    // against.
-    std::vector<float> constraintWeights;
-    std::vector<char> constraintHaveWeight;
     // Geometry-domain constraint deltas. Conceptually framework-visible
     // (the Matrix revision reads them), but RrStore has no home for
     // them, so they live here until the framework grows one.

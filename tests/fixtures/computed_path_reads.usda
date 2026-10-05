@@ -9,9 +9,12 @@
     A surface projector on the same mesh reads its ray settings (double3)
     and a keyed shaderOffset (matrix4d), and packs three shader dials: a
     keyed double avar, a keyed float, and a float whose connection ends on
-    the same valueless double. Baked and verified at frames 1, 4, 7 and 10
-    by verify_binary_computed_path_reads, and played by
-    testRigExecRuntimeGeometry.
+    the same valueless double. The keyed mesh points are a chain base a
+    binary holds at its bake time, so a binary is verified there:
+    verify_binary_computed_path_reads bakes at frame 10 and drags inputs,
+    testRigExecRuntimeGeometry bakes at frame 1. The stage
+    tests/rigExecPathReadsHeldPoints.usda holds the points and plays
+    frames 1, 4, 7 and 10.
     """
     defaultPrim = "PathReadAsset"
     endTimeCode = 10

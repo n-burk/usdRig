@@ -1,17 +1,24 @@
 // .rigexec container + bake conformance.
 #include "rigExecBake/bake.h"
 #include "rigExecBake/capture.h"
+#include "rigExecBake/revisionReads.h"
+#include "rigExecBake/staticReport.h"
 #include "rigExec/frozenContextInternal.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/computed.h"
 #include "rigExecBinary/container.h"
 #include "rigExecBinary/external.h"
+#include "rigExecBinary/generated/presentation_generated.h"
 #include "rigExecExampleFixtures.h"
 #include "rigExecMath/propertyMath.h"
+#include "rigExecRigging/rigBuilder.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/usd/sdf/types.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
@@ -22,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -1070,55 +1078,6 @@ FindRig(const UsdStageRefPtr &stage)
     return SdfPath();
 }
 
-/// Whether a fixture's capture is expected to vary across the baked
-/// frames. Probed from pose outputs (body hash, frame header excluded):
-/// the animated stages move over their table frames (several peak
-/// mid-range with static endpoints, so endpoints alone mislabel
-/// them); the static ones never move. Unknown stages skip the guard.
-enum class _BinaryVariance {
-    Unknown,
-    Static,
-    Animated,
-};
-
-static _BinaryVariance
-_BinaryExpectedVariance(const std::string &fixture)
-{
-    const std::string name =
-        std::filesystem::path(fixture).filename().string();
-    static const char *animated[] = {
-        "01_FkChainTail.usda", "02_TwoBoneIkLeg.usda",
-        "03_IkFkBlendClamp.usda", "04_BlendShapeFace.usda",
-        "05_TwistRibbonSpine.usda", "06_LatticeBulge.usda",
-        "07_SurfaceDrape.usda", "08_AimEyes.usda",
-        "09_PropertyMathMovers.usda", "10_AimXformTurret.usda",
-        "11_VolumeWeights.usda",
-        "13_ReadPhases.usda", "14_VolumeConstrainedSweep.usda",
-        "16_ConnectionReadPhases.usda",
-        "aimtest.usda", "aimtest_points.usda",
-        "rotateConstraint.usda", "rigexec_flat.usda",
-        "par_rot_aim.usd", "par_rot_aim_redorder.usd",
-        "rot_par_combo.usd", "aim_par_combo_flattened.usd",
-        "ArmShotAnim.usda", "simple_rig_anim.usd", "Biped_anim.usda",
-    };
-    static const char *statics[] = {
-        "ArmRig.usda", "spider_leg.usd", "spider_leg_ik.usd",
-        "simple_rig.usd", "spider_legs_assembly_ref.usda",
-        "Biped.usda", "Biped_body.usda", "Biped_stack.usda",
-    };
-    for (const char *known : animated) {
-        if (name == known) {
-            return _BinaryVariance::Animated;
-        }
-    }
-    for (const char *known : statics) {
-        if (name == known) {
-            return _BinaryVariance::Static;
-        }
-    }
-    return _BinaryVariance::Unknown;
-}
-
 static std::vector<double>
 _ParseTableFrames(const std::string &text)
 {
@@ -1144,7 +1103,7 @@ _ParseTableFrames(const std::string &text)
 // driver-curve arrays must reach the frame record. Fixture 11 TipCurve
 // is an UNMOVED driver no chain base covers, so without the recorder
 // hook in the gather it is unrepresentable and the runtime builds the
-// wrong field. Filename-keyed like _BinaryExpectedVariance.
+// wrong field. Keyed by file name.
 static void
 _BinaryCheckWeightGatherReads(const std::string &fixture,
                               const std::set<std::string> &seenPathReads)
@@ -1948,7 +1907,7 @@ _ComputedReadFloat(const RigExecWireComputed &computed,
 // at 0.5 and a DynamicWeight whose driver connects to an animated double.
 // Both become envelope-only entries read the Resolved way, and the oracle's
 // formula over the section's slot values reproduces, bit for bit, the
-// envelope the program recorded at every baked frame.
+// envelope the program recorded, in a bake at each of three times.
 static void
 TestComputedEnvelopeBake()
 {
@@ -2003,106 +1962,110 @@ TestComputedEnvelopeBake()
     constraint("A", "/Asset/TargetA", fixed.GetPath());
     constraint("B", "/Asset/TargetB", driven.GetPath());
 
-    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = {1.0, 5.0, 10.0};
-    RigExecBakeResult result;
-    std::string error;
-    const bool baked = RigExecBakeToBinary(evaluator, opts, &result, &error);
-    if (!baked) {
-        std::printf("envelope bake diagnostic: %s\n", error.c_str());
-    }
-    CHECK(baked);
-    if (!baked) {
-        return;
-    }
-    const RigExecBakedProgramImpl &program =
-        evaluator.GetBakedProgram()->GetStepGraph();
-    RigExecWireComputed computed;
-    RigExecWireInputTable table;
-    std::unique_ptr<RigExecBinaryReader> reader;
-    if (!_BinaryCheckComputed(program, result.bytes, opts.frames, &computed,
-                              &table, &reader)) {
-        return;
-    }
-    CHECK(program.weightObjects.empty());
-    CHECK(computed.weightObjects.size() == 2);
-    CHECK(table.frames.size() == opts.frames.size());
-    std::string text;
-    size_t checkedEnvelopes = 0;
-    for (size_t k = 0; k < program.constraints.size(); ++k) {
-        const int32_t index = computed.constraintWeightObjectIndex[k];
-        CHECK(index >= 0);
-        if (index < 0) {
-            continue;
+    for (const double time : {1.0, 5.0, 10.0}) {
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.time = time;
+        const std::vector<double> frames = {time};
+        RigExecBakeResult result;
+        std::string error;
+        const bool baked =
+            RigExecBakeToBinary(evaluator, opts, &result, &error);
+        if (!baked) {
+            std::printf("envelope bake diagnostic: %s\n", error.c_str());
         }
-        const v4::RigExecWireWeightObject &object =
-            computed.weightObjects[size_t(index)];
-        CHECK(object.envelopeOnly);
-        CHECK(object.oracleStaticError.empty());
-        CHECK(object.oraclePhaseError.empty());
-        CHECK(object.defaultWeight.mode == v4::ReadMode::Resolved);
-        reader->GetString(object.type, &text);
-        const bool dynamic = text == "RigExecDynamicWeight";
-        if (dynamic) {
-            // inputs:driver walks to the avar it is connected to.
-            CHECK(object.driver.walk.size() == 2);
-            if (object.driver.walk.size() == 2) {
-                const v4::InputSlot &leaf =
-                    computed.inputs[object.driver.walk[1]];
-                reader->GetString(leaf.name, &text);
-                CHECK(text == amount.GetPath().GetString());
-                CHECK(leaf.type == v4::InputTag::Double);
-                CHECK(leaf.flags & uint8_t(v4::InputSlotFlags::Animated));
-            }
+        CHECK(baked);
+        if (!baked) {
+            return;
         }
-        for (size_t f = 0; f < table.frames.size(); ++f) {
-            const RigExecWireComputedFrame &frame = computed.frames[f];
-            const RigExecWireFrameInputs &record = table.frames[f];
-            CHECK(frame.frame == record.frame);
-            CHECK(record.constraintHaveWeight.size() > k &&
-                  record.constraintHaveWeight[k]);
-            if (record.constraintWeights.size() <= k) {
+        const RigExecBakedProgramImpl &program =
+            evaluator.GetBakedProgram()->GetStepGraph();
+        RigExecWireComputed computed;
+        RigExecWireInputTable table;
+        std::unique_ptr<RigExecBinaryReader> reader;
+        if (!_BinaryCheckComputed(program, result.bytes, frames, &computed,
+                                  &table, &reader)) {
+            return;
+        }
+        CHECK(program.weightObjects.empty());
+        CHECK(computed.weightObjects.size() == 2);
+        CHECK(table.frames.size() == frames.size());
+        std::string text;
+        size_t checkedEnvelopes = 0;
+        for (size_t k = 0; k < program.constraints.size(); ++k) {
+            const int32_t index = computed.constraintWeightObjectIndex[k];
+            CHECK(index >= 0);
+            if (index < 0) {
                 continue;
             }
-            // _ResolveWeights' two scalar arms at count 1, no base.
-            float expected = 0.0f;
+            const v4::RigExecWireWeightObject &object =
+                computed.weightObjects[size_t(index)];
+            CHECK(object.envelopeOnly);
+            CHECK(object.oracleStaticError.empty());
+            CHECK(object.oraclePhaseError.empty());
+            CHECK(object.defaultWeight.mode == v4::ReadMode::Resolved);
+            reader->GetString(object.type, &text);
+            const bool dynamic = text == "RigExecDynamicWeight";
             if (dynamic) {
-                const float base = 1.0f;
-                const float driver =
-                    _ComputedReadFloat(computed, frame, object.driver);
-                const float scale =
-                    _ComputedReadFloat(computed, frame, object.scale);
-                const float bias =
-                    _ComputedReadFloat(computed, frame, object.bias);
-                expected = (base * driver) * scale + bias;
-            } else {
-                expected =
-                    _ComputedReadFloat(computed, frame, object.defaultWeight);
+                // inputs:driver walks to the avar it is connected to.
+                CHECK(object.driver.walk.size() == 2);
+                if (object.driver.walk.size() == 2) {
+                    const v4::InputSlot &leaf =
+                        computed.inputs[object.driver.walk[1]];
+                    reader->GetString(leaf.name, &text);
+                    CHECK(text == amount.GetPath().GetString());
+                    CHECK(leaf.type == v4::InputTag::Double);
+                    CHECK(leaf.flags & uint8_t(v4::InputSlotFlags::Animated));
+                }
             }
-            uint32_t want = 0, got = 0;
-            std::memcpy(&want, &expected, sizeof(expected));
-            std::memcpy(&got, &record.constraintWeights[k], sizeof(got));
-            if (want != got) {
-                std::printf("envelope %zu at frame %g: computed %.9g, "
-                            "recorded %.9g\n",
-                            k, record.frame, double(expected),
-                            double(record.constraintWeights[k]));
+            for (size_t f = 0; f < table.frames.size(); ++f) {
+                const RigExecWireComputedFrame &frame = computed.frames[f];
+                const RigExecWireFrameInputs &record = table.frames[f];
+                CHECK(frame.frame == record.frame);
+                CHECK(record.constraintHaveWeight.size() > k &&
+                      record.constraintHaveWeight[k]);
+                if (record.constraintWeights.size() <= k) {
+                    continue;
+                }
+                // _ResolveWeights' two scalar arms at count 1, no base.
+                float expected = 0.0f;
+                if (dynamic) {
+                    const float base = 1.0f;
+                    const float driver =
+                        _ComputedReadFloat(computed, frame, object.driver);
+                    const float scale =
+                        _ComputedReadFloat(computed, frame, object.scale);
+                    const float bias =
+                        _ComputedReadFloat(computed, frame, object.bias);
+                    expected = (base * driver) * scale + bias;
+                } else {
+                    expected = _ComputedReadFloat(computed, frame,
+                                              object.defaultWeight);
+                }
+                uint32_t want = 0, got = 0;
+                std::memcpy(&want, &expected, sizeof(expected));
+                std::memcpy(&got, &record.constraintWeights[k], sizeof(got));
+                if (want != got) {
+                    std::printf("envelope %zu at frame %g: computed %.9g, "
+                                "recorded %.9g\n",
+                                k, record.frame, double(expected),
+                                double(record.constraintWeights[k]));
+                }
+                CHECK(want == got);
+                ++checkedEnvelopes;
             }
-            CHECK(want == got);
-            ++checkedEnvelopes;
         }
+        CHECK(checkedEnvelopes == 2 * frames.size());
     }
-    CHECK(checkedEnvelopes == 2 * opts.frames.size());
 }
 
 // A geometry-domain constraint whose sphere weight samples the points in
 // flight (testRigExecVolumeWeights' ConstraintEnvelopeFixture, with the
 // sphere's height keyed): the step-backed object is marked in flight with
 // no static samples, the constraint resolves no scalar envelope, and the
-// program recorded a dense current-phase packet for its revision at every
-// frame, moving with the sphere.
+// program recorded a dense current-phase packet for its revision in a bake
+// at each of two times, moving with the sphere between them.
 static void
 TestComputedCurrentPhaseBake()
 {
@@ -2152,68 +2115,74 @@ TestComputedCurrentPhaseBake()
     constraint.CreateRelationship(TfToken("rigExec:weightObject"))
         .SetTargets({sphere.GetPath()});
 
-    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = {1.0, 2.0};
-    RigExecBakeResult result;
-    std::string error;
-    const bool baked = RigExecBakeToBinary(evaluator, opts, &result, &error);
-    if (!baked) {
-        std::printf("current-phase bake diagnostic: %s\n", error.c_str());
-    }
-    CHECK(baked);
-    if (!baked) {
-        return;
-    }
-    const RigExecBakedProgramImpl &program =
-        evaluator.GetBakedProgram()->GetStepGraph();
-    RigExecWireComputed computed;
-    RigExecWireInputTable table;
-    std::unique_ptr<RigExecBinaryReader> reader;
-    if (!_BinaryCheckComputed(program, result.bytes, opts.frames, &computed,
-                              &table, &reader)) {
-        return;
-    }
-    for (int32_t index : computed.constraintWeightObjectIndex) {
-        CHECK(index == -1);
-    }
-    std::string text;
-    const v4::RigExecWireWeightObject *found = nullptr;
-    for (const v4::RigExecWireWeightObject &object : computed.weightObjects) {
-        reader->GetString(object.path, &text);
-        if (text == sphere.GetPath().GetString()) {
-            found = &object;
-        }
-    }
-    CHECK(found);
-    if (!found) {
-        return;
-    }
-    CHECK(!found->envelopeOnly);
-    CHECK(found->samplesInFlight);
-    CHECK(found->oracleSamples == -1);
-    CHECK(found->oraclePhaseError.empty());
-    CHECK(found->oracleStaticError.empty());
-    CHECK(found->falloffMax.mode == v4::ReadMode::Baked);
-    CHECK(found->falloffMax.walk.size() == 1);
-    if (found->falloffMax.walk.size() == 1) {
-        reader->GetString(computed.inputs[found->falloffMax.walk[0]].name,
-                          &text);
-        CHECK(text == "/Asset/Rig/Weights/Sphere.inputs:falloffMax");
-    }
-    // The packet the program measured against the entering points.
+    const std::vector<double> times = {1.0, 2.0};
+    // The packet the program measured against the entering points, per bake.
     std::vector<std::vector<float>> fields;
-    for (const RigExecWireFrameInputs &record : table.frames) {
-        for (const auto &chain : record.revisionPhasePackets) {
-            for (const RigExecWireWeightPacket &packet : chain) {
-                if (packet.valid && packet.values.size() == 3) {
-                    fields.push_back(packet.values);
+    for (const double time : times) {
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.time = time;
+        RigExecBakeResult result;
+        std::string error;
+        const bool baked =
+            RigExecBakeToBinary(evaluator, opts, &result, &error);
+        if (!baked) {
+            std::printf("current-phase bake diagnostic: %s\n", error.c_str());
+        }
+        CHECK(baked);
+        if (!baked) {
+            return;
+        }
+        const RigExecBakedProgramImpl &program =
+            evaluator.GetBakedProgram()->GetStepGraph();
+        RigExecWireComputed computed;
+        RigExecWireInputTable table;
+        std::unique_ptr<RigExecBinaryReader> reader;
+        if (!_BinaryCheckComputed(program, result.bytes, {time}, &computed,
+                                  &table, &reader)) {
+            return;
+        }
+        for (int32_t index : computed.constraintWeightObjectIndex) {
+            CHECK(index == -1);
+        }
+        std::string text;
+        const v4::RigExecWireWeightObject *found = nullptr;
+        for (const v4::RigExecWireWeightObject &object :
+             computed.weightObjects) {
+            reader->GetString(object.path, &text);
+            if (text == sphere.GetPath().GetString()) {
+                found = &object;
+            }
+        }
+        CHECK(found);
+        if (!found) {
+            return;
+        }
+        CHECK(!found->envelopeOnly);
+        CHECK(found->samplesInFlight);
+        CHECK(found->oracleSamples == -1);
+        CHECK(found->oraclePhaseError.empty());
+        CHECK(found->oracleStaticError.empty());
+        CHECK(found->falloffMax.mode == v4::ReadMode::Baked);
+        CHECK(found->falloffMax.walk.size() == 1);
+        if (found->falloffMax.walk.size() == 1) {
+            reader->GetString(computed.inputs[found->falloffMax.walk[0]].name,
+                              &text);
+            CHECK(text == "/Asset/Rig/Weights/Sphere.inputs:falloffMax");
+        }
+        CHECK(table.frames.size() == 1);
+        for (const RigExecWireFrameInputs &record : table.frames) {
+            for (const auto &chain : record.revisionPhasePackets) {
+                for (const RigExecWireWeightPacket &packet : chain) {
+                    if (packet.valid && packet.values.size() == 3) {
+                        fields.push_back(packet.values);
+                    }
                 }
             }
         }
     }
-    CHECK(fields.size() == opts.frames.size());
+    CHECK(fields.size() == times.size());
     CHECK(fields.size() < 2 || fields[0] != fields[1]);
 }
 
@@ -2285,8 +2254,8 @@ _ChainScalarEnvelopes(const RigExecWireComputed &computed,
 // tests/fixtures/computed_chains.usda: the chain tables as the evaluator
 // compiled them (order, value types, read modes and walks, envelopes,
 // curve keys, phased consumers), and the reference above reproducing every
-// recorded property value bit for bit and the chains' diagnostic lines at
-// every baked frame.
+// recorded property value bit for bit and the chains' diagnostic lines, in
+// a bake at each of five times.
 static void
 TestComputedChainBake()
 {
@@ -2300,216 +2269,627 @@ TestComputedChainBake()
         return;
     }
     const SdfPath rigPath("/Asset/Rig");
-    RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = {1.0, 3.0, 5.0, 7.0, 10.0};
-    RigExecBakeResult result;
-    std::string error;
-    const bool baked = RigExecBakeToBinary(evaluator, opts, &result, &error);
-    if (!baked) {
-        std::printf("chain bake diagnostic: %s\n", error.c_str());
-    }
-    CHECK(baked);
-    if (!baked) {
-        return;
-    }
-    const RigExecBakedProgramImpl &program =
-        evaluator.GetBakedProgram()->GetStepGraph();
-    RigExecWireComputed computed;
-    RigExecWireInputTable table;
-    std::unique_ptr<RigExecBinaryReader> reader;
-    if (!_BinaryCheckComputed(program, result.bytes, opts.frames, &computed,
-                              &table, &reader)) {
-        return;
-    }
-    const auto text = [&](uint32_t id) {
-        std::string s;
-        reader->GetString(id, &s);
-        return s;
-    };
-    const auto slotName = [&](uint32_t slot) {
-        return text(computed.inputs[slot].name);
-    };
-    std::map<std::string, const v4::PropertyChain *> chains;
-    for (size_t c = 0; c < computed.propertyChains.size(); ++c) {
-        const v4::PropertyChain &chain = computed.propertyChains[c];
-        chains[slotName(chain.target)] = &chain;
-        CHECK(computed.inputs[chain.target].chain == int32_t(c));
-    }
-    CHECK(chains.size() == 8);
-    const v4::PropertyChain *dial =
-        chains["/Asset/Rig/Channels/Dial.rigExec:amount"];
-    const v4::PropertyChain *wide =
-        chains["/Asset/Rig/Channels/Wide.rigExec:level"];
-    const v4::PropertyChain *vec =
-        chains["/Asset/Rig/Channels/Vec.rigExec:offset"];
-    const v4::PropertyChain *space =
-        chains["/Asset/Rig/Channels/Space.rigExec:local"];
-    const v4::PropertyChain *missing =
-        chains["/Asset/Rig/Channels/Missing.rigExec:none"];
-    CHECK(dial && wide && vec && space && missing);
-    if (!dial || !wide || !vec || !space || !missing) {
-        return;
-    }
-    // A consumer chain runs after the chain it reads.
-    const auto position = [&](const v4::PropertyChain *chain) {
-        return chain - computed.propertyChains.data();
-    };
-    CHECK(position(dial) <
-          position(chains["/Asset/Rig/Channels/Readouts.rigExec:early"]));
-    CHECK(dial->valueType == v4::PropertyValueType::Float);
-    CHECK(wide->valueType == v4::PropertyValueType::Double);
-    CHECK(vec->valueType == v4::PropertyValueType::Vec3f);
-    CHECK(space->valueType == v4::PropertyValueType::Matrix4d);
-    CHECK((computed.inputs[missing->target].flags &
-           uint8_t(v4::InputSlotFlags::HasValue)) == 0);
-    const char *order[] = {"Gain", "Shape", "Fade", "Nudge",
-                           "Off",  "Over",  "Limit"};
-    CHECK(dial->revisions.size() == 7);
-    for (size_t r = 0; r < dial->revisions.size() && r < 7; ++r) {
-        CHECK(text(dial->revisions[r].mover) ==
-              std::string("/Asset/Rig/Movers/Dial/") + order[r]);
-    }
-    if (dial->revisions.size() == 7) {
-        // Gain multiplies by the control's double avar, read through its
-        // connection.
-        const v4::PropertyRevision &gain = dial->revisions[0];
-        CHECK(gain.op == v4::PropertyOp::Multiply);
-        CHECK(gain.value.mode == v4::ReadMode::Resolved &&
-              gain.value.tag == v4::InputTag::Float &&
-              gain.value.walk.size() == 2);
-        if (gain.value.walk.size() == 2) {
-            CHECK(slotName(gain.value.walk[1]) ==
-                  "/Asset/Rig/Controls/Dial.avars:tx");
-            CHECK(computed.inputs[gain.value.walk[1]].type ==
-                  v4::InputTag::Double);
+    for (const double time : {1.0, 3.0, 5.0, 7.0, 10.0}) {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.time = time;
+        const std::vector<double> frames = {time};
+        RigExecBakeResult result;
+        std::string error;
+        const bool baked =
+            RigExecBakeToBinary(evaluator, opts, &result, &error);
+        if (!baked) {
+            std::printf("chain bake diagnostic: %s\n", error.c_str());
         }
-        const v4::PropertyRevision &shape = dial->revisions[1];
-        CHECK(shape.op == v4::PropertyOp::Curve && shape.keys.size() == 3 &&
-              shape.tangents.size() == 3 && shape.hasTangentsAttr);
-        if (shape.keys.size() == 3) {
-            CHECK(shape.keys[1] == RigExecWireVec2f({0.5f, 0.8f}));
+        CHECK(baked);
+        if (!baked) {
+            return;
         }
-        const auto envelopeOf = [&](const v4::PropertyRevision &revision) {
-            return revision.envelope >= 0
-                       ? text(computed.weightObjects[size_t(
-                                                         revision.envelope)]
-                                  .path)
-                       : std::string();
+        const RigExecBakedProgramImpl &program =
+            evaluator.GetBakedProgram()->GetStepGraph();
+        RigExecWireComputed computed;
+        RigExecWireInputTable table;
+        std::unique_ptr<RigExecBinaryReader> reader;
+        if (!_BinaryCheckComputed(program, result.bytes, frames, &computed,
+                                  &table, &reader)) {
+            return;
+        }
+        const auto text = [&](uint32_t id) {
+            std::string s;
+            reader->GetString(id, &s);
+            return s;
         };
-        CHECK(envelopeOf(dial->revisions[2]) == "/Asset/Rig/Weights/Half");
-        CHECK(envelopeOf(dial->revisions[3]) == "/Asset/Rig/Weights/Ramp");
-        CHECK(dial->revisions[0].envelope == -1);
-        const v4::PropertyRevision &off = dial->revisions[4];
-        CHECK(off.enabled.mode == v4::ReadMode::Pinned &&
-              off.enabled.tag == v4::InputTag::Bool &&
-              off.enabled.walk.size() == 1);
-        // MoverAPI declares inputs:enabled, so an unauthored one still
-        // reads its own schema fallback.
-        const v4::RigExecWireInput &enabled = dial->revisions[0].enabled;
-        CHECK(enabled.mode == v4::ReadMode::Pinned &&
-              enabled.walk.size() == 1);
-        if (enabled.walk.size() == 1) {
-            CHECK(computed.values[computed.inputs[enabled.walk[0]].value]
-                      .bits == 1);
+        const auto slotName = [&](uint32_t slot) {
+            return text(computed.inputs[slot].name);
+        };
+        std::map<std::string, const v4::PropertyChain *> chains;
+        for (size_t c = 0; c < computed.propertyChains.size(); ++c) {
+            const v4::PropertyChain &chain = computed.propertyChains[c];
+            chains[slotName(chain.target)] = &chain;
+            CHECK(computed.inputs[chain.target].chain == int32_t(c));
         }
-        const v4::PropertyRevision &over = dial->revisions[5];
-        CHECK(over.defaultWeight.mode == v4::ReadMode::Pinned &&
-              over.defaultWeight.walk.size() == 1);
-        CHECK(dial->revisions[6].op == v4::PropertyOp::Clamp);
-    }
-    CHECK(wide->revisions.size() == 1 &&
-          wide->revisions[0].value.tag == v4::InputTag::Float);
-    CHECK(vec->revisions.size() == 2 &&
-          vec->revisions[0].value.tag == v4::InputTag::Vec3f);
-    CHECK(space->revisions.size() == 1 &&
-          space->revisions[0].value.tag == v4::InputTag::Matrix4d &&
-          space->revisions[0].min.walk.empty() &&
-          space->revisions[0].max.walk.empty());
-    // The phased consumers: the dial's base, the dial after Shape (two
-    // revisions applied), and the double chain's base read as a float.
-    CHECK(computed.phasedConsumers.size() == 3);
-    std::map<std::string, v4::PhasedConsumer> phased;
-    for (size_t k = 0; k < computed.phasedConsumers.size(); ++k) {
-        const v4::PhasedConsumer &consumer = computed.phasedConsumers[k];
-        phased[slotName(consumer.consumer)] = consumer;
-        CHECK(computed.inputs[consumer.consumer].phased == int32_t(k));
-    }
-    const v4::PhasedConsumer base =
-        phased["/Asset/Rig/Movers/Readouts/Base.inputs:value"];
-    const v4::PhasedConsumer early =
-        phased["/Asset/Rig/Movers/Readouts/Early.inputs:value"];
-    const v4::PhasedConsumer narrow =
-        phased["/Asset/Rig/Movers/Readouts/Narrow.inputs:value"];
-    CHECK(computed.propertyChains.data() + base.chain == dial &&
-          base.applied == 0 &&
-          base.consumerType == v4::PropertyValueType::Float);
-    CHECK(computed.propertyChains.data() + early.chain == dial &&
-          early.applied == 2);
-    CHECK(computed.propertyChains.data() + narrow.chain == wide &&
-          narrow.applied == 0 &&
-          narrow.consumerType == v4::PropertyValueType::Float);
-
-    // Follow's weight declares `final`, so it is the one registered read
-    // that crosses a chain rather than a phased consumer: its walk runs
-    // from its own attribute to the dial's target.
-    CHECK(computed.chainReads.size() == 1);
-    if (computed.chainReads.size() == 1) {
-        const RigExecWireChainRead &weight = computed.chainReads[0];
-        CHECK(weight.read.tag == v4::InputTag::Float &&
-              weight.read.mode == v4::ReadMode::Baked &&
-              weight.read.walk.size() == 2);
-        if (weight.read.walk.size() == 2) {
-            CHECK(slotName(weight.read.walk[0]) ==
-                  "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
-            const int32_t chain = computed.inputs[weight.read.walk[1]].chain;
-            CHECK(chain >= 0 &&
-                  computed.propertyChains.data() + chain == dial);
+        CHECK(chains.size() == 8);
+        const v4::PropertyChain *dial =
+            chains["/Asset/Rig/Channels/Dial.rigExec:amount"];
+        const v4::PropertyChain *wide =
+            chains["/Asset/Rig/Channels/Wide.rigExec:level"];
+        const v4::PropertyChain *vec =
+            chains["/Asset/Rig/Channels/Vec.rigExec:offset"];
+        const v4::PropertyChain *space =
+            chains["/Asset/Rig/Channels/Space.rigExec:local"];
+        const v4::PropertyChain *missing =
+            chains["/Asset/Rig/Channels/Missing.rigExec:none"];
+        CHECK(dial && wide && vec && space && missing);
+        if (!dial || !wide || !vec || !space || !missing) {
+            return;
         }
-        CHECK(weight.uid < table.directory.size() &&
-              text(table.directory[weight.uid].head) ==
-                  "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
-    }
-
-    // Every recorded value, with the envelopes resolved, and the chains'
-    // lines as the evaluator printed them first at each frame.
-    size_t skipped = 0, chainReads = 0;
-    std::vector<std::vector<std::string>> lines;
-    const size_t compared = _BinaryCheckChains(
-        program, computed, table, *reader,
-        _ChainScalarEnvelopes(computed, *reader), &skipped, &lines,
-        &chainReads);
-    std::printf("  computed chains: %zu value(s) and %zu chain read(s) "
-                "reproduced bit for bit\n",
-                compared, chainReads);
-    CHECK(skipped == 0);
-    CHECK(compared == 10 * opts.frames.size());
-    CHECK(chainReads == opts.frames.size());
-    CHECK(lines.size() == opts.frames.size());
-    RigExecRigEvaluator replay(stage, rigPath);
-    replay.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    for (size_t f = 0; f < lines.size(); ++f) {
-        const RigExecRigPose pose = replay.Evaluate(UsdTimeCode(opts.frames[f]));
-        CHECK(lines[f].size() == 3);
-        const auto at = std::search(pose.diagnostics.begin(),
-                                    pose.diagnostics.end(), lines[f].begin(),
-                                    lines[f].end());
-        if (at == pose.diagnostics.end()) {
-            for (const std::string &line : lines[f]) {
-                std::printf("  reference line: %s\n", line.c_str());
+        // A consumer chain runs after the chain it reads.
+        const auto position = [&](const v4::PropertyChain *chain) {
+            return chain - computed.propertyChains.data();
+        };
+        CHECK(position(dial) <
+              position(chains["/Asset/Rig/Channels/Readouts.rigExec:early"]));
+        CHECK(dial->valueType == v4::PropertyValueType::Float);
+        CHECK(wide->valueType == v4::PropertyValueType::Double);
+        CHECK(vec->valueType == v4::PropertyValueType::Vec3f);
+        CHECK(space->valueType == v4::PropertyValueType::Matrix4d);
+        CHECK((computed.inputs[missing->target].flags &
+               uint8_t(v4::InputSlotFlags::HasValue)) == 0);
+        const char *order[] = {"Gain", "Shape", "Fade", "Nudge",
+                               "Off",  "Over",  "Limit"};
+        CHECK(dial->revisions.size() == 7);
+        for (size_t r = 0; r < dial->revisions.size() && r < 7; ++r) {
+            CHECK(text(dial->revisions[r].mover) ==
+                  std::string("/Asset/Rig/Movers/Dial/") + order[r]);
+        }
+        if (dial->revisions.size() == 7) {
+            // Gain multiplies by the control's double avar, read through its
+            // connection.
+            const v4::PropertyRevision &gain = dial->revisions[0];
+            CHECK(gain.op == v4::PropertyOp::Multiply);
+            CHECK(gain.value.mode == v4::ReadMode::Resolved &&
+                  gain.value.tag == v4::InputTag::Float &&
+                  gain.value.walk.size() == 2);
+            if (gain.value.walk.size() == 2) {
+                CHECK(slotName(gain.value.walk[1]) ==
+                      "/Asset/Rig/Controls/Dial.avars:tx");
+                CHECK(computed.inputs[gain.value.walk[1]].type ==
+                      v4::InputTag::Double);
             }
-            for (const std::string &line : pose.diagnostics) {
-                std::printf("  evaluator line: %s\n", line.c_str());
+            const v4::PropertyRevision &shape = dial->revisions[1];
+            CHECK(shape.op == v4::PropertyOp::Curve && shape.keys.size() == 3 &&
+                  shape.tangents.size() == 3 && shape.hasTangentsAttr);
+            if (shape.keys.size() == 3) {
+                CHECK(shape.keys[1] == RigExecWireVec2f({0.5f, 0.8f}));
             }
+            const auto envelopeOf = [&](const v4::PropertyRevision &revision) {
+                return revision.envelope >= 0
+                           ? text(computed.weightObjects[size_t(
+                                                             revision.envelope)]
+                                      .path)
+                           : std::string();
+            };
+            CHECK(envelopeOf(dial->revisions[2]) == "/Asset/Rig/Weights/Half");
+            CHECK(envelopeOf(dial->revisions[3]) == "/Asset/Rig/Weights/Ramp");
+            CHECK(dial->revisions[0].envelope == -1);
+            const v4::PropertyRevision &off = dial->revisions[4];
+            CHECK(off.enabled.mode == v4::ReadMode::Pinned &&
+                  off.enabled.tag == v4::InputTag::Bool &&
+                  off.enabled.walk.size() == 1);
+            // MoverAPI declares inputs:enabled, so an unauthored one still
+            // reads its own schema fallback.
+            const v4::RigExecWireInput &enabled = dial->revisions[0].enabled;
+            CHECK(enabled.mode == v4::ReadMode::Pinned &&
+                  enabled.walk.size() == 1);
+            if (enabled.walk.size() == 1) {
+                CHECK(computed.values[computed.inputs[enabled.walk[0]].value]
+                          .bits == 1);
+            }
+            const v4::PropertyRevision &over = dial->revisions[5];
+            CHECK(over.defaultWeight.mode == v4::ReadMode::Pinned &&
+                  over.defaultWeight.walk.size() == 1);
+            CHECK(dial->revisions[6].op == v4::PropertyOp::Clamp);
         }
-        CHECK(at != pose.diagnostics.end());
+        CHECK(wide->revisions.size() == 1 &&
+              wide->revisions[0].value.tag == v4::InputTag::Float);
+        CHECK(vec->revisions.size() == 2 &&
+              vec->revisions[0].value.tag == v4::InputTag::Vec3f);
+        CHECK(space->revisions.size() == 1 &&
+              space->revisions[0].value.tag == v4::InputTag::Matrix4d &&
+              space->revisions[0].min.walk.empty() &&
+              space->revisions[0].max.walk.empty());
+        // The phased consumers: the dial's base, the dial after Shape (two
+        // revisions applied), and the double chain's base read as a float.
+        CHECK(computed.phasedConsumers.size() == 3);
+        std::map<std::string, v4::PhasedConsumer> phased;
+        for (size_t k = 0; k < computed.phasedConsumers.size(); ++k) {
+            const v4::PhasedConsumer &consumer = computed.phasedConsumers[k];
+            phased[slotName(consumer.consumer)] = consumer;
+            CHECK(computed.inputs[consumer.consumer].phased == int32_t(k));
+        }
+        const v4::PhasedConsumer base =
+            phased["/Asset/Rig/Movers/Readouts/Base.inputs:value"];
+        const v4::PhasedConsumer early =
+            phased["/Asset/Rig/Movers/Readouts/Early.inputs:value"];
+        const v4::PhasedConsumer narrow =
+            phased["/Asset/Rig/Movers/Readouts/Narrow.inputs:value"];
+        CHECK(computed.propertyChains.data() + base.chain == dial &&
+              base.applied == 0 &&
+              base.consumerType == v4::PropertyValueType::Float);
+        CHECK(computed.propertyChains.data() + early.chain == dial &&
+              early.applied == 2);
+        CHECK(computed.propertyChains.data() + narrow.chain == wide &&
+              narrow.applied == 0 &&
+              narrow.consumerType == v4::PropertyValueType::Float);
+
+        // Follow's weight declares `final`, so it is the one registered read
+        // that crosses a chain rather than a phased consumer: its walk runs
+        // from its own attribute to the dial's target.
+        CHECK(computed.chainReads.size() == 1);
+        if (computed.chainReads.size() == 1) {
+            const RigExecWireChainRead &weight = computed.chainReads[0];
+            CHECK(weight.read.tag == v4::InputTag::Float &&
+                  weight.read.mode == v4::ReadMode::Baked &&
+                  weight.read.walk.size() == 2);
+            if (weight.read.walk.size() == 2) {
+                CHECK(slotName(weight.read.walk[0]) ==
+                      "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
+                const int32_t chain =
+                    computed.inputs[weight.read.walk[1]].chain;
+                CHECK(chain >= 0 &&
+                      computed.propertyChains.data() + chain == dial);
+            }
+            CHECK(weight.uid < table.directory.size() &&
+                  text(table.directory[weight.uid].head) ==
+                      "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
+        }
+
+        // Every recorded value, with the envelopes resolved, and the chains'
+        // lines as the evaluator printed them first at each frame.
+        size_t skipped = 0, chainReads = 0;
+        std::vector<std::vector<std::string>> lines;
+        const size_t compared = _BinaryCheckChains(
+            program, computed, table, *reader,
+            _ChainScalarEnvelopes(computed, *reader), &skipped, &lines,
+            &chainReads);
+        std::printf("  computed chains at %g: %zu value(s) and %zu chain "
+                    "read(s) reproduced bit for bit\n",
+                    time, compared, chainReads);
+        CHECK(skipped == 0);
+        CHECK(compared == 10 * frames.size());
+        CHECK(chainReads == frames.size());
+        CHECK(lines.size() == frames.size());
+        RigExecRigEvaluator replay(stage, rigPath);
+        replay.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        for (size_t f = 0; f < lines.size(); ++f) {
+            const RigExecRigPose pose = replay.Evaluate(UsdTimeCode(frames[f]));
+            CHECK(lines[f].size() == 3);
+            const auto at =
+                std::search(pose.diagnostics.begin(), pose.diagnostics.end(),
+                            lines[f].begin(), lines[f].end());
+            if (at == pose.diagnostics.end()) {
+                for (const std::string &line : lines[f]) {
+                    std::printf("  reference line: %s\n", line.c_str());
+                }
+                for (const std::string &line : pose.diagnostics) {
+                    std::printf("  evaluator line: %s\n", line.c_str());
+                }
+            }
+            CHECK(at != pose.diagnostics.end());
+        }
     }
 }
 
+static int classGuardStatic = 0;
+static int classGuardInputs = 0;
+static int enumeratedRows = 0;
+static int enumeratedTried = 0;
+
+// Path-read completeness: an enumeration of its own over the program the
+// bake ran at \p t holds every key the file's record holds, at the same
+// value bit for bit, and counts what the bake's self-check counted; the
+// record holds every key the enumeration lists that no overlay stands on,
+// the ones the run's branches did not reach included. A rig with mover
+// revisions records at least their enables. Then the comparator is shown
+// to name its offender: a dropped key, a changed value, and a
+// connection-following read enumerated as a raw one.
 static void
-TestBake(const std::string &fixture, const std::vector<double> &bakeFrames,
-         const std::filesystem::path &scratch)
+_BinaryCheckEnumeratedReads(const std::string &fixture,
+                            const RigExecBakedProgramImpl &program, double t,
+                            const std::vector<RigExecWirePathRead> &recorded,
+                            const RigExecBinaryReader &strings,
+                            const RigExecBakeResult &result)
+{
+    const auto text = [&strings](uint32_t id, std::string *out) {
+        return strings.GetString(id, out);
+    };
+    std::vector<RigExecBakeRevisionRead> enumerated;
+    RigExecBakeEnumerateProgramReads(program, t, &enumerated);
+    RigExecBakePathReadCheck check;
+    std::string error;
+    const bool complete =
+        RigExecBakeCheckPathReads(recorded, enumerated, text, &check, &error);
+    CHECK(complete);
+    CHECK(check.recorded == recorded.size());
+    CHECK(check.recorded == result.pathReadsWritten);
+    CHECK(result.pathReadsRecorded <= result.pathReadsWritten);
+    CHECK(check.enumerated == result.pathReadsEnumerated);
+    CHECK(check.unenumerated == 0 && result.pathReadsUnenumerated == 0);
+    std::set<std::pair<std::string, bool>> held;
+    for (const RigExecWirePathRead &read : recorded) {
+        std::string path;
+        CHECK(strings.GetString(read.path, &path));
+        held.emplace(path, read.wasDefault != 0);
+    }
+    size_t missing = 0;
+    for (const RigExecBakeRevisionRead &candidate : enumerated) {
+        if (!candidate.overlaid &&
+            !held.count(std::make_pair(candidate.path.GetString(),
+                                       candidate.rest))) {
+            if (missing++ == 0) {
+                std::printf("  %s: enumerated %s (%s) is not in the "
+                            "record\n",
+                            fixture.c_str(), candidate.path.GetText(),
+                            candidate.rest ? "rest" : "live");
+            }
+        }
+    }
+    CHECK(missing == 0);
+    bool moverRevisions = false;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : program.chains) {
+        moverRevisions = moverRevisions || !chain.revisions.empty();
+    }
+    CHECK(!moverRevisions || check.recorded > 0);
+    ++enumeratedTried;
+    std::printf("path-read completeness %s: %zu recorded, %zu written, "
+                "%zu enumerated, %s\n",
+                fixture.c_str(), result.pathReadsRecorded, check.recorded,
+                check.enumerated,
+                complete ? "all recorded keys enumerated with equal values"
+                         : error.c_str());
+    if (complete && missing == 0 &&
+        (!moverRevisions || check.recorded > 0)) {
+        ++enumeratedRows;
+    }
+    if (!complete || recorded.empty()) {
+        return;
+    }
+    const auto label = [&](const RigExecWirePathRead &read) {
+        std::string path;
+        CHECK(strings.GetString(read.path, &path));
+        return "path read " + path + " (" +
+               (read.wasDefault ? "rest" : "live") + ")";
+    };
+    const auto sameKey = [&](const RigExecWirePathRead &read,
+                             const RigExecBakeRevisionRead &candidate) {
+        std::string path;
+        return strings.GetString(read.path, &path) &&
+               candidate.path.GetString() == path &&
+               candidate.rest == (read.wasDefault != 0);
+    };
+    // A dropped key: the record's middle entry.
+    {
+        const RigExecWirePathRead &read = recorded[recorded.size() / 2];
+        std::vector<RigExecBakeRevisionRead> dropped;
+        for (const RigExecBakeRevisionRead &candidate : enumerated) {
+            if (!sameKey(read, candidate)) {
+                dropped.push_back(candidate);
+            }
+        }
+        error.clear();
+        CHECK(!RigExecBakeCheckPathReads(recorded, dropped, text, nullptr,
+                                         &error));
+        CHECK(error ==
+              label(read) + " recorded by the assembly but not enumerated");
+    }
+    // A changed value: the first entry holding one, enumerated as absent.
+    for (const RigExecWirePathRead &read : recorded) {
+        if (read.value.tag == RigExecWirePathValue::Tag::Absent) {
+            continue;
+        }
+        std::vector<RigExecBakeRevisionRead> changed = enumerated;
+        for (RigExecBakeRevisionRead &candidate : changed) {
+            if (sameKey(read, candidate)) {
+                candidate.value = VtValue();
+            }
+        }
+        error.clear();
+        CHECK(!RigExecBakeCheckPathReads(recorded, changed, text, nullptr,
+                                         &error));
+        CHECK(error == label(read) + " enumerated with another value");
+        break;
+    }
+    // A connection-following read enumerated as a raw one.
+    for (const RigExecWirePathRead &read : recorded) {
+        if (!read.forceFrame) {
+            continue;
+        }
+        std::vector<RigExecBakeRevisionRead> raw = enumerated;
+        for (RigExecBakeRevisionRead &candidate : raw) {
+            if (sameKey(read, candidate)) {
+                candidate.resolved = false;
+            }
+        }
+        error.clear();
+        CHECK(!RigExecBakeCheckPathReads(recorded, raw, text, nullptr,
+                                         &error));
+        CHECK(error == label(read) +
+                           " recorded as connection-following but "
+                           "enumerated as a raw read");
+        break;
+    }
+}
+
+// A connection-following read whose walk reaches a property chain's target
+// takes the chain's result in the run: here a wrinkle scale connected, at
+// its final read phase, to an attribute a float mover revises. The record
+// holds that result, not the authored value, and the enumeration reads
+// through the run's property results, so the bake at one time passes its
+// self-check. A walk over the stage alone would read the authored value and
+// refuse the bake.
+static void
+TestEnumeratedReadThroughPropertyResult()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const SdfPath rig("/Rig"), target("/Rig/Body.points");
+    RigExecRigBuilder builder = RigExecRigBuilder::Create(stage, rig);
+    constexpr int nx = 5, ny = 4;
+    std::vector<GfVec3f> rest;
+    VtIntArray counts, indices;
+    for (int y = 0; y < ny; ++y) {
+        for (int x = 0; x < nx; ++x) {
+            rest.emplace_back(0.25f * float(x), 0.2f * float(y), 0.0f);
+        }
+    }
+    for (int y = 0; y + 1 < ny; ++y) {
+        for (int x = 0; x + 1 < nx; ++x) {
+            const int a = y * nx + x;
+            counts.push_back(4);
+            for (const int i : {a, a + 1, a + 1 + nx, a + nx}) {
+                indices.push_back(i);
+            }
+        }
+    }
+    VtVec3fArray compressed(rest.begin(), rest.end());
+    for (GfVec3f &p : compressed) {
+        p[0] *= 0.65f;
+    }
+    const UsdGeomMesh mesh = UsdGeomMesh::Define(stage, target.GetPrimPath());
+    CHECK(mesh.CreatePointsAttr().Set(compressed));
+    CHECK(mesh.CreateFaceVertexCountsAttr().Set(counts));
+    CHECK(mesh.CreateFaceVertexIndicesAttr().Set(indices));
+    RigExecWrinkleMoverHandle wrinkle =
+        builder.NewMoverChain("Deform", target).AddWrinkleMover("Wrinkle");
+    wrinkle.SetRestPoints(rest);
+    const UsdAttribute driver = stage->GetPrimAtPath(rig).CreateAttribute(
+        TfToken("wrinkleScale"), SdfValueTypeNames->Float);
+    const float authored = 0.4f;
+    CHECK(driver.Set(authored));
+    const UsdAttribute scale =
+        wrinkle.GetPrim().GetAttribute(TfToken("inputs:wrinkleScale"));
+    CHECK(scale.SetConnections({driver.GetPath()}));
+    wrinkle.SetReadPhase(TfToken("inputs:wrinkleScale"), "final");
+    builder.NewMoverChain("Scale", driver.GetPath())
+        .AddFloatMathMover("Blend", TfToken("blend"), 0.8f);
+
+    RigExecRigEvaluator evaluator(stage, rig);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecBakeOpts opts;
+    opts.time = 1.0;
+    RigExecBakeResult result;
+    std::string error;
+    const bool baked = RigExecBakeToBinary(evaluator, opts, &result, &error);
+    CHECK(baked);
+    if (!baked) {
+        std::printf("read through a property result: %s\n", error.c_str());
+        return;
+    }
+    CHECK(result.pathReadsRecorded > 0);
+    const RigExecBakedProgramImpl &program =
+        evaluator.GetBakedProgram()->GetStepGraph();
+    const auto chained = program.propertyResults.find(driver.GetPath());
+    CHECK(chained != program.propertyResults.end() &&
+          chained->second.IsHolding<float>());
+    if (chained == program.propertyResults.end() ||
+        !chained->second.IsHolding<float>()) {
+        return;
+    }
+    const float value = chained->second.UncheckedGet<float>();
+    CHECK(value != authored);
+    std::unique_ptr<RigExecBinaryReader> reader = RigExecBinaryReader::Open(
+        result.bytes.data(), result.bytes.size(), &error);
+    CHECK(reader);
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+    if (!reader ||
+        !reader->FindSection(RigExecBinarySection::InputTable, &data,
+                             &size)) {
+        CHECK(false);
+        return;
+    }
+    RigExecWireReader cursor(data, size);
+    RigExecWireInputTable table;
+    CHECK(RigExecWireDecodeInputTable(&cursor, &table, &error));
+    CHECK(table.frames.size() == 1);
+    const RigExecWirePathRead *recorded = nullptr;
+    for (const RigExecWireFrameInputs &record : table.frames) {
+        for (const RigExecWirePathRead &read : record.pathReads) {
+            std::string path;
+            if (!read.wasDefault && reader->GetString(read.path, &path) &&
+                path == scale.GetPath().GetString()) {
+                recorded = &read;
+            }
+        }
+    }
+    CHECK(recorded && recorded->forceFrame &&
+          recorded->value.tag == RigExecWirePathValue::Tag::Float &&
+          std::memcmp(&recorded->value.f32, &value, sizeof(float)) == 0);
+    std::printf("read through a property result: %s recorded %g, the "
+                "chain's result (authored %g), %zu recorded, %zu "
+                "enumerated\n",
+                scale.GetPath().GetText(),
+                recorded ? double(recorded->value.f32) : 0.0,
+                double(authored), result.pathReadsRecorded,
+                result.pathReadsEnumerated);
+}
+
+// The static report lists a path read a geometry assembly makes at the time
+// whose attribute the stage animates and no input slot evaluates: the stage
+// with the mesh points held reports nothing, and keying the projector's
+// rigExec:projectionMode token (a raw read at the time) in the session
+// layer makes it report that attribute, once, as a revision read.
+static void
+TestStaticReportRevisionReads()
+{
+    const std::string path =
+        (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
+         "rigExecPathReadsHeldPoints.usda")
+            .string();
+    const UsdStageRefPtr stage = UsdStage::Open(path);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/PathReadAsset/Rig");
+    std::vector<RigExecBakeStaticEntry> entries;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, rig);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecBakeStaticReport(evaluator, &entries, &error));
+        CHECK(entries.empty());
+        for (const RigExecBakeStaticEntry &entry : entries) {
+            std::printf("  unexpected static %s: %s\n", entry.field.c_str(),
+                        entry.source.c_str());
+        }
+    }
+    const SdfPath mode(
+        "/PathReadAsset/Rig/Movers/Projector.rigExec:projectionMode");
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        const UsdAttribute attribute =
+            stage->GetPrimAtPath(mode.GetPrimPath())
+                .CreateAttribute(mode.GetNameToken(),
+                                 SdfValueTypeNames->Token, false);
+        CHECK(attribute.Set(TfToken("material"), UsdTimeCode(1.0)) &&
+              attribute.Set(TfToken("material"), UsdTimeCode(10.0)));
+    }
+    {
+        RigExecRigEvaluator evaluator(stage, rig);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecBakeStaticReport(evaluator, &entries, &error));
+    }
+    stage->GetSessionLayer()->Clear();
+    const bool reported =
+        entries.size() == 1 &&
+        entries[0].field ==
+            "revision read /PathReadAsset/Rig/Movers/Projector" &&
+        entries[0].source == mode.GetString();
+    CHECK(reported);
+    std::printf("static report: a keyed raw path read is %s (%zu "
+                "entr%s)\n",
+                reported ? "reported" : "NOT reported", entries.size(),
+                entries.size() == 1 ? "y" : "ies");
+}
+
+/// A presentation with one control naming \p input, finished with
+/// \p identifier.
+static std::vector<uint8_t>
+_PresentationBytes(const std::string &input,
+                   const char *identifier = fb::PresentationIdentifier())
+{
+    flatbuffers::FlatBufferBuilder builder;
+    const auto control = fb::CreatePresentationControl(
+        builder, builder.CreateString("Tail.rz"),
+        builder.CreateString(input), fb::PresentationUnit::Degrees);
+    const std::vector<flatbuffers::Offset<fb::PresentationControl>> controls(
+        1, control);
+    const auto presentation = fb::CreatePresentation(
+        builder, 1, builder.CreateVector(controls), 0,
+        builder.CreateString("{}"));
+    builder.Finish(presentation, identifier);
+    return std::vector<uint8_t>(builder.GetBufferPointer(),
+                                builder.GetBufferPointer() +
+                                    builder.GetSize());
+}
+
+// The bake's options: a time must be finite; a presentation whose control
+// names a listed input is embedded as the Presentation section byte for
+// byte, and one naming an input the file does not list, or with another
+// identifier, refuses the bake.
+static void
+TestBakeOptions(const std::string &fixture, const std::string &input)
+{
+    const UsdStageRefPtr stage = UsdStage::Open(fixture);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = FindRig(stage);
+    const auto bake = [&](const std::vector<uint8_t> &presentation,
+                          RigExecBakeResult *result, std::string *error) {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.presentation = presentation;
+        return RigExecBakeToBinary(evaluator, opts, result, error);
+    };
+    const auto section = [](const std::vector<uint8_t> &bytes,
+                            std::vector<uint8_t> *out) {
+        std::string error;
+        const std::unique_ptr<RigExecBinaryReader> reader =
+            RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
+        CHECK(reader);
+        const uint8_t *data = nullptr;
+        size_t size = 0;
+        if (!reader ||
+            !reader->FindSection(RigExecBinarySection::Presentation, &data,
+                                 &size)) {
+            return false;
+        }
+        out->assign(data, data + size);
+        return true;
+    };
+    RigExecBakeResult result;
+    std::string error;
+    for (const double time : {std::numeric_limits<double>::infinity(),
+                              -std::numeric_limits<double>::infinity()}) {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        RigExecBakeOpts opts;
+        opts.time = time;
+        error.clear();
+        CHECK(!RigExecBakeToBinary(evaluator, opts, &result, &error));
+        CHECK(error == "the bake time must be finite");
+    }
+    std::vector<uint8_t> embedded;
+    CHECK(bake({}, &result, &error));
+    CHECK(!section(result.bytes, &embedded));
+
+    const std::vector<uint8_t> valid = _PresentationBytes(input);
+    CHECK(bake(valid, &result, &error));
+    if (!error.empty()) {
+        std::printf("presentation bake diagnostic: %s\n", error.c_str());
+    }
+    CHECK(section(result.bytes, &embedded) && embedded == valid);
+
+    error.clear();
+    CHECK(!bake(_PresentationBytes("/RigExecTest/NoSuch.attr"), &result,
+                &error));
+    CHECK(error == "presentation control Tail.rz names "
+                   "/RigExecTest/NoSuch.attr, which is not a listed input");
+    std::printf("presentation, unknown input: %s\n", error.c_str());
+
+    error.clear();
+    CHECK(!bake(_PresentationBytes(input, "XXXX"), &result, &error));
+    CHECK(error == "the presentation is not a valid REXP buffer");
+    std::printf("presentation, bad identifier: %s\n", error.c_str());
+}
+
+static void
+TestBake(const std::string &fixture, const std::vector<double> &tableFrames,
+         const char *animation, const std::filesystem::path &scratch)
 {
     const UsdStageRefPtr stage = UsdStage::Open(fixture);
     CHECK(stage);
@@ -2521,6 +2901,10 @@ TestBake(const std::string &fixture, const std::vector<double> &bakeFrames,
     if (rigPath.IsEmpty()) {
         return;
     }
+    // The table's first frame, or the probe time without a table.
+    const double bakeTime = tableFrames.empty()
+                                ? std::numeric_limits<double>::quiet_NaN()
+                                : tableFrames.front();
     // Two fresh evaluators, one bake each: a bake is deterministic, so the
     // bytes are identical -- which is what makes a byte golden meaningful
     // for every slice that follows.
@@ -2529,13 +2913,11 @@ TestBake(const std::string &fixture, const std::vector<double> &bakeFrames,
         RigExecRigEvaluator evaluator(stage, rigPath);
         evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
-        opts.frames = bakeFrames;
+        opts.time = bakeTime;
         RigExecBakeResult result;
         std::string error;
         CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-        if (error.empty()) {
-            // keep the diagnostic visible when the CHECK above fails
-        } else {
+        if (!error.empty()) {
             std::printf("bake diagnostic: %s\n", error.c_str());
         }
         if (result.bytes.empty()) {
@@ -2552,17 +2934,67 @@ TestBake(const std::string &fixture, const std::vector<double> &bakeFrames,
         size_t size = 0;
         CHECK(reader->FindSection(RigExecBinarySection::Manifest, &data,
                                  &size));
-        CHECK(size == result.manifestJson.size());
-        CHECK(result.manifestJson.find(rigPath.GetString()) !=
-              std::string::npos);
+        const std::string manifest =
+            data ? std::string(reinterpret_cast<const char *>(data), size)
+                 : std::string();
+        CHECK(manifest.find(rigPath.GetString()) != std::string::npos);
         if (pass == 0) {
+            const double t =
+                std::isnan(bakeTime)
+                    ? RigExecBakedProbeTime(stage).GetValue()
+                    : bakeTime;
             _BinaryCompareProgram(evaluator, result.bytes);
             RigExecWireComputed computed;
             RigExecWireInputTable table;
             std::unique_ptr<RigExecBinaryReader> computedReader;
-            _BinaryCheckComputed(evaluator.GetBakedProgram()->GetStepGraph(),
-                                 result.bytes, bakeFrames, &computed, &table,
-                                 &computedReader);
+            if (_BinaryCheckComputed(
+                    evaluator.GetBakedProgram()->GetStepGraph(), result.bytes,
+                    {t}, &computed, &table, &computedReader)) {
+                // One record, at the bake time, holding the static path
+                // reads the gathers need.
+                CHECK(table.frames.size() == 1);
+                CHECK(computed.bakeTime == t);
+                std::set<std::string> seenPathReads;
+                for (const RigExecWireFrameInputs &record : table.frames) {
+                    CHECK(record.frame == t);
+                    for (const RigExecWirePathRead &read : record.pathReads) {
+                        std::string path;
+                        if (computedReader->GetString(read.path, &path)) {
+                            seenPathReads.insert(path);
+                        }
+                    }
+                }
+                _BinaryCheckWeightGatherReads(fixture, seenPathReads);
+                if (table.frames.size() == 1) {
+                    _BinaryCheckEnumeratedReads(
+                        fixture, evaluator.GetBakedProgram()->GetStepGraph(),
+                        t, table.frames.front().pathReads, *computedReader,
+                        result);
+                }
+            }
+            // The class guard: a stage classed static holds an animated
+            // source in static data, one classed inputs holds none, so a
+            // class cannot outlive its reason.
+            if (animation) {
+                std::vector<RigExecBakeStaticEntry> entries;
+                CHECK(RigExecBakeStaticReport(evaluator, &entries, &error));
+                for (const RigExecBakeStaticEntry &entry : entries) {
+                    std::printf("  static %s: %s\n", entry.field.c_str(),
+                                entry.source.c_str());
+                }
+                const bool expectStatic =
+                    std::string(animation) == "static";
+                const bool ok =
+                    expectStatic ? !entries.empty() : entries.empty();
+                std::printf("class guard %s: %s, %zu animated static "
+                            "source(s)%s\n",
+                            fixture.c_str(), animation, entries.size(),
+                            ok ? "" : " -- WRONG CLASS");
+                CHECK(ok);
+                if (ok) {
+                    ++(expectStatic ? classGuardStatic : classGuardInputs);
+                }
+            }
         }
         if (pass == 0) {
             first = result.bytes;
@@ -2570,9 +3002,9 @@ TestBake(const std::string &fixture, const std::vector<double> &bakeFrames,
             CHECK(result.bytes == first);
         }
     }
-    // Capture fidelity: drive the capture API frame by frame, encoding
-    // and decoding the table per frame and comparing against the live
-    // program before the next Evaluate moves it on.
+    // Capture fidelity: one forced run at the bake time through the
+    // capture API, its record encoded, decoded and compared against the
+    // live program before anything moves it on.
     {
         RigExecRigEvaluator evaluator(stage, rigPath);
         evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
@@ -2582,86 +3014,46 @@ TestBake(const std::string &fixture, const std::vector<double> &bakeFrames,
         std::string captureError;
         RigExecBakeCapture capture(evaluator, &writer, &captureError);
         CHECK(capture.Valid());
-        const RigExecBakedProgramImpl &program =
-            evaluator.GetBakedProgram()->GetStepGraph();
+        const RigExecBakedProgram *baked = evaluator.GetBakedProgram();
+        CHECK(baked);
+        if (!capture.Valid() || !baked) {
+            return;
+        }
+        const RigExecBakedProgramImpl &program = baked->GetStepGraph();
         const std::vector<_BinaryOracleInput> oracle =
             _BinaryCollectOracle(program);
-        const std::vector<double> &frames = bakeFrames;
-        bool recordsVary = false;
-        std::string varyDiff;
-        bool haveFirst = false;
-        RigExecWireFrameInputs firstRecord;
-        std::set<std::string> seenPathReads;
-        for (double frame : frames) {
-            RigExecRigPose pose;
-            if (!capture.CaptureFrame(frame, &pose, &captureError)) {
-                CHECK(captureError.empty());
-                std::printf("capture diagnostic: %s\n",
-                            captureError.c_str());
-                return;
-            }
-            // The string table so far, as bytes: the comparisons below
-            // resolve references the way every other section does.
-            const std::vector<uint8_t> bytes = writer.Finish();
-            std::string openError;
-            std::unique_ptr<RigExecBinaryReader> reader =
-                RigExecBinaryReader::Open(bytes.data(), bytes.size(),
-                                          &openError);
-            CHECK(reader);
-            if (!reader) {
-                return;
-            }
-            std::vector<uint8_t> payload;
-            CHECK(RigExecWireEncodeInputTable(capture.GetTable(),
-                                              &payload));
-            RigExecWireReader cursor(payload.data(), payload.size());
-            RigExecWireInputTable decoded;
-            std::string decodeError;
-            CHECK(RigExecWireDecodeInputTable(&cursor, &decoded,
-                                              &decodeError));
-            _BinaryCompareTableStatic(program, decoded, oracle, *reader);
-            CHECK(decoded.frames.size() ==
-                  capture.GetTable().frames.size());
-            _BinaryCompareTableFrame(program, decoded.frames.back(),
-                                     oracle, decoded, *reader);
-            for (const RigExecWirePathRead &read :
-                 decoded.frames.back().pathReads) {
-                std::string path;
-                if (reader->GetString(read.path, &path)) {
-                    seenPathReads.insert(path);
-                }
-            }
-            if (!haveFirst) {
-                firstRecord = decoded.frames.back();
-                haveFirst = true;
-            } else if (!_BinaryFrameInputsEqual(firstRecord,
-                                               decoded.frames.back())) {
-                if (!recordsVary) {
-                    varyDiff = _BinaryFrameInputsDiff(firstRecord,
-                                                      decoded.frames.back());
-                }
-                recordsVary = true;
-            }
+        const double t = std::isnan(bakeTime)
+                             ? RigExecBakedProbeTime(stage).GetValue()
+                             : bakeTime;
+        baked->RequestFullRun();
+        RigExecRigPose pose;
+        if (!capture.CaptureFrame(t, &pose, &captureError)) {
+            CHECK(captureError.empty());
+            std::printf("capture diagnostic: %s\n", captureError.c_str());
+            return;
         }
-        // The varies-guard: animated fixtures must capture different
-        // records across frames (or the varying-input sampling is
-        // vacuous), and static fixtures must capture identical ones
-        // (or the capture is nondeterministic).
-        const _BinaryVariance expected =
-            _BinaryExpectedVariance(fixture);
-        if (expected == _BinaryVariance::Animated && !recordsVary) {
-            std::printf(
-                "capture is static on animated fixture %s\n",
-                fixture.c_str());
+        // The string table so far, as bytes: the comparisons below
+        // resolve references the way every other section does.
+        const std::vector<uint8_t> bytes = writer.Finish();
+        std::string openError;
+        std::unique_ptr<RigExecBinaryReader> reader =
+            RigExecBinaryReader::Open(bytes.data(), bytes.size(), &openError);
+        CHECK(reader);
+        if (!reader) {
+            return;
         }
-        CHECK(expected != _BinaryVariance::Animated || recordsVary);
-        if (expected == _BinaryVariance::Static && recordsVary) {
-            std::printf(
-                "capture varies on static fixture %s: %s\n",
-                fixture.c_str(), varyDiff.c_str());
+        std::vector<uint8_t> payload;
+        CHECK(RigExecWireEncodeInputTable(capture.GetTable(), &payload));
+        RigExecWireReader cursor(payload.data(), payload.size());
+        RigExecWireInputTable decoded;
+        std::string decodeError;
+        CHECK(RigExecWireDecodeInputTable(&cursor, &decoded, &decodeError));
+        _BinaryCompareTableStatic(program, decoded, oracle, *reader);
+        CHECK(decoded.frames.size() == 1);
+        if (!decoded.frames.empty()) {
+            _BinaryCompareTableFrame(program, decoded.frames.back(), oracle,
+                                     decoded, *reader);
         }
-        CHECK(expected != _BinaryVariance::Static || !recordsVary);
-        _BinaryCheckWeightGatherReads(fixture, seenPathReads);
     }
     // The bytes survive a trip through a file: the CLI writes exactly this
     // vector, so the vector is the format, not an in-memory sketch of it.
@@ -2679,14 +3071,22 @@ TestBake(const std::string &fixture, const std::vector<double> &bakeFrames,
     }
     CHECK(Bytes(file) == first);
 
-    // No frames is an error, not an empty binary.
+    // A bake is of the authored epoch: a held drag refuses it rather than
+    // printing its value into the defaults.
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    RigExecValueOverride drag;
+    drag.prim = rigPath;
+    drag.attribute = TfToken("avars:tx");
+    drag.value = VtValue(0.25);
+    evaluator.SetInteractiveOverrides({drag});
     RigExecBakeOpts opts;
+    opts.time = bakeTime;
     RigExecBakeResult result;
     std::string error;
     CHECK(!RigExecBakeToBinary(evaluator, opts, &result, &error));
-    CHECK(error.find("frames") != std::string::npos);
+    CHECK(error == "cannot bake with interactive overrides standing");
+    CHECK(result.bytes.empty());
 }
 
 int
@@ -2711,11 +3111,19 @@ main(int argc, char **argv)
     TestComputedEnvelopeBake();
     TestComputedCurrentPhaseBake();
     TestComputedChainBake();
+    TestEnumeratedReadThroughPropertyResult();
+    TestStaticReportRevisionReads();
+    TestBakeOptions((std::filesystem::path(RIGEXEC_EXAMPLES_DIR) /
+                     "01_FkChainTail.usda")
+                        .string(),
+                    "/TailAsset/Rig/Controls/Tail2.avars:rz");
     auto BakeOne = [&](const std::string &stage,
-                       const std::vector<double> &frames) {
+                       const std::vector<double> &frames,
+                       const char *animation) {
         std::printf("bake conformance: %s\n", stage.c_str());
-        TestBake(stage, frames, scratch);
+        TestBake(stage, frames, animation, scratch);
     };
+    int bakingRows = 0;
     if (argc > 1 && std::filesystem::is_directory(argv[1])) {
         for (const RigExecExampleFixture &fixture :
              kRigExecExampleFixtures) {
@@ -2726,11 +3134,13 @@ main(int argc, char **argv)
             }
             const std::string stage =
                 (std::filesystem::path(argv[1]) / fixture.stage).string();
-            BakeOne(stage, _ParseTableFrames(fixture.frames));
+            BakeOne(stage, _ParseTableFrames(fixture.frames),
+                    fixture.animation);
+            ++bakingRows;
         }
     } else if (argc > 1) {
         for (int i = 1; i < argc; ++i) {
-            BakeOne(argv[i], {1001, 1024, 1048});
+            BakeOne(argv[i], {1001}, nullptr);
         }
     } else {
         for (const RigExecExampleFixture &fixture :
@@ -2741,9 +3151,21 @@ main(int argc, char **argv)
             const std::string stage =
                 (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) /
                  fixture.stage).string();
-            BakeOne(stage, _ParseTableFrames(fixture.frames));
+            BakeOne(stage, _ParseTableFrames(fixture.frames),
+                    fixture.animation);
+            ++bakingRows;
         }
     }
+    std::printf("class guard: %d static row(s) holding an animated source "
+                "in static data, %d inputs row(s) holding none, of %d "
+                "baking row(s)\n",
+                classGuardStatic, classGuardInputs, bakingRows);
+    CHECK(classGuardStatic + classGuardInputs == bakingRows);
+    std::printf("path-read completeness: %d of %d baking row(s) hold "
+                "exactly the enumerated path reads\n",
+                enumeratedRows, bakingRows);
+    CHECK(enumeratedRows == enumeratedTried);
+    CHECK(bakingRows == 0 || enumeratedTried == bakingRows);
     if (!failures) {
         std::filesystem::remove_all(scratch);
     }

@@ -2,18 +2,29 @@
 #include "playback.h"
 #include "rigExec/movers/moverRegistry.h"
 
+#include "pxr/base/tf/staticTokens.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usdGeom/xformable.h"
 
-#include <cmath>
 #include <fstream>
-#include <limits>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace rigExec {
 
 namespace {
+
+TF_DEFINE_PRIVATE_TOKENS(
+    _playbackTokens,
+    ((asset, "rigExec:asset"))
+    ((generated, "__RigExecGenerated"))
+    (points)
+    (normals)
+    (extent)
+);
 
 // FNV-1a 64 over the file bytes: the binding-epoch digest. Only stability
 // per file is required (a binary's published prim set never changes), so
@@ -44,8 +55,7 @@ RigExecPlaybackAssetFor(const UsdPrim &rig, std::string *resolvedPath)
     if (!rig || !resolvedPath) {
         return false;
     }
-    static const TfToken assetName("rigExec:asset");
-    const UsdAttribute attribute = rig.GetAttribute(assetName);
+    const UsdAttribute attribute = rig.GetAttribute(_playbackTokens->asset);
     if (!attribute) {
         return false;
     }
@@ -99,12 +109,6 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
         }
         return false;
     }
-    if (reader->GetFrameTimes().empty()) {
-        if (error) {
-            *error = resolvedPath + " carries no baked frames";
-        }
-        return false;
-    }
     // Plugin movers play through the kernel their plugin registered. One
     // with none loaded here passes its points through: said once here, and
     // in the diagnostics of every frame it does.
@@ -124,6 +128,28 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
                     resolvedPath.c_str(), why.c_str());
         }
     }
+    // The inputs bind once the kernels are in: a binary baked from this
+    // stage resolves every one, so a miss is said once, here.
+    RigExecInputSampler sampler;
+    if (!sampler.Bind(_stage, *reader, &why)) {
+        if (error) {
+            *error = "cannot play " + resolvedPath + ": " + why;
+        }
+        return false;
+    }
+    const std::vector<std::string> &warnings = sampler.GetWarnings();
+    if (!warnings.empty()) {
+        std::string named;
+        for (size_t i = 0; i < warnings.size() && i < 4; ++i) {
+            named += (i ? "; " : "") + warnings[i];
+        }
+        if (warnings.size() > 4) {
+            named += "; ...";
+        }
+        TF_WARN("rigExec: %s: %zu input(s) keep their bake-time value: %s",
+                resolvedPath.c_str(), warnings.size(), named.c_str());
+    }
+    _sampler = std::move(sampler);
     _epochDigest = _PlaybackDigestBytes(bytes);
     _reader = std::move(reader);
     _assetPath = resolvedPath;
@@ -133,31 +159,7 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
 SdfPath
 RigExecBakedPlayback::GetGeneratedScope() const
 {
-    return _rigPath.AppendChild(TfToken("__RigExecGenerated"));
-}
-
-double
-RigExecBakedPlayback::MapTimeToFrame(UsdTimeCode time) const
-{
-    if (!_reader) {
-        return 0.0;
-    }
-    const std::vector<double> frames = _reader->GetFrameTimes();
-    if (frames.empty()) {
-        return 0.0;
-    }
-    const double t = time.IsDefault() ? 0.0 : time.GetValue();
-    double best = frames[0];
-    double gap = std::fabs(frames[0] - t);
-    for (size_t i = 1; i < frames.size(); ++i) {
-        const double next = std::fabs(frames[i] - t);
-        // Strictly smaller wins, so a tie keeps the lower frame.
-        if (next < gap) {
-            gap = next;
-            best = frames[i];
-        }
-    }
-    return best;
+    return _rigPath.AppendChild(_playbackTokens->generated);
 }
 
 RigExecImagingBridge::PublishResult
@@ -168,7 +170,7 @@ RigExecBakedPlayback::EvaluateAndPublishResult(UsdTimeCode time)
         return result;
     }
     std::string why;
-    if (!_reader->SetFrame(MapTimeToFrame(time), &why) ||
+    if (!_sampler.Apply(time, _reader.get(), &why) ||
         !_reader->Execute(&why)) {
         // The bridge's rule: a rig that cannot evaluate stops driving the
         // scene, and the next good generation re-announces its epoch.
@@ -179,17 +181,16 @@ RigExecBakedPlayback::EvaluateAndPublishResult(UsdTimeCode time)
 
     auto snapshot = std::make_shared<RigExecImagingSnapshot>();
     snapshot->generation = ++_generation;
-    // The REQUESTED time, not the baked frame it mapped to: the merge
-    // only accepts a generation that describes the stage/time it asked
-    // for, and the mapping is this class's internal answer.
+    // The requested time: the merge only accepts a generation that
+    // describes the stage/time it asked for.
     snapshot->stage = UsdStageWeakPtr(_stage);
     snapshot->sampleTimeIsDefault = time.IsDefault();
     snapshot->sampleTime = time.IsDefault() ? 0.0 : time.GetValue();
     snapshot->assetRoot = _assetRoot;
 
-    static const TfToken pointsName("points");
-    static const TfToken normalsName("normals");
-    static const TfToken extentName("extent");
+    const TfToken &pointsName = _playbackTokens->points;
+    const TfToken &normalsName = _playbackTokens->normals;
+    const TfToken &extentName = _playbackTokens->extent;
     for (const RigExecRuntimePoints &moved : _reader->GetPoints()) {
         if (!_PlaybackPathOk(moved.path)) {
             continue;

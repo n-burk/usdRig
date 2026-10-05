@@ -175,11 +175,14 @@ void TestEvaluation()
     CHECK(!RigExecCanFreezeProgram(baked, &error));
     CHECK(!error.empty());
     RigExecBakeOpts options;
-    options.frames = {1.0};
+    options.time = 1.0;
     RigExecBakeResult output;
     error.clear();
     CHECK(RigExecBakeToBinary(baked, options, &output, &error));
     CHECK(!output.bytes.empty());
+    // The plugin records its gain read, a key no core assembly reads: the
+    // bake counts it rather than refusing it.
+    CHECK(output.pathReadsUnenumerated == 1);
 }
 
 // A plugin mover on /Rig/Body that also reads /Rig/Reference at `final`,
@@ -288,13 +291,17 @@ void TestExport()
     const auto stage = MakeExportRig(type.c_str());
     RigExecRigEvaluator baked(stage, kRig);
     baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    // Baked at frame 1. The plugin mover's payload holds its parameters
+    // (gain among them) as the bake time read them, so playback is held to
+    // the program at that time; inputs the rest of the rig reads move.
     RigExecBakeOpts options;
-    options.frames = {1.0, 2.0, 3.0};
+    options.time = 1.0;
     RigExecBakeResult result;
     std::string error;
     if (!RigExecBakeToBinary(baked, options, &result, &error)) {
         throw std::runtime_error("export failed: " + error);
     }
+    CHECK(result.pathReadsUnenumerated == 1);
 
     // Played through the plugin's kernel: what the baked program evaluated.
     auto reader = RigExecRuntimeReader::Open(result.bytes.data(),
@@ -308,49 +315,48 @@ void TestExport()
     CHECK(handler && handler->runtimeKernel.IsSet());
     CHECK(reader->SetExternalKernel(type, handler->runtimeKernel, &error));
     CHECK(reader->GetMissingExternalKernels().empty());
-    for (double frame : options.frames) {
-        CHECK(reader->SetFrame(frame, &error));
-        if (!reader->Execute(&error)) {
-            throw std::runtime_error("playback failed: " + error);
-        }
-        CHECK(!Mentions(reader->GetDiagnostics(), "no kernel"));
-        const RigExecRigPose pose = baked.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid);
-        for (const SdfPath &path : {kTarget, kReference}) {
-            CheckSame(Points(*reader, path),
-                      pose.movedProperties.at(path).Get<VtVec3fArray>(),
-                      path.GetString() + " at frame " +
-                          std::to_string(frame));
-        }
-        // Both sides agreeing is not enough: they must agree on the
-        // deformation, reference included (ty and gain are linear keys).
-        CheckDeformed(Points(*reader, kTarget), float(frame - 1.0),
-                      0.5f * float(frame), "playback arithmetic");
+    const double frame = 1.0;
+    if (!reader->Execute(&error)) {
+        throw std::runtime_error("playback failed: " + error);
     }
+    CHECK(!Mentions(reader->GetDiagnostics(), "no kernel"));
+    const RigExecRigPose pose = baked.Evaluate(UsdTimeCode(frame));
+    CHECK(pose.valid);
+    for (const SdfPath &path : {kTarget, kReference}) {
+        CheckSame(Points(*reader, path),
+                  pose.movedProperties.at(path).Get<VtVec3fArray>(),
+                  path.GetString() + " at frame " + std::to_string(frame));
+    }
+    // Both sides agreeing is not enough: they must agree on the
+    // deformation, reference included (ty is 0 and gain 0.5 at frame 1).
+    CheckDeformed(Points(*reader, kTarget), 0.0f, 0.5f,
+                  "playback arithmetic");
 
-    // Posed: the phased reference is playback's own evaluation, so a posed
-    // control moves the plugin mover with it.
-    CHECK(reader->SetFrame(2.0, &error));
-    CHECK(reader->SetAvar(kControl.GetString() + ".avars:ty", 5.0, &error));
+    // Posed: the phased reference is playback's own evaluation, so the
+    // control's avar set as an input moves the plugin mover with it. An
+    // unconnected avar's authored value and an interactive override on it
+    // are the same value, so the program's reference is the override.
+    CHECK(reader->SetInput(kControl.GetString() + ".avars:ty", 5.0, &error));
     CHECK(reader->Execute(&error));
     baked.SetInteractiveOverrides({RigExecValueOverride{
         kControl, TfToken(), TfToken("avars:ty"), VtValue(5.0)}});
-    const RigExecRigPose posed = baked.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose posed = baked.Evaluate(UsdTimeCode(frame));
     baked.ClearInteractiveOverrides();
     CHECK(posed.valid);
     CheckSame(Points(*reader, kTarget),
               posed.movedProperties.at(kTarget).Get<VtVec3fArray>(),
               "posed playback");
-    // The exported frame bytes hold the unposed lift of 1; the kernel must
-    // have used playback's lift of 5.
-    CheckDeformed(Points(*reader, kTarget), 5.0f, 1.0f, "posed arithmetic");
-    reader->ClearAvars();
+    // The payload was baked with the unposed lift of 0; the kernel must
+    // have used playback's lift of 5 (and the gain of 0.5 the payload
+    // holds).
+    CheckDeformed(Points(*reader, kTarget), 5.0f, 0.5f, "posed arithmetic");
+    reader->ResetInputs();
 
     // Without the kernel the mover is a no-op, and every frame says so.
     auto bare = RigExecRuntimeReader::Open(result.bytes.data(),
                                            result.bytes.size(), &error);
     CHECK(bare);
-    CHECK(bare->SetFrame(3.0, &error) && bare->Execute(&error));
+    CHECK(bare->Execute(&error));
     CHECK(Mentions(bare->GetDiagnostics(),
                    "warning: /Rig/External is a " + type +
                        ", which this runtime has no kernel for"));
@@ -362,7 +368,7 @@ void TestExport()
         }
     }
     CheckSame(Points(*bare, kReference),
-              baked.Evaluate(UsdTimeCode(3.0))
+              baked.Evaluate(UsdTimeCode(frame))
                   .movedProperties.at(kReference)
                   .Get<VtVec3fArray>(),
               "reference beside a missing kernel");

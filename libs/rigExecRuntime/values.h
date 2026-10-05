@@ -102,10 +102,24 @@ struct RrPointFrameArray {
     }
 };
 
-// A resolved input value, tagged like RigExecWireInput: a read the slots
-// answered, or a wire constant.
+// The value type of an input, a read or a constant: the slot model's tag
+// numbers (v4::InputTag), of which 0..6 are also RigExecWireInput::Tag's.
+enum class RrInputTag : uint8_t {
+    Double = 0,
+    Float = 1,
+    Bool = 2,
+    Int = 3,
+    Matrix4d = 4,
+    Token = 5,
+    Vec3d = 6,
+    Vec3f = 7,
+};
+
+// A resolved input value: a read the slots answered, a wire constant, or
+// an input's value. The member `tag` names holds the value; Token is a
+// string-table id (or an id the reader interned for unknown text).
 struct RrInputValue {
-    RigExecWireInput::Tag tag = RigExecWireInput::Tag::Double;
+    RrInputTag tag = RrInputTag::Double;
     double f64 = 0;
     float f32 = 0;
     bool boolean = false;
@@ -113,44 +127,37 @@ struct RrInputValue {
     RrMat4d matrix;
     uint32_t token = 0;
     RrVec3d vec = RrVec3d(0.0);
+    RrVec3f vec3f = RrVec3f(0.0f);
 
     bool operator==(const RrInputValue &o) const
     {
         return tag == o.tag && f64 == o.f64 && f32 == o.f32 &&
                boolean == o.boolean && i32 == o.i32 && matrix == o.matrix &&
-               token == o.token && vec == o.vec;
+               token == o.token && vec == o.vec && vec3f == o.vec3f;
     }
     bool operator!=(const RrInputValue &o) const { return !(*this == o); }
 };
 
-inline RrInputValue
-RrWireInputConstant(const RigExecWireInput &input)
-{
-    RrInputValue out;
-    out.tag = input.tag;
-    out.f64 = input.f64;
-    out.f32 = input.f32;
-    out.boolean = input.boolean;
-    out.i32 = input.i32;
-    for (size_t r = 0; r < 4; ++r) {
-        for (size_t c = 0; c < 4; ++c) {
-            out.matrix[r][c] = input.matrix[r * 4 + c];
-        }
-    }
-    out.token = input.token;
-    out.vec =
-        RrVec3d(input.vec[0], input.vec[1], input.vec[2]);
-    return out;
-}
+// One input of a .rigexec: an attribute whose authored value the rig reads.
+struct RigExecRuntimeInputInfo {
+    /// The attribute path, e.g. "/Rig/Controls/Hips.avars:tx".
+    std::string name;
+    /// The attribute's value type.
+    RrInputTag type = RrInputTag::Double;
+    /// Whether the attribute is time-varying in the baked stage.
+    bool animated = false;
+    /// Its value at the bake time; the type's zero when that read failed.
+    RrInputValue defaultValue;
+};
 
 // A slot-model value in the steps' form: the member its tag names holds
-// the value's bits, every other member stays zero. The input tags share
-// numbers up to Vec3d; no step input reads a Vec3f.
+// the value's bits, every other member stays zero. No step input reads a
+// Vec3f; an input's value can be one.
 inline RrInputValue
 RrValueFromWire(const v4::RigExecWireValue &value)
 {
     RrInputValue out;
-    out.tag = RigExecWireInput::Tag(uint8_t(value.tag));
+    out.tag = RrInputTag(uint8_t(value.tag));
     out.matrix.SetDiagonal(0.0);
     switch (value.tag) {
     case v4::InputTag::Double:
@@ -181,6 +188,7 @@ RrValueFromWire(const v4::RigExecWireValue &value)
         out.vec = RrVec3d(value.vec3d[0], value.vec3d[1], value.vec3d[2]);
         break;
     case v4::InputTag::Vec3f:
+        out.vec3f = RrVec3f(value.vec3f[0], value.vec3f[1], value.vec3f[2]);
         break;
     }
     return out;
@@ -363,37 +371,12 @@ struct RrStepCounters {
     void Clear() { *this = RrStepCounters(); }
 };
 
-// What a cross-check comparison compared (RrProgram::CrossCheckThisRun):
-// computed results (constraint envelopes, current-phase weight packets,
-// property values) and computed reads (registered reads that cross a
-// chain, every other registered read, blend channel weights, revision
-// default weights, connection-following mover scalars, blend sample
-// activations).
-enum RrCrossCheckKind : size_t {
-    RrCrossCheckEnvelope = 0,
-    RrCrossCheckPhasePacket,
-    RrCrossCheckPropertyValue,
-    RrCrossCheckChainRead,
-    RrCrossCheckRegisteredRead,
-    RrCrossCheckBlendWeight,
-    RrCrossCheckDefaultWeight,
-    RrCrossCheckPathRead,
-    RrCrossCheckBlendActivation,
-    RrCrossCheckKindCount,
-};
-
-using RrCrossCheckCounts = std::array<uint64_t, RrCrossCheckKindCount>;
-
 // One step's run output: diagnostics, counters, phased records, bail.
 struct RrStepOutput {
     std::vector<std::string> diagnostics;
     RrStepCounters counters;
     RrSnapshots snapshots;
     bool bail = false;
-    /// Values this run compared against the frame record, per kind.
-    /// Execute zeroes every step's counts before the walk, so a skipped
-    /// step reports none, and sums them after.
-    RrCrossCheckCounts crossChecked{};
 
     void BeginRun()
     {

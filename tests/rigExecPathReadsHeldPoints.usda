@@ -1,0 +1,31 @@
+#usda 1.0
+(
+    """
+    Test stage: tests/fixtures/computed_path_reads.usda with the mesh's
+    points held at their frame-1 value by a default in this stronger layer,
+    which shadows the keyed points. With the chain base no longer animated,
+    every animated source the rig reads is an input, so a binary baked at
+    frame 1 must follow the keyed double3 ray origin, matrix4d shader
+    offset, float displacement and dials at frames 1, 4, 7 and 10:
+    verify_binary_computed_path_reads_held_points and
+    testRigExecRuntimeGeometry play it.
+    """
+    defaultPrim = "PathReadAsset"
+    endTimeCode = 10
+    startTimeCode = 1
+    subLayers = [
+        @./fixtures/computed_path_reads.usda@
+    ]
+    upAxis = "Y"
+)
+
+over "PathReadAsset"
+{
+    over "Geom"
+    {
+        over "Ball"
+        {
+            point3f[] points = [(1, 0, 0), (0, 1.2, 0), (-1, 0, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+        }
+    }
+}

@@ -24,11 +24,20 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace rigExec {
 
 class RigExecRigEvaluator;
 class RigExecBakeCapture;
+
+/// A weight object the runtime resolves whose oracle facts hold one time's
+/// answer of an animated attribute: the facts are what the file holds, the
+/// attribute is what the stage animates.
+struct RigExecBakeTimeVaryingFact {
+    std::string object;
+    std::string attribute;
+};
 
 class RigExecBakeComputedCapture {
 public:
@@ -40,11 +49,11 @@ public:
     /// program (the caller compiles first), interning names into
     /// \p writer. \p records is the frame-record capture of the same
     /// program, whose directory numbers the chain-crossing reads. Static
-    /// data and slot defaults are read at the program's probe time. Check
-    /// Valid before recording.
+    /// data and slot defaults are read at \p time, the bake time. Never
+    /// evaluates. Check Valid before recording.
     RigExecBakeComputedCapture(RigExecRigEvaluator &evaluator,
                                const RigExecBakeCapture &records,
-                               RigExecBinaryWriter *writer,
+                               double time, RigExecBinaryWriter *writer,
                                std::string *error);
     ~RigExecBakeComputedCapture();
 
@@ -55,6 +64,14 @@ public:
     bool RecordFrame(double frame, std::string *error);
 
     const RigExecWireComputed &GetComputed() const;
+
+    /// Every resolved weight object whose facts are of an animated
+    /// attribute, in the order the composition pass met them (composing
+    /// objects before the ones they compose).
+    const std::vector<RigExecBakeTimeVaryingFact> &GetTimeVaryingFacts() const;
+
+    /// The listed inputs' names, ascending: the names a client sets.
+    const std::vector<std::string> &GetListedInputNames() const;
 
 private:
     struct _State;

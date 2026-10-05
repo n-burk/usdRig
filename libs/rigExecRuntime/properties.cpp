@@ -48,9 +48,6 @@ struct RrPropertyScratch {
     std::vector<size_t> phasedPublish;
     /// Per propertyValues entry: the attribute path id it is published at.
     std::vector<uint32_t> publishNames;
-    /// Per chain read: the frame-record field the cross-check compares it
-    /// with, named for a mismatch.
-    std::vector<std::string> chainReadFields;
     // Per-run scratch, reused across Executes.
     std::vector<RrPropertyValue> history;
     std::vector<float> weights;
@@ -350,11 +347,6 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
     history.push_back(_RrHold(value));
     for (size_t k = plan.phasedBegin; k < plan.phasedEnd; ++k) {
         const v4::PhasedConsumer &consumer = computed.phasedConsumers[k];
-        // An override on the consumer or on a hop before the target is
-        // what the reader's walk meets first: the reader stands aside.
-        if (RrInputsAnyOverridden(program, consumer.hops)) {
-            continue;
-        }
         RrPropertyValue held =
             history[std::min(size_t(consumer.applied), history.size() - 1)];
         // RigExecPhasedConsumerValue: a float/double pair converts, every
@@ -368,168 +360,6 @@ _RrRunChain(RrProgram *program, RrPropertyScratch *scratch, size_t c,
         }
         _RrPublish(program, *scratch, scratch->phasedPublish[k], held);
     }
-}
-
-const char *
-_RrTagName(_RrTag tag)
-{
-    switch (tag) {
-    case _RrTag::Float:
-        return "float";
-    case _RrTag::Double:
-        return "double";
-    case _RrTag::Matrix4d:
-        return "matrix4d";
-    case _RrTag::Vec3f:
-        return "vec3f";
-    }
-    return "unknown";
-}
-
-const char *
-_RrTagName(RigExecWirePropertyValue::Tag tag)
-{
-    return _RrTagName(_RrTag(uint8_t(tag)));
-}
-
-bool
-_RrSameDoubleBits(double a, double b)
-{
-    return std::memcmp(&a, &b, sizeof(double)) == 0;
-}
-
-// A read's value in the frame record's form: the old input tags are the v4
-// numbers up to Vec3d, and every member the tag does not use stays zero, as
-// the record leaves it.
-RigExecWireValue
-_RrRecordForm(const v4::RigExecWireValue &value)
-{
-    RigExecWireValue out;
-    out.tag = RigExecWireInput::Tag(uint8_t(value.tag));
-    switch (value.tag) {
-    case v4::InputTag::Double:
-        std::memcpy(&out.f64, &value.bits, sizeof(out.f64));
-        break;
-    case v4::InputTag::Float:
-        out.f32 = RrWireValueFloat(value);
-        break;
-    case v4::InputTag::Bool:
-        out.boolean = value.bits != 0;
-        break;
-    case v4::InputTag::Int:
-        out.i32 = int32_t(uint32_t(value.bits));
-        break;
-    case v4::InputTag::Matrix4d:
-        out.matrix = value.matrix;
-        break;
-    case v4::InputTag::Token:
-        out.token = uint32_t(value.bits);
-        break;
-    case v4::InputTag::Vec3d:
-        out.vec = value.vec3d;
-        break;
-    default:
-        break;
-    }
-    return out;
-}
-
-const char *
-_RrInputTagName(RigExecWireInput::Tag tag)
-{
-    switch (tag) {
-    case RigExecWireInput::Tag::Double:
-        return "double";
-    case RigExecWireInput::Tag::Float:
-        return "float";
-    case RigExecWireInput::Tag::Bool:
-        return "bool";
-    case RigExecWireInput::Tag::Int:
-        return "int";
-    case RigExecWireInput::Tag::Matrix4d:
-        return "matrix4d";
-    case RigExecWireInput::Tag::Token:
-        return "token";
-    case RigExecWireInput::Tag::Vec3d:
-        return "vec3d";
-    }
-    return "unknown";
-}
-
-// Bitwise equality of a computed read and the record's value, on the
-// member the tag names; false with the mismatch text naming \p field.
-bool
-_RrSameRecordBits(const RrProgram *program, const RigExecWireValue &computed,
-                  const RigExecWireValue &recorded, const std::string &field,
-                  std::string *why)
-{
-    if (computed.tag != recorded.tag) {
-        *why = RrCrossCheckMismatch(field + ".tag",
-                                    _RrInputTagName(computed.tag),
-                                    _RrInputTagName(recorded.tag));
-        return false;
-    }
-    switch (computed.tag) {
-    case RigExecWireInput::Tag::Double:
-        if (!_RrSameDoubleBits(computed.f64, recorded.f64)) {
-            *why = RrCrossCheckMismatch(field, computed.f64, recorded.f64);
-            return false;
-        }
-        return true;
-    case RigExecWireInput::Tag::Float:
-        if (!RrSameFloatBits(computed.f32, recorded.f32)) {
-            *why = RrCrossCheckMismatch(field, computed.f32, recorded.f32);
-            return false;
-        }
-        return true;
-    case RigExecWireInput::Tag::Bool:
-        if (computed.boolean != recorded.boolean) {
-            *why = RrCrossCheckMismatch(
-                field, std::string(computed.boolean ? "true" : "false"),
-                std::string(recorded.boolean ? "true" : "false"));
-            return false;
-        }
-        return true;
-    case RigExecWireInput::Tag::Int:
-        if (computed.i32 != recorded.i32) {
-            *why = RrCrossCheckMismatch(field, std::to_string(computed.i32),
-                                        std::to_string(recorded.i32));
-            return false;
-        }
-        return true;
-    case RigExecWireInput::Tag::Matrix4d:
-        for (size_t i = 0; i < 16; ++i) {
-            if (!_RrSameDoubleBits(computed.matrix[i], recorded.matrix[i])) {
-                *why = RrCrossCheckMismatch(
-                    field + ".matrix[" + std::to_string(i / 4) + "][" +
-                        std::to_string(i % 4) + "]",
-                    computed.matrix[i], recorded.matrix[i]);
-                return false;
-            }
-        }
-        return true;
-    case RigExecWireInput::Tag::Token:
-        if (computed.token != recorded.token) {
-            *why = RrCrossCheckMismatch(field,
-                                        program->TextOrEmpty(computed.token),
-                                        program->TextOrEmpty(recorded.token));
-            return false;
-        }
-        return true;
-    case RigExecWireInput::Tag::Vec3d:
-        for (size_t i = 0; i < 3; ++i) {
-            if (!_RrSameDoubleBits(computed.vec[i], recorded.vec[i])) {
-                *why = RrCrossCheckMismatch(
-                    field + ".vec[" + std::to_string(i) + "]",
-                    computed.vec[i], recorded.vec[i]);
-                return false;
-            }
-        }
-        return true;
-    }
-    *why = RrCrossCheckMismatch(field + ".tag", std::string("unknown"),
-                                std::string("unknown"));
-    return false;
 }
 
 }  // namespace
@@ -628,16 +458,6 @@ RrPropertySizeScratch(RrProgram *program, std::string *error)
         plan.phasedEnd = k + 1;
         scratch->phasedPublish[k] = entryOf(consumer.consumer);
     }
-    scratch->chainReadFields.reserve(computed->chainReads.size());
-    for (const RigExecWireChainRead &entry : computed->chainReads) {
-        const std::string head =
-            entry.read.walk.empty()
-                ? std::string()
-                : program->TextOrEmpty(
-                      computed->inputs[entry.read.walk[0]].name);
-        scratch->chainReadFields.push_back(
-            "values[uid " + std::to_string(entry.uid) + ", " + head + "]");
-    }
     const size_t entries = scratch->publishNames.size();
     store.propertyResults.clear();
     store.propertyValues.assign(entries, _RrPropertyZero());
@@ -670,8 +490,9 @@ RrRunPropertyChains(RrProgram *program,
     for (size_t c = 0; c < computed->propertyChains.size(); ++c) {
         const v4::PropertyChain &chain = computed->propertyChains[c];
         const RrPropertyScratch::Chain &plan = scratch->chains[c];
-        // The base: a drag on the target, else its own value; a missing
-        // value, or one of another type, fails that read.
+        // The base: the target's own value, which an input set there
+        // authors; a missing value, or one of another type, fails that
+        // read.
         v4::RigExecWireValue base;
         if (!RrChainBase(program, c, plan.baseTag, &base)) {
             poseDiagnostics->push_back("property chain " + plan.target +
@@ -700,143 +521,6 @@ RrRunPropertyChains(RrProgram *program,
                         poseDiagnostics);
             break;
         }
-    }
-    return true;
-}
-
-bool
-RrCrossCheckPropertyResults(const RrProgram *program,
-                            const RigExecWireFrameInputs &record,
-                            uint64_t *compared, std::string *error)
-{
-    const auto mismatch = [error](const std::string &why) {
-        return _RrFail(error, "property chains: " + why);
-    };
-    const auto fieldOf = [program](uint32_t path) {
-        return "propertyValues[" + program->TextOrEmpty(path) + "]";
-    };
-    if (record.propertyPaths.size() != record.propertyValues.size()) {
-        return _RrFail(error,
-                       "frame record pairs no values with its properties");
-    }
-    const std::map<uint32_t, RrPropertyValue> &results =
-        program->store.propertyResults;
-    uint64_t checked = 0;
-    for (size_t i = 0; i < record.propertyPaths.size(); ++i) {
-        const RigExecWirePropertyValue &recorded = record.propertyValues[i];
-        const uint32_t path = record.propertyPaths[i];
-        const auto found = results.find(path);
-        if (found == results.end()) {
-            return mismatch(RrCrossCheckMismatch(
-                fieldOf(path), std::string("nothing"),
-                _RrTagName(recorded.tag)));
-        }
-        const RrPropertyValue &value = found->second;
-        if (uint8_t(value.tag) != uint8_t(recorded.tag)) {
-            return mismatch(RrCrossCheckMismatch(fieldOf(path) + ".tag",
-                                                 _RrTagName(value.tag),
-                                                 _RrTagName(recorded.tag)));
-        }
-        switch (value.tag) {
-        case _RrTag::Float:
-            if (!RrSameFloatBits(value.f32, recorded.f32)) {
-                return mismatch(
-                    RrCrossCheckMismatch(fieldOf(path), value.f32,
-                                         recorded.f32));
-            }
-            break;
-        case _RrTag::Double:
-            if (!_RrSameDoubleBits(value.f64, recorded.f64)) {
-                return mismatch(
-                    RrCrossCheckMismatch(fieldOf(path), value.f64,
-                                         recorded.f64));
-            }
-            break;
-        case _RrTag::Matrix4d:
-            for (size_t r = 0; r < 4; ++r) {
-                for (size_t c = 0; c < 4; ++c) {
-                    const double want = recorded.matrix[r * 4 + c];
-                    if (!_RrSameDoubleBits(value.matrix[r][c], want)) {
-                        return mismatch(RrCrossCheckMismatch(
-                            fieldOf(path) + ".matrix[" + std::to_string(r) +
-                                "][" + std::to_string(c) + "]",
-                            value.matrix[r][c], want));
-                    }
-                }
-            }
-            break;
-        case _RrTag::Vec3f:
-            for (size_t k = 0; k < 3; ++k) {
-                if (!RrSameFloatBits(value.vec[k], recorded.vec[k])) {
-                    return mismatch(RrCrossCheckMismatch(
-                        fieldOf(path) + ".vec[" + std::to_string(k) + "]",
-                        value.vec[k], recorded.vec[k]));
-                }
-            }
-            break;
-        }
-        ++checked;
-    }
-    // Every recorded path is published (above) and the record names each
-    // path once, so a larger map publishes a path the record lacks.
-    if (results.size() != record.propertyPaths.size()) {
-        for (const auto &[path, value] : results) {
-            if (std::find(record.propertyPaths.begin(),
-                          record.propertyPaths.end(),
-                          path) == record.propertyPaths.end()) {
-                return mismatch(RrCrossCheckMismatch(fieldOf(path),
-                                                     _RrTagName(value.tag),
-                                                     std::string("nothing")));
-            }
-        }
-        return mismatch("the frame record names a property path twice");
-    }
-    if (compared) {
-        *compared += checked;
-    }
-    return true;
-}
-
-bool
-RrCrossCheckChainReads(const RrProgram *program,
-                       const RigExecWireFrameInputs &record,
-                       uint64_t *compared, std::string *error)
-{
-    const RigExecWireComputed *computed = program->inputState.computed;
-    if (computed->chainReads.empty()) {
-        return true;
-    }
-    const RrPropertyScratch *scratch =
-        static_cast<const RrPropertyScratch *>(program->properties.get());
-    if (!scratch ||
-        scratch->chainReadFields.size() != computed->chainReads.size()) {
-        return _RrFail(error, "the chain reads disagree with the computed "
-                              "section");
-    }
-    uint64_t checked = 0;
-    for (size_t k = 0; k < computed->chainReads.size(); ++k) {
-        const RigExecWireChainRead &entry = computed->chainReads[k];
-        // The record holds a value for the uid only at the frames whose
-        // step read it (uids ascending, paired with values); those are
-        // compared.
-        const auto at = std::lower_bound(record.uids.begin(),
-                                         record.uids.end(), entry.uid);
-        const size_t index = size_t(at - record.uids.begin());
-        if (at == record.uids.end() || *at != entry.uid ||
-            index >= record.values.size()) {
-            continue;
-        }
-        const RigExecWireValue value =
-            _RrRecordForm(RrReadInput(program, entry.read));
-        std::string why;
-        if (!_RrSameRecordBits(program, value, record.values[index],
-                               scratch->chainReadFields[k], &why)) {
-            return _RrFail(error, "chain reads: " + why);
-        }
-        ++checked;
-    }
-    if (compared) {
-        *compared += checked;
     }
     return true;
 }

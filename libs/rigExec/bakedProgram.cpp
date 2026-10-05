@@ -3279,6 +3279,9 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     RigExecRigEvaluator &E = *B.evaluator;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "Baked", "baked");
     _lastBail = RigExecBakedBail::None;
+    // Consumed by this run whatever becomes of it.
+    const bool fullRunRequested = _fullRunRequested;
+    _fullRunRequested = false;
 
     // Two clock reads per phase, and only when asked: the profiler's scopes
     // take three mutexes apiece and cost more than the prologue they would
@@ -3505,7 +3508,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     bool bailed = false;
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedRegion", "baked");
-        bailed = !RigExecBakedRunSteps(&B, time);
+        bailed = !RigExecBakedRunSteps(&B, time, fullRunRequested);
     }
     if (measuring) {
         const double mark = now();

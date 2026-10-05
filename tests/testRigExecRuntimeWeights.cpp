@@ -1,15 +1,11 @@
 // rigExecRuntime weight-family parity (M2): baked program vs runtime over
 // every baking fixture, comparing weight packets bit for bit, plus
 // synthetic builder checks against the real baked builders.
-// Fixture strategy per fixture: bake in-process, then run a fresh
-// evaluator (Evaluate) and a fresh reader (SetFrame + Execute) frame by
-// frame in order. Mask 0x7 is tried first; when Execute fails with "not
-// implemented yet" (pose or geometry still landing) the fixture falls
-// back to mask 0x2 and compares pose-independent packets only: volume
-// packets read the pose base frames, so volumetric objects -- and
-// anything composed over them -- are deferred, with weightFrames and
-// diagnostics, until pose lands. In 0x7 mode weightFrames and
-// diagnostics compare verbatim too.
+// Fixture strategy per fixture: bake in-process at the first frame, then
+// run a fresh evaluator (Evaluate) and a fresh reader played through its
+// inputs (the input sampler hands it the stage's animated inputs) frame by
+// frame in order, comparing every packet, the weight frames and the
+// diagnostics. A `static` row plays the bake time alone.
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
@@ -49,6 +45,8 @@ static int failures = 0;
             std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);  \
         }                                                               \
     } while (0)
+
+#include "rigExecRuntimeDrive.h"
 
 static SdfPath
 _FindRig(const UsdStageRefPtr &stage)
@@ -115,45 +113,6 @@ _DecodeWeightWire(const std::vector<uint8_t> &bytes,
     }
     RigExecWireReader cursor(data, size);
     return RigExecWireDecodeDomainGeometry(&cursor, geometry, error);
-}
-
-static bool
-_IsVolumeType(const std::string &type)
-{
-    return type == "RigExecSphereWeight" || type == "RigExecPlaneWeight" ||
-           type == "RigExecCurveWeight";
-}
-
-// Objects whose packets read pose state and so cannot compare while
-// pose is masked out: volumetric objects, and anything composed over
-// a deferred object. The table is in dependency order, so one forward
-// pass settles it.
-static std::vector<char>
-_DeferredWithoutPose(
-    RigExecBinaryReader *reader,
-    const std::vector<RigExecWireWeightObject> &objects)
-{
-    std::vector<char> deferred(objects.size(), 0);
-    for (size_t i = 0; i < objects.size(); ++i) {
-        const RigExecWireWeightObject &wire = objects[i];
-        if (_IsVolumeType(_WireString(reader, wire.type))) {
-            deferred[i] = 1;
-            continue;
-        }
-        if (wire.base >= 0 && size_t(wire.base) < deferred.size() &&
-            deferred[size_t(wire.base)]) {
-            deferred[i] = 1;
-            continue;
-        }
-        for (int32_t input : wire.inputs) {
-            if (input >= 0 && size_t(input) < deferred.size() &&
-                deferred[size_t(input)]) {
-                deferred[i] = 1;
-                break;
-            }
-        }
-    }
-    return deferred;
 }
 
 static bool
@@ -261,38 +220,22 @@ _CompareDiagnostics(const std::vector<std::string> &actual,
     return false;
 }
 
-// Runs one fixture at one mask with a fresh evaluator and reader,
-// frames in order. Weight steps emit no diagnostics of their own, so a
-// diagnostics mismatch in 0x7 mode is sibling drift, reported as such.
+// Plays one fixture's bake through its inputs with a fresh evaluator and
+// reader, \p frames in order: every weight packet, the weight frames and
+// the diagnostics, bit for bit and verbatim.
 static bool
-_RunFixtureAtMask(const std::string &stagePath,
-                  const std::vector<double> &frames,
-                  const std::vector<uint8_t> &bytes,
-                  RigExecBinaryReader *reader,
-                  const RigExecWireDomainGeometry &geometry,
-                  unsigned mask, bool compareFrames,
-                  size_t *compared, size_t *deferredCount)
+_RunFixture(const UsdStageRefPtr &stage, const std::vector<double> &frames,
+            const std::vector<uint8_t> &bytes, RigExecBinaryReader *reader,
+            const RigExecWireDomainGeometry &geometry, size_t *compared)
 {
-    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
-    if (!stage) {
-        return false;
-    }
     RigExecRigEvaluator evaluator(stage, _FindRig(stage));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::string error;
-    std::unique_ptr<RigExecRuntimeReader> runtime =
-        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
-    if (!runtime) {
+    RigExecTestPlayer runtime;
+    if (!runtime.Open(bytes, stage, &error)) {
         std::printf("  open diagnostic: %s\n", error.c_str());
         return false;
     }
-    runtime->SetCrossCheckForTesting(true);
-    runtime->SetRunMaskForTesting(mask);
-    const std::vector<char> deferred =
-        mask == 0x7u ? std::vector<char>(geometry.weightObjects.size(),
-                                         0)
-                     : _DeferredWithoutPose(
-                           reader, geometry.weightObjects);
     bool ok = true;
     for (double frame : frames) {
         const RigExecRigPose pose = evaluator.Evaluate(
@@ -303,14 +246,8 @@ _RunFixtureAtMask(const std::string &stagePath,
             std::printf("  no baked program @ %g\n", frame);
             return false;
         }
-        if (!runtime->SetFrame(frame, &error)) {
-            std::printf("  SetFrame @ %g: %s\n", frame,
-                        error.c_str());
-            return false;
-        }
-        if (!runtime->Execute(&error)) {
-            std::printf("  Execute @ %g mask=0x%x: %s\n", frame, mask,
-                        error.c_str());
+        if (!runtime.Play(frame, &error)) {
+            std::printf("  Execute @ %g: %s\n", frame, error.c_str());
             return false;
         }
         const std::vector<RigExecWeightPacket> &bakedPackets =
@@ -327,9 +264,6 @@ _RunFixtureAtMask(const std::string &stagePath,
             return false;
         }
         for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
-            if (deferred[i]) {
-                continue;
-            }
             ++(*compared);
             if (!_ComparePacket(reader, geometry.weightObjects[i],
                                 bakedPackets[i], actualPackets[i],
@@ -337,26 +271,21 @@ _RunFixtureAtMask(const std::string &stagePath,
                 ok = false;
             }
         }
-        if (compareFrames) {
-            if (!_CompareWeightFrames(runtime->GetWeightFrames(),
-                                      pose.weightFrames, frame)) {
-                ok = false;
-            }
-            if (!_CompareDiagnostics(runtime->GetDiagnostics(),
-                                     pose.diagnostics, frame)) {
-                ok = false;
-            }
+        if (!_CompareWeightFrames(runtime->GetWeightFrames(),
+                                  pose.weightFrames, frame)) {
+            ok = false;
         }
-    }
-    for (char d : deferred) {
-        *deferredCount += d ? frames.size() : 0;
+        if (!_CompareDiagnostics(runtime->GetDiagnostics(),
+                                 pose.diagnostics, frame)) {
+            ok = false;
+        }
     }
     return ok;
 }
 
 static void
 _TestFixture(const std::string &name, const std::string &stagePath,
-             const std::vector<double> &frames)
+             const std::vector<double> &frames, bool staticClass)
 {
     const UsdStageRefPtr stage = UsdStage::Open(stagePath);
     CHECK(stage);
@@ -368,79 +297,42 @@ _TestFixture(const std::string &name, const std::string &stagePath,
     if (rigPath.IsEmpty()) {
         return;
     }
-    RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    if (!error.empty()) {
-        std::printf("bake diagnostic: %s\n", error.c_str());
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
+        if (!error.empty()) {
+            std::printf("bake diagnostic: %s\n", error.c_str());
+        }
     }
-    CHECK(!result.bytes.empty());
-    if (result.bytes.empty()) {
+    CHECK(!bytes.empty());
+    if (bytes.empty()) {
         return;
     }
     std::unique_ptr<RigExecBinaryReader> reader;
     RigExecWireDomainGeometry geometry;
-    CHECK(_DecodeWeightWire(result.bytes, &reader, &geometry, &error));
+    CHECK(_DecodeWeightWire(bytes, &reader, &geometry, &error));
     if (!reader) {
         std::printf("wire decode diagnostic: %s\n", error.c_str());
         return;
     }
-
-    // Full mask first: weightFrames and diagnostics compare only when
-    // every family runs.
-    size_t compared = 0, deferredCount = 0;
-    if (_RunFixtureAtMask(stagePath, frames, result.bytes, reader.get(),
-                          geometry, 0x7u, true, &compared,
-                          &deferredCount)) {
-        std::printf("%s: mask=0x7 compared=%zu deferred=%zu "
+    // A `static` row holds an animated source in static data at the bake
+    // time: it plays that time alone.
+    const std::vector<double> times =
+        staticClass ? std::vector<double>{frames.front()} : frames;
+    size_t compared = 0;
+    if (_RunFixture(stage, times, bytes, reader.get(), geometry,
+                    &compared)) {
+        std::printf("%s: %zu frame(s) of a bake at %g%s, packets=%zu "
                     "weightFrames=yes diagnostics=yes OK\n",
-                    name.c_str(), compared, deferredCount);
-        return;
-    }
-    // Fall back only across an unlanded sibling: a weight failure of
-    // our own must fail the fixture, not hide behind the mask. The
-    // probe walks every frame, so a partially landed sibling still
-    // reads as a gap rather than a weight failure.
-    compared = deferredCount = 0;
-    std::unique_ptr<RigExecRuntimeReader> probe =
-        RigExecRuntimeReader::Open(result.bytes.data(),
-                                   result.bytes.size(), &error);
-    bool siblingMissing = false;
-    if (probe) {
-        probe->SetCrossCheckForTesting(true);
-        probe->SetRunMaskForTesting(0x7u);
-        for (double frame : frames) {
-            if (!probe->SetFrame(frame, &error) ||
-                probe->Execute(&error)) {
-                continue;
-            }
-            if (error.find("not implemented yet") !=
-                std::string::npos) {
-                siblingMissing = true;
-            }
-            break;
-        }
-    }
-    if (!siblingMissing) {
-        ++failures;
-        std::printf("%s: mask=0x7 FAILED (not a sibling gap)\n",
-                    name.c_str());
-        return;
-    }
-    if (_RunFixtureAtMask(stagePath, frames, result.bytes, reader.get(),
-                          geometry, 0x2u, false, &compared,
-                          &deferredCount)) {
-        std::printf("%s: mask=0x2 compared=%zu deferred=%zu "
-                    "weightFrames=deferred diagnostics=deferred OK\n",
-                    name.c_str(), compared, deferredCount);
+                    name.c_str(), times.size(), frames.front(),
+                    staticClass ? " (static)" : "", compared);
         return;
     }
     ++failures;
-    std::printf("%s: mask=0x2 FAILED\n", name.c_str());
+    std::printf("%s: FAILED\n", name.c_str());
 }
 
 // Synthetic builder checks: a hand-built wire program exercising every
@@ -1330,10 +1222,9 @@ _TestSyntheticBuilders()
     }
     // Pose and geometry prologues are siblings' work; the weight walk
     // runs under its own bit. Every weight object field is read through
-    // the Computed section, as a bake writes it.
-    runtime->SetCrossCheckForTesting(true);
+    // the Computed section, as a bake writes it: a fresh reader plays the
+    // slots' defaults.
     runtime->SetRunMaskForTesting(0x2u);
-    CHECK(runtime->SetFrame(1.0, &error));
     CHECK(runtime->Execute(&error));
     if (!error.empty()) {
         std::printf("synthetic execute diagnostic: %s\n",
@@ -1382,6 +1273,59 @@ _TestSyntheticBuilders()
     }
     std::printf("synthetic: %zu/%zu packets match\n", ok,
                 expected.size());
+
+    // Each slot set as an input: the next run builds every packet that
+    // reads one from the new value -- object 2's default (0.3 -> 0.6),
+    // the combine over it (object 10), and object 11's signed and legacy
+    // scales (2 -> 1.5, 0.5 -> 0.75) -- and leaves the others as they were.
+    CHECK(runtime->GetInputCount() == 3);
+    CHECK(runtime->SetInput("/Synth/0.value", 0.6, &error));
+    CHECK(runtime->SetInput("/Synth/1.value", 1.5, &error));
+    CHECK(runtime->SetInput("/Synth/2.value", 0.75, &error));
+    CHECK(runtime->Execute(&error));
+    std::vector<RigExecWeightPacket> moved = expected;
+    {
+        RigExecStaticWeightInputs in;
+        in.representation = TfToken("constant");
+        in.rangePolicy = TfToken("strict");
+        in.defaultWeight = 0.6f;
+        moved[2] = RigExecBuildStaticWeightPacket(in);
+    }
+    moved[10] = RigExecBuildCombineWeightPacket(
+        TfToken("dense"), TfToken("strict"), TfToken("add"),
+        {moved[2], moved[6]}, 3, 0.5f, 0.0f);
+    moved[25] = RigExecBuildCombineWeightPacket(
+        TfToken("dense"), TfToken("strict"), TfToken("add"),
+        {moved[2], moved[6]}, 3, 1.0f, 0.0f);
+    {
+        RigExecVolumeWeightInputs sphereIn = volumeInputs("y", "unbounded");
+        sphereIn.samplePoints = signedSamples;
+        sphereIn.scales = GfVec3f(1.0f, 0.75f, 1.0f);
+        sphereIn.positiveScales = GfVec3f(1.5f, 3.0f, 1.0f);
+        sphereIn.negativeScales = GfVec3f(1.0f, 1.0f, 4.0f);
+        sphereIn.params.curve =
+            RigExecBuildFalloffLut(RigExecFalloffProfile::Smooth);
+        moved[11] = RigExecBuildVolumeWeightPacket(
+            TfToken("RigExecSphereWeight"), sphereIn);
+    }
+    for (const size_t i : {size_t(2), size_t(10), size_t(11)}) {
+        CHECK(moved[i].values != expected[i].values ||
+              moved[i].defaultWeight != expected[i].defaultWeight);
+    }
+    const std::vector<RrWeightPacket> &set = runtime->GetWeightPackets();
+    CHECK(set.size() == moved.size());
+    size_t setOk = 0;
+    for (size_t i = 0; i < moved.size() && i < set.size(); ++i) {
+        const std::string path =
+            _WireString(reader.get(), geometry.weightObjects[i].path);
+        if (_SynthCompare(path.c_str(), moved[i], set[i], reader.get())) {
+            ++setOk;
+        } else {
+            ++failures;
+        }
+    }
+    std::printf("synthetic, slots set as inputs: %zu/%zu packets match\n",
+                setOk, moved.size());
 }
 
 // The read evaluator and the weight oracle over a hand-built Computed
@@ -1462,7 +1406,10 @@ _TestComputedReadsAndOracle()
         slot.name = slotNames[s];
         slot.type = slotTypes[s];
         slot.value = frame.values[s];
-        slot.flags = uint8_t(v4::InputSlotFlags::Listed);
+        slot.flags = uint8_t(v4::InputSlotFlags::Listed) |
+                     (frame.hasValue[s]
+                          ? uint8_t(v4::InputSlotFlags::HasValue)
+                          : uint8_t(0));
         computed.inputs.push_back(slot);
     }
     computed.listedInputs = 5;
@@ -1574,7 +1521,6 @@ _TestComputedReadsAndOracle()
     program.strings = strings.get();
     CHECK(RrInputsOpen(&program, &computed, &error));
     CHECK(RrWeightSizeScratch(&program, &error));
-    CHECK(RrInputsSelectFrame(&program, 0, &error));
     program.store.overridden.assign(4, 0);
 
     // Reads, mode by mode.
@@ -1772,7 +1718,7 @@ main(int argc, char **argv)
             continue;
         }
         _TestFixture(fixture.stage, examplesDir + "/" + fixture.stage,
-                     frames);
+                     frames, std::string(fixture.animation) == "static");
     }
     CHECK(sawBaking);
 

@@ -1,20 +1,21 @@
-// .rigexec capture: the per-frame values the program consumed.
+// .rigexec capture: the values the program consumed in a run.
 // RigExecBakeCapture walks the standing program's bound varying inputs once,
 // assigning uids in the traversal order the InputTable section documents,
 // arms the bake recorder on the resolved inputs, and then captures one
 // record per Evaluate: the recorded reads plus the prologue's retained
-// arrays for that frame. The destructor disarms, so the evaluator a bake
-// leaves behind reads exactly as it did before.
+// arrays for that run. A bake captures one record, from a run at the bake
+// time with every step forced (RigExecBakedProgram::RequestFullRun), so the
+// record holds every static datum a step reads. The destructor disarms, so
+// the evaluator a bake leaves behind reads exactly as it did before.
 // A capture refuses to run with interactive overrides standing: a bake is
-// of the authored epoch, and a held drag would print its values into every
-// stream. It also refuses when the program rebuilds mid-loop, because a
+// of the authored epoch, and a held drag would print its values into the
+// record. It also refuses when the program rebuilds mid-capture, because a
 // rebuild reallocates the inputs the uid map keys off.
 //
 // The directory holds the inputs that vary, the ones a record can hold a
 // value for. The runtime reads every input over the Computed section's
-// slots (computedCapture.h), which a client poses through; a uid only keys
-// the frame records the runtime's test cross-check compares those reads
-// with.
+// slots (computedCapture.h), which a client sets, and reads only the
+// record's static data, never its uids or recorded input values.
 //
 #ifndef RIGEXEC_BAKE_CAPTURE_H
 #define RIGEXEC_BAKE_CAPTURE_H
@@ -24,6 +25,7 @@
 
 #include <pxr/base/vt/value.h>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -37,6 +39,20 @@ class RigExecBakedProgram;
 struct RigExecBakedProgramImpl;
 struct RigExecRigPose;
 struct RigExecBakeReadRecorder;
+
+/// Encodes one stage read's value the way a frame record holds it: an empty
+/// value is Absent, a token goes through \p intern for its string id. False,
+/// with \p out untouched past its tag, for a type no record can carry.
+bool RigExecBakeEncodePathValue(
+    const PXR_NS::VtValue &held,
+    const std::function<uint32_t(const std::string &)> &intern,
+    RigExecWirePathValue *out);
+
+/// Whether \p a and \p b hold the same value bit for bit: the same tag, and
+/// for that tag the same payload, floats and doubles compared by their bytes
+/// (so -0 differs from 0 and a NaN equals only its own bits), tokens by id.
+bool RigExecBakeSamePathValue(const RigExecWirePathValue &a,
+                              const RigExecWirePathValue &b);
 
 class RigExecBakeCapture {
 public:
@@ -66,8 +82,8 @@ public:
     }
 
     /// Evaluates \p frame and appends its record, or returns false with
-    /// the reason: an invalid generation, a mid-loop rebuild, an
-    /// unmapped record, or an unencodable value.
+    /// the reason: an invalid generation, a rebuild since the capture was
+    /// armed, an unmapped record, or an unencodable value.
     bool CaptureFrame(double frame, RigExecRigPose *pose,
                       std::string *error);
 

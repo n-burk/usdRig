@@ -1,12 +1,13 @@
-// rigExecRuntime frame driver (M2 framework).
-// SetFrame selects a baked frame, whose slot values the input reads see;
-// Execute places the standing overrides, runs the property chains, then
-// the prologues, the region and the epilogue, then assembles the outputs.
+// rigExecRuntime driver (M2 framework).
+// The input API writes slot values; Execute applies the inputs set since
+// the last run, runs the property chains, then the prologues over the
+// static record, the region and the epilogue, then assembles the outputs.
 // Failures name the step and keep the previous outputs.
 #include "rigExecRuntime/runtime.h"
 
+#include "poseInternal.h"
+
 #include <algorithm>
-#include <cmath>
 
 namespace rigExec {
 
@@ -25,78 +26,153 @@ _SortByPath(std::vector<T> *out)
 
 }  // namespace
 
-std::vector<double>
-RigExecRuntimeReader::GetFrameTimes() const
+size_t
+RigExecRuntimeReader::GetInputCount() const
 {
-    std::vector<double> out;
-    out.reserve(_inputs.frames.size());
-    for (const auto &frame : _inputs.frames) {
-        out.push_back(frame.frame);
-    }
-    return out;
+    return _program.inputState.inputInfo.size();
+}
+
+const RigExecRuntimeInputInfo &
+RigExecRuntimeReader::GetInputInfo(size_t index) const
+{
+    const auto &info = _program.inputState.inputInfo;
+    return index < info.size() ? info[index] : _noInput;
 }
 
 bool
-RigExecRuntimeReader::SetFrame(double frame, std::string *error)
+RigExecRuntimeReader::FindInput(const std::string &name, size_t *index) const
 {
-    for (size_t i = 0; i < _inputs.frames.size(); ++i) {
-        if (_inputs.frames[i].frame != frame) {
-            continue;
-        }
-        const RigExecWireFrameInputs &record = _inputs.frames[i];
-        if (record.uids.size() != record.values.size()) {
-            if (error) {
-                *error = "frame record pairs no values with its uids";
-            }
-            return false;
-        }
-        _frameIndex = i;
-        _frameSelected = true;
-        return true;
+    const RrInputState &state = _program.inputState;
+    const auto found = state.nameIndex.find(name);
+    if (found == state.nameIndex.end() ||
+        found->second >= state.inputInfo.size()) {
+        return false;
     }
-    if (error) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "no baked frame at %.17g",
-                      frame);
-        *error = buffer;
+    if (index) {
+        *index = found->second;
     }
-    return false;
+    return true;
+}
+
+const RrInputValue &
+RigExecRuntimeReader::GetInputValue(size_t index) const
+{
+    const auto &values = _program.inputState.inputValues;
+    return index < values.size() ? values[index] : _noValue;
+}
+
+bool
+RigExecRuntimeReader::SetInput(const std::string &name,
+                               const RrInputValue &value, std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsSet(&_program, index, value, error);
+}
+
+bool
+RigExecRuntimeReader::SetInput(const std::string &name, double value,
+                               std::string *error)
+{
+    RrInputValue held = _noValue;
+    held.tag = RrInputTag::Double;
+    held.f64 = value;
+    return SetInput(name, held, error);
+}
+
+bool
+RigExecRuntimeReader::SetInputToken(const std::string &name,
+                                    const std::string &text,
+                                    std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsSetToken(&_program, index, text, error);
+}
+
+bool
+RigExecRuntimeReader::SetInputAt(size_t index, const RrInputValue &value,
+                                 std::string *error)
+{
+    return RrInputsSet(&_program, index, value, error);
+}
+
+bool
+RigExecRuntimeReader::SetSampledInputAt(size_t index,
+                                        const RrInputValue &value,
+                                        std::string *error)
+{
+    return RrInputsSet(&_program, index, value, error,
+                       /*acceptNonFinite=*/true);
+}
+
+bool
+RigExecRuntimeReader::ClearInput(const std::string &name, std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsClear(&_program, index, error);
+}
+
+bool
+RigExecRuntimeReader::ClearInputAt(size_t index, std::string *error)
+{
+    return RrInputsClear(&_program, index, error);
+}
+
+bool
+RigExecRuntimeReader::ResetInput(const std::string &name, std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    RrInputsReset(&_program, index);
+    return true;
 }
 
 void
-RigExecRuntimeReader::ClearAvars()
+RigExecRuntimeReader::ResetInputs()
 {
-    _avarOverrides.clear();
+    for (size_t i = 0; i < GetInputCount(); ++i) {
+        RrInputsReset(&_program, i);
+    }
 }
 
-bool
-RigExecRuntimeReader::SetAvar(const std::string &path, double value,
-                            std::string *error)
+void
+RigExecRuntimeReader::TouchAnimatedInputs()
 {
-    // The avar's input slot, and the pose slot and channel of the avar
-    // binding it heads.
-    const RrInputState &state = _program.inputState;
-    const auto found = state.nameIndex.find(path);
-    const int32_t avar = found != state.nameIndex.end()
-                             ? state.slotAvar[found->second]
-                             : -1;
-    const size_t slot = avar >= 0 ? size_t(avar) / 11 : 0;
-    const int channel = avar >= 0 ? avar % 11 : -1;
-    if (!std::isfinite(value) || avar < 0 || channel >= 9 ||
-        _slotMeta.slotKind[slot] != RigExecWireSlotKind::FirstFramePose ||
-        _constants.posedAuthored[slot] ||
-        std::find(_slotMeta.controlSlots.begin(), _slotMeta.controlSlots.end(),
-                  int(slot)) == _slotMeta.controlSlots.end() ||
-        (channel >= 3 && channel <= 5 && _constants.noScaleAvars[slot])) {
-        if (error) *error = "expected a finite TRS avar on a compiled pose slot: " + path;
-        return false;
-    }
-    // An interactive override, as in the USD evaluators: every read whose
-    // walk passes the avar reads it, and a phased reader whose consumer or
-    // hop it is stands aside. On an avar math movers revise it is the
-    // chain's base (RrChainBase), and the chain's result answers there.
-    _avarOverrides[found->second] = value;
-    return true;
+    _program.store.animatedTouched = true;
+}
+
+double
+RigExecRuntimeReader::GetBakeTime() const
+{
+    return _computed.bakeTime;
+}
+
+std::string
+RigExecRuntimeReader::GetTokenText(uint32_t token) const
+{
+    return _program.TextOrEmpty(token);
 }
 
 void
@@ -105,20 +181,18 @@ RigExecRuntimeReader::SetRunMaskForTesting(unsigned mask)
     _program.runMask = mask;
 }
 
-void
-RigExecRuntimeReader::SetCrossCheckForTesting(bool enabled)
-{
-    _program.crossCheck = enabled;
-}
-
 std::vector<RigExecRuntimeJointMatrix>
 RigExecRuntimeReader::GetJointRestMatrices() const
 {
     std::vector<RigExecRuntimeJointMatrix> out;
+    const std::vector<RrPointFrame> &restFrames = RrPoseRestFrames(&_program);
     for (size_t i = 0; i < _slotMeta.jointSlots.size(); ++i) {
         const size_t slot = size_t(_slotMeta.jointSlots[i]);
+        if (slot >= restFrames.size()) {
+            continue;
+        }
         RrMat4d rest;
-        const RrPointFrame frame = RrWireToFrame(_constants.restFrames[slot]);
+        const RrPointFrame &frame = restFrames[slot];
         if (RrPointsToMatrix(RrIdentityLandmarks(), frame.points, &rest)) {
             out.push_back({_program.TextOrEmpty(_slotMeta.jointPaths[i]), rest});
         }
@@ -145,7 +219,7 @@ RigExecRuntimeReader::GetJointPoseMatrices() const
 }
 
 std::vector<RigExecRuntimePropertyValue>
-RigExecRuntimeReader::GetPropertyResultsForTesting() const
+RigExecRuntimeReader::GetPropertyValues() const
 {
     std::vector<RigExecRuntimePropertyValue> out;
     out.reserve(_program.store.propertyResults.size());
@@ -189,29 +263,11 @@ RigExecRuntimeReader::GetWeightPackets() const
 bool
 RigExecRuntimeReader::Execute(std::string *error)
 {
-    if (!_frameSelected) {
-        if (error) {
-            *error = "no frame selected";
-        }
-        return false;
-    }
     RrProgram &program = _program;
     RrStore &store = program.store;
-    const RigExecWireFrameInputs &record = _inputs.frames[_frameIndex];
-    const double time = record.frame;
-    program.frameIndex = _frameIndex;
-    // The slot values every computed read sees this run.
-    if (!RrInputsSelectFrame(&program, _frameIndex, error)) {
-        return false;
-    }
-    // The standing overrides, placed before the chains as the program
-    // places them: every read sees them from here on.
-    RrInputsSetOverrides(&program, _avarOverrides);
-    const bool crossCheck = program.CrossCheckThisRun();
-    for (RrStepOutput &output : store.stepOutputs) {
-        output.crossChecked.fill(0);
-    }
-    RrCrossCheckCounts checked{};
+    // The inputs set since the last run. Only an Animated input set, or
+    // TouchAnimatedInputs, dirties what a change of time dirties.
+    RrInputsApplyTouched(&program);
 
     // The property chains run first, as the baked prologue runs them: their
     // lines open the generation and their results are what every later
@@ -223,35 +279,23 @@ RigExecRuntimeReader::Execute(std::string *error)
         }
         return false;
     }
-    // The chains' results and every input read, evaluated over the slots,
-    // against the frame record.
-    if (crossCheck &&
-        (!RrCrossCheckPropertyResults(&program, record,
-                                      &checked[RrCrossCheckPropertyValue],
-                                      error) ||
-         !RrCrossCheckChainReads(&program, record,
-                                 &checked[RrCrossCheckChainRead], error) ||
-         !RrCrossCheckReads(&program, record, &checked, error))) {
-        return false;
-    }
     store.runSnapshots.Clear();
 
     if ((program.runMask & 0x1u) != 0 &&
-        !RrProloguePose(&program, record, &poseDiagnostics, error)) {
+        !RrProloguePose(&program, &poseDiagnostics, error)) {
         return false;
     }
     if ((program.runMask & 0x4u) != 0 &&
-        !RrPrologueGeometry(&program, time, record, &poseDiagnostics,
-                            error)) {
+        !RrPrologueGeometry(&program, &poseDiagnostics, error)) {
         return false;
     }
-    if (!RrRunSteps(&program, time, false, error)) {
+    if (!RrRunSteps(&program, false, error)) {
         return false;
     }
     if (!RrPublishPose(&program, &poseDiagnostics, error)) {
         return false;
     }
-    RrPublishGeometry(&program, record, &poseDiagnostics);
+    RrPublishGeometry(&program, &poseDiagnostics);
 
     RigExecRuntimeCounters counters;
     for (size_t s = 0; s < store.stepOutputs.size(); ++s) {
@@ -261,9 +305,6 @@ RigExecRuntimeReader::Execute(std::string *error)
         counters.schedulesBuilt += output.counters.schedulesBuilt;
         counters.chainsBuilt += output.counters.chainsBuilt;
         counters.revisionsBuilt += output.counters.revisionsBuilt;
-        for (size_t kind = 0; kind < RrCrossCheckKindCount; ++kind) {
-            checked[kind] += output.crossChecked[kind];
-        }
     }
     poseDiagnostics.push_back(
         "mover graph: " + std::to_string(counters.chainsBuilt) +
@@ -346,6 +387,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     }
     _SortByPath(&jointMatrices);
     _SortByPath(&points);
+    _SortByPath(&matrixPrimvars);
     _SortByPath(&weightFrames);
     _SortByPath(&weightFieldsOut);
     std::vector<RigExecRuntimeProviderXform> providerXforms;
@@ -370,9 +412,6 @@ RigExecRuntimeReader::Execute(std::string *error)
     _providerXforms = std::move(providerXforms);
     _diagnostics = std::move(poseDiagnostics);
     _counters = counters;
-    for (size_t kind = 0; kind < RrCrossCheckKindCount; ++kind) {
-        _crossCheckCounts[kind] += checked[kind];
-    }
     return true;
 }
 

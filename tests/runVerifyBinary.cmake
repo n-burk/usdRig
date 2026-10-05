@@ -1,19 +1,49 @@
-# runVerifyBinary.cmake: one fixture's bake-then-verify gate (M2).
+# runVerifyBinary.cmake: one fixture's bake-then-verify gate.
 #
-# Bakes STAGE at FRAMES with the rigExecBake CLI, then gates the zero-USD
-# runtime against the baked path with rigExecPose --verify-binary. Run as a
-# ctest entry (see rigexec_add_verify_binary_test in CMakeLists.txt); fails
-# loudly on either half. Required -D arguments: BAKE, POSE, STAGE, FRAMES,
-# OUT; optional: MIN_ENVELOPES, MIN_PHASE_PACKETS, MIN_PROPERTY_VALUES,
-# MIN_CHAIN_READS, MIN_REGISTERED_READS, MIN_BLEND_WEIGHTS,
-# MIN_DEFAULT_WEIGHTS, MIN_PATH_READS, MIN_BLEND_ACTIVATIONS.
+# Bakes STAGE once at TIME with the rigExecBake CLI, then gates the zero-USD
+# runtime against the baked path with rigExecPose --verify-binary: the
+# binary's defaults at TIME, every frame of FRAMES (TIME alone when CLASS is
+# static) with its Animated inputs sampled from the stage, and two drags of
+# each input DRAGS names against the session-layer edit. The bake's static
+# report must agree with CLASS: a static stage holds at least one animated
+# source in static data, an inputs stage none. Run as a ctest entry (see
+# rigexec_add_verify_binary_test in CMakeLists.txt); fails loudly on either
+# half.
+# Required -D arguments: BAKE, POSE, STAGE, FRAMES, OUT. Optional: TIME (the
+# first of FRAMES by default), CLASS (inputs or static; inputs by default),
+# DRAGS (comma-separated <prim>.<attr> list).
 if (NOT DEFINED BAKE OR NOT DEFINED POSE OR NOT DEFINED STAGE
         OR NOT DEFINED FRAMES OR NOT DEFINED OUT)
     message(FATAL_ERROR "runVerifyBinary.cmake: BAKE, POSE, STAGE, FRAMES "
                         "and OUT are all required")
 endif()
+string(REPLACE "," ";" _frame_list "${FRAMES}")
+if (NOT DEFINED TIME OR TIME STREQUAL "")
+    list(GET _frame_list 0 TIME)
+endif()
+if (NOT DEFINED CLASS OR CLASS STREQUAL "")
+    set(CLASS inputs)
+endif()
+if (CLASS STREQUAL "static")
+    set(_verify_frames "${TIME}")
+elseif (CLASS STREQUAL "inputs")
+    set(_verify_frames "${FRAMES}")
+else()
+    message(FATAL_ERROR "runVerifyBinary.cmake: CLASS is '${CLASS}', "
+                        "expected inputs or static")
+endif()
+set(_drag_args)
+set(_drag_count 0)
+if (DEFINED DRAGS AND NOT DRAGS STREQUAL "")
+    string(REPLACE "," ";" _drag_list "${DRAGS}")
+    foreach(_drag IN LISTS _drag_list)
+        list(APPEND _drag_args --drag-input "${_drag}")
+        math(EXPR _drag_count "${_drag_count} + 1")
+    endforeach()
+endif()
 execute_process(
-    COMMAND "${BAKE}" "${STAGE}" --frames "${FRAMES}" -o "${OUT}"
+    COMMAND "${BAKE}" "${STAGE}" --time "${TIME}" --report-static
+            -o "${OUT}"
     RESULT_VARIABLE _bake_rc
     OUTPUT_VARIABLE _bake_out
     ERROR_VARIABLE _bake_err)
@@ -21,61 +51,43 @@ if (NOT _bake_rc EQUAL 0)
     message(FATAL_ERROR
         "bake failed (${_bake_rc}):\n${_bake_out}\n${_bake_err}")
 endif()
-# The runtime compares what it computes (property-chain results,
-# constraint envelopes, current-phase weight packets, and every input read
-# it evaluates over the slots) bit for bit against the frame records the
-# bake wrote.
-set(ENV{RIGEXEC_RUNTIME_CROSSCHECK} 1)
+# The class guard: a class cannot outlive its reason.
+if (NOT _bake_out MATCHES "static report: ([0-9]+) animated source")
+    message(FATAL_ERROR "the bake printed no static report:\n${_bake_out}")
+endif()
+set(_static_sources "${CMAKE_MATCH_1}")
+if ((CLASS STREQUAL "static" AND _static_sources EQUAL 0) OR
+        (CLASS STREQUAL "inputs" AND NOT _static_sources EQUAL 0))
+    message(FATAL_ERROR "CLASS is ${CLASS}, but the static report lists "
+                        "${_static_sources} animated source(s):\n${_bake_out}")
+endif()
+message(STATUS "class ${CLASS}: ${_static_sources} animated static "
+               "source(s)")
 execute_process(
     COMMAND "${POSE}" "${STAGE}" --verify-binary "${OUT}"
+            --frames "${_verify_frames}" ${_drag_args}
     RESULT_VARIABLE _pose_rc
     OUTPUT_VARIABLE _pose_out
     ERROR_VARIABLE _pose_err)
-# Always show the per-frame ledger: a passing gate with no ledger is a gate
-# that cannot be audited.
+# Always show the ledger: a passing gate with no ledger is a gate that
+# cannot be audited.
 message(STATUS "${_pose_out}")
 if (NOT _pose_rc EQUAL 0)
     message(FATAL_ERROR
         "verify-binary failed (${_pose_rc}):\n${_pose_err}")
 endif()
-# The ledger every run prints with the cross-check on, one count per kind
-# (the total is not captured: a CMake regex keeps nine groups).
+# A run that exits 0 must also have printed both ledgers, each counting
+# what it was asked to verify.
+string(REPLACE "," ";" _verify_list "${_verify_frames}")
+list(LENGTH _verify_list _frame_count)
+math(EXPR _drag_values "${_drag_count} * 2")
 if (NOT _pose_out MATCHES
-        "cross-check: [0-9]+ computed value\\(s\\) matched the frame records \\(([0-9]+) envelope\\(s\\), ([0-9]+) current-phase packet\\(s\\), ([0-9]+) property value\\(s\\), ([0-9]+) chain read\\(s\\), ([0-9]+) registered read\\(s\\), ([0-9]+) blend weight\\(s\\), ([0-9]+) default weight\\(s\\), ([0-9]+) path read\\(s\\), ([0-9]+) blend activation\\(s\\)\\)")
-    message(FATAL_ERROR "verify-binary printed no cross-check ledger")
+        "verify-binary: ${_frame_count} of ${_frame_count} frame\\(s\\) match")
+    message(FATAL_ERROR "verify-binary printed no ledger matching "
+                        "${_frame_count} frame(s)")
 endif()
-set(_envelopes "${CMAKE_MATCH_1}")
-set(_packets "${CMAKE_MATCH_2}")
-set(_properties "${CMAKE_MATCH_3}")
-set(_chainReads "${CMAKE_MATCH_4}")
-set(_registeredReads "${CMAKE_MATCH_5}")
-set(_blendWeights "${CMAKE_MATCH_6}")
-set(_defaultWeights "${CMAKE_MATCH_7}")
-set(_pathReads "${CMAKE_MATCH_8}")
-set(_blendActivations "${CMAKE_MATCH_9}")
-# Optional MIN_ENVELOPES / MIN_PHASE_PACKETS / MIN_PROPERTY_VALUES /
-# MIN_CHAIN_READS / MIN_REGISTERED_READS / MIN_BLEND_WEIGHTS /
-# MIN_DEFAULT_WEIGHTS / MIN_PATH_READS / MIN_BLEND_ACTIVATIONS: a fixture
-# that exists to reach the computed paths fails when the cross-check
-# compared fewer values.
-foreach(_kind IN ITEMS
-        "MIN_ENVELOPES;_envelopes;envelope(s)"
-        "MIN_PHASE_PACKETS;_packets;current-phase packet(s)"
-        "MIN_PROPERTY_VALUES;_properties;property value(s)"
-        "MIN_CHAIN_READS;_chainReads;chain read(s)"
-        "MIN_REGISTERED_READS;_registeredReads;registered read(s)"
-        "MIN_BLEND_WEIGHTS;_blendWeights;blend weight(s)"
-        "MIN_DEFAULT_WEIGHTS;_defaultWeights;default weight(s)"
-        "MIN_PATH_READS;_pathReads;path read(s)"
-        "MIN_BLEND_ACTIVATIONS;_blendActivations;blend activation(s)")
-    list(GET _kind 0 _option)
-    list(GET _kind 1 _count)
-    list(GET _kind 2 _label)
-    if (DEFINED ${_option})
-        if (${${_count}} LESS ${${_option}})
-            message(FATAL_ERROR "the cross-check compared ${${_count}} "
-                                "${_label}, expected at least "
-                                "${${_option}}")
-        endif()
-    endif()
-endforeach()
+if (NOT _pose_out MATCHES
+        "verify-binary: ${_drag_values} of ${_drag_values} drag\\(s\\) match")
+    message(FATAL_ERROR "verify-binary printed no ledger matching "
+                        "${_drag_values} drag(s)")
+endif()

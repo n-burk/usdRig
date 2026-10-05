@@ -1,11 +1,11 @@
 // rigExecRuntime: zero-USD .rigexec playback (M2).
-// Opens a baked .rigexec file, replays its cluster DAG per frame, and
-// publishes joint matrices and deformed points -- no USD headers, no USD
-// library. The wire structs and decoders come from rigExecBinary (already
+// Opens a baked .rigexec file, replays its cluster DAG over the inputs the
+// caller sets, and publishes joint matrices and deformed points -- no USD
+// headers, no USD library. The wire structs and decoders come from rigExecBinary (already
 // USD-free); the math is runtimeMath.h (a bit-identical Gf mirror); the
 // step bodies are ports of the baked program's, one family per .cpp.
-// Fidelity rule (plan section 5): for the same frame, floating-point
-// results must be bit-identical to the baked path. rigExecPose
+// Fidelity rule: for the same input values, floating-point results must be
+// bit-identical to the baked path with those values authored. rigExecPose
 // --verify-binary gates every family on dynamic==baked==binary over the
 // shipped examples.
 // Threading (D2): Execute is serial over clusters; the consumer may run
@@ -27,7 +27,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -93,10 +92,13 @@ struct RigExecRuntimeCounters {
     uint32_t revisionsBuilt = 0;
 };
 
-// Plays a .rigexec file. Open decodes every section; SetFrame selects a
-// baked frame's inputs; Execute replays the cluster DAG; the getters
-// publish the frame's outputs. Any failure returns false with a reason;
-// the reader keeps its last good state.
+// Plays a .rigexec file: a static graph whose inputs are the attributes the
+// rig reads. Open decodes every section, and the inputs start at their
+// bake-time defaults; each input set takes effect as an authored value at
+// the next Execute; Execute replays the cluster DAG over the inputs; the
+// getters publish its outputs. A fresh reader executes its defaults, which
+// reproduce the rig at the bake time. Any failure returns false with a
+// reason; the reader keeps its last good state.
 class RigExecRuntimeReader
 {
 public:
@@ -106,37 +108,73 @@ public:
     RigExecRuntimeReader &operator=(const RigExecRuntimeReader &) = delete;
 
     // Opens a .rigexec image. False with the reason on a malformed file,
-    // an undecodable section, or tables whose cross-references do not
-    // close (versions, input reads, cone sizes).
+    // an undecodable section, an input table that does not hold exactly
+    // one static record, static tables that do not match the program, or
+    // tables whose cross-references do not close (versions, input reads,
+    // cone sizes).
     static std::unique_ptr<RigExecRuntimeReader> Open(
         const uint8_t *bytes, size_t size, std::string *error);
 
-    // Baked frame times, in file order.
-    std::vector<double> GetFrameTimes() const;
+    // The inputs: every attribute a read of the rig walks, sorted by path.
+    size_t GetInputCount() const;
+    // Input \p index's name, type, animation flag and bake-time default;
+    // an empty info past the count.
+    const RigExecRuntimeInputInfo &GetInputInfo(size_t index) const;
+    // The index of the input at attribute path \p name.
+    bool FindInput(const std::string &name, size_t *index) const;
+    // Input \p index's value: its default, or the value last set; a
+    // Double zero past the count.
+    const RrInputValue &GetInputValue(size_t index) const;
+    // The authored value of attribute \p name becomes \p value: Execute
+    // then evaluates as the rig would with that value authored. On a
+    // property chain's target it is the chain's base, which the chain's
+    // movers revise; on an attribute connected upstream it takes effect
+    // only where the connection walk falls back to it. False with the
+    // reason, and nothing changes, for an unknown name, a value of another
+    // type (a Double sets a Float input through static_cast<float>), a
+    // non-finite component, or a Token id that names no text.
+    // One gap against the USD evaluators remains: a plugin mover applies
+    // the payload its bake assembled, so an input it reads does not reach
+    // that mover's output.
+    bool SetInput(const std::string &name, const RrInputValue &value,
+                  std::string *error);
+    // A Double input, or a Float input through static_cast<float>.
+    bool SetInput(const std::string &name, double value, std::string *error);
+    // A Token input: text the file holds sets its id; other text is
+    // interned on the reader (GetTokenText resolves it).
+    bool SetInputToken(const std::string &name, const std::string &text,
+                       std::string *error);
+    // SetInput by index.
+    bool SetInputAt(size_t index, const RrInputValue &value,
+                    std::string *error);
+    // The stage's own value of input \p index at a sampled time, for a
+    // stage sampler: SetInputAt, except that a non-finite component is
+    // taken as the stage holds it (a bake-time default can hold one too);
+    // the steps that read it report it as the evaluators do.
+    bool SetSampledInputAt(size_t index, const RrInputValue &value,
+                           std::string *error);
+    // Input \p name holds no value, as an attribute whose typed read fails
+    // (a blocked sample, or Default on an attribute keyed alone): every
+    // read falls back as it does over such an attribute. False with the
+    // reason for an unknown name.
+    bool ClearInput(const std::string &name, std::string *error);
+    // ClearInput by index.
+    bool ClearInputAt(size_t index, std::string *error);
+    // Input \p name returns to its bake-time default.
+    bool ResetInput(const std::string &name, std::string *error);
+    void ResetInputs();
+    // Says time moved: the next Execute recomputes what a time change
+    // recomputes even where no Animated input took a new value. A stage
+    // sampler calls it on every change of time.
+    void TouchAnimatedInputs();
+    // The time the inputs' defaults were read at.
+    double GetBakeTime() const;
+    // The text of Token value \p token: a token the file holds, or text
+    // SetInputToken interned; empty for an unknown id.
+    std::string GetTokenText(uint32_t token) const;
 
-    // Selects a baked frame's inputs by exact time. False naming the
-    // miss when the file carries no such frame.
-    bool SetFrame(double frame, std::string *error);
-
-    // Persistent TRS avar overrides, placed on every Execute as the program
-    // places interactive overrides. Angles are degrees. Only compiled
-    // control slots with TRS poses and finite values are supported. The
-    // override is what every read whose connection walk passes the avar
-    // meets there, the avar's own binding and any reader downstream of it
-    // alike; a reader that reads a chain at a phase stands aside when the
-    // override is on it or on a hop of its connection, as in the USD
-    // evaluators. On an avar math movers revise, the override is the
-    // chain's base: the movers revise it as they would the value authored,
-    // so every reader plays what a file baked with that value plays.
-    // One gap against the USD evaluators remains for now: a plugin mover
-    // applies the payload its bake assembled for the frame, so a drag that
-    // reaches an input the plugin reads does not reach that mover's output.
-    bool SetAvar(const std::string &propertyPath, double value,
-                 std::string *error);
-    void ClearAvars();
-
-    // Replays the cluster DAG for the selected frame. False naming the
-    // first failing step; outputs keep their previous frame.
+    // Replays the cluster DAG over the inputs. False naming the first
+    // failing step; outputs keep their previous values.
     bool Execute(std::string *error);
 
     // Plugin movers: a file may hold movers an external library registered.
@@ -161,65 +199,9 @@ public:
     // one family's outputs are compared while another is still landing.
     void SetRunMaskForTesting(unsigned mask);
 
-    // Test-only cross-check of what the runtime computes against the frame
-    // record the bake also wrote, bit for bit: every property-chain result,
-    // constraint envelope and current-phase weight packet; every registered
-    // read evaluated over the slots against the record's value where it
-    // holds one, else the table's constant; every blend channel weight,
-    // revision default weight and connection-following mover scalar the
-    // assembly reads, where the record holds it. A run with an avar
-    // override standing is not compared: the record never saw the drag. A
-    // mismatch fails Execute naming the record field and its index. Off by
-    // default; RIGEXEC_RUNTIME_CROSSCHECK set to anything but empty or "0"
-    // when Open runs turns it on.
-    void SetCrossCheckForTesting(bool enabled);
-    bool GetCrossCheckForTesting() const { return _program.crossCheck; }
-    // Values the cross-check compared since Open, over the Executes that
-    // succeeded, of every kind.
-    uint64_t GetCrossCheckCountForTesting() const
-    {
-        uint64_t total = 0;
-        for (uint64_t count : _crossCheckCounts) {
-            total += count;
-        }
-        return total;
-    }
-    // The same count for one kind.
-    uint64_t GetCrossCheckCountForTesting(RrCrossCheckKind kind) const
-    {
-        return _crossCheckCounts[size_t(kind)];
-    }
-    // The computed results alone: envelopes, current-phase packets,
-    // property values and chain-crossing reads.
-    uint64_t GetCrossCheckResultCountForTesting() const
-    {
-        return _crossCheckCounts[RrCrossCheckEnvelope] +
-               _crossCheckCounts[RrCrossCheckPhasePacket] +
-               _crossCheckCounts[RrCrossCheckPropertyValue] +
-               _crossCheckCounts[RrCrossCheckChainRead];
-    }
-    uint64_t GetCrossCheckEnvelopeCountForTesting() const
-    {
-        return _crossCheckCounts[RrCrossCheckEnvelope];
-    }
-    uint64_t GetCrossCheckPhasePacketCountForTesting() const
-    {
-        return _crossCheckCounts[RrCrossCheckPhasePacket];
-    }
-    uint64_t GetCrossCheckPropertyValueCountForTesting() const
-    {
-        return _crossCheckCounts[RrCrossCheckPropertyValue];
-    }
-    uint64_t GetCrossCheckChainReadCountForTesting() const
-    {
-        return _crossCheckCounts[RrCrossCheckChainRead];
-    }
-
-    // Test-only: the property chains' published values as the last
-    // Execute computed them, in path order. They are inputs to the
-    // program, not outputs of the runtime contract.
-    std::vector<RigExecRuntimePropertyValue> GetPropertyResultsForTesting()
-        const;
+    // The property chains' published values (chain targets and phased
+    // consumers) as the last Execute computed them, in path order.
+    std::vector<RigExecRuntimePropertyValue> GetPropertyValues() const;
 
     // Final asset-space skinning deltas (rest -> posed), in path order.
     const std::vector<RigExecRuntimeJointMatrix> &GetJointMatrices() const
@@ -228,7 +210,9 @@ public:
     }
 
     // GetJointMatrices preserves the skinning delta (rest -> posed) API.
-    // Skeleton consumers need the asset-space rest and posed frames.
+    // Skeleton consumers need the asset-space rest and posed frames. The
+    // rest frames are the live ones: an input that recomposes the ladder
+    // moves them.
     std::vector<RigExecRuntimeJointMatrix> GetJointRestMatrices() const;
     std::vector<RigExecRuntimeJointMatrix> GetJointPoseMatrices() const;
 
@@ -279,16 +263,6 @@ public:
     const std::vector<RrMat4d> &GetBaseMatrices() const;
     const std::vector<RrWeightPacket> &GetWeightPackets() const;
 
-    // Section presence, for loader tests and --verify-binary diagnostics.
-    bool HasSteps() const { return _hasSteps; }
-    bool HasPoses() const { return _hasPoses; }
-    bool HasGeometry() const { return _hasGeometry; }
-    bool HasInputTable() const { return _hasInputTable; }
-    bool HasCones() const { return _hasCones; }
-    bool HasClusters() const { return _hasClusters; }
-    bool HasSlotMeta() const { return _hasSlotMeta; }
-    bool HasConstants() const { return _hasConstants; }
-
 private:
     RigExecRuntimeReader() = default;
 
@@ -305,21 +279,14 @@ private:
     // The Computed section (temporary): the input slots every read
     // evaluates over.
     RigExecWireComputed _computed;
-    bool _hasSteps = false;
-    bool _hasPoses = false;
-    bool _hasGeometry = false;
-    bool _hasInputTable = false;
-    bool _hasCones = false;
-    bool _hasClusters = false;
-    bool _hasSlotMeta = false;
-    bool _hasConstants = false;
 
     RrProgram _program;
 
-    size_t _frameIndex = 0;
-    bool _frameSelected = false;
-    // The standing avar overrides, by input slot.
-    std::map<uint32_t, double> _avarOverrides;
+    // What the input getters answer past the count.
+    RigExecRuntimeInputInfo _noInput{
+        std::string(), RrInputTag::Double, false,
+        RrValueFromWire(v4::RigExecWireValue())};
+    RrInputValue _noValue = RrValueFromWire(v4::RigExecWireValue());
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;
@@ -329,7 +296,6 @@ private:
     std::vector<RigExecRuntimeProviderXform> _providerXforms;
     std::vector<std::string> _diagnostics;
     RigExecRuntimeCounters _counters;
-    RrCrossCheckCounts _crossCheckCounts{};
 };
 
 }  // namespace rigExec

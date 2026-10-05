@@ -1,17 +1,18 @@
 // rigExecRuntime input slot model and read evaluation.
-// The slots, their per-frame values and every computed read come from the
-// temporary Computed section (rigExecBinary/computed.h). A read is a pure
-// function of the slot values, the standing interactive overrides and the
-// property-chain results the run selected, so it is safe wherever a step
-// body may run. USD-free.
+// The slots, their bake-time defaults and every computed read come from
+// the temporary Computed section (rigExecBinary/computed.h). A slot's
+// value is mutable: an input set through the reader is the attribute's
+// authored value. A read is a pure function of the slot values, the
+// override flags the set inputs raise and the property-chain results the
+// run published, so it is safe wherever a step body may run. USD-free.
 #ifndef RIGEXEC_RUNTIME_INPUTS_H
 #define RIGEXEC_RUNTIME_INPUTS_H
 
 #include "rigExecBinary/computed.h"
+#include "rigExecRuntime/values.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -21,30 +22,22 @@ namespace rigExec {
 
 struct RrProgram;
 
+/// The first token id SetInputToken gives text the string table lacks;
+/// RrProgram::GetText resolves ids from here through
+/// RrInputState::extraTokens. Above every string-table index.
+inline constexpr uint32_t RrExtraTokenBase = 0x80000000u;
+
 /// The slot model, over the section `computed` borrows from the reader.
 struct RrInputState {
     const RigExecWireComputed *computed = nullptr;
-    /// Per slot: the values[] id this run reads, and whether the
-    /// attribute's typed read succeeded. Seeded with the bake-time
-    /// defaults; each Execute loads its frame's row while the section
-    /// carries per-frame values.
-    std::vector<uint32_t> slotValue;
+    /// Per slot: the value every read sees this run, and whether it holds
+    /// one (the attribute's typed read succeeded, or a value was set).
+    /// Seeded with the bake-time defaults (values[slot.value] and the
+    /// HasValue flag, kept in slotDefaultHasValue).
+    std::vector<v4::RigExecWireValue> slotCurrent;
     std::vector<uint8_t> slotHasValue;
+    std::vector<uint8_t> slotDefaultHasValue;
 
-    /// What the cross-check compares each registered read with: the frame
-    /// record's value under `uid` where the record holds one, else the
-    /// table input's constant (`wire`; null for an avar binding, whose
-    /// constant is the avar table's at `avar`). `live` reads per run, so
-    /// the record holds its value only at the frames a step read it;
-    /// `chainRead` is compared as a chain read instead.
-    struct BoundRead {
-        const RigExecWireInput *wire = nullptr;
-        int32_t uid = -1;
-        int32_t avar = -1;
-        bool live = false;
-        bool chainRead = false;
-    };
-    std::vector<BoundRead> registered;
     /// The avar table's registered reads (RigExecBakedProgramImpl::
     /// avarBindings and avarConstantBindings), in section order.
     std::vector<uint32_t> avarBindingReads;
@@ -52,20 +45,36 @@ struct RrInputState {
     /// The override numbers of the provider ladders' inputs, sorted
     /// (RigExecBakedProgramImpl::ladderOverrides).
     std::vector<int32_t> ladderOverrides;
-    /// Per slot: the flat avar index (slot * 11 + channel) of the avar
-    /// binding the slot heads, or -1.
-    std::vector<int32_t> slotAvar;
     /// Per slot, the override numbers of the program reads whose walk
     /// passes it (RigExecBakedProgramImpl::overridableInputs over slots):
     /// slotOverrideNumbers[slotOverrideBegin[s], slotOverrideBegin[s + 1]).
     std::vector<uint32_t> slotOverrideBegin;
     std::vector<int32_t> slotOverrideNumbers;
-    /// Attribute path text -> slot id, for the override API.
+    /// The inverse: per override number, the slots of the walk of every
+    /// registered read carrying it, sorted:
+    /// overrideSlotList[overrideSlotBegin[n], overrideSlotBegin[n + 1]).
+    std::vector<uint32_t> overrideSlotBegin;
+    std::vector<uint32_t> overrideSlotList;
+    /// Per override number: whether a non-Animated slot of its walk holds a
+    /// value other than its default, which the next run copies into
+    /// RrStore::overridden. Sized at Open with the store's flags.
+    std::vector<char> valueOverridden;
+    /// Slots set or reset since the last run, each listed once.
+    std::vector<uint32_t> touched;
+    std::vector<char> touchedFlag;
+    /// Per listed input (index = slot id < computed->listedInputs): what
+    /// GetInputInfo reports, and the value GetInputValue reports.
+    std::vector<RigExecRuntimeInputInfo> inputInfo;
+    std::vector<RrInputValue> inputValues;
+    /// Token text SetInputToken met that the string table lacks, at ids
+    /// RrExtraTokenBase + k.
+    std::vector<std::string> extraTokens;
+    /// Token text -> id over the string table and extraTokens, built on
+    /// the first SetInputToken.
+    std::unordered_map<std::string, uint32_t> tokenIds;
+    bool tokenIdsBuilt = false;
+    /// Attribute path text -> slot id, for the input API.
     std::unordered_map<std::string, uint32_t> nameIndex;
-    /// The interactive overrides standing this run, keyed by attribute path
-    /// id: half of the overlay GetAttribute meets at each hop
-    /// (RrInputsOverlay).
-    std::map<uint32_t, v4::RigExecWireValue> overrides;
 
     /// Per geometry chain and revision, the index of its default weight
     /// read, or -1; per chain and revision (and per chain and derived
@@ -90,51 +99,70 @@ bool RrInputsOpen(RrProgram *program, const RigExecWireComputed *computed,
 /// Binds the section's registered reads to the runtime's tables: each
 /// names a table field the runtime reads, with that input's tag, override
 /// number and per-run liveness, and every field of every table row is
-/// named exactly once. Indexes the avar bindings, the ladder's override
-/// numbers, the override numbers by slot, the slot names and the geometry
-/// reads by revision and channel. Runs after RrInputsOpen attached the
-/// section; every read below relies on that.
+/// named exactly once; the override numbers the reads reach at each
+/// attribute are the ones the program registered there. Indexes the avar
+/// bindings, the ladder's override numbers, the override numbers by slot
+/// and the slots by override number, the slot names, the listed inputs and
+/// the geometry reads by revision and channel. Runs after RrInputsOpen
+/// attached the section; every read below relies on that.
 bool RrInputsBindReads(RrProgram *program, std::string *error);
 
-/// Loads InputTable frame \p index's slot values (the section's per-frame
-/// rows, aligned with the InputTable frames).
-bool RrInputsSelectFrame(RrProgram *program, size_t index,
-                         std::string *error);
+/// Input \p index (a listed slot) becomes \p value, as authored: the slot
+/// holds it, and the next run applies it (RrInputsApplyTouched). A Double
+/// value sets a Float input through static_cast<float>. False with the
+/// reason, nothing changed, for an index past the listed inputs, any other
+/// type mismatch, a non-finite component unless \p acceptNonFinite (a
+/// stage's own value, which a bake-time default can hold too), or a Token
+/// id that names no text. Setting the value the input holds still marks
+/// it.
+bool RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
+                 std::string *error, bool acceptNonFinite = false);
 
-/// Places \p overrides (slot id -> value) as the program places
-/// interactive overrides (RigExecBakedProgram::SetOverrides): each slot's
-/// value becomes the overlay at its attribute, and every program read
-/// whose walk passes the slot is flagged overridden, so it reads the long
-/// way. Clears the previous run's overrides first.
-void RrInputsSetOverrides(RrProgram *program,
-                          const std::map<uint32_t, double> &overrides);
+/// Token input \p index becomes \p text: text the string table holds sets
+/// its id; other text is interned at RrExtraTokenBase + k first, once.
+/// False with the reason, nothing changed, for an index past the listed
+/// inputs or an input that is not a Token.
+bool RrInputsSetToken(RrProgram *program, size_t index,
+                      const std::string &text, std::string *error);
 
-/// Whether an interactive override stands on one of \p slots: a phased
-/// reader whose consumer or hop holds one stands aside.
-bool RrInputsAnyOverridden(const RrProgram *program,
-                           const std::vector<uint32_t> &slots);
+/// Input \p index (a listed slot) returns to its bake-time default, value
+/// and HasValue alike, and is marked for the next run.
+void RrInputsReset(RrProgram *program, size_t index);
+
+/// Input \p index (a listed slot) holds no value, as an attribute whose
+/// typed read fails (a blocked sample, or Default on an attribute keyed
+/// alone): every read falls back as it does over such an attribute. The
+/// slot keeps its default's bits, and is marked for the next run. False
+/// with the reason for an index past the listed inputs.
+bool RrInputsClear(RrProgram *program, size_t index, std::string *error);
+
+/// What the inputs set or reset since the last run change for this one,
+/// at the start of a run: an Animated slot sets RrStore::animatedTouched,
+/// which dirties what time dirties; any other slot recomputes, for each
+/// override number its walk carries, whether a non-Animated slot of that
+/// walk differs bitwise from its default (HasValue included), so a value
+/// written back to its default clears the flag. Then RrStore::overridden
+/// takes those flags and the marks are cleared.
+void RrInputsApplyTouched(RrProgram *program);
 
 /// Whether the resolved inputs hold a value at attribute \p path this run:
-/// an interactive override or a property-chain result
-/// (RigExecResolvedInputs::Find).
+/// a property-chain result (RigExecResolvedInputs::Find).
 bool RrInputsPublished(const RrProgram *program, uint32_t path);
 
-/// RigExecResolvedInputs::Get<T> at attribute \p path: the value the
-/// resolved inputs hold there this run (a standing interactive override or
-/// a property-chain result; at a dragged chain target, the result), when
-/// it is exactly \p tag. \p out is written only on a hit. Every walk's hop
-/// and every geometry scalar read meets this overlay.
+/// RigExecResolvedInputs::Get<T> at attribute \p path: the property-chain
+/// result published there this run, when it is exactly \p tag. \p out is
+/// written only on a hit. Every walk's hop and every geometry scalar read
+/// meets this overlay.
 bool RrInputsOverlay(const RrProgram *program, uint32_t path,
                      v4::InputTag tag, v4::RigExecWireValue *out);
 
 /// The value property chain \p chain starts from this run, in the chain's
-/// type \p tag: an interactive override standing on its target, which is
-/// an edit of the target's base exactly as in the USD evaluators, else the
-/// target's own typed value; false when neither is there. The chain run
-/// (properties.cpp) revises it and publishes its own result at the target,
-/// which the overlay answers in the override's place, and each phased
-/// reader reads the chain's history from it, so every reader sees during a
-/// drag what it sees once the dragged value is authored and rebaked.
+/// type \p tag: the target's own typed value, which an input set there
+/// authors, as in the USD evaluators; false when it holds none of that
+/// type. The chain run (properties.cpp) revises it and publishes its own
+/// result at the target, and each phased reader reads the chain's history
+/// from it, so every reader sees what it sees once that value is authored
+/// and rebaked.
 bool RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
                  v4::RigExecWireValue *base);
 
@@ -143,9 +171,8 @@ bool RrChainBase(const RrProgram *program, size_t chain, v4::InputTag tag,
 /// RigExecResolvedInputs::GetAttribute (moverGraph.h), Pinned is
 /// _PinnedRead (rigEvaluatorProperties.cpp), Raw is the head's own typed
 /// value. GetAttribute's overlay at each hop is RrInputsOverlay: the
-/// interactive override standing there or the property-chain result
-/// published there (RrStore::propertyResults), answering when it holds
-/// exactly the walk's type.
+/// property-chain result published there (RrStore::propertyResults),
+/// answering when it holds exactly the walk's type.
 v4::RigExecWireValue RrReadInput(const RrProgram *program,
                                  const v4::RigExecWireInput &input);
 
@@ -194,18 +221,6 @@ float RrReadResolvedFloat(const RrProgram *program,
 
 /// The float a Float-tagged wire value holds (bits in the low 32).
 float RrWireValueFloat(const v4::RigExecWireValue &value);
-
-/// Cross-check helpers (RrProgram::CrossCheckThisRun): bitwise float
-/// equality, which tells -0 from +0 and compares NaN payloads, and the
-/// failure text naming the record field, e.g. "constraintWeights[3]".
-bool RrSameFloatBits(float a, float b);
-std::string RrCrossCheckMismatch(const std::string &field, float computed,
-                                 float recorded);
-std::string RrCrossCheckMismatch(const std::string &field, double computed,
-                                 double recorded);
-std::string RrCrossCheckMismatch(const std::string &field,
-                                 const std::string &computed,
-                                 const std::string &recorded);
 
 }  // namespace rigExec
 

@@ -1,7 +1,7 @@
-// .rigexec Computed section (tag 18): the input slot model, the weight
-// oracle facts, the property chains and the registered reads that cross
-// them, carried beside the old frame records while the runtime computes
-// the results those records replay.
+// .rigexec Computed section (tag 18): the input slot model with each
+// input's value at the bake time as its default, the weight oracle facts,
+// the property chains and the registered reads the runtime evaluates over
+// the slots, carried beside the InputTable's one static record.
 // TEMPORARY. This section, its codec and the per-frame slot values are
 // removed when the container moves to the single-FlatBuffer layout. The
 // types in namespace v4 are shaped like that layout's object types
@@ -172,9 +172,9 @@ struct PropertyRevision {
 /// dependency order (_propertyChainOrder).
 struct PropertyChain {
     /// Slot id of the target; the chain's base is its raw value, read with
-    /// the chain's type (a missing or mistyped value skips the chain). A
-    /// standing interactive override on the target
-    /// (RigExecRuntimeReader::SetAvar) stands in for that value.
+    /// the chain's type (a missing or mistyped value skips the chain). An
+    /// input set on the target (RigExecRuntimeReader::SetInput) authors
+    /// that value.
     uint32_t target = 0;
     PropertyValueType valueType = PropertyValueType::Float;
     std::vector<PropertyRevision> revisions;
@@ -194,9 +194,9 @@ struct PhasedConsumer {
     PropertyValueType consumerType = PropertyValueType::Float;
     uint32_t applied = 0;   ///< 0 = the base; at most the revision count
     /// Slot ids of the consumer, then of each attribute its connection walk
-    /// passes before the chain target (RigExecPhasedConnection::hops). An
-    /// interactive override on any of them stands the reader aside: nothing
-    /// is published at the consumer, and its walk meets the override.
+    /// passes before the chain target (RigExecPhasedConnection::hops). The
+    /// published value shadows an input set on any of them, as it shadows
+    /// the authored value there.
     std::vector<uint32_t> hops;
 };
 
@@ -286,10 +286,8 @@ struct RigExecWireWeightObject {
 
 /// A program-registered read whose walk crosses a property-chain target
 /// (Baked mode, Varying, LongWay and ViaChain), with the InputTable uid its
-/// per-frame value is recorded under: a restatement of the registered read
-/// with that uid, which the cross-check evaluates and compares with the
-/// frame record's value under the uid (temporary: the uids go with the
-/// frame records).
+/// value is recorded under: a restatement of the registered read with that
+/// uid (temporary: the uids go with the InputTable record).
 struct RigExecWireChainRead {
     uint32_t uid = 0;
     v4::RigExecWireInput read;
@@ -310,7 +308,7 @@ enum class RigExecWireRegisteredFamily : uint8_t {
 inline constexpr uint8_t RigExecWireRegisteredFamilyLast = 7;
 
 /// One program-registered read (a RigExecBakedInput the program holds), in
-/// Baked mode, with where the frame-record runtime reads its value today:
+/// Baked mode, with the table field the runtime reads it into:
 /// `object` indexes the family's table and `field` is the runtime's field
 /// number (rigExecRuntime/store.h; an interpolator's enable is 0 and its
 /// dial k is 1 + k; an avar binding's is 0). `uid` is its InputTable uid,
@@ -368,8 +366,9 @@ struct RigExecWirePathScalarRead {
     v4::RigExecWireInput read;
 };
 
-/// One baked frame's slot values (temporary: a v4 file has none). Aligned
-/// with RigExecWireInputTable::frames; one entry per slot in each vector.
+/// The slot values of an InputTable record (temporary: a v4 file has none;
+/// a bake writes one row, equal to the defaults). Aligned with
+/// RigExecWireInputTable::frames; one entry per slot in each vector.
 struct RigExecWireComputedFrame {
     double frame = 0;
     std::vector<uint32_t> values;   ///< values[] per slot: typed Get at frame

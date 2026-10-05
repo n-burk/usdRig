@@ -4,8 +4,8 @@
 // driven by the movers in libs/rigExec/moverGraph.cpp and the kernels in
 // libs/rigExecMath). The scalars an assembler reads through their
 // connections, blend channel weights and default weights are read over the
-// input slots; the remaining stage reads replay from the frame record's
-// pathReads; epoch state (skin layouts, blend shapes, partitions)
+// input slots; the remaining stage reads replay from the bake's captured
+// path reads (RrStatic); epoch state (skin layouts, blend shapes, partitions)
 // replays from the wire geometry tables. Bitwise: same ops in the same
 // order, float stays float.
 
@@ -2755,8 +2755,8 @@ RrGeoStatusForParameters(const RrGeoMoverParameters &parameters,
 }  // namespace
 
 // Scratch: revision packets, influence tables, output buffers, chunks, skin
-// topologies, blend layouts, the pathReads lookup and the
-// per-frame record pointer. Mirrors GeomChain/GeomRevision/GeomChunk.
+// topologies, blend layouts and the path-read lookup. Mirrors
+// GeomChain/GeomRevision/GeomChunk.
 
 struct RrGeometryScratch {
     struct Chunk {
@@ -2840,7 +2840,6 @@ struct RrGeometryScratch {
     bool stringsIndexed = false;
     std::unordered_map<std::string, uint32_t> stringToId;
     std::unordered_map<uint32_t, std::string> idToText;
-    const RigExecWireFrameInputs *frame = nullptr;
     std::map<std::pair<uint32_t, uint8_t>, const RigExecWirePathValue *>
         pathReads;
     // The connection-following scalars this run, in the Computed section's
@@ -2926,88 +2925,6 @@ RrGeoStorePacket(const RrProgram *program, const RrWeightPacket &packet)
     out.defaultWeight = packet.defaultWeight;
     out.valid = packet.valid;
     return out;
-}
-
-// The cross-check (RrProgram::CrossCheckThisRun) of a computed current-phase
-// packet against the frame record's: every field bit for bit, the token
-// fields as text. False with the text naming the first field that
-// differs.
-bool
-RrGeoCrossCheckPhasePacket(const RrProgram *program,
-                           const RigExecWireFrameInputs *record,
-                           size_t chain, size_t revision,
-                           const RrGeoWeightPacket &computed,
-                           RrStepOutput *output, std::string *error)
-{
-    const std::string field = "revisionPhasePackets[" +
-                              std::to_string(chain) + "][" +
-                              std::to_string(revision) + "]";
-    const auto fail = [error](const std::string &why) {
-        if (error) {
-            *error = why;
-        }
-        return false;
-    };
-    if (!record || chain >= record->revisionPhasePackets.size() ||
-        revision >= record->revisionPhasePackets[chain].size()) {
-        return fail("cross-check: the frame record carries no " + field);
-    }
-    const RigExecWireWeightPacket &recorded =
-        record->revisionPhasePackets[chain][revision];
-    const std::string representation =
-        program->TextOrEmpty(recorded.representation);
-    if (computed.representation != representation) {
-        return fail(RrCrossCheckMismatch(field + ".representation",
-                                         computed.representation,
-                                         representation));
-    }
-    const std::string rangePolicy =
-        program->TextOrEmpty(recorded.rangePolicy);
-    if (computed.rangePolicy != rangePolicy) {
-        return fail(RrCrossCheckMismatch(field + ".rangePolicy",
-                                         computed.rangePolicy, rangePolicy));
-    }
-    if (computed.values.size() != recorded.values.size()) {
-        return fail("cross-check mismatch at " + field +
-                    ".values: computed " +
-                    std::to_string(computed.values.size()) +
-                    " value(s), recorded " +
-                    std::to_string(recorded.values.size()));
-    }
-    for (size_t i = 0; i < computed.values.size(); ++i) {
-        if (!RrSameFloatBits(computed.values[i], recorded.values[i])) {
-            return fail(RrCrossCheckMismatch(
-                field + ".values[" + std::to_string(i) + "]",
-                computed.values[i], recorded.values[i]));
-        }
-    }
-    if (computed.indices.size() != recorded.indices.size()) {
-        return fail("cross-check mismatch at " + field +
-                    ".indices: computed " +
-                    std::to_string(computed.indices.size()) +
-                    " index(es), recorded " +
-                    std::to_string(recorded.indices.size()));
-    }
-    for (size_t i = 0; i < computed.indices.size(); ++i) {
-        if (int64_t(computed.indices[i]) != int64_t(recorded.indices[i])) {
-            return fail("cross-check mismatch at " + field + ".indices[" +
-                        std::to_string(i) + "]: computed " +
-                        std::to_string(computed.indices[i]) +
-                        ", recorded " + std::to_string(recorded.indices[i]));
-        }
-    }
-    if (!RrSameFloatBits(computed.defaultWeight, recorded.defaultWeight)) {
-        return fail(RrCrossCheckMismatch(field + ".defaultWeight",
-                                         computed.defaultWeight,
-                                         recorded.defaultWeight));
-    }
-    if (computed.valid != recorded.valid) {
-        return fail("cross-check mismatch at " + field + ".valid: computed " +
-                    (computed.valid ? "true" : "false") + ", recorded " +
-                    (recorded.valid ? "true" : "false"));
-    }
-    ++output->crossChecked[RrCrossCheckPhasePacket];
-    return true;
 }
 
 std::shared_ptr<const RrGeoSkinTopology>
@@ -3343,22 +3260,7 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
 
 namespace {
 
-// Step plumbing: the frame record, step labels, mover-attribute paths.
-
-const RigExecWireFrameInputs *
-RrGeoFindRecord(const RrProgram *program, double time)
-{
-    if (!program || !program->inputs) {
-        return nullptr;
-    }
-    // SetFrame matched exactly, so the step's time is one of these.
-    for (const RigExecWireFrameInputs &record : program->inputs->frames) {
-        if (record.frame == time) {
-            return &record;
-        }
-    }
-    return nullptr;
-}
+// Step plumbing: step labels, mover-attribute paths.
 
 std::string
 RrGeoStepLabel(const RrProgram *program, size_t step)
@@ -3500,8 +3402,8 @@ RrGeoResolveRevisionPhases(RrProgram *program, RrGeometryScratch *scratch,
     }
 }
 
-// Assembly: one revision's packet out of the record, the path reads and the
-// epoch tables. A port of AssembleRevision plus the RigExecAssemble*
+// Assembly: one revision's packet out of the static data, the path reads
+// and the epoch tables. A port of AssembleRevision plus the RigExecAssemble*
 // per-operation bodies it ends in.
 
 struct RrGeoAssembleInputs {
@@ -3511,7 +3413,6 @@ struct RrGeoAssembleInputs {
     RrGeometryScratch::Revision *rev = nullptr;
     const RrVec3f *basePoints = nullptr;
     size_t basePointCount = 0;
-    const RigExecWireFrameInputs *record = nullptr;
     size_t chain = 0;
     size_t revision = 0;
     bool derived = false;
@@ -3579,15 +3480,15 @@ RrGeoReadBindingVec3fArray(const RrGeoAssembleInputs &in, uint32_t path,
 
 // The blend channels: each channel's weight and each sample's activation
 // read over the slots, and the dense points the baked gather consumed, out
-// of the record, in binding order, each channel's samples stable-sorted by
-// activation. Sparse samples take the refused layout when this frame
-// refused the cache and the epoch one otherwise.
+// of the static data, in binding order, each channel's samples
+// stable-sorted by activation. Sparse samples take the refused layout when
+// the bake refused the cache and the epoch one otherwise.
 bool
 RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
                          const std::vector<RrVec3f> &base,
                          std::vector<RrVec3f> *deltas)
 {
-    const RigExecWireFrameInputs *record = in.record;
+    const RrStatic &statics = in.program->statics;
     std::vector<RrGeoBlendChannel> channels;
     channels.reserve(in.wire->blendChannels.size());
     for (size_t c = 0; c < in.wire->blendChannels.size(); ++c) {
@@ -3601,22 +3502,15 @@ RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
             RrGeoBlendSampleData sample;
             sample.activation = RrReadBlendActivation(
                 in.program, in.chain, in.revision, in.derived, c, s);
-            if (record) {
-                const std::vector<std::vector<std::vector<std::vector<
-                    std::vector<RigExecWireVec3f>>>>> *pts =
-                    in.derived ? &record->derivedBlendPoints
-                               : &record->blendPoints;
-                if (!boundSample.blendShape && in.chain < pts->size() &&
-                    in.revision < (*pts)[in.chain].size() &&
-                    c < (*pts)[in.chain][in.revision].size() &&
-                    s < (*pts)[in.chain][in.revision][c].size()) {
-                    const std::vector<RigExecWireVec3f> &consumed =
-                        (*pts)[in.chain][in.revision][c][s];
-                    sample.points.reserve(consumed.size());
-                    for (const RigExecWireVec3f &p : consumed) {
-                        sample.points.push_back(
-                            RrVec3f(p[0], p[1], p[2]));
-                    }
+            const std::vector<RigExecWireVec3f> *consumed =
+                boundSample.blendShape
+                    ? nullptr
+                    : statics.BlendPoints(in.chain, in.revision, in.derived,
+                                          c, s);
+            if (consumed) {
+                sample.points.reserve(consumed->size());
+                for (const RigExecWireVec3f &p : *consumed) {
+                    sample.points.push_back(RrVec3f(p[0], p[1], p[2]));
                 }
             }
             if (boundSample.blendShape) {
@@ -4069,8 +3963,7 @@ RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
         params->valid = true;
         return;
     }
-    const uint32_t blob =
-        program.external->frames[program.frameIndex][found->second];
+    const uint32_t blob = program.statics.ExternalFrame(found->second);
     if (blob == RigExecWireExternalNoFrame) {
         return;
     }
@@ -4766,12 +4659,10 @@ RrGeoResetRevision(RrGeometryScratch::Revision *rev)
 }  // namespace
 
 bool
-RrPrologueGeometry(RrProgram *program, double time,
-                   const RigExecWireFrameInputs &record,
+RrPrologueGeometry(RrProgram *program,
                    std::vector<std::string> *poseDiagnostics,
                    std::string *error)
 {
-    (void)time;
     (void)poseDiagnostics;
     if (!program || !program->geometry || !program->geo) {
         if (error) {
@@ -4790,11 +4681,11 @@ RrPrologueGeometry(RrProgram *program, double time,
         return false;
     }
 
-    // This frame's lookups: the stage-sourced reads by (path, Default)
+    // This run's lookups: the stage-sourced reads by (path, Default)
     // and the refused blend layouts by (mover, sample).
-    scratch->frame = &record;
+    const RrStatic &statics = program->statics;
     scratch->pathReads.clear();
-    for (const RigExecWirePathRead &read : record.pathReads) {
+    for (const RigExecWirePathRead &read : statics.PathReads()) {
         scratch->pathReads[std::make_pair(read.path, read.wasDefault)] =
             &read.value;
     }
@@ -4814,7 +4705,8 @@ RrPrologueGeometry(RrProgram *program, double time,
         }
     }
     scratch->refusedLayouts.clear();
-    for (const RigExecWireRefusedLayout &refused : record.refusedLayouts) {
+    for (const RigExecWireRefusedLayout &refused :
+         statics.RefusedLayouts()) {
         scratch->refusedLayouts[std::make_pair(refused.mover,
                                                refused.sample)] = &refused;
     }
@@ -4822,13 +4714,12 @@ RrPrologueGeometry(RrProgram *program, double time,
     for (size_t c = 0; c < geo.chains.size(); ++c) {
         const RigExecWireChain &wireChain = geo.chains[c];
         RrGeometryScratch::Chain &chain = scratch->chains[c];
-        const bool haveBase = c < record.chainHaveBase.size() &&
-                              record.chainHaveBase[c] != 0 &&
-                              c < record.chainBases.size();
+        const std::vector<RigExecWireVec3f> *wireBase = statics.ChainBase(c);
+        const bool haveBase = wireBase != nullptr;
         std::vector<RrVec3f> basePoints;
         if (haveBase) {
-            basePoints.reserve(record.chainBases[c].size());
-            for (const RigExecWireVec3f &p : record.chainBases[c]) {
+            basePoints.reserve(wireBase->size());
+            for (const RigExecWireVec3f &p : *wireBase) {
                 basePoints.push_back(RrVec3f(p[0], p[1], p[2]));
             }
         }
@@ -4923,14 +4814,13 @@ RrPrologueGeometry(RrProgram *program, double time,
                 return false;
             }
             RrGeometryScratch::Derived &derived = scratch->derived[id];
-            const bool derivedHaveBase =
-                id < record.derivedHaveBase.size() &&
-                record.derivedHaveBase[id] != 0 &&
-                id < record.derivedBases.size();
+            const std::vector<RigExecWireVec3f> *wireDerived =
+                statics.DerivedBase(id);
+            const bool derivedHaveBase = wireDerived != nullptr;
             std::vector<RrVec3f> derivedBase;
             if (derivedHaveBase) {
-                derivedBase.reserve(record.derivedBases[id].size());
-                for (const RigExecWireVec3f &p : record.derivedBases[id]) {
+                derivedBase.reserve(wireDerived->size());
+                for (const RigExecWireVec3f &p : *wireDerived) {
                     derivedBase.push_back(RrVec3f(p[0], p[1], p[2]));
                 }
             }
@@ -5101,8 +4991,7 @@ RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
 
 bool
 RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
-                    size_t step, const RigExecWireFrameInputs *record,
-                    std::string *error)
+                    size_t step, std::string *error)
 {
     RrStore &store = program->store;
     const RigExecWireDomainGeometry &geo = *program->geometry;
@@ -5171,20 +5060,11 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
     in.rev = &rev;
     in.basePoints = chain.result.empty() ? nullptr : chain.result.data();
     in.basePointCount = chain.result.size();
-    in.record = record;
     in.chain = chainIndex;
     in.revision = derivedIndex;
     in.derived = true;
     in.diagnostics = &output.diagnostics;
     RrGeoMoverParameters parameters = RrGeoAssembleRevision(in);
-    if (program->CrossCheckThisRun() &&
-        !RrCrossCheckRevisionReads(program, record, chainIndex, derivedIndex,
-                                   true, &output, error)) {
-        if (error) {
-            *error = RrGeoStepLabel(program, step) + ": " + *error;
-        }
-        return false;
-    }
     const RrGeoMoverStatus status = RrGeoStatusForParameters(
         parameters, program->TextOrEmpty(wire.moverPath));
     output.counters.revisionsBuilt = 1;
@@ -5331,9 +5211,7 @@ RrGeoRunInfluenceFoldStep(RrProgram *program, RrGeometryScratch *scratch,
 bool
 RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
                            size_t chainIndex, size_t revisionIndex,
-                           size_t step,
-                           const RigExecWireFrameInputs *record,
-                           std::string *error)
+                           size_t step, std::string *error)
 {
     RrStore &store = program->store;
     const RigExecWireDomainGeometry &geo = *program->geometry;
@@ -5380,15 +5258,6 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
             output.diagnostics.push_back("current-phase weight failed: " +
                                          why);
         }
-        if (program->CrossCheckThisRun() &&
-            !RrGeoCrossCheckPhasePacket(program, record, chainIndex,
-                                        revisionIndex, rev.currentPhasePacket,
-                                        &output, error)) {
-            if (error) {
-                *error = RrGeoStepLabel(program, step) + ": " + *error;
-            }
-            return false;
-        }
     }
     RrGeoAssembleInputs in;
     in.program = program;
@@ -5398,7 +5267,6 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
     in.basePoints =
         chain.lastBase.empty() ? nullptr : chain.lastBase.data();
     in.basePointCount = chain.lastBase.size();
-    in.record = record;
     in.chain = chainIndex;
     in.revision = revisionIndex;
     in.derived = false;
@@ -5408,14 +5276,6 @@ RrGeoRunRevisionStaticStep(RrProgram *program, RrGeometryScratch *scratch,
         rev.parameters, program->TextOrEmpty(wire.moverPath));
     output.counters.revisionsBuilt = 1;
     rev.defaultWeight = RrGeoAssembleDefaultWeight(in);
-    if (program->CrossCheckThisRun() &&
-        !RrCrossCheckRevisionReads(program, record, chainIndex, revisionIndex,
-                                   false, &output, error)) {
-        if (error) {
-            *error = RrGeoStepLabel(program, step) + ": " + *error;
-        }
-        return false;
-    }
     rev.staticDirty = !rev.ran || rev.parameters != rev.lastParameters ||
                       rev.status != rev.lastStatus ||
                       rev.defaultWeight != rev.lastDefaultWeight;
@@ -5691,8 +5551,7 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
 }  // namespace
 
 bool
-RrRunGeometryStep(RrProgram *program, size_t step, double time,
-                  std::string *error)
+RrRunGeometryStep(RrProgram *program, size_t step, std::string *error)
 {
     if (!program || !program->steps || !program->geometry ||
         !program->geo || step >= program->steps->size() ||
@@ -5717,12 +5576,8 @@ RrRunGeometryStep(RrProgram *program, size_t step, double time,
         }
         return false;
     }
-    const RigExecWireFrameInputs *record = scratch->frame;
-    if (!record || record->frame != time) {
-        record = RrGeoFindRecord(program, time);
-    }
     if (kind == RigExecWireStepKind::Derived) {
-        return RrGeoRunDerivedStep(program, scratch, step, record, error);
+        return RrGeoRunDerivedStep(program, scratch, step, error);
     }
     if (kind == RigExecWireStepKind::ChainStatus) {
         return RrGeoRunChainStatusStep(program, scratch, step, error);
@@ -5769,8 +5624,7 @@ RrRunGeometryStep(RrProgram *program, size_t step, double time,
                                          revisionIndex, step, error);
     case RigExecWireStepKind::RevisionStatic:
         return RrGeoRunRevisionStaticStep(program, scratch, chainIndex,
-                                          revisionIndex, step, record,
-                                          error);
+                                          revisionIndex, step, error);
     case RigExecWireStepKind::RevisionChunk:
         return RrGeoRunRevisionChunkStep(program, scratch, chainIndex,
                                          revisionIndex, step, error);

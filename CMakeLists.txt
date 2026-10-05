@@ -187,7 +187,7 @@ target_link_libraries(rigExecImaging PUBLIC
     sdr
     work
 )
-target_link_libraries(rigExecImaging PRIVATE rigExecRuntime)
+target_link_libraries(rigExecImaging PRIVATE rigExecRuntime rigExecSampler)
 target_compile_definitions(rigExecImaging PRIVATE RIGEXEC_IMAGING_EXPORTS)
 
 # The vendored FlatBuffers C++ runtime headers (Apache-2.0, unmodified; see
@@ -249,13 +249,25 @@ else ()
         -ffp-contract=off)
 endif ()
 
+# rigExecSampler: hands a .rigexec's Animated inputs the values a stage holds
+# at each new time (RigExecInputSampler), for every consumer that plays the
+# runtime over a stage. The runtime itself stays USD-free.
+add_library(rigExecSampler STATIC libs/rigExecSampler/inputSampler.cpp)
+target_include_directories(rigExecSampler PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecSampler PUBLIC rigExecRuntime usd sdf tf gf)
+set_target_properties(rigExecSampler PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(rigExec::rigExecSampler ALIAS rigExecSampler)
+
 # rigExecBake: .rigexec baking from a compiled evaluator (M1).
 add_library(rigExecBake SHARED
     libs/rigExecBake/bake.cpp
     libs/rigExecBake/serialize.cpp
     libs/rigExecBake/capture.cpp
-    libs/rigExecBake/propertyChainsBake.cpp
-    libs/rigExecBake/computedCapture.cpp)
+    libs/rigExecBake/computedCapture.cpp
+    libs/rigExecBake/revisionReads.cpp
+    libs/rigExecBake/staticReport.cpp)
 target_include_directories(rigExecBake PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -271,7 +283,7 @@ target_compile_definitions(rigExecBakeTool PRIVATE
     RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
 add_executable(rigExecPose tools/rigExecPose.cpp)
-target_link_libraries(rigExecPose PRIVATE rigExec rigExecRuntime)
+target_link_libraries(rigExecPose PRIVATE rigExec rigExecRuntime rigExecSampler)
 target_compile_definitions(rigExecPose PRIVATE
     RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
@@ -315,7 +327,7 @@ add_executable(testRigExecWrinkleMath tests/testRigExecWrinkleMath.cpp)
 target_link_libraries(testRigExecWrinkleMath PRIVATE rigExecMath)
 add_test(NAME testRigExecWrinkleMath COMMAND testRigExecWrinkleMath)
 add_executable(testRigExecWrinkle tests/testRigExecWrinkle.cpp)
-target_link_libraries(testRigExecWrinkle PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime)
+target_link_libraries(testRigExecWrinkle PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime rigExecSampler)
 add_test(NAME testRigExecWrinkle COMMAND testRigExecWrinkle
     "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
     "${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec")
@@ -326,7 +338,7 @@ add_test(NAME testRigExecWrinkleRuntime COMMAND testRigExecWrinkleRuntime
     "${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec")
 set_tests_properties(testRigExecWrinkleRuntime PROPERTIES FIXTURES_REQUIRED WrinkleBinary)
 add_executable(testRigExecDeltaMush tests/testRigExecDeltaMush.cpp)
-target_link_libraries(testRigExecDeltaMush PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime)
+target_link_libraries(testRigExecDeltaMush PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime rigExecSampler)
 add_test(NAME testRigExecDeltaMush COMMAND testRigExecDeltaMush "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 add_executable(testRigExecRuntimeLiveFace tests/testRigExecRuntimeLiveFace.cpp)
 target_link_libraries(testRigExecRuntimeLiveFace PRIVATE rigExec rigExecBake rigExecRuntime)
@@ -337,7 +349,7 @@ add_executable(testRigExecDeltaMushRuntime tests/testRigExecDeltaMushRuntime.cpp
 target_link_libraries(testRigExecDeltaMushRuntime PRIVATE rigExecRuntime)
 add_test(NAME testRigExecDeltaMushBakeFile COMMAND rigExecBakeTool
     "${CMAKE_CURRENT_SOURCE_DIR}/docs/examples/delta_mush_mover.usda"
-    --rig /Rig --frames 1,12,24,36,48
+    --rig /Rig --time 1
     -o "${CMAKE_CURRENT_BINARY_DIR}/delta_mush_test.rigexec")
 set_tests_properties(testRigExecDeltaMushBakeFile PROPERTIES FIXTURES_SETUP DeltaMushBinary)
 add_test(NAME testRigExecDeltaMushRuntime COMMAND testRigExecDeltaMushRuntime
@@ -579,7 +591,7 @@ target_link_libraries(testRigExecRuntimeMath PRIVATE rigExecRuntime gf)
 add_test(NAME testRigExecRuntimeMath COMMAND testRigExecRuntimeMath)
 
 add_executable(testRigExecRuntimeLoader tests/testRigExecRuntimeLoader.cpp)
-target_link_libraries(testRigExecRuntimeLoader PRIVATE rigExecRuntime rigExecBake)
+target_link_libraries(testRigExecRuntimeLoader PRIVATE rigExecRuntime rigExecBake rigExecSampler)
 target_include_directories(testRigExecRuntimeLoader PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecRuntimeLoader PRIVATE
@@ -590,7 +602,7 @@ add_test(NAME testRigExecRuntimeLoader COMMAND testRigExecRuntimeLoader
 
 # Family parity tests: baked program vs runtime, per family. Each is
 add_executable(testRigExecRuntimePose tests/testRigExecRuntimePose.cpp)
-target_link_libraries(testRigExecRuntimePose PRIVATE rigExecRuntime rigExecBake)
+target_link_libraries(testRigExecRuntimePose PRIVATE rigExecRuntime rigExecBake rigExecSampler)
 target_include_directories(testRigExecRuntimePose PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecRuntimePose PRIVATE
@@ -608,7 +620,7 @@ set_tests_properties(testRigExecRuntimePoseFineClusters PROPERTIES
     ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
 
 add_executable(testRigExecRuntimeWeights tests/testRigExecRuntimeWeights.cpp)
-target_link_libraries(testRigExecRuntimeWeights PRIVATE rigExecRuntime rigExecBake)
+target_link_libraries(testRigExecRuntimeWeights PRIVATE rigExecRuntime rigExecBake rigExecSampler)
 target_include_directories(testRigExecRuntimeWeights PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecRuntimeWeights PRIVATE
@@ -618,7 +630,7 @@ add_test(NAME testRigExecRuntimeWeights COMMAND testRigExecRuntimeWeights
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecRuntimeGeometry tests/testRigExecRuntimeGeometry.cpp)
-target_link_libraries(testRigExecRuntimeGeometry PRIVATE rigExecRuntime rigExecBake)
+target_link_libraries(testRigExecRuntimeGeometry PRIVATE rigExecRuntime rigExecBake rigExecSampler)
 target_include_directories(testRigExecRuntimeGeometry PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecRuntimeGeometry PRIVATE
@@ -627,6 +639,18 @@ target_compile_definitions(testRigExecRuntimeGeometry PRIVATE
 add_test(NAME testRigExecRuntimeGeometry COMMAND testRigExecRuntimeGeometry
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
+# Inputs set on a binary against the same values authored in the session
+# layer, in the dynamic and baked evaluators: example inputs, held
+# space-switch indices and a ladder input a switch recomposes from.
+add_executable(testRigExecRuntimeInputs tests/testRigExecRuntimeInputs.cpp)
+target_link_libraries(testRigExecRuntimeInputs PRIVATE
+    rigExec rigExecBake rigExecRuntime rigExecSampler)
+target_compile_definitions(testRigExecRuntimeInputs PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecRuntimeInputs COMMAND testRigExecRuntimeInputs
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+
 # The single-FlatBuffer format on hand-built files: bit exactness, the
 # refusals before and in verification, determinism, validation rules.
 add_executable(testRigExecFormat tests/testRigExecFormat.cpp)
@@ -634,7 +658,7 @@ target_link_libraries(testRigExecFormat PRIVATE rigExecBinary)
 add_test(NAME testRigExecFormat COMMAND testRigExecFormat)
 
 add_executable(testRigExecBinary tests/testRigExecBinary.cpp)
-target_link_libraries(testRigExecBinary PRIVATE rigExecBake)
+target_link_libraries(testRigExecBinary PRIVATE rigExecBake rigExecRigging)
 target_include_directories(testRigExecBinary PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecBinary PRIVATE
@@ -644,18 +668,18 @@ add_test(NAME testRigExecBinary COMMAND testRigExecBinary
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # RIG names a stage under examples/, STAGE any other stage by full path.
-# Each MIN_* option fails the test unless the runtime's record cross-check
-# compared at least that many values of its kind: MIN_ENVELOPES constraint
-# envelopes, MIN_PHASE_PACKETS current-phase weight packets,
-# MIN_PROPERTY_VALUES property-chain values, MIN_CHAIN_READS registered
-# reads crossing a chain, MIN_REGISTERED_READS the other registered reads,
-# MIN_BLEND_WEIGHTS blend channel weights, MIN_DEFAULT_WEIGHTS geometry
-# revisions' default weights, MIN_PATH_READS the assemblers'
-# connection-following scalar reads, and MIN_BLEND_ACTIVATIONS blend
-# samples' activations.
+# The test bakes the stage once, at TIME (default: the first of FRAMES), and
+# replays the binary against the parity evaluator: its defaults at TIME, then
+# every frame of FRAMES with the binary's Animated inputs sampled from the
+# stage, then two drags of each input DRAGS names (a comma-separated list of
+# <prim>.<attr>) against the same value authored in the session layer.
+# CLASS is `inputs` (every animated source is an input, so the binary
+# follows the stage at every frame) or `static` (an animated source is
+# static data the binary holds at TIME, so it verifies at TIME alone, plus
+# the drags); see tests/exampleFixtures.cmake.
 function(rigexec_add_verify_binary_test)
     cmake_parse_arguments(A ""
-        "NAME;RIG;STAGE;FRAMES;MIN_ENVELOPES;MIN_PHASE_PACKETS;MIN_PROPERTY_VALUES;MIN_CHAIN_READS;MIN_REGISTERED_READS;MIN_BLEND_WEIGHTS;MIN_DEFAULT_WEIGHTS;MIN_PATH_READS;MIN_BLEND_ACTIVATIONS"
+        "NAME;RIG;STAGE;FRAMES;TIME;CLASS;DRAGS"
         "" ${ARGN})
     if (NOT DEFINED A_NAME OR NOT DEFINED A_FRAMES OR
             (NOT DEFINED A_RIG AND NOT DEFINED A_STAGE) OR
@@ -667,23 +691,25 @@ function(rigexec_add_verify_binary_test)
         message(FATAL_ERROR "rigexec_add_verify_binary_test: unknown "
                             "argument(s): ${A_UNPARSED_ARGUMENTS}")
     endif()
+    if (DEFINED A_CLASS AND NOT A_CLASS STREQUAL "inputs" AND
+            NOT A_CLASS STREQUAL "static")
+        message(FATAL_ERROR "rigexec_add_verify_binary_test: CLASS is "
+                            "'${A_CLASS}', expected inputs or static")
+    endif()
     if (DEFINED A_RIG)
         set(A_STAGE "${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}")
     endif()
-    set(_expect)
-    foreach(_option IN ITEMS MIN_ENVELOPES MIN_PHASE_PACKETS
-            MIN_PROPERTY_VALUES MIN_CHAIN_READS MIN_REGISTERED_READS
-            MIN_BLEND_WEIGHTS MIN_DEFAULT_WEIGHTS MIN_PATH_READS
-            MIN_BLEND_ACTIVATIONS)
+    set(_options)
+    foreach(_option IN ITEMS TIME CLASS DRAGS)
         if (DEFINED A_${_option})
-            list(APPEND _expect "-D${_option}=${A_${_option}}")
+            list(APPEND _options "-D${_option}=${A_${_option}}")
         endif()
     endforeach()
     set(_out "${CMAKE_CURRENT_BINARY_DIR}/verify-binary/${A_NAME}.rigexec")
     add_test(NAME verify_binary_${A_NAME} COMMAND "${CMAKE_COMMAND}"
         "-DBAKE=$<TARGET_FILE:rigExecBakeTool>" "-DPOSE=$<TARGET_FILE:rigExecPose>"
         "-DSTAGE=${A_STAGE}"
-        "-DFRAMES=${A_FRAMES}" "-DOUT=${_out}" ${_expect}
+        "-DFRAMES=${A_FRAMES}" "-DOUT=${_out}" ${_options}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/runVerifyBinary.cmake")
     set(_schema_resources
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -692,43 +718,51 @@ function(rigexec_add_verify_binary_test)
 endfunction()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/verify-binary")
-# Floors on examples whose geometry reads the cross-check compares: the
-# blend shape face's channel weights (one per channel and frame) and
-# sample activations, the tail's default weights and enable reads, and the
-# biped stack's, whose blend weights are mostly pose-driven (it compares 18
-# channels that are not, so a floor of 400 fails if the pose-driven arm
-# stops comparing).
-set(_verify_binary_floors_04_BlendShapeFace
-    MIN_BLEND_WEIGHTS 10 MIN_BLEND_ACTIVATIONS 15)
-set(_verify_binary_floors_01_FkChainTail
-    MIN_DEFAULT_WEIGHTS 20 MIN_PATH_READS 20)
-set(_verify_binary_floors_biped_Biped_stack
-    MIN_BLEND_WEIGHTS 400 MIN_DEFAULT_WEIGHTS 400 MIN_PATH_READS 500
-    MIN_BLEND_ACTIVATIONS 400)
+# Every baking example, in its fixture class, dragging the table's control
+# avar and operator input (fields 2-5) where the row names them.
 foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
     string(REPLACE "|" ";" _fixture_fields "${_fixture}")
     list(GET _fixture_fields 0 _fixture_stage)
     list(GET _fixture_fields 1 _fixture_frames)
+    list(GET _fixture_fields 2 _fixture_control_prim)
+    list(GET _fixture_fields 3 _fixture_control_avar)
+    list(GET _fixture_fields 4 _fixture_operator_prim)
+    list(GET _fixture_fields 5 _fixture_operator_input)
     list(GET _fixture_fields 6 _fixture_bakes)
+    list(GET _fixture_fields 8 _fixture_animation)
     string(REGEX REPLACE "\\.(usda|usd)$" "" _fixture_name "${_fixture_stage}")
     string(REPLACE "/" "_" _fixture_name "${_fixture_name}")
+    set(_fixture_drags)
+    if (NOT _fixture_control_prim STREQUAL "-")
+        list(APPEND _fixture_drags
+            "${_fixture_control_prim}.${_fixture_control_avar}")
+    endif()
+    if (NOT _fixture_operator_prim STREQUAL "-")
+        list(APPEND _fixture_drags
+            "${_fixture_operator_prim}.${_fixture_operator_input}")
+    endif()
+    set(_fixture_drag_args)
+    if (_fixture_drags)
+        string(REPLACE ";" "," _fixture_drag_list "${_fixture_drags}")
+        set(_fixture_drag_args DRAGS "${_fixture_drag_list}")
+    endif()
     if (_fixture_bakes STREQUAL "YES")
         rigexec_add_verify_binary_test(NAME ${_fixture_name}
             RIG ${_fixture_stage} FRAMES ${_fixture_frames}
-            ${_verify_binary_floors_${_fixture_name}})
+            CLASS ${_fixture_animation} ${_fixture_drag_args})
     endif()
 endforeach()
 
 # The stack's binary round trip; see the parity entry above for why the
 rigexec_add_verify_binary_test(NAME biped_Biped_stack_anim
-    RIG biped/Biped_stack_anim.usda FRAMES 1,50,100,150,200)
+    RIG biped/Biped_stack_anim.usda FRAMES 1,50,100,150,200 CLASS inputs)
 
 # The results the runtime computes rather than replays (constraint
 # envelopes, current-phase weight fields), which no example exercises:
-# both must reach the record cross-check at every frame.
+# the binary, baked at the first frame, must compute them at every frame.
 rigexec_add_verify_binary_test(NAME computed_weights
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_weights.usda"
-    FRAMES 1,3,5,7,10 MIN_ENVELOPES 20 MIN_PHASE_PACKETS 5)
+    FRAMES 1,3,5,7,10 CLASS inputs)
 
 # Property chains the runtime computes in the cases no example covers
 # together: envelopes on property movers, a double chain, vec3f and matrix
@@ -736,7 +770,7 @@ rigexec_add_verify_binary_test(NAME computed_weights
 # weight read through a chain at a declared `final`.
 rigexec_add_verify_binary_test(NAME computed_chains
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_chains.usda"
-    FRAMES 1,3,5,7,10 MIN_PROPERTY_VALUES 50 MIN_CHAIN_READS 5)
+    FRAMES 1,3,5,7,10 CLASS inputs)
 
 # Two-bone IK measured in an animated rigExec:space and a keyed
 # rigExec:spaceMatrix, one with a keyed spaceMatrix alone, and a spline IK
@@ -744,26 +778,44 @@ rigexec_add_verify_binary_test(NAME computed_chains
 # registered read the runtime both consumes and computes.
 rigexec_add_verify_binary_test(NAME computed_ik_space
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_ik_space.usda"
-    FRAMES 1,3,5,7,10 MIN_REGISTERED_READS 5)
+    FRAMES 1,3,5,7,10 CLASS inputs)
 
 # The assemblers' connection-following scalar reads of every type (int,
 # bool, float, a float widened to double, double3, matrix4d), including a
 # float whose connection ends on a double with no value, which reads the
-# head's own value.
+# head's own value. The mesh's keyed points are a chain base the binary
+# holds at the bake time, so the class is static; the drags show the reads
+# are computed: the keyed avar a mover input and a shader dial read through
+# their connections, a keyed float dial, and the two heads whose
+# connections end on the valueless double. Baked at frame 10, where the
+# points have left the mush's rest points, so a drag of the mush's inputs
+# moves its output (a mush of its own rest returns it). The same stage with
+# the points held by a stronger default is of the inputs class: its binary
+# follows the keyed double3, matrix4d and float reads at every frame.
 rigexec_add_verify_binary_test(NAME computed_path_reads
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_path_reads.usda"
-    FRAMES 1,4,7,10 MIN_PATH_READS 52 MIN_DEFAULT_WEIGHTS 4)
+    FRAMES 1,4,7,10 TIME 10 CLASS static
+    DRAGS "/PathReadAsset/Rig/Controls/Dial.avars:amount,/PathReadAsset/Rig/Dials.gain,/PathReadAsset/Rig/Dials.held,/PathReadAsset/Rig/Movers/Mush.inputs:step")
+rigexec_add_verify_binary_test(NAME computed_path_reads_held_points
+    STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecPathReadsHeldPoints.usda"
+    FRAMES 1,4,7,10 CLASS inputs)
 
 # Space switches nested under switched controls, whose compose reads an
 # ancestor recomposed before that ancestor's own switch: the nested pair,
 # a pair resolved in one round, the nested pair reading keyed dials that
 # hold no default, and a switch whose parent and rigExec:space are
-# recomposed on a control above them.
+# recomposed on a control above them. The nested pair is baked at frame 2,
+# where its controls have left their rests (at rest a switch holds its
+# target whatever its index), and drags each switch's inputs:activeSpace
+# there.
+set(_switch_drags_space_switch_nested
+    TIME 2
+    DRAGS "/Rig/Movers/sSpaces.inputs:activeSpace,/Rig/Movers/pSpaces.inputs:activeSpace")
 foreach(_switch_fixture IN ITEMS space_switch_nested space_switch_same_round
         space_switch_dial space_switch_carry)
     rigexec_add_verify_binary_test(NAME ${_switch_fixture}
         STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/${_switch_fixture}.usda"
-        FRAMES 0,1,2,3)
+        FRAMES 0,1,2,3 CLASS inputs ${_switch_drags_${_switch_fixture}})
 endforeach()
 
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
@@ -1666,14 +1718,14 @@ endforeach()
 # Install
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecFlatBuffers rigExecBinary rigExecBake rigExecRuntime
+install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecFlatBuffers rigExecBinary rigExecBake rigExecRuntime rigExecSampler
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${RIGEXEC_INSTALL_LIBDIR}")
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
-foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime)
+foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime rigExecSampler)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING

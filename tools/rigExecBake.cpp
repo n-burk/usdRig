@@ -1,28 +1,38 @@
 // rigExecBake -- bake a rig to a .rigexec binary.
-//   rigExecBake <stage> [--rig <primPath>] --frames a,b,c -o <file.rigexec>
-//               [--manifest-out <file.json>]
+//   rigExecBake <stage> [--rig <primPath>] [--time T]
+//               [--presentation <file.rexp>] [--report-static]
+//               -o <file.rigexec>
 // Where rigExecPose evaluates and prints, this compiles the epoch through
-// the baked program and serializes it. A bake is of the PROGRAM, so the
-// tool pins the Baked mode and treats anything else as a failure -- the
-// --require-baked rigExecPose opts into, here unconditional, because baking
-// dynamic numbers into a file whose reader promises program semantics would
-// be a binary no parity check can hold to account. Exit status is 2 on
-// usage errors and 1 when the rig fails to compile, to bake, or to write,
-// so it can gate a build the way rigExecPose does.
+// the baked program, runs it once at T (default: the stage's start time
+// code when it authors a range, else 0) and serializes the static graph
+// with every input's value at T as its default. --presentation embeds a
+// REXP buffer whose controls name listed inputs. --report-static lists, after
+// the bake, every static datum whose source the stage animates, which the
+// binary holds at T only; it never changes the exit status.
+// A bake is of the PROGRAM, so the tool pins the Baked mode and treats
+// anything else as a failure -- the --require-baked rigExecPose opts into,
+// here unconditional, because baking dynamic numbers into a file whose
+// reader promises program semantics would be a binary no parity check can
+// hold to account. Exit status is 2 on usage errors and 1 when the rig fails
+// to compile, to bake, or to write, so it can gate a build the way
+// rigExecPose does.
 #include "rigExecBake/bake.h"
+#include "rigExecBake/staticReport.h"
+#include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/arch/env.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
-#include "pxr/base/tf/stringUtils.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -51,16 +61,17 @@ FindRig(const UsdStageRefPtr &stage)
     return SdfPath();
 }
 
-std::vector<double>
-ParseFrames(const std::string &text)
+// The whole of \p text as one finite number.
+bool
+ParseTime(const char *text, double *out)
 {
-    std::vector<double> frames;
-    for (const std::string &piece : TfStringSplit(text, ",")) {
-        if (!piece.empty()) {
-            frames.push_back(std::atof(piece.c_str()));
-        }
+    char *end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || !std::isfinite(value)) {
+        return false;
     }
-    return frames;
+    *out = value;
+    return true;
 }
 
 }  // namespace
@@ -70,44 +81,58 @@ main(int argc, char **argv)
 {
     if (argc < 2) {
         std::printf(
-            "usage: rigExecBake <stage> [--rig <primPath>] "
-            "--frames a,b,c -o <file.rigexec> "
-            "[--manifest-out <file.json>] [--poseable]\n"
-            "  --poseable  a file a client can pose, not only replay: every\n"
-            "              input an override can reach, and the property\n"
-            "              chains as programs\n");
+            "usage: rigExecBake <stage> [--rig <primPath>] [--time T] "
+            "[--presentation <file.rexp>] [--report-static] "
+            "-o <file.rigexec>\n");
         return 2;
     }
     std::string stagePath = argv[1];
     std::string rigArg;
     std::string output;
-    std::string manifestOut;
-    std::vector<double> frames;
-    bool poseable = false;
+    std::string presentationPath;
+    double time = std::nan("");
+    bool haveTime = false;
+    bool reportStatic = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--rig" && i + 1 < argc) {
             rigArg = argv[++i];
-        } else if (arg == "--frames" && i + 1 < argc) {
-            frames = ParseFrames(argv[++i]);
+        } else if (arg == "--time" && i + 1 < argc) {
+            const char *text = argv[++i];
+            if (!ParseTime(text, &time)) {
+                std::printf("--time wants a finite number, not '%s'\n",
+                            text);
+                return 2;
+            }
+            haveTime = true;
+        } else if (arg == "--presentation" && i + 1 < argc) {
+            presentationPath = argv[++i];
+        } else if (arg == "--report-static") {
+            reportStatic = true;
         } else if (arg == "-o" && i + 1 < argc) {
             output = argv[++i];
-        } else if (arg == "--manifest-out" && i + 1 < argc) {
-            manifestOut = argv[++i];
-        } else if (arg == "--poseable") {
-            poseable = true;
         } else {
             std::printf("unknown argument: %s\n", arg.c_str());
             return 2;
         }
     }
-    if (frames.empty()) {
-        std::printf("--frames wants a non-empty frame list\n");
-        return 2;
-    }
     if (output.empty()) {
         std::printf("-o wants an output file\n");
         return 2;
+    }
+    std::vector<uint8_t> presentation;
+    if (!presentationPath.empty()) {
+        std::ifstream stream(presentationPath, std::ios::binary);
+        if (!stream) {
+            std::printf("FATAL: cannot read %s\n", presentationPath.c_str());
+            return 2;
+        }
+        presentation.assign(std::istreambuf_iterator<char>(stream),
+                            std::istreambuf_iterator<char>());
+        if (presentation.empty()) {
+            std::printf("FATAL: %s is empty\n", presentationPath.c_str());
+            return 2;
+        }
     }
 
     // Before the first evaluator exists: the evaluator reads
@@ -141,8 +166,9 @@ main(int argc, char **argv)
     // Compile so the program builds inside it rather than on first use.
     evaluator.SetEvaluationMode(rigExec::RigExecEvaluationMode::Baked);
     rigExec::RigExecBakeOpts opts;
-    opts.frames = frames;
-    opts.overridableInputs = poseable;
+    opts.time = haveTime ? time
+                         : rigExec::RigExecBakedProbeTime(stage).GetValue();
+    opts.presentation = std::move(presentation);
     rigExec::RigExecBakeResult result;
     std::string error;
     if (!rigExec::RigExecBakeToBinary(evaluator, opts, &result, &error)) {
@@ -163,20 +189,21 @@ main(int argc, char **argv)
             return 1;
         }
     }
-    if (!manifestOut.empty()) {
-        std::ofstream stream(manifestOut);
-        if (!stream) {
-            std::printf("  FAIL: cannot open %s for writing\n",
-                        manifestOut.c_str());
-            return 1;
-        }
-        stream << result.manifestJson;
-        if (!stream) {
-            std::printf("  FAIL: cannot write %s\n", manifestOut.c_str());
-            return 1;
+    std::printf("  baked at time %.17g to %s (%zu bytes)\n", opts.time,
+                output.c_str(), result.bytes.size());
+    if (reportStatic) {
+        std::vector<rigExec::RigExecBakeStaticEntry> entries;
+        if (rigExec::RigExecBakeStaticReport(evaluator, &entries, &error)) {
+            for (const rigExec::RigExecBakeStaticEntry &entry : entries) {
+                std::printf("  static %s: %s\n", entry.field.c_str(),
+                            entry.source.c_str());
+            }
+            std::printf("  static report: %zu animated source(s) held at "
+                        "the bake time\n",
+                        entries.size());
+        } else {
+            std::printf("  static report unavailable: %s\n", error.c_str());
         }
     }
-    std::printf("  baked %zu frame(s) to %s (%zu bytes)\n", frames.size(),
-                output.c_str(), result.bytes.size());
     return 0;
 }

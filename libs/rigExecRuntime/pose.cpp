@@ -256,6 +256,13 @@ _RrScratch(RrProgram *program)
 
 } // namespace runtimePoseDetail
 
+const std::vector<RrPointFrame> &
+RrPoseRestFrames(const RrProgram *program)
+{
+    return static_cast<const RrPoseScratch *>(program->pose.get())
+        ->restFrames;
+}
+
 bool
 RrPoseSizeScratch(RrProgram *program, std::string *error)
 {
@@ -420,8 +427,6 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
     }
     scratch->recordAfter.assign(poses.commits.size(), 1);
     scratch->recordEveryTarget.assign(poses.commits.size(), 1);
-    scratch->constraintWeights.assign(poses.constraints.size(), 0.0f);
-    scratch->constraintHaveWeight.assign(poses.constraints.size(), 0);
     scratch->weightScratch.assign(poses.constraints.size(), {});
     scratch->weightError.assign(poses.constraints.size(), {});
     scratch->deltaValues.assign(
@@ -446,66 +451,18 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
 
 bool
 RrProloguePose(RrProgram *program,
-               const RigExecWireFrameInputs &record,
                std::vector<std::string> *poseDiagnostics,
                std::string *error)
 {
     (void)poseDiagnostics;
+    (void)error;
     RrStore &store = program->store;
     RrPoseScratch *scratch = _RrScratch(program);
     const RigExecWireSlotMeta &meta = *program->slotMeta;
     const RigExecWireDomainPose &poses = *program->poses;
     const RigExecWireDomainGeometry &geometry = *program->geometry;
-    // Every record table is validated before anything is mutated.
-    if (record.solverRibbonPoints.size() != poses.solvers.size()) {
-        if (error) {
-            *error = "frame record ribbon tables do not match the solvers";
-        }
-        return false;
-    }
-    if (record.xformBase.size() != meta.xformSlots.size()) {
-        if (error) {
-            *error = "frame record xform tables do not match the slots";
-        }
-        return false;
-    }
-    if (record.nativeFrames.size() != poses.nativeSources.size()) {
-        if (error) {
-            *error =
-                "frame record native frames do not match the sources";
-        }
-        return false;
-    }
-    if (record.deltaBaseMatrix.size() != geometry.deltaBasePaths.size() ||
-        record.deltaBaseOk.size() != geometry.deltaBasePaths.size()) {
-        if (error) {
-            *error = "frame record delta tables do not match the paths";
-        }
-        return false;
-    }
-    if (record.arrayWeights.size() != poses.constraintArrays.size() ||
-        record.arrayTranslationOffsets.size() !=
-            poses.constraintArrays.size() ||
-        record.arrayRotationOffsets.size() !=
-            poses.constraintArrays.size() ||
-        record.arrayOk.size() != poses.constraintArrays.size() ||
-        record.arrayPoleWeights.size() !=
-            poses.constraintArrays.size() ||
-        record.arrayPoleOk.size() != poses.constraintArrays.size()) {
-        if (error) {
-            *error =
-                "frame record array tables do not match the constraints";
-        }
-        return false;
-    }
-    if (record.constraintWeights.size() != poses.constraints.size() ||
-        record.constraintHaveWeight.size() != poses.constraints.size()) {
-        if (error) {
-            *error =
-                "frame record envelope tables do not match the constraints";
-        }
-        return false;
-    }
+    // Open checked the static tables' sizes against the program.
+    const RrStatic &statics = program->statics;
     // RigExecBakedRunInputs. The provider ladder, before the avars that
     // compose against it: it recomposes when a channel varies, while a drag
     // stands on one of its channels, and once more after that drag is
@@ -580,25 +537,18 @@ RrProloguePose(RrProgram *program,
         }
         store.ribbonLast[s].swap(store.ribbonPoints[s]);
         std::vector<RrVec3f> &points = store.ribbonPoints[s];
+        const std::vector<RigExecWireVec3f> &driver = statics.RibbonPoints(s);
         points.clear();
-        points.reserve(record.solverRibbonPoints[s].size());
-        for (const RigExecWireVec3f &p : record.solverRibbonPoints[s]) {
+        points.reserve(driver.size());
+        for (const RigExecWireVec3f &p : driver) {
             points.push_back(RrVec3f(p[0], p[1], p[2]));
         }
         store.ribbonDirty[s] = points != store.ribbonLast[s] ? 1 : 0;
     }
-    // Xform-derived slots, seeded from the stage through the record.
+    // Xform-derived slots, seeded from the stage values the bake captured.
     for (size_t k = 0; k < meta.xformSlots.size(); ++k) {
         const int slot = meta.xformSlots[k];
-        if (slot < 0 || size_t(slot) >= store.fin.size() ||
-            size_t(slot) >= store.base.size() ||
-            k >= store.xformBase.size()) {
-            if (error) {
-                *error = "frame record xform tables do not match the slots";
-            }
-            return false;
-        }
-        const RrMat4d matrix = _RrWireMatrix(record.xformBase[k]);
+        const RrMat4d matrix = _RrWireMatrix(statics.XformBase(k));
         store.xformBase[k] = matrix;
         const RrPointFrame frame = RrFrameFromMatrix(matrix);
         store.base[size_t(slot)] = frame;
@@ -607,57 +557,42 @@ RrProloguePose(RrProgram *program,
     // The target transform each geometry-domain constraint measures
     // its delta against.
     for (size_t k = 0; k < geometry.deltaBasePaths.size(); ++k) {
-        store.deltaBaseOk[k] = record.deltaBaseOk[k] ? 1 : 0;
-        store.deltaBaseMatrix[k] = _RrWireMatrix(record.deltaBaseMatrix[k]);
+        store.deltaBaseOk[k] = statics.DeltaBaseOk(k) ? 1 : 0;
+        store.deltaBaseMatrix[k] = _RrWireMatrix(statics.DeltaBase(k));
     }
-    // The plain Xformables a constraint reads as a source. The record
+    // The plain Xformables a constraint reads as a source. The bake
     // carries frames only, no ok array, so ok is the frame's own
     // usability: a store read that failed has no frame to seed.
     for (size_t k = 0; k < poses.nativeSources.size(); ++k) {
-        const RrPointFrame frame = RrWireToFrame(record.nativeFrames[k]);
+        const RrPointFrame frame = RrWireToFrame(statics.NativeFrame(k));
         store.nativeFrames[k] = frame;
         store.nativeFrameOk[k] = RrFrameUsable(frame) ? 1 : 0;
     }
-    // The recorded envelopes, which only the cross-check reads: the
-    // Constraint step computes its own. Sizes were validated against the
-    // constraints at the head.
-    for (size_t k = 0;
-         program->CrossCheckThisRun() && k < poses.constraints.size();
-         ++k) {
-        scratch->constraintHaveWeight[k] =
-            k < record.constraintHaveWeight.size() &&
-                    record.constraintHaveWeight[k]
-                ? 1
-                : 0;
-        scratch->constraintWeights[k] =
-            k < record.constraintWeights.size()
-                ? record.constraintWeights[k]
-                : 0.0f;
-    }
     // A constraint's own authored tables, as the prologue read them at
-    // this frame's time. Capture folded every read semantic into the
-    // record; the cardinality lines it cannot carry stay empty.
+    // the bake time. Capture folded every read semantic into them; the
+    // cardinality lines it cannot carry stay empty.
     for (size_t k = 0; k < poses.constraintArrays.size(); ++k) {
         RrConstraintArraysLive &live = store.arrays[k];
-        live.weights = record.arrayWeights[k];
+        live.weights = statics.ArrayWeights(k);
+        const std::vector<RigExecWireVec3d> &translations =
+            statics.ArrayTranslationOffsets(k);
         live.translationOffsets.clear();
-        live.translationOffsets.reserve(
-            record.arrayTranslationOffsets[k].size());
-        for (const RigExecWireVec3d &v :
-             record.arrayTranslationOffsets[k]) {
+        live.translationOffsets.reserve(translations.size());
+        for (const RigExecWireVec3d &v : translations) {
             live.translationOffsets.push_back(
                 RrVec3d(v[0], v[1], v[2]));
         }
+        const std::vector<RigExecWireVec3d> &rotations =
+            statics.ArrayRotationOffsets(k);
         live.rotationOffsets.clear();
-        live.rotationOffsets.reserve(
-            record.arrayRotationOffsets[k].size());
-        for (const RigExecWireVec3d &v : record.arrayRotationOffsets[k]) {
+        live.rotationOffsets.reserve(rotations.size());
+        for (const RigExecWireVec3d &v : rotations) {
             live.rotationOffsets.push_back(
                 RrVec3d(v[0], v[1], v[2]));
         }
-        live.ok = record.arrayOk[k] != 0;
-        live.poleWeights = record.arrayPoleWeights[k];
-        live.poleOk = record.arrayPoleOk[k] != 0;
+        live.ok = statics.ArrayOk(k);
+        live.poleWeights = statics.ArrayPoleWeights(k);
+        live.poleOk = statics.ArrayPoleOk(k);
     }
     return true;
 }

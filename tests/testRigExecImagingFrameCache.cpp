@@ -683,7 +683,7 @@ TestPlaybackBypassesCache(
     RigExecRigEvaluator evaluator(stage, rig);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = {1.0, 2.0, 3.0, 4.0};
+    opts.time = 1.0;
     RigExecBakeResult baked;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &baked, &error));

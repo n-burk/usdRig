@@ -614,10 +614,8 @@ _RrFinishCommit(RrProgram *program, size_t step, size_t commitIndex,
 } // namespace runtimePoseDetail
 
 bool
-RrRunPoseStep(RrProgram *program, size_t step, double time,
-              std::string *error)
+RrRunPoseStep(RrProgram *program, size_t step, std::string *error)
 {
-    (void)time;
     RrStore &store = program->store;
     RrPoseScratch *scratch = _RrScratch(program);
     if (step >= program->steps->size() ||

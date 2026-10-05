@@ -1,6 +1,10 @@
 // rigExecRuntime pose-family parity (M2): baked program vs runtime over
 // every baking fixture, comparing fin/base versions, rest -> pose
-// matrices and joint matrices bit for bit. Owned by the pose-port worker.
+// matrices and joint matrices bit for bit. Each stage is baked at one time
+// and the binary is played through its inputs: the input sampler hands it
+// the stage's animated inputs at each frame, and a drag is an input set to
+// an authored value, held to the evaluator with the same value authored in
+// the session layer.
 #include "rigExecBake/bake.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
@@ -13,6 +17,7 @@
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xform.h"
@@ -36,8 +41,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 static int failures = 0;
 static int comparedFixtures = 0;
-static int deferredFixtures = 0;
-static int fullModeFixtures = 0;
+static int comparedFrames = 0;
 
 #define CHECK(cond)                                                     \
     do {                                                                \
@@ -48,6 +52,7 @@ static int fullModeFixtures = 0;
     } while (0)
 
 #include "rigExecSectionEdit.h"
+#include "rigExecRuntimeDrive.h"
 
 static SdfPath
 _FindRig(const UsdStageRefPtr &stage)
@@ -111,130 +116,138 @@ _MatricesEqual(const GfMatrix4d &a, const RrMat4d &b)
     return true;
 }
 
-// Whether any wire constraint binds a weight object: those fixtures need
-// the weights family, so pose-only mode defers them instead of failing.
 static bool
-_AnyWeightObject(const std::vector<uint8_t> &bytes)
+_SameBits(const RrPropertyValue &a, const RrPropertyValue &b)
 {
-    std::string error;
-    std::unique_ptr<RigExecBinaryReader> reader =
-        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
-    if (!reader) {
-        return true;
+    using Tag = RrPropertyValue::Tag;
+    if (a.tag != b.tag) {
+        return false;
     }
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    if (!reader->FindSection(RigExecBinarySection::DomainPose, &data,
-                             &size)) {
-        return true;
-    }
-    RigExecWireReader cursor(data, size);
-    RigExecWireDomainPose poses;
-    if (!RigExecWireDecodeDomainPose(&cursor, &poses, &error)) {
-        return true;
-    }
-    for (const RigExecWireConstraint &c : poses.constraints) {
-        if (c.weightObject != 0) {
-            return true;
+    switch (a.tag) {
+    case Tag::Float:
+        return std::memcmp(&a.f32, &b.f32, sizeof(float)) == 0;
+    case Tag::Double:
+        return std::memcmp(&a.f64, &b.f64, sizeof(double)) == 0;
+    case Tag::Matrix4d:
+        for (size_t r = 0; r < 4; ++r) {
+            if (std::memcmp(a.matrix[r], b.matrix[r], sizeof(double) * 4) !=
+                0) {
+                return false;
+            }
         }
+        return true;
+    case Tag::Vec3f:
+        return std::memcmp(a.vec.data(), b.vec.data(), sizeof(float) * 3) ==
+               0;
     }
     return false;
 }
 
-// Bakes \p stage at \p bakeFrames and compares a fresh reader, with the
-// record cross-check on, against a fresh baked evaluator frame by frame.
-// \p crossChecked receives the values the cross-check compared.
+// One played frame of a file: what a consumer reads, plus the property
+// results.
+struct _PlayedFrame {
+    std::vector<RigExecRuntimePropertyValue> properties;
+    std::vector<RrPointFrame> fin;
+    std::vector<RigExecRuntimeProviderXform> xforms;
+    std::vector<std::string> diagnostics;
+};
+
+static _PlayedFrame
+_Snapshot(const RigExecRuntimeReader &reader)
+{
+    return {reader.GetPropertyValues(), reader.GetFinFrames(),
+            reader.GetProviderXforms(), reader.GetDiagnostics()};
+}
+
+// Whether two played frames publish the same values bit for bit: property
+// results, version pool and provider transforms, and with \p diagnostics
+// the generation's lines too.
+static bool
+_SamePlayed(const _PlayedFrame &a, const _PlayedFrame &b,
+            bool diagnostics = true)
+{
+    if (a.properties.size() != b.properties.size() || a.fin != b.fin ||
+        (diagnostics && a.diagnostics != b.diagnostics) ||
+        a.xforms.size() != b.xforms.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.properties.size(); ++i) {
+        if (a.properties[i].path != b.properties[i].path ||
+            !_SameBits(a.properties[i].value, b.properties[i].value)) {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < a.xforms.size(); ++i) {
+        if (a.xforms[i].path != b.xforms[i].path ||
+            a.xforms[i].matrix != b.xforms[i].matrix ||
+            a.xforms[i].base != b.xforms[i].base) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The file plays a value computed from its inputs, not one it holds: its
+// outputs at the first and the last frame differ, while it holds the bake
+// time's static data alone.
+static void
+_CheckFramesDiffer(const char *name, const std::vector<_PlayedFrame> &rows)
+{
+    const bool differ =
+        rows.size() > 1 && !_SamePlayed(rows.front(), rows.back(), false);
+    CHECK(differ);
+    if (!differ) {
+        std::printf("%s: the first and last frames play the same outputs\n",
+                    name);
+    }
+}
+
+// Bakes \p stage at the first of \p frames and plays the file through the
+// input sampler beside a fresh baked evaluator, frame by frame: the step
+// graph's version pools and rest -> pose matrices, the joint matrices and
+// the diagnostics, bit for bit. A `static` stage holds an animated source
+// in static data at the bake time, so it plays that time alone. \p played,
+// when given, receives each frame's outputs.
 static void
 _TestStage(const std::string &name, const UsdStageRefPtr &stage,
-           const std::vector<double> &bakeFrames,
-           uint64_t *crossChecked = nullptr)
+           const std::vector<double> &frames,
+           std::vector<_PlayedFrame> *played = nullptr,
+           bool staticClass = false)
 {
     const SdfPath rigPath = _FindRig(stage);
-    CHECK(!rigPath.IsEmpty());
-    if (rigPath.IsEmpty()) {
-        std::printf("%s: FAILED (no rig)\n", name.c_str());
+    CHECK(!rigPath.IsEmpty() && !frames.empty());
+    if (rigPath.IsEmpty() || frames.empty()) {
+        std::printf("%s: FAILED (no rig or no frames)\n", name.c_str());
         return;
     }
-    RigExecRigEvaluator evaluator(stage, rigPath);
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = bakeFrames;
-    RigExecBakeResult result;
+    const std::vector<double> times =
+        staticClass ? std::vector<double>{frames.front()} : frames;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    if (!error.empty()) {
-        std::printf("bake diagnostic: %s\n", error.c_str());
-    }
-    CHECK(!result.bytes.empty());
-    if (result.bytes.empty()) {
-        std::printf("%s: FAILED (no bytes)\n", name.c_str());
-        return;
-    }
-
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader);
-    if (!reader) {
-        std::printf("open diagnostic: %s\n", error.c_str());
-        std::printf("%s: FAILED (open)\n", name.c_str());
-        return;
-    }
-
-    // Mask strategy: full mode first; when another family is still
-    // landing, fall back to pose-only on fixtures whose constraints bind
-    // no weight object, and defer the rest.
-    reader->SetCrossCheckForTesting(true);
-    reader->SetRunMaskForTesting(0x7u);
-    bool fullMode = true;
-    if (fullMode) {
-        const RigExecRigPose probe =
-            evaluator.Evaluate(UsdTimeCode(bakeFrames[0]));
-        if (!probe.valid || !reader->SetFrame(bakeFrames[0], &error) ||
-            !reader->Execute(&error)) {
-            if (!probe.valid) {
-                std::printf("%s: FAILED (probe invalid)\n",
-                            name.c_str());
-                CHECK(false);
-                return;
-            }
-            if (error.find("not implemented yet") != std::string::npos) {
-                fullMode = false;
-            } else {
-                std::printf("%s frame %.17g: %s\n", name.c_str(),
-                            bakeFrames[0], error.c_str());
-                CHECK(false);
-                return;
-            }
-        }
-    }
-    // Fresh evaluator + reader so the measured walk starts clean in the
-    // mode the probe selected.
-    RigExecRigEvaluator measured(stage, rigPath);
-    measured.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    reader = RigExecRuntimeReader::Open(
-        result.bytes.data(), result.bytes.size(), &error);
-    CHECK(reader);
-    if (!reader) {
-        std::printf("%s: FAILED (reopen)\n", name.c_str());
-        return;
-    }
-    reader->SetCrossCheckForTesting(true);
-    reader->SetRunMaskForTesting(fullMode ? 0x7u : 0x1u);
-    if (!fullMode) {
-        if (_AnyWeightObject(result.bytes)) {
-            ++deferredFixtures;
-            std::printf("%s: deferred (pose-only; binds weightObject)\n",
-                        name.c_str());
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        if (!RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error)) {
+            std::printf("%s: FAILED (bake: %s)\n", name.c_str(),
+                        error.c_str());
+            CHECK(false);
             return;
         }
-    } else {
-        ++fullModeFixtures;
     }
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
+        std::printf("%s: FAILED (open: %s)\n", name.c_str(), error.c_str());
+        CHECK(false);
+        return;
+    }
+    // A fresh evaluator beside a fresh reader: both start at the bake
+    // time's generation, the compile notices in it.
+    RigExecRigEvaluator measured(stage, rigPath);
+    measured.SetEvaluationMode(RigExecEvaluationMode::Baked);
 
     bool failed = false;
-    int comparedFrames = 0;
-    for (double frame : bakeFrames) {
+    int compared = 0;
+    for (double frame : times) {
         const RigExecRigPose pose =
             measured.Evaluate(UsdTimeCode(frame));
         if (!pose.valid) {
@@ -254,24 +267,19 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
             break;
         }
         const RigExecBakedProgramImpl &graph = program->GetStepGraph();
-        if (!reader->SetFrame(frame, &error)) {
-            std::printf("setframe diagnostic: %s\n", error.c_str());
-            CHECK(false);
-            failed = true;
-            break;
-        }
-        if (!reader->Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("execute diagnostic at %s frame %.17g: %s\n",
                         name.c_str(), frame, error.c_str());
             CHECK(false);
             failed = true;
             break;
         }
+        const RigExecRuntimeReader &reader = player.Reader();
 
-        const std::vector<RrPointFrame> &fin = reader->GetFinFrames();
-        const std::vector<RrPointFrame> &base = reader->GetBaseFrames();
-        const std::vector<RrMat4d> &finalM = reader->GetFinalMatrices();
-        const std::vector<RrMat4d> &baseM = reader->GetBaseMatrices();
+        const std::vector<RrPointFrame> &fin = reader.GetFinFrames();
+        const std::vector<RrPointFrame> &base = reader.GetBaseFrames();
+        const std::vector<RrMat4d> &finalM = reader.GetFinalMatrices();
+        const std::vector<RrMat4d> &baseM = reader.GetBaseMatrices();
         if (fin.size() != graph.fin.size() ||
             base.size() != graph.base.size() ||
             finalM.size() != graph.finalMatrix.size() ||
@@ -331,7 +339,7 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
             wantJoints[entry.first.GetString()] = entry.second;
         }
         const std::vector<RigExecRuntimeJointMatrix> &gotJoints =
-            reader->GetJointMatrices();
+            reader.GetJointMatrices();
         if (gotJoints.size() != wantJoints.size()) {
             std::printf("%s frame %.17g: %zu joints vs %zu\n",
                         name.c_str(), frame, gotJoints.size(),
@@ -352,58 +360,48 @@ _TestStage(const std::string &name, const UsdStageRefPtr &stage,
             }
         }
 
-        // Diagnostics verbatim in full mode only: pose-only mode skips
-        // whole families, so its generation summary cannot match.
-        if (fullMode) {
-            const std::vector<std::string> &diagnostics =
-                reader->GetDiagnostics();
-            if (diagnostics != pose.diagnostics) {
-                std::printf("%s frame %.17g: diagnostics differ "
-                            "(%zu vs %zu)\n", name.c_str(), frame,
-                            diagnostics.size(), pose.diagnostics.size());
-                const size_t common =
-                    std::min(diagnostics.size(),
-                             pose.diagnostics.size());
-                for (size_t i = 0; i < common; ++i) {
-                    if (diagnostics[i] != pose.diagnostics[i]) {
-                        std::printf("  got:  %s\n  want: %s\n",
-                                    diagnostics[i].c_str(),
-                                    pose.diagnostics[i].c_str());
-                        break;
-                    }
+        // Diagnostics verbatim, the summary line included.
+        const std::vector<std::string> &diagnostics = reader.GetDiagnostics();
+        if (diagnostics != pose.diagnostics) {
+            std::printf("%s frame %.17g: diagnostics differ "
+                        "(%zu vs %zu)\n", name.c_str(), frame,
+                        diagnostics.size(), pose.diagnostics.size());
+            const size_t common =
+                std::min(diagnostics.size(), pose.diagnostics.size());
+            for (size_t i = 0; i < common; ++i) {
+                if (diagnostics[i] != pose.diagnostics[i]) {
+                    std::printf("  got:  %s\n  want: %s\n",
+                                diagnostics[i].c_str(),
+                                pose.diagnostics[i].c_str());
+                    break;
                 }
-                CHECK(false);
-                failed = true;
             }
+            CHECK(false);
+            failed = true;
         }
-        ++comparedFrames;
+        if (played) {
+            played->push_back(_Snapshot(reader));
+        }
+        ++compared;
     }
 
-    if (crossChecked) {
-        *crossChecked = reader->GetCrossCheckResultCountForTesting();
-    }
     if (failed) {
         std::printf("%s: FAILED\n", name.c_str());
     } else {
         ++comparedFixtures;
-        std::printf("%s: compared %d frames%s, %llu cross-checked (%llu "
-                    "registered read(s), %llu path read(s))\n",
-                    name.c_str(), comparedFrames,
-                    fullMode ? " (full)" : " (pose-only)",
-                    static_cast<unsigned long long>(
-                        reader->GetCrossCheckCountForTesting()),
-                    static_cast<unsigned long long>(
-                        reader->GetCrossCheckCountForTesting(
-                            RrCrossCheckRegisteredRead)),
-                    static_cast<unsigned long long>(
-                        reader->GetCrossCheckCountForTesting(
-                            RrCrossCheckPathRead)));
+        comparedFrames += compared;
+        std::printf("%s: compared %d frame(s) of a bake at %.17g%s (%zu "
+                    "input(s), %zu sampled per frame)\n",
+                    name.c_str(), compared, frames.front(),
+                    staticClass ? ", static" : "",
+                    player->GetInputCount(),
+                    player.Sampler().GetAnimatedCount());
     }
 }
 
 static void
 _TestFixture(const std::string &name, const std::string &stagePath,
-             const std::vector<double> &bakeFrames)
+             const std::vector<double> &frames, bool staticClass = false)
 {
     const UsdStageRefPtr stage = UsdStage::Open(stagePath);
     CHECK(stage);
@@ -411,7 +409,7 @@ _TestFixture(const std::string &name, const std::string &stagePath,
         std::printf("%s: FAILED (no stage)\n", name.c_str());
         return;
     }
-    _TestStage(name, stage, bakeFrames);
+    _TestStage(name, stage, frames, nullptr, staticClass);
 }
 
 static bool
@@ -493,82 +491,66 @@ _EnvelopeStage(double lastDriver = 0.8)
     return stage;
 }
 
-// Runs every frame of \p bytes through a fresh reader; false with the
-// first Execute error.
-static bool
-_RunFrames(const std::vector<uint8_t> &bytes,
-           const std::vector<double> &frames, bool crossCheck,
-           std::vector<std::vector<RrPointFrame>> *fins, std::string *error)
-{
-    const std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), error);
-    if (!reader) {
-        return false;
-    }
-    reader->SetCrossCheckForTesting(crossCheck);
-    for (double frame : frames) {
-        if (!reader->SetFrame(frame, error) || !reader->Execute(error)) {
-            return false;
-        }
-        fins->push_back(reader->GetFinFrames());
-    }
-    return true;
-}
-
-// Constraint envelopes are computed, not replayed: the parity path with
-// the cross-check compares every envelope against the record; a record
-// whose envelope was altered fails the cross-check naming the field, and
-// with the cross-check off plays exactly as the untouched file does.
+// Constraint envelopes are computed, not replayed: a file baked at the
+// first frame plays every frame bit for bit with the baked program, and
+// the dynamic envelope's transform moves between the first and last frame
+// although the file holds the first frame's static data alone.
 static void
 TestComputedEnvelopes()
 {
     const std::vector<double> frames = {1.0, 5.0, 10.0};
-    uint64_t crossChecked = 0;
-    _TestStage("computed envelopes", _EnvelopeStage(), frames,
-               &crossChecked);
-    // Two envelopes per frame: the Constraint steps run every frame.
-    CHECK(crossChecked == 2 * frames.size());
-
-    const UsdStageRefPtr stage = _EnvelopeStage();
-    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
-    std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    RigExecWireInputTable table;
-    CHECK(_DecodeInputTable(result.bytes, &table));
-    if (table.frames.empty() || table.frames[0].constraintWeights.size() != 2) {
-        CHECK(false);
-        return;
-    }
-    // Constraint 1's envelope at the first frame, moved off what the
-    // oracle computes there (0.5 or 0.2).
-    table.frames[0].constraintWeights[1] = 0.25f;
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeInputTable(table, &payload));
-    const std::vector<uint8_t> tampered =
-        _ReplaceSection(result.bytes, RigExecBinarySection::InputTable,
-                        payload);
-
-    std::vector<std::vector<RrPointFrame>> untouched, replayed, ignored;
-    CHECK(_RunFrames(result.bytes, frames, true, &untouched, &error));
-    CHECK(!_RunFrames(tampered, frames, true, &ignored, &error));
-    CHECK(error.find("cross-check mismatch at constraintWeights[1]") !=
-          std::string::npos);
-    std::printf("computed envelopes, tampered record: %s\n", error.c_str());
-    CHECK(_RunFrames(tampered, frames, false, &replayed, &error));
-    CHECK(replayed == untouched);
+    std::vector<_PlayedFrame> rows;
+    _TestStage("computed envelopes", _EnvelopeStage(), frames, &rows);
+    _CheckFramesDiffer("computed envelopes", rows);
 
     // The dynamic envelope driven to 1.6 at frame 10 breaks its strict
     // range: the oracle's error passes the constraint through with the
-    // program's diagnostic (compared verbatim by the parity path), and a
-    // failed resolve is not compared against the record.
-    uint64_t strictChecked = 0;
+    // program's diagnostic (compared verbatim by the parity path).
+    rows.clear();
     _TestStage("computed envelopes, strict violation", _EnvelopeStage(1.6),
-               frames, &strictChecked);
-    CHECK(strictChecked == 2 * frames.size() - 1);
+               frames, &rows);
+    _CheckFramesDiffer("computed envelopes, strict violation", rows);
+    // The violation happens at frame 10 alone: the driver reaches 1.6 there
+    // and stays inside the range at frames 1 and 5.
+    const auto violates = [](const _PlayedFrame &row) {
+        for (const std::string &line : row.diagnostics) {
+            if (line.find("strict range violation") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    CHECK(rows.size() == frames.size());
+    if (rows.size() == frames.size()) {
+        CHECK(!violates(rows[0]) && !violates(rows[1]) && violates(rows[2]));
+    }
+}
+
+// An Animated input the stage holds no value for at a time: a blocked
+// sample from frame 5 on, and Default on an attribute keyed alone. The
+// sampler leaves the input with no value there, so the binary reads its
+// fallback as the evaluator reads the stage, rather than the bake time's
+// value.
+static void
+TestSampledInputWithNoValue()
+{
+    const UsdStageRefPtr stage = _EnvelopeStage();
+    const UsdAttribute amount =
+        stage->GetAttributeAtPath(SdfPath("/Asset/Dial.avars:amount"));
+    CHECK(amount && amount.Set(SdfValueBlock(), UsdTimeCode(5.0)));
+    double probe = 0.0;
+    CHECK(!amount.Get(&probe, UsdTimeCode(7.0)) &&
+          !amount.Get(&probe, UsdTimeCode::Default()));
+    const double defaultTime = UsdTimeCode::Default().GetValue();
+    std::vector<_PlayedFrame> rows;
+    _TestStage("sampled input with no value", stage,
+               {1.0, 7.0, defaultTime, 10.0}, &rows);
+    // Frames 7 and Default read the fallback, frame 1 the keyed 0.2.
+    CHECK(rows.size() == 4);
+    if (rows.size() == 4) {
+        CHECK(!_SamePlayed(rows[0], rows[1], false));
+        CHECK(_SamePlayed(rows[1], rows[2], false));
+    }
 }
 
 // One constraint envelope a computed-envelope case reads back. The target
@@ -594,41 +576,34 @@ _FindProviderXform(const RigExecRuntimeReader &reader, const char *path)
     return nullptr;
 }
 
-// Plays \p stage's bake with the cross-check on beside the dynamic path:
-// an ExecReference evaluator (the exec-authoritative walk every evaluator
-// is held to) and the dynamic weight oracle itself
+// Plays \p stage's bake at the first frame through its inputs beside the
+// dynamic path: an ExecReference evaluator (the exec-authoritative walk
+// every evaluator is held to) and the dynamic weight oracle itself
 // (RigExecRigEvaluator::_ResolveWeights, which the baked program holds as
 // resolveWeights). At every frame each probe's revised transform must
 // equal the dynamic evaluator's bit for bit and imply exactly the envelope
 // the oracle resolves. \p envelopes receives the oracle's envelopes, one
-// row per frame in probe order; \p crossChecked the envelopes the
-// cross-check compared. False on any difference.
+// row per frame in probe order. False on any difference.
 static bool
 _EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
                        const std::vector<double> &frames,
                        const std::vector<_EnvelopeProbe> &probes,
-                       uint64_t *crossChecked,
                        std::vector<std::vector<float>> *envelopes)
 {
     const SdfPath rigPath = _FindRig(stage);
     RigExecRigEvaluator baked(stage, rigPath);
     baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    if (!RigExecBakeToBinary(baked, opts, &result, &error)) {
+    if (!RigExecTestBakeAt(baked, frames.front(), &bytes, &error)) {
         std::printf("%s: bake failed: %s\n", name.c_str(), error.c_str());
         return false;
     }
-    const std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    if (!reader) {
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
         std::printf("%s: open failed: %s\n", name.c_str(), error.c_str());
         return false;
     }
-    reader->SetCrossCheckForTesting(true);
     RigExecRigEvaluator dynamic(stage, rigPath);
     dynamic.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
 
@@ -644,7 +619,7 @@ _EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
                         name.c_str(), frame);
             return false;
         }
-        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("%s frame %g: %s\n", name.c_str(), frame,
                         error.c_str());
             return false;
@@ -667,7 +642,7 @@ _EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
             const auto expected =
                 want.providerXforms.find(SdfPath(probe.target));
             const RigExecRuntimeProviderXform *got =
-                _FindProviderXform(*reader, probe.target);
+                _FindProviderXform(player.Reader(), probe.target);
             if (expected == want.providerXforms.end() || !got) {
                 std::printf("%s frame %g: %s has no revised transform "
                             "(dynamic %d, runtime %d)\n", name.c_str(),
@@ -695,13 +670,6 @@ _EnvelopesMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
             }
         }
         envelopes->push_back(std::move(row));
-    }
-    *crossChecked = reader->GetCrossCheckEnvelopeCountForTesting();
-    // Transform-domain envelopes only: nothing measures a current phase.
-    if (reader->GetCrossCheckPhasePacketCountForTesting() != 0) {
-        std::printf("%s: compared current-phase packets it has none of\n",
-                    name.c_str());
-        same = false;
     }
     return same;
 }
@@ -753,26 +721,18 @@ TestStaticWeightEnvelope()
 {
     const char *const name = "static weight envelope";
     const std::vector<double> frames = {1.0, 2.0, 3.0};
-    uint64_t parityChecked = 0;
-    _TestStage(name, _StaticWeightConstraintStage(), frames, &parityChecked);
-    uint64_t dynamicChecked = 0;
+    _TestStage(name, _StaticWeightConstraintStage(), frames);
     std::vector<std::vector<float>> envelopes;
     CHECK(_EnvelopesMatchDynamic(
         name, _StaticWeightConstraintStage(), frames,
-        {{"/Asset/Target", "/Asset/Rig/Weights/W", 10.0}}, &dynamicChecked,
-        &envelopes));
-    // Not vacuous: a Constraint step that binds a weight object reads
-    // outside the program and reruns every run, so its envelope is
-    // computed and compared at every frame.
-    CHECK(parityChecked == frames.size());
-    CHECK(dynamicChecked == frames.size());
+        {{"/Asset/Target", "/Asset/Rig/Weights/W", 10.0}}, &envelopes));
+    // The applied envelope is the weight object's at every frame.
     CHECK(envelopes.size() == frames.size());
     for (const std::vector<float> &row : envelopes) {
         CHECK(row == std::vector<float>{0.5f});
     }
-    std::printf("%s: %llu + %llu envelope(s) cross-checked\n", name,
-                static_cast<unsigned long long>(parityChecked),
-                static_cast<unsigned long long>(dynamicChecked));
+    std::printf("%s: %zu frame(s) applied the weight object's envelope\n",
+                name, envelopes.size());
 }
 
 // A DynamicWeight driven by a rig control's animated avar. The Dial
@@ -916,106 +876,66 @@ _AvarDrivenStage(bool clampDial = false)
     return stage;
 }
 
-// Each frame's revised x of \p target from a fresh reader over \p bytes;
-// false with the first Execute error.
-static bool
-_RunTargetX(const std::vector<uint8_t> &bytes,
-            const std::vector<double> &frames, bool crossCheck,
-            const char *target, std::vector<double> *xs, std::string *error)
-{
-    const std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), error);
-    if (!reader) {
-        return false;
-    }
-    reader->SetCrossCheckForTesting(crossCheck);
-    for (double frame : frames) {
-        if (!reader->SetFrame(frame, error) || !reader->Execute(error)) {
-            return false;
-        }
-        const RigExecRuntimeProviderXform *xform =
-            _FindProviderXform(*reader, target);
-        if (!xform) {
-            *error = std::string(target) + " has no revised transform";
-            return false;
-        }
-        xs->push_back(xform->matrix[3][0]);
-    }
-    return true;
-}
-
-// The envelopes come from the Computed section's slot values: the Dial
-// avar's value at the middle frame, set to 0 in the section alone, makes
-// the runtime compute Driven's envelope from 0 there (0.125), which the
-// cross-check refuses against the record naming the field, and which with
-// the cross-check off moves the target to 1.25 at that frame only.
+// The avar as an input set on a file baked at frame 1: Dial.avars:tx set
+// to 1.2 is what a fresh evaluator in the dynamic and the baked mode
+// publishes at frame 1 with 1.2 authored on the avar in the session
+// layer, every output bit for bit. The set moves Driven's envelope off the
+// keyed value's to (1 * 1.2f) * 0.625 + 0.125.
 static void
-_TestSlotValuesDriveEnvelopes()
+_TestAvarInputMatchesSessionEdit()
 {
-    const std::vector<double> frames = {1.0, 5.0, 10.0};
+    const char *const name = "avar-driven envelope, input set";
     const UsdStageRefPtr stage = _AvarDrivenStage();
-    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    const SdfPath rigPath("/Asset/Rig");
+    const std::string tx = "/Asset/Rig/Controls/Dial.avars:tx";
+    const double bakeTime = 1.0;
+    const double value = 1.2;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
-                                  &error);
-    const uint8_t *data = nullptr;
-    size_t size = 0;
-    RigExecWireComputed computed;
-    if (!binary ||
-        !binary->FindSection(RigExecBinarySection::Computed, &data, &size)) {
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(evaluator, bakeTime, &bytes, &error));
+    }
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
+        std::printf("%s: open: %s\n", name, error.c_str());
         CHECK(false);
         return;
     }
-    {
-        RigExecWireReader cursor(data, size);
-        CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
+    CHECK(player.Play(bakeTime, &error));
+    const RigExecRuntimeProviderXform *defaults =
+        _FindProviderXform(player.Reader(), "/Asset/TargetA");
+    const double defaultX = defaults ? defaults->matrix[3][0] : 0.0;
+    CHECK(player->SetInput(tx, value, &error));
+    CHECK(player.Play(bakeTime, &error));
+    const RigExecRuntimeProviderXform *moved =
+        _FindProviderXform(player.Reader(), "/Asset/TargetA");
+    CHECK(defaults && moved);
+    if (moved) {
+        const float driven = (1.0f * static_cast<float>(value)) * 0.625f +
+                             0.125f;
+        CHECK(moved->matrix[3][0] == 10.0 * double(driven));
+        CHECK(moved->matrix[3][0] != defaultX);
     }
-    size_t slot = computed.inputs.size();
-    std::string text;
-    for (size_t s = 0; s < computed.inputs.size(); ++s) {
-        if (binary->GetString(computed.inputs[s].name, &text) &&
-            text == "/Asset/Rig/Controls/Dial.avars:tx") {
-            slot = s;
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+        std::vector<RigExecRigPose> poses;
+        CHECK(RigExecTestEditedPoses(stage, rigPath, mode,
+                                     {{SdfPath(tx), VtValue(value)}},
+                                     {bakeTime}, &poses, &error));
+        std::vector<std::string> diffs;
+        const bool same =
+            poses.size() == 1 &&
+            RigExecCompareRuntimeOutputs(poses[0], player.Reader(), &diffs);
+        CHECK(same);
+        std::printf("%s, %s: %s\n", name,
+                    mode == RigExecEvaluationMode::Dynamic ? "dynamic"
+                                                           : "baked",
+                    same ? "binary == session edit" : "MISMATCH");
+        for (const std::string &line : diffs) {
+            std::printf("    %s\n", line.c_str());
         }
-    }
-    CHECK(slot < computed.inputs.size());
-    CHECK(computed.frames.size() == frames.size());
-    if (slot >= computed.inputs.size() ||
-        computed.frames.size() != frames.size()) {
-        return;
-    }
-    // values[0] is Double +0.0.
-    computed.frames[1].values[slot] = 0;
-    computed.frames[1].hasValue[slot] = 1;
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeComputed(computed, &payload, &error));
-    const std::vector<uint8_t> tampered = _ReplaceSection(
-        result.bytes, RigExecBinarySection::Computed, payload);
-
-    std::vector<double> untouched, moved, ignored;
-    CHECK(_RunTargetX(result.bytes, frames, true, "/Asset/TargetA",
-                      &untouched, &error));
-    CHECK(!_RunTargetX(tampered, frames, true, "/Asset/TargetA", &ignored,
-                       &error));
-    // The registered read of the altered slot (the dial's avar binding) is
-    // compared first, against the value the frame record holds for it.
-    CHECK(error.find("registered reads: cross-check mismatch at "
-                     "avarBindings[0].input") != std::string::npos);
-    std::printf("avar-driven dynamic envelope, altered slot value: %s\n",
-                error.c_str());
-    CHECK(_RunTargetX(tampered, frames, false, "/Asset/TargetA", &moved,
-                      &error));
-    CHECK(moved.size() == frames.size() && untouched.size() == frames.size());
-    if (moved.size() == frames.size() && untouched.size() == frames.size()) {
-        CHECK(moved[0] == untouched[0]);
-        CHECK(moved[1] == 10.0 * double(0.125f) && moved[1] != untouched[1]);
-        CHECK(moved[2] == untouched[2]);
     }
 }
 
@@ -1024,20 +944,16 @@ TestAvarDrivenDynamicEnvelope()
 {
     const char *const name = "avar-driven dynamic envelope";
     const std::vector<double> frames = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-    uint64_t parityChecked = 0;
-    _TestStage(name, _AvarDrivenStage(), frames, &parityChecked);
-    uint64_t dynamicChecked = 0;
+    std::vector<_PlayedFrame> rows;
+    _TestStage(name, _AvarDrivenStage(), frames, &rows);
+    _CheckFramesDiffer(name, rows);
     std::vector<std::vector<float>> envelopes;
     CHECK(_EnvelopesMatchDynamic(
         name, _AvarDrivenStage(), frames,
         {{"/Asset/TargetA", "/Asset/Rig/Weights/Driven", 10.0},
          {"/Asset/TargetB", "/Asset/Rig/Weights/Modulated", 10.0},
          {"/Asset/TargetC", "/Asset/Rig/Weights/Blend", 10.0}},
-        &dynamicChecked, &envelopes));
-    // Every envelope is computed and compared at every frame: a Constraint
-    // step that binds a weight object reruns every run.
-    CHECK(parityChecked == 3 * frames.size());
-    CHECK(dynamicChecked == 3 * frames.size());
+        &envelopes));
 
     // The oracle's own arithmetic over the avar read at each frame, which
     // the envelopes above equal, with d the double avar narrowed to float:
@@ -1071,42 +987,34 @@ TestAvarDrivenDynamicEnvelope()
     // Frames 9 and 10 exercise the clamp; the operation order shows.
     CHECK(clamped == 2);
     CHECK(reassociated > 0);
-    _TestSlotValuesDriveEnvelopes();
-    std::printf("%s: %llu + %llu envelope(s) cross-checked over %zu "
-                "frames\n", name,
-                static_cast<unsigned long long>(parityChecked),
-                static_cast<unsigned long long>(dynamicChecked),
-                frames.size());
+    _TestAvarInputMatchesSessionEdit();
+    std::printf("%s: %zu frame(s) of envelopes equal the oracle's\n", name,
+                envelopes.size());
 }
 
 // The avar-driven stage with a float math mover clamping the Dial avar
 // to [0, 1]: each driver's walk crosses the chain's target, so the oracle
 // reads the chain's double result through the generation's overlay, not
 // the authored avar. The parity path compares the runtime against the
-// baked program (cross-check on), the dynamic comparison against
-// ExecReference and the dynamic oracle, and the envelopes must be the
-// oracle's arithmetic over the clamped value: from frame 7 on that differs
-// from the authored value's.
+// baked program, the dynamic comparison against ExecReference and the
+// dynamic oracle, and the envelopes must be the oracle's arithmetic over
+// the clamped value: from frame 7 on that differs from the authored
+// value's.
 static void
 TestChainDrivenEnvelope()
 {
     const char *const name = "chain-driven envelope";
     const std::vector<double> frames = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-    uint64_t parityChecked = 0;
-    _TestStage(name, _AvarDrivenStage(true), frames, &parityChecked);
-    uint64_t dynamicChecked = 0;
+    std::vector<_PlayedFrame> rows;
+    _TestStage(name, _AvarDrivenStage(true), frames, &rows);
+    _CheckFramesDiffer(name, rows);
     std::vector<std::vector<float>> envelopes;
     CHECK(_EnvelopesMatchDynamic(
         name, _AvarDrivenStage(true), frames,
         {{"/Asset/TargetA", "/Asset/Rig/Weights/Driven", 10.0},
          {"/Asset/TargetB", "/Asset/Rig/Weights/Modulated", 10.0},
          {"/Asset/TargetC", "/Asset/Rig/Weights/Blend", 10.0}},
-        &dynamicChecked, &envelopes));
-    // Per frame: three envelopes, the clamp chain's one published value,
-    // and the avar binding of Dial.avars:tx, a registered read whose head
-    // is the chain's target.
-    CHECK(parityChecked == 3 * frames.size() + frames.size() + frames.size());
-    CHECK(dynamicChecked == 3 * frames.size());
+        &envelopes));
     const UsdStageRefPtr stage = _AvarDrivenStage(true);
     const UsdAttribute tx = stage->GetAttributeAtPath(
         SdfPath("/Asset/Rig/Controls/Dial.avars:tx"));
@@ -1130,12 +1038,7 @@ TestChainDrivenEnvelope()
         chained += d != authored;
     }
     CHECK(chained == 4);
-    std::printf("%s: %llu value(s) (envelopes, property values, chain "
-                "reads) + %llu "
-                "envelope(s) cross-checked, %zu frame(s) read through the "
-                "chain\n", name,
-                static_cast<unsigned long long>(parityChecked),
-                static_cast<unsigned long long>(dynamicChecked), chained);
+    std::printf("%s: %zu frame(s) read through the chain\n", name, chained);
 }
 
 // \p bytes without section \p tag; everything else copied unchanged.
@@ -1187,7 +1090,7 @@ TestComputedOpenRefusals()
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = {1.0, 5.0};
+    opts.time = 1.0;
     RigExecBakeResult result;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
@@ -1343,33 +1246,6 @@ _ChainLines(const std::vector<std::string> &lines)
     return out;
 }
 
-static bool
-_SameBits(const RrPropertyValue &a, const RrPropertyValue &b)
-{
-    using Tag = RrPropertyValue::Tag;
-    if (a.tag != b.tag) {
-        return false;
-    }
-    switch (a.tag) {
-    case Tag::Float:
-        return std::memcmp(&a.f32, &b.f32, sizeof(float)) == 0;
-    case Tag::Double:
-        return std::memcmp(&a.f64, &b.f64, sizeof(double)) == 0;
-    case Tag::Matrix4d:
-        for (size_t r = 0; r < 4; ++r) {
-            if (std::memcmp(a.matrix[r], b.matrix[r], sizeof(double) * 4) !=
-                0) {
-                return false;
-            }
-        }
-        return true;
-    case Tag::Vec3f:
-        return std::memcmp(a.vec.data(), b.vec.data(), sizeof(float) * 3) ==
-               0;
-    }
-    return false;
-}
-
 // One frame of a chain case: the runtime's property results by path, and
 // the chains' diagnostic lines.
 struct _ChainFrame {
@@ -1377,37 +1253,32 @@ struct _ChainFrame {
     std::vector<std::string> lines;
 };
 
-// Plays \p stage's bake with the cross-check on beside an ExecReference
-// evaluator (the exec-authoritative walk every evaluator is held to). At
-// every frame each property result the runtime computed must equal the
-// dynamic evaluator's published value bit for bit, the two must publish
-// the same set, and the chains' diagnostic lines must agree verbatim.
-// \p rows receives the runtime's results and lines per frame; \p checked
-// the property values the cross-check compared. False on any difference.
+// Plays \p stage's bake at the first frame through its inputs beside an
+// ExecReference evaluator (the exec-authoritative walk every evaluator is
+// held to). At every frame each property result the runtime computed must
+// equal the dynamic evaluator's published value bit for bit, the two must
+// publish the same set, and the chains' diagnostic lines must agree
+// verbatim. \p rows receives the runtime's results and lines per frame.
+// False on any difference.
 static bool
 _ChainsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
-                    const std::vector<double> &frames, uint64_t *checked,
+                    const std::vector<double> &frames,
                     std::vector<_ChainFrame> *rows)
 {
     const SdfPath rigPath = _FindRig(stage);
     RigExecRigEvaluator baked(stage, rigPath);
     baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    if (!RigExecBakeToBinary(baked, opts, &result, &error)) {
+    if (!RigExecTestBakeAt(baked, frames.front(), &bytes, &error)) {
         std::printf("%s: bake failed: %s\n", name.c_str(), error.c_str());
         return false;
     }
-    const std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    if (!reader) {
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
         std::printf("%s: open failed: %s\n", name.c_str(), error.c_str());
         return false;
     }
-    reader->SetCrossCheckForTesting(true);
     RigExecRigEvaluator dynamic(stage, rigPath);
     dynamic.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
 
@@ -1419,14 +1290,14 @@ _ChainsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
                         frame);
             return false;
         }
-        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("%s frame %g: %s\n", name.c_str(), frame,
                         error.c_str());
             return false;
         }
         _ChainFrame row;
         for (const RigExecRuntimePropertyValue &got :
-             reader->GetPropertyResultsForTesting()) {
+             player->GetPropertyValues()) {
             row.values[got.path] = got.value;
             const auto found = want.movedProperties.find(SdfPath(got.path));
             if (found == want.movedProperties.end() ||
@@ -1450,7 +1321,7 @@ _ChainsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
             }
         }
         const std::vector<std::string> got =
-            _ChainLines(reader->GetDiagnostics());
+            _ChainLines(player->GetDiagnostics());
         const std::vector<std::string> expected =
             _ChainLines(want.diagnostics);
         if (got != expected) {
@@ -1466,14 +1337,6 @@ _ChainsMatchDynamic(const std::string &name, const UsdStageRefPtr &stage,
         }
         row.lines = got;
         rows->push_back(std::move(row));
-    }
-    *checked = reader->GetCrossCheckPropertyValueCountForTesting();
-    // Property chains only: nothing else computed is in these rigs.
-    if (reader->GetCrossCheckEnvelopeCountForTesting() != 0 ||
-        reader->GetCrossCheckPhasePacketCountForTesting() != 0) {
-        std::printf("%s: compared envelopes or packets it has none of\n",
-                    name.c_str());
-        same = false;
     }
     return same;
 }
@@ -1928,30 +1791,34 @@ _HasLine(const _ChainFrame &row, const std::string &line)
            row.lines.end();
 }
 
-// One chain case: baked parity with verbatim diagnostics and the
-// cross-check on, then the dynamic comparison. Both readers must compare
-// exactly \p expected property values over the frames.
+// One chain case: the binary baked at the first frame and played through
+// its inputs against the baked program (verbatim diagnostics), its first
+// and last frames apart, then against the dynamic evaluator, which must
+// see exactly \p expected property values published over the frames.
 static bool
 _RunChainCase(const char *name, UsdStageRefPtr (*build)(),
-              const std::vector<double> &frames, uint64_t expected,
+              const std::vector<double> &frames, size_t expected,
               std::vector<_ChainFrame> *rows)
 {
     const int failuresBefore = failures;
-    uint64_t parity = 0;
-    _TestStage(name, build(), frames, &parity);
-    uint64_t dynamicChecked = 0;
-    CHECK(_ChainsMatchDynamic(name, build(), frames, &dynamicChecked, rows));
+    std::vector<_PlayedFrame> played;
+    _TestStage(name, build(), frames, &played);
+    if (frames.size() > 1) {
+        _CheckFramesDiffer(name, played);
+    }
+    CHECK(_ChainsMatchDynamic(name, build(), frames, rows));
     // These rigs compute nothing but property chains.
-    CHECK(parity == expected);
-    CHECK(dynamicChecked == expected);
-    CHECK(dynamicChecked > 0);
+    size_t published = 0;
+    for (const _ChainFrame &row : *rows) {
+        published += row.values.size();
+    }
+    CHECK(published == expected);
+    CHECK(published > 0);
     CHECK(rows->size() == frames.size());
-    std::printf("%s: %llu + %llu property value(s) cross-checked\n", name,
-                static_cast<unsigned long long>(parity),
-                static_cast<unsigned long long>(dynamicChecked));
+    std::printf("%s: %zu property value(s) equal the dynamic evaluator's\n",
+                name, published);
     return failures == failuresBefore && rows->size() == frames.size();
 }
-
 
 static void
 TestFloatChainCurveClamp()
@@ -2290,7 +2157,7 @@ TestDefaultReadPhaseRoundTrip()
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = frames;
+    opts.time = frames.front();
     RigExecBakeResult result;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
@@ -2334,14 +2201,45 @@ TestDefaultReadPhaseRoundTrip()
 static void
 TestNonFiniteBase()
 {
-    const std::vector<double> frames = {1, 3, 5, 7};
+    const char *const name = "non-finite bases and results";
+    // Bad's base is +inf at frame 3 and NaN at frame 5. The sampler hands
+    // the reader the stage's own values, non-finite ones included, so one
+    // bake at frame 1 plays all four frames. Bad publishes at frames 1 and
+    // 7, Huge never, Blow at every frame.
     std::vector<_ChainFrame> rows;
-    // Bad publishes at frames 1 and 7, Huge never, Blow at every frame.
-    if (!_RunChainCase("non-finite bases and results", _NonFiniteStage,
-                       frames, 6, &rows)) {
+    if (!_RunChainCase(name, _NonFiniteStage, {1, 3, 5, 7}, 6, &rows)) {
         return;
     }
+    // A bake at frame 3 or 5 holds the non-finite base as its default.
+    for (const double frame : {3.0, 5.0}) {
+        std::vector<_ChainFrame> baked;
+        if (!_RunChainCase(name, _NonFiniteStage, {frame}, 1, &baked)) {
+            return;
+        }
+    }
     const std::string badPath = "/Asset/Rig/Channels/Bad.rigExec:amount";
+    {
+        // A host's set takes finite values only; the stage's +inf reaches
+        // the reader through the sampler alone.
+        const UsdStageRefPtr stage = _NonFiniteStage();
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        std::vector<uint8_t> bytes;
+        std::string error;
+        CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+        RigExecTestPlayer player;
+        CHECK(player.Open(bytes, stage, &error));
+        error.clear();
+        CHECK(!player->SetInput(badPath,
+                                double(std::numeric_limits<float>::infinity()),
+                                &error));
+        CHECK(error == badPath + " takes finite values only");
+        CHECK(player.Play(3.0, &error));
+        size_t index = 0;
+        CHECK(player->FindInput(badPath, &index));
+        const RrInputValue &held = player->GetInputValue(index);
+        CHECK(held.tag == RrInputTag::Float && std::isinf(held.f32));
+    }
     const std::string hugePath = "/Asset/Rig/Channels/Huge.rigExec:level";
     const std::string blowPath = "/Asset/Rig/Channels/Blow.rigExec:amount";
     const std::string hugeLine =
@@ -2376,77 +2274,14 @@ TestNonFiniteBase()
           _HasLine(rows[2], overflow) && _HasLine(rows[3], overflow));
 }
 
-// One played frame of a file: what a consumer reads, plus the property
-// results.
-struct _PlayedFrame {
-    std::vector<RigExecRuntimePropertyValue> properties;
-    std::vector<RrPointFrame> fin;
-    std::vector<RigExecRuntimeProviderXform> xforms;
-    std::vector<std::string> diagnostics;
-};
-
-static bool
-_SamePlayed(const _PlayedFrame &a, const _PlayedFrame &b)
-{
-    if (a.properties.size() != b.properties.size() || a.fin != b.fin ||
-        a.diagnostics != b.diagnostics || a.xforms.size() != b.xforms.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < a.properties.size(); ++i) {
-        if (a.properties[i].path != b.properties[i].path ||
-            !_SameBits(a.properties[i].value, b.properties[i].value)) {
-            return false;
-        }
-    }
-    for (size_t i = 0; i < a.xforms.size(); ++i) {
-        if (a.xforms[i].path != b.xforms[i].path ||
-            a.xforms[i].matrix != b.xforms[i].matrix ||
-            a.xforms[i].base != b.xforms[i].base) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Plays \p frames of \p bytes through a fresh reader; \p chainReads, when
-// given, receives the chain-crossing reads the cross-check compared.
-static bool
-_PlayFrames(const std::vector<uint8_t> &bytes,
-            const std::vector<double> &frames, bool crossCheck,
-            std::vector<_PlayedFrame> *out, std::string *error,
-            uint64_t *chainReads = nullptr)
-{
-    const std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), error);
-    if (!reader) {
-        return false;
-    }
-    reader->SetCrossCheckForTesting(crossCheck);
-    for (double frame : frames) {
-        if (!reader->SetFrame(frame, error) || !reader->Execute(error)) {
-            return false;
-        }
-        out->push_back({reader->GetPropertyResultsForTesting(),
-                        reader->GetFinFrames(), reader->GetProviderXforms(),
-                        reader->GetDiagnostics()});
-    }
-    if (chainReads) {
-        *chainReads = reader->GetCrossCheckChainReadCountForTesting();
-    }
-    return true;
-}
-
 // tests/fixtures/computed_chains.usda: the chain cases together (a curve
 // with tangents, envelopes on property revisions, double, vec3f and matrix
-// chains, the chains' diagnostics, phased consumers) under the baked parity
-// path and against the dynamic evaluator, 10 values per frame, plus the
-// constraint weight Follow reads through the dial's chain at its declared
-// `final`. Then the record
-// is shown unread: a recorded property value, or Follow's recorded weight,
-// moved off what the runtime computes fails the cross-check naming it and,
-// with the cross-check off, plays exactly as the untouched file does; and a
-// slot value a chain reads, changed in the computed section alone, changes
-// the chain's result and the transform of the constraint reading it.
+// chains, the chains' diagnostics, phased consumers) played through the
+// inputs of a bake at the first frame, against the baked program and the
+// dynamic evaluator, 10 values per frame, the constraint weight Follow
+// reads through the dial's chain at its declared `final` included. Without
+// the computed section the file does not open: nothing could read an
+// input.
 static void
 TestComputedChainsFixture()
 {
@@ -2461,199 +2296,35 @@ TestComputedChainsFixture()
     if (!stage) {
         return;
     }
-    uint64_t parity = 0;
-    _TestStage(name, stage, frames, &parity);
-    uint64_t dynamicChecked = 0;
+    std::vector<_PlayedFrame> played;
+    _TestStage(name, stage, frames, &played);
+    _CheckFramesDiffer(name, played);
     std::vector<_ChainFrame> rows;
-    CHECK(_ChainsMatchDynamic(name, stage, frames, &dynamicChecked, &rows));
-    // Per frame: 10 property values and Follow's inputs:defaultWeight.
-    CHECK(parity == 10 * frames.size() + frames.size());
-    CHECK(dynamicChecked == 10 * frames.size());
+    CHECK(_ChainsMatchDynamic(name, stage, frames, &rows));
+    size_t published = 0;
+    for (const _ChainFrame &row : rows) {
+        published += row.values.size();
+    }
+    CHECK(published == 10 * frames.size());
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
-                                  &error);
-    CHECK(binary);
-    if (!binary) {
-        return;
-    }
-    // Without the computed section nothing can read an input.
-    CHECK(_OpenError(_WithoutSection(result.bytes,
+    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
+    CHECK(_OpenError(_WithoutSection(bytes,
                                      RigExecBinarySection::Computed)) ==
           "the file carries no computed section, which every input read "
           "needs; rebake it");
-
-    const std::string dial = "/Asset/Rig/Channels/Dial.rigExec:amount";
-    const std::string follow = "/Asset/Rig/Movers/Follow.inputs:defaultWeight";
-    std::vector<_PlayedFrame> untouched;
-    uint64_t chainReads = 0;
-    CHECK(_PlayFrames(result.bytes, frames, true, &untouched, &error,
-                      &chainReads));
-    CHECK(chainReads == frames.size());
-
-    // The dial's recorded value at the first frame, moved by 1/8.
-    RigExecWireInputTable table;
-    CHECK(_DecodeInputTable(result.bytes, &table));
-    bool moved = false;
-    std::string text;
-    if (!table.frames.empty()) {
-        RigExecWireFrameInputs &record = table.frames[0];
-        for (size_t i = 0; i < record.propertyPaths.size() &&
-                           i < record.propertyValues.size();
-             ++i) {
-            if (binary->GetString(record.propertyPaths[i], &text) &&
-                text == dial) {
-                record.propertyValues[i].f32 += 0.125f;
-                moved = true;
-            }
-        }
-    }
-    CHECK(moved);
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeInputTable(table, &payload));
-    const std::vector<uint8_t> tampered = _ReplaceSection(
-        result.bytes, RigExecBinarySection::InputTable, payload);
-    std::vector<_PlayedFrame> ignored, replayed;
-    CHECK(!_PlayFrames(tampered, frames, true, &ignored, &error));
-    CHECK(error.find("cross-check mismatch at propertyValues[" + dial + "]") !=
-          std::string::npos);
-    std::printf("%s, tampered record: %s\n", name, error.c_str());
-    CHECK(_PlayFrames(tampered, frames, false, &replayed, &error));
-    CHECK(replayed.size() == untouched.size());
-    for (size_t f = 0; f < replayed.size() && f < untouched.size(); ++f) {
-        CHECK(_SamePlayed(replayed[f], untouched[f]));
-    }
-
-    // Follow's recorded weight at the first frame, moved by 1/8: the
-    // constraint takes what the chain computes, so only the cross-check
-    // reads the record.
-    {
-        RigExecWireInputTable weights;
-        CHECK(_DecodeInputTable(result.bytes, &weights));
-        bool movedWeight = false;
-        for (size_t uid = 0; uid < weights.directory.size(); ++uid) {
-            if (weights.frames.empty() ||
-                !binary->GetString(weights.directory[uid].head, &text) ||
-                text != follow) {
-                continue;
-            }
-            RigExecWireFrameInputs &record = weights.frames[0];
-            for (size_t k = 0;
-                 k < record.uids.size() && k < record.values.size(); ++k) {
-                if (record.uids[k] == uid) {
-                    CHECK(record.values[k].tag ==
-                          RigExecWireInput::Tag::Float);
-                    record.values[k].f32 += 0.125f;
-                    movedWeight = true;
-                }
-            }
-        }
-        CHECK(movedWeight);
-        payload.clear();
-        CHECK(RigExecWireEncodeInputTable(weights, &payload));
-        const std::vector<uint8_t> weightTampered = _ReplaceSection(
-            result.bytes, RigExecBinarySection::InputTable, payload);
-        ignored.clear();
-        CHECK(!_PlayFrames(weightTampered, frames, true, &ignored, &error));
-        CHECK(error.find("chain reads: cross-check mismatch at values[uid ") !=
-                  std::string::npos &&
-              error.find(", " + follow + "]") != std::string::npos);
-        std::printf("%s, tampered chain read: %s\n", name, error.c_str());
-        std::vector<_PlayedFrame> weightReplayed;
-        CHECK(_PlayFrames(weightTampered, frames, false, &weightReplayed,
-                          &error));
-        CHECK(weightReplayed.size() == untouched.size());
-        for (size_t f = 0;
-             f < weightReplayed.size() && f < untouched.size(); ++f) {
-            CHECK(_SamePlayed(weightReplayed[f], untouched[f]));
-        }
-    }
-
-    // Controls/Dial.avars:tx (Gain's multiplier, read through a connection)
-    // set to +0 at frame 5 in the computed section alone.
-    RigExecWireComputed computed;
-    {
-        const uint8_t *data = nullptr;
-        size_t size = 0;
-        CHECK(binary->FindSection(RigExecBinarySection::Computed, &data,
-                                  &size));
-        RigExecWireReader cursor(data, size);
-        CHECK(RigExecWireDecodeComputed(&cursor, &computed, &error));
-    }
-    size_t slot = computed.inputs.size();
-    for (size_t s = 0; s < computed.inputs.size(); ++s) {
-        if (binary->GetString(computed.inputs[s].name, &text) &&
-            text == "/Asset/Rig/Controls/Dial.avars:tx") {
-            slot = s;
-        }
-    }
-    CHECK(slot < computed.inputs.size() &&
-          computed.frames.size() == frames.size());
-    if (slot >= computed.inputs.size() ||
-        computed.frames.size() != frames.size()) {
-        return;
-    }
-    computed.frames[2].values[slot] = 0;  // values[0] is Double +0.0
-    computed.frames[2].hasValue[slot] = 1;
-    payload.clear();
-    CHECK(RigExecWireEncodeComputed(computed, &payload, &error));
-    const std::vector<uint8_t> altered = _ReplaceSection(
-        result.bytes, RigExecBinarySection::Computed, payload);
-    std::vector<_PlayedFrame> recomputed;
-    ignored.clear();
-    CHECK(!_PlayFrames(altered, frames, true, &ignored, &error));
-    CHECK(error.find("cross-check mismatch at propertyValues[" + dial + "]") !=
-          std::string::npos);
-    std::printf("%s, altered slot value: %s\n", name, error.c_str());
-    CHECK(_PlayFrames(altered, frames, false, &recomputed, &error));
-    CHECK(recomputed.size() == untouched.size());
-    for (size_t f = 0; f < recomputed.size() && f < untouched.size(); ++f) {
-        const auto dialOf = [&](const _PlayedFrame &played) {
-            for (const RigExecRuntimePropertyValue &v : played.properties) {
-                if (v.path == dial) {
-                    return v.value.f32;
-                }
-            }
-            return -1.0f;
-        };
-        CHECK((dialOf(recomputed[f]) != dialOf(untouched[f])) == (f == 2));
-        // Follow reads the dial's result (it declares `final`) as its
-        // weight, so the transform it revises moves with it.
-        const auto targetOf = [&](const _PlayedFrame &played,
-                                  bool *found) {
-            for (const RigExecRuntimeProviderXform &x : played.xforms) {
-                if (x.path == "/Asset/Target") {
-                    *found = true;
-                    return x.matrix;
-                }
-            }
-            *found = false;
-            return RrMat4d(1.0);
-        };
-        bool inRecomputed = false, inUntouched = false;
-        const RrMat4d moved = targetOf(recomputed[f], &inRecomputed);
-        const RrMat4d kept = targetOf(untouched[f], &inUntouched);
-        CHECK(inRecomputed && inUntouched);
-        CHECK((moved != kept) == (f == 2));
-    }
 }
 
 // tests/fixtures/computed_ik_space.usda: a TwoBoneIk measured in an
 // animated rigExec:space composed with a keyed, non-uniform
 // rigExec:spaceMatrix, beside one reading a constant spaceMatrix. The arm's
-// spaceMatrix is a registered read the frame records carry at every frame
-// (a bake that left it out of the directory refused the rig), the runtime
-// plays the fixture bit for bit with the baked program, and the solver
-// reads it through its slot: the recorded matrix moved at one frame fails
-// the registered-read cross-check naming solvers[k].ikSpace and, with the
-// cross-check off, moves nothing.
+// spaceMatrix is a registered read the record directory lists and the
+// record holds (a bake that left it out of the directory refused the rig),
+// and the runtime plays the fixture through its inputs bit for bit with
+// the baked program.
 static void
 TestIkSpaceFixture()
 {
@@ -2668,18 +2339,17 @@ TestIkSpaceFixture()
     if (!stage) {
         return;
     }
-    _TestStage(name, stage, frames);
+    std::vector<_PlayedFrame> played;
+    _TestStage(name, stage, frames, &played);
+    _CheckFramesDiffer(name, played);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/IkSpaceAsset/Rig"));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
     const std::unique_ptr<RigExecBinaryReader> binary =
-        RigExecBinaryReader::Open(result.bytes.data(), result.bytes.size(),
-                                  &error);
+        RigExecBinaryReader::Open(bytes.data(), bytes.size(), &error);
     CHECK(binary);
     if (!binary) {
         return;
@@ -2687,7 +2357,7 @@ TestIkSpaceFixture()
     const std::string spaceMatrix =
         "/IkSpaceAsset/Rig/Solvers/ArmIK.rigExec:spaceMatrix";
     RigExecWireInputTable table;
-    CHECK(_DecodeInputTable(result.bytes, &table));
+    CHECK(_DecodeInputTable(bytes, &table));
     int64_t uid = -1;
     std::string text;
     for (size_t k = 0; k < table.directory.size(); ++k) {
@@ -2699,48 +2369,20 @@ TestIkSpaceFixture()
         }
     }
     CHECK(uid >= 0);
-    CHECK(table.frames.size() == frames.size());
-    if (uid < 0 || table.frames.size() != frames.size()) {
+    CHECK(table.frames.size() == 1);
+    if (uid < 0 || table.frames.size() != 1) {
         return;
     }
-    // Recorded at every frame, and not the identity at any.
-    for (const RigExecWireFrameInputs &record : table.frames) {
-        bool held = false;
-        for (size_t k = 0; k < record.uids.size(); ++k) {
-            if (record.uids[k] == uint32_t(uid)) {
-                held = true;
-                CHECK(record.values[k].matrix[0] != 1.0);
-            }
-        }
-        CHECK(held);
-    }
-
-    std::vector<_PlayedFrame> untouched;
-    CHECK(_PlayFrames(result.bytes, frames, true, &untouched, &error));
-    // The arm's recorded spaceMatrix at frame 3, its x axis doubled.
-    for (size_t k = 0; k < table.frames[1].uids.size(); ++k) {
-        if (table.frames[1].uids[k] == uint32_t(uid)) {
-            table.frames[1].values[k].matrix[0] *= 2.0;
+    // Recorded, and not the identity.
+    bool held = false;
+    const RigExecWireFrameInputs &record = table.frames[0];
+    for (size_t k = 0; k < record.uids.size(); ++k) {
+        if (record.uids[k] == uint32_t(uid)) {
+            held = true;
+            CHECK(record.values[k].matrix[0] != 1.0);
         }
     }
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeInputTable(table, &payload));
-    const std::vector<uint8_t> tampered = _ReplaceSection(
-        result.bytes, RigExecBinarySection::InputTable, payload);
-    std::vector<_PlayedFrame> ignored, replayed;
-    CHECK(!_PlayFrames(tampered, frames, true, &ignored, &error));
-    CHECK(error.find("registered reads: cross-check mismatch at solvers[") !=
-              std::string::npos &&
-          error.find("].ikSpace (uid " + std::to_string(uid) + ", " +
-                     spaceMatrix + ").matrix[0][0]") != std::string::npos);
-    std::printf("%s, tampered record: %s\n", name, error.c_str());
-    // The solver reads the spaceMatrix through its slot, so the altered
-    // record moves nothing.
-    CHECK(_PlayFrames(tampered, frames, false, &replayed, &error));
-    CHECK(replayed.size() == untouched.size());
-    for (size_t f = 0; f < replayed.size() && f < untouched.size(); ++f) {
-        CHECK(replayed[f].fin == untouched[f].fin);
-    }
+    CHECK(held);
 
     // A constant spaceMatrix and no space keep the leg on the solver's
     // constant arm, whose bone lengths are measured in that matrix when the
@@ -2771,7 +2413,10 @@ TestIkSpaceFixture()
     CHECK(kneeRest.Set(knee, UsdTimeCode(1.0)));
     knee.SetTranslate(GfVec3d(0.0, -2.0, 0.6));
     CHECK(kneeRest.Set(knee, UsdTimeCode(10.0)));
-    _TestStage("ik space fixture, constant leg space", constant, frames);
+    played.clear();
+    _TestStage("ik space fixture, constant leg space", constant, frames,
+               &played);
+    _CheckFramesDiffer("ik space fixture, constant leg space", played);
 }
 
 // The read phase on inputs outside the movers, replayed: the docs
@@ -2922,15 +2567,124 @@ TestConstraintAndAvarReadersReplay(const std::string &examplesDir)
     }
 }
 
-// A drag on an avar that reads a chain at its base. The USD evaluators
-// stand the reader aside and pose with the drag; so does the runtime,
-// whose SetAvar places the drag as an interactive override, and every
-// frame the step graph pools hold matches the baked program under the
-// same drag bit for bit. A drag on the avar a math mover revises is that
-// chain's base (TestSetAvarOnChainTarget).
-static void
-TestSetAvarOnPhasedReader()
+// One evaluation of a drag's reference: the pose and the program's
+// version pools.
+struct _Reference {
+    RigExecRigPose pose;
+    std::vector<RigExecPointFrame> fin, base;
+};
+
+// A fresh BakedWithParityCheck evaluator compiled on \p stage, handed
+// \p edits in the session layer and evaluated at each of \p frames
+// (RigExecTestEditedPoses, compiled after the edits with
+// \p compileAfterEdits), with its version pools after each. The parity
+// check holds the baked program to the dynamic evaluator.
+static std::vector<_Reference>
+_References(const UsdStageRefPtr &stage, const SdfPath &rigPath,
+            const std::vector<RigExecTestEdit> &edits,
+            const std::vector<double> &frames,
+            bool compileAfterEdits = false)
 {
+    std::vector<RigExecRigPose> poses;
+    std::vector<_Reference> out(frames.size());
+    std::string error;
+    const bool ok = RigExecTestEditedPoses(
+        stage, rigPath, RigExecEvaluationMode::BakedWithParityCheck, edits,
+        frames, &poses, &error,
+        [&](const RigExecRigEvaluator &evaluator, size_t i) {
+            const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+            if (program) {
+                out[i].fin = program->GetStepGraph().fin;
+                out[i].base = program->GetStepGraph().base;
+            }
+        },
+        compileAfterEdits);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("reference: %s\n", error.c_str());
+    }
+    for (size_t i = 0; i < poses.size() && i < out.size(); ++i) {
+        out[i].pose = std::move(poses[i]);
+    }
+    return out;
+}
+
+// \p value on the attribute at \p path, typed to it.
+static RigExecTestEdit
+_Edit(const UsdStageRefPtr &stage, const std::string &path, double value)
+{
+    return {SdfPath(path),
+            RigExecTestTypedValue(stage->GetAttributeAtPath(SdfPath(path)),
+                                  value)};
+}
+
+// Whether the runtime's version pools equal \p fin and \p base bit for
+// bit, naming the first slot that differs.
+static bool
+_SamePools(const char *what, double frame, const RigExecRuntimeReader &reader,
+           const std::vector<RigExecPointFrame> &wantFin,
+           const std::vector<RigExecPointFrame> &wantBase)
+{
+    const std::vector<RrPointFrame> &fin = reader.GetFinFrames();
+    const std::vector<RrPointFrame> &base = reader.GetBaseFrames();
+    if (fin.size() != wantFin.size() || base.size() != wantBase.size()) {
+        std::printf("%s frame %.17g: the version pools differ in size\n",
+                    what, frame);
+        return false;
+    }
+    for (size_t i = 0; i < fin.size(); ++i) {
+        if (!_FramesEqual(wantFin[i], fin[i])) {
+            std::printf("%s frame %.17g: fin[%zu] differs\n", what, frame,
+                        i);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < base.size(); ++i) {
+        if (!_FramesEqual(wantBase[i], base[i])) {
+            std::printf("%s frame %.17g: base[%zu] differs\n", what, frame,
+                        i);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool
+_SamePools(const char *what, double frame, const RigExecRuntimeReader &reader,
+           const RigExecBakedProgramImpl &graph)
+{
+    return _SamePools(what, frame, reader, graph.fin, graph.base);
+}
+
+static bool
+_SamePools(const char *what, double frame, const RigExecRuntimeReader &reader,
+           const _Reference &reference)
+{
+    return _SamePools(what, frame, reader, reference.fin, reference.base);
+}
+
+// The control's point \p axis of landmark 0 in \p pose, NaN when the pose
+// has no frame for it.
+static double
+_ControlAt(const RigExecRigPose &pose, const SdfPath &control, size_t axis)
+{
+    const auto found = pose.controlFrames.find(control);
+    return found == pose.controlFrames.end() ? std::nan("")
+                                             : found->second.points[0][axis];
+}
+
+// An input set on an avar that reads a chain at its base through a
+// connection: Lift's avars:ty, connected to the height channel the Raise
+// mover revises. The set is an authored value on the head of that
+// connection, and the walk reads past it to the channel, as the evaluators
+// do with 5.5 authored on the avar in the session layer: the reader does
+// not stand aside, and the pose is the undragged one. Played through the
+// inputs of a bake at frame 1 at frames 1 and 4, every version-pool frame
+// equals the baked program's under the session edit bit for bit.
+static void
+TestSetInputOnPhasedReader()
+{
+    const char *const name = "set input on a phased reader";
     const UsdStageRefPtr stage = _LiftReadStage(false);
     const UsdPrim lift =
         stage->GetPrimAtPath(SdfPath("/Asset/Rig/Controls/Lift"));
@@ -2945,104 +2699,45 @@ TestSetAvarOnPhasedReader()
     const std::vector<double> frames = {1.0, 4.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader);
-    if (!reader) {
-        std::printf("set avar on a phased reader: open: %s\n",
-                    error.c_str());
+    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        CHECK(false);
         return;
     }
-    reader->SetRunMaskForTesting(0x7u);
+    const std::string ty = "/Asset/Rig/Controls/Lift.avars:ty";
     const double drag = 5.5;
-    CHECK(reader->SetAvar("/Asset/Rig/Controls/Lift.avars:ty", drag,
-                          &error));
-
-    RigExecRigEvaluator dragged(stage, rigPath);
-    dragged.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    dragged.SetInteractiveOverrides({RigExecValueOverride{
-        lift.GetPath(), TfToken(), TfToken("avars:ty"), VtValue(drag)}});
-    for (const double frame : frames) {
-        const RigExecRigPose pose = dragged.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid);
-        const auto control = pose.controlFrames.find(lift.GetPath());
-        CHECK(control != pose.controlFrames.end() &&
-              control->second.points[0][1] == drag);
-        const RigExecBakedProgram *program = dragged.GetBakedProgram();
-        CHECK(program);
-        if (!pose.valid || !program) {
-            return;
-        }
-        const RigExecBakedProgramImpl &graph = program->GetStepGraph();
-        CHECK(reader->SetFrame(frame, &error));
-        CHECK(reader->Execute(&error));
-        const std::vector<RrPointFrame> &fin = reader->GetFinFrames();
-        CHECK(fin.size() == graph.fin.size());
-        bool same = fin.size() == graph.fin.size();
-        bool sawDrag = false;
-        for (size_t i = 0; same && i < fin.size(); ++i) {
-            same = _FramesEqual(graph.fin[i], fin[i]);
-            sawDrag = sawDrag || fin[i].points[0][1] == drag;
-        }
-        if (!same) {
-            std::printf("set avar on a phased reader frame %.17g: the "
-                        "runtime's frames differ from the baked drag\n",
-                        frame);
-        }
-        CHECK(same);
-        CHECK(sawDrag);
+    const std::vector<_Reference> undragged =
+        _References(stage, rigPath, {}, frames);
+    const std::vector<_Reference> dragged =
+        _References(stage, rigPath, {_Edit(stage, ty, drag)}, frames);
+    CHECK(player.Hold(ty, drag, &error));
+    for (size_t f = 0; f < frames.size() && f < dragged.size(); ++f) {
+        CHECK(player.Play(frames[f], &error));
+        CHECK(_SamePools(name, frames[f], player.Reader(), dragged[f]));
+        CHECK(_SamePools(name, frames[f], player.Reader(), undragged[f]));
+        CHECK(_ControlAt(dragged[f].pose, lift.GetPath(), 1) != drag);
     }
+    std::printf("%s: checked\n", name);
 }
 
-// Whether the runtime's version pools equal the baked program's bit for
-// bit, naming the first slot that differs.
-static bool
-_SamePools(const char *what, double frame, const RigExecRuntimeReader &reader,
-           const RigExecBakedProgramImpl &graph)
-{
-    const std::vector<RrPointFrame> &fin = reader.GetFinFrames();
-    const std::vector<RrPointFrame> &base = reader.GetBaseFrames();
-    if (fin.size() != graph.fin.size() || base.size() != graph.base.size()) {
-        std::printf("%s frame %.17g: the version pools differ in size\n",
-                    what, frame);
-        return false;
-    }
-    for (size_t i = 0; i < fin.size(); ++i) {
-        if (!_FramesEqual(graph.fin[i], fin[i])) {
-            std::printf("%s frame %.17g: fin[%zu] differs\n", what, frame,
-                        i);
-            return false;
-        }
-    }
-    for (size_t i = 0; i < base.size(); ++i) {
-        if (!_FramesEqual(graph.base[i], base[i])) {
-            std::printf("%s frame %.17g: base[%zu] differs\n", what, frame,
-                        i);
-            return false;
-        }
-    }
-    return true;
-}
-
-// A drag on an avar partway along other readers' connections. Hop's
+// Inputs set on avars partway along other readers' connections. Hop's
 // avars:tx reads the Raise chain's target at its base and Lift's avars:ty
 // reads that chain through Hop's tx, so both are phased readers; Reach's
-// avars:tz reads Pin's avars:tx, which no chain revises. A drag on Hop's
-// tx stands both phased readers aside and reaches Lift through the hop;
-// a drag on Pin's tx reaches Reach. The runtime's SetAvar places the same
-// overrides the baked program does: before, while and after the drags
-// stand, every version-pool frame equals the baked program's bit for bit,
-// and the baked program agrees with the dynamic evaluator.
+// avars:tz reads Pin's avars:tx, which no chain revises. Set on Hop's tx,
+// an authored value is shadowed by the readable channel upstream of it:
+// Lift and Hop keep reading the channel, and both readers still publish.
+// Set on Pin's tx, it reaches Reach. Before, while and after the sets
+// stand, every version-pool frame equals the baked program's under the
+// same values authored in the session layer, bit for bit, and the baked
+// program agrees with the dynamic evaluator.
 static void
-TestSetAvarOnHop()
+TestSetInputOnHop()
 {
-    const char *const name = "set avar on a hop";
+    const char *const name = "set input on a hop";
     const UsdStageRefPtr stage = _LiftReadStage(false);
     const UsdAttribute height = stage->GetAttributeAtPath(
         SdfPath("/Asset/Rig/Channels/Lift.rigExec:height"));
@@ -3073,26 +2768,22 @@ TestSetAvarOnHop()
     const std::vector<double> frames = {1.0, 4.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader);
-    if (!reader) {
+    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
         std::printf("%s: open: %s\n", name, error.c_str());
+        CHECK(false);
         return;
     }
-    reader->SetCrossCheckForTesting(true);
     const std::string hopPath = hopTx.GetPath().GetString();
+    const std::string pinPath = pinTx.GetPath().GetString();
     const std::string liftPath = "/Asset/Rig/Controls/Lift.avars:ty";
-    // Each phased reader's record is published while no drag stands.
+    // Each phased reader's record is published whatever stands.
     const auto published = [&](const std::string &path) {
         for (const RigExecRuntimePropertyValue &value :
-             reader->GetPropertyResultsForTesting()) {
+             player->GetPropertyValues()) {
             if (value.path == path) {
                 return true;
             }
@@ -3100,84 +2791,60 @@ TestSetAvarOnHop()
         return false;
     };
 
-    RigExecRigEvaluator program(stage, rigPath);
-    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-    // One pass over the frames with the overrides standing, or none.
-    const auto pass = [&](const char *what, bool dragging) {
-        bool same = true;
-        for (const double frame : frames) {
-            const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
-            CHECK(pose.valid && pose.bakedParityMismatches == 0);
-            const RigExecBakedProgram *baked = program.GetBakedProgram();
-            CHECK(baked);
-            if (!pose.valid || !baked) {
-                return false;
-            }
-            CHECK(reader->SetFrame(frame, &error));
-            if (!reader->Execute(&error)) {
-                std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
-                            error.c_str());
+    // One pass over the frames against \p references.
+    const auto pass = [&](const char *what, bool dragging,
+                          const std::vector<_Reference> &references) {
+        bool same = references.size() == frames.size();
+        for (size_t f = 0; f < frames.size() && f < references.size();
+             ++f) {
+            const RigExecRigPose &pose = references[f].pose;
+            if (!player.Play(frames[f], &error)) {
+                std::printf("%s, %s frame %.17g: %s\n", name, what,
+                            frames[f], error.c_str());
                 CHECK(false);
                 return false;
             }
-            same = _SamePools(what, frame, *reader, baked->GetStepGraph()) &&
+            same = _SamePools(what, frames[f], player.Reader(),
+                              references[f]) &&
                    same;
-            // The drag reaches the reader downstream of the hop, and the
-            // reader of the unrevised avar.
-            const auto at = [&](const UsdPrim &prim, size_t axis) {
-                const auto found = pose.controlFrames.find(prim.GetPath());
-                return found == pose.controlFrames.end()
-                           ? std::nan("")
-                           : found->second.points[0][axis];
-            };
-            if (dragging) {
-                CHECK(at(lift, 1) == 5.5 && at(hop, 0) == 5.5);
-                CHECK(at(reach, 2) == -0.75);
-            } else {
-                CHECK(at(lift, 1) != 5.5 && at(lift, 1) == at(hop, 0));
-                CHECK(at(reach, 2) == 0.25);
-            }
-            CHECK(published(liftPath) == !dragging &&
-                  published(hopPath) == !dragging);
+            // The set on the hop is shadowed upstream; the set on the
+            // unrevised avar reaches its reader.
+            CHECK(_ControlAt(pose, lift.GetPath(), 1) != 5.5 &&
+                  _ControlAt(pose, lift.GetPath(), 1) ==
+                      _ControlAt(pose, hop.GetPath(), 0));
+            CHECK(_ControlAt(pose, reach.GetPath(), 2) ==
+                  (dragging ? -0.75 : 0.25));
+            CHECK(published(liftPath) && published(hopPath));
         }
         CHECK(same);
         return same;
     };
-    const uint64_t before = reader->GetCrossCheckCountForTesting();
-    CHECK(pass("undragged", false));
-    CHECK(reader->GetCrossCheckCountForTesting() > before);
-
-    CHECK(reader->SetAvar(hopPath, 5.5, &error));
-    CHECK(reader->SetAvar(pinTx.GetPath().GetString(), -0.75, &error));
-    program.SetInteractiveOverrides(
-        {RigExecValueOverride{hop.GetPath(), TfToken(), TfToken("avars:tx"),
-                              VtValue(5.5)},
-         RigExecValueOverride{pin.GetPath(), TfToken(), TfToken("avars:tx"),
-                              VtValue(-0.75)}});
-    // A standing drag is an input the frame record never saw: nothing is
-    // compared against it.
-    const uint64_t dragged = reader->GetCrossCheckCountForTesting();
-    CHECK(pass("dragged", true));
-    CHECK(reader->GetCrossCheckCountForTesting() == dragged);
-
-    reader->ClearAvars();
-    program.ClearInteractiveOverrides();
-    CHECK(pass("released", false));
-    CHECK(reader->GetCrossCheckCountForTesting() > dragged);
+    const std::vector<_Reference> undragged =
+        _References(stage, rigPath, {}, frames);
+    CHECK(pass("undragged", false, undragged));
+    CHECK(player.Hold(hopPath, 5.5, &error));
+    CHECK(player.Hold(pinPath, -0.75, &error));
+    CHECK(pass("dragged", true,
+               _References(stage, rigPath,
+                           {_Edit(stage, hopPath, 5.5),
+                            _Edit(stage, pinPath, -0.75)},
+                           frames)));
+    player.ReleaseAll();
+    CHECK(pass("released", false, undragged));
     std::printf("%s: checked\n", name);
 }
 
-// A drag on an avar a provider ladder reads: Ctl's rest:tx is connected to
-// Pin's constant avars:tx, so no frame recomposes the ladder until a drag
-// stands on Pin's tx, and the frame after its release recomposes it once
-// more to write the authored rest back. The runtime's SetAvar places the
-// same override as the baked program: every version-pool frame equals the
-// baked program's bit for bit undragged, dragged, released at the frame
-// the drag stood on, and released, and the drag moves the pools.
+// An input set on an avar a provider ladder reads: Ctl's rest:tx is
+// connected to Pin's constant avars:tx, so no frame recomposes the ladder
+// until a value is set on Pin's tx, and the run after its reset recomposes
+// it once more to write the authored rest back. Every version-pool frame
+// equals the baked program's under the same value authored in the session
+// layer, bit for bit: unset, set, reset at the frame the set stood on, and
+// reset; and the set moves the pools.
 static void
-TestSetAvarOnLadderInput()
+TestSetInputOnLadderInput()
 {
-    const char *const name = "set avar on a ladder input";
+    const char *const name = "set input on a ladder input";
     const UsdStageRefPtr stage = UsdStage::CreateInMemory();
     stage->SetStartTimeCode(1.0);
     stage->SetEndTimeCode(4.0);
@@ -3203,67 +2870,64 @@ TestSetAvarOnLadderInput()
     const std::vector<double> frames = {1.0, 4.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader);
-    if (!reader) {
+    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
         std::printf("%s: open: %s\n", name, error.c_str());
+        CHECK(false);
         return;
     }
-    reader->SetCrossCheckForTesting(true);
-    RigExecRigEvaluator program(stage, rigPath);
-    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-    // One frame under whatever overrides stand: the pools, against the
-    // program's, into \p fin.
+    // One run at \p frame against \p reference: the pools into \p fin.
     const auto run = [&](const char *what, double frame,
+                         const _Reference &reference,
                          std::vector<std::vector<RrPointFrame>> *fin) {
-        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid && pose.bakedParityMismatches == 0);
-        const RigExecBakedProgram *baked = program.GetBakedProgram();
-        CHECK(baked);
-        if (!pose.valid || !baked) {
-            return false;
-        }
-        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
                         error.c_str());
             CHECK(false);
             return false;
         }
-        fin->push_back(reader->GetFinFrames());
-        return _SamePools(what, frame, *reader, baked->GetStepGraph());
+        fin->push_back(player->GetFinFrames());
+        return _SamePools(what, frame, player.Reader(), reference);
     };
     const auto pass = [&](const char *what,
+                          const std::vector<_Reference> &references,
                           std::vector<std::vector<RrPointFrame>> *fin) {
-        bool same = true;
-        for (const double frame : frames) {
-            same = run(what, frame, fin) && same;
+        bool same = references.size() == frames.size();
+        for (size_t f = 0; f < frames.size() && f < references.size();
+             ++f) {
+            same = run(what, frames[f], references[f], fin) && same;
         }
         return same;
     };
+    const std::string pinPath = pinTx.GetPath().GetString();
+    const std::vector<_Reference> unset =
+        _References(stage, rigPath, {}, frames);
     std::vector<std::vector<RrPointFrame>> undragged, dragged, releasedHere,
         released;
-    CHECK(pass("undragged", &undragged));
-    CHECK(reader->SetAvar(pinTx.GetPath().GetString(), -0.75, &error));
-    program.SetInteractiveOverrides({RigExecValueOverride{
-        pin.GetPath(), TfToken(), TfToken("avars:tx"), VtValue(-0.75)}});
-    CHECK(pass("dragged", &dragged));
+    CHECK(pass("undragged", unset, &undragged));
+    CHECK(player.Hold(pinPath, -0.75, &error));
+    // Compiled with the value authored: a value edit of an avar a ladder
+    // reads through a connection, taken by an evaluator compiled before
+    // it, breaks the baked program's parity with the dynamic evaluator.
+    CHECK(pass("dragged",
+               _References(stage, rigPath, {_Edit(stage, pinPath, -0.75)},
+                           frames, true),
+               &dragged));
     CHECK(dragged.size() == frames.size() &&
           undragged.size() == frames.size());
     for (size_t f = 0; f < dragged.size() && f < undragged.size(); ++f) {
         CHECK(dragged[f] != undragged[f]);
     }
-    reader->ClearAvars();
-    program.ClearInteractiveOverrides();
-    CHECK(run("released in place", frames.back(), &releasedHere));
+    player.ReleaseAll();
+    if (!unset.empty()) {
+        CHECK(run("released in place", frames.back(), unset.back(),
+                  &releasedHere));
+    }
     CHECK(!releasedHere.empty() && releasedHere.back() == undragged.back());
-    CHECK(pass("released", &released));
+    CHECK(pass("released", unset, &released));
     CHECK(released == undragged);
     std::printf("%s: checked\n", name);
 }
@@ -3277,7 +2941,7 @@ _SamePropertyResults(const char *what, const RigExecRigPose &pose,
     bool same = true;
     std::map<std::string, RrPropertyValue> got;
     for (const RigExecRuntimePropertyValue &value :
-         reader.GetPropertyResultsForTesting()) {
+         reader.GetPropertyValues()) {
         got[value.path] = value.value;
         const auto found = pose.movedProperties.find(SdfPath(value.path));
         if (found == pose.movedProperties.end() ||
@@ -3297,52 +2961,39 @@ _SamePropertyResults(const char *what, const RigExecRigPose &pose,
     return same;
 }
 
-// A drag at a fixed frame on \p control's avars:tx, which a property
+// An input set at a fixed frame on \p control's avars:tx, which a property
 // chain's input reads through a connection, the chain's result at
 // \p chainPath being what a constraint moving /Asset/Target weighs by.
-// The frame does not change, so the drag reaches the constraint only
+// The frame does not change, so the set reaches the constraint only
 // through the chain result it moves; baked with every step in its own
-// cluster (RIGEXEC_BAKED_GRAIN_US=0), nothing else dirties the
-// constraint's step. Under the same interactive override
-// the runtime's property results and version pools equal the baked
-// program's bit for bit, dragged and released, and the drag moves the
-// chain's result and the constrained transform.
+// cluster (RIGEXEC_BAKED_GRAIN_US=0), only the steps the input's own
+// dirtying reaches rerun. Under the same value authored in the session
+// layer the runtime's property results and version pools equal the baked
+// program's bit for bit, set and reset, and the set moves the chain's
+// result and the constrained transform.
 static void
-_DragChainInput(const std::string &name, const UsdStageRefPtr &stage,
-                const SdfPath &control, const std::string &chainPath)
+_SetChainInput(const std::string &name, const UsdStageRefPtr &stage,
+               const SdfPath &control, const std::string &chainPath)
 {
     const SdfPath rigPath("/Asset/Rig");
     const std::vector<double> frames = {1.0, 5.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader);
-    if (!reader) {
+    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
         std::printf("%s: open: %s\n", name.c_str(), error.c_str());
+        CHECK(false);
         return;
     }
-    reader->SetCrossCheckForTesting(true);
-    RigExecRigEvaluator program(stage, rigPath);
-    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
-    // One run at \p frame: the property results and pools against the
-    // program's; the chain's result and Target's transform out.
-    const auto run = [&](const char *what, double frame, float *chainValue,
+    // One run at \p frame against \p reference: the property results and
+    // pools; the chain's result and Target's transform out.
+    const auto run = [&](const char *what, double frame,
+                         const _Reference &reference, float *chainValue,
                          RrMat4d *target) {
-        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid && pose.bakedParityMismatches == 0);
-        const RigExecBakedProgram *baked = program.GetBakedProgram();
-        CHECK(baked);
-        if (!pose.valid || !baked) {
-            return false;
-        }
-        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("%s, %s frame %.17g: %s\n", name.c_str(), what,
                         frame, error.c_str());
             CHECK(false);
@@ -3350,14 +3001,14 @@ _DragChainInput(const std::string &name, const UsdStageRefPtr &stage,
         }
         bool chainFound = false, targetFound = false;
         for (const RigExecRuntimePropertyValue &value :
-             reader->GetPropertyResultsForTesting()) {
+             player->GetPropertyValues()) {
             if (value.path == chainPath) {
                 *chainValue = value.value.f32;
                 chainFound = true;
             }
         }
         for (const RigExecRuntimeProviderXform &x :
-             reader->GetProviderXforms()) {
+             player->GetProviderXforms()) {
             if (x.path == "/Asset/Target") {
                 *target = x.matrix;
                 targetFound = true;
@@ -3365,33 +3016,39 @@ _DragChainInput(const std::string &name, const UsdStageRefPtr &stage,
         }
         CHECK(chainFound && targetFound);
         const std::string label = name + ", " + what;
-        const bool properties =
-            _SamePropertyResults(label.c_str(), pose, *reader);
-        return _SamePools(label.c_str(), frame, *reader,
-                          baked->GetStepGraph()) &&
+        const bool properties = _SamePropertyResults(
+            label.c_str(), reference.pose, player.Reader());
+        return _SamePools(label.c_str(), frame, player.Reader(),
+                          reference) &&
                properties;
     };
+    const std::string tx = control.GetString() + ".avars:tx";
+    const std::vector<_Reference> unset =
+        _References(stage, rigPath, {}, frames);
+    const std::vector<_Reference> set =
+        _References(stage, rigPath, {_Edit(stage, tx, 2.0)}, {frames.back()});
+    if (unset.size() != frames.size() || set.size() != 1) {
+        CHECK(false);
+        return;
+    }
     float undraggedChain = 0.0f, draggedChain = 0.0f, releasedChain = 0.0f;
     RrMat4d undraggedTarget(1.0), draggedTarget(1.0), releasedTarget(1.0);
     float ignoredChain = 0.0f;
     RrMat4d ignoredTarget(1.0);
-    CHECK(run("first frame", frames.front(), &ignoredChain, &ignoredTarget));
-    CHECK(run("undragged", frames.back(), &undraggedChain,
+    CHECK(run("first frame", frames.front(), unset.front(), &ignoredChain,
+              &ignoredTarget));
+    CHECK(run("unset", frames.back(), unset.back(), &undraggedChain,
               &undraggedTarget));
-    const uint64_t compared = reader->GetCrossCheckCountForTesting();
-    CHECK(reader->SetAvar(control.GetString() + ".avars:tx", 2.0, &error));
-    program.SetInteractiveOverrides({RigExecValueOverride{
-        control, TfToken(), TfToken("avars:tx"), VtValue(2.0)}});
-    CHECK(run("dragged", frames.back(), &draggedChain, &draggedTarget));
-    CHECK(reader->GetCrossCheckCountForTesting() == compared);
+    CHECK(player.Hold(tx, 2.0, &error));
+    CHECK(run("set", frames.back(), set.front(), &draggedChain,
+              &draggedTarget));
     CHECK(draggedChain != undraggedChain);
     CHECK(draggedTarget != undraggedTarget);
-    reader->ClearAvars();
-    program.ClearInteractiveOverrides();
-    CHECK(run("released", frames.back(), &releasedChain, &releasedTarget));
+    player.ReleaseAll();
+    CHECK(run("reset", frames.back(), unset.back(), &releasedChain,
+              &releasedTarget));
     CHECK(std::memcmp(&releasedChain, &undraggedChain, sizeof(float)) == 0);
     CHECK(releasedTarget == undraggedTarget);
-    CHECK(reader->GetCrossCheckCountForTesting() > compared);
     std::printf("%s: checked\n", name.c_str());
 }
 
@@ -3438,7 +3095,7 @@ _RevisedWeightStage()
 // Follow's weight reads the dial's result at its declared `final`; and the
 // rig above, where nothing declares a phase.
 static void
-TestSetAvarOnChainInput()
+TestSetInputOnChainInput()
 {
     const std::string fixture =
         (std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / ".." / "tests" /
@@ -3447,14 +3104,13 @@ TestSetAvarOnChainInput()
     const UsdStageRefPtr stage = UsdStage::Open(fixture);
     CHECK(stage);
     if (stage) {
-        _DragChainInput("set avar on a chain input", stage,
-                        SdfPath("/Asset/Rig/Controls/Dial"),
-                        "/Asset/Rig/Channels/Dial.rigExec:amount");
+        _SetChainInput("set input on a chain input", stage,
+                       SdfPath("/Asset/Rig/Controls/Dial"),
+                       "/Asset/Rig/Channels/Dial.rigExec:amount");
     }
-    _DragChainInput("set avar on a revised weight's input",
-                    _RevisedWeightStage(),
-                    SdfPath("/Asset/Rig/Controls/Knob"),
-                    "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
+    _SetChainInput("set input on a revised weight's input",
+                   _RevisedWeightStage(), SdfPath("/Asset/Rig/Controls/Knob"),
+                   "/Asset/Rig/Movers/Follow.inputs:defaultWeight");
 }
 
 // The blink on a control avar: Dial.avars:tx authored at 0.2 (or
@@ -3527,7 +3183,7 @@ static _PlayedPose
 _Played(const RigExecRuntimeReader &reader)
 {
     return {reader.GetFinFrames(), reader.GetBaseFrames(),
-            reader.GetPropertyResultsForTesting(), reader.GetDiagnostics()};
+            reader.GetPropertyValues(), reader.GetDiagnostics()};
 }
 
 // The first thing \p a and \p b disagree on, or empty when they agree bit
@@ -3570,20 +3226,20 @@ _PlayedDiffer(const _PlayedPose &a, const _PlayedPose &b)
     return std::string();
 }
 
-// SetAvar on an avar math movers revise is an edit of the chain's base, as
-// an interactive override on it is in the USD evaluators. Dragged to 1.4,
-// the dial's base readers read 1.4, Offset's checkpoint 1.5 and the final
-// readers and the dial itself 1.0. At frames 1 and 4 every version-pool
-// frame equals the baked program's under the same override (which the
+// An input set on an avar math movers revise is the chain's base, as the
+// value authored there is in the USD evaluators. Set to 1.4, the dial's
+// base readers read 1.4, Offset's checkpoint 1.5 and the final readers and
+// the dial itself 1.0. At frames 1 and 4 every version-pool frame equals
+// the baked program's under 1.4 authored in the session layer (which the
 // parity check holds to the dynamic evaluator), and the played pose --
 // pools, property results and diagnostics -- equals bit for bit what a
 // file baked with 1.4 authored on the dial plays. The same holds as the
-// held drag moves to 1.5 (the final holds at 1.0) and then to 0.5 without
-// being cleared. Cleared, the drag plays the original file again.
+// held value moves to 1.5 (the final holds at 1.0) and then to 0.5 without
+// being reset. Reset, the input plays the original file again.
 static void
-TestSetAvarOnChainTarget()
+TestSetInputOnChainTarget()
 {
-    const char *const name = "set avar on a chain target";
+    const char *const name = "set input on a chain target";
     const SdfPath rigPath("/Asset/Rig");
     const std::string dialTx = "/Asset/Rig/Controls/Dial.avars:tx";
     const std::vector<double> frames = {1.0, 4.0};
@@ -3592,25 +3248,22 @@ TestSetAvarOnChainTarget()
                           std::vector<uint8_t> *bytes) {
         RigExecRigEvaluator evaluator(stage, rigPath);
         evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-        RigExecBakeOpts opts;
-        opts.frames = frames;
-        RigExecBakeResult result;
         std::string error;
-        const bool ok = RigExecBakeToBinary(evaluator, opts, &result, &error);
+        const bool ok =
+            RigExecTestBakeAt(evaluator, frames.front(), bytes, &error);
         if (!ok) {
             std::printf("%s: bake: %s\n", name, error.c_str());
         }
-        *bytes = std::move(result.bytes);
         return ok;
     };
-    const auto play = [&](RigExecRuntimeReader &reader, double frame,
+    const auto play = [&](RigExecTestPlayer &player, double frame,
                           _PlayedPose *out) {
         std::string error;
-        if (!reader.SetFrame(frame, &error) || !reader.Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("%s frame %.17g: %s\n", name, frame, error.c_str());
             return false;
         }
-        *out = _Played(reader);
+        *out = _Played(player.Reader());
         return true;
     };
 
@@ -3618,87 +3271,77 @@ TestSetAvarOnChainTarget()
     std::vector<uint8_t> original;
     CHECK(bake(stage, &original));
     std::string error;
-    std::unique_ptr<RigExecRuntimeReader> reader = RigExecRuntimeReader::Open(
-        original.data(), original.size(), &error);
-    CHECK(reader);
-    if (!reader) {
+    RigExecTestPlayer player;
+    if (!player.Open(original, stage, &error)) {
         std::printf("%s: open: %s\n", name, error.c_str());
+        CHECK(false);
         return;
     }
-    reader->SetCrossCheckForTesting(true);
     std::vector<_PlayedPose> undragged(frames.size());
     for (size_t f = 0; f < frames.size(); ++f) {
-        CHECK(play(*reader, frames[f], &undragged[f]));
+        CHECK(play(player, frames[f], &undragged[f]));
     }
 
-    // The drag, then moved without being cleared: 1.4 -> 1.5 leaves the
-    // clamped final on 1.0 while the base and checkpoint readers move, and
-    // 1.5 -> 0.5 moves every reader.
+    // The set, then moved without a reset: 1.4 -> 1.5 leaves the clamped
+    // final on 1.0 while the base and checkpoint readers move, and 1.5 ->
+    // 0.5 moves every reader.
     struct HeldDrag {
         double drag, final, checkpoint;
     };
     const HeldDrag held[] = {
         {drag, 1.0, 1.5}, {1.5, 1.0, 1.6}, {0.5, 0.6, 0.6}};
-    RigExecRigEvaluator program(stage, rigPath);
-    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     for (const HeldDrag &h : held) {
         char what[64];
-        std::snprintf(what, sizeof(what), "chain target dragged to %.9g",
+        std::snprintf(what, sizeof(what), "chain target set to %.9g",
                       h.drag);
-        CHECK(reader->SetAvar(dialTx, h.drag, &error));
-        program.SetInteractiveOverrides({RigExecValueOverride{
-            SdfPath("/Asset/Rig/Controls/Dial"), TfToken(),
-            TfToken("avars:tx"), VtValue(h.drag)}});
+        CHECK(player.Hold(dialTx, h.drag, &error));
+        const std::vector<_Reference> references = _References(
+            stage, rigPath, {_Edit(stage, dialTx, h.drag)}, frames);
+        if (references.size() != frames.size()) {
+            CHECK(false);
+            return;
+        }
         std::vector<_PlayedPose> dragged(frames.size());
         for (size_t f = 0; f < frames.size(); ++f) {
-            const RigExecRigPose pose =
-                program.Evaluate(UsdTimeCode(frames[f]));
-            CHECK(pose.valid && pose.bakedParityMismatches == 0);
-            const RigExecBakedProgram *baked = program.GetBakedProgram();
-            CHECK(baked);
-            if (!pose.valid || !baked ||
-                !play(*reader, frames[f], &dragged[f])) {
+            const RigExecRigPose &pose = references[f].pose;
+            if (!play(player, frames[f], &dragged[f])) {
                 CHECK(false);
                 return;
             }
-            CHECK(_SamePools(what, frames[f], *reader, baked->GetStepGraph()));
+            CHECK(_SamePools(what, frames[f], player.Reader(),
+                             references[f]));
             CHECK(!_PlayedDiffer(undragged[f], dragged[f]).empty());
             const auto ty = [&](const char *control) {
-                const auto found = pose.controlFrames.find(
-                    SdfPath(std::string("/Asset/Rig/Controls/") + control));
-                return found == pose.controlFrames.end()
-                           ? std::nan("")
-                           : found->second.points[0][1];
+                return _ControlAt(
+                    pose,
+                    SdfPath(std::string("/Asset/Rig/Controls/") + control),
+                    1);
             };
-            const auto dial =
-                pose.controlFrames.find(SdfPath("/Asset/Rig/Controls/Dial"));
-            CHECK(dial != pose.controlFrames.end() &&
-                  std::abs(dial->second.points[0][0] - h.final) < 1e-6);
+            const double dial =
+                _ControlAt(pose, SdfPath("/Asset/Rig/Controls/Dial"), 0);
+            CHECK(std::abs(dial - h.final) < 1e-6);
             CHECK(ty("BaseReader") == h.drag);
             CHECK(std::abs(ty("FinalReader") - h.final) < 1e-6);
             CHECK(std::abs(ty("CheckReader") - h.checkpoint) < 1e-6);
         }
 
-        // Released: the held value authored on the dial and baked again.
+        // The held value authored on the dial and baked again.
         stage->GetAttributeAtPath(SdfPath(dialTx)).Set(h.drag);
         std::vector<uint8_t> authored;
         CHECK(bake(stage, &authored));
         stage->GetAttributeAtPath(SdfPath(dialTx)).Set(0.2);
-        std::unique_ptr<RigExecRuntimeReader> released =
-            RigExecRuntimeReader::Open(authored.data(), authored.size(),
-                                       &error);
-        CHECK(released);
-        if (!released) {
+        RigExecTestPlayer released;
+        if (!released.Open(authored, stage, &error)) {
             std::printf("%s: open released: %s\n", name, error.c_str());
+            CHECK(false);
             return;
         }
-        released->SetCrossCheckForTesting(true);
         for (size_t f = 0; f < frames.size(); ++f) {
             _PlayedPose played;
-            CHECK(play(*released, frames[f], &played));
+            CHECK(play(released, frames[f], &played));
             const std::string why = _PlayedDiffer(dragged[f], played);
             if (!why.empty()) {
-                std::printf("%s, frame %.17g: the drag and the release "
+                std::printf("%s, frame %.17g: the set and the rebake "
                             "differ (%s)\n",
                             what, frames[f], why.c_str());
             }
@@ -3706,11 +3349,11 @@ TestSetAvarOnChainTarget()
         }
     }
 
-    // Cleared: the original file's poses again.
-    reader->ClearAvars();
+    // Reset: the original file's poses again.
+    player.ReleaseAll();
     for (size_t f = 0; f < frames.size(); ++f) {
         _PlayedPose played;
-        CHECK(play(*reader, frames[f], &played));
+        CHECK(play(player, frames[f], &played));
         CHECK(_PlayedDiffer(undragged[f], played).empty());
     }
     std::printf("%s: checked\n", name);
@@ -3722,8 +3365,10 @@ TestSetAvarOnChainTarget()
 // a table field left unbound, a chain read that differs from the
 // registered read of its uid in its constant, an override number reaching
 // another attribute than the program registered it on, and a walk through
-// an attribute the program registered no override on. SetAvar refuses an
-// attribute that heads no avar binding.
+// an attribute the program registered no override on. An input refuses a
+// name the file does not list, a value of another type, a non-finite value
+// and an index past the count; a chain target, which no avar override
+// reached, takes a set like any input.
 static void
 TestRegisteredReadRefusals()
 {
@@ -3740,7 +3385,7 @@ TestRegisteredReadRefusals()
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = {1.0, 5.0};
+    opts.time = 1.0;
     RigExecBakeResult result;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
@@ -3901,21 +3546,55 @@ TestRegisteredReadRefusals()
         }
     }
 
-    // An attribute that heads no avar binding: a chain target, and a path
-    // the file does not name.
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader);
-    if (reader) {
-        for (const char *path : {"/Asset/Rig/Channels/Dial.rigExec:amount",
-                                 "/Asset/Rig/Controls/Dial.avars:none"}) {
-            error.clear();
-            CHECK(!reader->SetAvar(path, 1.0, &error));
-            CHECK(error == std::string("expected a finite TRS avar on a "
-                                       "compiled pose slot: ") +
-                               path);
-        }
+    // An input refuses, changing nothing, a name the file does not list,
+    // a value of another type, a non-finite value and an index past the
+    // count.
+    RigExecTestPlayer player;
+    if (!player.Open(result.bytes, stage, &error)) {
+        std::printf("%s: open: %s\n", name, error.c_str());
+        CHECK(false);
+        return;
+    }
+    const std::string amount = "/Asset/Rig/Channels/Dial.rigExec:amount";
+    size_t index = 0;
+    CHECK(player->FindInput(amount, &index));
+    const RrInputValue before = player->GetInputValue(index);
+    const auto unchanged = [&] {
+        const RrInputValue &now = player->GetInputValue(index);
+        return now.tag == before.tag &&
+               std::memcmp(&now.f32, &before.f32, sizeof(float)) == 0;
+    };
+    error.clear();
+    CHECK(!player->SetInput("/Asset/Rig/Controls/Dial.avars:none", 1.0,
+                            &error));
+    CHECK(error == "no input named /Asset/Rig/Controls/Dial.avars:none");
+    RrInputValue wrong = before;
+    wrong.tag = RrInputTag::Bool;
+    error.clear();
+    CHECK(!player->SetInputAt(index, wrong, &error));
+    CHECK(error == amount + " is a float input, not a bool");
+    error.clear();
+    CHECK(!player->SetInput(amount, std::nan(""), &error));
+    CHECK(error == amount + " takes finite values only");
+    error.clear();
+    CHECK(!player->SetInputAt(player->GetInputCount(), before, &error));
+    CHECK(error == "no input at index " +
+                       std::to_string(player->GetInputCount()) +
+                       "; the file lists " +
+                       std::to_string(player->GetInputCount()));
+    CHECK(unchanged());
+
+    // What only an avar override refused is an authored value now: the
+    // chain target's base, set to 0.3, plays what the baked program plays
+    // with 0.3 authored on it in the session layer.
+    CHECK(player->SetInput(amount, 0.3, &error));
+    CHECK(player.Play(1.0, &error));
+    const std::vector<_Reference> set = _References(
+        stage, SdfPath("/Asset/Rig"), {_Edit(stage, amount, 0.3)}, {1.0});
+    CHECK(set.size() == 1);
+    if (set.size() == 1) {
+        CHECK(_SamePools(name, 1.0, player.Reader(), set[0]));
+        CHECK(_SamePropertyResults(name, set[0].pose, player.Reader()));
     }
     std::printf("%s: checked\n", name);
 }
@@ -3979,15 +3658,14 @@ _SameVersion(const RigExecWireFrameVersion &read, int anchor,
 
 // Space switches nested under switched controls, read at the versions the
 // program bound at Build: each fixture's version pools, joints and
-// diagnostics equal the baked program's bit for bit at every frame, with
-// the record cross-check on. In the nested fixture S reads P recomposed
-// from its avars before P's switch, so its parent version is {-1, {P}}.
-// In the carry fixture P hangs under G and S's space Q under P, so S
-// reads {G, {P}} for its parent and {G, {P, Q}} for its space.
-// The dial fixture's indices are keyed with no default: each is a live
-// input whose record holds its key at every frame, the runtime's read of
-// it matches that record, and the playback reads it from its slot rather
-// than replaying the record.
+// diagnostics equal the baked program's bit for bit at every frame, played
+// through the inputs of a bake at the first frame. In the nested fixture S
+// reads P recomposed from its avars before P's switch, so its parent
+// version is {-1, {P}}. In the carry fixture P hangs under G and S's space
+// Q under P, so S reads {G, {P}} for its parent and {G, {P, Q}} for its
+// space. The dial fixture's indices are keyed with no default: each is a
+// live input the record directory lists, whose record holds its key at
+// the bake time.
 static void
 TestSpaceSwitchVersionFixtures()
 {
@@ -4007,7 +3685,7 @@ TestSpaceSwitchVersionFixtures()
         RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
         evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
-        opts.frames = frames;
+        opts.time = frames.front();
         std::string error;
         const bool ok = RigExecBakeToBinary(evaluator, opts, result, &error);
         CHECK(ok);
@@ -4099,7 +3777,7 @@ TestSpaceSwitchVersionFixtures()
                                   &error);
     RigExecWireInputTable table;
     CHECK(binary && _DecodeInputTable(dial.bytes, &table));
-    if (!binary || table.frames.size() != frames.size()) {
+    if (!binary || table.frames.size() != 1) {
         CHECK(false);
         return;
     }
@@ -4122,48 +3800,18 @@ TestSpaceSwitchVersionFixtures()
                 entry.uid = int64_t(k);
             }
         }
-        // Live: listed in the directory, and recorded at every frame at
-        // its key.
+        // Live: listed in the directory, and recorded at its key at the
+        // bake time.
         CHECK(entry.uid >= 0);
-        for (size_t f = 0; f < table.frames.size() && entry.uid >= 0; ++f) {
-            const RigExecWireFrameInputs &record = table.frames[f];
-            bool held = false;
-            for (size_t k = 0; k < record.uids.size(); ++k) {
-                if (record.uids[k] == uint32_t(entry.uid)) {
-                    held = true;
-                    CHECK(record.values[k].f64 == entry.keys[f]);
-                }
+        const RigExecWireFrameInputs &record = table.frames[0];
+        bool held = false;
+        for (size_t k = 0; k < record.uids.size() && entry.uid >= 0; ++k) {
+            if (record.uids[k] == uint32_t(entry.uid)) {
+                held = true;
+                CHECK(record.values[k].f64 == entry.keys[0]);
             }
-            CHECK(held);
         }
-    }
-    if (dials[0].uid < 0) {
-        return;
-    }
-    std::vector<_PlayedFrame> untouched;
-    CHECK(_PlayFrames(dial.bytes, frames, true, &untouched, &error));
-    // P's recorded dial at frame 1 moved: the cross-check names it.
-    for (size_t k = 0; k < table.frames[1].uids.size(); ++k) {
-        if (table.frames[1].uids[k] == uint32_t(dials[0].uid)) {
-            table.frames[1].values[k].f64 = 0.25;
-        }
-    }
-    std::vector<uint8_t> payload;
-    CHECK(RigExecWireEncodeInputTable(table, &payload));
-    const std::vector<uint8_t> tampered = _ReplaceSection(
-        dial.bytes, RigExecBinarySection::InputTable, payload);
-    std::vector<_PlayedFrame> ignored, replayed;
-    CHECK(!_PlayFrames(tampered, frames, true, &ignored, &error));
-    CHECK(error.find("registered reads: cross-check mismatch at "
-                     "spaceSwitches[") != std::string::npos &&
-          error.find("].active (uid " + std::to_string(dials[0].uid) +
-                     ", " + dials[0].path + ")") != std::string::npos);
-    std::printf("space switch dial, tampered record: %s\n", error.c_str());
-    // The switch reads its dial through the slot: the record moves nothing.
-    CHECK(_PlayFrames(tampered, frames, false, &replayed, &error));
-    CHECK(replayed.size() == untouched.size());
-    for (size_t f = 0; f < replayed.size() && f < untouched.size(); ++f) {
-        CHECK(replayed[f].fin == untouched[f].fin);
+        CHECK(held);
     }
     std::printf("space switch version fixtures: checked\n");
 }
@@ -4174,8 +3822,8 @@ TestSpaceSwitchVersionFixtures()
 // rewritten so S reads its parent as {anchor -1, recompose {P}} -- P
 // composed from its avars against identity instead of G's frame -- and
 // then also Arm as {-1, {Arm}}. No binding of this rig produces either.
-// The runtime playing the rewritten section and the program with the same
-// versions on its switch, its compose steps run through
+// The runtime playing the rewritten section through its inputs and the
+// program with the same versions on its switch, its compose steps run through
 // RigExecBakedRunPoseStep, agree bit for bit on every version-pool frame.
 // The parent enters a switched compose only through the round trip of
 // `local`, so it moves S in the last digits; the source moves S outright.
@@ -4240,7 +3888,7 @@ TestHandBuiltSwitchReads()
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = frames;
+    opts.time = frames.front();
     RigExecBakeResult result;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
@@ -4333,19 +3981,16 @@ TestHandBuiltSwitchReads()
                     RigExecBakedRunPoseStep(&B, &step, UsdTimeCode(frame));
                 }
             }
-            const std::unique_ptr<RigExecRuntimeReader> reader =
-                RigExecRuntimeReader::Open(bytes.data(), bytes.size(),
-                                           &error);
-            CHECK(reader);
-            if (!reader || !reader->SetFrame(frame, &error) ||
-                !reader->Execute(&error)) {
+            RigExecTestPlayer player;
+            if (!player.Open(bytes, stage, &error) ||
+                !player.Play(frame, &error)) {
                 std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
                             error.c_str());
                 CHECK(false);
                 return;
             }
-            CHECK(_SamePools(what, frame, *reader, B));
-            const RrPointFrame &got = reader->GetFinFrames()[size_t(sSlot)];
+            CHECK(_SamePools(what, frame, player.Reader(), B));
+            const RrPointFrame &got = player->GetFinFrames()[size_t(sSlot)];
             const RigExecPointFrame &bound = natural[size_t(sSlot)];
             if (!_FramesEqual(bound, got)) {
                 ++movedFrames;
@@ -4372,14 +4017,15 @@ TestHandBuiltSwitchReads()
     std::printf("%s: checked\n", name);
 }
 
-// The nested fixture with both switch indices connected to a Dial
-// control's avars (tx for P's, ty for S's), so SetAvar reaches them. A
-// drag of both indices held over every frame, then released; then, at
-// one frame, a drag on P's rz alone. S's switch reads P only recomposed
-// from those avars, and its compose step is emitted before P's, so only
-// the closure's dirtying of the steps that recompose P re-runs it. Every
-// frame's version pools equal the baked program's under the same
-// overrides bit for bit, and the baked program agrees with the dynamic
+// The nested fixture's switch indices set as inputs: pSpaces' and
+// sSpaces' inputs:activeSpace (keyed) set to 0.25 and 0.75, held over
+// every frame -- set again after the stage's keys at each frame, as a host
+// holding a drag does -- then reset; then, at one frame, an input set on
+// P's rz alone. S's switch reads P only recomposed from those avars, and
+// its compose step is emitted before P's, so only the closure's dirtying
+// of the steps that recompose P re-runs it. Every frame's version pools
+// equal the baked program's under the same values authored in the session
+// layer bit for bit, and the baked program agrees with the dynamic
 // evaluator.
 static void
 TestSpaceSwitchIndexDrag()
@@ -4391,103 +4037,83 @@ TestSpaceSwitchIndexDrag()
     if (!stage) {
         return;
     }
-    stage->SetEditTarget(stage->GetSessionLayer());
-    const UsdPrim dial = stage->DefinePrim(
-        SdfPath("/Rig/Controls/Dial"), TfToken("RigExecControl"));
-    dial.CreateAttribute(TfToken("rest:space"), SdfValueTypeNames->Matrix4d)
-        .Set(GfMatrix4d(1.0));
-    const UsdAttribute pIndex =
-        dial.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double);
-    pIndex.Set(0.0);
-    const UsdAttribute sIndex =
-        dial.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double);
-    sIndex.Set(0.5);
-    stage->GetAttributeAtPath(SdfPath("/Rig/Movers/pSpaces.inputs:activeSpace"))
-        .SetConnections({pIndex.GetPath()});
-    stage->GetAttributeAtPath(SdfPath("/Rig/Movers/sSpaces.inputs:activeSpace"))
-        .SetConnections({sIndex.GetPath()});
-
     const SdfPath rigPath("/Rig");
     const std::vector<double> frames = {0.0, 1.0, 2.0, 3.0};
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = frames;
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader);
-    if (!reader) {
+    CHECK(RigExecTestBakeAt(evaluator, frames.front(), &bytes, &error));
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
         std::printf("%s: open: %s\n", name, error.c_str());
+        CHECK(false);
         return;
     }
-    reader->SetCrossCheckForTesting(true);
-    RigExecRigEvaluator program(stage, rigPath);
-    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     const auto run = [&](const char *what, double frame,
+                         const _Reference &reference,
                          std::vector<std::vector<RrPointFrame>> *fin) {
-        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid && pose.bakedParityMismatches == 0);
-        const RigExecBakedProgram *baked = program.GetBakedProgram();
-        CHECK(baked);
-        if (!pose.valid || !baked) {
-            return false;
-        }
-        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("%s, %s frame %.17g: %s\n", name, what, frame,
                         error.c_str());
             CHECK(false);
             return false;
         }
-        fin->push_back(reader->GetFinFrames());
-        return _SamePools(what, frame, *reader, baked->GetStepGraph());
+        fin->push_back(player->GetFinFrames());
+        return _SamePools(what, frame, player.Reader(), reference);
     };
     const auto pass = [&](const char *what,
+                          const std::vector<_Reference> &references,
                           std::vector<std::vector<RrPointFrame>> *fin) {
-        bool same = true;
-        for (const double frame : frames) {
-            same = run(what, frame, fin) && same;
+        bool same = references.size() == frames.size();
+        for (size_t f = 0; f < frames.size() && f < references.size();
+             ++f) {
+            same = run(what, frames[f], references[f], fin) && same;
         }
         return same;
     };
-    const auto overrideOf = [](const SdfPath &prim, const char *avar,
-                               double value) {
-        return RigExecValueOverride{prim, TfToken(), TfToken(avar),
-                                    VtValue(value)};
-    };
+    const std::string pIndex = "/Rig/Movers/pSpaces.inputs:activeSpace";
+    const std::string sIndex = "/Rig/Movers/sSpaces.inputs:activeSpace";
+    const std::vector<_Reference> unset =
+        _References(stage, rigPath, {}, frames);
     std::vector<std::vector<RrPointFrame>> undragged, dragged, released;
-    CHECK(pass("undragged", &undragged));
-    CHECK(reader->SetAvar(pIndex.GetPath().GetString(), 0.25, &error));
-    CHECK(reader->SetAvar(sIndex.GetPath().GetString(), 0.75, &error));
-    program.SetInteractiveOverrides(
-        {overrideOf(dial.GetPath(), "avars:tx", 0.25),
-         overrideOf(dial.GetPath(), "avars:ty", 0.75)});
-    CHECK(pass("indices held", &dragged));
+    CHECK(pass("undragged", unset, &undragged));
+    CHECK(player.Hold(pIndex, 0.25, &error));
+    CHECK(player.Hold(sIndex, 0.75, &error));
+    CHECK(pass("indices held",
+               _References(stage, rigPath,
+                           {_Edit(stage, pIndex, 0.25),
+                            _Edit(stage, sIndex, 0.75)},
+                           frames),
+               &dragged));
     CHECK(dragged.size() == frames.size() &&
           undragged.size() == frames.size());
-    for (size_t f = 0; f < dragged.size() && f < undragged.size(); ++f) {
+    // At frame 0 every control rests, where a switch holds its target in
+    // place whatever its index; from frame 1 on the held indices move the
+    // pools.
+    for (size_t f = 1; f < dragged.size() && f < undragged.size(); ++f) {
         CHECK(dragged[f] != undragged[f]);
     }
-    reader->ClearAvars();
-    program.ClearInteractiveOverrides();
-    CHECK(pass("indices released", &released));
+    player.ReleaseAll();
+    CHECK(pass("indices released", unset, &released));
     CHECK(released == undragged);
 
     // At one frame, only P's avars move.
-    const double frame = 2.0;
-    const SdfPath pPath("/Rig/Controls/P");
+    const size_t at = 2;
+    const double frame = frames[at];
+    const std::string pRz = "/Rig/Controls/P.avars:rz";
     std::vector<std::vector<RrPointFrame>> still, turned, back;
-    CHECK(run("before the rz drag", frame, &still));
-    CHECK(run("before the rz drag, again", frame, &still));
-    CHECK(reader->SetAvar("/Rig/Controls/P.avars:rz", 40.0, &error));
-    program.SetInteractiveOverrides({overrideOf(pPath, "avars:rz", 40.0)});
-    CHECK(run("rz dragged", frame, &turned));
-    reader->ClearAvars();
-    program.ClearInteractiveOverrides();
-    CHECK(run("rz released", frame, &back));
+    CHECK(run("before the rz drag", frame, unset[at], &still));
+    CHECK(run("before the rz drag, again", frame, unset[at], &still));
+    CHECK(player.Hold(pRz, 40.0, &error));
+    const std::vector<_Reference> rz =
+        _References(stage, rigPath, {_Edit(stage, pRz, 40.0)}, {frame});
+    CHECK(rz.size() == 1);
+    if (rz.size() == 1) {
+        CHECK(run("rz dragged", frame, rz[0], &turned));
+    }
+    player.ReleaseAll();
+    CHECK(run("rz released", frame, unset[at], &back));
     CHECK(still.size() == 2 && turned.size() == 1 && back.size() == 1);
     if (still.size() == 2 && turned.size() == 1 && back.size() == 1) {
         CHECK(turned[0] != still[1]);
@@ -4514,7 +4140,7 @@ TestSpaceSwitchOpenRefusals()
     RigExecRigEvaluator evaluator(stage, SdfPath("/Rig"));
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
     RigExecBakeOpts opts;
-    opts.frames = {0.0, 1.0};
+    opts.time = 0.0;
     RigExecBakeResult result;
     std::string error;
     CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
@@ -4637,11 +4263,12 @@ TestSpaceSwitchOpenRefusals()
 
 // The carry fixture, at a frame where S blends Other (twist-filtered) with
 // world and at one where S is at world. S's space reads Q recomposed
-// through P and Q on G's frame, so a drag of G's, P's or Q's avars alone
-// moves S outright. P's and Q's reach S's compose step only through the
-// closure's dirtying of the steps that recompose them; G's through S's
-// read of its posedM. Each drag and its release match the baked program's
-// version pools bit for bit, with parity against the dynamic walk.
+// through P and Q on G's frame, so an input set on G's, P's or Q's avars
+// alone moves S outright. P's and Q's reach S's compose step only through
+// the closure's dirtying of the steps that recompose them; G's through S's
+// read of its posedM. Each set and its reset match the baked program's
+// version pools under the same value authored in the session layer bit for
+// bit, with parity against the dynamic walk.
 static void
 TestSpaceSwitchCarryDrag()
 {
@@ -4655,42 +4282,29 @@ TestSpaceSwitchCarryDrag()
     const SdfPath rigPath("/Rig");
     RigExecRigEvaluator evaluator(stage, rigPath);
     evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    RigExecBakeOpts opts;
-    opts.frames = {0.0, 1.0, 2.0, 3.0};
-    RigExecBakeResult result;
+    std::vector<uint8_t> bytes;
     std::string error;
-    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    CHECK(RigExecTestBakeAt(evaluator, 0.0, &bytes, &error));
     RigExecWireSlotMeta meta;
-    const int s = _SlotOfPath(result.bytes, "/Rig/Controls/G/P/S", &meta);
-    std::unique_ptr<RigExecRuntimeReader> reader =
-        RigExecRuntimeReader::Open(result.bytes.data(), result.bytes.size(),
-                                   &error);
-    CHECK(reader && s >= 0);
-    if (!reader || s < 0) {
+    const int s = _SlotOfPath(bytes, "/Rig/Controls/G/P/S", &meta);
+    RigExecTestPlayer player;
+    const bool opened = player.Open(bytes, stage, &error);
+    CHECK(opened && s >= 0);
+    if (!opened || s < 0) {
         std::printf("%s: open: %s\n", name, error.c_str());
         return;
     }
-    reader->SetCrossCheckForTesting(true);
-    RigExecRigEvaluator program(stage, rigPath);
-    program.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     const auto run = [&](const std::string &what, double frame,
+                         const _Reference &reference,
                          std::vector<std::vector<RrPointFrame>> *fin) {
-        const RigExecRigPose pose = program.Evaluate(UsdTimeCode(frame));
-        CHECK(pose.valid && pose.bakedParityMismatches == 0);
-        const RigExecBakedProgram *baked = program.GetBakedProgram();
-        CHECK(baked);
-        if (!pose.valid || !baked) {
-            return false;
-        }
-        if (!reader->SetFrame(frame, &error) || !reader->Execute(&error)) {
+        if (!player.Play(frame, &error)) {
             std::printf("%s, %s frame %.17g: %s\n", name, what.c_str(),
                         frame, error.c_str());
             CHECK(false);
             return false;
         }
-        fin->push_back(reader->GetFinFrames());
-        return _SamePools(what.c_str(), frame, *reader,
-                          baked->GetStepGraph());
+        fin->push_back(player->GetFinFrames());
+        return _SamePools(what.c_str(), frame, player.Reader(), reference);
     };
     struct Drag {
         const char *prim;
@@ -4702,21 +4316,26 @@ TestSpaceSwitchCarryDrag()
                           {"/Rig/Controls/G/P/Q", "avars:rz", -30.0},
                           {"/Rig/Controls/G", "avars:rz", 35.0}};
     for (const double frame : {0.0, 2.0}) {
+        const std::vector<_Reference> unset =
+            _References(stage, rigPath, {}, {frame});
+        if (unset.size() != 1) {
+            CHECK(false);
+            continue;
+        }
         for (const Drag &drag : drags) {
             const std::string what =
                 std::string(drag.prim) + "." + drag.avar;
+            const std::vector<_Reference> set = _References(
+                stage, rigPath, {_Edit(stage, what, drag.value)}, {frame});
             std::vector<std::vector<RrPointFrame>> still, turned, back;
-            CHECK(run(what + " before", frame, &still));
-            CHECK(run(what + " before, again", frame, &still));
-            CHECK(reader->SetAvar(what, drag.value, &error));
-            program.SetInteractiveOverrides(
-                {RigExecValueOverride{SdfPath(drag.prim), TfToken(),
-                                      TfToken(drag.avar),
-                                      VtValue(drag.value)}});
-            CHECK(run(what + " dragged", frame, &turned));
-            reader->ClearAvars();
-            program.ClearInteractiveOverrides();
-            CHECK(run(what + " released", frame, &back));
+            CHECK(run(what + " before", frame, unset[0], &still));
+            CHECK(run(what + " before, again", frame, unset[0], &still));
+            CHECK(player.Hold(what, drag.value, &error));
+            if (set.size() == 1) {
+                CHECK(run(what + " dragged", frame, set[0], &turned));
+            }
+            player.ReleaseAll();
+            CHECK(run(what + " released", frame, unset[0], &back));
             CHECK(still.size() == 2 && turned.size() == 1 &&
                   back.size() == 1);
             if (still.size() != 2 || turned.size() != 1 ||
@@ -4760,6 +4379,7 @@ main(int argc, char **argv)
     TestPhasedConsumers();
     TestDefaultReadPhaseRoundTrip();
     TestNonFiniteBase();
+    TestSampledInputWithNoValue();
     TestComputedChainsFixture();
     TestIkSpaceFixture();
 
@@ -4768,11 +4388,11 @@ main(int argc, char **argv)
         examplesDir = argv[1];
     }
     TestConstraintAndAvarReadersReplay(examplesDir);
-    TestSetAvarOnPhasedReader();
-    TestSetAvarOnHop();
-    TestSetAvarOnLadderInput();
-    TestSetAvarOnChainInput();
-    TestSetAvarOnChainTarget();
+    TestSetInputOnPhasedReader();
+    TestSetInputOnHop();
+    TestSetInputOnLadderInput();
+    TestSetInputOnChainInput();
+    TestSetInputOnChainTarget();
     TestRegisteredReadRefusals();
     TestSpaceSwitchVersionFixtures();
     TestHandBuiltSwitchReads();
@@ -4792,19 +4412,21 @@ main(int argc, char **argv)
         if (frames.empty()) {
             continue;
         }
-        _TestFixture(fixture.stage, stagePath, frames);
+        // A `static` row holds an animated source in static data at the
+        // bake time: it plays that time alone.
+        _TestFixture(fixture.stage, stagePath, frames,
+                     std::string(fixture.animation) == "static");
     }
     CHECK(sawBaking);
 
     if (failures == 0) {
         std::printf("testRigExecRuntimePose: all tests passed "
-                    "(%d compared, %d deferred, %d full-mode)\n",
-                    comparedFixtures, deferredFixtures,
-                    fullModeFixtures);
+                    "(%d stage(s) compared over %d frame(s))\n",
+                    comparedFixtures, comparedFrames);
         return 0;
     }
     std::printf("testRigExecRuntimePose: %d failures "
-                "(%d compared, %d deferred, %d full-mode)\n", failures,
-                comparedFixtures, deferredFixtures, fullModeFixtures);
+                "(%d stage(s) compared over %d frame(s))\n", failures,
+                comparedFixtures, comparedFrames);
     return 1;
 }

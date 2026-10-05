@@ -7,10 +7,11 @@
 // Gf -> Rr, TfToken comparisons -> string-table text comparisons, the
 // arithmetic untouched: float stays float, in the same order.
 // Where the baked step reads the stage per frame, the runtime reads the
-// frame record. Scalar inputs are read over the input slots (ReadWeight,
-// the runtime form of RigExecBakedRead); the point arrays a volume measures
-// resolve through two layers, in order: a live (wasDefault == false)
-// pathReads entry for the attribute, else the chain base of the chain
+// stage values the bake captured (RrStatic). Scalar inputs are read over
+// the input slots (ReadWeight, the runtime form of RigExecBakedRead); the
+// point arrays a volume measures resolve through two layers, in order: a
+// live (wasDefault == false) path read for the attribute, else the chain
+// base of the chain
 // whose target IS that attribute path. Chain targets are attribute
 // paths (the prologue builds the base query on GetAttributeAtPath of
 // the target), so the second layer matches by exact id, not by
@@ -56,14 +57,12 @@ struct RrWeightOracleKind {
 };
 
 struct RrWeightScratch {
-    // The record the lookup below was built from. Keyed by frame time:
-    // Execute passes the selected record's own frame into the walk, so
-    // equality with a record's frame is exact.
-    bool haveRecord = false;
-    double recordFrame = 0.0;
-    // Live stage reads this frame: attribute path id -> pathReads index,
-    // for wasDefault == false entries only. A rest-time read is not what
-    // a frame-time gather consumed.
+    // The path-read list the lookup below was built from (RrStatic::
+    // PathReads), null before the first build.
+    const std::vector<RigExecWirePathRead> *liveReadsOf = nullptr;
+    // Live stage reads: attribute path id -> path-read index, for
+    // wasDefault == false entries only. A rest-time read is not what a
+    // frame-time gather consumed.
     std::unordered_map<uint32_t, size_t> liveReads;
     // Chain target attribute id -> chain index, built once (epoch data).
     std::unordered_map<uint32_t, size_t> chainByTarget;
@@ -162,18 +161,6 @@ _RrStepLabel(const RrProgram *program, size_t step)
     return program->TextOrEmpty((*program->steps)[step].label);
 }
 
-const RigExecWireFrameInputs *
-_RrFindRecord(const RrProgram *program, double time)
-{
-    for (const RigExecWireFrameInputs &record :
-         program->inputs->frames) {
-        if (record.frame == time) {
-            return &record;
-        }
-    }
-    return nullptr;
-}
-
 RrWeightScratch *
 _RrScratch(const RrProgram *program)
 {
@@ -181,21 +168,22 @@ _RrScratch(const RrProgram *program)
 }
 
 void
-_RrRefreshReads(RrProgram *program, const RigExecWireFrameInputs *record)
+_RrRefreshReads(RrProgram *program)
 {
     RrWeightScratch *scratch = _RrScratch(program);
-    if (scratch->haveRecord && scratch->recordFrame == record->frame) {
+    const std::vector<RigExecWirePathRead> &reads =
+        program->statics.PathReads();
+    if (scratch->liveReadsOf == &reads) {
         return;
     }
     scratch->liveReads.clear();
-    for (size_t i = 0; i < record->pathReads.size(); ++i) {
-        const RigExecWirePathRead &read = record->pathReads[i];
+    for (size_t i = 0; i < reads.size(); ++i) {
+        const RigExecWirePathRead &read = reads[i];
         if (read.wasDefault == 0) {
             scratch->liveReads.emplace(read.path, i);
         }
     }
-    scratch->haveRecord = true;
-    scratch->recordFrame = record->frame;
+    scratch->liveReadsOf = &reads;
 }
 
 // A bound weight input as the float the builders consume. The read
@@ -205,10 +193,10 @@ float
 _RrReadWeightFloat(const RrProgram *program, size_t object, int field)
 {
     const RrInputValue value = program->ReadWeight(object, field);
-    if (value.tag == RigExecWireInput::Tag::Float) {
+    if (value.tag == RrInputTag::Float) {
         return value.f32;
     }
-    if (value.tag == RigExecWireInput::Tag::Double) {
+    if (value.tag == RrInputTag::Double) {
         return static_cast<float>(value.f64);
     }
     return 0.0f;
@@ -216,18 +204,17 @@ _RrReadWeightFloat(const RrProgram *program, size_t object, int field)
 
 // Appends one attribute's points to a volume gather. A failed read --
 // no live entry, a known-absent mark, a mistyped holding, or a chain
-// with no base this frame -- contributes nothing, exactly as a false
-// GetAttribute does in the baked gather.
+// with no base -- contributes nothing, exactly as a false GetAttribute
+// does in the baked gather.
 void
 _RrGatherPoints(const RrProgram *program, RrWeightScratch *scratch,
-               const RigExecWireFrameInputs *record, uint32_t path,
-               std::vector<RrVec3f> *out)
+               uint32_t path, std::vector<RrVec3f> *out)
 {
+    const RrStatic &statics = program->statics;
+    const std::vector<RigExecWirePathRead> &reads = statics.PathReads();
     const auto live = scratch->liveReads.find(path);
-    if (live != scratch->liveReads.end() &&
-        live->second < record->pathReads.size()) {
-        const RigExecWirePathValue &value =
-            record->pathReads[live->second].value;
+    if (live != scratch->liveReads.end() && live->second < reads.size()) {
+        const RigExecWirePathValue &value = reads[live->second].value;
         if (value.tag == RigExecWirePathValue::Tag::Vec3fArray) {
             for (const RigExecWireVec3f &p : value.vec3s) {
                 out->push_back(RrVec3f(p[0], p[1], p[2]));
@@ -236,14 +223,14 @@ _RrGatherPoints(const RrProgram *program, RrWeightScratch *scratch,
         return;
     }
     const auto chain = scratch->chainByTarget.find(path);
-    if (chain == scratch->chainByTarget.end() ||
-        chain->second >= record->chainBases.size() ||
-        chain->second >= record->chainHaveBase.size() ||
-        !record->chainHaveBase[chain->second]) {
+    const std::vector<RigExecWireVec3f> *base =
+        chain == scratch->chainByTarget.end()
+            ? nullptr
+            : statics.ChainBase(chain->second);
+    if (!base) {
         return;
     }
-    for (const RigExecWireVec3f &p :
-         record->chainBases[chain->second]) {
+    for (const RigExecWireVec3f &p : *base) {
         out->push_back(RrVec3f(p[0], p[1], p[2]));
     }
 }
@@ -252,31 +239,28 @@ _RrGatherPoints(const RrProgram *program, RrWeightScratch *scratch,
 // fallback: the same read as above, measured rather than copied.
 size_t
 _RrGatherPointCount(const RrProgram *program, RrWeightScratch *scratch,
-                   const RigExecWireFrameInputs *record, uint32_t path)
+                   uint32_t path)
 {
+    const RrStatic &statics = program->statics;
+    const std::vector<RigExecWirePathRead> &reads = statics.PathReads();
     const auto live = scratch->liveReads.find(path);
-    if (live != scratch->liveReads.end() &&
-        live->second < record->pathReads.size()) {
-        const RigExecWirePathValue &value =
-            record->pathReads[live->second].value;
+    if (live != scratch->liveReads.end() && live->second < reads.size()) {
+        const RigExecWirePathValue &value = reads[live->second].value;
         if (value.tag == RigExecWirePathValue::Tag::Vec3fArray) {
             return value.vec3s.size();
         }
         return 0;
     }
     const auto chain = scratch->chainByTarget.find(path);
-    if (chain == scratch->chainByTarget.end() ||
-        chain->second >= record->chainBases.size() ||
-        chain->second >= record->chainHaveBase.size() ||
-        !record->chainHaveBase[chain->second]) {
-        return 0;
-    }
-    return record->chainBases[chain->second].size();
+    const std::vector<RigExecWireVec3f> *base =
+        chain == scratch->chainByTarget.end()
+            ? nullptr
+            : statics.ChainBase(chain->second);
+    return base ? base->size() : 0;
 }
 
 void
 _RrGatherPointList(const RrProgram *program, RrWeightScratch *scratch,
-                   const RigExecWireFrameInputs *record,
                    const std::vector<uint32_t> &paths,
                    const std::vector<uint8_t> &valid,
                    std::vector<RrVec3f> *out)
@@ -285,7 +269,7 @@ _RrGatherPointList(const RrProgram *program, RrWeightScratch *scratch,
         if (i < valid.size() && !valid[i]) {
             continue;
         }
-        _RrGatherPoints(program, scratch, record, paths[i], out);
+        _RrGatherPoints(program, scratch, paths[i], out);
     }
 }
 
@@ -1248,9 +1232,7 @@ _RrBuildCurvePacket(const RrProgram *program,
 // over: the step assigns unconditionally, exactly as the baked one
 // does, whatever the cone skipped.
 bool
-_RrRunWeightPacket(RrProgram *program, size_t step,
-                   const RigExecWireFrameInputs *record,
-                   std::string *error)
+_RrRunWeightPacket(RrProgram *program, size_t step, std::string *error)
 {
     RrStore &store = program->store;
     const RigExecWireStep &wireStep = (*program->steps)[step];
@@ -1292,7 +1274,7 @@ _RrRunWeightPacket(RrProgram *program, size_t step,
                 continue;
             }
             targetCount += _RrGatherPointCount(
-                program, scratch, record, wire.combineTargetPoints[i]);
+                program, scratch, wire.combineTargetPoints[i]);
         }
         store.weightPackets[index] = _RrBuildCombinePacket(
             program, wire, store, targetCount,
@@ -1355,16 +1337,13 @@ _RrRunWeightPacket(RrProgram *program, size_t step,
         RrMat4d worldToLocal;
         if (_RrVolumeCanBuild(program, wire, !isPlane, placement,
                               hasPlacement, scales, &worldToLocal)) {
-            _RrGatherPointList(program, scratch, record,
-                               wire.targetPoints, wire.targetValid,
-                               &targetPoints);
-            _RrGatherPointList(program, scratch, record,
-                               wire.samplePoints, wire.sampleValid,
-                               &samplePoints);
+            _RrGatherPointList(program, scratch, wire.targetPoints,
+                               wire.targetValid, &targetPoints);
+            _RrGatherPointList(program, scratch, wire.samplePoints,
+                               wire.sampleValid, &samplePoints);
             if (isCurve) {
-                _RrGatherPointList(program, scratch, record,
-                                   wire.curvePoints, wire.curveValid,
-                                   &curvePoints);
+                _RrGatherPointList(program, scratch, wire.curvePoints,
+                                   wire.curveValid, &curvePoints);
             }
         }
         if (isSphere) {
@@ -1827,8 +1806,7 @@ RrResolveWeightOracle(const RrProgram *program, size_t object, size_t count,
 }
 
 bool
-RrRunWeightStep(RrProgram *program, size_t step, double time,
-                std::string *error)
+RrRunWeightStep(RrProgram *program, size_t step, std::string *error)
 {
     if (!program || !program->steps || !program->geometry ||
         !program->inputs || !program->slotMeta || !program->constants ||
@@ -1849,19 +1827,8 @@ RrRunWeightStep(RrProgram *program, size_t step, double time,
         }
         return false;
     }
-    const RigExecWireFrameInputs *record = _RrFindRecord(program, time);
-    if (!record) {
-        if (error) {
-            char buffer[64];
-            std::snprintf(buffer, sizeof(buffer),
-                          "weight step %s names no baked frame",
-                          _RrStepLabel(program, step).c_str());
-            *error = buffer;
-        }
-        return false;
-    }
-    _RrRefreshReads(program, record);
-    return _RrRunWeightPacket(program, step, record, error);
+    _RrRefreshReads(program);
+    return _RrRunWeightPacket(program, step, error);
 }
 
 }  // namespace rigExec

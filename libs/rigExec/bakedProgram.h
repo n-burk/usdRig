@@ -302,6 +302,14 @@ public:
     /// path and drops the program.
     bool Run(UsdTimeCode time, RigExecRigPose *pose);
 
+    /// Asks the next Run to execute every step rather than the closure of
+    /// what moved, then forget the request. A request, not state: the
+    /// results are the same either way (the cone verifier's invariant);
+    /// what changes is that every step's reads happen in that run, which a
+    /// bake capturing them needs. Const because the evaluator hands its
+    /// program out const; the flag is the only thing it touches.
+    void RequestFullRun() const { _fullRunRequested = true; }
+
     /// Why the last Run returned false; None after one that returned true.
     RigExecBakedBail GetLastBail() const { return _lastBail; }
 
@@ -505,6 +513,8 @@ private:
     explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);
     std::unique_ptr<RigExecBakedProgramImpl> _impl;
     RigExecBakedBail _lastBail = RigExecBakedBail::None;
+    /// RequestFullRun's one-shot flag, consumed by the next Run.
+    mutable bool _fullRunRequested = false;
 };
 
 }  // namespace rigExec

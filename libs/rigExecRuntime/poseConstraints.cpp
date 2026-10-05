@@ -1634,9 +1634,7 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
     if (walkIndex < 0 ||
         size_t(walkIndex) >= program->poses->constraints.size() ||
         size_t(walkIndex) >= scratch->weightScratch.size() ||
-        size_t(walkIndex) >= scratch->weightError.size() ||
-        size_t(walkIndex) >= scratch->constraintWeights.size() ||
-        size_t(walkIndex) >= scratch->constraintHaveWeight.size()) {
+        size_t(walkIndex) >= scratch->weightError.size()) {
         if (error) {
             *error = _RrStepHead(program, step) +
                      " names no constraint";
@@ -1725,31 +1723,6 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
             return finish();
         }
         weight = envelope[0];
-        if (program->CrossCheckThisRun()) {
-            // The record's envelope is the program's own resolve at this
-            // frame, which a successful resolve here must equal.
-            const std::string field = "[" + std::to_string(ci) + "]";
-            if (!scratch->constraintHaveWeight[ci]) {
-                if (error) {
-                    *error = _RrStepHead(program, step) +
-                             ": cross-check mismatch at "
-                             "constraintHaveWeight" +
-                             field + ": computed 1, recorded 0";
-                }
-                return false;
-            }
-            if (!RrSameFloatBits(envelope[0],
-                                 scratch->constraintWeights[ci])) {
-                if (error) {
-                    *error = _RrStepHead(program, step) + ": " +
-                             RrCrossCheckMismatch(
-                                 "constraintWeights" + field, envelope[0],
-                                 scratch->constraintWeights[ci]);
-                }
-                return false;
-            }
-            ++output.crossChecked[RrCrossCheckEnvelope];
-        }
     } else if (c.weightObject == 0) {
         weight = double(program->ReadConstraint(ci,
                                                 RrConstraintDefaultWeight)
