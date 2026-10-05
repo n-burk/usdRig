@@ -11,10 +11,12 @@
 #include "rigExecBinary/format.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecRuntime/runtime.h"
+#include "rigExecRuntime/poseInternal.h"
 #include "rigExecExampleFixtures.h"
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
@@ -4289,6 +4291,427 @@ TestSpaceSwitchCarryDrag()
     std::printf("%s: checked\n", name);
 }
 
+// Rigs whose movers read phases run their cones like any other rig. At
+// fine clusters (RIGEXEC_BAKED_GRAIN_US=0, one step per cluster) a repeat
+// Execute at unchanged inputs closes fewer clusters than the file holds
+// and still publishes what live baked publishes at the bake time, from the
+// frame records and chain versions the skipped steps kept. Each drag held
+// afterwards publishes what live baked publishes under the same session
+// edit and moves the outputs; let go, the rig publishes the bake time's
+// outputs again. At the default grain a small rig can sit in one or two
+// clusters, so the count would show nothing there.
+static void
+TestPhasedRigsRunCones(const std::string &examplesDir)
+{
+    if (TfGetenv("RIGEXEC_BAKED_GRAIN_US", "") != "0") {
+        std::printf("phased rigs under cones: checked at grain 0 only\n");
+        return;
+    }
+    struct Row {
+        std::string stage;
+        double time;
+        std::vector<std::pair<std::string, double>> drags;
+    };
+    const Row rows[] = {
+        {examplesDir + "/13_ReadPhases.usda",
+         1001.0,
+         {{"/ReadPhaseAsset/Rig/Controls/LiftCtl.avars:ty", 0.25}}},
+        {_FixturePath("frame_record_fallbacks.usda"),
+         1.0,
+         {{"/RecordAsset/Rig/Controls/Dial.avars:amount", 1.25},
+          {"/RecordAsset/Rig/Controls/Late.avars:tz", 0.25}}},
+        {_FixturePath("solver_checkpoint.usda"),
+         1.0,
+         {{"/CheckpointAsset/Rig/Controls/ZKnee.avars:rx", 15.25},
+          {"/CheckpointAsset/Rig/Controls/KneeTarget.avars:tx", 0.25}}},
+    };
+    for (const Row &row : rows) {
+        const std::string name =
+            std::filesystem::path(row.stage).filename().string();
+        const UsdStageRefPtr stage = UsdStage::Open(row.stage);
+        CHECK(stage);
+        if (!stage) {
+            std::printf("%s: FAILED (no stage)\n", name.c_str());
+            continue;
+        }
+        const SdfPath rigPath = _FindRig(stage);
+        std::vector<uint8_t> bytes;
+        std::string error;
+        {
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+            if (!RigExecTestBakeAt(evaluator, row.time, &bytes, &error)) {
+                std::printf("%s: FAILED (bake: %s)\n", name.c_str(),
+                            error.c_str());
+                CHECK(false);
+                continue;
+            }
+        }
+        std::unique_ptr<fb::RigExecWireFile> file;
+        if (!RigExecFormatOpen(bytes.data(), bytes.size(), &file, &error)) {
+            std::printf("%s: FAILED (open: %s)\n", name.c_str(),
+                        error.c_str());
+            CHECK(false);
+            continue;
+        }
+        size_t bindings = 0;
+        for (const fb::RigExecWireChain &chain : file->geometry->chains) {
+            for (const fb::RigExecWireRevision &revision : chain.revisions) {
+                bindings += revision.pointBindings.size();
+            }
+            for (const fb::RigExecWireDerived &derived : chain.derived) {
+                if (derived.revision) {
+                    bindings += derived.revision->pointBindings.size();
+                }
+            }
+        }
+        const size_t records = file->pose->frameRecords.size();
+        const size_t clusters = file->clustering->clusters.size();
+        CHECK(records + bindings > 0);
+
+        std::vector<RigExecRigPose> still;
+        if (!RigExecTestEditedPoses(stage, rigPath,
+                                    RigExecEvaluationMode::Baked, {},
+                                    {row.time}, &still, &error) ||
+            still.size() != 1) {
+            std::printf("%s: FAILED (reference: %s)\n", name.c_str(),
+                        error.c_str());
+            CHECK(false);
+            continue;
+        }
+        RigExecTestPlayer player;
+        if (!player.Open(bytes, stage, &error)) {
+            std::printf("%s: FAILED (open: %s)\n", name.c_str(),
+                        error.c_str());
+            CHECK(false);
+            continue;
+        }
+        const auto matches = [&](const RigExecRigPose &pose,
+                                 const std::string &what) {
+            std::vector<std::string> diffs;
+            const bool same =
+                RigExecCompareRuntimeOutputs(pose, player.Reader(), &diffs);
+            if (!same) {
+                std::printf("%s, %s: %s\n", name.c_str(), what.c_str(),
+                            diffs.empty() ? "differs"
+                                          : diffs.front().c_str());
+            }
+            return same;
+        };
+        CHECK(player.Play(row.time, &error));
+        CHECK(matches(still[0], "first run"));
+        const size_t first = player->GetClosedClusterCountForTesting();
+        CHECK(player.Play(row.time, &error));
+        const size_t repeat = player->GetClosedClusterCountForTesting();
+        CHECK(repeat < clusters);
+        CHECK(matches(still[0], "repeat run"));
+        std::printf("%s: %zu frame record(s), %zu point binding(s); closed "
+                    "%zu, then %zu at unchanged inputs, of %zu cluster(s)\n",
+                    name.c_str(), records, bindings, first, repeat,
+                    clusters);
+
+        for (const auto &[path, value] : row.drags) {
+            const std::string what =
+                path + " = " + std::to_string(value);
+            std::vector<RigExecRigPose> dragged;
+            if (!RigExecTestEditedPoses(stage, rigPath,
+                                        RigExecEvaluationMode::Baked,
+                                        {_Edit(stage, path, value)},
+                                        {row.time}, &dragged, &error) ||
+                dragged.size() != 1) {
+                std::printf("%s, %s: FAILED (reference: %s)\n",
+                            name.c_str(), what.c_str(), error.c_str());
+                CHECK(false);
+                continue;
+            }
+            CHECK(player.Hold(path, value, &error));
+            CHECK(player.Play(row.time, &error));
+            const size_t held = player->GetClosedClusterCountForTesting();
+            CHECK(matches(dragged[0], what));
+            std::vector<std::string> moved;
+            CHECK(!RigExecCompareRuntimeOutputs(still[0], player.Reader(),
+                                                &moved));
+            player.ReleaseAll();
+            CHECK(player.Play(row.time, &error));
+            const size_t released =
+                player->GetClosedClusterCountForTesting();
+            CHECK(matches(still[0], what + ", released"));
+            std::printf("%s, %s: closed %zu, then %zu released\n",
+                        name.c_str(), what.c_str(), held, released);
+        }
+    }
+}
+
+// The FrameMatrix step's gates, white-box over a hand-assembled program,
+// against RigExecBakedEvalFrameRecord on the same values bit for bit, the
+// matrix and the valid byte: a constraint commit's exit flags as its
+// constraint step leaves them in the pose scratch (nothing recorded with
+// recordAfter clear, the first target alone with recordEveryTarget clear),
+// a solver commit's present byte, which ignores those flags, an unusable
+// frame, a rest without a valid frame (the identity landmarks) and a
+// singular one. Every run writes both fields over a poisoned entry. No
+// authored rig reaches the two constraint exits.
+static void
+TestFrameMatrixGates()
+{
+    // One slot; commit 0 a constraint's, commit 1 a solver batch's.
+    fb::RigExecWireFile file;
+    file.pose = std::make_unique<fb::RigExecWireDomainPose>();
+    file.geometry = std::make_unique<fb::RigExecWireDomainGeometry>();
+    fb::RigExecWireSlotMeta slotMeta;
+    slotMeta.paths = {0};
+    fb::RigExecWireConstants constants;
+    constants.restM.resize(1);
+    constants.restPts.resize(1);
+    constants.restFrames.resize(1);
+    constants.selfD.resize(1);
+    constants.parentDinv.resize(1);
+    constants.rotOrder.resize(1);
+    constants.restRoundTrip.resize(1);
+    constants.defaultRoundTrip.resize(1);
+    constants.posedAuthored.resize(1);
+    constants.posedAuthoredM.resize(1);
+    constants.noScaleAvars.resize(1);
+    file.pose->commits.resize(2);
+    file.pose->commits[1].solverOutput = true;
+    file.pose->commits[1].slots = {0};
+    // Constraint targets 0 and 1, the solver's position 0, and a record of
+    // an unusable version: (commit, target, position, version).
+    const std::array<std::array<int, 4>, 4> records = {
+        {{0, 0, -1, 0}, {0, 1, -1, 0}, {1, -1, 0, 0}, {0, 0, -1, 1}}};
+    std::vector<RigExecBakedFrameRecord> baked;
+    for (size_t r = 0; r < records.size(); ++r) {
+        const std::array<int, 4> &row = records[r];
+        file.pose->frameRecords.push_back(fb::FrameRecord(
+            0, uint32_t(row[0]), row[1], row[2], uint32_t(row[3]), 0));
+        RigExecBakedFrameRecord record;
+        record.slot = 0;
+        record.commit = row[0];
+        record.target = row[1];
+        record.position = row[2];
+        record.version = uint32_t(row[3]);
+        baked.push_back(record);
+        fb::RigExecWireStep step;
+        step.kind = fb::StepKind::FrameMatrix;
+        step.object = int32_t(r);
+        file.steps.push_back(std::move(step));
+    }
+
+    RrProgram program;
+    program.steps = &file.steps;
+    program.slotMeta = &slotMeta;
+    program.constants = &constants;
+    program.poses = file.pose.get();
+    program.geometry = file.geometry.get();
+    RrStore &store = program.store;
+    store.commits.resize(2);
+    store.stepOutputs.resize(file.steps.size());
+    store.frameMatrix.assign(records.size(), RrMat4d(1.0));
+    store.frameMatrixValid.assign(records.size(), 0);
+    std::string error;
+    CHECK(RrPoseSizeScratch(&program, &error));
+    if (!program.pose) {
+        std::printf("frame matrix gates: %s\n", error.c_str());
+        return;
+    }
+    RrPoseScratch &scratch = *static_cast<RrPoseScratch *>(program.pose.get());
+
+    // The program's twin over the same frames.
+    RigExecPointFrame rest;
+    rest.points = {GfVec3d(0, 1, 0), GfVec3d(1, 1, 0), GfVec3d(0, 2, 0),
+                   GfVec3d(0, 1, 1)};
+    RigExecPointFrame posed;
+    posed.points = {GfVec3d(2, 0, 0), GfVec3d(2, 1, 0), GfVec3d(1, 0, 0),
+                    GfVec3d(2, 0, 2)};
+    RigExecPointFrame unusable = posed;
+    unusable.flags = 0;
+    RigExecBakedProgramImpl B;
+    B.paths = {SdfPath("/A")};
+    B.fin = {posed, unusable};
+    B.commits.resize(2);
+    B.commits[1].solverOutput = true;
+    B.commits[1].slots = {0};
+    const auto runtimeFrame = [](const RigExecPointFrame &frame) {
+        RrPointFrame out;
+        for (size_t i = 0; i < 4; ++i) {
+            out.points[i] = RrVec3d(frame.points[i][0], frame.points[i][1],
+                                    frame.points[i][2]);
+        }
+        out.flags = frame.flags;
+        return out;
+    };
+    store.fin = {runtimeFrame(posed), runtimeFrame(unusable)};
+    const auto setRest = [&](const RigExecPointFrame &frame) {
+        B.restFrames = {frame};
+        scratch.restFrames[0] = runtimeFrame(frame);
+    };
+    setRest(rest);
+
+    int cases = 0;
+    int recorded = 0;
+    // Runs record \p r's step over a poisoned entry and compares it with
+    // the program's evaluation of the same record.
+    const auto agree = [&](size_t r, const char *what) {
+        ++cases;
+        RrMat4d poison(1.0);
+        poison[3][0] = 7.0;
+        store.frameMatrix[r] = poison;
+        store.frameMatrixValid[r] = 2;
+        error.clear();
+        const bool ran = RrRunPoseStep(&program, r, &error);
+        CHECK(ran);
+        GfMatrix4d expected(0.0);
+        const bool valid =
+            RigExecBakedEvalFrameRecord(B, baked[r], &expected);
+        const RrMat4d &actual = store.frameMatrix[r];
+        bool same = ran && store.frameMatrixValid[r] == (valid ? 1 : 0);
+        for (size_t row = 0; row < 4; ++row) {
+            for (size_t col = 0; col < 4; ++col) {
+                same = same && std::memcmp(&actual[row][col],
+                                           &expected[int(row)][int(col)],
+                                           sizeof(double)) == 0;
+            }
+        }
+        CHECK(same);
+        if (!same) {
+            std::printf("frame matrix gates, %s: runtime valid %d, program "
+                        "valid %d%s%s\n",
+                        what, int(store.frameMatrixValid[r]), int(valid),
+                        error.empty() ? "" : ": ", error.c_str());
+        }
+        recorded += valid ? 1 : 0;
+        return valid;
+    };
+    const auto exitFlags = [&](bool after, bool everyTarget) {
+        scratch.recordAfter[0] = after ? 1 : 0;
+        scratch.recordEveryTarget[0] = everyTarget ? 1 : 0;
+        B.commits[0].recordAfter = after;
+        B.commits[0].recordEveryTarget = everyTarget;
+    };
+
+    // The constraint's exits: every target, the first alone, none.
+    exitFlags(true, true);
+    CHECK(agree(0, "every target, target 0"));
+    CHECK(agree(1, "every target, target 1"));
+    exitFlags(true, false);
+    CHECK(agree(0, "first target alone, target 0"));
+    CHECK(!agree(1, "first target alone, target 1"));
+    exitFlags(false, true);
+    CHECK(!agree(0, "no record, target 0"));
+    CHECK(!agree(1, "no record, target 1"));
+    exitFlags(false, false);
+    CHECK(!agree(0, "no record nor every target, target 0"));
+    CHECK(!agree(1, "no record nor every target, target 1"));
+
+    // A solver's record reads its present byte alone; the constraint
+    // flags of its own commit do not apply.
+    scratch.recordAfter[1] = 0;
+    scratch.recordEveryTarget[1] = 0;
+    B.commits[1].recordAfter = false;
+    B.commits[1].recordEveryTarget = false;
+    store.commits[1].present = {1};
+    B.commits[1].present = {1};
+    CHECK(agree(2, "solver present"));
+    store.commits[1].present = {0};
+    B.commits[1].present = {0};
+    CHECK(!agree(2, "solver absent"));
+
+    // An unusable frame is not recorded; a rest without a valid frame
+    // measures from the identity landmarks; a singular one does not
+    // decompose.
+    exitFlags(true, true);
+    CHECK(!agree(3, "unusable frame"));
+    RigExecPointFrame invalidRest = rest;
+    invalidRest.flags = 0;
+    setRest(invalidRest);
+    CHECK(agree(0, "rest without a valid frame"));
+    RigExecPointFrame singular = rest;
+    singular.points[3] = singular.points[0];
+    setRest(singular);
+    CHECK(!agree(0, "singular rest"));
+    setRest(rest);
+    std::printf("frame matrix gates: %d case(s) agree with the program, %d "
+                "recorded\n",
+                cases, recorded);
+}
+
+// A joint whose composed rest goes non-finite at frame 2 while its final
+// frame stays usable: a non-identity default:space makes the final frame
+// independent of the rest. Baked tests the composed rest before it
+// publishes and hands that generation back, so the binary refuses the
+// frame too; both publish frame 1, before and after.
+static void
+TestUnusableComposedRestRefusesPublish()
+{
+    const char *const name = "unusable composed rest";
+    const UsdStageRefPtr stage =
+        UsdStage::Open(_FixturePath("oneloop_two_limbs.usda"));
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath joint("/LimbsAsset/Rig/Joints/LimbA0/LimbA1/LimbA2");
+    const SdfPath restTx = joint.AppendProperty(TfToken("rest:tx"));
+    {
+        const UsdEditContext session(stage, stage->GetSessionLayer());
+        const UsdPrim prim =
+            stage->DefinePrim(joint, TfToken("RigExecJoint"));
+        GfMatrix4d space(1.0);
+        space.SetTranslateOnly(GfVec3d(2.0, 0.0, 0.0));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(space);
+        prim.CreateAttribute(TfToken("default:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(space);
+        const UsdAttribute tx = prim.CreateAttribute(
+            TfToken("rest:tx"), SdfValueTypeNames->Double);
+        tx.Set(0.0, UsdTimeCode(1.0));
+        tx.Set(std::numeric_limits<double>::quiet_NaN(), UsdTimeCode(2.0));
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath("/LimbsAsset/Rig"));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<uint8_t> bytes;
+    std::string error;
+    CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+    RigExecTestPlayer player;
+    if (!player.Open(bytes, stage, &error)) {
+        std::printf("FAILED: %s: %s\n", name, error.c_str());
+        ++failures;
+        return;
+    }
+    // The sampler hands the reader frame 2's NaN only through an Animated
+    // slot.
+    size_t index = 0;
+    CHECK(player->FindInput(restTx.GetString(), &index) &&
+          player->GetInputInfo(index).animated);
+
+    const auto publishes = [&](double frame) {
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        std::string why;
+        CHECK(player.Play(frame, &why));
+        std::vector<std::string> diffs;
+        CHECK(RigExecCompareRuntimeOutputs(live, player.Reader(), &diffs));
+        for (const std::string &diff : diffs) {
+            std::printf("  %s frame %g: %s\n", name, frame, diff.c_str());
+        }
+    };
+    publishes(1.0);
+
+    const size_t generations = evaluator.GetBakedGenerationCount();
+    const RigExecRigPose fallback = evaluator.Evaluate(UsdTimeCode(2.0));
+    CHECK(evaluator.GetBakedGenerationCount() == generations);
+    const auto final = fallback.jointFramesFinal.find(joint);
+    CHECK(final != fallback.jointFramesFinal.end() &&
+          RigExecBakedUsable(final->second));
+    error.clear();
+    CHECK(!player.Play(2.0, &error));
+    CHECK(error == "joint " + joint.GetString() +
+                       " has an unusable rest or final frame");
+
+    publishes(1.0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4311,6 +4734,8 @@ main(int argc, char **argv)
     TestSampledInputWithNoValue();
     TestComputedChainsFixture();
     TestIkSpaceFixture();
+    TestFrameMatrixGates();
+    TestUnusableComposedRestRefusesPublish();
 
     std::string examplesDir = RIGEXEC_EXAMPLES_DIR;
     if (argc > 1) {
@@ -4329,6 +4754,7 @@ main(int argc, char **argv)
     TestSpaceSwitchIndexDrag();
     TestSpaceSwitchOpenRefusals();
     TestSpaceSwitchCarryDrag();
+    TestPhasedRigsRunCones(examplesDir);
     bool sawBaking = false;
     for (const RigExecExampleFixture &fixture : kRigExecExampleFixtures) {
         if (!fixture.bakesToday) {

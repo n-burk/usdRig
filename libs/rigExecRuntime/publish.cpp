@@ -5,6 +5,7 @@
 // publication, weight fields and moved properties. Guides
 // are skipped: the runtime carries no tap request, which is the
 // guides-disabled shape the baked path mirrors.
+#include "rigExecRuntime/poseInternal.h"
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
@@ -19,7 +20,6 @@ RrPublishPose(RrProgram *program,
 {
     RrStore &store = program->store;
     const RigExecWireSlotMeta &meta = *program->slotMeta;
-    const RigExecWireConstants &constants = *program->constants;
     const std::vector<RigExecWireStep> &steps = *program->steps;
 
     store.providerXforms.clear();
@@ -133,14 +133,17 @@ RrPublishPose(RrProgram *program,
     }
 
     // Joint publication, decided first so a frame that cannot publish
-    // returns before a single key is inserted.
+    // returns before a single key is inserted. The rest tested is this
+    // run's composed one, which a recompose can make unusable.
+    const std::vector<RrPointFrame> &restFrames = RrPoseRestFrames(program);
     store.jointMatrixPublished.assign(meta.jointSlots.size(), 0);
     for (size_t k = 0; k < meta.jointSlots.size(); ++k) {
         const size_t slot = size_t(meta.jointSlots[k]);
         const RrPointFrame &finalFrame =
             store.fin[size_t(store.finLast[slot])];
         if (finalFrame.IsValid() && !finalFrame.IsDegenerate()) {
-            if (!RrFrameUsable(RrWireToFrame(constants.restFrames[slot])) ||
+            if (slot >= restFrames.size() ||
+                !RrFrameUsable(restFrames[slot]) ||
                 !RrFrameUsable(finalFrame)) {
                 if (error) {
                     *error = "joint " +
