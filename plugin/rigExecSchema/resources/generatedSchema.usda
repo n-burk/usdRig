@@ -192,6 +192,13 @@ class RigExecControl "RigExecControl" (
         relative to the control's origin."""
         }
     )
+    quatf guide:orient = (1, 0, 0, 0) (
+        customData = {
+            string userDocBrief = """Rotation of the drawn shape in the control's LOCAL frame,
+        applied after guide:scaleX/Y/Z and guide:planeNormal and before
+        guide:offset."""
+        }
+    )
     uniform token guide:planeNormal = "Y" (
         allowedTokens = ["X", "Y", "Z"]
         customData = {
@@ -3817,6 +3824,13 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
         customData = {
             string userDocBrief = """Where the guide shape is drawn, in the control's LOCAL frame,
         relative to the control's origin."""
+        }
+    )
+    quatf guide:orient = (1, 0, 0, 0) (
+        customData = {
+            string userDocBrief = """Rotation of the drawn shape in the control's LOCAL frame,
+        applied after guide:scaleX/Y/Z and guide:planeNormal and before
+        guide:offset."""
         }
     )
     uniform token guide:planeNormal = "Y" (

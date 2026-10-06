@@ -544,6 +544,9 @@ class PickerPanel(QtWidgets.QDialog):
         # it reaches a gizmo drag. None in a test that built the panel
         # alone, and every edit below still works -- just unrecorded.
         self._undo = undoStack
+        # A switch shown through the preview channel and not yet authored:
+        # (stage, gizmoMath.Writer, undo label). See _PreviewThenCommit.
+        self._pendingCommit = None
         # Every picker on the stage, one outer tab each, and the one
         # whose tab is showing. `_picker` stays the ACTIVE picker so the
         # single-character code below reads the same as it always did.
@@ -1286,9 +1289,12 @@ class PickerPanel(QtWidgets.QDialog):
         could not be made, so the caller falls back to a plain toggle."""
         stage = self._stage()
         try:
-            done = ikfkMatch.SwitchLimbs(stage, [limb], self._Frame(),
-                                         self._WriteMode(), self._undo,
-                                         self._limbRest)
+            time = self._Frame()
+            values, done = ikfkMatch.PlanSwitch(stage, [limb], time,
+                                                self._limbRest)
+            if values:
+                self._PreviewThenCommit(values, ikfkMatch.SwitchLabel(done),
+                                        time, self._WriteMode())
         except Exception as error:
             self._status.setText("IK/FK match failed (%s); switched "
                                  "without matching." % error)
@@ -1365,15 +1371,8 @@ class PickerPanel(QtWidgets.QDialog):
         mode = self._WriteMode()
         matched = self._MatchSpace(stage, attr, value, label, time, mode)
         if matched is None:
-            scope = self._UndoScope("Switch %s" % target["attr"],
-                                    [attr.GetPath()])
-            try:
-                writer = gizmoMath.Writer(stage, time, mode)
-                writer.Set(attr, float(value))
-                writer.CommitToStage()
-            finally:
-                if scope is not None:
-                    scope.__exit__(None, None, None)
+            self._PreviewThenCommit({attr.GetPath(): float(value)},
+                                    "Switch %s" % target["attr"], time, mode)
         button.value = label
         # The limb just changed mode, so the other half of its controls
         # should appear and this half disappear.
@@ -1401,13 +1400,88 @@ class PickerPanel(QtWidgets.QDialog):
             evaluate = ikfkMatch.Evaluator(stage, rig)
             plan = spaceMatch.Plan(stage, control, attr.GetPath(), value,
                                    time, evaluate)
-            spaceMatch.Apply(stage, plan, time, mode, self._undo,
-                             "Switch %s to %s" % (control.name, label))
+            self._PreviewThenCommit(plan, "Switch %s to %s"
+                                    % (control.name, label), time, mode)
         except Exception as error:
             self._status.setText("Space match failed (%s); switched "
                                  "without matching." % error)
             return None
         return len(plan) - 1
+
+    def _PreviewThenCommit(self, values, label, time, mode):
+        """Show `values` ({attribute path: value}) now, author them next.
+
+        The interactive half goes to Hydra through the preview channel, the
+        way a drag does: no stage edit happens on the click, so nothing
+        re-reads, re-digests or rebuilds while the animator waits. The stage
+        write follows on the next turn of the event loop, once the viewport
+        has drawn the new pose, as one edit and one undo entry; the preview
+        is withdrawn first without a republish, so the commit's own notice
+        is the one evaluation (gizmoUI._EndDrag ends a drag the same way).
+        """
+        stage = self._stage()
+        if stage is None:
+            return
+        # Never two in flight: an earlier switch lands before this one is
+        # planned against it.
+        self._CommitPending()
+        writer = gizmoMath.Writer(stage, time, mode)
+        for path, value in values.items():
+            attr = stage.GetAttributeAtPath(Sdf.Path(str(path)))
+            if attr:
+                writer.Set(attr, value)
+        if not writer.HasPending():
+            return
+        try:
+            import gizmoPreview
+            gizmoPreview.Push(writer.Pending(), session=self._api,
+                              stage=stage)
+            import avarEditorUI
+            avarEditorUI._FollowPreviewInViewport(self._api)
+        except Exception:
+            pass
+        self._pendingCommit = (stage, writer, label)
+        QtCore.QTimer.singleShot(0, self._CommitPending)
+
+    def _CommitPending(self):
+        """Author the switch _PreviewThenCommit showed, if one is waiting."""
+        pending, self._pendingCommit = self._pendingCommit, None
+        if pending is None:
+            return
+        stage, writer, label = pending
+        try:
+            import gizmoPreview
+        except ImportError:
+            gizmoPreview = None
+        if stage is not self._stage():
+            # The stage was replaced under the switch: nothing to author it
+            # onto, and nothing left to preview.
+            writer.Clear()
+            if gizmoPreview is not None:
+                gizmoPreview.End(session=self._api, stage=stage)
+            return
+        if gizmoPreview is not None:
+            gizmoPreview.End(session=self._api, stage=stage, publish=False)
+        scope = None
+        if self._undo is not None:
+            scope = rigExecUndo.SpecScope(stage, list(writer.Pending()),
+                                          self._undo, label)
+            scope.__enter__()
+        authored = []
+        try:
+            authored = writer.CommitToStage()
+        except Exception as error:
+            if scope is not None:
+                scope.__exit__(type(error), error, None)
+                scope = None
+            raise
+        finally:
+            if scope is not None:
+                scope.__exit__(None, None, None)
+        if not authored and gizmoPreview is not None:
+            # Expected to publish through its notice and authored nothing:
+            # put the authored rig back on screen.
+            gizmoPreview.Republish(session=self._api)
 
     def _OnSelectionChanged(self, *args):
         model = getattr(self._api, "dataModel", None)

@@ -1444,11 +1444,23 @@ RigExecRigEvaluator::_ApplySurfaceProjectors(RigExecRigPose *pose,
                     std::min<size_t>(dials.size(), 16);
                 for (size_t i = 0; i < slots; ++i) {
                     double value = 0.0;
-                    // A mover may have revised the dial; that revision is
-                    // the value the animator sees, so it wins over the
-                    // authored one.
+                    // A held drag (an interactive override) wins, then a
+                    // mover's revision of the dial, then the authored
+                    // value: a slider previews without authoring.
+                    const RigExecValueOverride *held = nullptr;
+                    for (const RigExecValueOverride &o :
+                         _interactiveOverrides) {
+                        if (o.prim == dials[i].GetPrimPath() &&
+                            o.attribute == dials[i].GetNameToken()) {
+                            held = &o;
+                        }
+                    }
                     const auto moved = pose->movedProperties.find(dials[i]);
-                    if (moved != pose->movedProperties.end() &&
+                    if (held && held->value.IsHolding<double>()) {
+                        value = held->value.UncheckedGet<double>();
+                    } else if (held && held->value.IsHolding<float>()) {
+                        value = held->value.UncheckedGet<float>();
+                    } else if (moved != pose->movedProperties.end() &&
                         moved->second.IsHolding<double>()) {
                         value = moved->second.UncheckedGet<double>();
                     } else if (const UsdAttribute attr =

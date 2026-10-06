@@ -2818,6 +2818,31 @@ std::vector<int> RigExecBakedMergeCommitShards(
     RigExecBakedProgramImpl *program,
     std::vector<RigExecBakedCommitShard> *shards);
 
+/// Whether \p name is an animator's channel the bake reads live rather
+/// than folding: an `avars:` property that is neither a transform channel
+/// (those patch in place) nor one of the avars that choose how a frame
+/// composes (structure). The same names are value-only for the epoch
+/// digest, which reads none of their values.
+inline bool
+RigExecIsLiveAvarName(const std::string &name)
+{
+    static const std::string kAvars("avars:");
+    if (!TfStringStartsWith(name, kAvars)) {
+        return false;
+    }
+    static const char *const kNotLive[] = {
+        "avars:tx", "avars:ty", "avars:tz", "avars:sx", "avars:sy",
+        "avars:sz", "avars:rx", "avars:ry", "avars:rz", "avars:rspin",
+        "avars:unitScaleFactor", "avars:rotationOrder", "avars:rotationSign",
+        "avars:defaultSpace"};
+    for (const char *other : kNotLive) {
+        if (name == other) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Registers \p input, read as \p name on \p prim through \p walk, into
 /// \p sink: the bound/varying counts, the invalidation index, and -- for an
 /// input with a head -- an override number and the paths an override on it
@@ -2827,6 +2852,28 @@ void
 RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
                        RigExecBakedInput<T> *input, const SdfPathVector &walk)
 {
+    // An input that resolves to an avar is an animator's channel -- an IK/FK
+    // blend, a space index, a dial -- and is edited interactively. Read live
+    // the long way, as a keyed avar is (RigExecProgramAvarPatch), rather than
+    // folded as a constant: a folded value can only change by rebuilding the
+    // program, and that rebuild is what made every such edit stall the UI.
+    // Live, an edit routes as a value edit and re-runs only its cone.
+    // The transform channels keep their in-place patch (patchableAvars),
+    // and the avars that choose how a frame composes stay folded.
+    if (input->head && !input->varying) {
+        const auto live = [](const std::string &name) {
+            return RigExecIsLiveAvarName(name);
+        };
+        bool avar = live(input->head.GetName());
+        for (const SdfPath &path : walk) {
+            avar = avar || (path.IsPropertyPath() && live(path.GetName()));
+        }
+        if (avar) {
+            input->varying = true;
+            input->query = UsdAttributeQuery();
+            input->resolvedAttr = input->head;
+        }
+    }
     if (prim && prim.GetAttribute(TfToken(name))) {
         sink->Bound(input->varying);
     }

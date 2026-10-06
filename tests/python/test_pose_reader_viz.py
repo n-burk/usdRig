@@ -119,7 +119,7 @@ def TestJawPose():
         "M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/"
         "M_LoFace/M_Jaw")
     _Check(jaw.IsValid(), "the jaw control exists")
-    jaw.GetAttribute("avars:rx").Set(-22.0)
+    jaw.GetAttribute("avars:rx").Set(22.0)
     rig = _Evaluate(stage)
     readers = _Readers(stage, rig.evaluate(0))
     reader = next((r for r in readers
@@ -132,9 +132,9 @@ def TestJawPose():
                  if s.name == "neutral_jaw_open_22")
     _Check(abs(shape.weight - 1.0) < 1e-3,
            "the engine publishes neutral_jaw_open_22 at 1 with the jaw at "
-           "-22: %.6f" % shape.weight)
+           "22: %.6f" % shape.weight)
     gap = (shape.centre - reader.liveOrigin).GetLength()
-    print("    jaw -22: weight %.6f, driver to sphere centre %.2e, "
+    print("    jaw 22: weight %.6f, driver to sphere centre %.2e, "
           "%d coincident pair(s)" % (shape.weight, gap, len(
               [o for o in reader.overlaps
                if o[2] == viz.OVERLAP_COINCIDENT])))

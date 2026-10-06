@@ -13,8 +13,8 @@ over "Biped"
             def RigExecAutoClavicle "clavicle_l_auto"
             {
                 rel rigExec:amountAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr.avars:autoClav>
-                rel rigExec:anchor = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
-                matrix4d rigExec:basis = ( (0.0, 0.0, -1.0, 0), (0.0, 1.0, 0.0, 0), (1.0, 0.0, 0.0, 0), (0, 0, 0, 1) )
+                rel rigExec:anchor = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>
+                matrix4d rigExec:basis = ( (0, 0, -1, 0), (0, 1, 0, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
                 rel rigExec:fkControls = [
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr/L_UpArmSwing/L_UpArm/L_LoArm>,
@@ -22,7 +22,7 @@ over "Biped"
                 ]
                 rel rigExec:ikBlendAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_Arm.avars:ikfk>
                 rel rigExec:ikTarget = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK/wrist_l_ikOrient>
-                double rigExec:ikValue = 1.0
+                double rigExec:ikValue = 1
                 uniform token rigExec:kernel = "gaussian"
                 rel rigExec:pivot = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/L_Shldr>
                 rel rigExec:poleControl = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmPV>
@@ -36,8 +36,8 @@ over "Biped"
             def RigExecAutoClavicle "clavicle_r_auto"
             {
                 rel rigExec:amountAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr.avars:autoClav>
-                rel rigExec:anchor = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
-                matrix4d rigExec:basis = ( (0.0, 0.0, 1.0, 0), (0.0, 1.0, 0.0, 0), (1.0, 0.0, 0.0, 0), (0, 0, 0, 1) )
+                rel rigExec:anchor = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>
+                matrix4d rigExec:basis = ( (0, 0, 1, 0), (0, 1, 0, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
                 rel rigExec:fkControls = [
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr/R_UpArmSwing/R_UpArm/R_LoArm>,
@@ -45,7 +45,7 @@ over "Biped"
                 ]
                 rel rigExec:ikBlendAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_Arm.avars:ikfk>
                 rel rigExec:ikTarget = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK/wrist_r_ikOrient>
-                double rigExec:ikValue = 1.0
+                double rigExec:ikValue = 1
                 uniform token rigExec:kernel = "gaussian"
                 rel rigExec:pivot = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr>
                 rel rigExec:poleControl = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmPV>
@@ -118,3 +118,4 @@ over "Biped"
         }
     }
 }
+

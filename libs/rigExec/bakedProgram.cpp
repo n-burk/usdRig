@@ -961,6 +961,48 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
 
 // Invalidation.
 
+namespace {
+
+// A live input's own spec appearing or going away -- the first value a
+// layer authors for an animator's channel, or the undo that removes it.
+// The frame reads that input the long way every run, so what it composes to
+// afterwards needs no rebuild: it routes like a value edit. A spec that
+// brings anything but a value (a connection, metadata) is still structure.
+bool
+_IsLiveInputResync(const RigExecBakedProgramImpl &B,
+                   const UsdNotice::ObjectsChanged &notice,
+                   const SdfPath &path)
+{
+    if (!path.IsPropertyPath() || B.rebuild.count(path) ||
+        B.xformPrims.count(path.GetPrimPath())) {
+        return false;
+    }
+    const auto found = B.overridableInputs.find(path);
+    if (found == B.overridableInputs.end()) {
+        return false;
+    }
+    for (const int index : found->second) {
+        if (index < 0 || size_t(index) >= B.cones.editRoute.size() ||
+            !B.cones.editRoute[size_t(index)]) {
+            return false;
+        }
+    }
+    static const TfToken kDefault("default");
+    static const TfToken kTimeSamples("timeSamples");
+    static const TfToken kSpline("spline");
+    static const TfToken kTypeName("typeName");
+    static const TfToken kCustom("custom");
+    for (const TfToken &field : notice.GetChangedFields(path)) {
+        if (field != kDefault && field != kTimeSamples && field != kSpline &&
+            field != kTypeName && field != kCustom) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
 bool
 RigExecBakedProgram::IsInvalidatedBy(
     const UsdNotice::ObjectsChanged &notice) const
@@ -1024,7 +1066,7 @@ RigExecBakedProgram::IsInvalidatedBy(
         return B.prims.count(prim) > 0 || B.xformPrims.count(prim) > 0;
     };
     for (const SdfPath &path : notice.GetResyncedPaths()) {
-        if (overlaps(path)) {
+        if (!_IsLiveInputResync(B, notice, path) && overlaps(path)) {
             return true;
         }
     }
@@ -1267,14 +1309,35 @@ _ConnectedSources(const RigExecBakedProgramImpl &B)
 bool
 _RouteValueEdits(const RigExecBakedProgramImpl &B,
                  const UsdNotice::ObjectsChanged &notice,
-                 std::vector<int> *indices, std::vector<SdfPath> *readPaths)
+                 std::vector<int> *indices, std::vector<SdfPath> *readPaths,
+                 bool skipPatchableAvars = false)
 {
-    // Every resync still runs the program whole: which retained query or
+    // The transform channels the in-place patch moves, when the caller
+    // applies that patch beside this routing.
+    const auto patchedElsewhere = [&B, skipPatchableAvars](
+                                      const SdfPath &path) {
+        return skipPatchableAvars && B.patchableAvars.count(path) > 0;
+    };
+    // Every resync still runs the program whole -- which retained query or
     // cached binding a spec appearing or going away leaves stale is not
-    // indexed per path.
-    if (!notice.GetResyncedPaths().empty() ||
-        !notice.GetResolvedAssetPathsResyncedPaths().empty()) {
+    // indexed per path -- except a live input's own spec, which the frame
+    // re-reads anyway (_IsLiveInputResync).
+    if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
         return false;
+    }
+    std::vector<int> resyncDecided;
+    std::vector<SdfPath> resyncRead;
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        if (patchedElsewhere(path)) {
+            continue;
+        }
+        if (!_IsLiveInputResync(B, notice, path)) {
+            return false;
+        }
+        for (const int index : B.overridableInputs.find(path)->second) {
+            resyncDecided.push_back(index);
+        }
+        resyncRead.push_back(path);
     }
     static const TfToken kDefault("default");
     static const TfToken kTimeSamples("timeSamples");
@@ -1292,14 +1355,17 @@ _RouteValueEdits(const RigExecBakedProgramImpl &B,
         const auto below = B.prims.lower_bound(prim);
         return below != B.prims.end() && below->HasPrefix(prim);
     };
-    std::vector<int> decided;
-    std::vector<SdfPath> read;
+    std::vector<int> decided = std::move(resyncDecided);
+    std::vector<SdfPath> read = std::move(resyncRead);
     for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
         const std::vector<TfToken> fields = notice.GetChangedFields(path);
         // Layer metadata: the time codes, the frame rate -- read by every
         // time conversion and indexed nowhere.
         if (path.IsAbsoluteRootPath()) {
             return false;
+        }
+        if (patchedElsewhere(path)) {
+            continue;
         }
         if (!path.IsPropertyPath()) {
             // The empty info every ancestor of an edited spec reports moves
@@ -1371,17 +1437,20 @@ _RouteValueEdits(const RigExecBakedProgramImpl &B,
 bool
 RigExecBakedProgram::DryRunValueEdits(
     const UsdNotice::ObjectsChanged &notice,
-    std::vector<SdfPath> *readPaths) const
+    std::vector<SdfPath> *readPaths, bool skipPatchableAvars) const
 {
-    return _RouteValueEdits(*_impl, notice, nullptr, readPaths);
+    return _RouteValueEdits(*_impl, notice, nullptr, readPaths,
+                            skipPatchableAvars);
 }
 
 bool
-RigExecBakedProgram::ApplyValueEdits(const UsdNotice::ObjectsChanged &notice)
+RigExecBakedProgram::ApplyValueEdits(const UsdNotice::ObjectsChanged &notice,
+                                     bool skipPatchableAvars)
 {
     RigExecBakedProgramImpl &B = *_impl;
     std::vector<int> indices;
-    if (!_RouteValueEdits(B, notice, &indices, nullptr)) {
+    if (!_RouteValueEdits(B, notice, &indices, nullptr,
+                          skipPatchableAvars)) {
         return false;
     }
     if (indices.empty()) {
@@ -1513,6 +1582,12 @@ _DryRunAvarPatches(const RigExecBakedProgramImpl &B,
             // `over` being touched above it). It moves no value the frame
             // reads, and IsInvalidatedBy ignores it for the same reason.
             if (path.IsPrimPath()) {
+                continue;
+            }
+            // A live input's value in the same edit -- an IK/FK blend keyed
+            // with the channels it switches -- is not a patch: the caller
+            // routes it (DryRunValueEdits) alongside these.
+            if (_IsLiveInputResync(B, notice, path)) {
                 continue;
             }
             // A PROPERTY the bake did not fold: a value the frame path

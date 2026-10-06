@@ -2656,7 +2656,7 @@ over "Biped"
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/L_LoLip>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/mouth/lip_lower_l_cluster>
                 }
@@ -2669,7 +2669,7 @@ over "Biped"
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/R_LoLip>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/mouth/lip_lower_r_cluster>
                 }
@@ -2695,7 +2695,7 @@ over "Biped"
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/lip_lower_rotScale_pivot>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/mouth/lip_lower_cluster>
                 }
@@ -2721,7 +2721,7 @@ over "Biped"
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/lip_lower_translate_pivot>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/mouth/lip_lower_translate_cluster>
                 }
@@ -2732,7 +2732,7 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/face_mid_compress/mouthMain_auto/M_Mouth>
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/face_mid_compress/mouthMain_auto/M_Mouth/M_Mouth_offset>
                     uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/face_mid_compress>
                     token rigExec:weightBlend = "radial"
@@ -2943,14 +2943,15 @@ over "Biped"
                                                                         )
                                                                         {
                                                                             color3f guide:displayColor = (1, 0, 0)
-                                                                            double3 guide:offset = (0.024499999999999966, -1.0125, -9.104299999999999)
+                                                                            double3 guide:offset = (-0.02450000507913339, -1.0124999702805622, 9.104299990191466)
+                                                                            quatf guide:orient = (-4.2498475e-16, 2.1598808e-16, 1, -1.0114462e-15)
                                                                             uniform token guide:planeNormal = "Y"
                                                                             double guide:scaleX = 2.6905
                                                                             double guide:scaleY = 0.10762000000000001
                                                                             double guide:scaleZ = 0.4325000000000001
                                                                             uniform token guide:shape = "box"
                                                                             uniform token purpose = "default"
-                                                                            matrix4d rest:space = ( (1, -8.271805879011245e-25, 1.3629014274035336e-25, 0), (8.271807359187653e-25, 1, 8.67361737988453e-19, 0), (-2.396877932651917e-25, 1.387778780781448e-17, 1, 0), (1.150368009321695e-22, 0, -2.220446049250313e-15, 1) )
+                                                                            matrix4d rest:space = ( (-0.9999999999999998, 3.47351962914268e-16, -7.629328407709235e-16, 2.4541958340083154e-34), (5.166003845566182e-16, 0.999999999999999, -1.989629023709637e-15, 7.065443976241608e-19), (9.370061622338106e-16, -2.0560828553562586e-15, -1.0000000000000004, -1.5407439555097894e-33), (-5.07914142485863e-9, -2.9719416261286824e-8, -9.808537093647374e-9, 1) )
 
                                                                             def RigExecControl "mouth_corner_l_follow_on_mouthMain_ctl" (
                                                                                 prepend apiSchemas = ["RigExecControlAPI"]
@@ -2960,7 +2961,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.5232141748038447, 5.753785474183112e-32, 0.8522012246437644, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.8522012246437644, 5.14562610421849e-32, -0.5232141748038447, 0), (-3.121999979019165, -0.6080201291000549, -1.9797285791974086, 1) )
+                                                                                matrix4d rest:space = ( (0.5232141748038441, -2.3123891272442973e-15, -0.8522012246437648, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.8522012246437651, 1.0121116726979223e-15, 0.523214174803844, 0), (3.1219999739400257, -0.6080200993806386, 1.9797285693888724, 1) )
                                                                             }
 
                                                                             def RigExecControl "mouth_corner_r_follow_on_mouthMain_ctl" (
@@ -2972,7 +2973,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (0.5232141748038449, -1.98514966757112e-32, 0.8522012246437641, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.8522012246437641, 7.459403198961537e-32, 0.5232141748038449, 0), (3.121999979019165, -0.6080201291000549, -1.9797285791974095, 1) )
+                                                                                matrix4d rest:space = ( (-0.5232141748038459, -2.0435235289458376e-15, -0.8522012246437639, 0), (5.16600383732476e-16, 1.0000000000000013, -1.76765728889865e-15, 0), (0.852201224643764, -1.662227650011735e-15, -0.5232141748038457, 0), (-3.121999984098306, -0.6080200993806386, 1.9797285693888782, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_center_up_follow_on_mouthMain_ctl" (
@@ -2983,7 +2984,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-1, 7.395570986446986e-32, 1.2246467988184275e-16, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-1.2246467988184268e-16, -2.211118511468551e-32, -1, 0), (3.374044632172503e-9, -0.4386170529281799, -4.244528412495138, 1) )
+                                                                                matrix4d rest:space = ( (1.0000000000000002, -3.4735196208708945e-16, -8.853975204130776e-16, 0), (5.166003837324765e-16, 1.0000000000000016, -1.3750726551451472e-15, 0), (1.0594708418759673e-15, 2.6707120485589704e-15, 1, 0), (-8.453182306471704e-9, -0.4386170232087636, 4.244528402686604, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_center_low_follow_on_mouthMain_ctl" (
@@ -2994,7 +2995,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-1, 7.395570986446986e-32, 1.2246467988184275e-16, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-1.2246467988184268e-16, -2.211118511468551e-32, -1, 0), (3.3314775711730867e-9, -0.8963196896469299, -4.244628548298361, 1) )
+                                                                                matrix4d rest:space = ( (1.0000000000000002, -3.4735196208708945e-16, -8.853975204130776e-16, 0), (5.166003837324765e-16, 1.0000000000000016, -1.3750726551451472e-15, 0), (1.0594708418759673e-15, 2.6707120485589704e-15, 1, 0), (-8.410615481827818e-9, -0.8963196599275136, 4.244628538489828, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_corner_l_follow_on_mouthMain_ctl" (
@@ -3005,7 +3006,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.7071067811865474, 6.792955288729665e-32, 0.7071067811865478, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.7071067811865478, 3.6659615017966315e-32, -0.7071067811865474, 0), (-3.122000217437744, -0.6080201291000549, -1.9797285791974086, 1) )
+                                                                                matrix4d rest:space = ( (0.7071067811865469, -2.013503517134536e-15, -0.7071067811865483, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.7071067811865486, 1.5222736614340678e-15, 0.7071067811865467, 0), (3.122000212358605, -0.6080200993806386, 1.9797285693888724, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_corner_r_follow_on_mouthMain_ctl" (
@@ -3017,7 +3018,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.7071067811865476, 3.66596150179663e-32, -0.7071067811865476, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (0.7071067811865476, -6.792955288729665e-32, -0.7071067811865476, 0), (3.122000217437744, -0.6080201291000549, -1.9797285791974095, 1) )
+                                                                                matrix4d rest:space = ( (0.7071067811865482, 1.5222736614340684e-15, 0.7071067811865469, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-0.7071067811865469, 2.013503517134535e-15, 0.7071067811865481, 0), (-3.1220002225168852, -0.6080200993806386, 1.9797285693888782, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_up_0_l_follow_on_mouthMain_ctl" (
@@ -3028,7 +3029,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.7532764865153175, 7.025171189751807e-32, 0.6577039872641329, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.6577039872641329, 3.1985129422931094e-32, -0.7532764865153175, 0), (-2.7344000339508057, -0.4902222775375549, -2.5473285910229704, 1) )
+                                                                                matrix4d rest:space = ( (0.7532764865153171, -1.906025171808133e-15, -0.6577039872641334, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.6577039872641336, 1.6548660242577964e-15, 0.7532764865153171, 0), (2.7344000288716663, -0.4902222478181386, 2.547328581214434, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_up_0_r_follow_on_mouthMain_ctl" (
@@ -3040,7 +3041,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.7532764865153178, 4.1166482671390077e-32, -0.6577039872641327, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (0.6577039872641327, -6.529680109469128e-32, -0.7532764865153178, 0), (2.7344000339508057, -0.4902222775375549, -2.5473285910229704, 1) )
+                                                                                matrix4d rest:space = ( (0.7532764865153186, 1.382721040637804e-15, 0.6577039872641322, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-0.6577039872641322, 2.111775565155193e-15, 0.7532764865153181, 0), (-2.734400039029946, -0.4902222478181386, 2.5473285812144386, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_up_1_l_follow_on_mouthMain_ctl" (
@@ -3051,7 +3052,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.8196832657651453, 7.328592105441494e-32, 0.572817024733541, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.572817024733541, 2.4238921261879516e-32, -0.8196832657651453, 0), (-2.0536999702453613, -0.4386170529281799, -3.3084284063916227, 1) )
+                                                                                matrix4d rest:space = ( (0.819683265765145, -1.7168596883175477e-15, -0.5728170247335415, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.5728170247335418, 1.85038004864925e-15, 0.8196832657651449, 0), (2.053699965166223, -0.4386170232087636, 3.3084283965830865, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_up_1_r_follow_on_mouthMain_ctl" (
@@ -3063,7 +3064,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.8196832657651455, 4.795459451296152e-32, -0.5728170247335408, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (0.5728170247335408, -6.04872581113657e-32, -0.8196832657651455, 0), (2.0536999702453613, -0.4386170529281799, -3.3084284063916227, 1) )
+                                                                                matrix4d rest:space = ( (0.8196832657651462, 1.1474225070105952e-15, 0.5728170247335402, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-0.5728170247335401, 2.2483182835654183e-15, 0.8196832657651459, 0), (-2.0536999753245007, -0.4386170232087636, 3.30842839658309, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_up_2_l_follow_on_mouthMain_ctl" (
@@ -3074,7 +3075,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.9556358401572754, 7.718759296511792e-32, 0.29455074436656653, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.29455074436656653, 6.534684267918842e-34, -0.9556358401572754, 0), (-1.065400004386902, -0.4386170529281799, -3.9273287054638883, 1) )
+                                                                                matrix4d rest:space = ( (0.9556358401572753, -1.0683695135754534e-15, -0.29455074436656714, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.29455074436656736, 2.286941209622927e-15, 0.9556358401572752, 0), (1.0653999993077643, -0.4386170232087636, 3.927328695655354, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_up_2_r_follow_on_mouthMain_ctl" (
@@ -3086,7 +3087,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.9556358401572754, 6.41618608964028e-32, -0.2945507443665663, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (0.2945507443665663, -4.2913950354682946e-32, -0.9556358401572754, 0), (1.0654000043869016, -0.4386170529281799, -3.9273287054638883, 1) )
+                                                                                matrix4d rest:space = ( (0.955635840157276, 4.0448554533670615e-16, 0.2945507443665656, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-0.2945507443665655, 2.491566767602806e-15, 0.9556358401572757, 0), (-1.0654000094660399, -0.4386170232087636, 3.927328695655355, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_low_0_l_follow_on_mouthMain_ctl" (
@@ -3097,7 +3098,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.7532764865153175, 7.025171189751807e-32, 0.6577039872641329, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.6577039872641329, 3.1985129422931094e-32, -0.7532764865153175, 0), (-2.7344000339508057, -0.7632172726547424, -2.5473285910229704, 1) )
+                                                                                matrix4d rest:space = ( (0.7532764865153171, -1.906025171808133e-15, -0.6577039872641334, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.6577039872641336, 1.6548660242577964e-15, 0.7532764865153171, 0), (2.7344000288716663, -0.7632172429353261, 2.547328581214434, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_low_0_r_follow_on_mouthMain_ctl" (
@@ -3109,7 +3110,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.7532764865153178, 4.1166482671390077e-32, -0.6577039872641327, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (0.6577039872641327, -6.529680109469128e-32, -0.7532764865153178, 0), (2.7344000339508057, -0.7632172726547424, -2.5473285910229704, 1) )
+                                                                                matrix4d rest:space = ( (0.7532764865153186, 1.382721040637804e-15, 0.6577039872641322, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-0.6577039872641322, 2.111775565155193e-15, 0.7532764865153181, 0), (-2.734400039029946, -0.7632172429353261, 2.5473285812144386, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_low_1_l_follow_on_mouthMain_ctl" (
@@ -3120,7 +3121,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.8196832657651453, 7.328592105441494e-32, 0.572817024733541, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.572817024733541, 2.4238921261879516e-32, -0.8196832657651453, 0), (-2.053800106048584, -0.8411133908188049, -3.3084284063916227, 1) )
+                                                                                matrix4d rest:space = ( (0.819683265765145, -1.7168596883175477e-15, -0.5728170247335415, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.5728170247335418, 1.85038004864925e-15, 0.8196832657651449, 0), (2.0538001009694455, -0.8411133610993886, 3.3084283965830883, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_low_1_r_follow_on_mouthMain_ctl" (
@@ -3132,7 +3133,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.8196832657651455, 4.795459451296152e-32, -0.5728170247335408, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (0.5728170247335408, -6.04872581113657e-32, -0.8196832657651455, 0), (2.053800106048584, -0.8411133908188049, -3.3084284063916227, 1) )
+                                                                                matrix4d rest:space = ( (0.8196832657651462, 1.1474225070105952e-15, 0.5728170247335402, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-0.5728170247335401, 2.2483182835654183e-15, 0.8196832657651459, 0), (-2.0538001111277233, -0.8411133610993886, 3.30842839658309, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_low_2_l_follow_on_mouthMain_ctl" (
@@ -3143,7 +3144,7 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.9556358401572754, 7.718759296511792e-32, 0.29455074436656653, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (-0.29455074436656653, 6.534684267918842e-34, -0.9556358401572754, 0), (-1.065400004386902, -0.8963196896469299, -3.927428841267111, 1) )
+                                                                                matrix4d rest:space = ( (0.9556358401572753, -1.0683695135754534e-15, -0.29455074436656714, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (0.29455074436656736, 2.286941209622927e-15, 0.9556358401572752, 0), (1.065399999307764, -0.8963196599275136, 3.9274288314585766, 1) )
                                                                             }
 
                                                                             def RigExecControl "lipMain_low_2_r_follow_on_mouthMain_ctl" (
@@ -3155,7 +3156,13 @@ over "Biped"
                                                                                 double guide:scaleY = 0
                                                                                 double guide:scaleZ = 0
                                                                                 uniform token purpose = "default"
-                                                                                matrix4d rest:space = ( (-0.9556358401572754, 6.41618608964028e-32, -0.2945507443665663, 0), (1.233657376183676e-31, 1, 8.67361737988453e-19, 0), (0.2945507443665663, -4.2913950354682946e-32, -0.9556358401572754, 0), (1.0654000043869016, -0.8963196896469299, -3.927428841267111, 1) )
+                                                                                matrix4d rest:space = ( (0.955635840157276, 4.0448554533670615e-16, 0.2945507443665656, 0), (5.166003837324762e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-0.2945507443665655, 2.491566767602806e-15, 0.9556358401572757, 0), (-1.06540000946604, -0.8963196599275136, 3.9274288314585784, 1) )
+                                                                            }
+
+                                                                            def RigExecJoint "M_Mouth_offset"
+                                                                            {
+                                                                                uniform token purpose = "guide"
+                                                                                matrix4d rest:space = ( (-1.0000000000000002, 3.4735196208708925e-16, 7.629328405312349e-16, 0), (5.166003837324763e-16, 1.0000000000000013, -1.5456126839736188e-15, 0), (-9.370061619941245e-16, -2.500172019730498e-15, -1, 0), (-5.07914142485874e-9, 2.9719416261286824e-8, -9.808534873201324e-9, 1) )
                                                                             }
                                                                         }
                                                                     }
@@ -3271,7 +3278,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.5232141741848942, -1.3369279918422108e-9, 0.8522012242637597, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.8522012250237724, 6.004484603528315e-9, -0.5232141754227969, 0), (-3.1219999726923966, -7.503820077114142, -6.2911285690536864, 1) )
+                                                                    matrix4d rest:space = ( (0.5232141748038431, -1.3372398544289598e-15, -0.8522012246437655, 0), (1.2693644461747195e-16, 1.0000000000000002, -1.5689312273895465e-15, 0), (0.8522012246437655, 9.51534100762559e-16, 0.5232141748038431, 0), (3.1219999726919565, -7.5038200771139145, 6.291128569053432, 1) )
 
                                                                     def RigExecJoint "mouth_corner_l_pin"
                                                                     {
@@ -3331,7 +3338,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.5232141754227951, -5.959556050306464e-9, 0.8522012250237759, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.8522012242637557, 1.5247634218577794e-9, 0.5232141741848971, 0), (3.1219999853459317, -7.5038201046971835, -6.291128564518697, 1) )
+                                                                    matrix4d rest:space = ( (-0.5232141748038467, -1.2309026160756162e-15, -0.852201224643763, 0), (-3.034334063226288e-16, 1.0000000000000002, -1.720903270796305e-15, 0), (0.852201224643763, -8.015055440507752e-16, -0.5232141748038467, 0), (-3.121999985346372, -7.503820104696587, 6.291128564518453, 1) )
 
                                                                     def RigExecJoint "mouth_corner_r_pin"
                                                                     {
@@ -3392,7 +3399,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9999999999999998, 4.417529456457574e-9, -7.262954871235151e-10, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-7.26296097744681e-10, 4.280963128865919e-9, -1.0000000000000042, 0), (7.3075746367147374e-9, -7.3344170050382615, -8.555928400809151, 1) )
+                                                                    matrix4d rest:space = ( (0.9999999999999999, -7.82905721322122e-17, -2.0548011590981884e-15, 0), (-2.792203124482179e-17, 1, -1.7473715701204052e-15, 0), (2.2846684848137696e-15, 1.545883336494448e-15, 0.9999999999999996, 0), (-7.30800150933215e-9, -7.33441700503775, 8.555928400808895, 1) )
 
                                                                     def RigExecControl "lipMain_center_up_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3432,7 +3439,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9999999999999998, 4.417529456457574e-9, -7.262954871235151e-10, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-7.26296097744681e-10, 4.280963128865919e-9, -1.0000000000000042, 0), (9.286794211881496e-9, -7.792119641756557, -8.556028534652931, 1) )
+                                                                    matrix4d rest:space = ( (0.9999999999999999, -7.82905721322122e-17, -2.0548011590981884e-15, 0), (-2.792203124482179e-17, 1, -1.7473715701204052e-15, 0), (2.2846684848137696e-15, 1.545883336494448e-15, 0.9999999999999996, 0), (-9.28724887888035e-9, -7.792119641756045, 8.556028534652693, 1) )
 
                                                                     def RigExecControl "lipMain_center_low_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3472,7 +3479,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7071067806729785, 9.656697632180161e-11, 0.7071067806729823, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.7071067817001164, 6.1507630931831456e-9, -0.7071067817001189, 0), (-3.1220002111109757, -7.503820077114142, -6.2911285690536864, 1) )
+                                                                    matrix4d rest:space = ( (0.7071067811865457, -8.837888973722861e-16, -0.7071067811865492, 0), (-3.7571355309174063e-16, 1, -1.7498506097938816e-15, 0), (0.7071067811865492, 1.0736293398559972e-15, 0.7071067811865458, 0), (3.1220002111105356, -7.5038200771139145, 6.291128569053432, 1) )
 
                                                                     def RigExecControl "lipMain_corner_l_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3516,7 +3523,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7071067817001162, 6.1507630931831456e-9, -0.7071067817001191, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.7071067806729787, -9.656697632180326e-11, -0.707106780672982, 0), (3.122000223764511, -7.5038201046971835, -6.291128564518697, 1) )
+                                                                    matrix4d rest:space = ( (0.7071067811865491, 7.620999488298301e-16, 0.7071067811865461, 0), (-5.182790088662198e-16, 0.9999999999999997, -1.7820077043090584e-15, 0), (-0.7071067811865462, 1.2819556921796424e-15, 0.7071067811865489, 0), (-3.122000223764951, -7.503820104696587, 6.291128564518453, 1) )
 
                                                                     def RigExecControl "lipMain_corner_r_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3561,7 +3568,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7532764860376295, 5.120145488524292e-10, 0.6577039867170342, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039878112345, 6.130175601982645e-9, -0.7532764869930083, 0), (-2.7344000285566445, -7.386022224833994, -6.858728581102035, 1) )
+                                                                    matrix4d rest:space = ( (0.7532764865153162, -8.557134181465839e-16, -0.6577039872641347, 0), (-1.090377766978537e-16, 0.9999999999999999, -1.5611806824222952e-15, 0), (0.6577039872641348, 1.1945602062499704e-15, 0.7532764865153162, 0), (2.734400028556212, -7.3860222248337095, 6.8587285811017775, 1) )
 
                                                                     def RigExecControl "lipMain_up_0_l_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3605,7 +3612,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7532764869930053, 6.143227587224135e-9, -0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.6577039867170309, 3.19322127244837e-10, -0.7532764860376334, 0), (2.734400039344966, -7.38602224899256, -6.85872857713007, 1) )
+                                                                    matrix4d rest:space = ( (0.7532764865153191, 1.0723778374776808e-15, 0.657703987264131, 0), (-1.4668583801397937e-16, 0.9999999999999999, -1.5050307955607255e-15, 0), (-0.6577039872641312, 1.0734512311538176e-15, 0.753276486515319, 0), (-2.7344000393453984, -7.386022248991964, 6.8587285771298205, 1) )
 
                                                                     def RigExecControl "lipMain_up_0_r_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3650,7 +3657,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.8196832653491104, 1.168766409011906e-9, 0.5728170241382111, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.5728170253288736, 6.039469918009796e-9, -0.8196832661811833, 0), (-2.0536999656319455, -7.334416999973399, -7.619828396197225, 1) )
+                                                                    matrix4d rest:space = ( (0.8196832657651443, -8.810589679516045e-16, -0.5728170247335429, 0), (-2.856134448628022e-16, 1.0000000000000004, -1.7116604334545813e-15, 0), (0.5728170247335429, 1.1450045061266445e-15, 0.8196832657651444, 0), (2.053699965631518, -7.334416999973058, 7.619828396196967, 1) )
 
                                                                     def RigExecControl "lipMain_up_1_l_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3694,7 +3701,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.8196832661811799, 6.073183533953838e-9, -0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.572817024138208, 9.785977581681881e-10, -0.8196832653491144, 0), (2.0536999748587763, -7.334417018117932, -7.619828393214039, 1) )
+                                                                    matrix4d rest:space = ( (0.819683265765147, 6.284507058417222e-16, 0.572817024733539, 0), (-3.7715214331938374e-16, 0.9999999999999996, -1.80692375096194e-15, 0), (-0.5728170247335392, 1.2906432172367913e-15, 0.8196832657651463, 0), (-2.053699974859204, -7.334417018117335, 7.619828393213787, 1) )
 
                                                                     def RigExecControl "lipMain_up_1_r_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3739,7 +3746,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9556358399433441, 2.9605885973280643e-9, 0.2945507436724936, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.29455074506064094, 5.392228385996913e-9, -0.9556358403712103, 0), (-1.0654000002229909, -7.334417001689729, -8.238728694551696, 1) )
+                                                                    matrix4d rest:space = ( (0.9556358401572748, -3.398471902206203e-16, -0.2945507443665687, 0), (-2.46960402114327e-16, 1.0000000000000004, -1.7202227707633869e-15, 0), (0.2945507443665686, 1.6563206438258927e-15, 0.9556358401572749, 0), (1.0654000002225634, -7.334417001689303, 8.238728694551439, 1) )
 
                                                                     def RigExecControl "lipMain_up_2_l_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3783,7 +3790,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9556358403712063, 5.482510349754627e-9, -0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.2945507436724918, 2.7898552066752895e-9, -0.9556358399433486, 0), (1.0654000085508124, -7.334417011102602, -8.238728693004106, 1) )
+                                                                    matrix4d rest:space = ( (0.9556358401572762, 5.74816786308158e-16, 0.29455074436656403, 0), (-9.329302329090532e-17, 1.0000000000000007, -1.6841649551317274e-15, 0), (-0.2945507443665644, 1.7922650676996535e-15, 0.9556358401572762, 0), (-1.0654000085512398, -7.334417011102033, 8.238728693003852, 1) )
 
                                                                     def RigExecControl "lipMain_up_2_r_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3828,7 +3835,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7532764860376295, 5.120145488524292e-10, 0.6577039867170342, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039878112345, 6.130175601982645e-9, -0.7532764869930083, 0), (-2.7344000273507145, -7.659017219951153, -6.858728579933333, 1) )
+                                                                    matrix4d rest:space = ( (0.7532764865153162, -8.557134181465839e-16, -0.6577039872641347, 0), (-1.090377766978537e-16, 0.9999999999999999, -1.5611806824222952e-15, 0), (0.6577039872641348, 1.1945602062499704e-15, 0.7532764865153162, 0), (2.7344000273502655, -7.659017219950869, 6.858728579933086, 1) )
 
                                                                     def RigExecControl "lipMain_low_0_l_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3872,7 +3879,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7532764869930053, 6.143227587224135e-9, -0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.6577039867170309, 3.19322127244837e-10, -0.7532764860376334, 0), (2.734400040550896, -7.6590172441097195, -6.8587285759613685, 1) )
+                                                                    matrix4d rest:space = ( (0.7532764865153191, 1.0723778374776808e-15, 0.657703987264131, 0), (-1.4668583801397937e-16, 0.9999999999999999, -1.5050307955607255e-15, 0), (-0.6577039872641312, 1.0734512311538176e-15, 0.753276486515319, 0), (-2.734400040551345, -7.659017244109123, 6.8587285759611305, 1) )
 
                                                                     def RigExecControl "lipMain_low_0_r_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3917,7 +3924,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.8196832653491104, 1.168766409011906e-9, 0.5728170241382111, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.5728170253288736, 6.039469918009796e-9, -0.8196832661811833, 0), (-2.0538000996571775, -7.736913337863541, -7.6198283944741965, 1) )
+                                                                    matrix4d rest:space = ( (0.8196832657651443, -8.810589679516045e-16, -0.5728170247335429, 0), (-2.856134448628022e-16, 1.0000000000000004, -1.7116604334545813e-15, 0), (0.5728170247335429, 1.1450045061266445e-15, 0.8196832657651444, 0), (2.0538000996567254, -7.7369133378632, 7.619828394473954, 1) )
 
                                                                     def RigExecControl "lipMain_low_1_l_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -3961,7 +3968,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.8196832661811799, 6.073183533953838e-9, -0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.572817024138208, 9.785977581681881e-10, -0.8196832653491144, 0), (2.0538001124399896, -7.7369133560089836, -7.619828391490865, 1) )
+                                                                    matrix4d rest:space = ( (0.819683265765147, 6.284507058417222e-16, 0.572817024733539, 0), (-3.7715214331938374e-16, 0.9999999999999996, -1.80692375096194e-15, 0), (-0.5728170247335392, 1.2906432172367913e-15, 0.8196832657651463, 0), (-2.0538001124404417, -7.736913356008387, 7.619828391490628, 1) )
 
                                                                     def RigExecControl "lipMain_low_1_r_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4006,7 +4013,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9556358399433441, 2.9605885973280643e-9, 0.2945507436724936, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.29455074506064094, 5.392228385996913e-9, -0.9556358403712103, 0), (-1.0653999982012043, -7.792119638408025, -8.238828828395476, 1) )
+                                                                    matrix4d rest:space = ( (0.9556358401572748, -3.398471902206203e-16, -0.2945507443665687, 0), (-2.46960402114327e-16, 1.0000000000000004, -1.7202227707633869e-15, 0), (0.2945507443665686, 1.6563206438258927e-15, 0.9556358401572749, 0), (1.0653999982007492, -7.792119638407598, 8.238828828395237, 1) )
 
                                                                     def RigExecControl "lipMain_low_2_l_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4050,7 +4057,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (1, -1, -1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9556358403712063, 5.482510349754627e-9, -0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (0.2945507436724918, 2.7898552066752895e-9, -0.9556358399433486, 0), (1.065400010572599, -7.792119647820897, -8.238828826847886, 1) )
+                                                                    matrix4d rest:space = ( (0.9556358401572762, 5.74816786308158e-16, 0.29455074436656403, 0), (-9.329302329090532e-17, 1.0000000000000007, -1.6841649551317274e-15, 0), (-0.2945507443665644, 1.7922650676996535e-15, 0.9556358401572762, 0), (-1.0654000105730541, -7.7921196478203285, 8.23882882684765, 1) )
 
                                                                     def RigExecControl "lipMain_low_2_r_turn" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4095,7 +4102,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9999999999999998, 4.417529456457574e-9, -7.262954871235151e-10, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-7.26296097744681e-10, 4.280963128865919e-9, -1.0000000000000042, 0), (7.3075746367147374e-9, -7.3344170050382615, -8.555928400809151, 1) )
+                                                                    matrix4d rest:space = ( (0.9999999999999999, -7.82905721322122e-17, -2.0548011590981884e-15, 0), (-2.792203124482179e-17, 1, -1.7473715701204052e-15, 0), (2.2846684848137696e-15, 1.545883336494448e-15, 0.9999999999999996, 0), (-7.30800150933215e-9, -7.33441700503775, 8.555928400808895, 1) )
 
                                                                     def RigExecControl "M_UpLipMid" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4117,7 +4124,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9999999999999998, 4.417529456457574e-9, -7.262954871235151e-10, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-7.26296097744681e-10, 4.280963128865919e-9, -1.0000000000000042, 0), (9.286794211881496e-9, -7.792119641756557, -8.556028534652931, 1) )
+                                                                    matrix4d rest:space = ( (0.9999999999999999, -7.82905721322122e-17, -2.0548011590981884e-15, 0), (-2.792203124482179e-17, 1, -1.7473715701204052e-15, 0), (2.2846684848137696e-15, 1.545883336494448e-15, 0.9999999999999996, 0), (-9.28724887888035e-9, -7.792119641756045, 8.556028534652693, 1) )
 
                                                                     def RigExecControl "M_LoLipMid" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4139,7 +4146,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.6615671186784057, -2.8774189120484773e-10, 0.7498859553574103, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.7498859563183939, 6.144787743561669e-9, -0.6615671197676866, 0), (-3.1220002111109757, -7.503820077114142, -6.2911285690536864, 1) )
+                                                                    matrix4d rest:space = ( (0.6615671192230436, -1.0093943613699516e-15, -0.7498859558379016, 0), (-9.115710783326334e-17, 1, -1.7376802906321265e-15, 0), (0.7498859558379021, 8.869634089782133e-16, 0.6615671192230431, 0), (3.1220002111105356, -7.5038200771139145, 6.291128569053432, 1) )
 
                                                                     def RigExecControl "L_OutLip" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4162,7 +4169,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.6615671197676841, -6.13272636438801e-9, 0.7498859563183967, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.7498859553574067, 4.804988542338692e-10, 0.661567118678409, 0), (3.122000223764511, -7.5038201046971835, -6.291128564518697, 1) )
+                                                                    matrix4d rest:space = ( (-0.6615671192230468, -1.1337364491464387e-15, -0.7498859558378991, 0), (-3.0966447076623457e-16, 1.0000000000000007, -1.6542808830944928e-15, 0), (0.7498859558378994, -1.0567971555553246e-15, -0.6615671192230472, 0), (-3.122000223764951, -7.503820104696587, 6.291128564518453, 1) )
 
                                                                     def RigExecControl "R_OutLip" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4185,7 +4192,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7532764860376295, 5.120145488524292e-10, 0.6577039867170342, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039878112345, 6.130175601982645e-9, -0.7532764869930083, 0), (-2.7344000285566445, -7.386022224833994, -6.858728581102035, 1) )
+                                                                    matrix4d rest:space = ( (0.7532764865153162, -8.557134181465839e-16, -0.6577039872641347, 0), (-1.090377766978537e-16, 0.9999999999999999, -1.5611806824222952e-15, 0), (0.6577039872641348, 1.1945602062499704e-15, 0.7532764865153162, 0), (2.734400028556212, -7.3860222248337095, 6.8587285811017775, 1) )
 
                                                                     def RigExecControl "lip_up_0_l_pinch" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4219,7 +4226,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.7532764869930053, -6.143227587224135e-9, 0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039867170309, -3.19322127244837e-10, 0.7532764860376334, 0), (2.734400039344966, -7.38602224899256, -6.85872857713007, 1) )
+                                                                    matrix4d rest:space = ( (-0.7532764865153191, -1.0723778374776808e-15, -0.657703987264131, 0), (-1.4668583801397937e-16, 0.9999999999999999, -1.5050307955607255e-15, 0), (0.6577039872641312, -1.0734512311538176e-15, -0.753276486515319, 0), (-2.7344000393453984, -7.386022248991964, 6.8587285771298205, 1) )
 
                                                                     def RigExecControl "lip_up_0_r_pinch" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4254,7 +4261,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.8196832653491104, 1.168766409011906e-9, 0.5728170241382111, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.5728170253288736, 6.039469918009796e-9, -0.8196832661811833, 0), (-2.0536999656319455, -7.334416999973399, -7.619828396197225, 1) )
+                                                                    matrix4d rest:space = ( (0.8196832657651443, -8.810589679516045e-16, -0.5728170247335429, 0), (-2.856134448628022e-16, 1.0000000000000004, -1.7116604334545813e-15, 0), (0.5728170247335429, 1.1450045061266445e-15, 0.8196832657651444, 0), (2.053699965631518, -7.334416999973058, 7.619828396196967, 1) )
 
                                                                     def RigExecControl "L_UpLip2" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4277,7 +4284,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.8196832661811799, -6.073183533953838e-9, 0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.572817024138208, -9.785977581681881e-10, 0.8196832653491144, 0), (2.0536999748587763, -7.334417018117932, -7.619828393214039, 1) )
+                                                                    matrix4d rest:space = ( (-0.819683265765147, -6.284507058417222e-16, -0.572817024733539, 0), (-3.7715214331938374e-16, 0.9999999999999996, -1.80692375096194e-15, 0), (0.5728170247335392, -1.2906432172367913e-15, -0.8196832657651463, 0), (-2.053699974859204, -7.334417018117335, 7.619828393213787, 1) )
 
                                                                     def RigExecControl "R_UpLip2" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4300,7 +4307,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9556358399433441, 2.9605885973280643e-9, 0.2945507436724936, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.29455074506064094, 5.392228385996913e-9, -0.9556358403712103, 0), (-1.0654000002229909, -7.334417001689729, -8.238728694551696, 1) )
+                                                                    matrix4d rest:space = ( (0.9556358401572748, -3.398471902206203e-16, -0.2945507443665687, 0), (-2.46960402114327e-16, 1.0000000000000004, -1.7202227707633869e-15, 0), (0.2945507443665686, 1.6563206438258927e-15, 0.9556358401572749, 0), (1.0654000002225634, -7.334417001689303, 8.238728694551439, 1) )
 
                                                                     def RigExecControl "L_UpLip1" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4323,7 +4330,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.9556358403712063, -5.482510349754627e-9, 0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.2945507436724918, -2.7898552066752895e-9, 0.9556358399433486, 0), (1.0654000085508124, -7.334417011102602, -8.238728693004106, 1) )
+                                                                    matrix4d rest:space = ( (-0.9556358401572762, -5.74816786308158e-16, -0.29455074436656403, 0), (-9.329302329090532e-17, 1.0000000000000007, -1.6841649551317274e-15, 0), (0.2945507443665644, -1.7922650676996535e-15, -0.9556358401572762, 0), (-1.0654000085512398, -7.334417011102033, 8.238728693003852, 1) )
 
                                                                     def RigExecControl "R_UpLip1" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4346,7 +4353,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.7532764860376295, 5.120145488524292e-10, 0.6577039867170342, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039878112345, 6.130175601982645e-9, -0.7532764869930083, 0), (-2.7344000273507145, -7.659017219951153, -6.858728579933333, 1) )
+                                                                    matrix4d rest:space = ( (0.7532764865153162, -8.557134181465839e-16, -0.6577039872641347, 0), (-1.090377766978537e-16, 0.9999999999999999, -1.5611806824222952e-15, 0), (0.6577039872641348, 1.1945602062499704e-15, 0.7532764865153162, 0), (2.7344000273502655, -7.659017219950869, 6.858728579933086, 1) )
 
                                                                     def RigExecControl "lip_low_0_l_pinch" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4380,7 +4387,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.7532764869930053, -6.143227587224135e-9, 0.657703987811237, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.6577039867170309, -3.19322127244837e-10, 0.7532764860376334, 0), (2.734400040550896, -7.6590172441097195, -6.8587285759613685, 1) )
+                                                                    matrix4d rest:space = ( (-0.7532764865153191, -1.0723778374776808e-15, -0.657703987264131, 0), (-1.4668583801397937e-16, 0.9999999999999999, -1.5050307955607255e-15, 0), (0.6577039872641312, -1.0734512311538176e-15, -0.753276486515319, 0), (-2.734400040551345, -7.659017244109123, 6.8587285759611305, 1) )
 
                                                                     def RigExecControl "lip_low_0_r_pinch" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4415,7 +4422,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.8196832653491104, 1.168766409011906e-9, 0.5728170241382111, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.5728170253288736, 6.039469918009796e-9, -0.8196832661811833, 0), (-2.0538000996571775, -7.736913337863541, -7.6198283944741965, 1) )
+                                                                    matrix4d rest:space = ( (0.8196832657651443, -8.810589679516045e-16, -0.5728170247335429, 0), (-2.856134448628022e-16, 1.0000000000000004, -1.7116604334545813e-15, 0), (0.5728170247335429, 1.1450045061266445e-15, 0.8196832657651444, 0), (2.0538000996567254, -7.7369133378632, 7.619828394473954, 1) )
 
                                                                     def RigExecControl "L_LoLip2" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4438,7 +4445,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.8196832661811799, -6.073183533953838e-9, 0.5728170253288756, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.572817024138208, -9.785977581681881e-10, 0.8196832653491144, 0), (2.0538001124399896, -7.7369133560089836, -7.619828391490865, 1) )
+                                                                    matrix4d rest:space = ( (-0.819683265765147, -6.284507058417222e-16, -0.572817024733539, 0), (-3.7715214331938374e-16, 0.9999999999999996, -1.80692375096194e-15, 0), (0.5728170247335392, -1.2906432172367913e-15, -0.8196832657651463, 0), (-2.0538001124404417, -7.736913356008387, 7.619828391490628, 1) )
 
                                                                     def RigExecControl "R_LoLip2" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4461,7 +4468,7 @@ over "Biped"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-0.9556358399433441, 2.9605885973280643e-9, 0.2945507436724936, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.29455074506064094, 5.392228385996913e-9, -0.9556358403712103, 0), (-1.0653999982012043, -7.792119638408025, -8.238828828395476, 1) )
+                                                                    matrix4d rest:space = ( (0.9556358401572748, -3.398471902206203e-16, -0.2945507443665687, 0), (-2.46960402114327e-16, 1.0000000000000004, -1.7202227707633869e-15, 0), (0.2945507443665686, 1.6563206438258927e-15, 0.9556358401572749, 0), (1.0653999982007492, -7.792119638407598, 8.238828828395237, 1) )
 
                                                                     def RigExecControl "L_LoLip1" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4484,7 +4491,7 @@ over "Biped"
                                                                     double3 avars:rotationSign = (-1, -1, 1)
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (0.9556358403712063, -5.482510349754627e-9, 0.29455074506064166, 0), (-4.4174081645926085e-9, 0.9999999999998862, -4.281037764476021e-9, 0), (-0.2945507436724918, -2.7898552066752895e-9, 0.9556358399433486, 0), (1.065400010572599, -7.792119647820897, -8.238828826847886, 1) )
+                                                                    matrix4d rest:space = ( (-0.9556358401572762, -5.74816786308158e-16, -0.29455074436656403, 0), (-9.329302329090532e-17, 1.0000000000000007, -1.6841649551317274e-15, 0), (0.2945507443665644, -1.7922650676996535e-15, -0.9556358401572762, 0), (-1.0654000105730541, -7.7921196478203285, 8.23882882684765, 1) )
 
                                                                     def RigExecControl "R_LoLip1" (
                                                                         prepend apiSchemas = ["RigExecControlAPI"]
@@ -4513,7 +4520,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9999999999999982, 4.417472613038523e-9, -7.262910462311822e-10, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-7.262960977445221e-10, 4.2809063132024415e-9, -0.9999999999999971, 0), (1.38556045737909e-8, -3.667599956881986, -9.378799979482652, 1) )
+                                                                        matrix4d rest:space = ( (1, -9.490700438717202e-17, -1.6825810190181952e-15, 0), (2.4979146912047447e-16, 1.0000000000000002, -1.885807874876037e-15, 0), (1.5975646272364674e-15, 2.0011562628777514e-15, 0.9999999999999999, 0), (-1.3856081146592026e-8, -3.6675999568807924, 9.378799979482586, 1) )
                                                                     }
 
                                                                     def RigExecControl "lip_lower_translate_pivot" (
@@ -4524,7 +4531,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9999999999999982, 4.417472613038523e-9, -7.262910462311822e-10, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-7.262960977445221e-10, 4.2809063132024415e-9, -0.9999999999999971, 0), (1.38556045737909e-8, -3.667599956881986, -9.378799979482652, 1) )
+                                                                        matrix4d rest:space = ( (1, -9.490700438717202e-17, -1.6825810190181952e-15, 0), (2.4979146912047447e-16, 1.0000000000000002, -1.885807874876037e-15, 0), (1.5975646272364674e-15, 2.0011562628777514e-15, 0.9999999999999999, 0), (-1.3856081146592026e-8, -3.6675999568807924, 9.378799979482586, 1) )
 
                                                                         def RigExecControl "M_LoLipCenter" (
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
@@ -4550,7 +4557,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.5232141741848935, -1.3369093147468075e-9, 0.852201224263756, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.852201225023771, 6.004406434736503e-9, -0.5232141754227894, 0), (-3.121999972692392, -1.7741200771151853, -8.228528569053609, 1) )
+                                                                        matrix4d rest:space = ( (0.5232141748038438, -1.7170765309913275e-15, -0.8522012246437657, 0), (4.059535066170078e-18, 1.0000000000000004, -2.0096182607718468e-15, 0), (0.8522012246437654, 9.042272539033928e-16, 0.5232141748038435, 0), (3.1219999726919796, -1.774120077114162, 8.228528569053413, 1) )
                                                                     }
 
                                                                     def RigExecControl "mouth_corner_l_jawPin" (
@@ -4561,7 +4568,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.5232141741848935, -1.3369093147468075e-9, 0.852201224263756, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.852201225023771, 6.004406434736503e-9, -0.5232141754227894, 0), (-3.121999972692392, -1.7741200771151853, -8.228528569053609, 1) )
+                                                                        matrix4d rest:space = ( (0.5232141748038438, -1.7170765309913275e-15, -0.8522012246437657, 0), (4.059535066170078e-18, 1.0000000000000004, -2.0096182607718468e-15, 0), (0.8522012246437654, 9.042272539033928e-16, 0.5232141748038435, 0), (3.1219999726919796, -1.774120077114162, 8.228528569053413, 1) )
                                                                     }
 
                                                                     def RigExecControl "mouth_corner_r_follow_on_jaw_ctl" (
@@ -4573,7 +4580,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (0.5232141754227944, -5.959477890645877e-9, 0.8522012250237676, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.8522012242637543, 1.5247447065869332e-9, 0.5232141741848971, 0), (3.1219999853459273, -1.7741201046978858, -8.228528564518648, 1) )
+                                                                        matrix4d rest:space = ( (-0.5232141748038462, -1.394451399005289e-15, -0.852201224643763, 0), (1.979463210879647e-17, 0.9999999999999993, -2.1431909996032273e-15, 0), (0.8522012246437635, -1.2664900177952846e-15, -0.5232141748038465, 0), (-3.1219999853463416, -1.7741201046966637, 8.228528564518445, 1) )
                                                                     }
 
                                                                     def RigExecControl "mouth_corner_r_jawPin" (
@@ -4585,7 +4592,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (0.5232141754227944, -5.959477890645877e-9, 0.8522012250237676, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.8522012242637543, 1.5247447065869332e-9, 0.5232141741848971, 0), (3.1219999853459273, -1.7741201046978858, -8.228528564518648, 1) )
+                                                                        matrix4d rest:space = ( (-0.5232141748038462, -1.394451399005289e-15, -0.852201224643763, 0), (1.979463210879647e-17, 0.9999999999999993, -2.1431909996032273e-15, 0), (0.8522012246437635, -1.2664900177952846e-15, -0.5232141748038465, 0), (-3.1219999853463416, -1.7741201046966637, 8.228528564518445, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_center_low_follow_on_jaw_ctl" (
@@ -4596,7 +4603,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9999999999999982, 4.417472613038523e-9, -7.262910462311822e-10, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-7.262960977445221e-10, 4.2809063132024415e-9, -0.9999999999999971, 0), (9.286794211884778e-9, -2.0624196417575433, -10.493428534652852, 1) )
+                                                                        matrix4d rest:space = ( (1, -9.490700438717202e-17, -1.6825810190181952e-15, 0), (2.4979146912047447e-16, 1.0000000000000002, -1.885807874876037e-15, 0), (1.5975646272364674e-15, 2.0011562628777514e-15, 0.9999999999999999, 0), (-9.287219628553437e-9, -2.0624196417562644, 10.493428534652674, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_corner_l_follow_on_jaw_ctl" (
@@ -4607,7 +4614,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.7071067806729774, 9.656695669564745e-11, 0.7071067806729804, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.7071067817001153, 6.150682724075146e-9, -0.7071067817001108, 0), (-3.1220002111109713, -1.7741200771151853, -8.228528569053609, 1) )
+                                                                        matrix4d rest:space = ( (0.7071067811865464, -1.5664972788245188e-15, -0.7071067811865491, 0), (2.348016929459397e-16, 1.0000000000000002, -2.050892713300583e-15, 0), (0.7071067811865491, 1.2316135873251254e-15, 0.7071067811865464, 0), (3.1220002111105587, -1.774120077114162, 8.228528569053413, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_corner_r_follow_on_jaw_ctl" (
@@ -4619,7 +4626,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.7071067817001151, 6.150682724075146e-9, -0.707106781700111, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (0.7071067806729776, -9.656695669564952e-11, -0.7071067806729802, 0), (3.1220002237645064, -1.7741201046978858, -8.228528564518648, 1) )
+                                                                        matrix4d rest:space = ( (0.7071067811865488, 1.1239506040605236e-15, 0.7071067811865465, 0), (2.2235430142170615e-16, 0.9999999999999997, -2.0180464614322468e-15, 0), (-0.7071067811865468, 1.51555368416664e-15, 0.7071067811865489, 0), (-3.1220002237649207, -1.7741201046966637, 8.228528564518445, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_up_0_l_follow_on_jaw_ctl" (
@@ -4630,7 +4637,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.7532764860376284, 5.120090979298534e-10, 0.657703986717033, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.6577039878112334, 6.130095417935921e-9, -0.753276486993, 0), (-2.73440002855664, -1.6563222248350655, -8.796128581101955, 1) )
+                                                                        matrix4d rest:space = ( (0.7532764865153168, -1.2968409245377319e-15, -0.6577039872641343, 0), (3.8969416820644404e-16, 0.9999999999999999, -1.8317874673339785e-15, 0), (0.6577039872641346, 1.5105377071995114e-15, 0.7532764865153165, 0), (2.73440002855623, -1.656322224834014, 8.796128581101753, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_up_0_r_follow_on_jaw_ctl" (
@@ -4642,7 +4649,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.7532764869930042, 6.1431474005247425e-9, -0.6577039878112289, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (0.6577039867170298, 3.193167154848325e-10, -0.7532764860376309, 0), (2.7344000393449615, -1.656322248993348, -8.796128577130016, 1) )
+                                                                        matrix4d rest:space = ( (0.7532764865153186, 1.2087432868831703e-15, 0.657703987264131, 0), (-6.980956552494372e-17, 0.9999999999999994, -1.977692687176528e-15, 0), (-0.6577039872641317, 1.7648949714389092e-15, 0.7532764865153191, 0), (-2.7344000393453722, -1.6563222489920975, 8.796128577129807, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_up_1_l_follow_on_jaw_ctl" (
@@ -4653,7 +4660,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.8196832653491092, 1.1687523603918523e-9, 0.5728170241382107, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.5728170253288727, 6.039390786283033e-9, -0.8196832661811749, 0), (-2.0536999656319423, -1.604716999974471, -9.557228396197143, 1) )
+                                                                        matrix4d rest:space = ( (0.819683265765145, -1.3289882650070355e-15, -0.5728170247335427, 0), (3.2614943294285186e-16, 0.9999999999999998, -1.867960995464484e-15, 0), (0.5728170247335425, 1.443943173129079e-15, 0.8196832657651444, 0), (2.053699965631534, -1.6047169999733342, 9.557228396196933, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_up_1_r_follow_on_jaw_ctl" (
@@ -4665,7 +4672,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.8196832661811787, 6.0731043953751614e-9, -0.5728170253288678, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (0.5728170241382071, 9.785837481977783e-10, -0.8196832653491112, 0), (2.053699974858773, -1.6047170181187767, -9.557228393213975, 1) )
+                                                                        matrix4d rest:space = ( (0.8196832657651465, 9.534102920413969e-16, 0.5728170247335395, 0), (2.1944892576554256e-16, 0.9999999999999997, -1.8594940125150154e-15, 0), (-0.5728170247335399, 1.7246246455082648e-15, 0.8196832657651466, 0), (-2.0536999748591827, -1.6047170181174977, 9.557228393213762, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_up_2_l_follow_on_jaw_ctl" (
@@ -4676,7 +4683,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9556358399433427, 2.9605510108155106e-9, 0.29455074367249584, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.2945507450606405, 5.392157347641218e-9, -0.9556358403712022, 0), (-1.065400000222989, -1.6047170016908012, -10.176128694551615, 1) )
+                                                                        matrix4d rest:space = ( (0.9556358401572751, -5.908244800227355e-16, -0.2945507443665681, 0), (3.4591265492091536e-16, 0.9999999999999998, -1.848956333843903e-15, 0), (0.294550744366568, 1.698958981243663e-15, 0.9556358401572749, 0), (1.0654000002225794, -1.604717001689579, 10.176128694551407, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_up_2_r_follow_on_jaw_ctl" (
@@ -4688,7 +4695,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9556358403712049, 5.482439293050136e-9, -0.29455074506063533, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (0.29455074367249134, 2.7898176548623817e-9, -0.9556358399433431, 0), (1.0654000085508106, -1.6047170111035598, -10.176128693004033, 1) )
+                                                                        matrix4d rest:space = ( (0.9556358401572762, 1.6733104303927814e-16, 0.2945507443665645, 0), (1.7617082879815578e-16, 0.9999999999999998, -1.855005987667538e-15, 0), (-0.2945507443665649, 1.846177341733238e-15, 0.955635840157276, 0), (-1.0654000085512207, -1.6047170111022808, 10.176128693003822, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_low_0_l_follow_on_jaw_ctl" (
@@ -4699,7 +4706,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.7532764860376284, 5.120090979298534e-10, 0.657703986717033, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.6577039878112334, 6.130095417935921e-9, -0.753276486993, 0), (-2.73440002735071, -1.9293172199522246, -8.796128579933253, 1) )
+                                                                        matrix4d rest:space = ( (0.7532764865153168, -1.2968409245377319e-15, -0.6577039872641343, 0), (3.8969416820644404e-16, 0.9999999999999999, -1.8317874673339785e-15, 0), (0.6577039872641346, 1.5105377071995114e-15, 0.7532764865153165, 0), (2.7344000273502913, -1.929317219951173, 8.79612857993307, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_low_0_r_follow_on_jaw_ctl" (
@@ -4711,7 +4718,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.7532764869930042, 6.1431474005247425e-9, -0.6577039878112289, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (0.6577039867170298, 3.193167154848325e-10, -0.7532764860376309, 0), (2.7344000405508915, -1.929317244110507, -8.796128575961312, 1) )
+                                                                        matrix4d rest:space = ( (0.7532764865153186, 1.2087432868831703e-15, 0.657703987264131, 0), (-6.980956552494372e-17, 0.9999999999999994, -1.977692687176528e-15, 0), (-0.6577039872641317, 1.7648949714389092e-15, 0.7532764865153191, 0), (-2.734400040551311, -1.9293172441092565, 8.796128575961124, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_low_1_l_follow_on_jaw_ctl" (
@@ -4722,7 +4729,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.8196832653491092, 1.1687523603918523e-9, 0.5728170241382107, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.5728170253288727, 6.039390786283033e-9, -0.8196832661811749, 0), (-2.0538000996571744, -2.0072133378645844, -9.557228394474112, 1) )
+                                                                        matrix4d rest:space = ( (0.819683265765145, -1.3289882650070355e-15, -0.5728170247335427, 0), (3.2614943294285186e-16, 0.9999999999999998, -1.867960995464484e-15, 0), (0.5728170247335425, 1.443943173129079e-15, 0.8196832657651444, 0), (2.0538000996567525, -2.0072133378634476, 9.557228394473931, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_low_1_r_follow_on_jaw_ctl" (
@@ -4734,7 +4741,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.8196832661811787, 6.0731043953751614e-9, -0.5728170253288678, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (0.5728170241382071, 9.785837481977783e-10, -0.8196832653491112, 0), (2.0538001124399865, -2.0072133560097996, -9.5572283914908, 1) )
+                                                                        matrix4d rest:space = ( (0.8196832657651465, 9.534102920413969e-16, 0.5728170247335395, 0), (2.1944892576554256e-16, 0.9999999999999997, -1.8594940125150154e-15, 0), (-0.5728170247335399, 1.7246246455082648e-15, 0.8196832657651466, 0), (-2.0538001124404093, -2.0072133560085206, 9.557228391490614, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_low_2_l_follow_on_jaw_ctl" (
@@ -4745,7 +4752,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9556358399433427, 2.9605510108155106e-9, 0.29455074367249584, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-0.2945507450606405, 5.392157347641218e-9, -0.9556358403712022, 0), (-1.0653999982012026, -2.062419638409068, -10.176228828395393, 1) )
+                                                                        matrix4d rest:space = ( (0.9556358401572751, -5.908244800227355e-16, -0.2945507443665681, 0), (3.4591265492091536e-16, 0.9999999999999998, -1.848956333843903e-15, 0), (0.294550744366568, 1.698958981243663e-15, 0.9556358401572749, 0), (1.0653999982007778, -2.062419638407846, 10.176228828395217, 1) )
                                                                     }
 
                                                                     def RigExecControl "lipMain_low_2_r_follow_on_jaw_ctl" (
@@ -4757,7 +4764,7 @@ over "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9556358403712049, 5.482439293050136e-9, -0.29455074506063533, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (0.29455074367249134, 2.7898176548623817e-9, -0.9556358399433431, 0), (1.0654000105725971, -2.0624196478218266, -10.176228826847812, 1) )
+                                                                        matrix4d rest:space = ( (0.9556358401572762, 1.6733104303927814e-16, 0.2945507443665645, 0), (1.7617082879815578e-16, 0.9999999999999998, -1.855005987667538e-15, 0), (-0.2945507443665649, 1.846177341733238e-15, 0.955635840157276, 0), (-1.0654000105730224, -2.0624196478205477, 10.176228826847632, 1) )
                                                                     }
 
                                                                     def RigExecControl "R_LoLip" (
@@ -4773,7 +4780,7 @@ over "Biped"
                                                                         double guide:scaleZ = 0.07364999999999977
                                                                         uniform token guide:shape = "box"
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (0.8715644861800357, 0.07226672170152232, 0.48492563025589003, 0), (-0.06624382202874625, 0.9973651354568742, -0.029572695109117298, 0), (-0.4857850373084275, -0.006348819521873637, 0.8740552550181855, 0), (1.741800012886897, -3.3599999668756766, -8.841699979534448, 1) )
+                                                                        matrix4d rest:space = ( (-0.8715644861470705, 0.07226672762756536, -0.4849256299322573, 0), (0.06624381760149926, 0.9973651350377881, 0.029572690791241803, 0), (0.48578503797129535, -0.00634881792606982, -0.8740552553438302, 0), (-1.7418000128873632, -3.3599999668744545, 8.841699979534358, 1) )
                                                                     }
 
                                                                     def RigExecControl "L_LoLip" (
@@ -4788,7 +4795,7 @@ over "Biped"
                                                                         double guide:scaleZ = 0.07365
                                                                         uniform token guide:shape = "box"
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.8715644861140998, 0.0722667294017468, 0.48492562898987107, 0), (0.06624381317425142, 0.9973651348716137, -0.029572695012892718, 0), (-0.485785038634164, 0.006348823813757839, -0.8740552557238281, 0), (-1.7417999871130925, -3.3599999514869694, -8.841699982064554, 1) )
+                                                                        matrix4d rest:space = ( (0.8715644861470687, 0.07226672762756482, -0.4849256299322606, 0), (-0.06624381760149861, 0.9973651350377885, 0.029572690791242116, 0), (0.4857850379712984, 0.00634881792606939, 0.8740552553438292, 0), (1.741799987112627, -3.359999951485861, 8.841699982064469, 1) )
                                                                     }
 
                                                                     def RigExecControl "M_LoLip" (
@@ -4803,7 +4810,7 @@ over "Biped"
                                                                         double guide:scaleZ = 0.05
                                                                         uniform token guide:shape = "circle"
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (-0.9999999999999982, 4.417472613038523e-9, -7.262910462311822e-10, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (-7.262960977445221e-10, 4.2809063132024415e-9, -0.9999999999999971, 0), (1.38556045737909e-8, -3.667599956881986, -9.378799979482652, 1) )
+                                                                        matrix4d rest:space = ( (1, -9.490700438717202e-17, -1.6825810190181952e-15, 0), (2.4979146912047447e-16, 1.0000000000000002, -1.885807874876037e-15, 0), (1.5975646272364674e-15, 2.0011562628777514e-15, 0.9999999999999999, 0), (-1.3856081146592026e-8, -3.6675999568807924, 9.378799979482586, 1) )
                                                                     }
                                                                 }
                                                             }

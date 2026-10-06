@@ -2569,13 +2569,39 @@ RigExecAssembleParameters(
             const auto pick = [](size_t count, size_t j) {
                 return count <= 1 ? size_t(0) : j % count;
             };
+            // rigExec:driverDeltaFrame: "local" applies T * S^-1, the
+            // driver's local matrix, as a world offset; "posed" conjugates
+            // it into the space's current frame so it rides the space.
+            // RECORDED, as rigExec:weightBlend is: the zero-USD runtime
+            // and the frozen replay read the recorded token, and an
+            // unrecorded read replays as the "local" fallback.
+            static const TfToken posedFrame("posed");
+            static const TfToken deltaFrameName("rigExec:driverDeltaFrame");
+            TfToken deltaFrame;
+            if (const UsdAttribute a = moverPrim.GetAttribute(deltaFrameName)) {
+                a.Get(&deltaFrame, time);
+                RigExecRecordStageRead(nullptr, _RecorderOf(values.resolved),
+                                       a.GetPath(), a, time,
+                                       VtValue(deltaFrame),
+                                       /*forceFrame=*/false);
+            } else {
+                RigExecRecordStageRead(nullptr, _RecorderOf(values.resolved),
+                                       moverPrim.GetPath().AppendProperty(
+                                           deltaFrameName),
+                                       UsdAttribute(), time,
+                                       VtValue(deltaFrame),
+                                       /*forceFrame=*/false);
+            }
+            const bool posedDelta = deltaFrame == posedFrame;
             const auto measured = [&](size_t first, size_t count,
                                       size_t spaceFirst, size_t spaceCount,
                                       size_t j) {
                 GfMatrix4d m = (*table)[first + pick(count, j)];
                 if (spaceCount > 0) {
-                    m = RigExecMeasureInSpace(
-                        m, (*table)[spaceFirst + pick(spaceCount, j)]);
+                    const GfMatrix4d &space =
+                        (*table)[spaceFirst + pick(spaceCount, j)];
+                    m = posedDelta ? RigExecMeasureInPosedSpace(m, space)
+                                   : RigExecMeasureInSpace(m, space);
                 }
                 return m;
             };

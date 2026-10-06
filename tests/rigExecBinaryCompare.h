@@ -1588,8 +1588,29 @@ _BinaryCollectOracle(const rigExec::RigExecBakedProgramImpl &program)
         }
         _BinaryCollectOne(ladder.rotationOrder, Tag::Token, &oracle);
     }
+    // The capture walks the switches and the auto clavicles right after the
+    // ladders (capture.cpp); an index or a channel the bake reads live is
+    // varying and holds a uid.
+    for (const auto &sw : program.spaceSwitches) {
+        _BinaryCollectOne(sw.activeInput, Tag::Double, &oracle);
+    }
+    for (const auto &ac : program.autoClavicles) {
+        if (ac.ikBlendIsFloat) {
+            _BinaryCollectOne(ac.ikBlendFloat, Tag::Float, &oracle);
+        } else {
+            _BinaryCollectOne(ac.ikBlendInput, Tag::Double, &oracle);
+        }
+        if (ac.amountIsFloat) {
+            _BinaryCollectOne(ac.amountFloat, Tag::Float, &oracle);
+        } else {
+            _BinaryCollectOne(ac.amountInput, Tag::Double, &oracle);
+        }
+    }
     for (const auto &interp : program.poseInterpolators) {
         _BinaryCollectOne(interp.enabled, Tag::Bool, &oracle);
+        for (const auto &value : interp.valueInputs) {
+            _BinaryCollectOne(value, Tag::Double, &oracle);
+        }
     }
     for (const auto &solver : program.solvers) {
         _BinaryCollectOne(solver.bend, Tag::Double, &oracle);

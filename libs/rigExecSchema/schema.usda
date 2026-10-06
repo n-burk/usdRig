@@ -253,6 +253,13 @@ class RigExecControl "RigExecControl" (
         be seen and picked. Scaled by the evaluated control-frame scale, so
         a scaled control carries its shape with it."""
     )
+    quatf guide:orient = (1, 0, 0, 0) (
+        doc = """Rotation of the drawn shape in the control's LOCAL frame,
+        applied after guide:scaleX/Y/Z and guide:planeNormal and before
+        guide:offset. Lets a shape keep its placement when the control's
+        own axes are re-oriented: the shape stays where it was drawn while
+        the axes the animator rotates about change. Identity by default."""
+    )
     color3f guide:displayColor = (1.0, 0.85, 0.2) (
         doc = """Constant colour of the synthesized guide. May be CONNECTED
         to another color3f attribute, in which case the first connection

@@ -31,6 +31,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 
+#include <algorithm>
 #include <list>
 #include <map>
 #include <set>
@@ -2117,6 +2118,32 @@ private:
     /// providerXforms and rewrites the posed points so composed world
     /// geometry is unchanged.
     void _ApplySurfaceProjectors(RigExecRigPose *pose, UsdTimeCode time) const;
+public:
+    /// Re-applies the surface projectors (eye placement and shader dials)
+    /// to \p pose, which a cached or background-warmed frame did not get
+    /// from Evaluate. Reads the stage and the standing interactive
+    /// overrides, so a served frame shows the current dials.
+    void ApplySurfaceProjectors(RigExecRigPose *pose, UsdTimeCode time) const
+    {
+        if (_surfaceProjectors.empty() || !pose) {
+            return;
+        }
+        // Idempotent apart from its diagnostics: a frame memoized from a
+        // live evaluation already carries them, so only new lines are kept.
+        const size_t before = pose->diagnostics.size();
+        _ApplySurfaceProjectors(pose, time);
+        std::vector<std::string> added(
+            pose->diagnostics.begin() + before, pose->diagnostics.end());
+        pose->diagnostics.resize(before);
+        for (std::string &line : added) {
+            if (std::find(pose->diagnostics.begin(),
+                          pose->diagnostics.begin() + before, line) ==
+                pose->diagnostics.begin() + before) {
+                pose->diagnostics.push_back(std::move(line));
+            }
+        }
+    }
+private:
 
     /// Resolve projectors on the pose Evaluate is about to publish,
     /// whichever path produced it.

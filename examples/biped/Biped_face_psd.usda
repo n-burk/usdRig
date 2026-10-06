@@ -63,7 +63,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float inputs:value = -0.033333335
+                    float inputs:value = 0.033333335
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/face_psd_drivers/jaw_driver.avars:tx>
                     uniform token rigExec:operation = "multiply"
                 }
@@ -99,7 +99,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float inputs:value = -0.033333335
+                    float inputs:value = 0.033333335
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/face_psd_drivers/jaw__mouth_corner_l_driver.avars:tz>
                     uniform token rigExec:operation = "multiply"
                 }
@@ -135,7 +135,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float inputs:value = -0.033333335
+                    float inputs:value = 0.033333335
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/face_psd_drivers/jaw__mouth_corner_r_driver.avars:tz>
                     uniform token rigExec:operation = "multiply"
                 }
@@ -971,7 +971,7 @@ over "Biped"
                     float outputs:weight = 0
                     float rigExec:falloff = 0.3
                     rel rigExec:poseControls = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rx>
-                    double[] rigExec:poseControlValues = [-21.99999682359346]
+                    double[] rigExec:poseControlValues = [21.999996823593463]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (6.0103155e-17, -1.1705134e-17, 0.98155904, 0.19115935)
                     float rigExec:rotationRadius = 1.5707964
@@ -987,7 +987,7 @@ over "Biped"
                     float outputs:weight = 0
                     float rigExec:falloff = 0.3
                     rel rigExec:poseControls = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rx>
-                    double[] rigExec:poseControlValues = [21.999993647193918]
+                    double[] rigExec:poseControlValues = [-21.999993647193918]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (6.011149e-17, 1.1662225e-17, 0.98169523, -0.1904586)
                     float rigExec:rotationRadius = 1.5707964
@@ -1003,7 +1003,7 @@ over "Biped"
                     float outputs:weight = 0
                     float rigExec:falloff = 0.3
                     rel rigExec:poseControls = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rx>
-                    double[] rigExec:poseControlValues = [-49.999992780894225]
+                    double[] rigExec:poseControlValues = [49.999992780894225]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (5.5486108e-17, -2.5897711e-17, 0.9061569, 0.4229417)
                     float rigExec:rotationRadius = 1.5707964
@@ -1041,7 +1041,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-2.220446049250313e-16, -2.842170943040401e-14, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [-2.220446049250313e-16, -2.842170943040401e-14, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1064,7 +1064,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 0, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 0, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1087,7 +1087,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 0, 0, -49.999992780894225, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 0, 0, 49.999992780894225, -1.454288986923958e-12, -6.222273979301702e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1110,7 +1110,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 0, 0, 21.999993647193918, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 0, 0, -21.999993647193918, 6.963281074010235e-13, -1.5866208610691225e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1133,7 +1133,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 3, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 3, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1156,7 +1156,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, -3, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [0, -3, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1179,7 +1179,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-3, 0, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [-3, 0, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1202,7 +1202,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, 0, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [3, 0, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1225,7 +1225,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, -3, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [0, -3, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1248,7 +1248,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, -3, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [3, -3, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1271,7 +1271,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 3, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 3, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1294,7 +1294,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [4, 5, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [4, 5, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1317,7 +1317,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-3, 0, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [-3, 0, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1340,7 +1340,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, 0, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [3, 0, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1363,7 +1363,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, 3, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [3, 3, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1401,7 +1401,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-2.220446049250313e-16, 0, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [-2.220446049250313e-16, 0, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1424,7 +1424,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 0, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 0, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1447,7 +1447,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 0, 0, -49.999992780894225, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 0, 0, 49.999992780894225, -1.454288986923958e-12, -6.222273979301702e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1470,7 +1470,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 0, 0, 21.999993647193918, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 0, 0, -21.999993647193918, 6.963281074010235e-13, -1.5866208610691225e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1493,7 +1493,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 3, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 3, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1516,7 +1516,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, -3, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [0, -3, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1539,7 +1539,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-3, 0, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [-3, 0, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1562,7 +1562,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, 0, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [3, 0, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1585,7 +1585,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, -3, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [0, -3, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1608,7 +1608,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, -3, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [3, -3, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1631,7 +1631,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [0, 3, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [0, 3, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1654,7 +1654,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [4, 5, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [4, 5, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1677,7 +1677,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-3, 0, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [-3, 0, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1700,7 +1700,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, 0, 0, 0, 0, 0]
+                    double[] rigExec:poseControlValues = [3, 0, 0, 0, -0, 3.119082664117743e-28]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -1723,7 +1723,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [3, 3, 0, -21.99999682359346, 0, 0]
+                    double[] rigExec:poseControlValues = [3, 3, 0, 21.999996823593463, -7.050601522465309e-13, -1.1374013323134617e-13]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (1, 0, 0, 0)
                     float rigExec:rotationRadius = 1.5707964
@@ -2923,7 +2923,7 @@ over "Biped"
                                                                 double guide:scaleY = 0
                                                                 double guide:scaleZ = 0
                                                                 uniform token purpose = "default"
-                                                                matrix4d rest:space = ( (1, -8.271806125530277e-25, 3.9719366519077593e-25, 0), (-8.271806125530277e-25, 1, 0, 0), (4.9990031208123954e-26, 0, 1, 0), (0, -8.881784197001252e-16, 0, 1) )
+                                                                matrix4d rest:space = ( (4.0114503909530805e-15, 1, -2.4618460648686986e-14, 0), (-9.070355762585508e-17, -2.448897036471617e-14, -0.9999999999999999, 0), (-1, 4.0933271545626156e-15, 2.492943289812869e-16, 0), (-1.3667984656652636e-14, -8.526512829121202e-14, -4.1744385725905886e-13, 1) )
 
                                                                 def RigExecControl "mouth_corner_l_driver" (
                                                                     prepend apiSchemas = ["RigExecControlAPI"]

@@ -1,31 +1,31 @@
 #usda 1.0
 (
     defaultPrim = "Biped"
-    doc = """The body, as one branch of the biped's layer tree. Each layer\r\r
-    carries one kind of data for the body, strongest first:\r\r
-\r\r
-      Biped_body_picker.usda          the Body panel of the control picker\r\r
-      Biped_body_touch_regions.usda   TouchPose regions on the body's\r\r
-                                      controls\r\r
-      Biped_body_breathing.usda       the chest and belly breathing dials\r\r
-                                      and their pose interpolators\r\r
-      Biped_body_psd.usda             the pose interpolators, one weight\r\r
-                                      per body corrective\r\r
-      Biped_body_shapes.usdc          the corrective blend shapes those\r\r
-                                      weights drive\r\r
-      Biped_body_bendy.usda           the bendy limbs: bend controls along\r\r
-                                      each arm and leg and their wires\r\r
-      Biped_body_wires.usda           the spine and head wires: three bend\r\r
-                                      controls along the spine and three\r\r
-                                      over the skull, and the wires they\r\r
-                                      drive\r\r
-      Biped_body_center.usda          the spine, neck, head and rig root\r\r
-      Biped_body_left.usda            the left limbs\r\r
-      Biped_body_right.usda           the right limbs\r\r
-      Biped_body_model.usda           the geometry and materials\r\r
-\r\r
-    The face branch, Biped_face_rig.usda, has the same kinds of layer for\r\r
-    the face. Mute a layer to switch it off; the psd and shapes layers go\r\r
+    doc = """The body, as one branch of the biped's layer tree. Each layer\r\r\r\r\r
+    carries one kind of data for the body, strongest first:\r\r\r\r\r
+\r\r\r\r\r
+      Biped_body_picker.usda          the Body panel of the control picker\r\r\r\r\r
+      Biped_body_touch_regions.usda   TouchPose regions on the body's\r\r\r\r\r
+                                      controls\r\r\r\r\r
+      Biped_body_breathing.usda       the chest and belly breathing dials\r\r\r\r\r
+                                      and their pose interpolators\r\r\r\r\r
+      Biped_body_psd.usda             the pose interpolators, one weight\r\r\r\r\r
+                                      per body corrective\r\r\r\r\r
+      Biped_body_shapes.usdc          the corrective blend shapes those\r\r\r\r\r
+                                      weights drive\r\r\r\r\r
+      Biped_body_bendy.usda           the bendy limbs: bend controls along\r\r\r\r\r
+                                      each arm and leg and their wires\r\r\r\r\r
+      Biped_body_wires.usda           the spine and head wires: three bend\r\r\r\r\r
+                                      controls along the spine and three\r\r\r\r\r
+                                      over the skull, and the wires they\r\r\r\r\r
+                                      drive\r\r\r\r\r
+      Biped_body_center.usda          the spine, neck, head and rig root\r\r\r\r\r
+      Biped_body_left.usda            the left limbs\r\r\r\r\r
+      Biped_body_right.usda           the right limbs\r\r\r\r\r
+      Biped_body_model.usda           the geometry and materials\r\r\r\r\r
+\r\r\r\r\r
+    The face branch, Biped_face_rig.usda, has the same kinds of layer for\r\r\r\r\r
+    the face. Mute a layer to switch it off; the psd and shapes layers go\r\r\r\r\r
     together."""
     metersPerUnit = 0.01
     subLayers = [
@@ -394,6 +394,8 @@ over "Biped"
                                 over "M_BodyGimbal"
                                 {
                                     reorder nameChildren = ["pelvis_l_ctl", "pelvis_r_ctl"]
+                                    double3 guide:offset = (-33.96825, -2.1841258472278344, 4.612319692799945)
+                                    quatf guide:orient = (-0.5306114, 0.467388, 0.5306114, -0.467388)
                                     uniform token guide:shape = "circle"
 
                                     over "L_Hip"

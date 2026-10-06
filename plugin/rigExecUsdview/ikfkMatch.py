@@ -524,13 +524,11 @@ def Evaluator(stage, rigPath):
 
 # -- applying a switch -----------------------------------------------------
 
-def SwitchLimbs(stage, limbs, time, mode, undoStack=None, restCache=None):
-    """Match and switch every limb in `limbs` to its other half, authored
-    as ONE edit and one undo entry. `mode` is a gizmoMath write mode, so a
-    switch lands the way a drag does (keyed in animation mode). `restCache`
-    ({key: RestOffsets}) keeps the rest measurements between calls; they
-    change only with the rig's structure. Returns [(limb, toIk, channels)]
-    for the limbs switched."""
+def PlanSwitch(stage, limbs, time, restCache=None):
+    """({attribute path: value}, [(limb, toIk, channels)]) that match and
+    switch every limb in `limbs` to its other half, without authoring.
+    `restCache` ({key: RestOffsets}) keeps the rest measurements between
+    calls; they change only with the rig's structure."""
     values = {}
     done = []
     for limb in limbs:
@@ -546,11 +544,25 @@ def SwitchLimbs(stage, limbs, time, mode, undoStack=None, restCache=None):
         planned, toIk = Plan(limb, stage, evaluate, time, rest=rest)
         values.update(planned)
         done.append((limb, toIk, len(planned) - 1))
-    if not values:
-        return []
-    label = "Switch %s" % ", ".join(
+    return values, done
+
+
+def SwitchLabel(done):
+    """The undo label for PlanSwitch's `done`."""
+    return "Switch %s" % ", ".join(
         "%s to %s" % (limb.switchControl.name, "IK" if toIk else "FK")
         for limb, toIk, _ in done)
+
+
+def SwitchLimbs(stage, limbs, time, mode, undoStack=None, restCache=None):
+    """Match and switch every limb in `limbs` to its other half, authored
+    as ONE edit and one undo entry. `mode` is a gizmoMath write mode, so a
+    switch lands the way a drag does (keyed in animation mode). Returns
+    [(limb, toIk, channels)] for the limbs switched."""
+    values, done = PlanSwitch(stage, limbs, time, restCache)
+    if not values:
+        return []
+    label = SwitchLabel(done)
     scope = None
     if undoStack is not None:
         import rigExecUndo

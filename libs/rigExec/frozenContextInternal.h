@@ -207,6 +207,25 @@ extern thread_local std::shared_ptr<const void> _lastFrozenSlots;
 
 extern thread_local size_t _lastFrozenSlotBytes;
 
+// Visits the inputs the compose reads beside the avars: each space switch's
+// active index and each auto clavicle's IK/FK blend and dial. They are read
+// live (RigExecIsLiveAvarName), so they must key the frame cache and be
+// patched into a frozen run like any other varying input.
+template <class Impl, class Fn>
+void
+_VisitComposeInputs(Impl &B, Fn &&fn)
+{
+    for (auto &sw : B.spaceSwitches) {
+        fn(sw.activeInput);
+    }
+    for (auto &ac : B.autoClavicles) {
+        fn(ac.ikBlendInput);
+        fn(ac.ikBlendFloat);
+        fn(ac.amountInput);
+        fn(ac.amountFloat);
+    }
+}
+
 // Visits every patchable input in one fixed order. The freeze uses it to
 // capture head paths (UI thread, handles valid there) and the worker uses
 // it to patch constants (side-table keys, no handle dereference); sharing
@@ -236,6 +255,7 @@ _ForEachPatchableInput(Impl &B, Fn &&fn)
     for (auto &object : B.weightObjects) {
         _VisitWeightInputs(object, fn);
     }
+    _VisitComposeInputs(B, fn);
 }
 
 void

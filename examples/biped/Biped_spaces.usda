@@ -15,9 +15,9 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK.avars:space>
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_Skull_offset>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_HipSwivel_offset>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
@@ -31,7 +31,7 @@ over "Biped"
                 uniform token[] rigExec:rotationFilters = ["all", "all", "twist"]
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>,
                     </Biped/Rig/Main/Shot/Aux/Controls/L_ArmIK>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
@@ -45,7 +45,7 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/L_LegIK.avars:space>
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_HipSwivel_offset>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
@@ -87,9 +87,9 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK.avars:space>
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_Skull_offset>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_HipSwivel_offset>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
@@ -103,7 +103,7 @@ over "Biped"
                 uniform token[] rigExec:rotationFilters = ["all", "all", "twist"]
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>,
                     </Biped/Rig/Main/Shot/Aux/Controls/R_ArmIK>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
@@ -117,7 +117,7 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/R_LegIK.avars:space>
                 rel rigExec:sources = [
                     </Biped/Rig/Main/Shot/Aux>,
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_HipSwivel_offset>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
@@ -159,7 +159,7 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:space>
                 uniform token[] rigExec:rotationFilters = ["all", "orient", "orient"]
                 rel rigExec:sources = [
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>,
                     </Biped/Rig/Main/Shot/Aux>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
@@ -173,7 +173,7 @@ over "Biped"
                 rel rigExec:activeSpaceAttribute = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head.avars:space>
                 uniform token[] rigExec:rotationFilters = ["all", "orient", "orient"]
                 rel rigExec:sources = [
-                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck>,
+                    </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Neck_offset>,
                     </Biped/Rig/Main/Shot/Aux>,
                     </Biped/Rig/Main/Shot/Aux/Controls/M_Body>,
                 ]
@@ -355,6 +355,8 @@ over "Biped"
                                 {
                                     over "M_ChestTop"
                                     {
+                                        double3 guide:offset = (-7.442496823010687e-15, -2.842170943040401e-14, -4.098943406916078e-13)
+                                        quatf guide:orient = (-0.5, 0.5, 0.5, -0.5)
                                         custom token guide:shape = "circle"
 
                                         over "L_Shldr"

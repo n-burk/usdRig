@@ -266,6 +266,12 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
             const auto pick = [](size_t count, size_t j) {
                 return count <= 1 ? size_t(0) : j % count;
             };
+            TfToken deltaFrame("local");
+            if (const UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:driverDeltaFrame"))) {
+                a.Get(&deltaFrame);
+            }
+            const bool posedDelta = deltaFrame == "posed";
             bool missing = false;
             const auto measured = [&](const SdfPathVector &ts,
                                       const SdfPathVector &ss,
@@ -284,7 +290,10 @@ _OracleCurveMover(const rigExec::RigExecMoverOracleContext &ctx)
                         missing = true;
                         return m;
                     }
-                    m = rigExec::RigExecMeasureInSpace(m, sp->second);
+                    m = posedDelta
+                            ? rigExec::RigExecMeasureInPosedSpace(
+                                  m, sp->second)
+                            : rigExec::RigExecMeasureInSpace(m, sp->second);
                 }
                 return m;
             };

@@ -377,14 +377,19 @@ public:
     /// layer metadata, for a field other than a value, for a property the
     /// bake named but no step declares, and for an input no reader re-reads.
     /// The caller then bumps the stamp.
-    bool ApplyValueEdits(const UsdNotice::ObjectsChanged &notice);
+    /// \p skipPatchableAvars leaves the transform channels the in-place
+    /// avar patch takes (ApplyAvarValueEdits) to that patch, so one notice
+    /// can carry both: the patch moves those, and this routes the rest.
+    bool ApplyValueEdits(const UsdNotice::ObjectsChanged &notice,
+                         bool skipPatchableAvars = false);
 
     /// The read-only half of ApplyValueEdits: whether it would route
     /// \p notice, and in \p readPaths the property paths the notice names
     /// that anything in the program can read -- the paths a frame cache must
     /// still retire for. A path read by nothing is left out.
     bool DryRunValueEdits(const UsdNotice::ObjectsChanged &notice,
-                          std::vector<SdfPath> *readPaths) const;
+                          std::vector<SdfPath> *readPaths,
+                          bool skipPatchableAvars = false) const;
 
     /// Places the standing interactive overrides for the generations that
     /// follow, returning false when one of them names something the program

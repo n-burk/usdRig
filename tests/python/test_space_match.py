@@ -138,7 +138,7 @@ def TestRotationOnly(session):
     # The auto clavicles off: turning the chest under a world-held arm swings
     # the arm against the chest, which lifts the shoulder by design, and this
     # is about the space alone.
-    turned = {_Attr(CHEST, "avars:rx"): 30.0, _Attr(CHEST, "avars:ry"): -20.0,
+    turned = {_Attr(CHEST, "avars:rz"): -30.0, _Attr(CHEST, "avars:ry"): 20.0,
               _Attr(CT + "/L_Shldr", "avars:autoClav"): 0.0,
               _Attr(CT + "/R_Shldr", "avars:autoClav"): 0.0}
     for control in (SWING, NECK, HEAD):
@@ -158,7 +158,7 @@ def TestRotationOnly(session):
 
 
 def TestParity(baked, dynamic):
-    turned = {_Attr(CHEST, "avars:rx"): 30.0, _Attr(CHEST, "avars:ry"): -20.0,
+    turned = {_Attr(CHEST, "avars:rz"): -30.0, _Attr(CHEST, "avars:ry"): 20.0,
               _Attr(C + "/M_Body", "avars:ry"): 25.0}
     for control in (SWING, NECK, HEAD):
         space = _Attr(control, "avars:space")
@@ -174,14 +174,14 @@ def TestParity(baked, dynamic):
 def TestMatch(session):
     cases = [
         # Rotation-only: the swing posed in local, held in world.
-        (SWING, {_Attr(CHEST, "avars:rx"): 30.0,
+        (SWING, {_Attr(CHEST, "avars:rz"): -30.0,
                  _Attr(SWING, "avars:ry"): 15.0,
                  _Attr(SWING, "avars:space"): 0.0}, 1.0),
-        (HEAD, {_Attr(CHEST, "avars:rz"): 25.0,
+        (HEAD, {_Attr(CHEST, "avars:rx"): -25.0,
                 _Attr(HEAD, "avars:rx"): -10.0,
                 _Attr(HEAD, "avars:space"): 1.0}, 0.0),
         # Full: an IK hand moved in world, carried into the chest.
-        (C + "/L_ArmIK", {_Attr(CHEST, "avars:rx"): 20.0,
+        (C + "/L_ArmIK", {_Attr(CHEST, "avars:rz"): -20.0,
                           _Attr(C + "/L_ArmIK", "avars:tx"): 5.0,
                           _Attr(C + "/L_ArmIK", "avars:rz"): 30.0,
                           _Attr(C + "/L_ArmIK", "avars:space"): 0.0}, 1.0),

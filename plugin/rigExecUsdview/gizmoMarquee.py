@@ -15,7 +15,7 @@
 import sys
 import os
 
-from pxr import Tf, Usd
+from pxr import Gf, Tf, Usd, UsdGeom
 
 try:
     import gizmoMath
@@ -166,6 +166,41 @@ def ScreenPositions(stage, camera, viewport, time, solverPosed=None):
     except Exception:
         return {}
     positions = {}
+    selectable = Selectable(stage, solverPosed)
+    # The evaluated frames the viewport already published, where it has
+    # them: one lookup per control instead of recomposing each from its
+    # avars (~1.3 s for the 570 on Biped_stack, on every release, even for
+    # a band that catches nothing). Anything unpublished is composed below.
+    remaining = []
+    if gizmoMath._HasPublishedControlFrameReader():
+        xformCache = UsdGeom.XformCache(time)
+        assetToWorld = {}
+        for prim, posed in selectable:
+            published = gizmoMath._ReadPublishedControlFrame(
+                stage, prim.GetPath(), time)
+            if published is None:
+                remaining.append((prim, posed))
+                continue
+            root = gizmoMath.FindRigRoot(prim)
+            assetRoot = root.GetParent() if root else None
+            key = assetRoot.GetPath() if assetRoot else None
+            if key not in assetToWorld:
+                assetToWorld[key] = (
+                    xformCache.GetLocalToWorldTransform(assetRoot)
+                    if assetRoot and not assetRoot.IsPseudoRoot()
+                    else Gf.Matrix4d(1.0))
+            world = assetToWorld[key].Transform(
+                Gf.Matrix4d(published).ExtractTranslation())
+            try:
+                screen = gizmoScreen.ProjectPoint(viewProj, viewport, world)
+            except Exception:
+                screen = None
+            if screen is not None:
+                positions[str(prim.GetPath())] = (screen[0], screen[1])
+        if not remaining:
+            return positions
+    else:
+        remaining = selectable
     # ONE frame cache and ONE memo scope for the whole pass. Measured on
     # examples/biped/Biped.usda, the 111 selectable controls cost 0.844 s
     # with a memo per ComputeRigFrames call and 0.262 s inside one scope;
@@ -174,7 +209,7 @@ def ScreenPositions(stage, camera, viewport, time, solverPosed=None):
     # stage never shares the memo, whatever its prim paths.
     frameCache = {}
     with gizmoMath.MemoScope(stage):
-        for prim, posed in Selectable(stage, solverPosed):
+        for prim, posed in remaining:
             try:
                 frames = gizmoMath.ComputeRigFrames(stage, prim, time,
                                                     posed, frameCache)

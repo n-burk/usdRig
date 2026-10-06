@@ -288,7 +288,7 @@ def "Biped"
                 )
                 {
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 7.37)
                 }
 
@@ -299,7 +299,7 @@ def "Biped"
                     double3[] inputs:rotationOffsets = [(0, -0, 0)]
                     double3[] inputs:translationOffsets = [(2.842170943040401e-14, -4.440892098500626e-16, -3.1554436208840472e-30)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 7.92)
                 }
             }
@@ -454,7 +454,7 @@ def "Biped"
                 )
                 {
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/M_BodyGimbal_offset>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 9.57)
                 }
 
@@ -465,7 +465,7 @@ def "Biped"
                     double3[] inputs:rotationOffsets = [(1.2303343823942762e-31, 1.9421187711420675e-30, 7.249699999999991)]
                     double3[] inputs:translationOffsets = [(1.5846190607825008, 0.9132700981663717, -1.262177448353619e-29)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/M_BodyGimbal_offset>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 9.68)
                 }
             }
@@ -478,7 +478,7 @@ def "Biped"
                 {
                     double3 inputs:aimVector = (0.9991133350268364, 0.04210158870580196, 1.615939276553072e-31)
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/spine_mid_follow>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>
                     uniform token rigExec:worldUpType = "none"
                     uniform float2 ui:nodegraph:node:pos = (6.76, 17.49)
                 }
@@ -495,8 +495,8 @@ def "Biped"
                     double3[] inputs:translationOffsets = [(20.69377058701197, 1.2053758519355728, -6.310887241768095e-30), (-13.671227778666179, -1.2681347341515505, -3.1554436208840472e-30)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/spine_mid_follow>
                     rel rigExec:sources = [
-                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal>,
-                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/M_BodyGimbal_offset>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>,
                     ]
                     rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 17.6)
@@ -517,7 +517,7 @@ def "Biped"
                 double inputs:midFollowWeight = 0.5
                 double inputs:minLengthRatio = 0.5
                 double inputs:preserveVolume = 1
-                rel rigExec:endControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop>
+                rel rigExec:endControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_ChestTop_offset>
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def>,
@@ -527,9 +527,9 @@ def "Biped"
                     </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def/spine_ik_spine_4_def/spine_ik_spine_5_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/spine_ik_spine_0_def/spine_ik_spine_1_def/spine_ik_spine_2_def/spine_ik_spine_3_def/spine_ik_spine_4_def/spine_ik_spine_5_def/spine_ik_chest_def>,
                 ]
-                rel rigExec:midControl = </Biped/Rig/Main/Shot/Aux/Controls/spine_mid_follow/M_SpineMid>
+                rel rigExec:midControl = </Biped/Rig/Main/Shot/Aux/Controls/spine_mid_follow/M_SpineMid/M_SpineMid_offset>
                 uniform token rigExec:restLength = "curve"
-                rel rigExec:rootControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal>
+                rel rigExec:rootControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_HipSwivel/M_BodyGimbal/M_BodyGimbal_offset>
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                 uniform float[] rigExec:volumeWeights = [0.1429, 0.2857, 0.4286, 0.5, 0.3571, 0.2143, 0.0714]
                 uniform float2 ui:nodegraph:node:pos = (1.78, 0)
@@ -542,7 +542,7 @@ def "Biped"
                 double inputs:midFollowWeight = 0
                 double inputs:minLengthRatio = 0.5
                 double inputs:preserveVolume = 1
-                rel rigExec:endControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal>
+                rel rigExec:endControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/M_HeadGimbal_offset>
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/neck_ik_neck_0_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/neck_ik_neck_0_def/neck_ik_neck_1_def>,
@@ -552,7 +552,7 @@ def "Biped"
                 ]
                 rel rigExec:midControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/neck_cv1>
                 uniform token rigExec:restLength = "curve"
-                rel rigExec:rootControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck>
+                rel rigExec:rootControl = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Neck_offset>
                 uniform token rigExec:rootTangent = "aim"
                 rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                 uniform float[] rigExec:volumeWeights = [0.16, 0.32, 0.4, 0.24, 0.08]
@@ -583,13 +583,21 @@ def "Biped"
                             )
                             {
                                 color3f guide:displayColor = (0, 1, 0)
+                                double3 guide:offset = (-4.688456928093035e-15, 3.411080806032899, 0.8995543101957417)
+                                quatf guide:orient = (-0.49755126, 0.5024368, 0.49755126, -0.5024368)
                                 uniform token guide:planeNormal = "X"
                                 double guide:scaleX = 0.843496
                                 double guide:scaleY = 21.086393339645277
                                 double guide:scaleZ = 21.0874
                                 uniform token guide:shape = "circle"
-                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                                matrix4d rest:space = ( (-2.105808412456409e-16, 2.3294489145054166e-16, -1, 0), (0.9999522624716787, -0.009771017233199402, -2.243101136131641e-16, 0), (-0.009771017233199616, -0.9999522624716783, -2.307641695759271e-16, 0), (-3.4021284087991717, 0.9328410970359657, -3.7157321015673504e-15, 1) )
                                 uniform float2 ui:nodegraph:node:pos = (0.36, 3.41)
+
+                                def RigExecJoint "M_SpineMid_offset"
+                                {
+                                    uniform token purpose = "guide"
+                                    matrix4d rest:space = ( (-2.220446049250313e-16, 0.9999522624716783, -0.009771017233199415, 0), (2.329448914505416e-16, -0.009771017233199616, -0.9999522624716786, 0), (-1, -2.1284689718551697e-16, -2.308761822083959e-16, 0), (-4.688456928093035e-15, 3.411080806032899, 0.8995543101957417, 1) )
+                                }
                             }
                         }
 
@@ -624,9 +632,11 @@ def "Biped"
                                     prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                                 )
                                 {
+                                    token avars:rotationOrder = "XZY"
                                     double default:ty = 0
                                     color3f guide:displayColor = (0, 1, 0)
-                                    double3 guide:offset = (0.000700000000000145, 8.33545, 1.9693999999999994)
+                                    double3 guide:offset = (-1.9694000000000023, -8.331629337726836, -0.08819621500400604)
+                                    quatf guide:orient = (-0.0015186067, 0.70710516, 0.0015186067, -0.70710516)
                                     double guide:scaleX = 12.51974717154148
                                     double guide:scaleY = 1.8779620757312219
                                     double guide:scaleZ = 14.685802781581886
@@ -634,35 +644,38 @@ def "Biped"
                                     custom double pivot:arcLength = 34.38562920764963
                                     custom double pivot:height = 3.5
                                     custom double pivot:restOffset = 12.03497022267737
-                                    matrix4d rest:space = ( (2.210888176518999e-16, 0.004295258541734124, -0.9999907753344827, 0), (2.229962956237863e-16, -0.9999907753344824, -0.004295258541802193, 0), (-1.0000000000000002, -2.2204460492503128e-16, -2.2204460492506055e-16, 0), (-4.0118694552953514e-15, 18.46232862749214, -0.39447484356492746, 1) )
+                                    matrix4d rest:space = ( (1, 0, 0, 0), (1.0009808626988998e-33, 1, 0, 0), (0, 0, 1, 0), (7.468735901157109e-16, 18.458587863638144, -0.34278153491563756, 1) )
                                     uniform float2 ui:nodegraph:node:pos = (0.54, 0.22)
 
                                     def RigExecControl "M_ChestTop" (
                                         prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                                     )
                                     {
-                                        matrix4d default:space = ( (-2.2204460492503126e-16, 1.0000000000000002, -8.326672684688674e-17, 0), (2.220446049250313e-16, -8.326672684688674e-17, -1.0000000000000002, 0), (-1.0000000000000004, -2.2204460492503136e-16, -2.220446049250313e-16, 0), (-7.44249682301069e-15, 129.00817523124906, -3.3208493124320233, 1) )
+                                        token avars:rotationOrder = "XZY"
+                                        matrix4d default:space = ( (1.0000000000000004, -1.2506992058970083e-17, -1.4427619974523446e-17, 0), (-4.1053534415116354e-21, 1.0000000000000002, 4.811146140242831e-17, 0), (9.557784563211523e-19, -2.0185834519550184e-16, 1.0000000000000004, 0), (0, 129.00817523124908, -3.3208493124316134, 1) )
                                         color3f guide:displayColor = (0, 0.275, 0.098)
                                         uniform token guide:planeNormal = "X"
                                         double guide:scaleX = 0.7247239999999999
                                         double guide:scaleY = 18.1181
                                         double guide:scaleZ = 18.1181
                                         uniform token guide:shape = "circle"
-                                        matrix4d rest:space = ( (0.004295258541802276, -0.9999907753344827, -6.16297582203673e-33, 0), (0.9999907753344824, 0.0042952585417342076, 2.9261809203041907e-29, 0), (-2.9286461106330063e-29, -8.685944049186434e-32, 1.0000000000000002, 0), (4.440892098500626e-16, -12.034970222677345, 3.1554436208840472e-30, 1) )
+                                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 12.038599967956543, 0, 1) )
                                         uniform float2 ui:nodegraph:node:pos = (0.72, 0.33)
 
                                         def RigExecControl "M_Neck" (
                                             prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                                         )
                                         {
+                                            token avars:rotationOrder = "XZY"
                                             custom double avars:space = 0
                                             color3f guide:displayColor = (1, 1, 0.388)
-                                            double3 guide:offset = (0, 3.61875, 0.76485)
+                                            double3 guide:offset = (-0.7648500000000095, 0.3072775311274787, -3.605680529576511)
+                                            quatf guide:orient = (-0.5207957, 0.478301, 0.5207957, -0.478301)
                                             double guide:scaleX = 1.137846518437559
                                             double guide:scaleY = 7.585643456250394
                                             double guide:scaleZ = 8.85084686279298
                                             uniform token guide:shape = "cube"
-                                            matrix4d rest:space = ( (0.9963884019553996, -0.08491261654645385, 4.0059342843254506e-32, 0), (0.08491261654645385, 0.9963884019553996, -4.930380657631324e-32, 0), (1.8488927466117467e-32, 2.465190328815662e-32, 1, 0), (16.085511310858664, 3.667403976722253, 0, 1) )
+                                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 16.085511310858635, -3.6674039767222553, 1) )
                                             uniform float2 ui:nodegraph:node:pos = (0.9, 0.44)
 
                                             def RigExecControl "neck_cv1" (
@@ -672,7 +685,7 @@ def "Biped"
                                                 double guide:scaleX = 0
                                                 double guide:scaleY = 0
                                                 double guide:scaleZ = 0
-                                                matrix4d rest:space = ( (1, 1.3877787807814457e-17, -1.232595164407831e-32, 0), (-1.3877787807814457e-17, 1, -2.465190328815662e-32, 0), (2.7733391199176196e-32, -2.465190328815662e-32, 1, 0), (4.595400000000012, 3.552713678800501e-15, 6.310887241768095e-30, 1) )
+                                                matrix4d rest:space = ( (-2.4017412458128773e-16, 0.9963884019553997, 0.0849126165464537, 0), (2.0334095583488166e-16, 0.08491261654645356, -0.9963884019553995, 0), (-1, -2.345515969840014e-16, -2.364722248995546e-16, 0), (-1.12999954696157e-14, 4.5788032623458435, 0.3902074380771614, 1) )
                                                 uniform float2 ui:nodegraph:node:pos = (1.08, 0.77)
                                             }
 
@@ -680,9 +693,11 @@ def "Biped"
                                                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                                             )
                                             {
+                                                token avars:rotationOrder = "XZY"
                                                 double default:ty = 0
                                                 color3f guide:displayColor = (1, 1, 0.388)
-                                                double3 guide:offset = (-0.0001499999999996504, 13.37555, -5.8368)
+                                                double3 guide:offset = (5.836799999999991, -13.320683710111695, -1.2064047993736176)
+                                                quatf guide:orient = (-0.031926006, 0.7063857, 0.031926006, -0.7063857)
                                                 double guide:scaleX = 1.1836955458964438
                                                 double guide:scaleY = 7.891303639309626
                                                 double guide:scaleZ = 9.336287319660201
@@ -690,25 +705,56 @@ def "Biped"
                                                 custom double pivot:arcLength = 14.390886949888564
                                                 custom double pivot:height = 3.5
                                                 custom double pivot:restOffset = 5.036810432460998
-                                                matrix4d rest:space = ( (0.005316079736792531, 0.9999858695482813, -3.697785493223493e-31, 0), (-0.9999858695482812, 0.00531607973679421, -4.622231866529366e-32, 0), (-8.011868568650901e-32, 3.697785493223493e-31, 0.9999999999999998, 0), (9.3533607399456, -0.04972391412191968, 9.466330862652142e-30, 1) )
+                                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 9.31501133522275, 0.8437312676544586, 1) )
                                                 uniform float2 ui:nodegraph:node:pos = (1.08, 0.55)
 
                                                 def RigExecControl "M_HeadGimbal" (
                                                     prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                                                 )
                                                 {
-                                                    matrix4d default:space = ( (-2.2204460492503128e-16, 1.0000000000000002, -9.71445146547012e-17, 0), (2.220446049250313e-16, -9.71445146547012e-17, -1.0000000000000002, 0), (-1.0000000000000004, -2.2204460492503136e-16, -2.220446049250313e-16, 0), (-1.3670373929937247e-14, 159.42531946992028, -5.690128533039568, 1) )
+                                                    matrix4d default:space = ( (1.0000000000000004, -1.250699205896964e-17, -1.442761997452379e-17, 0), (-4.1053534423498e-21, 1, 2.0938136313661976e-15, 0), (9.55778456321522e-19, -1.9156206524324337e-15, 1.0000000000000002, 0), (-2.80308366608453e-18, 154.40869787733044, -6.144522021499409, 1) )
                                                     color3f guide:displayColor = (0.894, 0.675, 0.475)
-                                                    double3 guide:offset = (0, 23.2539, -1.646)
+                                                    double3 guide:offset = (1.6459999999999912, 5.016621592589797, -22.799506511540173)
+                                                    quatf guide:orient = (-0.5, 0.5, 0.5, -0.5)
                                                     double guide:scaleX = 9.09822057327964
                                                     double guide:scaleY = 1.364733085991946
                                                     double guide:scaleZ = 10.460905480384842
                                                     uniform token guide:shape = "cube"
-                                                    matrix4d rest:space = ( (0.09020829688643732, -0.995922920296972, -3.0814879110195527e-33, 0), (0.9959229202969718, 0.09020829688643563, 3.697785493223493e-31, 0), (-3.697785493223493e-31, -2.1570415377137042e-32, 1.0000000000000002, 0), (0, -5.03681043246101, -9.466330862652142e-30, 1) )
+                                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
                                                     uniform float2 ui:nodegraph:node:pos = (1.26, 0.66)
+
+                                                    def RigExecJoint "M_HeadGimbal_offset"
+                                                    {
+                                                        uniform token purpose = "guide"
+                                                        matrix4d rest:space = ( (-2.2204049957158933e-16, 1.0000000000000002, -2.19136758045793e-15, 0), (2.2300038338135273e-16, -2.012765167087135e-15, -1, 0), (-1, -2.345515969840015e-16, -2.3647222489955456e-16, 0), (-1.3667984550773395e-14, 5.016621592589843, 0.4543934884598304, 1) )
+                                                    }
+                                                }
+
+                                                def RigExecJoint "M_Head_offset"
+                                                {
+                                                    uniform token purpose = "guide"
+                                                    matrix4d rest:space = ( (2.0206129773833469e-16, 0.09020829688643542, -0.995922920296972, 0), (2.412517075473902e-16, -0.9959229202969723, -0.09020829688643511, 0), (-1, -2.345515969840015e-16, -2.3647222489955495e-16, 0), (-1.2452845433349676e-14, 0.000346637711004405, 0.000031397607694216845, 1) )
                                                 }
                                             }
+
+                                            def RigExecJoint "M_Neck_offset"
+                                            {
+                                                uniform token purpose = "guide"
+                                                matrix4d rest:space = ( (-2.401741245812878e-16, 0.9963884019553997, 0.08491261654645371, 0), (2.0334095583488166e-16, 0.08491261654645357, -0.9963884019553995, 0), (-1, -2.3455159698400144e-16, -2.364722248995546e-16, 0), (-1.0196299297514843e-14, 0, -4.0945025148175773e-13, 1) )
+                                            }
                                         }
+
+                                        def RigExecJoint "M_ChestTop_offset"
+                                        {
+                                            uniform token purpose = "guide"
+                                            matrix4d rest:space = ( (-2.2204049957158965e-16, 1, -1.31378188249315e-16, 0), (2.2300038338135234e-16, -2.851250720423885e-16, -0.9999999999999999, 0), (-1, -2.3455159698400144e-16, -2.364722248995546e-16, 0), (-7.442496823010687e-15, -2.842170943040401e-14, -4.098943406916078e-13, 1) )
+                                        }
+                                    }
+
+                                    def RigExecJoint "M_Chest_offset"
+                                    {
+                                        uniform token purpose = "guide"
+                                        matrix4d rest:space = ( (2.220446049250313e-16, 0.004295258541768215, -0.9999907753344826, 0), (2.2299629562378624e-16, -0.9999907753344827, -0.0042952585417681596, 0), (-1, -2.345515969840014e-16, -2.364722248995839e-16, 0), (-4.758743045411063e-15, 0.003740763853997464, -0.05169330864928989, 1) )
                                     }
                                 }
                             }
@@ -717,9 +763,11 @@ def "Biped"
                                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                             )
                             {
+                                token avars:rotationOrder = "XZY"
                                 double default:ty = 0
                                 color3f guide:displayColor = (0, 1, 0)
-                                double3 guide:offset = (0, -4.01435, 0)
+                                double3 guide:offset = (-1.5706984319098405e-15, -4.018053732817977, 0.034450637521997465)
+                                quatf guide:orient = (-0.70710516, -0.0015186067, 0.70710516, 0.0015186067)
                                 uniform token guide:planeNormal = "Y"
                                 double guide:scaleX = 20.188613765072798
                                 double guide:scaleY = 0.84146
@@ -728,23 +776,35 @@ def "Biped"
                                 custom double pivot:arcLength = 34.38562920764963
                                 custom double pivot:height = 3.5
                                 custom double pivot:restOffset = 12.03497022267737
-                                matrix4d rest:space = ( (-2.2108881765185417e-16, -0.004295258541804385, 0.9999907753344822, 0), (-2.229962956237863e-16, 0.9999907753344824, 0.004295258541802193, 0), (-1, -2.2204460492503136e-16, -2.2204460492503047e-16, 0), (-2.465883611247187e-15, 10.347659204102541, 0.7576933086492899, 1) )
+                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10.351399967956539, 0.706, 1) )
                                 uniform float2 ui:nodegraph:node:pos = (0.36, 1.98)
 
                                 def RigExecControl "M_BodyGimbal" (
                                     prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
                                 )
                                 {
-                                    matrix4d default:space = ( (-2.4829014076981426e-16, 0.9920056104423742, 0.12619377500832948, 0), (1.9224884693836868e-16, 0.12619377500832948, -0.9920056104423742, 0), (-1.0000000000000004, -2.2204460492503136e-16, -2.220446049250313e-16, 0), (2.178701663524407e-16, 94.6565, -3.4684000000000004, 1) )
+                                    matrix4d default:space = ( (1.0000000000000004, -3.4512664603419266e-31, -2.9582283945787943e-31, 0), (-4.105353449227681e-21, 1.0000000000000002, -2.1724111114494115e-15, 0), (9.557784563586478e-19, 2.238402322319707e-15, 1.0000000000000002, 0), (-6.817061425295165e-19, 96.34370000000001, -4.174399999999977, 1) )
                                     color3f guide:displayColor = (1, 0.69, 0.69)
-                                    double3 guide:offset = (0, -3.9378, 33.96825)
+                                    double3 guide:offset = (-33.96825, -2.1841258472278344, 4.612319692799945)
                                     uniform token guide:planeNormal = "X"
                                     double guide:scaleX = 0.14136400000000005
                                     double guide:scaleY = 3.50579742758387
                                     double guide:scaleZ = 3.534100000000001
                                     uniform token guide:shape = "circle"
-                                    matrix4d rest:space = ( (0.12193169034119633, 0.9925384944124531, 1.232595164407831e-32, 0), (-0.9925384944124531, 0.12193169034119412, -8.38164711797325e-31, 0), (-7.395570986446986e-31, 1.1497801767991798e-31, 1.0000000000000004, 0), (0, -12.034970222677373, 0, 1) )
+                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -10.351399967956539, -0.706, 1) )
                                     uniform float2 ui:nodegraph:node:pos = (0.54, 2.09)
+
+                                    def RigExecJoint "M_BodyGimbal_offset"
+                                    {
+                                        uniform token purpose = "guide"
+                                        matrix4d rest:space = ( (-2.484066815276392e-16, 0.9920056104423738, 0.12619377500833157, 0), (1.9319750259946584e-16, 0.12619377500833168, -0.9920056104423738, 0), (-1, -2.2204460492503116e-16, -2.2204460492503205e-16, 0), (2.1787016635244138e-16, -1.6872000000000185, 0.7059999999999733, 1) )
+                                    }
+                                }
+
+                                def RigExecJoint "M_HipSwivel_offset"
+                                {
+                                    uniform token purpose = "guide"
+                                    matrix4d rest:space = ( (-2.220446049250313e-16, -0.004295258541804383, 0.9999907753344823, 0), (-2.229962956237863e-16, 0.9999907753344823, 0.004295258541804383, 0), (-1, -2.220446049250313e-16, -2.220446049250313e-16, 0), (-2.465883611247187e-15, -0.003740763853997464, 0.05169330864928989, 1) )
                                 }
                             }
                         }

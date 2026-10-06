@@ -177,11 +177,11 @@ _MENU_RANK = "rigExecMenuRank"
 # warms. The flush samples the whole neighbor+sweep band synchronously on
 # the UI thread (benchCommitLag: ~136 ms on the biped, ~121 ms of it the
 # per-frame sampling), so firing it on the next event-loop turn put that
-# freeze inside every gizmo release and every undo/redo. A short idle
-# delay keeps the gesture responsive -- the release's own repaint lands
-# first -- while a pause in editing still warms the held playhead with no
-# scrub. Must stay positive: zero puts the burst back inside the gesture.
-_WARMING_COMMIT_DELAY_MS = 120
+# freeze inside every gizmo release and every undo/redo. The delay keeps
+# warming out of a run of edits -- picker clicks, drags, Avar Editor
+# scrubs a moment apart -- and warms the held playhead once the animator
+# pauses. Must stay positive: zero puts the burst back inside the gesture.
+_WARMING_COMMIT_DELAY_MS = 500
 
 
 # How often the recurring idle driver re-queries the warm range at a held

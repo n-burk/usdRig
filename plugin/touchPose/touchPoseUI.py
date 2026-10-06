@@ -255,6 +255,15 @@ def GizmoDragging(usdviewApi=None):
         return False
 
 
+def _PreviewModule():
+    """gizmoPreview, or None in a session without the viewport tools."""
+    try:
+        import gizmoPreview
+        return gizmoPreview
+    except ImportError:
+        return None
+
+
 def GizmoOwns(x, y, ratio=1.0, usdviewApi=None):
     """True when `usdviewApi`'s session's viewport gizmo (without an api:
     the current session's) would take a press at this pixel.
@@ -511,6 +520,10 @@ class TouchPoseController(QtCore.QObject,
         self._timeQuiet.setInterval(TIME_QUIET_MS)
         self._timeQuiet.timeout.connect(self._OnTimeQuiet)
         self._frameSignal = None
+        # Previewed edits -- an avar slider or scrub, a picker dial -- go
+        # to Hydra through gizmoPreview without moving the timeline or the
+        # gizmo, so they are heard as a listener and treated like a scrub.
+        self._previewListening = False
         # See `_HoverSoon`: the mouse reports far faster than the
         # highlight can usefully change.
         self._lastHover = 0
@@ -709,8 +722,10 @@ class TouchPoseController(QtCore.QObject,
             self.SyncSelection()
             self._dragPoll.start()
             self._ConnectFrames(True)
+            self._ConnectPreview(True)
         else:
             self._ConnectFrames(False)
+            self._ConnectPreview(False)
             self._timeQuiet.stop()
             self._timeBusy = False
             self._dragPoll.stop()
@@ -1309,6 +1324,29 @@ class TouchPoseController(QtCore.QObject,
                 pass
             self._frameSignal = None
 
+    def _ConnectPreview(self, on):
+        preview = _PreviewModule()
+        if preview is None or on == self._previewListening:
+            return
+        if on:
+            preview.AddListener(self._OnPreview)
+        else:
+            preview.RemoveListener(self._OnPreview)
+        self._previewListening = on
+
+    def _OnPreview(self, pending):
+        """A previewed edit sample (or its end, `pending` None): dark while
+        values are being driven, back on once they have been still a
+        moment -- the same quiet rule as the timeline. An end with no
+        samples before it (a selection change drops the preview too) is
+        not an edit and suspends nothing."""
+        if pending is None:
+            if self._timeBusy:
+                self._timeQuiet.start()
+            self._PollDrag()
+            return
+        self._OnFrameChanged()
+
     def _OnFrameChanged(self, *args):
         """The timeline moved: dark until it has been still a moment."""
         self._timeBusy = True
@@ -1322,13 +1360,16 @@ class TouchPoseController(QtCore.QObject,
     def _PollDrag(self):
         """Stand TouchPose down while the rig is being moved.
 
-        A gizmo drag, playback and a scrub all turn every highlight off --
+        A gizmo drag, an open edit preview (an avar slider held still
+        included), playback and a scrub all turn every highlight off --
         hover, lead and selection -- and the picking with them, and turn
         them back on as they were once the rig is still.
         """
         if not self._active or self._model is None:
             return
-        dragging = GizmoDragging() or self._timeBusy
+        preview = _PreviewModule()
+        dragging = (GizmoDragging() or self._timeBusy or
+                    (preview is not None and preview.IsPreviewing()))
         if dragging == self._suspended:
             return
         self._suspended = dragging

@@ -17,6 +17,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/taskListCache.h"
 
+#include "pxr/base/gf/quatf.h"
 #include "pxr/usd/usd/notice.h"
 
 #include <atomic>
@@ -557,6 +558,8 @@ private:
         GfVec3d scale;
         double wireWidth = 0.05;
         GfVec3d offset = GfVec3d(0.0);
+        /// guide:orient -- the shape's rotation in the control's frame.
+        GfQuatf orient = GfQuatf(1.0f);
         bool radiusReady = false;
         bool radiusLive = false;
         double radius = 1.0;

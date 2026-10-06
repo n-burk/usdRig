@@ -496,7 +496,7 @@ def testUsdviewInputFunction(appController):
     _Check(space_button.attr_target.get("enum") == ["local", "world", "hips"],
            "offering local / world / hips: %s"
            % space_button.attr_target.get("enum"))
-    posed = {ct + ".avars:rx": 30.0, swing + ".avars:ry": 15.0,
+    posed = {ct + ".avars:rz": -30.0, swing + ".avars:ry": 15.0,
              swing + ".avars:space": 0.0}
     for path, value in posed.items():
         attr = stage.GetAttributeAtPath(path)

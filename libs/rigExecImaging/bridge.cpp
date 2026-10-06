@@ -7,6 +7,8 @@
 #include "rigExecMath/curvenet.h"
 #include "rigExec/frameCacheSparsity.h"
 
+#include "pxr/base/gf/quatd.h"
+#include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
@@ -1292,6 +1294,7 @@ RigExecImagingBridge::_FillControlGuides(
             inputs.scale = GfVec3d(1.0, 1.0, 1.0);
             inputs.wireWidth = 0.05;
             inputs.offset = GfVec3d(0.0);
+            inputs.orient = GfQuatf(1.0f);
             bool live = false;
             if (prim) {
                 if (UsdAttribute a =
@@ -1327,6 +1330,11 @@ RigExecImagingBridge::_FillControlGuides(
                 if (UsdAttribute a =
                         prim.GetAttribute(TfToken("guide:offset"))) {
                     a.Get(&inputs.offset, pose.time);
+                    live = live || _GuideAttrIsLive(a);
+                }
+                if (UsdAttribute a =
+                        prim.GetAttribute(TfToken("guide:orient"))) {
+                    a.Get(&inputs.orient, pose.time);
                     live = live || _GuideAttrIsLive(a);
                 }
             }
@@ -1383,6 +1391,15 @@ RigExecImagingBridge::_FillControlGuides(
                                 inputs.offset[1] * evaluatedScale[1],
                                 inputs.offset[2] * evaluatedScale[2]);
             guideFrame = GfMatrix4d(1.0).SetTranslate(local) * placement;
+        }
+        // guide:orient turns the shape in that same local frame, after it
+        // is sized and before it is offset: S * R * T(offset) * placement.
+        const GfQuatd orient(inputs.orient);
+        if (orient != GfQuatd(1.0) && std::isfinite(orient.GetReal()) &&
+            orient.GetLength() > 1e-12) {
+            GfMatrix4d rotate(1.0);
+            rotate.SetRotate(GfRotation(orient.GetNormalized()));
+            guideFrame = rotate * guideFrame;
         }
         published.controlGuideFrame = guideFrame;
         published.controlGuideShape = shape;
@@ -2228,6 +2245,10 @@ RigExecImagingBridge::_ServeCachedPose(
 {
     _frameCache->NoteProvenanceAlias(key, time);
     RigExecRigPose cached = pose;
+    // A warmed frame never ran Evaluate's projector pass, and the dials it
+    // packs are not part of the cache key: apply it at serve time, from the
+    // current stage and overrides.
+    _evaluator->ApplySurfaceProjectors(&cached, time);
     const bool verify = RigExecFrameCacheVerifyRequested();
     if (verify) {
         // Shadow mode: prove the hit against a live evaluation, the same

@@ -1329,8 +1329,8 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float2[] inputs:keys = [(-40, -0.39057696), (0, 0)]
-                    float2[] inputs:tangents = [(0.015642693, 0.015772598), (0, 0)]
+                    float2[] inputs:keys = [(-0, 0), (40, -0.39057696)]
+                    float2[] inputs:tangents = [(-0, -0), (-0.015772598, -0.015642693)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/ear_r_auto/R_Ear.face:jawTerm>
                     uniform token rigExec:operation = "curve"
                 }
@@ -1639,8 +1639,8 @@ def "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    float2[] inputs:keys = [(-40, -0.39057696), (0, 0)]
-                    float2[] inputs:tangents = [(0.015642693, 0.015772598), (0, 0)]
+                    float2[] inputs:keys = [(-0, 0), (40, -0.39057696)]
+                    float2[] inputs:tangents = [(-0, -0), (-0.015772598, -0.015642693)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/ear_l_auto/L_Ear.face:jawTerm>
                     uniform token rigExec:operation = "curve"
                 }
@@ -2069,9 +2069,9 @@ def "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/chin_auto/M_Chin>
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/chin_auto/M_Chin/M_Chin_offset>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/cheeks/chin_cluster>
                 }
@@ -2149,7 +2149,7 @@ def "Biped"
 
                                 def "M_Chest"
                                 {
-                                    double3 guide:offset = (0.000700000000000145, 8.33545, 1.9693999999999994)
+                                    double3 guide:offset = (-1.9694000000000023, -8.331629337726836, -0.08819621500400604)
 
                                     def "M_ChestTop"
                                     {
@@ -2159,15 +2159,15 @@ def "Biped"
                                         def "M_Neck"
                                         {
                                             custom double avars:space = 0
-                                            double3 guide:offset = (0, 3.61875, 0.76485)
+                                            double3 guide:offset = (-0.7648500000000095, 0.3072775311274787, -3.605680529576511)
 
                                             def "M_Head"
                                             {
-                                                double3 guide:offset = (-0.0001499999999996504, 13.37555, -5.8368)
+                                                double3 guide:offset = (5.836799999999991, -13.320683710111695, -1.2064047993736176)
 
                                                 def "M_HeadGimbal"
                                                 {
-                                                    double3 guide:offset = (0, 23.2539, -1.646)
+                                                    double3 guide:offset = (1.6459999999999912, 5.016621592589797, -22.799506511540173)
 
                                                     def "skull_follow"
                                                     {
@@ -2925,20 +2925,27 @@ def "Biped"
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
                                                                         uniform token purpose = "default"
-                                                                        matrix4d rest:space = ( (0.9999999999999982, -4.417472613038524e-9, 7.262911686958621e-10, 0), (-4.417408164592831e-9, 0.9999999999998579, -4.281041289433954e-9, 0), (7.262959752798423e-10, -4.280906313202441e-9, 0.9999999999999971, 0), (2.1465936559112282e-8, -5.149599963151616, -7.914199973138153, 1) )
+                                                                        matrix4d rest:space = ( (-1.0000000000000002, 2.9155929381727473e-16, 1.6511232861504354e-15, 0), (9.294698871885958e-17, 1.0000000000000002, -1.9940183919466613e-15, 0), (-1.6026453334236029e-15, -1.729169335218912e-15, -0.9999999999999999, 0), (-2.14664598403552e-8, -5.149599963150536, 7.9141999731381905, 1) )
 
                                                                         def RigExecControl "M_Chin" (
                                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                                         )
                                                                         {
                                                                             color3f guide:displayColor = (0, 0, 1)
-                                                                            double3 guide:offset = (0.006900000000000017, -1.3414000000000001, -3.0650500000000003)
+                                                                            double3 guide:offset = (-0.006900021466456041, -1.3413999631504823, 3.065049973138197)
+                                                                            quatf guide:orient = (-8.1344216e-16, 9.612657e-17, 1, -9.293674e-16)
                                                                             double guide:scaleX = 0.4082
                                                                             double guide:scaleY = 0.3982
                                                                             double guide:scaleZ = 0.39364999999999983
                                                                             uniform token guide:shape = "box"
                                                                             uniform token purpose = "default"
-                                                                            matrix4d rest:space = ( (1, 8.271804892935113e-25, 2.396877193094818e-25, 0), (1.2336573761827792e-31, 1, 8.67361737988453e-19, 0), (-1.3629021669606323e-25, 1.387778780781448e-17, 1, 0), (1.7341985901747728e-22, 2.842170943040401e-14, 0, 1) )
+                                                                            matrix4d rest:space = ( (-0.9999999999999998, 2.9155929381727177e-16, -1.6511232861504362e-15, 0), (9.294698874896479e-17, 0.9999999999999998, -1.9891855483165163e-15, 0), (1.6026453334236027e-15, -1.7291693352189124e-15, -1.0000000000000002, 0), (-2.1466460809565126e-8, -3.6849485240963986e-8, -2.6861805224598356e-8, 1) )
+
+                                                                            def RigExecJoint "M_Chin_offset"
+                                                                            {
+                                                                                uniform token purpose = "guide"
+                                                                                matrix4d rest:space = ( (-1.0000000000000002, 2.915592938172746e-16, 1.6511232860141455e-15, 0), (9.294698871885946e-17, 1.0000000000000007, -2.0182868047508683e-15, 0), (-1.6026453332873125e-15, -1.6991830387809998e-15, -0.9999999999999998, 0), (-2.146646080956534e-8, 3.6849513662673417e-8, -2.6861805224598356e-8, 1) )
+                                                                            }
                                                                         }
                                                                     }
                                                                 }

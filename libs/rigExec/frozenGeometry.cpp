@@ -584,13 +584,24 @@ _FrozenAssembleWire(
         const auto pick = [](size_t count, size_t j) {
             return count <= 1 ? size_t(0) : j % count;
         };
+        // rigExec:driverDeltaFrame, sampled as live reads it.
+        bool posedDelta = false;
+        if (const RigExecSampledInput *sample =
+                findSample("driverDeltaFrame")) {
+            TfToken frame;
+            if (sample->hasValue && _SampleHolds(sample->value, &frame)) {
+                posedDelta = frame == TfToken("posed");
+            }
+        }
         const auto measured = [&](size_t first, size_t count,
                                   size_t spaceFirst, size_t spaceCount,
                                   size_t j) {
             GfMatrix4d m = (*table)[first + pick(count, j)];
             if (spaceCount > 0) {
-                m = RigExecMeasureInSpace(
-                    m, (*table)[spaceFirst + pick(spaceCount, j)]);
+                const GfMatrix4d &space =
+                    (*table)[spaceFirst + pick(spaceCount, j)];
+                m = posedDelta ? RigExecMeasureInPosedSpace(m, space)
+                               : RigExecMeasureInSpace(m, space);
             }
             return m;
         };

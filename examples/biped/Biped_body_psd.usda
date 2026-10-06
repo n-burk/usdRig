@@ -922,7 +922,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [54.902538431629154, 3.98850543382323, 2.0725859612195086]
+                    double[] rigExec:poseControlValues = [-0.00503075436371474, 55.143830869204784, 0.009634444763595694]
                     uniform token rigExec:poseType = "twist"
                     quatf rigExec:rotation = (0.8870108, 0.4589365, 0.050882734, -3.3653635e-15)
                     float rigExec:rotationRadius = 0.9549359
@@ -942,7 +942,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-54.90253843162916, -3.9885054338232173, 2.072585961219516]
+                    double[] rigExec:poseControlValues = [-0.0050307543637063135, -55.1438308692048, -0.009634444763610006]
                     uniform token rigExec:poseType = "twist"
                     quatf rigExec:rotation = (0.8870108, -0.4589365, -0.050882734, -3.4208747e-15)
                     float rigExec:rotationRadius = 0.9549359
@@ -993,7 +993,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [-5.778369441205374, 49.754012813568394, -2.681195677761657]
+                    double[] rigExec:poseControlValues = [-1.487812199314676, -3.175861294805777, -50.19504954856013]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (0.90630776, -0.03588562, 0.42109194, -5.551115e-17)
                     float rigExec:rotationRadius = 0.5215786
@@ -1013,7 +1013,7 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:ry>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>,
                     ]
-                    double[] rigExec:poseControlValues = [5.778369441205388, -49.754012813568394, -2.6811956777616754]
+                    double[] rigExec:poseControlValues = [-1.4878121993147055, 3.175861294805813, 50.195049548560135]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (0.90630776, 0.03588562, -0.42109194, -2.7755576e-17)
                     float rigExec:rotationRadius = 0.5215786
@@ -1028,8 +1028,11 @@ over "Biped"
                     bool inputs:enabled = 1
                     float outputs:weight = 0
                     float rigExec:falloff = 0.3
-                    rel rigExec:poseControls = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>
-                    double[] rigExec:poseControlValues = [-49.999993010194196]
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rx>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [49.99999301019419, 1.5179538742097274e-14]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (0.90630776, 0, 0, -0.42261827)
                     float rigExec:rotationRadius = 0.5235988
@@ -1044,8 +1047,11 @@ over "Biped"
                     bool inputs:enabled = 1
                     float outputs:weight = 0
                     float rigExec:falloff = 0.3
-                    rel rigExec:poseControls = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>
-                    double[] rigExec:poseControlValues = [49.999993010194196]
+                    rel rigExec:poseControls = [
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rx>,
+                        </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck.avars:rz>,
+                    ]
+                    double[] rigExec:poseControlValues = [-49.99999301019419, -5.5785176631179374e-15]
                     uniform token rigExec:poseType = "swing"
                     quatf rigExec:rotation = (0.90630776, 0, 0, 0.42261827)
                     float rigExec:rotationRadius = 0.5235988

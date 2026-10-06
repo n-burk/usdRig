@@ -178,7 +178,7 @@ def "Biped"
                     uniform token rigExec:pointFrame = "rest"
                     custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/tongue_curl_l>
                     token rigExec:transformReadPhase = "final"
-                    custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/mouth/tongue_curl_l_on_tongue_geo>
                 }
@@ -191,7 +191,7 @@ def "Biped"
                     uniform token rigExec:pointFrame = "rest"
                     custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/tongue_curl_r>
                     token rigExec:transformReadPhase = "final"
-                    custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/mouth/tongue_curl_r_on_tongue_geo>
                 }
@@ -960,7 +960,7 @@ def "Biped"
                     rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/head_low_squetch>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_LoFace_offset>
                     uniform token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/headSquetch/head_low_cluster_teeth_upper_geo>
                 }
@@ -974,7 +974,7 @@ def "Biped"
                     rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/head_low_squetch>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_LoFace_offset>
                     uniform token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/headSquetch/head_low_cluster_teeth_lower_geo>
                 }
@@ -988,7 +988,7 @@ def "Biped"
                     rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/head_low_squetch>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_LoFace_offset>
                     uniform token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/headSquetch/head_low_cluster_gums_upper_geo>
                 }
@@ -1002,7 +1002,7 @@ def "Biped"
                     rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/head_low_squetch>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_LoFace_offset>
                     uniform token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/headSquetch/head_low_cluster_gums_lower_geo>
                 }
@@ -1016,7 +1016,7 @@ def "Biped"
                     rel rigExec:space = </Biped/Rig/Main/Shot/Aux>
                     rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/head_low_squetch>
                     uniform token rigExec:transformReadPhase = "final"
-                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace>
+                    rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_LoFace_offset>
                     uniform token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/headSquetch/head_low_cluster_tongue_geo>
                 }
@@ -1363,7 +1363,7 @@ def "Biped"
                     double3[] inputs:rotationOffsets = [(0, -0, 0)]
                     double3[] inputs:translationOffsets = [(0.0000033814216067185043, -0.0000016110143121750298, 1.7232881037734125e-7)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def/face_lower_def/jaw_def/tongue_0_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_TongueBase>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_TongueBase/M_TongueBase_offset>
                 }
 
                 def RigExecParentConstraint "M_TongueMid_drives_tongue_2_def" (
@@ -1376,7 +1376,7 @@ def "Biped"
                     double3[] inputs:rotationOffsets = [(1.1339783139423936e-9, 6.352265190803116e-9, -2.8823000000133026)]
                     double3[] inputs:translationOffsets = [(-0.02578027629024504, 0.17865341602089302, -1.1103913696719933e-8)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def/face_lower_def/jaw_def/tongue_0_def/tongue_1_def/tongue_2_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_TongueBase/M_TongueMid>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_TongueBase/M_TongueMid/M_TongueMid_offset>
                 }
 
                 def RigExecParentConstraint "M_TongueTip_drives_tongue_4_def" (
@@ -1389,7 +1389,7 @@ def "Biped"
                     double3[] inputs:rotationOffsets = [(0, -0, 0)]
                     double3[] inputs:translationOffsets = [(1.9525792538388487e-8, -4.393655217427295e-9, -9.216230803746465e-9)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def/face_lower_def/jaw_def/tongue_0_def/tongue_1_def/tongue_2_def/tongue_3_def/tongue_4_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_TongueBase/M_TongueMid/M_TongueTip>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_TongueBase/M_TongueMid/M_TongueTip/M_TongueTip_offset>
                 }
             }
         }
@@ -2362,7 +2362,7 @@ def "Biped"
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
-                                                                        matrix4d rest:space = ( (-4.027058028961545e-10, -0.07281695094230789, -0.9973453215470854, 0), (-4.458568038117631e-9, 0.9973453221704015, -0.07281695948153638, 0), (0.9999999999999982, -4.417472613038523e-9, 7.262910462311825e-10, 0), (8.780647020557828e-9, -1.970519441076732, -6.044428519787506, 1) )
+                                                                        matrix4d rest:space = ( (1.3999367414667242e-15, -0.07281695521185816, 0.9973453218588205, 0), (3.207095583861695e-16, 0.9973453218588206, 0.07281695521185805, 0), (-1.0000000000000004, 4.889848799849619e-16, 2.0885623434788712e-15, 0), (-8.781064099265839e-9, -1.9705194410757656, 6.0444285197873215, 1) )
                                                                     }
 
                                                                     def RigExecControl "tongue_curl_r"
@@ -2371,7 +2371,7 @@ def "Biped"
                                                                         double guide:scaleX = 0
                                                                         double guide:scaleY = 0
                                                                         double guide:scaleZ = 0
-                                                                        matrix4d rest:space = ( (-4.0270581181365946e-10, -0.07281695094230788, -0.9973453215470852, 0), (-4.458567915978054e-9, 0.9973453221704013, -0.07281695948153637, 0), (-0.9999999999999982, 4.417472735503203e-9, -7.26291046231183e-10, 0), (8.780666165436848e-9, -1.9705194410767604, -6.044428519787504, 1) )
+                                                                        matrix4d rest:space = ( (1.5992467268769763e-15, -0.0728169552118583, 0.9973453218588209, 0), (5.494520290545593e-16, 0.9973453218588201, 0.07281695521185838, 0), (1.0000000000000007, -2.3330544794366915e-16, -1.935307203140132e-15, 0), (-8.781083244144859e-9, -1.970519441075794, 6.044428519787319, 1) )
                                                                     }
 
                                                                     def RigExecControl "M_LoTeeth"
@@ -2382,7 +2382,7 @@ def "Biped"
                                                                         double guide:scaleY = 0.4051
                                                                         double guide:scaleZ = 0.016204
                                                                         uniform token guide:shape = "circle"
-                                                                        matrix4d rest:space = ( (-0.9999999999999982, 4.417472613038524e-9, -7.262912911605424e-10, 0), (-4.41740816459283e-9, 0.9999999999998577, -4.281041272086715e-9, 0), (-7.26295852815162e-10, 4.280906299324653e-9, -0.9999999999999969, 0), (5.23245143329552e-9, -1.717899956820304, -9.3932999878294, 1) )
+                                                                        matrix4d rest:space = ( (0.9999999999999999, -2.1642690352365626e-17, -1.2772207198933258e-15, 0), (5.128139252945862e-16, 1.0000000000000002, -1.8076401197017075e-15, 0), (1.510135506813779e-15, 2.0856250222446588e-15, 1, 0), (-5.232864264941872e-9, -1.7178999568191102, 9.393299987829197, 1) )
 
                                                                         def RigExecControl "M_LoTeethShear"
                                                                         {
@@ -2432,32 +2432,55 @@ def "Biped"
 
                                                                     def RigExecControl "M_TongueBase"
                                                                     {
+                                                                        double3 guide:offset = (-2.1591334300799338e-8, 1.4712753682033508e-8, -1.7658443596246798e-8)
+                                                                        quatf guide:orient = (0.6903455, -0.15304592, -0.6903455, 0.15304592)
                                                                         uniform token guide:planeNormal = "X"
                                                                         double guide:scaleX = 0.18910000000000002
                                                                         double guide:scaleY = 1.7372
                                                                         double guide:scaleZ = 4.7275
                                                                         uniform token guide:shape = "circle"
-                                                                        matrix4d rest:space = ( (-3.771844465310168e-9, 0.7439990901773627, -0.6681806360018425, 0), (-2.411263131210893e-9, 0.6681806296316682, 0.7439990844565387, 0), (0.9999999999999982, -4.417472613038524e-9, 7.262912911605424e-10, 0), (-1.7232880278451101e-7, -4.016701439326539, -0.8517965420063982, 1) )
+                                                                        matrix4d rest:space = ( (1, -3.9983370484753055e-32, 9.860761315262648e-32, 0), (8.509880831909337e-32, 0.9200049116874986, -0.39190682881378525, 0), (-8.577933713455771e-32, 0.39190682881378525, 0.9200049116874988, 0), (1.939196593169403e-7, -4.0167014459412655, 0.8517965640182359, 1) )
 
                                                                         def RigExecControl "M_TongueMid"
                                                                         {
-                                                                            double3 guide:offset = (0, 0.46509999999999996, 0)
+                                                                            double3 guide:offset = (-2.1591329340827834e-8, 0.46396704927469223, 0.03244371500853117)
+                                                                            quatf guide:orient = (0.706676, 0.024677671, -0.706676, -0.024677671)
                                                                             uniform token guide:planeNormal = "X"
                                                                             double guide:scaleX = 0.182028
                                                                             double guide:scaleY = 1.7553999999999998
                                                                             double guide:scaleZ = 4.5507
                                                                             uniform token guide:shape = "circle"
-                                                                            matrix4d rest:space = ( (0.714593562113293, -0.6995398780528782, -6.326838009271663e-25, 0), (0.6995398780528782, 0.7145935621132927, -3.304830457024783e-25, 0), (3.898851346822356e-26, -1.5539302585786237e-26, 1, 0), (3.3242316775928202, -1.1631912595781557, 1.939196591083105e-7, 1) )
+                                                                            matrix4d rest:space = ( (1, -1.1116901154845678e-32, 5.029989551073803e-32, 0), (2.0133510531894155e-25, 0.9641412746452107, 0.26538952979631414, 0), (-9.464540152743864e-26, -0.26538952979631414, 0.9641412746452104, 0), (-1.939196591083104e-7, 0.3506717168389457, 3.504362923511181, 1) )
 
                                                                             def RigExecControl "M_TongueTip"
                                                                             {
+                                                                                double3 guide:offset = (-2.159132476361308e-8, 1.0292950491930242e-8, -2.0550977808397874e-8)
+                                                                                quatf guide:orient = (0.7010574, 0.09229595, -0.7010574, -0.09229595)
                                                                                 uniform token guide:planeNormal = "X"
                                                                                 double guide:scaleX = 0.106452
                                                                                 double guide:scaleY = 1.2658
                                                                                 double guide:scaleZ = 2.6613
                                                                                 uniform token guide:shape = "circle"
-                                                                                matrix4d rest:space = ( (0.9882107521868803, -0.15309967100630956, -5.327436694260723e-19, 0), (0.15309967100630953, 0.9882107521868804, 6.918412591943852e-18, 0), (-5.327436694261216e-19, -6.9184125919438426e-18, 1, 0), (3.2070283498379784, -0.13609171469903458, -2.646977999612734e-23, 1) )
+                                                                                matrix4d rest:space = ( (1, 2.0516359741152622e-32, -1.607084245660527e-32, 0), (-7.517058654624685e-32, 0.9992673317390982, -0.03827270200839098, 0), (-3.256057709399569e-32, 0.03827270200839072, 0.9992673317390981, 0), (-5.9164567891575885e-31, -0.3594711910041042, 3.189722911839258, 1) )
+
+                                                                                def RigExecJoint "M_TongueTip_offset"
+                                                                                {
+                                                                                    uniform token purpose = "guide"
+                                                                                    matrix4d rest:space = ( (1.4150187352458961e-15, -0.2588190451025185, 0.9659258262890693, 0), (3.8081498562178856e-16, 0.9659258262890692, 0.258819045102519, 0), (-1, -1.3429885009579694e-16, 1.6584063743630543e-15, 0), (-2.159132476361308e-8, 1.0292950491930242e-8, -2.0550977808397874e-8, 1) )
+                                                                                }
                                                                             }
+
+                                                                            def RigExecJoint "M_TongueMid_offset"
+                                                                            {
+                                                                                uniform token purpose = "guide"
+                                                                                matrix4d rest:space = ( (1.4571721213982693e-15, -0.06975647374412293, 0.9975640502598249, 0), (1.5964553729450174e-16, 0.9975640502598244, 0.06975647374412317, 0), (-1, -7.08068462621709e-17, 1.6628598768135453e-15, 0), (-2.1591329415078974e-8, 9.498847930444754e-9, -2.0929860511387233e-8, 1) )
+                                                                            }
+                                                                        }
+
+                                                                        def RigExecJoint "M_TongueBase_offset"
+                                                                        {
+                                                                            uniform token purpose = "guide"
+                                                                            matrix4d rest:space = ( (1.1529642360125842e-15, 0.4226182617407017, 0.9063077870366487, 0), (-9.052683353106522e-16, 0.906307787036649, -0.42261826174070166, 0), (-1, -5.095734038499978e-16, 1.584440445516176e-15, 0), (-2.1591334300799338e-8, 1.4712753682033508e-8, -1.7658443596246798e-8, 1) )
                                                                         }
                                                                     }
                                                                 }

@@ -533,6 +533,13 @@ _SampleWireInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
     };
     floats("inputs:driverWeights", "driverWeights");
     floats("inputs:driverBaseWeights", "driverBaseWeights");
+    if (const UsdAttribute a =
+            moverPrim.GetAttribute(TfToken("rigExec:driverDeltaFrame"))) {
+        TfToken frame;
+        const bool has = a.Get(&frame, time);
+        out->Add(_FrozenWireInputKey(moverPath, "driverDeltaFrame"),
+                 VtValue(frame), has);
+    }
     if (binding.driverTransformCount == 0 &&
         !binding.driverCurvePoints.IsEmpty()) {
         VtVec3fArray posed;
@@ -1506,6 +1513,10 @@ _SampleWithPinnedChainBindings(
         _SampleFlaggedBinding(interp.enabled, resolved, &refreshed,
                               overrideFlags, time, &sampled, chainFresh);
     }
+    _VisitComposeInputs(B, [&](const auto &input) {
+        _SampleFlaggedBinding(input, resolved, &refreshed, overrideFlags,
+                              time, &sampled, chainFresh);
+    });
     for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
         _SampleSolverBindings(solver, resolved, &refreshed, overrideFlags,
                               time, &sampled, chainFresh);
@@ -2024,6 +2035,11 @@ RigExecSampleFrameInputsWithBurstCache(
                                   chainFresh);
         });
     }
+    _VisitComposeInputs(B, [&](const auto &input) {
+        _SampleFlaggedBinding(input, resolved, &refreshed,
+                              cache->overrideFlags, time, &sampled,
+                              chainFresh);
+    });
     for (size_t i : cache->solverSites) {
         _SampleSolverBindings(B.solvers[i], resolved, &refreshed,
                               cache->overrideFlags, time, &sampled,

@@ -506,7 +506,7 @@ over "Biped"
                     double3[] inputs:rotationOffsets = [(0, -0, 0)]
                     double3[] inputs:translationOffsets = [(1.0587911840678754e-22, -2.842170943040401e-14, 0)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def/face_lower_def/jaw_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_Jaw/M_Jaw_offset>
                 }
 
                 def RigExecParentConstraint "M_LoFace_drives_face_lower_def" (
@@ -519,7 +519,7 @@ over "Biped"
                     double3[] inputs:rotationOffsets = [(0, -0, 0)]
                     double3[] inputs:translationOffsets = [(-2.117582368135751e-22, 0, -4.440892098500626e-16)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def/face_lower_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_LoFace/M_LoFace_offset>
                 }
 
                 def RigExecParentConstraint "M_HeadTip_drives_head_tip_def" (
@@ -584,7 +584,7 @@ over "Biped"
                     double3[] inputs:rotationOffsets = [(0, -0, 0)]
                     double3[] inputs:translationOffsets = [(0, 0, 0)]
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def>
-                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull>
+                    rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_Skull_offset>
                 }
             }
         }
@@ -647,20 +647,21 @@ over "Biped"
                                                     {
                                                         double guide:radius = 0
                                                         uniform token purpose = "default"
-                                                        matrix4d rest:space = ( (0.9999999999999996, 4.281036747322273e-9, 4.417407717394315e-9, 0), (4.280991630634111e-9, 1.0000000000000004, -7.262958567891476e-10, 0), (4.417415988555716e-9, -7.262965784349264e-10, 1.0000000000000007, 0), (2.842170943040401e-14, -8.881784197001252e-16, 3.1554436208840472e-30, 1) )
+                                                        matrix4d rest:space = ( (4.011450391680281e-15, 1, -2.4612889521801994e-14, 0), (-1.1656384336269746e-16, -2.4488970363061813e-14, -1, 0), (-1, 4.093327155289817e-15, 2.7702205775550296e-16, 0), (-1.3667984550773404e-14, 5.016621592589871, 0.4543934884598313, 1) )
 
                                                         def RigExecControl "M_Skull" (
                                                             prepend apiSchemas = ["RigExecControlAPI"]
                                                         )
                                                         {
                                                             color3f guide:displayColor = (0, 1, 0)
-                                                            double3 guide:offset = (9.209549980346068, 3.619456931891832e-8, 5.820475301732131e-8)
+                                                            double3 guide:offset = (-5.82047297416531e-8, 9.209549980345983, -3.619521437589775e-8)
+                                                            quatf guide:orient = (-0.5, 0.5, 0.5, -0.5)
                                                             double guide:scaleX = 11.104650019653931
                                                             double guide:scaleY = 0.15
                                                             double guide:scaleZ = 10.5208
                                                             uniform token guide:shape = "cube"
                                                             uniform token purpose = "default"
-                                                            matrix4d rest:space = ( (1.0000000000000004, -1.474515285452531e-17, -2.0748987501150087e-24, 0), (-8.271806125530277e-25, 1, 2.0679515313825692e-25, 0), (-7.771905794189738e-25, -1.0339757656912846e-25, 1, 0), (-2.842170943040401e-14, -8.881784197001252e-16, 1.0587911840678754e-22, 1) )
+                                                            matrix4d rest:space = ( (4.09332715528981e-15, -2.7702205775560374e-16, -1, 0), (1, -2.461880239415408e-14, 4.011450391680283e-15, 0), (-2.448897036306181e-14, -1, 1.1656384336259922e-16, 0), (5.684341886080802e-14, -4.192202140984591e-13, -1.3667984550773082e-14, 1) )
 
                                                             def RigExecControl "M_UpFace" (
                                                                 prepend apiSchemas = ["RigExecControlAPI"]
@@ -673,7 +674,7 @@ over "Biped"
                                                                 double guide:scaleZ = 0.15
                                                                 uniform token guide:shape = "cube"
                                                                 uniform token purpose = "default"
-                                                                matrix4d rest:space = ( (-5.6843418854080615e-14, -1.7763565960023552e-15, -1, 0), (1.0000000000000282, 2.677545562747471e-15, -2.2204456866874155e-16, 0), (-1.1368683773071502e-13, -0.9999999999999978, 1.3255569316162268e-22, 0), (-3.632700000000483, -1.250200000000004, 2.117582368135751e-22, 1) )
+                                                                matrix4d rest:space = ( (1, -3.266609314198136e-14, 2.057432115947101e-15, 0), (3.24842302203734e-14, 1.0000000000000002, 3.076214853685154e-14, 0), (-1.8361859821586152e-15, -3.105816434440282e-14, 1.0000000000000004, 0), (-2.8094652662453766e-14, -3.63270000000054, 1.2501999999996745, 1) )
 
                                                                 def RigExecJoint "nose_bridge_follow"
                                                                 {
@@ -1099,19 +1100,20 @@ over "Biped"
                                                                     doc = "How much of the lower face the nose and its bridge follow, 0 to 1. 1 is the rig's default; at 0 both stay with the skull."
                                                                 )
                                                                 color3f guide:displayColor = (1, 0, 0)
-                                                                double3 guide:offset = (-0.008150073480767794, -18.389400045746353, -10.677400078718424)
+                                                                double3 guide:offset = (0.00815007347967292, -18.389400045745763, 10.677400078718602)
+                                                                quatf guide:orient = (-7.730958e-16, 3.038337e-14, 1, -1.9594752e-14)
                                                                 double guide:scaleX = 4.003350002605459
                                                                 double guide:scaleY = 0.5898000176844285
                                                                 double guide:scaleZ = 0.15
                                                                 uniform token guide:shape = "cube"
                                                                 uniform token purpose = "default"
-                                                                matrix4d rest:space = ( (1.136868377228268e-13, 8.881779322839493e-16, 0.9999999999999991, 0), (1.0000000000001135, 9.011883585605705e-16, 2.2204439090979565e-16, 0), (-2.8421709409724492e-14, 0.9999999999999951, -4.280659669961918e-23, 0), (4.604700000000207, -2.6305999999999896, -1.0587911840678754e-22, 1) )
+                                                                matrix4d rest:space = ( (1, 0, 2.4492935982947054e-16, 0), (0, 1, -5.5711252306300235e-18, 0), (-2.4492935982947054e-16, 0, 1, 0), (0, 4.604700000000008, 2.6305999999999994, 1) )
 
                                                                 def RigExecJoint "face_mid_compress"
                                                                 {
                                                                     double guide:radius = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (1.0000000000000024, -5.684341886734862e-14, -8.88178174337676e-16, 0), (2.0371097387225885e-22, 1.0000000000000566, -1.474539273690295e-17, 0), (2.0917329739934687e-22, -5.6829541094506896e-14, 1.000000000000005, 0), (-9.529120656610879e-22, -5.704099999999642, 1.9374000000000047, 1) )
+                                                                    matrix4d rest:space = ( (-1, 3.279995504001175e-14, 9.482509100732037e-16, 0), (3.264753912906798e-14, 1.0000000000000002, -6.804170098592224e-14, 0), (-1.0464294414935867e-15, -6.796534063323101e-14, -0.9999999999999998, 0), (-3.44314296398355e-13, -5.704099999999556, -1.9374000000003222, 1) )
                                                                 }
 
                                                                 def RigExecControl "face_mid_compress_twin" (
@@ -1124,7 +1126,7 @@ over "Biped"
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (1.0000000000000024, -5.684341886734862e-14, -8.88178174337676e-16, 0), (2.0371097387225885e-22, 1.0000000000000566, -1.474539273690295e-17, 0), (2.0917329739934687e-22, -5.6829541094506896e-14, 1.000000000000005, 0), (-9.529120656610879e-22, -5.704099999999642, 1.9374000000000047, 1) )
+                                                                    matrix4d rest:space = ( (-1, 3.279995504001175e-14, 9.482509100732037e-16, 0), (3.264753912906798e-14, 1.0000000000000002, -6.804170098592224e-14, 0), (-1.0464294414935867e-15, -6.796534063323101e-14, -0.9999999999999998, 0), (-3.44314296398355e-13, -5.704099999999556, -1.9374000000003222, 1) )
                                                                 }
 
                                                                 def RigExecControl "nose_bridge_follow_twin" (
@@ -1135,7 +1137,7 @@ over "Biped"
                                                                     double guide:scaleY = 0
                                                                     double guide:scaleZ = 0
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (-1.000000000000001, 1.1368683772997089e-13, -8.881789073230963e-16, 0), (1.2185095851256019e-16, 0.9949898287562263, 0.09997620052796703, 0), (1.2243595934379435e-17, 0.09997620052786124, -0.9949898287560526, 0), (-4.235164736271502e-22, 0.3443999999991263, -7.5208000000000315, 1) )
+                                                                    matrix4d rest:space = ( (1, -5.68943673249558e-15, -6.007392364792677e-15, 0), (4.857154724618159e-15, 0.9949898287560512, -0.09997620052794343, 0), (6.5723149790650574e-15, 0.0999762005279434, 0.9949898287560512, 0), (3.7810499700206385e-14, 0.34439999999958104, 7.5207999999994755, 1) )
                                                                 }
 
                                                                 def RigExecControl "M_Jaw" (
@@ -1146,14 +1148,33 @@ over "Biped"
                                                                         doc = "Jaw compression, 0 to 1: how hard the jaw is pressed up into the middle of the face. Rolls the mid-face back and tips and shortens the nose."
                                                                     )
                                                                     color3f guide:displayColor = (1, 1, 0.388)
-                                                                    double3 guide:offset = (-0.2639999999999998, -6.79415, -11.1697)
+                                                                    double3 guide:offset = (0.2639999999994189, -6.794149999998689, 11.169700000000152)
+                                                                    quatf guide:orient = (5.612754e-16, 1.633694e-14, 1, -3.4840786e-14)
                                                                     double guide:scaleX = 4.9366
                                                                     double guide:scaleY = 1.1952500182316559
                                                                     double guide:scaleZ = 1.8795000070275298
                                                                     uniform token guide:shape = "cube"
                                                                     uniform token purpose = "default"
-                                                                    matrix4d rest:space = ( (1.0000000000000016, -5.684341888602627e-14, 4.440892343139292e-15, 0), (2.3027953371783893e-22, 1.0000000000000282, 3.5379684084863286e-15, 0), (1.5757790669135177e-22, -5.682954110195152e-14, 1.0000000000000069, 0), (-1.0587911840678754e-21, -5.7296999999995535, 1.9374000000000011, 1) )
+                                                                    matrix4d rest:space = ( (1, 0, -4.930380657631324e-32, 0), (0, 1, 2.7073654644752336e-18, 0), (4.930380657631324e-32, 0, 1, 0), (-4.745261417336156e-16, -5.729700000000008, -1.9373999999999971, 1) )
+
+                                                                    def RigExecJoint "M_Jaw_offset"
+                                                                    {
+                                                                        uniform token purpose = "guide"
+                                                                        matrix4d rest:space = ( (-1.0000000000000002, 3.2646040769172803e-14, -1.0464802772295382e-15, 0), (3.2701715540617084e-14, 0.9999999999999999, -6.963104266067385e-14, 0), (1.198621355148233e-15, -6.97321018899487e-14, -1, 0), (-3.4539436067532605e-13, 5.400124791776761e-13, -3.2152058793144533e-13, 1) )
+                                                                    }
                                                                 }
+
+                                                                def RigExecJoint "M_LoFace_offset"
+                                                                {
+                                                                    uniform token purpose = "guide"
+                                                                    matrix4d rest:space = ( (-1, 6.080728979257134e-14, 1.5252328482102987e-15, 0), (6.072619236676386e-14, 1, -3.923046153393147e-14, 0), (-1.567150419494246e-15, -3.914854919586158e-14, -0.9999999999999998, 0), (5.110173750697115e-15, 1.7053025658242404e-13, -5.417888360170764e-13, 1) )
+                                                                }
+                                                            }
+
+                                                            def RigExecJoint "M_Skull_offset"
+                                                            {
+                                                                uniform token purpose = "guide"
+                                                                matrix4d rest:space = ( (4.01145039090309e-15, 1, -2.4618460647859806e-14, 0), (-1.165637825889441e-16, -2.448897036388899e-14, -0.9999999999999999, 0), (-1, 4.093327154512626e-15, 2.7702205559923574e-16, 0), (-1.3667984656652636e-14, -8.526512829121202e-14, -4.18332035678759e-13, 1) )
                                                             }
                                                         }
                                                     }
