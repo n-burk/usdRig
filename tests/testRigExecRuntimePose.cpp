@@ -5070,8 +5070,8 @@ _AlwaysRunSteps(const fb::RigExecWireFile &file)
 // live baked's under the same session edit. Set again to the same value,
 // and then run with nothing set, the run is what a run owes with no input
 // changed: the source steps and the steps the file marks always dirty
-// (the two-limb rig's Derived extents; none on the IK rig, so there no
-// step but the sources runs), and no revision executes. Reset, the readers
+// (none on these supported rigs), and no head or non-source step runs.
+// Reset, the readers
 // run once and the outputs are the bake time's again; the run after that
 // owes nothing either. The IK softness inputs are Solve steps' declared
 // inputs, which an override number names; A0's rz is the limb's keyed
@@ -5089,8 +5089,8 @@ TestRepeatedSetRunsNothing()
         bool animated;
         // The label of a step among the input's readers.
         const char *reader;
-        // No step but the sources is owed with no input changed.
-        bool noneOwed;
+        // Matrix rest-space coverage uses the original static upstream fixture.
+        bool matrix = false;
     };
     const Row rows[] = {
         {"oneloop_two_limbs.usda", "/LimbsAsset/Rig",
@@ -5101,7 +5101,10 @@ TestRepeatedSetRunsNothing()
          "ComposeSubtree /LimbsAsset/Rig/Controls/A0", false},
         {"computed_ik_space.usda", "/IkSpaceAsset/Rig",
          "/IkSpaceAsset/Rig/Solvers/ArmIK.inputs:softness", 0.35, false,
-         "Solve /IkSpaceAsset/Rig/Solvers/ArmIK", true},
+         "Solve /IkSpaceAsset/Rig/Solvers/ArmIK", false},
+        {"upstream_inputs.usda", "/LimbsAsset/Rig",
+         "/LimbsAsset/Upstream.inputs:space", 0.0, false,
+         "RestCompose /LimbsAsset/Rig/Controls/BRoot", true},
     };
     const double frame = 1.0;
     for (const Row &row : rows) {
@@ -5119,7 +5122,10 @@ TestRepeatedSetRunsNothing()
             continue;
         }
         const std::vector<int32_t> owed = _AlwaysRunSteps(*file);
-        CHECK(!row.noneOwed || _NonSourceSteps(*file, owed) == 0);
+        CHECK(_NonSourceSteps(*file, owed) == 0);
+        GfMatrix4d matrix(1.0); matrix.SetTranslateOnly(GfVec3d(1,0,10));
+        const VtValue inputValue = row.matrix ? VtValue(matrix) :
+            RigExecTestTypedValue(stage->GetAttributeAtPath(SdfPath(row.input)),row.value);
         std::string error;
         std::vector<RigExecRigPose> still;
         std::vector<RigExecRigPose> dragged;
@@ -5128,7 +5134,7 @@ TestRepeatedSetRunsNothing()
                                     {frame}, &still, &error) ||
             !RigExecTestEditedPoses(stage, rigPath,
                                     RigExecEvaluationMode::Baked,
-                                    {_Edit(stage, row.input, row.value)},
+                                    {{SdfPath(row.input),inputValue}},
                                     {frame}, &dragged, &error) ||
             still.size() != 1 || dragged.size() != 1) {
             std::printf("FAILED: %s: reference: %s\n", what.c_str(),
@@ -5147,6 +5153,8 @@ TestRepeatedSetRunsNothing()
         CHECK(player->FindInput(row.input, &index) &&
               player->GetInputInfo(index).animated == row.animated);
         CHECK(player.Play(frame, &error));
+        RrInputValue runtimeValue;
+        CHECK(RigExecInputValueFrom(inputValue,player->GetInputInfo(index).type,&runtimeValue));
 
         // The last run's non-source steps, and whether it ran only what a
         // run owes with no input changed and executed no revision.
@@ -5159,7 +5167,13 @@ TestRepeatedSetRunsNothing()
                         "revision(s) executed\n",
                         what.c_str(), leg, _NonSourceSteps(*file, trace),
                         trace.size(), unsigned(revisions));
-            return trace == owed && revisions == 0;
+            const bool idleRun = trace == owed && revisions == 0;
+            if (idleRun) for (int32_t step : trace) {
+                CHECK(step >= 0 && size_t(step) < file->steps.size());
+                if (step >= 0 && size_t(step) < file->steps.size())
+                    CHECK(!file->steps[size_t(step)].isHead && file->steps[size_t(step)].isSource);
+            }
+            return idleRun;
         };
         const auto ranReader = [&] {
             for (const int32_t step : player->GetLastRunTraceForTesting()) {
@@ -5183,7 +5197,7 @@ TestRepeatedSetRunsNothing()
             return same;
         };
 
-        CHECK(player->SetInput(row.input, row.value, &error) &&
+        CHECK(player->SetInput(row.input, runtimeValue, &error) &&
               player->Execute(&error));
         CHECK(!idle("set") && ranReader());
         CHECK(matches(dragged[0], "set"));
@@ -5191,7 +5205,7 @@ TestRepeatedSetRunsNothing()
         CHECK(!RigExecCompareRuntimeOutputs(still[0], player.Reader(),
                                             &moved));
 
-        CHECK(player->SetInput(row.input, row.value, &error) &&
+        CHECK(player->SetInput(row.input, runtimeValue, &error) &&
               player->Execute(&error));
         CHECK(idle("set again"));
         CHECK(matches(dragged[0], "set again"));

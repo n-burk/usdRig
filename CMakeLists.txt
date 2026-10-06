@@ -1037,6 +1037,14 @@ target_compile_definitions(testRigExecImaging PRIVATE
     ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecImagingFineClusters COMMAND testRigExecImaging
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecImagingFineClusters PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0")
+add_test(NAME testRigExecImagingFineClustersReference COMMAND testRigExecImaging
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecImagingFineClustersReference PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_GRAIN_US=0;RIGEXEC_EVALUATION_MODE=reference")
 
 add_executable(testRigExecProfilerApi tests/testRigExecProfilerApi.cpp)
 target_link_libraries(testRigExecProfilerApi PRIVATE rigExecImaging js)

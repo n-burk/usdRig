@@ -246,8 +246,9 @@ public:
     bool GetSkinLayoutIsOpenForTesting(const std::string &moverPath) const;
 
     // Test-only: whether the last Execute ran step \p step: a source step
-    // always, any other when the closure ran its cluster. False past the
-    // steps and before the first Execute.
+    // always; ordinary steps report exact closure selection. Heads report
+    // actual current trace membership. False past the steps and before the
+    // first Execute; ordinary selection remains independent of test masks.
     bool GetStepRanForTesting(size_t step) const;
 
     // Test-only: the steps the last Execute ran, by index, in the order it

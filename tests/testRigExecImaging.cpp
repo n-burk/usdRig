@@ -13,6 +13,7 @@
 #include "rigExecImaging/sceneIndices.h"
 #include "rigExecImaging/upstreamTable.h"
 #include "rigExecBake/bake.h"
+#include "rigExecBinary/format.h"
 #include "rigExecMath/avarScale.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedTrace.h"
@@ -6608,16 +6609,207 @@ TestABakeExposesUpstreamAsInputs(const std::string &fixture)
     CHECK(RigExecCompareRuntimeOutputs(restored, *reader, &diffs));
 }
 
-// Deferred to the runtime session (W.5, on the W.3.9 already in the tree):
-// the .rigexec legs of steps 3 and 4. Through a playback session, a Set
-// runs only the forward cone of the value's slot
-// (GetLastRunTraceForTesting), and a second identical Set runs no step
-// beyond the sources.
+// D2: actual imaging playback, with cones derived from the original export.
 static void
-TestTheRuntimeUpstreamCone()
+TestTheRuntimeUpstreamCone(const std::string &fixture)
 {
-    std::printf("  runtime upstream cone and no-change-no-work: SKIPPED "
-                "(runtime session, W.5)\n");
+    const auto stage = UsdStage::Open(fixture);
+    CHECK(stage);
+    if (!stage) return;
+    RigExecRigEvaluator evaluator(stage, kUpLimbsRig);
+    CHECK(evaluator.Compile());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    evaluator.Evaluate(UsdTimeCode(1.0));
+    std::vector<uint8_t> bytes;
+    std::string error;
+    CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+    std::unique_ptr<fb::RigExecWireFile> file;
+    CHECK(RigExecFormatOpen(bytes.data(), bytes.size(), &file, &error));
+    CHECK(file);
+    if (!file) return;
+    const bool fine = file->clustering->grainUs == 0.0;
+    if (TfGetenv("RIGEXEC_BAKED_GRAIN_US", "") == "0") {
+        CHECK(fine);
+    }
+    if (fine) {
+        CHECK(file->clustering->clusters.size() == file->steps.size());
+        for (size_t c = 0; c < file->clustering->clusters.size(); ++c) {
+            const auto &members = file->clustering->clusters[c].members;
+            CHECK(members.size() == 1);
+            for (int index : members) {
+                CHECK(index >= 0 && size_t(index) < file->steps.size());
+                if (index >= 0 && size_t(index) < file->steps.size()) {
+                    CHECK(file->steps[size_t(index)].cluster == int(c));
+                    CHECK(file->clustering->clusterOf[size_t(index)] == int(c));
+                }
+            }
+        }
+    }
+    size_t heads = 0;
+    while (heads < file->steps.size() && file->steps[heads].isHead) ++heads;
+    CHECK(heads > 0);
+    for (size_t i = 0;i<file->steps.size();++i) {
+        CHECK(file->steps[i].isHead == (i<heads));
+        if (i<heads) CHECK(!file->steps[i].isSource);
+    }
+    // The actual static fixture owes no volatile ordinary work.
+    CHECK(std::all_of(file->cones->always->words.begin(), file->cones->always->words.end(),
+        [](uint64_t word){return word == 0;}));
+    const auto binary = std::filesystem::temp_directory_path() /
+        ("rigexec-d2-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".rigexec");
+    { std::ofstream out(binary, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()),
+        std::streamsize(bytes.size())); }
+    {
+        auto imaging = _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0, nullptr, [&](const UsdStageRefPtr &opened) {
+            UsdEditContext context(opened, opened->GetSessionLayer());
+            CHECK(opened->GetPrimAtPath(kUpLimbsRig).CreateAttribute(TfToken("rigExec:asset"),
+                SdfValueTypeNames->Asset).Set(SdfAssetPath(binary.generic_string())));
+        });
+        CHECK(imaging);
+        if (imaging) {
+            auto *playback = imaging->context->GetPlayback(kUpLimbsRig);
+            CHECK(playback && !imaging->context->GetBridge(kUpLimbsRig));
+            if (playback) {
+                const auto *reader = playback->GetReaderForTesting();
+                CHECK(reader);
+                if (!reader) return;
+                const auto authored = imaging->Pose();
+                const auto compareModes = [&](const std::vector<_UpstreamAuthored> &edits) {
+                    for (auto mode:{RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+                        const auto reference = UsdStage::Open(fixture);
+                        CHECK(reference);
+                        UsdEditContext editContext(reference, reference->GetSessionLayer());
+                        for (const auto &edit:edits) CHECK(reference->GetAttributeAtPath(edit.path).Set(edit.value));
+                        RigExecRigEvaluator live(reference, kUpLimbsRig);
+                        live.SetEvaluationMode(mode);
+                        CHECK(live.Compile());
+                        const auto pose = live.Evaluate(UsdTimeCode(1.0));
+                        std::vector<std::string> diffs;
+                        CHECK(RigExecCompareRuntimeOutputs(pose, *reader, &diffs));
+                    }
+                };
+                compareModes({});
+                const auto coneFor = [&](const SdfPath &path) {
+                    size_t slot = 0;
+                    CHECK(reader->FindInput(path.GetString(), &slot));
+                    CHECK(slot<file->listedInputs && (file->inputs[slot].flags() & 4));
+                    const auto &info = reader->GetInputInfo(slot);
+                    CHECK(!info.animated);
+                    if (path == kUpA0Rz) CHECK(info.type == RrInputTag::Double && info.defaultValue.f64 == 0.0);
+                    else CHECK(info.type == RrInputTag::Matrix4d &&
+                               info.defaultValue.matrix[3][0] == 0.0 &&
+                               info.defaultValue.matrix[3][2] == 10.0);
+                    std::vector<char> cone(file->steps.size(), 0);
+                    for (size_t i = 0;i<file->steps.size();++i) {
+                        const auto &step = file->steps[i];
+                        if (std::find(step.headInputSlots.begin(), step.headInputSlots.end(),
+                            uint32_t(slot)) != step.headInputSlots.end()) cone[i] = 1;
+                        for (const auto &read : step.headInputReads) {
+                            const auto reaches = [&](const auto &candidates) {
+                                return std::any_of(candidates.begin(), candidates.end(),
+                                    [&](const auto &candidate) { return candidate.slot == slot; });
+                            };
+                            if (std::find(read.walk.begin(), read.walk.end(), uint32_t(slot)) != read.walk.end() ||
+                                read.rawFallbackSlot == int32_t(slot) ||
+                                reaches(read.propertyCandidates) || reaches(read.doubleCandidates)) {
+                                cone[i] = 1;
+                            }
+                        }
+                        for (const auto &avar:file->pose->avarBindings) if (std::find(avar.read->walk.begin(),
+                            avar.read->walk.end(), uint32_t(slot)) != avar.read->walk.end()) {
+                            for (const auto &read : step.reads) {
+                                if (read.domain() == fb::SlotDomain::Avars &&
+                                    read.begin() <= avar.flat && avar.flat < read.end()) {
+                                    cone[i] = 1;
+                                }
+                            }
+                        }
+                    }
+                    CHECK(std::find(cone.begin(), cone.end(), char(1)) != cone.end());
+                    for (size_t n = 0; n < cone.size(); ++n) {
+                        for (size_t i = 0; i < cone.size(); ++i) {
+                            if (!cone[i]) continue;
+                            for (int next : file->steps[i].succs) {
+                                cone[size_t(next)] = 1;
+                            }
+                        }
+                    }
+                    return cone;
+                };
+                const auto a = coneFor(kUpA0Rz), b = coneFor(kUpSpace);
+                const auto checkTrace = [&](const std::vector<char> &cone, bool idle) {
+                    size_t body = 0;
+                    for (int32_t index:reader->GetLastRunTraceForTesting()) {
+                        CHECK(index>=0 && size_t(index)<file->steps.size());
+                        if (index<0 || size_t(index)>=file->steps.size()) continue;
+                        const auto &step = file->steps[size_t(index)];
+                        if (idle) CHECK(!step.isHead && step.isSource);
+                        else if (!step.isSource) { CHECK(cone[size_t(index)]); ++body; }
+                    }
+                    if (!idle) CHECK(body>0);
+                };
+                const GfMatrix4d space = _UpTranslate(1, 0, 10);
+                for (const auto &key:std::vector<std::pair<SdfPath, VtValue>>{{kUpA0Rz, VtValue(30.0)}, {kUpSpace,
+                    VtValue(space)}}) {
+                    const auto &cone = key.first == kUpA0Rz?a:b;
+                    const auto &other = key.first == kUpA0Rz?kUpLimbB:kUpLimbA;
+                    imaging->upstream->Set(key.first, key.second);
+                    checkTrace(cone, false);
+                    for (int32_t index : reader->GetLastRunTraceForTesting()) {
+                        if (index < 0 || size_t(index) >= file->steps.size() ||
+                            file->steps[size_t(index)].isSource) continue;
+                        const std::string label = reader->GetStepLabelForTesting(size_t(index));
+                        const auto &own = key.first == kUpA0Rz ? kUpLimbA : kUpLimbB;
+                        const bool foreign = _Names(label, other) && !_Names(label, own);
+                        if (foreign) {
+                            std::printf("    D2 %s %s: %s names only the other limb\n",
+                                        fine ? "fine" : "default",
+                                        key.first.GetText(), label.c_str());
+                        }
+                        CHECK(!foreign);
+                    }
+                    const auto standing = imaging->Pose();
+                    compareModes({{key.first, key.second, {}}});
+                    CHECK(_SameUpstreamPose(_UpstreamGeometry(_UpstreamReference(fixture, kUpLimbsRig,
+                        {{key.first, key.second, {}}}, 1.0)), standing, "D2 placed"));
+                    CHECK(!_SameUpstreamPose(authored, standing, "D2 nonvacuity", false));
+                    CHECK(_SameUpstreamPose(_UpstreamPart(authored, other), _UpstreamPart(standing, other),
+                        "D2 opposite limb"));
+                    const size_t count = imaging->Evaluations();
+                    imaging->upstream->Set(key.first, key.second);
+                    CHECK(imaging->Evaluations() == count);
+                    CHECK(playback->EvaluateAndPublishResult(UsdTimeCode(1.0)).ok);
+                    checkTrace(cone, true);
+                    compareModes({{key.first, key.second, {}}});
+                    CHECK(_SameUpstreamPose(standing, imaging->Pose(),
+                                            "D2 held standing"));
+                    imaging->upstream->Clear(key.first);
+                    checkTrace(cone, false);
+                    CHECK(_SameUpstreamPose(authored, imaging->Pose(), "D2 lifted"));
+                    compareModes({});
+                    CHECK(playback->EvaluateAndPublishResult(UsdTimeCode(1.0)).ok);
+                    checkTrace(cone, true);
+                }
+                std::vector<char> both = a;
+                for (size_t i = 0;i<both.size();++i) both[i] = both[i] || b[i];
+                imaging->upstream->Set(kUpA0Rz, VtValue(30.0));
+                imaging->upstream->Set(kUpSpace, VtValue(space));
+                checkTrace(both, false);
+                compareModes({{kUpA0Rz, VtValue(30.0), {}}, {kUpSpace, VtValue(space), {}}});
+                CHECK(_SameUpstreamPose(_UpstreamGeometry(_UpstreamReference(fixture, kUpLimbsRig, {{kUpA0Rz,
+                    VtValue(30.0), {}}, {kUpSpace, VtValue(space), {}}}, 1.0)), imaging->Pose(), "D2 both"));
+                CHECK(playback->EvaluateAndPublishResult(UsdTimeCode(1.0)).ok); checkTrace(both, true);
+                compareModes({{kUpA0Rz, VtValue(30.0), {}},
+                              {kUpSpace, VtValue(space), {}}});
+                imaging->upstream->Clear(kUpA0Rz); checkTrace(both, false);
+                imaging->upstream->Clear(kUpSpace); checkTrace(both, false);
+                CHECK(_SameUpstreamPose(authored, imaging->Pose(), "D2 both lifted"));
+            }
+        }
+    }
+    std::error_code removed; std::filesystem::remove(binary, removed);
+    std::printf("  runtime upstream cone and no-change-no-work (%s): checked\n",
+                fine ? "fine" : "default");
 }
 
 // Admission through imaging: each key is ignored, the pose stays authored.
@@ -7215,7 +7407,7 @@ TestUpstreamSceneIndexDrivesRigInputs(const std::string &examplesDir)
                             kUpLimbA, "", "BRoot", "Upstream inputs:space");
         _UpstreamPlaybackSteps(fixture);
         TestABakeExposesUpstreamAsInputs(fixture);
-        TestTheRuntimeUpstreamCone();
+        TestTheRuntimeUpstreamCone(fixture);
         _UpstreamAdmissionNegatives(fixture);
         _UpstreamAddsAndChains(fixture);
         _UpstreamChainConflictTimes(fixture);

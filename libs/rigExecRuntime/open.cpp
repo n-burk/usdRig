@@ -454,35 +454,49 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     if (!coneClustersInRange) {
         return fail("a cone lookup table names no cluster");
     }
-    // A compose step's Avars reads outside its own group: the slots a
-    // switch recomposes an earlier version of (RigExecBakedCones::
-    // avarVersionSteps, built from the same reads).
-    for (const RigExecWireStep &step : file.steps) {
-        if (step.kind != RigExecWireStepKind::ComposeSubtree ||
-            step.object < 0 ||
-            size_t(step.object) >= poses.composeGroups.size()) {
-            continue;
+    // Exact native declaration associations, independent of cluster packing.
+    program.avarReaderSteps.assign(slots, {});
+    program.chainBaseSteps.assign(geometry.chains.size(), {});
+    program.revisionSteps.assign(geometry.revisionIndex.size(), {});
+    program.revisionStaticStep.assign(geometry.revisionIndex.size(), -1);
+    for (size_t i = 0; i < file.steps.size(); ++i) {
+        const auto &step = file.steps[i];
+        if (step.isHead) continue;
+        if (step.kind == RigExecWireStepKind::ComposeSubtree) {
+            const auto &group = poses.composeGroups[size_t(step.object)];
+            for (int slot = group.begin; slot < group.end; ++slot)
+                program.avarReaderSteps[size_t(slot)].push_back(int32_t(i));
         }
-        const RigExecWireComposeGroup &group =
-            poses.composeGroups[size_t(step.object)];
-        for (const RigExecWireSlotRange &range : step.reads) {
-            if (range.domain() != RigExecWireSlotDomain::Avars) {
-                continue;
+        for (const auto &read : step.reads) {
+            if (step.kind == RigExecWireStepKind::ComposeSubtree &&
+                read.domain() == RigExecWireSlotDomain::Avars) {
+                for (uint32_t slot = read.begin() / 11;
+                     slot < (uint64_t(read.end()) + 10) / 11 && slot < slots; ++slot)
+                    if (int(slot) < poses.composeGroups[size_t(step.object)].begin ||
+                        int(slot) >= poses.composeGroups[size_t(step.object)].end)
+                        program.avarReaderSteps[slot].push_back(int32_t(i));
             }
-            for (uint64_t slot = range.begin() / 11;
-                 slot < (uint64_t(range.end()) + 10) / 11 && slot < slots;
-                 ++slot) {
-                if (int64_t(slot) >= group.begin &&
-                    int64_t(slot) < group.end) {
-                    continue;
-                }
-                if (program.avarVersionClusters.empty()) {
-                    program.avarVersionClusters.assign(slots, {});
-                }
-                program.avarVersionClusters[size_t(slot)].push_back(
-                    step.cluster);
+            if (read.domain() == RigExecWireSlotDomain::ChainBase) {
+                for (uint32_t c = read.begin(); c < read.end(); ++c)
+                    program.chainBaseSteps[c].push_back(int32_t(i));
             }
         }
+        switch (step.kind) {
+        case RigExecWireStepKind::RevisionStatic:
+            program.revisionStaticStep[size_t(step.object)] = int32_t(i);
+            [[fallthrough]];
+        case RigExecWireStepKind::InfluenceFold:
+        case RigExecWireStepKind::RevisionChunk:
+        case RigExecWireStepKind::RevisionFuse:
+            program.revisionSteps[size_t(step.object)].push_back(int32_t(i));
+            break;
+        default: break;
+        }
+    }
+    if (!std::all_of(program.revisionStaticStep.begin(),
+                     program.revisionStaticStep.end(),
+                     [](int32_t step) { return step >= 0; })) {
+        return fail("a revision has no RevisionStatic step");
     }
     for (int index : cones.varyingSteps) {
         if (index < 0 || size_t(index) >= file.steps.size()) {

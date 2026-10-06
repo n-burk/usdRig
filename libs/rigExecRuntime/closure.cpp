@@ -65,15 +65,6 @@ _RrSet(std::vector<uint64_t> *words, size_t cluster)
     (*words)[cluster / 64] |= uint64_t(1) << (cluster % 64);
 }
 
-void
-_RrUnionWords(std::vector<uint64_t> *words,
-              const std::vector<uint64_t> &other)
-{
-    for (size_t i = 0; i < words->size(); ++i) {
-        (*words)[i] |= other[i];
-    }
-}
-
 size_t
 _RrCount(const std::vector<uint64_t> &words)
 {
@@ -267,13 +258,16 @@ RrComputeClosure(RrProgram *program, bool force)
     const size_t count = program->clustering->clusters.size();
     store.closedWords.assign((count + 63) / 64, 0);
     if (count == 0) {
+        store.closedSteps.clear();
         store.animatedTouched = false;
         std::fill(store.changedSinceRun.begin(), store.changedSinceRun.end(),
                   char(0));
         store.anyChangedSinceRun = false;
         return;
     }
-    std::vector<uint64_t> dirty((count + 63) / 64, 0);
+    const size_t stepCount = program->steps->size();
+    std::vector<uint64_t> dirty((stepCount + 63) / 64, 0);
+    store.closedSteps.assign(dirty.size(), 0);
 
     // The runtime never rebuilds and carries no evaluator stamp, so the
     // stamp never moves and only the caller forces a whole run. A phased
@@ -281,51 +275,51 @@ RrComputeClosure(RrProgram *program, bool force)
     // that persist across runs like every other slot.
     const bool full = force;
     if (full) {
-    for (size_t c = 0; c < count; ++c) {
-            _RrSet(&dirty, c);
+        for (size_t i = 0; i < stepCount; ++i) {
+            if (!(*program->steps)[i].isHead) _RrSet(&dirty, i);
         }
     } else if (!store.everRan) {
-        _RrUnionWords(&dirty, cones.poseClusters->words);
-        _RrUnionWords(&dirty, cones.always->words);
+        for (size_t i = 0; i < stepCount; ++i) {
+            const auto &step = (*program->steps)[i];
+            if (!step.isHead && (!_RrIsGeometryKind(step.kind) || step.externalReads))
+                _RrSet(&dirty, i);
+        }
         for (int index : cones.varyingSteps) {
-            _RrSet(&dirty, size_t((*program->steps)[size_t(index)].cluster));
+            _RrSet(&dirty, size_t(index));
         }
         for (int index : cones.overrideSteps) {
-            _RrSet(&dirty, size_t((*program->steps)[size_t(index)].cluster));
+            _RrSet(&dirty, size_t(index));
         }
         for (size_t r = 0; r < program->geometry->revisionIndex.size();
              ++r) {
             if (store.revisionStaticDirty[r]) {
-                _RrSet(&dirty, size_t(cones.revisionStaticCluster[r]));
+                _RrSet(&dirty, size_t(program->revisionStaticStep[r]));
             }
             if (store.revisionRan[r]) {
                 continue;
             }
-            for (int cluster : cones.revisionClusters[r].v) {
-                _RrSet(&dirty, size_t(cluster));
+            for (int step : program->revisionSteps[r]) {
+                _RrSet(&dirty, size_t(step));
             }
         }
         for (size_t c = 0; c < program->geometry->chains.size(); ++c) {
             if (store.chainHaveBase[c] && !store.chainBaseDirty[c]) {
                 continue;
             }
-            for (int cluster : cones.chainBaseClusters[c].v) {
-                _RrSet(&dirty, size_t(cluster));
+            for (int step : program->chainBaseSteps[c]) {
+                _RrSet(&dirty, size_t(step));
             }
         }
     } else {
-        _RrUnionWords(&dirty, cones.always->words);
-        // A provider's own compose cluster, and every cluster that
+        for (size_t i = 0; i < stepCount; ++i)
+            if (!(*program->steps)[i].isHead && (*program->steps)[i].externalReads)
+                _RrSet(&dirty, i);
+        // A provider's own compose step, and every step that
         // recomposes an earlier version of it from the same avars and
         // ladder.
         const auto dirtyAvarReaders = [&](size_t slot) {
-            _RrSet(&dirty, size_t(cones.avarCluster[slot]));
-            if (slot < program->avarVersionClusters.size()) {
-                for (const int32_t cluster :
-                     program->avarVersionClusters[slot]) {
-                    _RrSet(&dirty, size_t(cluster));
-                }
-            }
+            for (int32_t step : program->avarReaderSteps[slot])
+                _RrSet(&dirty, size_t(step));
         };
         const size_t slots = program->slotMeta->paths.size();
         for (size_t i = 0; i < slots; ++i) {
@@ -351,18 +345,18 @@ RrComputeClosure(RrProgram *program, bool force)
                 store.chainHaveBase[c] == store.lastHaveBase[c]) {
                 continue;
             }
-            for (int cluster : cones.chainBaseClusters[c].v) {
-                _RrSet(&dirty, size_t(cluster));
+            for (int step : program->chainBaseSteps[c]) {
+                _RrSet(&dirty, size_t(step));
             }
         }
         for (size_t r = 0; r < program->geometry->revisionIndex.size();
              ++r) {
             if (store.revisionStaticDirty[r]) {
-                _RrSet(&dirty, size_t(cones.revisionStaticCluster[r]));
+                _RrSet(&dirty, size_t(program->revisionStaticStep[r]));
             }
             if (!store.revisionRan[r]) {
-                for (int cluster : cones.revisionClusters[r].v) {
-                    _RrSet(&dirty, size_t(cluster));
+                for (int step : program->revisionSteps[r]) {
+                    _RrSet(&dirty, size_t(step));
                 }
             }
         }
@@ -370,8 +364,7 @@ RrComputeClosure(RrProgram *program, bool force)
         // dirties when time moves.
         if (store.animatedTouched) {
             for (int index : cones.varyingSteps) {
-                _RrSet(&dirty,
-                       size_t((*program->steps)[size_t(index)].cluster));
+                _RrSet(&dirty, size_t(index));
             }
         }
         // A step that declares an input re-runs once when a set changed a
@@ -390,7 +383,7 @@ RrComputeClosure(RrProgram *program, bool force)
                     if (store.changedSinceRun[number] ||
                         (runMoved && store.overridden[number] &&
                          number < walkMoves.size() && walkMoves[number])) {
-                        _RrSet(&dirty, size_t(step.cluster));
+                        _RrSet(&dirty, size_t(index));
                         break;
                     }
                 }
@@ -410,22 +403,24 @@ RrComputeClosure(RrProgram *program, bool force)
         }
         for (const auto &read : step.reads)
             moved = moved || _RrRangeMoved(store, read);
-        if (moved) _RrSet(&dirty, size_t(step.cluster));
+        if (moved) _RrSet(&dirty, i);
     }
-    for (size_t c = 0; c < count; ++c) {
-        if ((dirty[c / 64] & (uint64_t(1) << (c % 64))) != 0) {
-            _RrUnionWords(&store.closedWords, cones.cone[c].words);
+    // Exact semantic closure; clusters schedule and count selected bodies only.
+    store.closedSteps = dirty;
+    std::vector<size_t> pending;
+    for (size_t i = 0; i < stepCount; ++i)
+        if (_RrTest(store.closedSteps, i)) pending.push_back(i);
+    for (size_t at = 0; at < pending.size(); ++at) {
+        for (int next : (*program->steps)[pending[at]].succs) {
+            const size_t index = size_t(next);
+            if ((*program->steps)[index].isHead || _RrTest(store.closedSteps, index)) continue;
+            _RrSet(&store.closedSteps, index);
+            pending.push_back(index);
         }
     }
-
-    // This census describes ordinary closure work. Head-only clusters
-    // contain no ordinary closed step; mixed clusters remain selected.
-    // Actual head execution is represented by the prologue run trace.
-    for (size_t c = 0; c < count; ++c) {
-        bool onlyHeads = true;
-        for (const auto index : program->clustering->clusters[c].members)
-            onlyHeads = onlyHeads && (*program->steps)[size_t(index)].isHead;
-        if (onlyHeads) store.closedWords[c / 64] &= ~(uint64_t(1) << (c % 64));
+    for (size_t i = 0; i < stepCount; ++i) {
+        if (!(*program->steps)[i].isHead && _RrTest(store.closedSteps, i))
+            _RrSet(&store.closedWords, size_t((*program->steps)[i].cluster));
     }
 
     // What the next run compares against.
@@ -478,7 +473,7 @@ RrRunSteps(RrProgram *program, bool force, std::string *error)
     RrComputeClosure(program, force);
     for (size_t i = 0; i < steps.size(); ++i) {
         if (steps[i].isHead || steps[i].isSource ||
-            _RrTest(store.closedWords, size_t(steps[i].cluster))) {
+            _RrTest(store.closedSteps, i)) {
             continue;
         }
         store.stepOutputs[i].MarkSkipped();
@@ -490,7 +485,7 @@ RrRunSteps(RrProgram *program, bool force, std::string *error)
     // the same way the cone skips: values stand, deltas reset.
     for (size_t i = 0; i < steps.size(); ++i) {
         if (steps[i].isHead || steps[i].isSource ||
-            !_RrTest(store.closedWords, size_t(steps[i].cluster))) {
+            !_RrTest(store.closedSteps, i)) {
             continue;
         }
         if ((_RrFamilyBit(steps[i].kind) & program->runMask) == 0) {

@@ -1040,31 +1040,84 @@ void
 TestAStandingValueCostsNothing()
 {
     std::printf("case: a standing value costs nothing\n");
-    const UsdStageRefPtr stage =
-        UsdStage::Open(Fixture("upstream_inputs.usda"));
+    const std::string fixture = Fixture("upstream_inputs.usda");
+    const UsdStageRefPtr stage = UsdStage::Open(fixture);
     auto evaluator = Make(stage, kLimbsRig, BakedMode());
     const RigExecBakedProgram *program = evaluator->GetBakedProgram();
     CHECK(program);
-    if (!program) {
-        return;
-    }
-    // The fixture keeps no always-dirty step (no Derived extent).
-    const RigExecBakedClusterSet &always =
-        program->GetStepGraph().cones.alwaysSteps;
-    CHECK(std::all_of(always.words.begin(), always.words.end(),
+    if (!program) return;
+    const auto &B = program->GetStepGraph();
+    CHECK(std::all_of(B.cones.alwaysSteps.words.begin(),
+                      B.cones.alwaysSteps.words.end(),
                       [](uint64_t w) { return w == 0; }));
     const UsdTimeCode time(1);
-    evaluator->Evaluate(time);
-    evaluator->SetUpstreamInputs({Up(kA0Rz, VtValue(30.0)),
-                                  Up(kUpstreamSpace,
-                                     VtValue(Translate(1, 0, 10)))});
-    evaluator->Evaluate(time);
+    const VtValue rotation(30.0), space(Translate(1, 0, 10));
+    const std::vector<RigExecValueOverride> inputs =
+        {Up(kA0Rz, rotation), Up(kUpstreamSpace, space)};
+    const auto authored = evaluator->Evaluate(time);
+    CheckSamePose("D2 authored", Reference(fixture, kLimbsRig,
+                   RigExecEvaluationMode::Dynamic, {}, time), authored);
+    const auto scalar = Reference(fixture, kLimbsRig,
+        RigExecEvaluationMode::Dynamic, {{kA0Rz, rotation, {}}}, time);
+    const auto matrix = Reference(fixture, kLimbsRig,
+        RigExecEvaluationMode::Dynamic, {{kUpstreamSpace, space, {}}}, time);
+    const auto expected = Reference(fixture, kLimbsRig,
+        RigExecEvaluationMode::Dynamic,
+        {{kA0Rz, rotation, {}}, {kUpstreamSpace, space, {}}}, time);
+    CHECK(Differences(authored, scalar) > 0);
+    CHECK(Differences(authored, matrix) > 0);
+    CHECK(Differences(expected, scalar) > 0);
+    CHECK(Differences(expected, matrix) > 0);
+
+    // Count actual bodies, including memo heads; cluster count alone does
+    // not establish that the head pass cost nothing. Sources may still run.
+    const auto work = [&B](const std::vector<RigExecOpTraceEntry> &trace) {
+        std::pair<size_t, size_t> count{0, 0};
+        for (const auto &entry : trace) {
+            CHECK(entry.step < B.steps.size());
+            if (entry.step >= B.steps.size()) continue;
+            if (B.steps[entry.step].isHead) ++count.first;
+            else if (!B.steps[entry.step].isSource) ++count.second;
+        }
+        return count;
+    };
+    evaluator->SetUpstreamInputs(inputs);
+    const auto standing = evaluator->Evaluate(time);
+    CHECK(evaluator->GetUpstreamInputPaths() == PathsOf(inputs));
+    CHECK(!HasLine(standing, "upstream input "));
+    CheckSamePose("D2 standing", expected, standing);
+    CHECK(Differences(authored, standing) > 0);
     CHECK(evaluator->GetBakedClustersRunLastGeneration() > 0);
-    evaluator->SetUpstreamInputs({Up(kA0Rz, VtValue(30.0)),
-                                  Up(kUpstreamSpace,
-                                     VtValue(Translate(1, 0, 10)))});
-    evaluator->Evaluate(time);
+    CHECK(work(evaluator->GetLastOpTrace()).second > 0);
+    const auto snapshot = Freeze(*evaluator, "D2 standing snapshot");
+    CHECK(snapshot);
+    if (!snapshot) return;
+    const auto snapshotUpstream = snapshot->program.lastUpstream;
+
+    evaluator->SetUpstreamInputs(inputs);
+    CheckSamePose("D2 repeated live standing", standing,
+                  evaluator->Evaluate(time));
     CHECK(evaluator->GetBakedClustersRunLastGeneration() == 0);
+    const auto liveWork = work(evaluator->GetLastOpTrace());
+    CHECK(liveWork.first == 0 && liveWork.second == 0);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto held = RunJob(*evaluator, snapshot, time, inputs,
+                                "D2 frozen standing");
+        CHECK(held.report.ran && held.pose.valid);
+        CheckSamePose("D2 frozen standing", standing, held.pose);
+        const auto heldWork = work(held.report.region);
+        CHECK(heldWork.first == 0 && heldWork.second == 0);
+        CHECK(snapshot->program.lastUpstream == snapshotUpstream);
+    }
+    const auto lifted = RunJob(*evaluator, snapshot, time, {},
+                              "D2 frozen lift");
+    CHECK(lifted.report.ran && lifted.pose.valid);
+    CheckSamePose("D2 frozen lift", authored, lifted.pose);
+    CHECK(work(lifted.report.region).second > 0);
+    CHECK(snapshot->program.lastUpstream == snapshotUpstream);
+    evaluator->SetUpstreamInputs({});
+    CheckSamePose("D2 live lift", authored, evaluator->Evaluate(time));
+    CHECK(work(evaluator->GetLastOpTrace()).second > 0);
 }
 
 // An oracle-resolved weight object's scalar input: a constraint envelope the

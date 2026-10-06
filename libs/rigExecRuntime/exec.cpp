@@ -310,9 +310,8 @@ RigExecRuntimeReader::GetStepRanForTesting(size_t step) const
     if (wire.isSource) {
         return true;
     }
-    const size_t cluster = size_t(wire.cluster);
-    return cluster / 64 < store.closedWords.size() &&
-           ((store.closedWords[cluster / 64] >> (cluster % 64)) & 1u) != 0;
+    return step / 64 < store.closedSteps.size() &&
+           ((store.closedSteps[step / 64] >> (step % 64)) & 1u) != 0;
 }
 
 std::vector<RigExecRuntimeJointMatrix>
