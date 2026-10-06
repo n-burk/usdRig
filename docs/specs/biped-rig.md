@@ -1,9 +1,8 @@
 # Biped guide
 
 The biped in `examples/biped` demonstrates layered body and face rigging,
-pose correctives, a control picker, and touch regions. It remains checked in.
-Its source and redistribution license are unresolved; see
-[third-party notices](../../THIRD_PARTY_NOTICES.md#provenance-requiring-owner-review).
+pose correctives, a control picker, and touch regions. Its eye shader is
+under its own EULA; see [third-party notices](../../THIRD_PARTY_NOTICES.md).
 
 ## Open a stage
 

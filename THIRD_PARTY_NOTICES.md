@@ -31,6 +31,11 @@ font atlases retain the SIL Open Font License 1.1, reproduced in
 Those font terms differ from both the root MIT and the editor's OpenUSD terms.
 The distribution [NOTICE](NOTICE) records these component boundaries.
 
+The Squarebit Eye shader, `examples/biped/shaders/sbe_eye.glslfx`, is
+licensed under the
+[Squarebit Eye End User License Agreement](https://www.squarebitstudios.com/squarebit-eye/eula),
+as its header states. It is not relicensed under MIT.
+
 ## Published methods
 
 Dual-quaternion skinning and Delta Mush have public research references listed in
@@ -38,17 +43,3 @@ Dual-quaternion skinning and Delta Mush have public research references listed i
 not a claim that RigExec invented them or an endorsement by their authors.
 A citation alone does not establish rights to source code or assets.
 
-## Provenance requiring owner review
-
-- `examples/biped` contains geometry, corrective shapes, and rig data
-  converted from a character and rig by
-  [Squarebit Studios](https://www.squarebitstudios.com/)
-  ([Matt Schiller](https://github.com/matthewschiller),
-  [Walt Yoder](https://github.com/wyoder)). It is retained in the
-  repository at the owner's request. A redistribution license for that
-  material is not documented here yet.
-
-The biped entry now identifies its source author; its redistribution
-terms are still undocumented. Before a public distribution, the owner must document
-ownership or permission for the affected material. No claim of an
-entirely MIT-licensed distribution is made here.

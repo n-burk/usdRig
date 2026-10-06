@@ -6,14 +6,12 @@ then publishes the results through Hydra for live playback in `usdview`.
 
 **Status: 0.1 alpha.** APIs and file formats may change. Original project code
 is [MIT licensed](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md)
-for bundled code, published methods, and unresolved asset provenance.
+for bundled code, published methods, and the eye shader license.
 The distribution [NOTICE](NOTICE) identifies OpenUSD, noodles, and font credits.
 
 Authors: [Nick Burkard](https://github.com/n-burk) and
 [Squarebit Studios](https://www.squarebitstudios.com)' [Walt Yoder](https://github.com/wyoder)
 and [Matt Schiller](https://github.com/matthewschiller).
-The biped example rig in `examples/biped` is a Squarebit Studios
-character converted to RigExec.
 
 ## Features
 
@@ -89,8 +87,7 @@ target_link_libraries(myApplication PRIVATE rigExec::rigExec)
 
 Start with [the smallest rig](examples/rigexec_flat.usda), the animated
 [reference arm](examples/ArmShotAnim.usda), or the [example catalog](examples/README.md).
-The [biped](examples/biped/README.md) remains available, with its provenance
-status documented in the third-party notices.
+The [biped](examples/biped/README.md) is the full character example.
 
 - [Node reference and tutorials](docs/index.md)
 - [Architecture and repository boundaries](docs/specs/spec.md)

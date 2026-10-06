@@ -24,9 +24,8 @@ The root README is the build entry point; `docs/index.md` is the node catalog.
   distinct from `.rigexec` binary playback.
 - `plugin/rigExecUsdview`: editor UI plus Qt-free interaction models.
 - `plugin/usdNoodles`: bundled third-party node editor; preserve its license.
-- `examples`: sample stages and procedural generators. The biped names
-  its source author but has an unresolved redistribution record; see
-  `THIRD_PARTY_NOTICES.md`.
+- `examples`: sample stages and procedural generators. The biped's eye
+  shader keeps its own EULA; see `THIRD_PARTY_NOTICES.md`.
 - `tests`: C++ suites, Python model tests, and graphical viewer tests.
 
 ## Build and verify
