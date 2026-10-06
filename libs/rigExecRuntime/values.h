@@ -18,14 +18,17 @@
 
 namespace rigExec {
 
-// The four identity landmarks a frame is measured against.
+// The four identity landmarks a frame is measured against. Initialised at
+// load rather than as a function-local static, whose first-use guard every
+// call would test.
+inline const std::array<RrVec3d, 4> kRrIdentityLandmarks = {
+    RrVec3d(0.0), RrVec3d(1.0, 0.0, 0.0), RrVec3d(0.0, 1.0, 0.0),
+    RrVec3d(0.0, 0.0, 1.0)};
+
 inline const std::array<RrVec3d, 4> &
 RrIdentityLandmarks()
 {
-    static const std::array<RrVec3d, 4> identity = {
-        RrVec3d(0.0), RrVec3d(1.0, 0.0, 0.0), RrVec3d(0.0, 1.0, 0.0),
-        RrVec3d(0.0, 0.0, 1.0)};
-    return identity;
+    return kRrIdentityLandmarks;
 }
 
 // Mirrors RigExecPointFrameFlags bit for bit.

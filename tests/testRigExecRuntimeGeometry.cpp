@@ -22,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -1907,6 +1908,266 @@ TestSparseSkinTopology()
     std::printf("sparse skin topology: checked\n");
 }
 
+// The C runtime's environment, the one std::getenv reads (TfSetenv on
+// Windows writes the process block only). Empty clears \p name.
+static std::string
+_GetEnv(const char *name)
+{
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    const char *value = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    return value ? value : "";
+}
+
+static void
+_SetEnv(const char *name, const std::string &value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    if (value.empty()) {
+        unsetenv(name);
+    } else {
+        setenv(name, value.c_str(), 1);
+    }
+#endif
+}
+
+// Three point sets over two controls: Shift translates by whole numbers,
+// Turn rotates. Lift is a matrix mover by Shift at weights 0 and 1 alone;
+// Bend one by Turn at interior weights too; Skin a classicLinear skin over
+// both, three of its rows on Shift alone.
+static UsdStageRefPtr
+_SimdSettingStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls"), TfToken("Scope"));
+    const auto control = [&](const char *path,
+                             const std::vector<std::pair<const char *,
+                                                         double>> &avars) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken("rest:space"),
+                             SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        for (const auto &[avar, value] : avars) {
+            prim.CreateAttribute(TfToken(avar), SdfValueTypeNames->Double)
+                .Set(value);
+        }
+        return prim.GetPath();
+    };
+    const SdfPath shift = control(
+        "/Asset/Rig/Controls/Shift",
+        {{"avars:tx", 3.0}, {"avars:ty", -2.0}, {"avars:tz", 5.0}});
+    const SdfPath turn = control(
+        "/Asset/Rig/Controls/Turn",
+        {{"avars:rz", 33.0}, {"avars:tx", 1.5}, {"avars:ty", -0.5}});
+
+    // Dyadic coordinates, so a whole-number translation is exact in float
+    // and lands on no zero.
+    const VtVec3fArray rest = {
+        GfVec3f(1.5f, 2.25f, -3.5f),   GfVec3f(-2.5f, 0.75f, 4.25f),
+        GfVec3f(3.25f, -1.5f, 0.5f),   GfVec3f(-0.25f, 5.5f, -2.75f),
+        GfVec3f(4.5f, -3.25f, 1.25f),  GfVec3f(-5.75f, 1.5f, 2.5f),
+        GfVec3f(0.5f, -4.5f, -1.75f),  GfVec3f(2.75f, 3.5f, -0.25f)};
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const auto points = [&](const char *path) {
+        const UsdPrim prim =
+            stage->DefinePrim(SdfPath(path), TfToken("Points"));
+        prim.CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray)
+            .Set(rest);
+        return prim.GetPath().AppendProperty(TfToken("points"));
+    };
+    const SdfPath lift = points("/Asset/Geom/Lift");
+    const SdfPath bend = points("/Asset/Geom/Bend");
+    const SdfPath skinned = points("/Asset/Geom/Skin");
+
+    stage->DefinePrim(SdfPath("/Asset/Rig/Weights"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const auto matrixMover = [&](const char *name, const SdfPath &target,
+                                 const SdfPath &transform,
+                                 const VtFloatArray &values) {
+        const SdfPath weightPath =
+            SdfPath("/Asset/Rig/Weights").AppendChild(TfToken(name));
+        const UsdPrim weight =
+            stage->DefinePrim(weightPath, TfToken("RigExecStaticWeight"));
+        weight.CreateRelationship(TfToken("rigExec:weightTarget"))
+            .SetTargets({target});
+        weight.CreateAttribute(TfToken("rigExec:representation"),
+                               SdfValueTypeNames->Token)
+            .Set(TfToken("dense"));
+        weight.CreateAttribute(TfToken("rigExec:values"),
+                               SdfValueTypeNames->FloatArray)
+            .Set(values);
+        weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                               SdfValueTypeNames->Float)
+            .Set(0.0f);
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers").AppendChild(TfToken(name)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves"))
+            .SetTargets({target});
+        mover.CreateRelationship(TfToken("rigExec:transform"))
+            .SetTargets({transform});
+        mover.CreateRelationship(TfToken("rigExec:weightObject"))
+            .SetTargets({weightPath});
+    };
+    matrixMover("Lift", lift, shift, {0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 1.0f});
+    matrixMover("Bend", bend, turn, {0.0f, 1.0f, 0.3f, 0.5f, 1.0f, 0.0f,
+                                     0.7f, 0.15f});
+
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin"), TfToken("RigExecSkinMover"));
+    skin.ApplyAPI(TfToken("RigExecMoverAPI"));
+    skin.GetRelationship(TfToken("rigExec:moves")).SetTargets({skinned});
+    skin.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({shift, turn});
+    skin.CreateAttribute(TfToken("rigExec:elementSize"),
+                         SdfValueTypeNames->Int)
+        .Set(2);
+    skin.CreateAttribute(TfToken("rigExec:skinningMethod"),
+                         SdfValueTypeNames->Token)
+        .Set(TfToken("classicLinear"));
+    skin.CreateAttribute(TfToken("rigExec:jointIndices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1});
+    skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{1.0f, 0.0f,  0.5f, 0.5f,   //
+                          1.0f, 0.0f,  0.25f, 0.75f, //
+                          0.0f, 1.0f,  1.0f, 0.0f,   //
+                          0.6f, 0.4f,  0.9f, 0.1f});
+    return stage;
+}
+
+// RIGEXEC_ENABLE_SIMD is read at Open, once per reader: two readers of one
+// file, opened with the switch off and then on, keep their own setting
+// whatever the environment says when they run. The SSE2 kernels match the
+// scalar ones within 1e-6 x extent and exactly where the arithmetic is: a
+// weight-0 point passes through, and a weight-1 point under a whole-number
+// translation lands on the same float.
+static void
+TestSimdSettingPerReader()
+{
+    const char *const name = "SIMD setting per reader";
+    const char *const variable = "RIGEXEC_ENABLE_SIMD";
+    const UsdStageRefPtr stage = _SimdSettingStage();
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<uint8_t> bytes;
+    std::string error;
+    // Baked before the switch moves, so the evaluator's own reading of it
+    // is the suite's.
+    const bool baked = RigExecTestBakeAt(evaluator, 0.0, &bytes, &error);
+    CHECK(baked);
+    if (!baked) {
+        std::printf("%s: bake: %s\n", name, error.c_str());
+        return;
+    }
+    const std::string original = _GetEnv(variable);
+    _SetEnv(variable, "0");
+    const std::unique_ptr<RigExecRuntimeReader> scalar =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    _SetEnv(variable, "1");
+    const std::unique_ptr<RigExecRuntimeReader> simd =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    CHECK(scalar && simd);
+    if (!scalar || !simd) {
+        _SetEnv(variable, original);
+        std::printf("%s: open: %s\n", name, error.c_str());
+        return;
+    }
+
+    // Lift: rows exact at every point. Bend: rows exact where the weight
+    // is 0. Skin: rows exact where Shift alone weighs.
+    struct Target {
+        const char *path;
+        std::vector<bool> exact;
+    };
+    const std::vector<Target> targets = {
+        {"/Asset/Geom/Lift.points", std::vector<bool>(8, true)},
+        {"/Asset/Geom/Bend.points",
+         {true, false, false, false, false, true, false, false}},
+        {"/Asset/Geom/Skin.points",
+         {true, false, true, false, false, true, false, false}}};
+    size_t differing = 0;
+    const auto compare = [&](const char *what, const char *environment) {
+        _SetEnv(variable, environment);
+        CHECK(!scalar->GetSimdEnabledForTesting());
+        CHECK(simd->GetSimdEnabledForTesting());
+        const bool ranScalar = scalar->Execute(&error);
+        CHECK(ranScalar);
+        const bool ranSimd = simd->Execute(&error);
+        CHECK(ranSimd);
+        if (!ranScalar || !ranSimd) {
+            std::printf("%s, %s: execute: %s\n", name, what, error.c_str());
+            return;
+        }
+        for (const Target &target : targets) {
+            const RigExecRuntimePoints *a = _FindPoints(*scalar, target.path);
+            const RigExecRuntimePoints *b = _FindPoints(*simd, target.path);
+            CHECK(a && b && a->points.size() == target.exact.size() &&
+                  b->points.size() == target.exact.size());
+            if (!a || !b || a->points.size() != target.exact.size() ||
+                b->points.size() != target.exact.size()) {
+                continue;
+            }
+            double extent = 1.0;
+            for (const RrVec3f &p : b->points) {
+                for (int k = 0; k < 3; ++k) {
+                    extent = std::max(extent, std::abs(double(p[k])));
+                }
+            }
+            for (size_t i = 0; i < target.exact.size(); ++i) {
+                const RrVec3f &x = a->points[i];
+                const RrVec3f &y = b->points[i];
+                const bool same =
+                    std::memcmp(&x, &y, sizeof(RrVec3f)) == 0;
+                differing += same ? 0 : 1;
+                double distance = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    const double d = double(x[k]) - double(y[k]);
+                    distance += d * d;
+                }
+                const bool close = std::sqrt(distance) <= 1e-6 * extent;
+                if ((target.exact[i] && !same) || !close) {
+                    ++failures;
+                    std::printf("FAIL %s, %s: %s point %zu is (%.9g %.9g "
+                                "%.9g) scalar, (%.9g %.9g %.9g) SIMD\n",
+                                name, what, target.path, i, x[0], x[1],
+                                x[2], y[0], y[1], y[2]);
+                }
+            }
+        }
+    };
+    // The switch flipped against each reader before every run.
+    compare("defaults", "1");
+    const std::vector<std::pair<const char *, double>> drags = {
+        {"/Asset/Rig/Controls/Shift.avars:tx", -6.0},
+        {"/Asset/Rig/Controls/Shift.avars:ty", 7.0},
+        {"/Asset/Rig/Controls/Shift.avars:tz", -1.0},
+        {"/Asset/Rig/Controls/Turn.avars:rz", -57.0},
+        {"/Asset/Rig/Controls/Turn.avars:tx", 2.0}};
+    for (const auto &[input, value] : drags) {
+        CHECK(scalar->SetInput(input, value, &error));
+        CHECK(simd->SetInput(input, value, &error));
+    }
+    compare("dragged", "0");
+    _SetEnv(variable, original);
+    std::printf("%s: checked (%zu point(s) differ within the tolerance)\n",
+                name, differing);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1955,6 +2216,8 @@ main(int argc, char **argv)
                      std::string(fixture.animation) == "static");
     }
     CHECK(sawBaking);
+    // Last: it moves RIGEXEC_ENABLE_SIMD, which the evaluator reads once.
+    TestSimdSettingPerReader();
 
     if (failures == 0) {
         std::printf("testRigExecRuntimeGeometry: all tests passed "

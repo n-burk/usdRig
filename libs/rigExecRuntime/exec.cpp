@@ -195,6 +195,12 @@ RigExecRuntimeReader::GetClosedClusterCountForTesting() const
     return _program->store.lastClosedClusters;
 }
 
+bool
+RigExecRuntimeReader::GetSimdEnabledForTesting() const
+{
+    return _program->geoSettings.useSimd;
+}
+
 std::vector<int32_t>
 RigExecRuntimeReader::GetLastRunTraceForTesting() const
 {

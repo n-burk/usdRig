@@ -399,8 +399,8 @@ RrMaskTransform(const RrMat4d &m, const bool translation[3],
             x = std::atan2(-r._mtx[2][1], r._mtx[1][1]);
             z = 0.0;
         }
-        static const RrVec3d axes[3] = {RrVec3d(1, 0, 0), RrVec3d(0, 1, 0),
-                                        RrVec3d(0, 0, 1)};
+        const RrVec3d axes[3] = {RrVec3d(1, 0, 0), RrVec3d(0, 1, 0),
+                                 RrVec3d(0, 0, 1)};
         const double angles[3] = {RrRadiansToDegrees(x),
                                   RrRadiansToDegrees(y),
                                   RrRadiansToDegrees(z)};

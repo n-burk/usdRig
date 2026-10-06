@@ -200,7 +200,7 @@ _RrComposeAvars(double tx, double ty, double tz, double sx, double sy,
                 double sz, double rx, double ry, double rz, double rspin,
                 const std::string &order)
 {
-    static const RrVec3d axes[3] = {
+    const RrVec3d axes[3] = {
         RrVec3d(1, 0, 0), RrVec3d(0, 1, 0), RrVec3d(0, 0, 1)};
     const double angles[3] = {rx, ry, rz};
     std::string sequence = order;

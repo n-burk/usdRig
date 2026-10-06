@@ -221,7 +221,7 @@ _RrOrderIndices(_RrEulerOrder order)
 RrQuatd
 _RrQuatFromEulerDegrees(const RrVec3d &degrees, _RrEulerOrder order)
 {
-    static const RrVec3d axes[3] = {
+    const RrVec3d axes[3] = {
         RrVec3d(1, 0, 0), RrVec3d(0, 1, 0), RrVec3d(0, 0, 1)};
     RrMat4d matrix = _RrIdentity();
     const std::array<int, 3> indices = _RrOrderIndices(order);
@@ -236,7 +236,7 @@ _RrQuatFromEulerDegrees(const RrVec3d &degrees, _RrEulerOrder order)
 RrVec3d
 _RrEulerDegreesFromQuat(const RrQuatd &rotation, _RrEulerOrder order)
 {
-    static const RrVec3d axes[3] = {
+    const RrVec3d axes[3] = {
         RrVec3d(1, 0, 0), RrVec3d(0, 1, 0), RrVec3d(0, 0, 1)};
     const std::array<int, 3> indices = _RrOrderIndices(order);
     // GfRotation::Decompose(a,b,c) describes row-matrix factors in the

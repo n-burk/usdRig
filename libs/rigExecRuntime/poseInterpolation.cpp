@@ -313,7 +313,7 @@ double _RrRbfSolver::TranslationDistance(const RrVec3d *translation,
     if (index >= _translations.size()) {
         return 0.0;
     }
-    static const RrVec3d rest(0.0);
+    const RrVec3d rest(0.0);
     const RrVec3d &here = translation ? *translation : rest;
     const RrVec3d &there = _translations[index];
     double total = 0.0;

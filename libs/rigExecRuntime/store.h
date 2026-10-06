@@ -355,6 +355,19 @@ struct RrRegisteredRead {
     int32_t avar = -1;
 };
 
+// The geometry kernels' environment settings. Open reads them once, so no
+// run reads the environment; a program a test assembles by hand keeps
+// these defaults.
+struct RrGeoSettings {
+    /// RIGEXEC_ENABLE_SIMD: the skin and matrix kernels take the SSE2 path.
+    bool useSimd = true;
+    /// RIGEXEC_BAKED_CHUNK_VERTS: vertices one chunk of a re-cut covers
+    /// before the cap; at least 1.
+    size_t chunkVertexTarget = 4096;
+    /// RIGEXEC_BAKED_MAX_CHUNKS: the most chunks a re-cut makes; at least 1.
+    size_t chunkCap = 32;
+};
+
 // The opened program plus its working state. The table pointers borrow
 // from `file`; the store is sized at Open.
 struct RrProgram {
@@ -382,6 +395,9 @@ struct RrProgram {
     /// sites read at Open and index the table by them.
     std::vector<RrPathRead> pathReads;
     std::vector<uint32_t> pathReadRows;
+    /// Read from the environment at Open; the geometry steps pass them to
+    /// the kernels.
+    RrGeoSettings geoSettings;
 
     /// One plugin revision's playback state, in external_movers order. No
     /// prepared state means no kernel here: the revision passes through.

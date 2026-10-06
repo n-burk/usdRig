@@ -319,37 +319,6 @@ RrGeoMat3ExtractRotationQuat(const RrMat3d &m)
     return rotation.GetQuat();
 }
 
-bool
-RrGeoGetenvBool(const char *name, bool fallback)
-{
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#endif
-    const char *value = std::getenv(name);
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-    if (!value || !*value) {
-        return fallback;
-    }
-    std::string lower(value);
-    for (char &c : lower) {
-        if (c >= 'A' && c <= 'Z') {
-            c = char(c - 'A' + 'a');
-        }
-    }
-    if (lower == "0" || lower == "false" || lower == "no" ||
-        lower == "off") {
-        return false;
-    }
-    if (lower == "1" || lower == "true" || lower == "yes" ||
-        lower == "on") {
-        return true;
-    }
-    return fallback;
-}
-
 // Packet mirrors: the per-mover parameter packet and its shared layouts,
 // compared exactly the way RigExecMoverParameters::operator== compares
 // (layouts and bindings by pointer, everything else by value).
@@ -884,12 +853,12 @@ RrGeoApplyLinearBlendSkinSimd(const RrVec3f *in, RrVec3f *out,
 
 #endif  // RIGEXEC_RUNTIME_HAS_SSE2
 
+// \p useSimd is the program's RrGeoSettings::useSimd.
 void
 RrGeoApplyMatrixKernelRange(const RrGeoMoverParameters &p,
                            const float *envelope, size_t begin, size_t end,
-                           RrVec3f *pts)
+                           RrVec3f *pts, bool useSimd)
 {
-    static const bool useSimd = RrGeoGetenvBool("RIGEXEC_ENABLE_SIMD", true);
     if (p.radialWeight) {
         // Factored per WEIGHT rather than per point: a painted falloff is
         // mostly a handful of distinct values. Mirrors
@@ -921,7 +890,8 @@ RrGeoApplyMatrixKernelRange(const RrGeoMoverParameters &p,
 }
 
 bool
-RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts)
+RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
+                       bool useSimd)
 {
     const size_t count = pts->size();
     const RrGeoWeightPacket &w = p.weights;
@@ -971,7 +941,8 @@ RrGeoApplyMatrixKernel(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts)
     if (!p.weights.ResolveAll(count, &weights)) {
         return false;  // cardinality mismatch fails atomically
     }
-    RrGeoApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data());
+    RrGeoApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data(),
+                                useSimd);
     return true;
 }
 
@@ -1331,7 +1302,7 @@ RrGeoDecomposeMatrix(const RrMat4d &matrix, RrQuatd *rotation,
         return true;
     }
 
-    static const std::array<RrVec3d, 4> unitRest = {
+    const std::array<RrVec3d, 4> unitRest = {
         RrVec3d(0, 0, 0), RrVec3d(1, 0, 0),
         RrVec3d(0, 1, 0), RrVec3d(0, 0, 1)};
     RrGeoTransformParams params;
@@ -2202,7 +2173,8 @@ RrGeoSkinTransformsAreUsable(const RrMat4d *transforms, size_t count)
 bool
 RrGeoApplySkinKernelRange(const RrGeoMoverParameters &p,
                          const RrGeoSkinTransformsView &transforms,
-                         size_t begin, size_t end, std::vector<RrVec3f> *pts)
+                         size_t begin, size_t end, std::vector<RrVec3f> *pts,
+                         bool useSimd)
 {
     const RrGeoSkinLayout layout =
         RrGeoSkinLayoutForPacket(p, transforms, pts->size());
@@ -2212,7 +2184,6 @@ RrGeoApplySkinKernelRange(const RrGeoMoverParameters &p,
     part.indexCount = (end - begin) * layout.elementSize;
     part.pointCount = end - begin;
     RrVec3f *const points = pts->data();
-    static const bool useSimd = RrGeoGetenvBool("RIGEXEC_ENABLE_SIMD", true);
 
     if (p.skinningMethod == "classicLinear") {
         if (useSimd) {
@@ -2242,7 +2213,8 @@ RrGeoApplySkinKernelRange(const RrGeoMoverParameters &p,
 bool
 RrGeoApplySkinKernelWithTransforms(
     const RrGeoMoverParameters &p,
-    const RrGeoSkinTransformsView &transforms, std::vector<RrVec3f> *pts)
+    const RrGeoSkinTransformsView &transforms, std::vector<RrVec3f> *pts,
+    bool useSimd)
 {
     const size_t count = pts->size();
     if (!RrGeoSkinLayoutIsUsable(p, count)) {
@@ -2256,7 +2228,7 @@ RrGeoApplySkinKernelWithTransforms(
 
     // The runtime runs serially; a point range is an independent
     // sub-problem, so the serial call is the parallel loop's answer.
-    return RrGeoApplySkinKernelRange(p, transforms, 0, count, pts);
+    return RrGeoApplySkinKernelRange(p, transforms, 0, count, pts, useSimd);
 }
 
 // One sample as the gather consumes it. `points` (the dense points, empty
@@ -2674,16 +2646,17 @@ RrGeoApplyExternal(const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts)
 bool
 RrGeoApplyRevisionKernel(
     int op, const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
-    std::unordered_map<uint64_t, RrGeoWireBasisEntry> *wireCache)
+    std::unordered_map<uint64_t, RrGeoWireBasisEntry> *wireCache,
+    bool useSimd)
 {
     switch (op) {
     case RrGeoOpExternal:
         return RrGeoApplyExternal(p, pts);
     case RrGeoOpMatrix:
-        return RrGeoApplyMatrixKernel(p, pts);
+        return RrGeoApplyMatrixKernel(p, pts, useSimd);
     case RrGeoOpSkin:
         return RrGeoApplySkinKernelWithTransforms(
-            p, RrGeoSkinTransformsOf(p), pts);
+            p, RrGeoSkinTransformsOf(p), pts, useSimd);
     case RrGeoOpBlendShape:
         return RrGeoApplyBlendShapeKernel(p, pts);
     case RrGeoOpVolumeCorrect:
@@ -2798,7 +2771,8 @@ RrGeoApplyRevisionKernel(
 bool
 RrGeoRunRevisionKernel(
     int op, const RrGeoMoverParameters &p, std::vector<RrVec3f> *pts,
-    std::unordered_map<uint64_t, RrGeoWireBasisEntry> *wireCache)
+    std::unordered_map<uint64_t, RrGeoWireBasisEntry> *wireCache,
+    bool useSimd)
 {
     if (!p.valid || p.kind != RrGeoKindToken(op)) {
         return false;
@@ -2809,7 +2783,7 @@ RrGeoRunRevisionKernel(
         op == RrGeoOpRecomputeExtent ||
         (op == RrGeoOpWire &&
          RrGeoWireTakesSparseEnvelope(p.weights))) {
-        return RrGeoApplyRevisionKernel(op, p, pts, wireCache);
+        return RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd);
     }
 
     const bool fullStrengthEnvelope = RrGeoEnvelopeIsFullStrength(p.weights);
@@ -2818,7 +2792,7 @@ RrGeoRunRevisionKernel(
     if (!fullStrengthEnvelope) {
         preceding = *pts;
     }
-    if (!RrGeoApplyRevisionKernel(op, p, pts, wireCache)) {
+    if (!RrGeoApplyRevisionKernel(op, p, pts, wireCache, useSimd)) {
         return false;
     }
     if (pts->size() != precedingSize) {
@@ -4615,7 +4589,7 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
 }
 
 void
-RrGeoFoldTransformForms(RrGeometryScratch::Revision *rev)
+RrGeoFoldTransformForms(RrGeometryScratch::Revision *rev, bool useSimd)
 {
     const size_t count = rev->influences.size();
     if (rev->parameters.skinningMethod == "dualQuaternion") {
@@ -4629,7 +4603,7 @@ RrGeoFoldTransformForms(RrGeometryScratch::Revision *rev)
         return;
     }
     rev->palette.clear();
-    if (!RrGeoGetenvBool("RIGEXEC_ENABLE_SIMD", true)) {
+    if (!useSimd) {
         rev->rows.clear();
         return;
     }
@@ -4657,13 +4631,12 @@ RrGeoWholeTransformsView(RrGeometryScratch::Revision *rev)
 }
 
 RrGeoSkinTransformsView
-RrGeoChunkTransformsView(const RrGeometryScratch::Chunk &chunk)
+RrGeoChunkTransformsView(const RrGeometryScratch::Chunk &chunk, bool useSimd)
 {
     RrGeoSkinTransformsView view;
     view.transforms = chunk.transforms.data();
     view.transformCount = chunk.transforms.size();
-    if (RrGeoGetenvBool("RIGEXEC_ENABLE_SIMD", true) &&
-        !chunk.rows.empty()) {
+    if (useSimd && !chunk.rows.empty()) {
         view.rows = chunk.rows.data();
     }
     if (!chunk.palette.empty()) {
@@ -4738,7 +4711,7 @@ RrGeoGatherChunkTransforms(RrProgram *program,
 bool
 RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
                const RrGeoSkinTransformsView &view, size_t begin,
-               size_t end, bool whole)
+               size_t end, bool whole, bool useSimd)
 {
     std::vector<RrVec3f> &out = rev->output;
     if (end > begin && preceding) {
@@ -4747,11 +4720,11 @@ RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
     }
     if (whole) {
         if (!RrGeoApplySkinKernelWithTransforms(rev->parameters, view,
-                                                &out)) {
+                                                &out, useSimd)) {
             return false;
         }
     } else if (!RrGeoApplySkinKernelRange(rev->parameters, view, begin,
-                                           end, &out)) {
+                                           end, &out, useSimd)) {
         return false;
     }
     if (!rev->fullStrength) {
@@ -4768,7 +4741,8 @@ RrGeoSkinRange(RrGeometryScratch::Revision *rev, const RrVec3f *preceding,
 
 bool
 RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
-                       RrGeometryScratch::Revision *rev, size_t revisionIndex)
+                       RrGeometryScratch::Revision *rev, size_t revisionIndex,
+                       bool useSimd)
 {
     const RrVec3f *points = nullptr;
     size_t count = 0;
@@ -4778,47 +4752,11 @@ RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
         return false;
     }
     return RrGeoSkinRange(rev, points, RrGeoWholeTransformsView(rev), 0,
-                          count, true);
+                          count, true, useSimd);
 }
 
 // The partition re-cut, for the frame an epoch-fixed layout moved under.
 // A port of RigExecBakedPartitionRevision.
-
-int
-RrGeoGetenvInt(const char *name, int fallback)
-{
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#endif
-    const char *value = std::getenv(name);
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-    return value && *value ? std::atoi(value) : fallback;
-}
-
-size_t
-RrGeoChunkVertexTarget()
-{
-    static const size_t target = [] {
-        const int authored = RrGeoGetenvInt("RIGEXEC_BAKED_CHUNK_VERTS",
-                                            4096);
-        return authored < 1 ? size_t(1) : size_t(authored);
-    }();
-    return target;
-}
-
-size_t
-RrGeoChunkCap()
-{
-    static const size_t cap = [] {
-        const int authored =
-            RrGeoGetenvInt("RIGEXEC_BAKED_MAX_CHUNKS", 32);
-        return authored < 1 ? size_t(1) : size_t(authored);
-    }();
-    return cap;
-}
 
 bool
 RrGeoChunkIsSubset(const std::vector<int32_t> &a,
@@ -4837,7 +4775,8 @@ RrGeoChunkIsSubset(const std::vector<int32_t> &a,
 }
 
 void
-RrGeoPartitionRevision(RrGeometryScratch::Revision *rev, size_t influences,
+RrGeoPartitionRevision(const RrGeoSettings &settings,
+                       RrGeometryScratch::Revision *rev, size_t influences,
                        const int *indices, size_t indexCount,
                        int elementSize, int chunkCount)
 {
@@ -4847,10 +4786,10 @@ RrGeoPartitionRevision(RrGeometryScratch::Revision *rev, size_t influences,
     rev->partitionIndexCount = indexCount;
     rev->partitionPointCount = points;
 
-    size_t target = RrGeoChunkVertexTarget();
+    size_t target = settings.chunkVertexTarget;
     size_t count = std::max<size_t>(1, (points + target - 1) / target);
-    if (count > RrGeoChunkCap()) {
-        count = RrGeoChunkCap();
+    if (count > settings.chunkCap) {
+        count = settings.chunkCap;
         target = std::max<size_t>(1, (points + count - 1) / count);
         count = std::max<size_t>(1, (points + target - 1) / target);
     }
@@ -5066,7 +5005,8 @@ RrPrologueGeometry(RrProgram *program,
                 if (rev.chunked && !sameLayout) {
                     if (rev.topology) {
                         RrGeoPartitionRevision(
-                            &rev, wire.influenceSlots.size(),
+                            program->geoSettings, &rev,
+                            wire.influenceSlots.size(),
                             rev.topology->indices.data(),
                             rev.topology->indices.size(),
                             rev.topology->elementSize,
@@ -5355,7 +5295,8 @@ RrGeoRunDerivedStep(RrProgram *program, RrGeometryScratch *scratch,
         const bool applied =
             status.AllowsApply() &&
             RrGeoRunRevisionKernel(int(wire.op), parameters, &values,
-                                   &scratch->wireBasis);
+                                   &scratch->wireBasis,
+                                   program->geoSettings.useSimd);
         rev.resultStatus = status.state;
         if (!applied) {
             values.assign(derived.lastBase.begin(), derived.lastBase.end());
@@ -5476,7 +5417,7 @@ RrGeoRunInfluenceFoldStep(RrProgram *program, RrGeometryScratch *scratch,
         !skin || RrGeoSkinTransformsAreUsable(rev.influences.data(),
                                              rev.influences.size());
     if (skin && rev.influencesValid) {
-        RrGeoFoldTransformForms(&rev);
+        RrGeoFoldTransformForms(&rev, program->geoSettings.useSimd);
     }
     return true;
 }
@@ -5635,6 +5576,7 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
                                           .chains[chainIndex]
                                           .revisions[revisionIndex];
     const bool skin = wire.op == uint8_t(RrGeoOpSkin);
+    const bool useSimd = program->geoSettings.useSimd;
     if (wireStep.part < 0 ||
         size_t(wireStep.part) >= rev.chunks.size()) {
         if (error) {
@@ -5676,7 +5618,7 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
             }
             chunk.ok = RrGeoRunRevisionKernel(
                 int(wire.op), rev.parameters, &rev.output,
-                &scratch->wireBasis);
+                &scratch->wireBasis, useSimd);
             return true;
         }
         if (!rev.parameters.valid ||
@@ -5687,7 +5629,7 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
         }
         chunk.ok = RrGeoSkinRange(&rev, points,
                                   RrGeoWholeTransformsView(&rev), 0, count,
-                                  true);
+                                  true, useSimd);
         return true;
     }
 
@@ -5716,9 +5658,10 @@ RrGeoRunRevisionChunkStep(RrProgram *program, RrGeometryScratch *scratch,
         }
         return false;
     }
-    chunk.ok = RrGeoSkinRange(&rev, points, RrGeoChunkTransformsView(chunk),
-                              size_t(chunk.begin), size_t(chunk.end),
-                              false);
+    chunk.ok = RrGeoSkinRange(&rev, points,
+                              RrGeoChunkTransformsView(chunk, useSimd),
+                              size_t(chunk.begin), size_t(chunk.end), false,
+                              useSimd);
     return true;
 }
 
@@ -5775,8 +5718,8 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
         rev.resultStatus = rev.status.state;
         bool applied = packetValid && rev.status.AllowsApply();
         if (applied && skin && rev.partitionStale) {
-            applied =
-                RrGeoFuseWholeRevision(chain, &rev, revisionIndex);
+            applied = RrGeoFuseWholeRevision(chain, &rev, revisionIndex,
+                                             program->geoSettings.useSimd);
         } else if (applied) {
             for (const RrGeometryScratch::Chunk &chunk : rev.chunks) {
                 if (!chunk.ok) {

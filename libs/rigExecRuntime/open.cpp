@@ -7,16 +7,83 @@
 // sizes and last-version maps (scanning the commit writes), and the store
 // sizing; the families build their own tables (blend layouts and points,
 // expanded skin topologies, base points, and the path-read rows each site
-// reads) as they size their scratch, so no run builds any of it.
+// reads) as they size their scratch, so no run builds any of it. The
+// geometry kernels' environment settings are read here too, so no run
+// reads the environment.
 // Cross-references that do not close are Open errors naming the table.
 #include "rigExecRuntime/runtime.h"
 
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
+#include <string>
 
 namespace rigExec {
+
+namespace {
+
+bool
+RrGeoGetenvBool(const char *name, bool fallback)
+{
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    const char *value = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    if (!value || !*value) {
+        return fallback;
+    }
+    std::string lower(value);
+    for (char &c : lower) {
+        if (c >= 'A' && c <= 'Z') {
+            c = char(c - 'A' + 'a');
+        }
+    }
+    if (lower == "0" || lower == "false" || lower == "no" ||
+        lower == "off") {
+        return false;
+    }
+    if (lower == "1" || lower == "true" || lower == "yes" ||
+        lower == "on") {
+        return true;
+    }
+    return fallback;
+}
+
+int
+RrGeoGetenvInt(const char *name, int fallback)
+{
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    const char *value = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    return value && *value ? std::atoi(value) : fallback;
+}
+
+// The baked program's defaults and clamps: SIMD on, 4096 vertices a chunk,
+// 32 chunks; a count below 1 is 1.
+RrGeoSettings
+RrGeoSettingsFromEnvironment()
+{
+    RrGeoSettings settings;
+    settings.useSimd = RrGeoGetenvBool("RIGEXEC_ENABLE_SIMD", true);
+    const int target = RrGeoGetenvInt("RIGEXEC_BAKED_CHUNK_VERTS", 4096);
+    settings.chunkVertexTarget = target < 1 ? size_t(1) : size_t(target);
+    const int cap = RrGeoGetenvInt("RIGEXEC_BAKED_MAX_CHUNKS", 32);
+    settings.chunkCap = cap < 1 ? size_t(1) : size_t(cap);
+    return settings;
+}
+
+}  // namespace
 
 RigExecRuntimeReader::RigExecRuntimeReader() : _program(new RrProgram())
 {
@@ -53,6 +120,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
     program.poses = file.pose.get();
     program.geometry = file.geometry.get();
     program.statics.file = &file;
+    program.geoSettings = RrGeoSettingsFromEnvironment();
     program.compileDiagnostics = file.compileDiagnostics;
     while (program.stepWeightObjects < file.geometry->weightObjects.size() &&
            !file.geometry->weightObjects[program.stepWeightObjects]
