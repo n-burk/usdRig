@@ -14,7 +14,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -22,6 +24,83 @@
 namespace rigExec {
 
 struct RrProgram;
+
+// The runtime numbers the input tags as the file does.
+static_assert(uint8_t(RrInputTag::IntArray) ==
+                      uint8_t(RigExecWireInputTag::IntArray) &&
+                  uint8_t(RrInputTag::FloatArray) ==
+                      uint8_t(RigExecWireInputTag::FloatArray) &&
+                  uint8_t(RrInputTag::DoubleArray) ==
+                      uint8_t(RigExecWireInputTag::DoubleArray) &&
+                  uint8_t(RrInputTag::Vec2fArray) ==
+                      uint8_t(RigExecWireInputTag::Vec2fArray) &&
+                  uint8_t(RrInputTag::Vec3fArray) ==
+                      uint8_t(RigExecWireInputTag::Vec3fArray),
+              "RrInputTag mirrors the file's InputTag");
+// Array elements are compared and copied as bytes, and an int array is
+// the layouts' std::vector<int>.
+static_assert(sizeof(RrVec2f) == 2 * sizeof(float) &&
+                  sizeof(RrVec3f) == 3 * sizeof(float) &&
+                  std::is_same<int, int32_t>::value,
+              "array elements are their components, unpadded");
+
+/// The element type of an array input tag.
+template <class T>
+struct RrArrayTag;
+template <>
+struct RrArrayTag<int32_t> {
+    static constexpr RigExecWireInputTag value = RigExecWireInputTag::IntArray;
+};
+template <>
+struct RrArrayTag<float> {
+    static constexpr RigExecWireInputTag value =
+        RigExecWireInputTag::FloatArray;
+};
+template <>
+struct RrArrayTag<double> {
+    static constexpr RigExecWireInputTag value =
+        RigExecWireInputTag::DoubleArray;
+};
+template <>
+struct RrArrayTag<RrVec2f> {
+    static constexpr RigExecWireInputTag value =
+        RigExecWireInputTag::Vec2fArray;
+};
+template <>
+struct RrArrayTag<RrVec3f> {
+    static constexpr RigExecWireInputTag value =
+        RigExecWireInputTag::Vec3fArray;
+};
+
+/// Typed element storage for an array input, one vector per element type;
+/// only the vector of the slot's tag is used.
+struct RrArrayBuffer {
+    std::vector<int32_t> ints;
+    std::vector<float> floats;
+    std::vector<double> doubles;
+    std::vector<RrVec2f> vec2s;
+    std::vector<RrVec3f> vec3s;
+};
+
+/// One array input slot. Its default is borrowed, never copied: a pool
+/// entry of the file, a float2 or float3 pool entry converted once at Open,
+/// or the expansion of a stored skin layout. A set's elements are held
+/// beside it; a set equal to the default holds nothing, so "at its
+/// default" is "holds no set".
+struct RrArraySlot {
+    RigExecWireInputTag tag = RigExecWireInputTag::IntArray;
+    /// A const std::vector of the tag's element type.
+    const void *defaultVector = nullptr;
+    RrArrayBuffer held;
+    bool holdsSet = false;
+    /// The held value came from an authored set (SetInputArray(At)):
+    /// Default-time reads take it too, as they take an authored value.
+    bool authored = false;
+    /// What the last run read, kept from this run's first set or reset:
+    /// `ran` when ranHeld, else the default.
+    RrArrayBuffer ran;
+    bool ranHeld = false;
+};
 
 /// A tagged value by value: the file's Value with its optional members
 /// inline, so a slot, a read and the overlay copy it without allocating.
@@ -76,6 +155,9 @@ RrValueFromWire(const RrWireValue &value)
     case RigExecWireInputTag::Vec3f:
         out.vec3f = RrVec3f(value.vec3f[0], value.vec3f[1], value.vec3f[2]);
         break;
+    default:
+        // An array value carries its tag alone.
+        break;
     }
     return out;
 }
@@ -115,17 +197,18 @@ struct RrPathValue {
     RigExecWireVec3d vec{};
     std::vector<int32_t> ints;
     std::vector<float> floats;
-    std::vector<RigExecWireVec2f> vec2s;
-    std::vector<RigExecWireVec3f> vec3s;
+    std::vector<RrVec2f> vec2s;
+    std::vector<RrVec3f> vec3s;
     RigExecWireVec3i vec3i{{0, 0, 0}};
     std::vector<double> doubles;
 };
 
 /// One row of the path-read table (RrProgram::pathReads), keyed by the
 /// attribute's path id and whether the site read its rest (Default) value.
-/// A value row holds what the bake captured. A read row holds the head of
-/// a connection-following read, whose value every geometry prologue
-/// evaluates over the slots.
+/// A value row holds what the bake captured. A scalar read row holds the
+/// head of a connection-following read, whose value every geometry
+/// prologue evaluates over the slots. An array read row is read in place
+/// (RrPathArray); at rest it holds the attribute's Default-time value.
 struct RrPathRead {
     uint32_t path = 0;
     bool rest = false;
@@ -142,9 +225,10 @@ int32_t RrFindPathReadRow(const std::vector<RrPathRead> &table,
                           uint32_t path, bool rest);
 
 /// Builds the path-read table at Open from the file's path_reads: a value
-/// row per static value, decoded out of the pools, and a read row per
-/// connection-following read. False with the reason for a read whose type
-/// no assembler site reads.
+/// row per static value, decoded out of the pools, a read row per
+/// connection-following scalar read, and an array read row, with a rest
+/// row's Default-time value decoded. False with the reason for a scalar
+/// read whose type no assembler site reads.
 bool RrInputsBuildPathReads(RrProgram *program, std::string *error);
 
 /// The slot model over the opened file.
@@ -167,6 +251,20 @@ struct RrInputState {
     /// defaults; kept for slots that are not Animated.
     std::vector<RrWireValue> slotRan;
     std::vector<uint8_t> slotRanHasValue;
+    /// Per slot: whether the inputs the last run applied changed it against
+    /// the run before (bits or elements, or HasValue; an Animated scalar
+    /// always), listed in changedSlots until the next run applies its own.
+    std::vector<char> slotChangedSinceRun;
+    std::vector<uint32_t> changedSlots;
+    /// The array slots: their storage, and per slot its entry (-1 for a
+    /// scalar slot).
+    std::vector<RrArraySlot> arrays;
+    std::vector<int32_t> arrayOf;
+    /// The float2 and float3 pool entries an array value names (a default
+    /// or a read's constant), in the runtime's vector types, by pool id;
+    /// converted once at Open.
+    std::map<uint32_t, std::vector<RrVec2f>> vec2Pool;
+    std::map<uint32_t, std::vector<RrVec3f>> vec3Pool;
 
     /// The avar table's reads (RigExecBakedProgramImpl::avarBindings and
     /// avarConstantBindings), as RrProgram::registeredReads indices, in
@@ -234,13 +332,122 @@ bool RrInputsBindReads(RrProgram *program, std::string *error);
 /// Input \p index (a listed slot) becomes \p value, as authored: the slot
 /// holds it, and the next run applies it (RrInputsApplyTouched). A Double
 /// value sets a Float input through static_cast<float>. False with the
-/// reason, nothing changed, for an index past the listed inputs, any other
-/// type mismatch, a non-finite component unless \p acceptNonFinite (a
-/// stage's own value, which a bake-time default can hold too), or a Token
-/// id that names no text. Setting the value the input holds still marks
-/// it.
+/// reason, nothing changed, for an index past the listed inputs, an array
+/// input, any other type mismatch, a non-finite component unless
+/// \p acceptNonFinite (a stage's own value, which a bake-time default can
+/// hold too), or a Token id that names no text. Setting the value the input
+/// holds still marks it.
 bool RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
                  std::string *error, bool acceptNonFinite = false);
+
+/// Array input \p index (a listed slot) holds a copy of \p value's
+/// elements: an \p authored set (SetInputArray), which every read takes and
+/// which keeps the default's element count, or a sampled one, of any
+/// count, which only the reads at the evaluation time take; each reader
+/// judges the elements as the evaluators judge the stage's. A set whose
+/// elements equal the held ones only takes the set's kind; one equal to the
+/// default holds nothing. False with the reason, nothing changed, for an
+/// index past the listed inputs, a scalar input, another tag, elements
+/// without data, or an authored count other than the default's.
+bool RrInputsSetArray(RrProgram *program, size_t index,
+                      const RigExecRuntimeArray &value, bool authored,
+                      std::string *error);
+
+/// Array input \p index's elements as the reads see them: its held set,
+/// else its default; valid until the next set or reset of that input.
+/// False for an index past the listed inputs or a scalar input.
+bool RrInputsGetArray(const RrProgram *program, size_t index,
+                      RigExecRuntimeArray *out);
+
+/// Array slot \p slot's default is the const std::vector \p vector, of
+/// its tag's element type: a stored skin layout's expansion, which the
+/// geometry family builds at Open.
+void RrInputsBindArrayDefault(RrProgram *program, uint32_t slot,
+                              const void *vector);
+
+/// After the families bound the layout defaults: every array slot has a
+/// default, and the listed ones report its element count. False with the
+/// reason otherwise.
+bool RrInputsFinishArrays(RrProgram *program, std::string *error);
+
+/// Array slot \p slot's elements this run (its held set, else its default)
+/// as a const std::vector of \p tag's element type; null for a slot that
+/// is not an array of that tag.
+const void *RrInputArrayValue(const RrProgram *program, uint32_t slot,
+                              RigExecWireInputTag tag);
+
+/// The same for array slot \p slot's default.
+const void *RrInputArrayDefault(const RrProgram *program, uint32_t slot,
+                                RigExecWireInputTag tag);
+
+template <class T>
+const std::vector<T> *
+RrInputArray(const RrProgram *program, uint32_t slot)
+{
+    return static_cast<const std::vector<T> *>(
+        RrInputArrayValue(program, slot, RrArrayTag<T>::value));
+}
+
+template <class T>
+const std::vector<T> *
+RrInputArrayDefaultOf(const RrProgram *program, uint32_t slot)
+{
+    return static_cast<const std::vector<T> *>(
+        RrInputArrayDefault(program, slot, RrArrayTag<T>::value));
+}
+
+/// Whether array slot \p slot holds an authored set, which Default-time
+/// reads take.
+bool RrInputArrayAuthored(const RrProgram *program, uint32_t slot);
+
+/// Whether slot \p slot holds a value this run (HasValue).
+bool RrInputHasValue(const RrProgram *program, uint32_t slot);
+
+/// Whether slot \p slot holds other than its default: another HasValue, or
+/// other bits (a scalar) or a held set (an array).
+bool RrInputDiffersFromDefault(const RrProgram *program, uint32_t slot);
+
+/// Whether the inputs this run applied changed slot \p slot
+/// (RrInputState::slotChangedSinceRun).
+bool RrInputChangedSinceRun(const RrProgram *program, uint32_t slot);
+
+/// The slot array read \p read answers from this run: Raw, its head when
+/// that holds a value; Resolved, the most upstream hop that does (no
+/// overlay holds arrays). -1 when none does, and the read takes its
+/// constant.
+int32_t RrArrayReadSlot(const RrProgram *program,
+                        const RigExecWireInput &read);
+
+/// Array read \p read's elements this run: RrArrayReadSlot's, else its
+/// constant's, as a const std::vector of \p tag's element type; null when
+/// \p read is not an array read of that tag.
+const void *RrArrayReadValue(const RrProgram *program,
+                             const RigExecWireInput &read,
+                             RigExecWireInputTag tag);
+
+template <class T>
+const std::vector<T> *
+RrArrayRead(const RrProgram *program, const RigExecWireInput &read)
+{
+    return static_cast<const std::vector<T> *>(
+        RrArrayReadValue(program, read, RrArrayTag<T>::value));
+}
+
+/// Path-read row \p row's elements this run, as a const std::vector of
+/// \p tag's element type; null when the row holds no array of that tag.
+/// A value row's static array; a live array read's RrArrayReadValue,
+/// which takes any value its slots hold; a rest one's held value only
+/// while an authored set stands on its slot, else its Default-time value.
+const void *RrPathArrayValue(const RrProgram *program, const RrPathRead &row,
+                             RigExecWireInputTag tag);
+
+template <class T>
+const std::vector<T> *
+RrPathArray(const RrProgram *program, const RrPathRead &row)
+{
+    return static_cast<const std::vector<T> *>(
+        RrPathArrayValue(program, row, RrArrayTag<T>::value));
+}
 
 /// Token input \p index becomes \p text: text the file holds (the empty
 /// token, or a Token node's text) sets its id; other text is interned at
@@ -250,27 +457,31 @@ bool RrInputsSetToken(RrProgram *program, size_t index,
                       const std::string &text, std::string *error);
 
 /// Input \p index (a listed slot) returns to its bake-time default, value
-/// and HasValue alike, and is marked for the next run.
+/// and HasValue alike (an array input also drops its authored mark), and
+/// is marked for the next run when it held anything else.
 void RrInputsReset(RrProgram *program, size_t index);
 
 /// Input \p index (a listed slot) holds no value, as an attribute whose
 /// typed read fails (a blocked sample, or Default on an attribute keyed
 /// alone): every read falls back as it does over such an attribute. The
 /// slot keeps its default's bits, and is marked for the next run. False
-/// with the reason for an index past the listed inputs.
+/// with the reason for an index past the listed inputs or an array input,
+/// which ResetInput restores instead.
 bool RrInputsClear(RrProgram *program, size_t index, std::string *error);
 
 /// What the inputs set or reset since the last run change for this one,
 /// at the start of a run: an Animated slot sets RrStore::animatedTouched,
-/// which dirties what time dirties; any other slot recomputes, for each
-/// override number its walk carries, whether a non-Animated slot of that
-/// walk differs bitwise from its default (HasValue included), so a value
-/// written back to its default clears the flag. Then RrStore::overridden
-/// takes those flags and the marks are cleared. A slot whose value or
-/// HasValue differs bitwise from what the last run read also sets
-/// RrStore::changedSinceRun for each of its override numbers, and this run
-/// becomes the one it is compared with; a set that repeats the value sets
-/// nothing.
+/// which dirties what time dirties; any other scalar slot recomputes, for
+/// each override number its walk carries, whether a non-Animated slot of
+/// that walk differs bitwise from its default (HasValue included), so a
+/// value written back to its default clears the flag. Then
+/// RrStore::overridden takes those flags and the marks are cleared. A slot
+/// whose value or HasValue differs bitwise from what the last run read
+/// also sets RrStore::changedSinceRun for each of its override numbers, and
+/// this run becomes the one it is compared with; a set that repeats the
+/// value sets nothing. Every slot that changed so is listed in
+/// slotChangedSinceRun; an array slot does nothing else, since every
+/// reader of an array runs on every Execute or compares by value.
 void RrInputsApplyTouched(RrProgram *program);
 
 /// Whether the resolved inputs hold a value at attribute \p path this run:

@@ -269,10 +269,14 @@ constexpr unsigned _PrimOrZero = _Zero | _Prim;
 constexpr unsigned _Baked = 1u << unsigned(ReadMode::Baked);
 constexpr unsigned _Resolved = 1u << unsigned(ReadMode::Resolved);
 constexpr unsigned _Pinned = 1u << unsigned(ReadMode::Pinned);
+constexpr unsigned _Raw = 1u << unsigned(ReadMode::Raw);
 constexpr unsigned _AnyMode = 0xfu;
 
-/// Any tag, for a read whose type the site does not fix.
+/// Any scalar tag, for a read whose type the site does not fix.
 constexpr int _AnyTag = -1;
+/// Any array tag, for an array read whose element type the site does not
+/// fix.
+constexpr int _AnyArrayTag = -2;
 
 uint8_t
 _Flags(fb::InputReadFlags flag)
@@ -379,14 +383,14 @@ _RowCount(size_t indices, size_t weights, int32_t elementSize)
                : 0;
 }
 
-/// How skin layout \p t breaks the evaluator's layout rules, as the text
-/// that follows "validated", or empty when it passes them. The rules: rows
-/// of an element size of at least 1, at least one influence, every index
-/// in [0, influence_count) and every weight finite and not negative; the
-/// kernels rely on them to index the influence table unchecked. The sparse
-/// form is rows by its shape, and an entry it drops is (0, +-0), which
-/// passes whenever there is an influence. \p t must have passed its form's
-/// shape checks, so its index and weight vectors are the same length.
+/// How skin layout \p t breaks the evaluator's layout rules
+/// (RigExecFormatSkinShapeValidates, then RigExecFormatSkinEntryValidates
+/// on every entry), as the text that follows "validated", or empty when it
+/// passes them; the kernels rely on them to index the influence table
+/// unchecked. The sparse form is rows by its shape, and an entry it drops
+/// is (0, +0), which passes whenever there is an influence. \p t must have
+/// passed its form's shape checks, so its index and weight vectors are the
+/// same length.
 std::string
 _RuleBreak(const fb::RigExecWireSkinTopology &t)
 {
@@ -394,7 +398,11 @@ _RuleBreak(const fb::RigExecWireSkinTopology &t)
         !_Rows(t.rawIndices.size(), t.rawWeights.size(), t.elementSize)) {
         return ", but its raw layout is not rows of element_size";
     }
-    if (t.elementSize < 1 || t.influenceCount < 1) {
+    const uint64_t dense =
+        t.raw ? uint64_t(t.rawIndices.size())
+              : t.pointCount * uint64_t(std::max(t.elementSize, 0));
+    if (!RigExecFormatSkinShapeValidates(size_t(dense), size_t(dense),
+                                         t.elementSize, t.influenceCount)) {
         return " with element_size " + std::to_string(t.elementSize) +
                " and " + std::to_string(t.influenceCount) + " influence(s)";
     }
@@ -402,17 +410,84 @@ _RuleBreak(const fb::RigExecWireSkinTopology &t)
     for (size_t k = 0; k < entries; ++k) {
         const int32_t index = t.raw ? t.rawIndices[k] : _TopologyIndex(t, k);
         const float weight = t.raw ? t.rawWeights[k] : t.weights[k];
+        if (RigExecFormatSkinEntryValidates(index, weight, t.influenceCount)) {
+            continue;
+        }
         const char *entry = t.raw ? ", but raw entry " : ", but kept entry ";
         if (index < 0 || uint64_t(index) >= t.influenceCount) {
             return entry + _N(k) + " indexes influence " +
                    std::to_string(index) + " of " +
                    std::to_string(t.influenceCount);
         }
-        if (!std::isfinite(weight) || weight < 0.0f) {
-            return entry + _N(k) + " has a negative or non-finite weight";
-        }
+        return entry + _N(k) + " has a negative or non-finite weight";
     }
     return {};
+}
+
+/// Whether \p weight is +0.0f, bit for bit: the one weight the sparse form
+/// drops, at index 0, from the end of a row.
+bool
+_IsPositiveZero(float weight)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &weight, sizeof bits);
+    return bits == 0;
+}
+
+/// An input tag's name in the refusals: the scalar's type, or the array's
+/// element type and "[]".
+const char *
+_TagName(fb::InputTag tag)
+{
+    switch (tag) {
+    case fb::InputTag::Double:
+        return "double";
+    case fb::InputTag::Float:
+        return "float";
+    case fb::InputTag::Bool:
+        return "bool";
+    case fb::InputTag::Int:
+        return "int";
+    case fb::InputTag::Matrix4d:
+        return "matrix4d";
+    case fb::InputTag::Token:
+        return "token";
+    case fb::InputTag::Vec3d:
+        return "vec3d";
+    case fb::InputTag::Vec3f:
+        return "vec3f";
+    case fb::InputTag::IntArray:
+        return "int[]";
+    case fb::InputTag::FloatArray:
+        return "float[]";
+    case fb::InputTag::DoubleArray:
+        return "double[]";
+    case fb::InputTag::Vec2fArray:
+        return "float2[]";
+    case fb::InputTag::Vec3fArray:
+        return "float3[]";
+    }
+    return "unknown";
+}
+
+/// The PathValue tag of a static value of array input tag \p tag.
+fb::PathTag
+_PathArrayTag(fb::InputTag tag)
+{
+    switch (tag) {
+    case fb::InputTag::IntArray:
+        return fb::PathTag::IntArray;
+    case fb::InputTag::FloatArray:
+        return fb::PathTag::FloatArray;
+    case fb::InputTag::DoubleArray:
+        return fb::PathTag::DoubleArray;
+    case fb::InputTag::Vec2fArray:
+        return fb::PathTag::Vec2fArray;
+    case fb::InputTag::Vec3fArray:
+        return fb::PathTag::Vec3fArray;
+    default:
+        return fb::PathTag::Absent;
+    }
 }
 
 /// Whether \p index names an entry of \p table.
@@ -428,6 +503,19 @@ _Has(const Table &table, int64_t index)
 static_assert(fb::StepKind::MAX == fb::StepKind::FrameMatrix &&
                   fb::SlotDomain::MAX == fb::SlotDomain::FrameMatrix,
               "a step kind or slot domain was appended: give it its rules");
+// The array tags and sources are frozen; the runtime mirrors the numbers.
+static_assert(uint8_t(fb::InputTag::IntArray) == 8 &&
+                  uint8_t(fb::InputTag::FloatArray) == 9 &&
+                  uint8_t(fb::InputTag::DoubleArray) == 10 &&
+                  uint8_t(fb::InputTag::Vec2fArray) == 11 &&
+                  uint8_t(fb::InputTag::Vec3fArray) == 12 &&
+                  fb::InputTag::MAX == fb::InputTag::Vec3fArray,
+              "the array input tags are frozen");
+static_assert(uint8_t(fb::ArraySource::Pool) == 0 &&
+                  uint8_t(fb::ArraySource::SkinIndices) == 1 &&
+                  uint8_t(fb::ArraySource::SkinWeights) == 2 &&
+                  fb::ArraySource::MAX == fb::ArraySource::SkinWeights,
+              "the array sources are frozen");
 
 class _Validator {
 public:
@@ -446,7 +534,8 @@ private:
     {
         return _Root() && _Paths() && _Values() && _Pools() && _Slots() &&
                _SlotMeta() && _Constants() && _Steps() && _Cones() &&
-               _Pose() && _Geometry() && _PhaseBindings() && _StepGraph() &&
+               _Pose() && _Geometry() && _LayoutValues() &&
+               _PhaseBindings() && _StepGraph() &&
                _PropertyChains() && _External() && _Overrides() &&
                _Presentation();
     }
@@ -577,10 +666,13 @@ private:
     }
 
     /// Every rule of one bound read: tag, mode and flags in range, the
-    /// constant a value of the read's tag, the walk inside the slots, the
-    /// pinned hop inside the walk and only where a Baked varying read
-    /// takes it, override numbers only on Baked reads, a Raw read over one
-    /// slot. \p tag and \p modes are what the site admits.
+    /// constant a value of the read's tag, the walk inside the slots and
+    /// typed for the read (a scalar read never walks an array slot, an
+    /// array read walks slots of its own tag), the pinned hop inside the
+    /// walk and only where a Baked varying read takes it, override numbers
+    /// only on Baked reads, a Raw read over one slot, and an array read Raw
+    /// or Resolved, crossing no chain, with a pool constant. \p tag and
+    /// \p modes are what the site admits.
     bool _Read(const RigExecWireInput *input, int tag, unsigned modes,
                const std::string &row, const char *field, long index = -1)
     {
@@ -592,7 +684,16 @@ private:
             (input->flags & ~_Flags(fb::InputReadFlags::ANY)) != 0) {
             return _Bad(where() + ": tag, mode or flags out of range");
         }
-        if (tag != _AnyTag && input->tag != InputTag(tag)) {
+        const bool array = RigExecFormatIsArrayTag(input->tag);
+        if (tag == _AnyTag && array) {
+            return _Bad(where() + ": tag " + _N(size_t(input->tag)) +
+                        " is an array tag, which this site does not read");
+        }
+        if (tag == _AnyArrayTag && !array) {
+            return _Bad(where() + ": tag " + _N(size_t(input->tag)) +
+                        " is not an array tag");
+        }
+        if (tag >= 0 && input->tag != InputTag(tag)) {
             return _Bad(where() + ": tag " + _N(size_t(input->tag)) +
                         ", expected " + _N(size_t(tag)));
         }
@@ -613,6 +714,34 @@ private:
                 return _Bad(where() + ".walk[" + _N(k) + "]: slot " +
                             _N(input->walk[k]) + " out of range (" +
                             _N(_f.inputs.size()) + " slots)");
+            }
+            const InputTag hop = _f.inputs[input->walk[k]].type();
+            if (!array && RigExecFormatIsArrayTag(hop)) {
+                return _Bad(where() + ".walk[" + _N(k) + "]: slot " +
+                            _N(input->walk[k]) +
+                            " is an array input, which a scalar read never "
+                            "walks");
+            }
+            if (array && hop != input->tag) {
+                return _Bad(where() + ".walk[" + _N(k) + "]: slot " +
+                            _N(input->walk[k]) + " holds " + _TagName(hop) +
+                            ", not the read's " + _TagName(input->tag));
+            }
+        }
+        if (array) {
+            if (input->mode != ReadMode::Raw &&
+                input->mode != ReadMode::Resolved) {
+                return _Bad(where() + ": an array read is Raw or Resolved");
+            }
+            if ((input->flags & (_Flags(fb::InputReadFlags::ViaChain) |
+                                 _Flags(fb::InputReadFlags::LongWay))) != 0) {
+                return _Bad(where() + ": an array read crosses no chain "
+                                      "and reads no long way");
+            }
+            if (_f.values[input->constant].arraySource !=
+                fb::ArraySource::Pool) {
+                return _Bad(where() + ": constant " + _N(input->constant) +
+                            " is not a pool array");
             }
         }
         const bool baked = input->mode == ReadMode::Baked;
@@ -916,6 +1045,19 @@ private:
                 bool(value.vec3f) != (value.tag == InputTag::Vec3f)) {
                 return _Bad(where + ": its members do not match its tag");
             }
+            if (value.arraySource > fb::ArraySource::MAX) {
+                return _Bad(where + ": array source out of range");
+            }
+            if (RigExecFormatIsArrayTag(value.tag)) {
+                if (!_ArrayValue(value, where)) {
+                    return false;
+                }
+                continue;
+            }
+            if (value.arraySource != fb::ArraySource::Pool ||
+                value.array != 0) {
+                return _Bad(where + ": an array source on a scalar value");
+            }
             bool ok = true;
             switch (value.tag) {
             case InputTag::Bool:
@@ -942,6 +1084,76 @@ private:
             }
             if (!ok) {
                 return _Bad(where + ": bits do not fit the tag");
+            }
+        }
+        return true;
+    }
+
+    /// The pool an array tag's elements live in, by size.
+    size_t _PoolSize(InputTag tag) const
+    {
+        switch (tag) {
+        case InputTag::IntArray:
+            return _f.intArrays.size();
+        case InputTag::FloatArray:
+            return _f.floatArrays.size();
+        case InputTag::DoubleArray:
+            return _f.doubleArrays.size();
+        case InputTag::Vec2fArray:
+            return _f.vec2fArrays.size();
+        case InputTag::Vec3fArray:
+            return _f.vec3fArrays.size();
+        default:
+            return 0;
+        }
+    }
+
+    /// An array value: no bits, and its elements in the pool of its tag, or
+    /// in a revision's stored layout, indices as int[] and weights as
+    /// float[] (_LayoutValues checks the revision once the chains are).
+    bool _ArrayValue(const fb::RigExecWireValue &value,
+                     const std::string &where)
+    {
+        if (value.bits != 0) {
+            return _Bad(where + ": bits or members on an array value");
+        }
+        switch (value.arraySource) {
+        case fb::ArraySource::Pool:
+            return _Pool(value.array, _PoolSize(value.tag), where, "array");
+        case fb::ArraySource::SkinIndices:
+        case fb::ArraySource::SkinWeights: {
+            const InputTag want =
+                value.arraySource == fb::ArraySource::SkinIndices
+                    ? InputTag::IntArray
+                    : InputTag::FloatArray;
+            if (value.tag != want) {
+                return _Bad(where + ": a skin layout source on a " +
+                            _TagName(value.tag) + " value");
+            }
+            return _Index(int64_t(value.array), _revisions, false, where,
+                          "array");
+        }
+        }
+        return _Bad(where + ": array source out of range");
+    }
+
+    /// Each array value a revision's layout holds names a main revision
+    /// whose layout the epoch fixes and the file stores.
+    bool _LayoutValues()
+    {
+        const fb::RigExecWireDomainGeometry &g = *_f.geometry;
+        for (size_t i = 0; i < _f.values.size(); ++i) {
+            const fb::RigExecWireValue &value = _f.values[i];
+            if (!RigExecFormatIsArrayTag(value.tag) ||
+                value.arraySource == fb::ArraySource::Pool) {
+                continue;
+            }
+            const RigExecWireIntPair &at = g.revisionIndex[value.array];
+            const fb::RigExecWireRevision &r =
+                g.chains[size_t(at.first)].revisions[size_t(at.second)];
+            if (!r.skinTopologyFixed || !r.topologyResolved || !r.topology) {
+                return _Bad("values[" + _N(i) + "]: revision " +
+                            _N(value.array) + " stores no fixed layout");
             }
         }
         return true;
@@ -991,6 +1203,11 @@ private:
                 _f.values[slot.value()].tag != slot.type() ||
                 listed != (i < _f.listedInputs)) {
                 return _Bad(where + ": malformed type, flags or default");
+            }
+            if (RigExecFormatIsArrayTag(slot.type()) &&
+                (slot.chain() != -1 || slot.phased() != -1)) {
+                return _Bad(where + ": an array slot names a chain or a "
+                                    "phased consumer");
             }
             if (slot.chain() != -1 &&
                 (slot.chain() < 0 ||
@@ -1888,10 +2105,12 @@ private:
                 }
             }
         }
-        for (size_t c = 0; c < _chains; ++c) {
-            if (!_Chain(g.chains[c], "geometry.chains[" + _N(c) + "]")) {
+        for (size_t c = 0, first = 0; c < _chains; ++c) {
+            if (!_Chain(g.chains[c], "geometry.chains[" + _N(c) + "]",
+                        first)) {
                 return false;
             }
+            first += g.chains[c].revisions.size();
         }
         if (!_WeightObjects(g) ||
             !_Size(g.falloffLuts.size(), g.falloffPaths.size(), row,
@@ -1910,7 +2129,42 @@ private:
         return _PathReads(g);
     }
 
-    bool _Chain(const fb::RigExecWireChain &chain, const std::string &row)
+    /// An input slot field: -1, or a slot of tag \p tag.
+    bool _InputSlotOf(int32_t slot, InputTag tag, const std::string &row,
+                      const char *field)
+    {
+        if (slot == -1) {
+            return true;
+        }
+        if (!_Index(slot, _f.inputs.size(), false, row, field)) {
+            return false;
+        }
+        if (_f.inputs[size_t(slot)].type() != tag) {
+            return _Bad(_At(row, field) + ": slot " + _N(size_t(slot)) +
+                        " is not a " + _TagName(tag) + " input");
+        }
+        return true;
+    }
+
+    /// The default of input slot \p slot.
+    const fb::RigExecWireValue &_DefaultOf(int32_t slot) const
+    {
+        return _f.values[_f.inputs[size_t(slot)].value()];
+    }
+
+    /// Whether input slot \p slot is attribute \p name of the prim at path
+    /// id \p prim, so that a set of one attribute reaches only its reads.
+    bool _SlotIs(int32_t slot, uint32_t prim, const char *name) const
+    {
+        return RigExecFormatPathText(_f, _f.inputs[size_t(slot)].name()) ==
+               RigExecFormatPathText(_f, prim) + "." + name;
+    }
+
+    /// \p chain, whose revisions take flat ids from \p firstRevision. Its
+    /// base slot is the target's points input, a float3[] slot whose
+    /// default is the base itself.
+    bool _Chain(const fb::RigExecWireChain &chain, const std::string &row,
+                size_t firstRevision)
     {
         if (!_PathId(chain.target, _AnyPath, row, "target") ||
             !_Pool(chain.base, _f.vec3fArrays.size(), row, "base")) {
@@ -1919,9 +2173,31 @@ private:
         if (!chain.haveBase && chain.base != 0) {
             return _Bad(row + ": a base without have_base");
         }
+        if (!_InputSlotOf(chain.baseSlot, InputTag::Vec3fArray, row,
+                          "base_slot")) {
+            return false;
+        }
+        if (chain.baseSlot != -1) {
+            const std::string at = _At(row, "base_slot");
+            const std::string slot = "slot " + _N(size_t(chain.baseSlot));
+            const fb::RigExecWireValue &value = _DefaultOf(chain.baseSlot);
+            if (!chain.haveBase) {
+                return _Bad(at + ": a base slot on a chain without a base");
+            }
+            if (_f.inputs[size_t(chain.baseSlot)].name() != chain.target) {
+                return _Bad(at + ": " + slot +
+                            " is not the chain target's input");
+            }
+            if (value.arraySource != fb::ArraySource::Pool ||
+                value.array != chain.base) {
+                return _Bad(at + ": " + slot +
+                            "'s default is not the chain's base");
+            }
+        }
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             if (!_Revision(chain.revisions[r], false,
-                           row + ".revisions[" + _N(r) + "]")) {
+                           row + ".revisions[" + _N(r) + "]",
+                           firstRevision + r)) {
                 return false;
             }
         }
@@ -1938,15 +2214,16 @@ private:
             if (!derived.revision) {
                 return _Bad(at + ".revision: missing");
             }
-            if (!_Revision(*derived.revision, true, at + ".revision")) {
+            if (!_Revision(*derived.revision, true, at + ".revision", 0)) {
                 return false;
             }
         }
         return true;
     }
 
+    /// Revision \p r, flat id \p id when not \p derived.
     bool _Revision(const fb::RigExecWireRevision &r, bool derived,
-                   const std::string &row)
+                   const std::string &row, size_t id)
     {
         if (r.op > uint8_t(fb::RevisionOp::MAX) ||
             r.op == uint8_t(fb::RevisionOp::Reserved10) ||
@@ -2002,7 +2279,63 @@ private:
              !_Topology(*r.partitionTopology, row + ".partition_topology"))) {
             return false;
         }
+        if (!_LayoutSlots(r, derived, row, id)) {
+            return false;
+        }
         return derived || _Chunks(r, row);
+    }
+
+    /// A revision's layout slots: both or neither, only on a main skin
+    /// whose layout the epoch fixes, its mover's int[] rigExec:jointIndices
+    /// and float[] rigExec:jointWeights, and with a stored layout defaulting
+    /// to its expansion, otherwise to pool arrays.
+    bool _LayoutSlots(const fb::RigExecWireRevision &r, bool derived,
+                      const std::string &row, size_t id)
+    {
+        const bool indices = r.jointIndicesSlot != -1;
+        const bool weights = r.jointWeightsSlot != -1;
+        if (!indices && !weights) {
+            return true;
+        }
+        if (indices != weights) {
+            return _Bad(row + ": joint_indices_slot and joint_weights_slot "
+                              "are set together");
+        }
+        if (derived || r.op != uint8_t(fb::RevisionOp::Skin) ||
+            !r.skinTopologyFixed) {
+            return _Bad(row + ": layout slots on a revision that is not a "
+                              "main skin whose layout the epoch fixes");
+        }
+        const bool stored = r.topologyResolved && r.topology;
+        const std::tuple<int32_t, InputTag, fb::ArraySource, const char *,
+                         const char *>
+            slots[] = {{r.jointIndicesSlot, InputTag::IntArray,
+                        fb::ArraySource::SkinIndices, "joint_indices_slot",
+                        "rigExec:jointIndices"},
+                       {r.jointWeightsSlot, InputTag::FloatArray,
+                        fb::ArraySource::SkinWeights, "joint_weights_slot",
+                        "rigExec:jointWeights"}};
+        for (const auto &[slot, tag, source, field, attribute] : slots) {
+            if (!_InputSlotOf(slot, tag, row, field)) {
+                return false;
+            }
+            if (!_SlotIs(slot, r.moverPath, attribute)) {
+                return _Bad(_At(row, field) + ": slot " + _N(size_t(slot)) +
+                            " is not the mover's " + attribute + " input");
+            }
+            const fb::RigExecWireValue &value = _DefaultOf(slot);
+            if (stored && (value.arraySource != source ||
+                           value.array != uint32_t(id))) {
+                return _Bad(_At(row, field) + ": its default does not name "
+                                              "this revision's layout");
+            }
+            if (!stored && value.arraySource != fb::ArraySource::Pool) {
+                return _Bad(_At(row, field) +
+                            ": its default names a layout this revision "
+                            "does not store");
+            }
+        }
+        return true;
     }
 
     /// A main revision's vertex partition, as the bake cuts one. Its point
@@ -2198,6 +2531,23 @@ private:
                           _Resolved, at, "activation_read")) {
                 return false;
             }
+            // A dense sample's points read through its slots.
+            if (sample.pointsRead) {
+                if (sample.blendShape != 0) {
+                    return _Bad(at + ".points_read: on a sample with a blend "
+                                     "shape");
+                }
+                if (!_ReadPtr(sample.pointsRead, int(InputTag::Vec3fArray),
+                              _Resolved | _Raw, at, "points_read")) {
+                    return false;
+                }
+                const std::vector<uint32_t> &walk = sample.pointsRead->walk;
+                if (walk.empty() ||
+                    _f.inputs[walk[0]].name() != sample.pointsPath) {
+                    return _Bad(at + ".points_read: a read headed by "
+                                     "points_path expected");
+                }
+            }
             // Offsets pair with indices, or, with no indices, run over
             // every point (UsdSkelBlendShape's dense form). A layout the
             // accumulation applies indexes only the points it counts.
@@ -2226,8 +2576,8 @@ private:
     /// A skin layout in the form its flag names, validated exactly when the
     /// evaluator's layout rules pass. The sparse form: one index width and
     /// its vector, one counts vector, every count within element_size, the
-    /// counts summing to the kept entries, no kept entry the canonical form
-    /// drops, and no raw arrays.
+    /// counts summing to the kept entries, no point whose last kept entry
+    /// is (0, +0), which the sparse form drops, and no raw arrays.
     bool _Topology(const fb::RigExecWireSkinTopology &t,
                    const std::string &row)
     {
@@ -2288,12 +2638,18 @@ private:
                         " kept entries, but the indices or weights hold a "
                         "different count");
         }
-        // The canonical form drops every (0, +-0) entry, so a layout has
-        // one encoding of its kept entries.
-        for (size_t k = 0; k < t.weights.size(); ++k) {
-            if (t.weights[k] == 0.0f && _TopologyIndex(t, k) == 0) {
-                return _Bad(row + ": kept entry " + _N(k) +
-                            " is (0, 0), which the sparse form drops");
+        // The sparse form drops each row's trailing (0, +0) entries, so a
+        // layout has one encoding of its kept entries.
+        size_t end = 0;
+        for (size_t p = 0; p < counted; ++p) {
+            const size_t count =
+                narrow ? size_t(t.counts8[p]) : size_t(t.counts16[p]);
+            end += count;
+            if (count > 0 && _TopologyIndex(t, end - 1) == 0 &&
+                _IsPositiveZero(t.weights[end - 1])) {
+                return _Bad(row + ": point " + _N(p) +
+                            " keeps a trailing (0, +0) entry, which the "
+                            "sparse form drops");
             }
         }
         return _Validated(t, row);
@@ -2388,12 +2744,38 @@ private:
                 !_Bools(w.targetValid, row, "target_valid") ||
                 !_Bools(w.sampleValid, row, "sample_valid") ||
                 !_Bools(w.curveValid, row, "curve_valid") ||
-                !_Index(w.providerSlot, _slots, true, row, "provider_slot") ||
-                !_Index(w.oracleSamples, _f.vec3fArrays.size(), true, row,
-                        "oracle_samples") ||
-                !_Index(w.oracleCurve, _f.vec3fArrays.size(), true, row,
-                        "oracle_curve")) {
+                !_Index(w.providerSlot, _slots, true, row, "provider_slot")) {
                 return false;
+            }
+            // The painted arrays and the oracle's points, as input slots:
+            // typed, with pool defaults; the painted ones are the object's
+            // own attributes. The oracle's attribute is the one the stage
+            // resolves its relationship to, which the file does not hold.
+            const std::tuple<int32_t, InputTag, const char *, const char *>
+                slots[] = {
+                    {w.valuesSlot, InputTag::FloatArray, "values_slot",
+                     "rigExec:values"},
+                    {w.indicesSlot, InputTag::IntArray, "indices_slot",
+                     "rigExec:indices"},
+                    {w.oracleSamplesSlot, InputTag::Vec3fArray,
+                     "oracle_samples_slot", nullptr},
+                    {w.oracleCurveSlot, InputTag::Vec3fArray,
+                     "oracle_curve_slot", nullptr}};
+            for (const auto &[slot, tag, field, attribute] : slots) {
+                if (!_InputSlotOf(slot, tag, row, field)) {
+                    return false;
+                }
+                if (slot != -1 && attribute &&
+                    !_SlotIs(slot, w.path, attribute)) {
+                    return _Bad(_At(row, field) + ": slot " +
+                                _N(size_t(slot)) + " is not the object's " +
+                                attribute + " input");
+                }
+                if (slot != -1 &&
+                    _DefaultOf(slot).arraySource != fb::ArraySource::Pool) {
+                    return _Bad(_At(row, field) +
+                                ": its default is not a pool array");
+                }
             }
             // Dependency order bounds the oracle's recursion.
             if (!_Index(w.base, i, true, row, "base") ||
@@ -2434,8 +2816,10 @@ private:
         return true;
     }
 
-    /// Path reads sorted strictly by (path, rest), each a static value or
-    /// a connection-following read headed by its own attribute.
+    /// Path reads sorted strictly by (path, rest), each a static value, a
+    /// live connection-following scalar read headed by its own attribute,
+    /// or an array read headed by it: Raw or Resolved when live, Raw at
+    /// rest, where it also holds the Default-time value of its type.
     bool _PathReads(const fb::RigExecWireDomainGeometry &g)
     {
         for (size_t i = 0; i < g.pathReads.size(); ++i) {
@@ -2451,6 +2835,12 @@ private:
                     return _Bad(row + ": not sorted strictly by (path, "
                                       "rest)");
                 }
+            }
+            if (read.read && RigExecFormatIsArrayTag(read.read->tag)) {
+                if (!_ArrayPathRead(read, row)) {
+                    return false;
+                }
+                continue;
             }
             if (bool(read.value) == bool(read.read)) {
                 return _Bad(row + ": holds both or neither of value and "
@@ -2473,6 +2863,41 @@ private:
             if (!_PathValue(*read.value, row + ".value")) {
                 return false;
             }
+        }
+        return true;
+    }
+
+    bool _ArrayPathRead(const fb::RigExecWirePathRead &read,
+                        const std::string &row)
+    {
+        if (!_ReadPtr(read.read, _AnyArrayTag, _Resolved | _Raw, row,
+                      "read")) {
+            return false;
+        }
+        if (read.read->walk.empty() ||
+            _f.inputs[read.read->walk[0]].name() != read.path) {
+            return _Bad(row + ".read: an array read headed by its own "
+                              "attribute expected");
+        }
+        if (read.headFallback) {
+            return _Bad(row + ": head_fallback on an array read");
+        }
+        if (read.rest != bool(read.value)) {
+            return _Bad(row + ": an array read holds a value exactly when "
+                              "it reads at rest");
+        }
+        if (!read.rest) {
+            return true;
+        }
+        if (read.read->mode != ReadMode::Raw) {
+            return _Bad(row + ".read: an array read at rest is Raw");
+        }
+        if (!_PathValue(*read.value, row + ".value")) {
+            return false;
+        }
+        if (read.value->tag != _PathArrayTag(read.read->tag)) {
+            return _Bad(row + ".value: tag " + _N(size_t(read.value->tag)) +
+                        " is not the read's " + _TagName(read.read->tag));
         }
         return true;
     }
@@ -3301,6 +3726,13 @@ private:
             if (!hops) {
                 return _Bad(row + ": malformed hops");
             }
+            for (size_t j = 0; j < phased.hops.size(); ++j) {
+                if (RigExecFormatIsArrayTag(
+                        _f.inputs[phased.hops[j]].type())) {
+                    return _Bad(_At(row, "hops", long(j)) + ": slot " +
+                                _N(phased.hops[j]) + " is an array input");
+                }
+            }
         }
         return true;
     }
@@ -3450,19 +3882,17 @@ RigExecFormatValidate(const fb::RigExecWireFile &file, std::string *error)
 namespace {
 
 /// Why a file of format \p version does not open. The previous version
-/// cannot hold a skin layout its sparse form cannot, which this one stores
-/// raw and only an export from the rig's stage can supply; any other
-/// version is a rebake.
+/// holds no array inputs, which only an export from the rig's stage can
+/// supply; any other version is a rebake.
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 7,
+    static_assert(RigExecFormatVersion == 8,
                   "name what the previous format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
            " (this reader reads " + _N(RigExecFormatVersion) + "); " +
-           (version + 1 == RigExecFormatVersion
-                ? "re-export: raw skin layouts"
-                : "rebake");
+           (version + 1 == RigExecFormatVersion ? "re-export: array inputs"
+                                                : "rebake");
 }
 
 /// Open after the identifier checks: copy, version probe, bounding walk,
@@ -3848,17 +4278,18 @@ RigExecFormatSparseTopology(const std::vector<int32_t> &indices,
     bool negative = false;
     int32_t largest = 0;
     for (size_t p = 0; p < points; ++p) {
-        size_t count = 0;
-        for (size_t e = p * width; e < (p + 1) * width; ++e) {
-            // Index 0 at weight +-0 reads exactly as padding.
-            if (indices[e] == 0 && weights[e] == 0.0f) {
-                continue;
-            }
+        // The row up to its trailing (0, +0) run, which the padding
+        // restores bit for bit.
+        size_t count = width;
+        while (count > 0 && indices[p * width + count - 1] == 0 &&
+               _IsPositiveZero(weights[p * width + count - 1])) {
+            --count;
+        }
+        for (size_t e = p * width; e < p * width + count; ++e) {
             kept.push_back(indices[e]);
             t.weights.push_back(weights[e]);
             negative = negative || indices[e] < 0;
             largest = std::max(largest, indices[e]);
-            ++count;
         }
         if (narrow) {
             t.counts8.push_back(uint8_t(count));

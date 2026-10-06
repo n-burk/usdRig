@@ -11,7 +11,11 @@
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/base/vt/value.h"
+#include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usd/timeCode.h"
 
 #include <algorithm>
 #include <cstring>
@@ -202,6 +206,165 @@ _PoolPoints(RigExecBakePools *pools, const Points &points)
     return pools->Vec3fs(xyz.data(), points.size());
 }
 
+/// The PathValue tag of a static array of input tag \p tag.
+fb::PathTag
+_PathArrayTag(fb::InputTag tag)
+{
+    switch (tag) {
+    case fb::InputTag::IntArray:
+        return fb::PathTag::IntArray;
+    case fb::InputTag::FloatArray:
+        return fb::PathTag::FloatArray;
+    case fb::InputTag::DoubleArray:
+        return fb::PathTag::DoubleArray;
+    case fb::InputTag::Vec2fArray:
+        return fb::PathTag::Vec2fArray;
+    case fb::InputTag::Vec3fArray:
+        return fb::PathTag::Vec3fArray;
+    default:
+        return fb::PathTag::Absent;
+    }
+}
+
+/// Whether \p a and \p b hold the same elements, bit for bit.
+template <class A, class B>
+bool
+_SameBytes(const A &a, const B &b)
+{
+    return a.size() == b.size() &&
+           (a.empty() || std::memcmp(a.data(), b.data(),
+                                     sizeof(a[0]) * a.size()) == 0);
+}
+
+/// The defaults of \p inputs' array slots, which the bake's run decides,
+/// patched into \p file's slots with their HasValue: a chain's base as the
+/// pool entry the chain stores, a fixed skin layout's array as the stored
+/// layout's expansion when the run stored one, every other the attribute's
+/// value at \p time, or at Default where every read of it is at Default.
+/// Each is the stage's array bit for bit. False, naming the input, when
+/// the run left a base or a layout other than its attributes' values.
+bool
+_ArrayDefaults(const RigExecBakedProgramImpl &program, double time,
+               const RigExecBakeInputs &inputs, RigExecBakePathTable *paths,
+               RigExecBakePools *pools, fb::RigExecWireFile *file,
+               std::string *error)
+{
+    const fb::RigExecWireDomainGeometry &geometry = *file->geometry;
+    for (const RigExecBakeArraySlot &entry : inputs.arraySlots) {
+        if (entry.slot >= file->inputs.size()) {
+            *error = "array input " + std::to_string(entry.slot) +
+                     " is not a slot of the file";
+            return false;
+        }
+        const fb::InputSlot slot = file->inputs[entry.slot];
+        const std::string name = paths->Text(slot.name());
+        const UsdAttribute a =
+            program.stage->GetAttributeAtPath(SdfPath(name));
+        const UsdTimeCode at =
+            entry.atDefault ? UsdTimeCode::Default() : UsdTimeCode(time);
+        fb::RigExecWireValue value;
+        value.tag = entry.tag;
+        bool has = false;
+        VtIntArray ints;
+        VtFloatArray floats;
+        VtDoubleArray doubles;
+        VtVec2fArray pairs;
+        VtVec3fArray points;
+        switch (entry.tag) {
+        case fb::InputTag::IntArray:
+            has = a && a.Get(&ints, at);
+            break;
+        case fb::InputTag::FloatArray:
+            has = a && a.Get(&floats, at);
+            break;
+        case fb::InputTag::DoubleArray:
+            has = a && a.Get(&doubles, at);
+            break;
+        case fb::InputTag::Vec2fArray:
+            has = a && a.Get(&pairs, at);
+            break;
+        case fb::InputTag::Vec3fArray:
+            has = a && a.Get(&points, at);
+            break;
+        default:
+            *error = "input " + name + " is no array input";
+            return false;
+        }
+        // A stored layout is its arrays' one copy.
+        bool stored = false;
+        if (entry.layoutChain >= 0) {
+            const size_t c = size_t(entry.layoutChain);
+            const size_t r = size_t(entry.layoutRevision);
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                program.chains[c].revisions[r];
+            stored = revision.topologyResolved && revision.topology;
+            if (stored) {
+                const bool same =
+                    entry.layoutIndices
+                        ? _SameBytes(revision.topology->indices, ints)
+                        : _SameBytes(revision.topology->weights, floats);
+                if (!same) {
+                    *error = "the layout of " +
+                             revision.moverPath.GetString() +
+                             " is not its inputs' values at the bake time";
+                    return false;
+                }
+                size_t flat = r;
+                for (size_t k = 0; k < c; ++k) {
+                    flat += geometry.chains[k].revisions.size();
+                }
+                value.arraySource = entry.layoutIndices
+                                        ? fb::ArraySource::SkinIndices
+                                        : fb::ArraySource::SkinWeights;
+                value.array = uint32_t(flat);
+            }
+        }
+        if (!stored) {
+            switch (entry.tag) {
+            case fb::InputTag::IntArray: {
+                const std::vector<int32_t> held(ints.begin(), ints.end());
+                value.array = pools->Ints(held.data(), held.size());
+                break;
+            }
+            case fb::InputTag::FloatArray:
+                value.array = pools->Floats(floats.cdata(), floats.size());
+                break;
+            case fb::InputTag::DoubleArray:
+                value.array = pools->Doubles(doubles.cdata(), doubles.size());
+                break;
+            case fb::InputTag::Vec2fArray:
+                value.array = pools->Vec2fs(
+                    reinterpret_cast<const float *>(pairs.cdata()),
+                    pairs.size());
+                break;
+            default:
+                value.array = pools->Vec3fs(
+                    reinterpret_cast<const float *>(points.cdata()),
+                    points.size());
+                break;
+            }
+        }
+        if (entry.chain >= 0) {
+            const size_t c = size_t(entry.chain);
+            const RigExecBakedProgramImpl::GeomChain &chain =
+                program.chains[c];
+            if (!has || !chain.haveBase ||
+                !_SameBytes(points, chain.lastBase) ||
+                value.array != geometry.chains[c].base) {
+                *error = "the base of chain " + chain.target.GetString() +
+                         " is not its input's value at the bake time";
+                return false;
+            }
+        }
+        const uint8_t hasValue = uint8_t(fb::InputSlotFlags::HasValue);
+        file->inputs[entry.slot] = fb::InputSlot(
+            slot.name(), pools->Value(value), slot.chain(), slot.phased(),
+            slot.type(),
+            uint8_t((slot.flags() & ~hasValue) | (has ? hasValue : 0)));
+    }
+    return true;
+}
+
 }  // namespace
 
 std::string
@@ -221,6 +384,12 @@ RigExecBakeValueKey(const fb::RigExecWireValue &value)
         _AppendMember(value.vec3f, &key);
         break;
     default:
+        // An array value names its elements by source and id.
+        if (RigExecFormatIsArrayTag(value.tag)) {
+            key.push_back(char(value.arraySource));
+            key.append(reinterpret_cast<const char *>(&value.array),
+                       sizeof(value.array));
+        }
         break;
     }
     return key;
@@ -248,6 +417,8 @@ RigExecBakePools::Value(const fb::RigExecWireValue &value)
         fb::RigExecWireValue out;
         out.tag = value.tag;
         out.bits = value.bits;
+        out.arraySource = value.arraySource;
+        out.array = value.array;
         switch (value.tag) {
         case fb::InputTag::Matrix4d:
             out.matrix = _CopyMember(value.matrix);
@@ -305,24 +476,12 @@ RigExecBakePools::Seed(const RigExecBakeInputs &inputs, std::string *error)
         }
         return false;
     };
-    if (_values.size() != 1 || _vec3fs.size() != 1) {
+    if (_values.size() != 1) {
         return fail("the pools already hold entries of their own");
     }
     for (size_t i = 0; i < inputs.values.size(); ++i) {
         if (Value(inputs.values[i]) != i) {
             return fail("value " + std::to_string(i) +
-                        " is not where the capture put it");
-        }
-    }
-    for (size_t i = 0; i < inputs.vec3fArrays.size(); ++i) {
-        const std::vector<RigExecWireVec3f> &points = inputs.vec3fArrays[i].v;
-        std::vector<float> xyz;
-        xyz.reserve(points.size() * 3);
-        for (const RigExecWireVec3f &p : points) {
-            xyz.insert(xyz.end(), p.begin(), p.end());
-        }
-        if (Vec3fs(xyz.data(), points.size()) != i) {
-            return fail("points array " + std::to_string(i) +
                         " is not where the capture put it");
         }
     }
@@ -531,8 +690,18 @@ RigExecBakeCaptureStatics(
         }
     }
 
+    if (!_ArrayDefaults(program, time, inputs, paths, pools, file, error)) {
+        return false;
+    }
+
     // The path reads: the connection-following scalar reads evaluate over
-    // the slots; every other key the assembly can read is a value.
+    // the slots, and so does every key an array read binds (at rest beside
+    // the attribute's Default-time value); every other key the assembly
+    // can read is a value.
+    std::map<std::pair<uint32_t, bool>, const RigExecBakeArrayRow *> bound;
+    for (const RigExecBakeArrayRow &row : inputs.arrayRows) {
+        bound.emplace(std::make_pair(row.path, row.rest), &row);
+    }
     std::vector<fb::RigExecWirePathRead> rows;
     std::set<std::pair<uint32_t, bool>> keys;
     for (const RigExecBakePathScalarRead &entry : inputs.pathScalarReads) {
@@ -558,6 +727,15 @@ RigExecBakeCaptureStatics(
         fb::RigExecWirePathRead row;
         row.path = path;
         row.rest = candidate.rest;
+        const auto read = bound.find(std::make_pair(path, candidate.rest));
+        if (read != bound.end()) {
+            row.read =
+                std::make_unique<fb::RigExecWireInput>(read->second->read);
+            if (!candidate.rest) {
+                rows.push_back(std::move(row));
+                continue;
+            }
+        }
         row.value = std::make_unique<fb::RigExecWirePathValue>();
         if (!_EncodePathValue(candidate.value, paths, pools,
                               row.value.get())) {
@@ -565,6 +743,22 @@ RigExecBakeCaptureStatics(
                         " enumerated with an unencodable value of type " +
                         candidate.value.GetTypeName());
         }
+        if (row.read && row.value->tag != _PathArrayTag(row.read->tag)) {
+            return fail("path read " + candidate.path.GetString() +
+                        " at rest holds no array of its input's type");
+        }
+        rows.push_back(std::move(row));
+    }
+    // A gather whose read answered nothing at the bake time is no key of
+    // the enumeration; its row reads its input all the same.
+    for (const RigExecBakeArrayRow &gather : inputs.arrayRows) {
+        if (!gather.gather || gather.rest ||
+            !keys.emplace(gather.path, false).second) {
+            continue;
+        }
+        fb::RigExecWirePathRead row;
+        row.path = gather.path;
+        row.read = std::make_unique<fb::RigExecWireInput>(gather.read);
         rows.push_back(std::move(row));
     }
     std::sort(rows.begin(), rows.end(),

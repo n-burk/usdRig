@@ -1,5 +1,6 @@
 // .rigexec input collection.
 #include "rigExecBake/computedCapture.h"
+#include "rigExecBake/arrayReads.h"
 #include "rigExecBake/pathTable.h"
 #include "rigExecBake/staticCapture.h"
 #include "rigExec/bakedProgram.h"
@@ -13,6 +14,8 @@
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/tf/type.h"
+#include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/usd/attribute.h"
@@ -134,6 +137,17 @@ _Identity()
     for (size_t i = 0; i < 4; ++i) {
         (*value.matrix)[i * 4 + i] = 1.0;
     }
+    return value;
+}
+
+/// The empty array of array tag \p tag: pool entry 0 of its pool.
+fb::RigExecWireValue
+_EmptyArray(InputTag tag)
+{
+    fb::RigExecWireValue value;
+    value.tag = tag;
+    value.arraySource = fb::ArraySource::Pool;
+    value.array = 0;
     return value;
 }
 
@@ -274,7 +288,6 @@ struct RigExecBakeComputedCapture::_State {
     UsdTimeCode bakeTime;
     RigExecBakeInputs computed;
     std::map<std::string, uint32_t> valueIds;
-    std::map<std::string, int32_t> arrayIds;
     /// Slots in first-reference order until Finish sorts them.
     std::map<SdfPath, uint32_t> slotIds;
     std::vector<UsdAttribute> slots;
@@ -291,20 +304,6 @@ struct RigExecBakeComputedCapture::_State {
                                             uint32_t(computed.values.size()));
         if (found.second) {
             computed.values.push_back(value);
-        }
-        return found.first->second;
-    }
-
-    int32_t InternPoints(const std::vector<GfVec3f> &points)
-    {
-        std::string key(reinterpret_cast<const char *>(points.data()),
-                        sizeof(GfVec3f) * points.size());
-        const auto found =
-            arrayIds.emplace(key, int32_t(computed.vec3fArrays.size()));
-        if (found.second) {
-            fb::RigExecWireVec3fArray array;
-            array.v = _ToVec3fs(points);
-            computed.vec3fArrays.push_back(std::move(array));
         }
         return found.first->second;
     }
@@ -376,6 +375,10 @@ struct RigExecBakeComputedCapture::_State {
             }
             break;
         }
+        default:
+            // An array slot's default waits for the bake's run.
+            *has = false;
+            break;
         }
         return Intern(value);
     }
@@ -398,6 +401,26 @@ struct RigExecBakeComputedCapture::_State {
             found = slotIds.emplace(path, uint32_t(slots.size())).first;
             slots.push_back(a);
             slotTags.push_back(tag);
+        }
+        *id = found->second;
+        return true;
+    }
+
+    /// The slot of array attribute \p path, of \p tag (provisional id until
+    /// the slots are sorted), added on first use; false when another read
+    /// takes it as another type.
+    bool ArraySlot(const SdfPath &path, InputTag tag, uint32_t *id,
+                   std::string *error)
+    {
+        auto found = slotIds.find(path);
+        if (found == slotIds.end()) {
+            found = slotIds.emplace(path, uint32_t(slots.size())).first;
+            slots.push_back(stage->GetAttributeAtPath(path));
+            slotTags.push_back(tag);
+        } else if (slotTags[found->second] != tag) {
+            *error = "the program reads " + path.GetString() +
+                     " as two types";
+            return false;
         }
         *id = found->second;
         return true;
@@ -598,8 +621,6 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     S.bakeTime = UsdTimeCode(time);
     RigExecBakeInputs &C = S.computed;
     S.Intern(_Double(0.0));
-    C.vec3fArrays.emplace_back();
-    S.arrayIds.emplace(std::string(), 0);
     S.registered.resize(B.overridden.size());
     for (const auto &[path, numbers] : B.overridableInputs) {
         for (int number : numbers) {
@@ -631,8 +652,6 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         wire.type = token(object.type);
         wire.representation = token(object.representation);
         wire.rangePolicy = token(object.rangePolicy);
-        wire.values = object.values;
-        wire.indices.assign(object.indices.begin(), object.indices.end());
         wire.base = int32_t(object.base);
         wire.inputs.assign(object.inputs.begin(), object.inputs.end());
         wire.combineMode = token(object.combineMode);
@@ -691,8 +710,6 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         wire.type = token(object.type);
         wire.representation = token(object.representation);
         wire.rangePolicy = token(object.rangePolicy);
-        wire.values = object.values;
-        wire.indices.assign(object.indices.begin(), object.indices.end());
         wire.base = int32_t(object.base);
         wire.inputs.assign(object.inputs.begin(), object.inputs.end());
         wire.combineMode = token(object.combineMode);
@@ -729,9 +746,12 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         C.weightObjects.push_back(std::move(wire));
     }
 
-    // The oracle facts, for every entry.
+    // The oracle facts, for every entry; the points it samples are input
+    // slots, listed with the other array reads below.
     std::vector<SdfPath> objectPaths(C.weightObjects.size());
+    std::vector<TfToken> objectTypes(C.weightObjects.size());
     std::vector<SdfPath> timeVarying(C.weightObjects.size());
+    std::vector<RigExecWeightOracleFacts> oracleFacts(C.weightObjects.size());
     for (size_t i = 0; i < C.weightObjects.size(); ++i) {
         const bool stepBacked = i < B.weightObjects.size();
         const SdfPath &path =
@@ -740,13 +760,10 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         const TfToken &type =
             stepBacked ? B.weightObjects[i].type
                        : envelopes[i - B.weightObjects.size()].type;
-        RigExecWeightOracleFacts facts;
+        RigExecWeightOracleFacts &facts = oracleFacts[i];
         RigExecBakedDescribeWeightOracle(evaluator, path, S.bakeTime, &facts);
         fb::RigExecWireWeightObject &wire = C.weightObjects[i];
         wire.samplesInFlight = facts.samplesInFlight;
-        wire.oracleSamples =
-            facts.haveSamples ? S.InternPoints(facts.samples) : -1;
-        wire.oracleCurve = facts.haveCurve ? S.InternPoints(facts.curve) : -1;
         if (type == TfToken("RigExecPlaneWeight")) {
             wire.oraclePlaneAxis = token(facts.planeAxis);
             wire.oraclePlaneBounds = token(facts.planeBounds);
@@ -754,6 +771,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         wire.oraclePhaseError = facts.phaseError;
         wire.oracleStaticError = facts.staticError;
         objectPaths[i] = path;
+        objectTypes[i] = type;
         timeVarying[i] = facts.timeVarying;
     }
 
@@ -1238,6 +1256,214 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         }
     }
 
+    // The array reads, as RigExecBakeListArrayReads chooses them: a slot
+    // per attribute they reach, and the site each binds. An entry the
+    // oracle resolves names the points it samples unless its read phases
+    // fail it first.
+    std::vector<RigExecBakeArrayObject> arrayObjects(C.weightObjects.size());
+    for (size_t i = 0; i < C.weightObjects.size(); ++i) {
+        RigExecBakeArrayObject &object = arrayObjects[i];
+        object.path = objectPaths[i];
+        object.type = objectTypes[i];
+        object.oracle = resolved[i] && oracleFacts[i].phaseError.empty();
+        object.samplesInFlight = oracleFacts[i].samplesInFlight;
+    }
+    std::vector<RigExecBakeArrayRead> arrayReads;
+    if (!RigExecBakeListArrayReads(B, arrayObjects, time, &arrayReads,
+                                   &why)) {
+        Fail(why);
+        return;
+    }
+    // Per array slot (provisional id), how its default is taken, and
+    // whether any read takes it at the time.
+    std::map<uint32_t, RigExecBakeArraySlot> arraySlots;
+    std::set<uint32_t> arrayLive;
+    std::map<std::pair<uint32_t, bool>, size_t> rowAt;
+    std::map<std::pair<uint32_t, uint32_t>, size_t> layoutAt;
+    C.chainBaseSlots.assign(B.chains.size(), -1);
+    for (const RigExecBakeArrayRead &read : arrayReads) {
+        fb::RigExecWireInput input;
+        input.tag = read.tag;
+        input.walk.reserve(read.hops.size());
+        for (const SdfPath &hop : read.hops) {
+            uint32_t id = 0;
+            if (!S.ArraySlot(hop, read.tag, &id, &why)) {
+                Fail(why);
+                return;
+            }
+            input.walk.push_back(id);
+            arraySlots[id].tag = read.tag;
+            if (!read.rest) {
+                arrayLive.insert(id);
+            }
+        }
+        input.mode = input.walk.size() == 1 ? fb::ReadMode::Raw
+                                            : fb::ReadMode::Resolved;
+        input.constant = S.Intern(_EmptyArray(read.tag));
+        const uint32_t head = input.walk.front();
+        fb::RigExecWireWeightObject *object =
+            read.object < C.weightObjects.size()
+                ? &C.weightObjects[read.object]
+                : nullptr;
+        switch (read.consumer) {
+        case RigExecBakeArrayConsumer::Row: {
+            const auto key =
+                std::make_pair(interner->Path(read.hops.front()), read.rest);
+            const auto at = rowAt.emplace(key, C.arrayRows.size());
+            if (at.second) {
+                RigExecBakeArrayRow row;
+                row.path = key.first;
+                row.rest = key.second;
+                row.gather = read.gather;
+                row.read = std::move(input);
+                C.arrayRows.push_back(std::move(row));
+                break;
+            }
+            RigExecBakeArrayRow &row = C.arrayRows[at.first->second];
+            if (row.read.walk != input.walk) {
+                Fail("the geometry assembly reads " +
+                     read.hops.front().GetString() + " two ways");
+                return;
+            }
+            row.gather = row.gather || read.gather;
+            break;
+        }
+        case RigExecBakeArrayConsumer::BlendPoints: {
+            RigExecBakeBlendPointsRead entry;
+            entry.chain = read.chain;
+            entry.revision = read.revision;
+            entry.derived = read.derived;
+            entry.channel = read.channel;
+            entry.sample = read.sample;
+            entry.read = std::move(input);
+            C.blendPoints.push_back(std::move(entry));
+            break;
+        }
+        case RigExecBakeArrayConsumer::Layout: {
+            const auto at = layoutAt.emplace(
+                std::make_pair(read.chain, read.revision),
+                C.layoutSlots.size());
+            if (at.second) {
+                RigExecBakeLayoutSlots slots;
+                slots.chain = read.chain;
+                slots.revision = read.revision;
+                C.layoutSlots.push_back(slots);
+            }
+            RigExecBakeLayoutSlots &slots = C.layoutSlots[at.first->second];
+            (read.indices ? slots.indices : slots.weights) = head;
+            RigExecBakeArraySlot &slot = arraySlots[head];
+            slot.layoutChain = int32_t(read.chain);
+            slot.layoutRevision = int32_t(read.revision);
+            slot.layoutIndices = read.indices;
+            break;
+        }
+        case RigExecBakeArrayConsumer::ChainBase:
+            C.chainBaseSlots[read.chain] = int32_t(head);
+            arraySlots[head].chain = int32_t(read.chain);
+            break;
+        case RigExecBakeArrayConsumer::Painted:
+            if (object) {
+                (read.indices ? object->indicesSlot : object->valuesSlot) =
+                    int32_t(head);
+            }
+            break;
+        case RigExecBakeArrayConsumer::OracleSamples:
+            if (object) {
+                object->oracleSamplesSlot = int32_t(head);
+            }
+            break;
+        case RigExecBakeArrayConsumer::OracleCurve:
+            if (object) {
+                object->oracleCurveSlot = int32_t(head);
+            }
+            break;
+        }
+    }
+    {
+        // The painted arrays are stored once, in their inputs, whose
+        // defaults (read at Default) are what Build folded; the oracle's
+        // points are its inputs' values at the time, as the facts hold them.
+        const auto painted = [&](int32_t slot, const auto &folded) {
+            using Element =
+                typename std::decay_t<decltype(folded)>::value_type;
+            VtArray<Element> held;
+            if (slot >= 0) {
+                S.slots[size_t(slot)].Get(&held, UsdTimeCode::Default());
+            }
+            return held.size() == folded.size() &&
+                   (held.empty() ||
+                    std::memcmp(held.cdata(), folded.data(),
+                                sizeof(Element) * folded.size()) == 0);
+        };
+        const auto points = [&](int32_t slot,
+                                const std::vector<GfVec3f> &want) {
+            VtVec3fArray held;
+            return slot >= 0 &&
+                   S.slots[size_t(slot)].Get(&held, S.bakeTime) &&
+                   held.size() == want.size() &&
+                   (want.empty() ||
+                    std::memcmp(held.cdata(), want.data(),
+                                sizeof(GfVec3f) * want.size()) == 0);
+        };
+        const std::string support = "dynamic/base sparse support mismatch on ";
+        for (size_t i = 0; i < C.weightObjects.size(); ++i) {
+            fb::RigExecWireWeightObject &wire = C.weightObjects[i];
+            const bool stepBacked = i < B.weightObjects.size();
+            const std::vector<float> &values =
+                stepBacked ? B.weightObjects[i].values
+                           : envelopes[i - B.weightObjects.size()].values;
+            const std::vector<int> &indices =
+                stepBacked ? B.weightObjects[i].indices
+                           : envelopes[i - B.weightObjects.size()].indices;
+            const std::string path = objectPaths[i].GetString();
+            if (!painted(wire.valuesSlot, values) ||
+                !painted(wire.indicesSlot, indices)) {
+                Fail("the painted weights of " + path +
+                     " are not its arrays at Default");
+                return;
+            }
+            const RigExecWeightOracleFacts &facts = oracleFacts[i];
+            const bool samples = arrayObjects[i].oracle &&
+                                 !facts.samplesInFlight && facts.haveSamples;
+            if ((samples || wire.oracleSamplesSlot >= 0) &&
+                !(samples && points(wire.oracleSamplesSlot, facts.samples))) {
+                Fail("the oracle's sample points of " + path +
+                     " are not its input's");
+                return;
+            }
+            const bool curve = arrayObjects[i].oracle && facts.haveCurve;
+            if ((curve || wire.oracleCurveSlot >= 0) &&
+                !points(wire.oracleCurveSlot,
+                        curve ? facts.curve : std::vector<GfVec3f>())) {
+                Fail("the oracle's curve points of " + path +
+                     " are not its input's");
+                return;
+            }
+            // A dynamic weight's sparse support, checked against its
+            // base's on every run over their indices inputs: the facts'
+            // error stands only where those inputs at their defaults would
+            // not report it.
+            if (wire.oracleStaticError == support + path &&
+                wire.indicesSlot >= 0 && wire.base >= 0 &&
+                size_t(wire.base) < C.weightObjects.size()) {
+                const int32_t baseSlot =
+                    C.weightObjects[size_t(wire.base)].indicesSlot;
+                VtIntArray mine, theirs;
+                S.slots[size_t(wire.indicesSlot)].Get(
+                    &mine, UsdTimeCode::Default());
+                if (baseSlot >= 0) {
+                    S.slots[size_t(baseSlot)].Get(&theirs,
+                                                  UsdTimeCode::Default());
+                }
+                if (!mine.empty() &&
+                    std::set<int>(mine.begin(), mine.end()) !=
+                        std::set<int>(theirs.begin(), theirs.end())) {
+                    wire.oracleStaticError.clear();
+                }
+            }
+        }
+    }
+
     // Every slot is listed; listed slots are ordered by path text.
     std::vector<std::string> names;
     names.reserve(S.slots.size());
@@ -1301,6 +1527,39 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     for (RigExecBakePathScalarRead &entry : C.pathScalarReads) {
         remapWalk(entry.read);
     }
+    for (RigExecBakeArrayRow &row : C.arrayRows) {
+        remapWalk(row.read);
+    }
+    for (RigExecBakeBlendPointsRead &entry : C.blendPoints) {
+        remapWalk(entry.read);
+    }
+    for (RigExecBakeLayoutSlots &slots : C.layoutSlots) {
+        slots.indices = remap[slots.indices];
+        slots.weights = remap[slots.weights];
+    }
+    const auto remapField = [&](int32_t *slot) {
+        if (*slot >= 0) {
+            *slot = int32_t(remap[size_t(*slot)]);
+        }
+    };
+    for (int32_t &slot : C.chainBaseSlots) {
+        remapField(&slot);
+    }
+    for (fb::RigExecWireWeightObject &object : C.weightObjects) {
+        remapField(&object.valuesSlot);
+        remapField(&object.indicesSlot);
+        remapField(&object.oracleSamplesSlot);
+        remapField(&object.oracleCurveSlot);
+    }
+    for (const auto &[id, slot] : arraySlots) {
+        RigExecBakeArraySlot entry = slot;
+        entry.slot = remap[id];
+        entry.atDefault = arrayLive.count(id) == 0;
+        C.arraySlots.push_back(entry);
+    }
+    std::sort(C.arraySlots.begin(), C.arraySlots.end(),
+              [](const RigExecBakeArraySlot &a,
+                 const RigExecBakeArraySlot &b) { return a.slot < b.slot; });
     // A slot's fields until its chain and phased consumer are known.
     struct _SlotRow {
         uint32_t name = 0;

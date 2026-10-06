@@ -1226,8 +1226,9 @@ _BakeAndCompare(RigExecRigEvaluator &evaluator, double time,
 // The phase fixtures and 13_ReadPhases: two bakes from fresh evaluators are
 // the same bytes, and the file holds the program's frame records, record
 // lists and point bindings. The record fixtures carry records, the example
-// a bound phased input, and the blend fixture, baked where its lifts have
-// moved the shape, two blend samples whose bindings answer.
+// a bound phased input, the blend fixture, baked where its lifts have moved
+// the shape, two blend samples whose bindings answer, and the volume
+// fixture a volume the oracle resolves, whose sampled points are an input.
 static void
 TestPhaseBindingBakes()
 {
@@ -1240,12 +1241,14 @@ TestPhaseBindingBakes()
         bool records;
         bool bindings;
         bool samples = false;
+        bool oracle = false;
     };
     const Row rows[] = {
         {(fixtures / "frame_record_fallbacks.usda").string(), 1.0, true,
          false},
         {(fixtures / "solver_checkpoint.usda").string(), 1.0, true, false},
-        {(fixtures / "volume_placements.usda").string(), 1.0, false, false},
+        {(fixtures / "volume_placements.usda").string(), 1.0, false, false,
+         false, true},
         {(std::filesystem::path(RIGEXEC_EXAMPLES_DIR) / "13_ReadPhases.usda")
              .string(),
          1001.0, false, true},
@@ -1288,13 +1291,14 @@ TestPhaseBindingBakes()
                                         &stats));
         }
         std::printf("phase tables %s: %zu records, %zu record lists, %zu "
-                    "bindings, %zu sample bindings (%zu answered); %zu "
-                    "bytes, %s; %d failures\n",
+                    "bindings, %zu sample bindings (%zu answered), %zu "
+                    "oracle point inputs; %zu bytes, %s; %d failures\n",
                     row.stage.c_str(), stats.frameRecords, stats.recordLists,
                     stats.pointBindings, stats.sampleBindings,
-                    stats.answeredSamples, first.size(),
+                    stats.answeredSamples, stats.arrayOracle, first.size(),
                     same ? "two bakes identical" : "BAKES DIFFER",
                     failures - failuresBefore);
+        CHECK((stats.arrayOracle > 0) == row.oracle);
         if (row.records) {
             CHECK(stats.frameRecords > 0 && stats.recordLists > 0);
         }
@@ -1583,7 +1587,7 @@ TestComputedCurrentPhaseBake()
         }
         CHECK(!found->envelopeOnly);
         CHECK(found->samplesInFlight);
-        CHECK(found->oracleSamples == -1);
+        CHECK(found->oracleSamplesSlot == -1);
         CHECK(found->oraclePhaseError.empty());
         CHECK(found->oracleStaticError.empty());
         CHECK(found->falloffMax->mode == fb::ReadMode::Baked);
@@ -1630,9 +1634,13 @@ _ChainScalarEnvelopes(const fb::RigExecWireFile &file)
                        ? _ChainFloat(value)
                        : fallback;
         };
+        std::string painted;
         CHECK(object.envelopeOnly && object.oracleStaticError.empty() &&
               object.base < 0 && object.inputs.empty() &&
-              representation == "constant" && object.values.empty());
+              representation == "constant" &&
+              (object.valuesSlot < 0 ||
+               (_BinarySlotBytes(file, object.valuesSlot, &painted) &&
+                painted.empty())));
         if (type == "RigExecStaticWeight") {
             float w = read(*object.defaultWeight, 0.0f);
             if (!std::isfinite(w) ||
@@ -2391,15 +2399,21 @@ TestBake(const std::string &fixture, const std::vector<double> &tableFrames,
         std::printf("compare %s: %zu steps, %zu inputs (%zu defaults), %zu "
                     "reads, %zu override numbers, %zu path reads (%zu read "
                     "rows, %zu value rows, %zu enumerated keys), %zu "
-                    "topologies (%zu entries dropped), %zu blend samples, "
-                    "%zu bases, %zu property chains, %zu oracle facts: %d "
-                    "failures\n",
+                    "topologies (%zu trailing pads dropped), %zu blend "
+                    "samples, %zu bases, %zu property chains, %zu oracle "
+                    "facts: %d failures\n",
                     fixture.c_str(), file->steps.size(), file->inputs.size(),
                     stats.defaults, stats.reads, stats.overrideNumbers,
                     file->geometry->pathReads.size(), stats.readRows,
                     stats.valueRows, stats.enumeratedKeys, stats.topologies,
                     stats.droppedEntries, stats.samples, stats.bases,
                     stats.propertyChains, stats.oracleFacts, failed);
+        std::printf("  array inputs: %zu (%zu live rows, %zu rest rows, %zu "
+                    "blend samples, %zu layout pairs, %zu chain bases, %zu "
+                    "painted arrays, %zu oracle points)\n",
+                    stats.arrayInputs, stats.arrayRows, stats.arrayRestRows,
+                    stats.arrayBlendSamples, stats.arrayLayouts,
+                    stats.arrayBases, stats.arrayPainted, stats.arrayOracle);
         if (failed == 0) {
             ++compareRows;
         }

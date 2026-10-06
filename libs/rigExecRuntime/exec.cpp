@@ -119,6 +119,47 @@ RigExecRuntimeReader::SetSampledInputAt(size_t index,
 }
 
 bool
+RigExecRuntimeReader::SetInputArray(const std::string &name,
+                                    const RigExecRuntimeArray &value,
+                                    std::string *error)
+{
+    size_t index = 0;
+    if (!FindInput(name, &index)) {
+        if (error) {
+            *error = "no input named " + name;
+        }
+        return false;
+    }
+    return RrInputsSetArray(_program.get(), index, value, /*authored=*/true,
+                            error);
+}
+
+bool
+RigExecRuntimeReader::SetInputArrayAt(size_t index,
+                                      const RigExecRuntimeArray &value,
+                                      std::string *error)
+{
+    return RrInputsSetArray(_program.get(), index, value, /*authored=*/true,
+                            error);
+}
+
+bool
+RigExecRuntimeReader::SetSampledInputArrayAt(size_t index,
+                                             const RigExecRuntimeArray &value,
+                                             std::string *error)
+{
+    return RrInputsSetArray(_program.get(), index, value, /*authored=*/false,
+                            error);
+}
+
+bool
+RigExecRuntimeReader::GetInputArrayAt(size_t index,
+                                      RigExecRuntimeArray *out) const
+{
+    return RrInputsGetArray(_program.get(), index, out);
+}
+
+bool
 RigExecRuntimeReader::ClearInput(const std::string &name, std::string *error)
 {
     size_t index = 0;
@@ -199,6 +240,20 @@ bool
 RigExecRuntimeReader::GetSimdEnabledForTesting() const
 {
     return _program->geoSettings.useSimd;
+}
+
+bool
+RigExecRuntimeReader::GetPartitionStaleForTesting(
+    const std::string &moverPath) const
+{
+    return RrGeometryPartitionStaleForTesting(_program.get(), moverPath);
+}
+
+bool
+RigExecRuntimeReader::GetSkinLayoutIsOpenForTesting(
+    const std::string &moverPath) const
+{
+    return RrGeometrySkinLayoutIsOpenForTesting(_program.get(), moverPath);
 }
 
 std::vector<int32_t>

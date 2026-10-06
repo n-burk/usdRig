@@ -41,6 +41,7 @@ _RIGEXEC_BAKE_PIN_STEP(RevisionChunk);
 _RIGEXEC_BAKE_PIN_STEP(RevisionFuse);
 _RIGEXEC_BAKE_PIN_STEP(ChainStatus);
 _RIGEXEC_BAKE_PIN_STEP(Derived);
+_RIGEXEC_BAKE_PIN_STEP(FrameMatrix);
 #undef _RIGEXEC_BAKE_PIN_STEP
 
 #define _RIGEXEC_BAKE_PIN_DOMAIN(name)                                     \
@@ -73,7 +74,16 @@ _RIGEXEC_BAKE_PIN_DOMAIN(WeightPacket);
 _RIGEXEC_BAKE_PIN_DOMAIN(WeightFrames);
 _RIGEXEC_BAKE_PIN_DOMAIN(PoseWeight);
 _RIGEXEC_BAKE_PIN_DOMAIN(Snapshots);
+_RIGEXEC_BAKE_PIN_DOMAIN(FrameMatrix);
 #undef _RIGEXEC_BAKE_PIN_DOMAIN
+// The program's last enumerators are the wire's: a program kind or domain
+// appended without its wire value fails the build here.
+static_assert(uint8_t(RigExecBakedStepKind::FrameMatrix) ==
+                  uint8_t(RigExecWireStepKind::MAX),
+              "the wire step kinds end before the program's");
+static_assert(RigExecBakedSlotDomainCount ==
+                  size_t(RigExecWireSlotDomain::MAX) + 1,
+              "the wire slot domains end before the program's");
 
 static_assert(uint8_t(RigExecBakedSlotKind::FirstFramePose) ==
                   uint8_t(RigExecWireSlotKind::FirstFramePose),
@@ -281,6 +291,8 @@ private:
         out.prim = _Path(phase.prim);
         return out;
     }
+    fb::RigExecWirePointsBinding
+    _PointsBinding(const RigExecBakedPointsBinding &binding);
 
     bool _Index();
     std::unique_ptr<fb::RigExecWireInput> _Registered(_Family family,
@@ -318,6 +330,11 @@ private:
         _blendReads;
     std::map<std::pair<uint32_t, uint32_t>, const fb::RigExecWireInput *>
         _defaultWeightReads;
+    std::map<std::tuple<uint32_t, uint32_t, bool, uint32_t, uint32_t>,
+             const fb::RigExecWireInput *>
+        _blendPoints;
+    std::map<std::pair<uint32_t, uint32_t>, const RigExecBakeLayoutSlots *>
+        _layoutSlots;
 };
 
 bool
@@ -349,6 +366,25 @@ _FileFill::_Index()
                          "revision");
         }
     }
+    for (const RigExecBakeBlendPointsRead &entry : _inputs.blendPoints) {
+        const auto key = std::make_tuple(entry.chain, entry.revision,
+                                         entry.derived, entry.channel,
+                                         entry.sample);
+        if (!_blendPoints.emplace(key, &entry.read).second) {
+            return _Fail("the inputs hold two points reads for one blend "
+                         "sample");
+        }
+    }
+    for (const RigExecBakeLayoutSlots &entry : _inputs.layoutSlots) {
+        if (!_layoutSlots
+                 .emplace(std::make_pair(entry.chain, entry.revision), &entry)
+                 .second) {
+            return _Fail("the inputs hold two layouts for one revision");
+        }
+    }
+    if (_inputs.chainBaseSlots.size() != _program.chains.size()) {
+        return _Fail("the inputs hold no base input per chain");
+    }
     return true;
 }
 
@@ -371,6 +407,24 @@ _FileFill::_Registered(_Family family, size_t object, size_t field)
 {
     return std::make_unique<fb::RigExecWireInput>(
         _RegisteredValue(family, object, field));
+}
+
+fb::RigExecWirePointsBinding
+_FileFill::_PointsBinding(const RigExecBakedPointsBinding &binding)
+{
+    // The binding as Build made it; its id is the program's test capture
+    // key and stays behind.
+    fb::RigExecWirePointsBinding out;
+    out.inputPath = _Path(binding.input);
+    out.phase = _Phase(binding.phase);
+    out.candidates.reserve(binding.candidates.size());
+    for (const RigExecBakedPointVersion &candidate : binding.candidates) {
+        out.candidates.emplace_back(int32_t(candidate.chain),
+                                    int32_t(candidate.version));
+    }
+    out.finalRead = binding.finalRead;
+    out.diagnoseMiss = binding.diagnoseMiss;
+    return out;
 }
 
 void
@@ -694,10 +748,6 @@ _FileFill::_Constraint(size_t index, fb::RigExecWireConstraint *out)
     }
     out->target = int32_t(constraint.target);
     out->targetSlots = _ToI32s(constraint.targetSlots);
-    out->snapshotTargets.reserve(constraint.snapshotTargets.size());
-    for (char v : constraint.snapshotTargets) {
-        out->snapshotTargets.push_back(v ? uint8_t(1) : uint8_t(0));
-    }
     out->sources = _ToI32s(constraint.sources);
     out->sourceNatives = _ToI32s(constraint.sourceNatives);
     out->sourcePaths.reserve(constraint.sourcePaths.size());
@@ -747,7 +797,6 @@ _FileFill::_Constraint(size_t index, fb::RigExecWireConstraint *out)
              ? RigExecWireConstraintWorldUpRotationOnly
              : 0) |
         (constraint.radialBlend ? RigExecWireConstraintRadialBlend : 0));
-    out->snapshotAfter = constraint.snapshotAfter;
     out->singleChainIk = constraint.singleChainIk;
     out->ikMode = uint8_t(constraint.ikMode);
     out->poleModeObject = constraint.poleModeObject;
@@ -964,7 +1013,6 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
         }
     }
     pose->hasPropertyChains = program.hasPropertyChains;
-    pose->phasedReads = program.phasedReads;
     pose->publishWeightFields = program.publishWeightFields;
     // In program order: resolution round, then discovery.
     pose->spaceSwitches.resize(program.spaceSwitches.size());
@@ -1019,6 +1067,15 @@ _FileFill::_Pose(fb::RigExecWireDomainPose *pose)
         pose->avarBindings.push_back(std::move(out));
     }
     pose->overrideCount = uint32_t(program.overridden.size());
+    // In the program's walk order, which the FrameMatrix steps index.
+    pose->frameRecords.reserve(program.frameRecords.size());
+    for (const RigExecBakedFrameRecord &record : program.frameRecords) {
+        const uint32_t mover = _Path(record.mover);
+        pose->frameRecords.emplace_back(
+            uint32_t(record.slot), uint32_t(record.commit),
+            int32_t(record.target), int32_t(record.position), record.version,
+            mover);
+    }
 }
 
 std::unique_ptr<fb::RigExecWireSkinTopology>
@@ -1153,6 +1210,18 @@ _FileFill::_Revision(const RigExecBakedProgramImpl::GeomRevision &revision,
                 wireSample.activationRead =
                     _FbInputPtr(reads->second->activations[s]);
             }
+            // Only a dense sample with a non-base phase is bound.
+            if (sample.pointBinding.id >= 0) {
+                wireSample.pointBinding =
+                    std::make_unique<fb::RigExecWirePointsBinding>(
+                        _PointsBinding(sample.pointBinding));
+            }
+            const auto points = _blendPoints.find(
+                std::make_tuple(uint32_t(chain), uint32_t(index), derived,
+                                uint32_t(ch), uint32_t(s)));
+            if (points != _blendPoints.end()) {
+                wireSample.pointsRead = _FbInputPtr(*points->second);
+            }
         }
     }
     out->influenceSlots = _ToI32s(revision.influenceSlots);
@@ -1168,8 +1237,14 @@ _FileFill::_Revision(const RigExecBakedProgramImpl::GeomRevision &revision,
     out->driverFramesSolver = int32_t(revision.driverFramesSolver);
     out->finalPhase = revision.finalPhase;
     out->skinTopologyFixed = revision.skinTopologyFixed;
-    out->snapshotAfter = revision.snapshotAfter;
-    out->readsSnapshots = revision.readsSnapshots;
+    if (!derived) {
+        const auto layout = _layoutSlots.find(
+            std::make_pair(uint32_t(chain), uint32_t(index)));
+        if (layout != _layoutSlots.end()) {
+            out->jointIndicesSlot = int32_t(layout->second->indices);
+            out->jointWeightsSlot = int32_t(layout->second->weights);
+        }
+    }
     out->packetInfluences.reserve(revision.packetInfluences.size());
     for (const GfMatrix4d &m : revision.packetInfluences) {
         out->packetInfluences.push_back(_ToMatrix(m));
@@ -1206,6 +1281,25 @@ _FileFill::_Revision(const RigExecBakedProgramImpl::GeomRevision &revision,
         out->topology = _Topology(*revision.topology, revision);
     }
     out->topologyResolved = revision.topologyResolved;
+    // The phase tables, in the program's order: frame records the fold
+    // reads (an AtPrim transform phase only), and one point binding per
+    // binding.phases entry.
+    out->transformRecords.reserve(revision.transformRecords.size());
+    for (const int record : revision.transformRecords) {
+        out->transformRecords.push_back(uint32_t(record));
+    }
+    out->influenceRecords.resize(revision.influenceRecords.size());
+    for (size_t k = 0; k < revision.influenceRecords.size(); ++k) {
+        std::vector<uint32_t> &records = out->influenceRecords[k].v;
+        records.reserve(revision.influenceRecords[k].size());
+        for (const int record : revision.influenceRecords[k]) {
+            records.push_back(uint32_t(record));
+        }
+    }
+    out->pointBindings.reserve(revision.pointBindings.size());
+    for (const RigExecBakedPointsBinding &binding : revision.pointBindings) {
+        out->pointBindings.push_back(_PointsBinding(binding));
+    }
     // RevisionStatic reads a main revision's inputs:defaultWeight; a
     // derived one weighs 1 and holds none.
     if (!derived) {
@@ -1229,6 +1323,7 @@ _FileFill::_Geometry(fb::RigExecWireDomainGeometry *geometry)
         const RigExecBakedProgramImpl::GeomChain &chain = program.chains[c];
         fb::RigExecWireChain &wire = geometry->chains[c];
         wire.target = _Path(chain.target);
+        wire.baseSlot = _inputs.chainBaseSlots[c];
         wire.revisions.resize(chain.revisions.size());
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             _Revision(chain.revisions[r], c, r, false, &wire.revisions[r]);

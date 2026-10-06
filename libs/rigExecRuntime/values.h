@@ -10,6 +10,7 @@
 #include "rigExecRuntime/runtimeMath.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -105,7 +106,8 @@ struct RrPointFrameArray {
 };
 
 // The value type of an input, a read or a constant, numbered as the
-// file's InputTag.
+// file's InputTag. The array tags hold int32_t, float, double, float[2]
+// and float[3] elements.
 enum class RrInputTag : uint8_t {
     Double = 0,
     Float = 1,
@@ -115,6 +117,27 @@ enum class RrInputTag : uint8_t {
     Token = 5,
     Vec3d = 6,
     Vec3f = 7,
+    IntArray = 8,
+    FloatArray = 9,
+    DoubleArray = 10,
+    Vec2fArray = 11,
+    Vec3fArray = 12,
+};
+
+inline bool
+RrInputTagIsArray(RrInputTag tag)
+{
+    return uint8_t(tag) >= uint8_t(RrInputTag::IntArray) &&
+           uint8_t(tag) <= uint8_t(RrInputTag::Vec3fArray);
+}
+
+// A view of an array input's elements: `count` elements of the type `tag`
+// names (int32_t, float, double, float[2] or float[3]) at `data`. A set
+// copies them; the reader never keeps the caller's pointer.
+struct RigExecRuntimeArray {
+    RrInputTag tag = RrInputTag::FloatArray;
+    const void *data = nullptr;
+    size_t count = 0;
 };
 
 // A resolved input value: a read the slots answered, a wire constant, or
@@ -149,7 +172,10 @@ struct RigExecRuntimeInputInfo {
     /// Whether the attribute is time-varying in the baked stage.
     bool animated = false;
     /// Its value at the bake time; the type's zero when that read failed.
+    /// An array input's carries the tag alone.
     RrInputValue defaultValue;
+    /// An array input's default element count; 0 for a scalar.
+    size_t defaultCount = 0;
 };
 
 // Mirrors RigExecWeightPacket with token path ids.

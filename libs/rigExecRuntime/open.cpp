@@ -629,6 +629,11 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         return fail(error ? *error
                           : std::string("geometry sizing failed"));
     }
+    // The layout defaults exist once the geometry family expanded them.
+    if (!RrInputsFinishArrays(&program, error)) {
+        return fail(error ? *error
+                          : std::string("an array input has no default"));
+    }
     if (!RrWeightSizeScratch(&program, error)) {
         return fail(error ? *error
                           : std::string("weight sizing failed"));

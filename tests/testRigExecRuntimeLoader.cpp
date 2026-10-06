@@ -756,7 +756,7 @@ _TestRetiredRefusals(const std::string &name,
     const std::string want =
         "unsupported .rigexec format version " + std::to_string(previous) +
         " (this reader reads " + std::to_string(RigExecFormatVersion) +
-        "); re-export: raw skin layouts";
+        "); re-export: array inputs";
     CHECK(got == want);
     if (got != want) {
         std::printf("%s, previous version: open said '%s', expected '%s'\n",
@@ -1238,8 +1238,8 @@ _TestRawSkinLayouts()
                std::memcmp(weights.cdata(), t.rawWeights.data(),
                            sizeof(float) * weights.size()) == 0));
     }
-    // OddSkin's last weight is authored -0, which the sparse form would
-    // drop and the raw form keeps.
+    // OddSkin's last weight is authored -0, which the raw form keeps bit
+    // for bit.
     {
         const fb::RigExecWireSkinTopology &odd =
             *chains[at[0].first].revisions[at[0].second].topology;
@@ -1576,6 +1576,13 @@ _SameInput(const RrInputValue &a, const RrInputValue &b)
         return _SameBits(a.vec, b.vec);
     case RrInputTag::Vec3f:
         return _SameBits(a.vec3f, b.vec3f);
+    case RrInputTag::IntArray:
+    case RrInputTag::FloatArray:
+    case RrInputTag::DoubleArray:
+    case RrInputTag::Vec2fArray:
+    case RrInputTag::Vec3fArray:
+        // An array input's value carries its tag alone.
+        return true;
     }
     return false;
 }

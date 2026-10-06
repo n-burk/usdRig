@@ -36,10 +36,10 @@ class RigExecBakePools {
 public:
     RigExecBakePools();
 
-    /// Takes \p inputs' values and points arrays in order, so the ids its
-    /// tables hold name the same entries here. False, with the reason,
-    /// when its tables do not start as the pools do or hold one entry
-    /// twice; call it before anything else is pooled.
+    /// Takes \p inputs' values in order, so the ids its tables hold name
+    /// the same entries here. False, with the reason, when its values do
+    /// not start as the pool does or hold one entry twice; call it before
+    /// anything else is pooled.
     bool Seed(const RigExecBakeInputs &inputs, std::string *error);
 
     /// The id of \p value, stored with only the member its tag names.
@@ -71,15 +71,21 @@ private:
 /// built from the same program, from \p program after the bake's forced
 /// run: the xform bases, the native sources' frames, the delta bases, the
 /// constraint arrays with the lines their reads reported, the chain and
-/// derived bases, every blend sample's dense points and the layout its
-/// run resolved (a layout the cache refused included), and each ribbon
-/// solver's driver points (the run's when they vary, else the constant).
-/// The path reads are one read row per connection-following scalar read
-/// of \p inputs and one value row per (path, rest) key of \p enumerated
-/// no overlay stands on, at its first such value, sorted by (path id,
-/// rest). False, naming the datum, for a value no row can hold.
+/// derived bases, every blend sample's dense points as its resolved input
+/// at \p time, the bake time (the run's own read where the sample reads
+/// it; a sample whose point binding answers computes its points from the
+/// bound version instead), the layout each run resolved (a layout the
+/// cache refused included), each ribbon solver's driver points (the run's
+/// when they vary, else the constant), and the defaults of the array
+/// inputs (RigExecBakeArraySlot). The path reads are one read row per
+/// connection-following scalar read of \p inputs, one per (path, rest) key
+/// an array read binds (a rest one with its Default-time value; a gather's
+/// even where \p enumerated keys none), and one value row per other key of
+/// \p enumerated no overlay stands on, at its first such value, sorted by
+/// (path id, rest). False, naming the datum, for a value no row can hold.
 bool RigExecBakeCaptureStatics(
-    const RigExecBakedProgramImpl &program, const RigExecBakeInputs &inputs,
+    const RigExecBakedProgramImpl &program, double time,
+    const RigExecBakeInputs &inputs,
     const std::vector<RigExecBakeRevisionRead> &enumerated,
     RigExecBakePathTable *paths, RigExecBakePools *pools,
     fb::RigExecWireFile *file, std::string *error);

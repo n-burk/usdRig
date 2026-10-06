@@ -6,6 +6,7 @@
 // evaluator with the same value authored in the session layer.
 #include "rigExecBake/bake.h"
 #include "rigExecBake/staticReport.h"
+#include "rigExec/moverGraph.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/format.h"
 #include "rigExecRuntime/runtime.h"
@@ -14,6 +15,9 @@
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/quatf.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xform.h"
@@ -24,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -524,13 +529,14 @@ TestPathReadsFixture()
     }
     const std::string step = "/PathReadAsset/Rig/Movers/Mush.inputs:step";
     const std::string held = "/PathReadAsset/Rig/Dials.held";
-    // The read rows are exactly those sites, each reading its head when its
-    // walk yields nothing; the two that end on the valueless double walk
-    // two hops, and their head holds the float the site reads.
+    // The scalar read rows are exactly those sites, each reading its head
+    // when its walk yields nothing; the two that end on the valueless
+    // double walk two hops, and their head holds the float the site reads.
+    // (The array read rows read the input slots of the arrays.)
     size_t rows = 0;
     size_t twoHops = 0;
     for (const fb::RigExecWirePathRead &row : file->geometry->pathReads) {
-        if (!row.read) {
+        if (!row.read || RigExecFormatIsArrayTag(row.read->tag)) {
             continue;
         }
         ++rows;
@@ -1465,6 +1471,9 @@ struct _MixOptions {
     const char *axis = "x";
     /// The plane samples a separate Points prim whose points are keyed.
     bool animatedSampler = false;
+    /// The plane's rigExec:sampleSource names that Points prim itself, not
+    /// its points attribute.
+    bool samplerPrim = false;
     /// The curve's points are keyed.
     bool animatedCurve = false;
 };
@@ -1558,7 +1567,8 @@ _VolumeMixStage(const _MixOptions &options)
         sampler.Set(rest, UsdTimeCode(1.0));
         sampler.Set(moved, UsdTimeCode(4.0));
         plane.CreateRelationship(TfToken("rigExec:sampleSource"))
-            .SetTargets({sampler.GetPath()});
+            .SetTargets({options.samplerPrim ? sampler.GetPrimPath()
+                                             : sampler.GetPath()});
     }
     setFloat(plane, "inputs:falloffMin", 0.0f);
     setFloat(plane, "inputs:falloffMax", 2.0f);
@@ -1798,11 +1808,11 @@ TestComputedOpenRefusals()
 }
 
 // A skin whose per-point layout holds, inside its rows, index-0 entries of
-// weight +0 and -0 (which the file's sparse form drops), a zero weight on
-// another index (which it keeps), and in one variant a negative weight,
-// under classicLinear and dualQuaternion: the file keeps exactly the
-// entries other than (0, +-0), and plays every frame bit for bit with the
-// baked program.
+// weight +0 and -0, a trailing (0, -0) and a trailing (0, +0), a zero
+// weight on another index, and in one variant a negative weight, under
+// classicLinear and dualQuaternion: the file's sparse form keeps each row
+// up to its trailing (0, +0) run, so it expands to the authored arrays bit
+// for bit, and plays every frame bit for bit with the baked program.
 static UsdStageRefPtr
 _SparseSkinStage(const char *method, bool negative)
 {
@@ -1873,10 +1883,10 @@ TestSparseSkinTopology()
             if (!negative) {
                 _CheckFramesDiffer(name, rows);
             }
-            // The file's layout: the 16 entries less the seven (0, +-0)
-            // ones, the zero on index 2 kept. A negative weight fails the
-            // layout's validation, so the bake keeps no epoch layout and
-            // both sides read the per-frame arrays.
+            // The file's layout: the 16 entries less the third row's
+            // trailing (0, +0), in order and bit for bit. A negative weight
+            // fails the layout's validation, so the bake keeps no epoch
+            // layout and both sides read the per-frame arrays.
             RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
             evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
             std::vector<uint8_t> bytes;
@@ -1896,16 +1906,745 @@ TestSparseSkinTopology()
             CHECK(topology->elementSize == 4 && topology->pointCount == 4);
             CHECK(topology->validated);
             CHECK(topology->counts8 ==
-                  (std::vector<uint8_t>{2, 2, 3, 2}));
+                  (std::vector<uint8_t>{4, 4, 3, 4}));
             CHECK(topology->indexWidth == 1);
             CHECK(topology->indices8 ==
-                  (std::vector<uint8_t>{1, 2, 2, 1, 1, 0, 2, 1, 2}));
-            CHECK(topology->weights ==
-                  (std::vector<float>{0.5f, 0.5f, 0.0f, 1.0f, 0.25f, 0.75f,
-                                      0.0f, 0.6f, 0.4f}));
+                  (std::vector<uint8_t>{0, 1, 0, 2,  //
+                                        2, 1, 0, 0,  //
+                                        1, 0, 2,     //
+                                        0, 0, 1, 2}));
+            const std::vector<float> kept = {0.0f,  0.5f, -0.0f, 0.5f,  //
+                                             0.0f,  1.0f, 0.0f,  -0.0f, //
+                                             0.25f, 0.75f, 0.0f,        //
+                                             -0.0f, 0.0f, 0.6f,  0.4f};
+            CHECK(topology->weights.size() == kept.size() &&
+                  std::memcmp(topology->weights.data(), kept.data(),
+                              sizeof(float) * kept.size()) == 0);
+            // And the expansion is the authored arrays, bit for bit.
+            std::vector<int32_t> denseIndices;
+            std::vector<float> denseWeights;
+            RigExecFormatExpandTopology(*topology, &denseIndices,
+                                        &denseWeights);
+            VtIntArray authoredIndices;
+            VtFloatArray authoredWeights;
+            const UsdPrim skin =
+                stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Skin"));
+            CHECK(skin.GetAttribute(TfToken("rigExec:jointIndices"))
+                      .Get(&authoredIndices) &&
+                  skin.GetAttribute(TfToken("rigExec:jointWeights"))
+                      .Get(&authoredWeights));
+            CHECK(denseIndices.size() == authoredIndices.size() &&
+                  std::equal(denseIndices.begin(), denseIndices.end(),
+                             authoredIndices.cbegin()));
+            CHECK(denseWeights.size() == authoredWeights.size() &&
+                  std::memcmp(denseWeights.data(), authoredWeights.cdata(),
+                              sizeof(float) * denseWeights.size()) == 0);
         }
     }
     std::printf("sparse skin topology: checked\n");
+}
+
+static UsdStageRefPtr _TwoKeySkinStage();
+
+// The layout rule the format and playback share
+// (RigExecFormatSkinLayoutValidates) against the evaluator's own
+// (RigExecBuildSkinTopology), layout by layout: valid rows, a -0 weight and
+// no rows pass; element sizes 0 and -1, unequal lengths, ragged rows, no
+// influences, an index below 0 or at the influence count, and NaN, inf and
+// negative weights fail. The point count is the rows of an element size of
+// at least 1, else 0.
+static void
+TestSharedLayoutRule()
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    struct Layout {
+        const char *name;
+        std::vector<int> indices;
+        std::vector<float> weights;
+        int elementSize;
+        size_t influences;
+    };
+    const Layout layouts[] = {
+        {"valid", {0, 1, 1, 0}, {0.5f, 0.5f, 1.0f, 0.0f}, 2, 2},
+        {"-0 weight", {0, 1}, {-0.0f, 1.0f}, 2, 2},
+        {"no rows", {}, {}, 2, 2},
+        {"element size 0", {}, {}, 0, 2},
+        {"element size 0 with entries", {0}, {1.0f}, 0, 2},
+        {"element size -1", {0, 1}, {0.5f, 0.5f}, -1, 2},
+        {"unequal lengths", {0, 1}, {1.0f}, 1, 2},
+        {"ragged", {0, 1, 0}, {1.0f, 0.0f, 0.0f}, 2, 2},
+        {"zero influences", {0, 0}, {1.0f, 0.0f}, 2, 0},
+        {"no rows, no influences", {}, {}, 2, 0},
+        {"index -1", {-1, 0}, {0.5f, 0.5f}, 2, 2},
+        {"index at the influence count", {2, 0}, {0.5f, 0.5f}, 2, 2},
+        {"NaN weight", {0, 1}, {nan, 0.5f}, 2, 2},
+        {"inf weight", {0, 1}, {inf, 0.5f}, 2, 2},
+        {"-1e-30 weight", {0, 1}, {-1e-30f, 0.5f}, 2, 2},
+    };
+    size_t passing = 0;
+    for (const Layout &layout : layouts) {
+        RigExecSkinTopology built;
+        RigExecBuildSkinTopology(TfSpan<const int>(layout.indices),
+                                 TfSpan<const float>(layout.weights),
+                                 layout.elementSize, layout.influences,
+                                 &built);
+        const bool shared = RigExecFormatSkinLayoutValidates(
+            layout.indices.data(), layout.indices.size(),
+            layout.weights.data(), layout.weights.size(), layout.elementSize,
+            layout.influences);
+        CHECK(shared == built.validated);
+        const bool rows = layout.elementSize >= 1 &&
+                          layout.indices.size() == layout.weights.size() &&
+                          layout.indices.size() %
+                                  size_t(layout.elementSize) ==
+                              0;
+        CHECK(built.pointCount ==
+              (rows ? layout.indices.size() / size_t(layout.elementSize)
+                    : 0));
+        if (shared != built.validated) {
+            std::printf("shared layout rule, %s: format %d, evaluator %d\n",
+                        layout.name, int(shared), int(built.validated));
+        }
+        passing += shared ? 1 : 0;
+    }
+    std::printf("shared layout rule: %zu layouts, %zu passing, every one as "
+                "the evaluator judges it\n",
+                sizeof(layouts) / sizeof(layouts[0]), passing);
+    CHECK(passing == 3);
+}
+
+// A reader of \p bytes that ran once, at its defaults.
+static std::unique_ptr<RigExecRuntimeReader>
+_ArrayReader(const char *name, const std::vector<uint8_t> &bytes)
+{
+    std::string error;
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    if (!reader || !reader->Execute(&error)) {
+        std::printf("FAILED: %s: %s\n", name, error.c_str());
+        ++failures;
+        return nullptr;
+    }
+    return reader;
+}
+
+// \p reader, after its first run, takes \p sets and runs again: equal to
+// the dynamic and the baked evaluator at the bake time with the sets
+// authored in the session layer (RigExecTestArrayReference), outputs,
+// property values and diagnostics.
+static bool
+_ArraySetsMatch(const char *name, const std::string &leg,
+                const UsdStageRefPtr &stage, const SdfPath &rigPath,
+                RigExecRuntimeReader *reader,
+                const std::vector<RigExecTestArraySet> &sets)
+{
+    std::string error;
+    if (!RigExecTestApplyArraySets(reader, sets, &error) ||
+        !reader->Execute(&error)) {
+        std::printf("FAILED: %s, %s: %s\n", name, leg.c_str(),
+                    error.c_str());
+        ++failures;
+        return false;
+    }
+    bool same = true;
+    for (const auto mode : {RigExecEvaluationMode::Dynamic,
+                            RigExecEvaluationMode::Baked}) {
+        RigExecRigPose pose;
+        if (!RigExecTestArrayReference(stage, rigPath, mode, sets,
+                                       reader->GetBakeTime(), &pose,
+                                       &error)) {
+            std::printf("FAILED: %s, %s: %s\n", name, leg.c_str(),
+                        error.c_str());
+            ++failures;
+            return false;
+        }
+        std::vector<std::string> diffs;
+        if (!RigExecCompareRuntimeRun(pose, *reader, &diffs)) {
+            same = false;
+            std::printf("FAILED: %s, %s, %s mode:\n", name, leg.c_str(),
+                        mode == RigExecEvaluationMode::Dynamic ? "dynamic"
+                                                               : "baked");
+            for (const std::string &diff : diffs) {
+                std::printf("    %s\n", diff.c_str());
+            }
+        }
+    }
+    CHECK(same);
+    return same;
+}
+
+// The oracle's sample points as an input: the volume mix's plane samples
+// a keyed Points prim through rigExec:sampleSource, which the export lists
+// at the attribute the oracle resolves the relationship to, its packet
+// gather bound to the same input. An authored set of its count reaches the
+// current-phase field; a sampled one of another count fails it with the
+// oracle's words, as live fails it.
+static void
+TestOraclePointsSet()
+{
+    const char *const name = "oracle sample points";
+    _MixOptions options;
+    options.animatedSampler = true;
+    const UsdStageRefPtr stage = _VolumeMixStage(options);
+    const SdfPath rigPath("/Asset/Rig");
+    const std::string sampler = "/Asset/Geom/Sampler.points";
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(evaluator, 2.0, &bytes, &error));
+    }
+    // The plane's oracle samples and its packet's gather read one input.
+    {
+        const std::unique_ptr<fb::RigExecWireFile> file =
+            RigExecTestUnpack(bytes);
+        if (!file) {
+            return;
+        }
+        const int64_t slot = RigExecTestSlotOf(*file, sampler);
+        int listed = 0;
+        for (const fb::RigExecWireWeightObject &object :
+             file->geometry->weightObjects) {
+            if (RigExecFormatPathText(*file, object.path) ==
+                "/Asset/Rig/Weights/Plane") {
+                listed += object.oracleSamplesSlot == slot ? 1 : 0;
+            }
+        }
+        const fb::RigExecWirePathRead *row =
+            RigExecTestPathReadRow(file.get(), sampler, false);
+        CHECK(slot >= 0 && listed == 1 && row && row->read &&
+              !row->value &&
+              row->read->walk == std::vector<uint32_t>{uint32_t(slot)});
+    }
+    // At its defaults the file plays as live does.
+    std::unique_ptr<RigExecRuntimeReader> reader = _ArrayReader(name, bytes);
+    if (!reader) {
+        return;
+    }
+    {
+        RigExecRigPose pose;
+        CHECK(RigExecTestArrayReference(stage, rigPath,
+                                        RigExecEvaluationMode::Baked, {}, 2.0,
+                                        &pose, &error));
+        std::vector<std::string> diffs;
+        CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
+        for (const std::string &diff : diffs) {
+            std::printf("  %s, defaults: %s\n", name, diff.c_str());
+        }
+    }
+    VtVec3fArray points;
+    CHECK(stage->GetAttributeAtPath(SdfPath(sampler))
+              .Get(&points, UsdTimeCode(2.0)));
+    VtVec3fArray moved = points;
+    for (GfVec3f &p : moved) {
+        p[0] -= 0.75f;
+        p[1] += 0.25f;
+    }
+    int matched = 0;
+    matched += _ArraySetsMatch(name, "authored", stage, rigPath, reader.get(),
+                               {{sampler, VtValue(moved), false}});
+    std::unique_ptr<RigExecRuntimeReader> fewer = _ArrayReader(name, bytes);
+    if (fewer) {
+        VtVec3fArray shorter(points.begin(), points.end() - 1);
+        matched += _ArraySetsMatch(name, "sampled, one point fewer", stage,
+                                   rigPath, fewer.get(),
+                                   {{sampler, VtValue(shorter), true}});
+        const std::string failed =
+            "current-phase weight failed: /Asset/Rig/Weights/Plane: "
+            "sampled point count does not match the target";
+        const std::vector<std::string> &lines = fewer->GetDiagnostics();
+        CHECK(std::find(lines.begin(), lines.end(), failed) != lines.end());
+    }
+    std::printf("%s: %d of 2 sets == session edit\n", name, matched);
+    CHECK(matched == 2);
+}
+
+// The oracle's sample points are the attribute the oracle resolves its
+// relationship to: a plane whose rigExec:sampleSource names a Points prim
+// samples that prim's points, an input of their own beside the packet's
+// gathered weight target, which names its attribute. The packet gathers
+// no sample points through a prim, so the samples have no row. An
+// authored set of the points reaches the current-phase field as the
+// session edit does.
+static void
+TestOracleSlotIsCanonical()
+{
+    const char *const name = "canonical oracle points";
+    _MixOptions options;
+    options.animatedSampler = true;
+    options.samplerPrim = true;
+    const UsdStageRefPtr stage = _VolumeMixStage(options);
+    const SdfPath rigPath("/Asset/Rig");
+    const std::string sampler = "/Asset/Geom/Sampler.points";
+    const std::string target = "/Asset/Geom/M.points";
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(evaluator, 2.0, &bytes, &error));
+    }
+    bool canonical = false;
+    if (const std::unique_ptr<fb::RigExecWireFile> file =
+            RigExecTestUnpack(bytes)) {
+        const int64_t samples = RigExecTestSlotOf(*file, sampler);
+        const int64_t gathered = RigExecTestSlotOf(*file, target);
+        for (const fb::RigExecWireWeightObject &object :
+             file->geometry->weightObjects) {
+            if (RigExecFormatPathText(*file, object.path) !=
+                "/Asset/Rig/Weights/Plane") {
+                continue;
+            }
+            const fb::RigExecWirePathRead *row =
+                RigExecTestPathReadRow(file.get(), target, false);
+            canonical =
+                samples >= 0 && gathered >= 0 && samples != gathered &&
+                object.oracleSamplesSlot == samples &&
+                object.samplePoints.empty() &&
+                !RigExecTestPathReadRow(file.get(), sampler, false) && row &&
+                row->read &&
+                row->read->walk == std::vector<uint32_t>{uint32_t(gathered)};
+        }
+    }
+    CHECK(canonical);
+    std::unique_ptr<RigExecRuntimeReader> reader = _ArrayReader(name, bytes);
+    if (!canonical || !reader) {
+        return;
+    }
+    {
+        RigExecRigPose pose;
+        CHECK(RigExecTestArrayReference(stage, rigPath,
+                                        RigExecEvaluationMode::Baked, {}, 2.0,
+                                        &pose, &error));
+        std::vector<std::string> diffs;
+        CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
+        for (const std::string &diff : diffs) {
+            std::printf("  %s, defaults: %s\n", name, diff.c_str());
+        }
+    }
+    VtVec3fArray points;
+    CHECK(stage->GetAttributeAtPath(SdfPath(sampler))
+              .Get(&points, UsdTimeCode(2.0)));
+    for (GfVec3f &p : points) {
+        p[0] -= 0.5f;
+    }
+    const bool matched =
+        _ArraySetsMatch(name, "authored", stage, rigPath, reader.get(),
+                        {{sampler, VtValue(points), false}});
+    std::printf("%s: %s listed apart from the gathered %s; set %s\n", name,
+                sampler.c_str(), target.c_str(),
+                matched ? "== session edit" : "differs");
+}
+
+// docs/examples/skin_mover.usda's two skins, whose layouts hold a mid-row
+// (0, 0) entry: a row that opens with (0, 0) before its other influence.
+// The stored layouts keep it and expand to the stage's arrays bit for bit,
+// which are their inputs' defaults, and every frame plays as live baked
+// does, linear and dual quaternion.
+static void
+TestLosslessLayoutPlaysAsLive()
+{
+    const char *const name = "lossless skin layouts";
+    const std::string path =
+        std::string(RIGEXEC_EXAMPLES_DIR) + "/../docs/examples/skin_mover.usda";
+    const UsdStageRefPtr stage = UsdStage::Open(path);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = _FindRig(stage);
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator baker(stage, rigPath);
+        baker.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(baker, 1001.0, &bytes, &error));
+    }
+    const std::unique_ptr<fb::RigExecWireFile> file = RigExecTestUnpack(bytes);
+    if (!file) {
+        return;
+    }
+    size_t layouts = 0, leadingZeros = 0;
+    for (const fb::RigExecWireChain &chain : file->geometry->chains) {
+        for (const fb::RigExecWireRevision &revision : chain.revisions) {
+            if (!revision.topology) {
+                continue;
+            }
+            const std::string mover =
+                RigExecFormatPathText(*file, revision.moverPath);
+            const UsdPrim prim = stage->GetPrimAtPath(SdfPath(mover));
+            VtIntArray indices;
+            VtFloatArray weights;
+            CHECK(prim.GetAttribute(TfToken("rigExec:jointIndices"))
+                      .Get(&indices) &&
+                  prim.GetAttribute(TfToken("rigExec:jointWeights"))
+                      .Get(&weights));
+            std::vector<int32_t> expandedIndices;
+            std::vector<float> expandedWeights;
+            RigExecFormatExpandTopology(*revision.topology, &expandedIndices,
+                                        &expandedWeights);
+            const bool same =
+                !revision.topology->raw &&
+                expandedIndices.size() == indices.size() &&
+                std::equal(expandedIndices.begin(), expandedIndices.end(),
+                           indices.cbegin()) &&
+                expandedWeights.size() == weights.size() &&
+                std::memcmp(expandedWeights.data(), weights.cdata(),
+                            sizeof(float) * weights.size()) == 0;
+            CHECK(same);
+            // Its inputs default to that layout.
+            CHECK(revision.jointIndicesSlot ==
+                      RigExecTestSlotOf(*file,
+                                        mover + ".rigExec:jointIndices") &&
+                  revision.jointWeightsSlot ==
+                      RigExecTestSlotOf(*file,
+                                        mover + ".rigExec:jointWeights"));
+            for (size_t e = 0; e + 1 < indices.size(); e += 2) {
+                leadingZeros += indices[e] == 0 && weights[e] == 0.0f ? 1 : 0;
+            }
+            // Returning from a value-equal signed-zero layout keeps its
+            // handle and does no more revision work than an unchanged run.
+            for (size_t z = 0; z < weights.size(); ++z) {
+                if (weights[z] != 0.0f || std::signbit(weights[z])) {
+                    continue;
+                }
+                std::unique_ptr<RigExecRuntimeReader> reader =
+                    _ArrayReader(name, bytes);
+                if (!reader) {
+                    break;
+                }
+                const std::string input = mover + ".rigExec:jointWeights";
+                VtFloatArray moved = weights;
+                moved[z] = 0.25f;
+                CHECK(RigExecTestApplyArraySets(
+                          reader.get(), {{input, VtValue(moved), false}},
+                          &error) &&
+                      reader->Execute(&error));
+                VtFloatArray signedZero = weights;
+                signedZero[z] = -0.0f;
+                CHECK(RigExecTestApplyArraySets(
+                          reader.get(),
+                          {{input, VtValue(signedZero), false}}, &error) &&
+                      reader->Execute(&error));
+                CHECK(!reader->GetSkinLayoutIsOpenForTesting(mover));
+                CHECK(reader->Execute(&error));
+                const uint32_t unchanged =
+                    reader->GetCounters().revisionsExecuted;
+                CHECK(reader->ResetInput(input, &error) &&
+                      reader->Execute(&error));
+                CHECK(!reader->GetSkinLayoutIsOpenForTesting(mover));
+                CHECK(reader->GetCounters().revisionsExecuted == unchanged);
+                break;
+            }
+            layouts += same ? 1 : 0;
+        }
+    }
+    CHECK(layouts == 2 && leadingZeros > 0);
+    std::printf("%s: %zu layouts expand to their arrays, %zu rows opening "
+                "with a kept (0, 0)\n",
+                name, layouts, leadingZeros);
+    std::vector<double> frames;
+    for (double t = 1001.0; t <= 1012.0; t += 1.0) {
+        frames.push_back(t);
+    }
+    _TestStage(name, stage, frames);
+}
+
+// A current-phase combine of a `preceding` sphere and a sparse dynamic
+// weight that paints its own support, [0, 1], its sparse base's.
+static UsdStageRefPtr
+_DynamicSupportStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const SdfPath target("/Asset/Geom/M.points");
+    const VtVec3fArray rest{GfVec3f(0, 0, 0),         GfVec3f(0.5f, 0.25f, 0),
+                            GfVec3f(-1, -0.5f, 0.25f), GfVec3f(2, 0, -0.5f),
+                            GfVec3f(0.25f, 1, 0.5f),  GfVec3f(-0.5f, 0.5f, -1)};
+    stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Points"))
+        .CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(rest);
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto place = [](const UsdPrim &prim, double tx, double ty,
+                          double tz) {
+        const char *const names[3] = {"avars:tx", "avars:ty", "avars:tz"};
+        const double at[3] = {tx, ty, tz};
+        for (int k = 0; k < 3; ++k) {
+            prim.CreateAttribute(TfToken(names[k]), SdfValueTypeNames->Double)
+                .Set(at[k]);
+        }
+    };
+    const auto setFloat = [](const UsdPrim &prim, const char *name, float v) {
+        prim.CreateAttribute(TfToken(name), SdfValueTypeNames->Float).Set(v);
+    };
+    const auto setToken = [](const UsdPrim &prim, const char *name,
+                             const char *v) {
+        prim.CreateAttribute(TfToken(name), SdfValueTypeNames->Token)
+            .Set(TfToken(v));
+    };
+    const auto weight = [&](const char *path, const char *type) {
+        const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken(type));
+        prim.CreateRelationship(TfToken("rigExec:weightTarget"))
+            .SetTargets({target});
+        return prim;
+    };
+    const UsdPrim joint = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/J"),
+                                            TfToken("RigExecJoint"));
+    place(joint, 0, 2, 0);
+    const UsdPrim lift = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Lift"),
+                                           TfToken("RigExecJoint"));
+    place(lift, 0, 0, 0);
+    const UsdAttribute liftTy = lift.GetAttribute(TfToken("avars:ty"));
+    liftTy.Clear();
+    liftTy.Set(1.5, UsdTimeCode(1.0));
+    liftTy.Set(0.0, UsdTimeCode(4.0));
+
+    const UsdPrim full = weight("/Asset/Rig/Weights/Full",
+                                "RigExecStaticWeight");
+    setToken(full, "rigExec:representation", "dense");
+    full.CreateAttribute(TfToken("rigExec:values"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray(rest.size(), 1.0f));
+    setFloat(full, "rigExec:defaultWeight", 0.0f);
+
+    const UsdPrim sphere = weight("/Asset/Rig/Weights/Sphere",
+                                  "RigExecSphereWeight");
+    sphere.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetMetadata(TfToken("rigExecReadPhase"), std::string("preceding"));
+    place(sphere, 0, 0, 0);
+    setFloat(sphere, "inputs:falloffMin", 0.0f);
+    setFloat(sphere, "inputs:falloffMax", 2.5f);
+    setToken(sphere, "rigExec:falloffProfile", "linear");
+
+    const UsdPrim base = weight("/Asset/Rig/Weights/Base",
+                                "RigExecStaticWeight");
+    setToken(base, "rigExec:representation", "sparse");
+    setFloat(base, "rigExec:defaultWeight", 0.0f);
+    base.CreateAttribute(TfToken("rigExec:indices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 1});
+    base.CreateAttribute(TfToken("rigExec:values"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{0.5f, 0.25f});
+    const UsdPrim dynamic = weight("/Asset/Rig/Weights/Dyn",
+                                   "RigExecDynamicWeight");
+    setToken(dynamic, "rigExec:representation", "sparse");
+    dynamic.CreateRelationship(TfToken("rigExec:baseWeight"))
+        .SetTargets({base.GetPath()});
+    dynamic.CreateAttribute(TfToken("rigExec:indices"),
+                            SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 1});
+
+    const UsdPrim combine = weight("/Asset/Rig/Weights/Mix",
+                                   "RigExecCombineWeight");
+    combine.CreateRelationship(TfToken("rigExec:inputWeights"))
+        .SetTargets({sphere.GetPath(), dynamic.GetPath()});
+    setToken(combine, "rigExec:combineMode", "max");
+    setToken(combine, "rigExec:rangePolicy", "clamp");
+
+    const auto mover = [&](const char *path, const UsdPrim &transform,
+                           const UsdPrim &envelope) {
+        const UsdPrim m =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecMatrixMover"));
+        CHECK(m.ApplyAPI(TfToken("RigExecMoverAPI")));
+        m.CreateRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        m.CreateRelationship(TfToken("rigExec:transform"))
+            .SetTargets({transform.GetPath()});
+        m.CreateRelationship(TfToken("rigExec:weightObject"))
+            .SetTargets({envelope.GetPath()});
+    };
+    mover("/Asset/Rig/Movers/Second", joint, combine);
+    mover("/Asset/Rig/Movers/Second/First", lift, full);
+    return stage;
+}
+
+// The dynamic support check over the painted indices, which the export
+// lists as inputs: an indices set off the base's support fails the
+// dynamic weight with the
+// oracle's words on every run, where the evaluators' compile refuses the
+// authored edit and skips its consumer, with the same pass-through; a set
+// of the base's support in another order passes, as the session edit
+// does.
+static void
+TestDynamicSupportFromSlots()
+{
+    const char *const name = "dynamic sparse support";
+    const UsdStageRefPtr stage = _DynamicSupportStage();
+    const SdfPath rigPath("/Asset/Rig");
+    const std::string dynamic = "/Asset/Rig/Weights/Dyn";
+    const std::string indices = dynamic + ".rigExec:indices";
+    const std::string failed =
+        "current-phase weight failed: dynamic/base sparse support mismatch "
+        "on " + dynamic;
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(evaluator, 2.0, &bytes, &error));
+    }
+    // Each weight's indices are its input.
+    int listed = 0;
+    if (const std::unique_ptr<fb::RigExecWireFile> file =
+            RigExecTestUnpack(bytes)) {
+        for (const fb::RigExecWireWeightObject &object :
+             file->geometry->weightObjects) {
+            const std::string path = RigExecFormatPathText(*file, object.path);
+            if ((path == dynamic || path == "/Asset/Rig/Weights/Base") &&
+                object.indicesSlot >= 0 &&
+                object.indicesSlot ==
+                    RigExecTestSlotOf(*file, path + ".rigExec:indices")) {
+                ++listed;
+            }
+        }
+    }
+    CHECK(listed == 2);
+    const auto hasLine = [&](const RigExecRuntimeReader &reader) {
+        const std::vector<std::string> &lines = reader.GetDiagnostics();
+        return std::find(lines.begin(), lines.end(), failed) != lines.end();
+    };
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        listed == 2 ? _ArrayReader(name, bytes) : nullptr;
+    if (!reader) {
+        return;
+    }
+    // At its defaults the support matches: live's run.
+    {
+        RigExecRigPose pose;
+        CHECK(RigExecTestArrayReference(stage, rigPath,
+                                        RigExecEvaluationMode::Baked, {}, 2.0,
+                                        &pose, &error));
+        std::vector<std::string> diffs;
+        CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
+        for (const std::string &diff : diffs) {
+            std::printf("  %s, defaults: %s\n", name, diff.c_str());
+        }
+        CHECK(!hasLine(*reader));
+    }
+    // Off the base's support.
+    const std::vector<RigExecTestArraySet> off = {
+        {indices, VtValue(VtIntArray{0, 2}), false}};
+    CHECK(RigExecTestApplyArraySets(reader.get(), off, &error) &&
+          reader->Execute(&error));
+    CHECK(hasLine(*reader));
+    for (const auto mode :
+         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+        RigExecRigPose pose;
+        CHECK(RigExecTestArrayReference(stage, rigPath, mode, off, 2.0,
+                                        &pose, &error));
+        std::vector<std::string> diffs;
+        CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs, true));
+        for (const std::string &diff : diffs) {
+            std::printf("  %s, off the support: %s\n", name, diff.c_str());
+        }
+    }
+    // The base's support in another order passes, as live passes it.
+    CHECK(_ArraySetsMatch(name, "the base's support", stage, rigPath,
+                          reader.get(),
+                          {{indices, VtValue(VtIntArray{1, 0}), false}}));
+    CHECK(!hasLine(*reader));
+    std::printf("%s: checked\n", name);
+}
+
+// A chunked skin's layout as inputs (the two-key skin, chunked at two
+// vertices): a repaint of its indices runs the revision whole and plays as
+// the session edit does with J1 moved, a weights-only set keeps the chunks,
+// and a reset returns the Open layout and the partition.
+static void
+TestLayoutSetOnChunkedRevision()
+{
+    const char *const name = "chunked layout inputs";
+    const std::string always = TfGetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+    const std::string verts = TfGetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const std::string skin = "/Asset/Rig/Movers/Skin";
+    const std::string indices = skin + ".rigExec:jointIndices";
+    const std::string weights = skin + ".rigExec:jointWeights";
+    const std::string j1 = "/Asset/Rig/J1.avars:ty";
+    const UsdStageRefPtr stage = _TwoKeySkinStage();
+    const SdfPath rigPath("/Asset/Rig");
+    std::vector<uint8_t> bytes;
+    std::string error;
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(RigExecTestBakeAt(evaluator, 1.0, &bytes, &error));
+    }
+    // The chunked revision's layout arrays are its inputs, defaulting to
+    // the stored layout.
+    int listed = 0;
+    if (const std::unique_ptr<fb::RigExecWireFile> file =
+            RigExecTestUnpack(bytes)) {
+        const auto &geometry = *file->geometry;
+        for (size_t id = 0; id < geometry.revisionIndex.size(); ++id) {
+            const auto &at = geometry.revisionIndex[id];
+            const fb::RigExecWireRevision &revision =
+                geometry.chains[size_t(at.first)]
+                    .revisions[size_t(at.second)];
+            const int64_t i = RigExecTestSlotOf(*file, indices);
+            const int64_t w = RigExecTestSlotOf(*file, weights);
+            if (RigExecFormatPathText(*file, revision.moverPath) != skin ||
+                !revision.chunked || !revision.topologyResolved || i < 0 ||
+                w < 0 || revision.jointIndicesSlot != i ||
+                revision.jointWeightsSlot != w) {
+                continue;
+            }
+            const fb::RigExecWireValue &a =
+                file->values[file->inputs[size_t(i)].value()];
+            const fb::RigExecWireValue &b =
+                file->values[file->inputs[size_t(w)].value()];
+            if (a.arraySource == fb::ArraySource::SkinIndices &&
+                b.arraySource == fb::ArraySource::SkinWeights &&
+                a.array == id && b.array == id) {
+                ++listed;
+            }
+        }
+    }
+    CHECK(listed == 1);
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        listed == 1 ? _ArrayReader(name, bytes) : nullptr;
+    if (reader) {
+        CHECK(!reader->GetPartitionStaleForTesting(skin) &&
+              reader->GetSkinLayoutIsOpenForTesting(skin));
+        // A repaint: the partition holds other indices, so the revision
+        // runs whole, and only J1 moves the points.
+        CHECK(_ArraySetsMatch(name, "repainted, J1 moved", stage, rigPath,
+                              reader.get(),
+                              {{indices, VtValue(VtIntArray{1, 1, 1, 1}),
+                                false},
+                               {j1, VtValue(25.0), false}}));
+        CHECK(reader->GetPartitionStaleForTesting(skin) &&
+              !reader->GetSkinLayoutIsOpenForTesting(skin));
+        // Back to the file's layout: the Open one, and the chunks run.
+        CHECK(reader->ResetInput(indices, &error) &&
+              reader->Execute(&error));
+        CHECK(!reader->GetPartitionStaleForTesting(skin) &&
+              reader->GetSkinLayoutIsOpenForTesting(skin));
+    }
+    std::unique_ptr<RigExecRuntimeReader> weighted =
+        listed == 1 ? _ArrayReader(name, bytes) : nullptr;
+    if (weighted) {
+        // Weights alone: the partition's indices stand, so the chunks run.
+        CHECK(_ArraySetsMatch(
+            name, "weights only", stage, rigPath, weighted.get(),
+            {{weights, VtValue(VtFloatArray{0.5f, 1.0f, 1.0f, 0.25f}),
+              false}}));
+        CHECK(!weighted->GetPartitionStaleForTesting(skin) &&
+              !weighted->GetSkinLayoutIsOpenForTesting(skin));
+    }
+    std::printf("%s: checked\n", name);
+    if (always.empty()) {
+        TfUnsetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+    } else {
+        TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", always);
+    }
+    if (verts.empty()) {
+        TfUnsetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    } else {
+        TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", verts);
+    }
 }
 
 // The C runtime's environment, the one std::getenv reads (TfSetenv on
@@ -2050,6 +2789,147 @@ _SimdSettingStage()
     return stage;
 }
 
+// A skin whose four points take one influence each, J0 for the first two
+// and J1 for the last two: under RIGEXEC_BAKED_CHUNK_VERTS=2 its Build keys
+// are {j0} and {j1}. J0 moves its points along x and J1 along y.
+static UsdStageRefPtr
+_TwoKeySkinStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim j0 = stage->DefinePrim(SdfPath("/Asset/Rig/J0"),
+                                         TfToken("RigExecControl"));
+    j0.GetAttribute(TfToken("avars:tx")).Set(10.0);
+    const UsdPrim j1 = stage->DefinePrim(SdfPath("/Asset/Rig/J1"),
+                                         TfToken("RigExecControl"));
+    j1.GetAttribute(TfToken("avars:ty")).Set(20.0);
+    const SdfPath target("/Asset/Geom/Mesh.points");
+    const UsdPrim mesh =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Mesh"));
+    VtVec3fArray points(4);
+    for (size_t i = 0; i < points.size(); ++i) {
+        points[i] = GfVec3f(float(i), float(i) * 2.0f, float(i) * 3.0f);
+    }
+    mesh.GetAttribute(TfToken("points")).Set(points);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin"), TfToken("RigExecSkinMover"));
+    skin.ApplyAPI(TfToken("RigExecMoverAPI"));
+    skin.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    skin.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    skin.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({j0.GetPath(), j1.GetPath()});
+    skin.CreateAttribute(TfToken("rigExec:elementSize"),
+                         SdfValueTypeNames->Int).Set(1);
+    skin.CreateAttribute(TfToken("rigExec:jointIndices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 0, 1, 1});
+    skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{1.0f, 1.0f, 1.0f, 1.0f});
+    return stage;
+}
+
+// A chunked skin repainted in place, so chunk 0's points bind J1. A bake
+// compiles first and so cuts its keys from the repainted layout; the file
+// a layout set at playback amounts to holds Build's keys, the repainted
+// layout, and Build's layout as the partition. It is made here by editing
+// the bake of the layout as built. Playback keeps the keys, finds the
+// partition stale and runs the revision whole, as live baked does after the
+// same in-place repaint, so moving J1 alone moves chunk 0's points too.
+// The file as baked keeps running its chunks.
+static void
+TestRepaintedChunkLayoutRunsWhole()
+{
+    const char *const name = "repainted chunk layout";
+    const std::string always = TfGetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+    const std::string verts = TfGetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const std::string skinPath = "/Asset/Rig/Movers/Skin";
+    const std::string j1 = "/Asset/Rig/J1.avars:ty";
+    const UsdStageRefPtr stage = _TwoKeySkinStage();
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    const UsdTimeCode time(1.0);
+    std::vector<uint8_t> asBuilt;
+    std::string error;
+    CHECK(RigExecTestBakeAt(evaluator, 1.0, &asBuilt, &error));
+
+    fb::RigExecWireSkinTopology repainted;
+    CHECK(RigExecFormatTopology({1, 1, 1, 1}, {1.0f, 1.0f, 1.0f, 1.0f}, 1, 4,
+                                2, true, &repainted, &error));
+    int edited = 0;
+    const std::vector<uint8_t> repaintedBytes =
+        RigExecTestEdited(asBuilt, [&](fb::RigExecWireFile *file) {
+            for (auto &chain : file->geometry->chains) {
+                for (auto &revision : chain.revisions) {
+                    if (RigExecFormatPathText(*file, revision.moverPath) !=
+                            skinPath ||
+                        !revision.chunked || !revision.topology) {
+                        continue;
+                    }
+                    revision.partitionTopology =
+                        std::make_unique<fb::RigExecWireSkinTopology>(
+                            *revision.topology);
+                    revision.partitionSameAsTopology = false;
+                    *revision.topology = repainted;
+                    ++edited;
+                }
+            }
+        });
+    CHECK(edited == 1);
+
+    const auto play = [&](const char *leg, const std::vector<uint8_t> &bytes,
+                          bool stale) {
+        const std::unique_ptr<RigExecRuntimeReader> reader =
+            RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+        if (!reader) {
+            std::printf("FAILED: %s, %s: %s\n", name, leg, error.c_str());
+            ++failures;
+            return;
+        }
+        const auto same = [&](const char *what, const RigExecRigPose &live) {
+            std::vector<std::string> diffs;
+            CHECK(RigExecCompareRuntimeOutputs(live, *reader, &diffs));
+            for (const std::string &diff : diffs) {
+                std::printf("  %s, %s, %s: %s\n", name, leg, what,
+                            diff.c_str());
+            }
+        };
+        CHECK(reader->Execute(&error));
+        same("defaults", evaluator.Evaluate(time));
+        CHECK(reader->GetPartitionStaleForTesting(skinPath) == stale);
+        // Only J1 moves: authored on the stage, set on the binary.
+        const RigExecTestSessionEdit edit(
+            stage->GetAttributeAtPath(SdfPath(j1)), 25.0);
+        CHECK(edit.IsSet());
+        CHECK(reader->SetInput(j1, 25.0, &error) && reader->Execute(&error));
+        same("J1 moved", evaluator.Evaluate(time));
+        CHECK(reader->GetPartitionStaleForTesting(skinPath) == stale);
+    };
+    play("as built", asBuilt, false);
+
+    // Live baked takes the repaint as a value edit and keeps Build's keys.
+    const size_t builds = evaluator.GetBakedProgramBuildCount();
+    stage->GetAttributeAtPath(SdfPath(skinPath + ".rigExec:jointIndices"))
+        .Set(VtIntArray{1, 1, 1, 1});
+    play("repainted", repaintedBytes, true);
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds);
+
+    if (always.empty()) {
+        TfUnsetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+    } else {
+        TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", always);
+    }
+    if (verts.empty()) {
+        TfUnsetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    } else {
+        TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", verts);
+    }
+}
+
 // RIGEXEC_ENABLE_SIMD is read at Open, once per reader: two readers of one
 // file, opened with the switch off and then on, keep their own setting
 // whatever the environment says when they run. The SSE2 kernels match the
@@ -2179,10 +3059,15 @@ main(int argc, char **argv)
     TestCurrentPhaseThroughCombine();
     TestCurrentPhaseFailure();
     TestVolumeMixCurrentPhase();
+    TestOraclePointsSet();
+    TestOracleSlotIsCanonical();
+    TestDynamicSupportFromSlots();
     TestEmptyPlaneAxis();
     TestAnimatedStaticPointsReported();
     TestComputedOpenRefusals();
     TestSparseSkinTopology();
+    TestSharedLayoutRule();
+    TestLosslessLayoutPlaysAsLive();
     TestPathReadsFixture();
     TestPoseDrivenBlendWeights();
     TestBlendActivationDrag();
@@ -2216,6 +3101,8 @@ main(int argc, char **argv)
                      std::string(fixture.animation) == "static");
     }
     CHECK(sawBaking);
+    TestRepaintedChunkLayoutRunsWhole();
+    TestLayoutSetOnChunkedRevision();
     // Last: it moves RIGEXEC_ENABLE_SIMD, which the evaluator reads once.
     TestSimdSettingPerReader();
 

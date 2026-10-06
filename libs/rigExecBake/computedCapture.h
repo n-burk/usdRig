@@ -11,9 +11,11 @@
 // geometry assembly's blend weights, activations, default weights and
 // connection-following scalar reads, plus every chain target (its raw
 // value is the chain's base) and every phased consumer (where a phased
-// value is published). Each slot's default is a raw typed Get at the bake
-// time -- no walk, no overlay -- because the runtime performs the walks.
-// Never evaluates. Internal to rigExecBake.
+// value is published), and every attribute an array read reaches
+// (RigExecBakeListArrayReads). Each scalar slot's default is a raw typed
+// Get at the bake time -- no walk, no overlay -- because the runtime
+// performs the walks; an array slot's is taken after the bake's run
+// (RigExecBakeArraySlot). Never evaluates. Internal to rigExecBake.
 #ifndef RIGEXEC_BAKE_COMPUTED_CAPTURE_H
 #define RIGEXEC_BAKE_COMPUTED_CAPTURE_H
 
@@ -93,15 +95,70 @@ struct RigExecBakePathScalarRead {
     fb::RigExecWireInput read;
 };
 
+/// An array input whose default the bake's run decides: the attribute's
+/// value at the bake time, or at Default when every read of it is at
+/// Default; a chain's base, as the pool entry the chain stores; a fixed
+/// skin revision's layout array, as the stored layout when the run stored
+/// one. Until then the slot's default is its tag's empty array.
+struct RigExecBakeArraySlot {
+    uint32_t slot = 0;
+    fb::InputTag tag = fb::InputTag::FloatArray;
+    bool atDefault = false;
+    /// The chain whose base it is, or -1.
+    int32_t chain = -1;
+    /// The chain revision whose layout array it is (chain, revision), or
+    /// -1, and whether it holds the indices rather than the weights.
+    int32_t layoutChain = -1;
+    int32_t layoutRevision = -1;
+    bool layoutIndices = false;
+};
+
+/// The path-read row of key (\c path, \c rest) an array read binds: its
+/// read over the slots, which a rest row pairs with its Default-time value.
+struct RigExecBakeArrayRow {
+    uint32_t path = 0;
+    bool rest = false;
+    /// A weight object's gather: the row is written even where the
+    /// enumeration keys none, since its read answered nothing at the time.
+    bool gather = false;
+    fb::RigExecWireInput read;
+};
+
+/// A dense blend sample's points read over the slots.
+struct RigExecBakeBlendPointsRead {
+    uint32_t chain = 0;
+    /// The revision, or the derived entry when \c derived.
+    uint32_t revision = 0;
+    bool derived = false;
+    uint32_t channel = 0;
+    uint32_t sample = 0;
+    fb::RigExecWireInput read;
+};
+
+/// A fixed main skin revision's layout inputs.
+struct RigExecBakeLayoutSlots {
+    uint32_t chain = 0;
+    uint32_t revision = 0;
+    uint32_t indices = 0;
+    uint32_t weights = 0;
+};
+
 /// What the collection gathered. Every value id indexes \c values, every
-/// points id \c vec3fArrays, every walk entry \c inputs; values[0] is
-/// Double +0.0 and vec3fArrays[0] is empty, as the file's pools hold them.
+/// walk entry \c inputs; values[0] is Double +0.0, as the file's pool
+/// holds it.
 struct RigExecBakeInputs {
     std::vector<fb::RigExecWireValue> values;
-    std::vector<fb::RigExecWireVec3fArray> vec3fArrays;
     /// Every slot, listed ones first, those ordered by path text.
     std::vector<fb::InputSlot> inputs;
     uint32_t listedInputs = 0;
+    /// The array inputs, in slot order; the path-read rows, blend sample
+    /// points and layouts their reads bind; and per chain its base input,
+    /// or -1. A weight object names its painted and oracle inputs itself.
+    std::vector<RigExecBakeArraySlot> arraySlots;
+    std::vector<RigExecBakeArrayRow> arrayRows;
+    std::vector<RigExecBakeBlendPointsRead> blendPoints;
+    std::vector<RigExecBakeLayoutSlots> layoutSlots;
+    std::vector<int32_t> chainBaseSlots;
     /// The step-backed objects in the program's order, then the
     /// envelope-only ones, each with its reads and oracle facts.
     std::vector<fb::RigExecWireWeightObject> weightObjects;

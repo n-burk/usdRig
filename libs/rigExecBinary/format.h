@@ -11,6 +11,7 @@
 
 #include "rigExecBinary/wireTypes.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -447,6 +448,7 @@ using RigExecWireStepKind = fb::StepKind;
 using RigExecWireSlotDomain = fb::SlotDomain;
 using RigExecWireSlotKind = fb::SlotKind;
 using RigExecWireInputTag = fb::InputTag;
+using RigExecWireArraySource = fb::ArraySource;
 using RigExecWireReadMode = fb::ReadMode;
 using RigExecWireInputReadFlags = fb::InputReadFlags;
 using RigExecWireInputSlotFlags = fb::InputSlotFlags;
@@ -467,17 +469,28 @@ inline constexpr uint8_t RigExecWireConstraintRadialBlend =
 /// rigexec.fbs bumps it. Open refuses any other value: the previous
 /// version with a re-export message naming what it lacks, every other one
 /// with a rebake message.
-inline constexpr uint32_t RigExecFormatVersion = 7;
+inline constexpr uint32_t RigExecFormatVersion = 8;
+
+/// Whether \p tag is one of the array tags (IntArray and after).
+inline constexpr bool
+RigExecFormatIsArrayTag(fb::InputTag tag)
+{
+    return uint8_t(tag) >= uint8_t(fb::InputTag::IntArray) &&
+           uint8_t(tag) <= uint8_t(fb::InputTag::Vec3fArray);
+}
 
 /// The file identifier, bytes 4-7 of every .rigexec file.
 inline constexpr char RigExecFormatIdentifier[] = "REXB";
 
 /// Every rule a file must satisfy that the file alone can decide: path tree
-/// and pools, value and slot typing, every read's walk, constant and
-/// override number, table shapes and indices, step and cone ranges, skin
-/// topologies, path reads, property chains, external movers and the nested
-/// presentation (bounded like Open's buffer, then verified with its REXP
-/// identifier). False with a reason naming the table, index and field.
+/// and pools, value and slot typing (array values' pools and stored
+/// layouts among them), every read's walk (no scalar read walks an array
+/// slot, an array read walks slots of its own tag), constant and override
+/// number, table shapes and indices, step and cone ranges, skin topologies
+/// and the layout, chain base, painted and oracle slots, path reads,
+/// property chains, external movers and the nested presentation (bounded
+/// like Open's buffer, then verified with its REXP identifier). False with
+/// a reason naming the table, index and field.
 bool RigExecFormatValidate(const fb::RigExecWireFile &file,
                            std::string *error);
 
@@ -513,14 +526,58 @@ std::string RigExecFormatPathText(const fb::RigExecWireFile &file,
 std::string RigExecFormatStepLabel(const fb::RigExecWireFile &file,
                                    size_t step);
 
-/// The canonical sparse form of a dense skin layout: \p indices and
-/// \p weights hold \p pointCount rows of \p elementSize entries each. Every
-/// entry is kept, in order, except one whose index is 0 and whose weight
-/// is zero of either sign, which reads exactly as padding; the counts and
-/// indices go into the narrowest vectors that hold them. False with the
-/// reason, and \p out untouched, for an element size outside [0, 65535],
-/// more points than a file can hold, or a layout that is not
-/// \p pointCount rows of \p elementSize.
+/// The evaluator's shape rule for a skin layout (RigExecBuildSkinTopology):
+/// \p indexCount indices and \p weightCount weights are rows of an
+/// \p elementSize of at least 1, over at least one influence.
+inline bool
+RigExecFormatSkinShapeValidates(size_t indexCount, size_t weightCount,
+                                int32_t elementSize, uint64_t influenceCount)
+{
+    return elementSize >= 1 && indexCount == weightCount &&
+           indexCount % size_t(elementSize) == 0 && influenceCount >= 1;
+}
+
+/// The evaluator's entry rule: \p index names one of \p influenceCount
+/// influences, and \p weight is finite and not negative (-0 passes).
+inline bool
+RigExecFormatSkinEntryValidates(int32_t index, float weight,
+                                uint64_t influenceCount)
+{
+    return index >= 0 && uint64_t(index) < influenceCount &&
+           std::isfinite(weight) && !(weight < 0.0f);
+}
+
+/// Whether the evaluator validates the dense skin layout \p indices x
+/// \p weights at \p elementSize over \p influenceCount influences: the
+/// shape rule, then the entry rule on every entry. Exactly
+/// RigExecBuildSkinTopology's `validated`; the validator holds a stored
+/// layout's flag to it, and playback computes it for a layout it builds.
+inline bool
+RigExecFormatSkinLayoutValidates(const int32_t *indices, size_t indexCount,
+                                 const float *weights, size_t weightCount,
+                                 int32_t elementSize, uint64_t influenceCount)
+{
+    if (!RigExecFormatSkinShapeValidates(indexCount, weightCount,
+                                         elementSize, influenceCount)) {
+        return false;
+    }
+    for (size_t k = 0; k < indexCount; ++k) {
+        if (!RigExecFormatSkinEntryValidates(indices[k], weights[k],
+                                             influenceCount)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The sparse form of a dense skin layout: \p indices and \p weights hold
+/// \p pointCount rows of \p elementSize entries each. Each row keeps its
+/// entries, in order, up to its trailing run of (index 0, weight +0.0f)
+/// entries, which the expansion's padding restores, so the form is
+/// lossless; the counts and indices go into the narrowest vectors that
+/// hold them. False with the reason, and \p out untouched, for an element
+/// size outside [0, 65535], more points than a file can hold, or a layout
+/// that is not \p pointCount rows of \p elementSize.
 bool RigExecFormatSparseTopology(const std::vector<int32_t> &indices,
                                  const std::vector<float> &weights,
                                  int32_t elementSize, uint64_t pointCount,
@@ -546,7 +603,8 @@ bool RigExecFormatTopology(const std::vector<int32_t> &indices,
 
 /// The arrays a layout the validator accepts stands for: a raw layout's
 /// own, verbatim; a sparse layout's dense rows, each point's kept entries
-/// in order, then (0, +0.0f) up to element_size.
+/// in order, then (0, +0.0f) up to element_size. Either way, the arrays
+/// the layout was written from, bit for bit.
 void RigExecFormatExpandTopology(const fb::RigExecWireSkinTopology &topology,
                                  std::vector<int32_t> *indices,
                                  std::vector<float> *weights);

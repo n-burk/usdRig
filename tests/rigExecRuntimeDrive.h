@@ -3,7 +3,8 @@
 // input sampler, author the reference value of an input drag in the session
 // layer, and compare a runtime reader's last run with a pose the evaluator
 // published, output domain by output domain, bit for bit, the way
-// rigExecPose --verify-binary compares them.
+// rigExecPose --verify-binary compares them; and set array inputs (authored
+// or sampled) beside their session-layer references.
 #ifndef RIGEXEC_TEST_RUNTIME_DRIVE_H
 #define RIGEXEC_TEST_RUNTIME_DRIVE_H
 
@@ -15,6 +16,8 @@
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/type.h"
+#include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/attribute.h"
@@ -665,6 +668,202 @@ RigExecCompareRuntime(const rigExec::RigExecRigPose &pose,
                      ", schedules " +
                      std::to_string(pose.moverGraphSchedulesBuilt) +
                      "/" + std::to_string(counters.schedulesBuilt));
+        }
+    }
+    return same;
+}
+
+/// \p lines without the "mover graph:" summary line, whose counters a
+/// freshly compiled reference moves (rigExecPose's drag comparison strips
+/// it the same way).
+inline std::vector<std::string>
+RigExecTestWithoutSummary(std::vector<std::string> lines)
+{
+    lines.erase(std::remove_if(lines.begin(), lines.end(),
+                               [](const std::string &line) {
+                                   return line.rfind("mover graph:", 0) == 0;
+                               }),
+                lines.end());
+    return lines;
+}
+
+/// The runtime view of array value \p value (a VtIntArray, VtFloatArray,
+/// VtDoubleArray, VtVec2fArray or VtVec3fArray), pointing into it; a
+/// Double-tagged empty view for any other value.
+inline rigExec::RigExecRuntimeArray
+RigExecTestArrayView(const PXR_NS::VtValue &value)
+{
+    using rigExec::RrInputTag;
+    rigExec::RigExecRuntimeArray view;
+    view.tag = RrInputTag::Double;
+    const auto take = [&](RrInputTag tag, const void *data, size_t count) {
+        view.tag = tag;
+        view.data = data;
+        view.count = count;
+    };
+    if (value.IsHolding<PXR_NS::VtIntArray>()) {
+        const auto &a = value.UncheckedGet<PXR_NS::VtIntArray>();
+        take(RrInputTag::IntArray, a.cdata(), a.size());
+    } else if (value.IsHolding<PXR_NS::VtFloatArray>()) {
+        const auto &a = value.UncheckedGet<PXR_NS::VtFloatArray>();
+        take(RrInputTag::FloatArray, a.cdata(), a.size());
+    } else if (value.IsHolding<PXR_NS::VtDoubleArray>()) {
+        const auto &a = value.UncheckedGet<PXR_NS::VtDoubleArray>();
+        take(RrInputTag::DoubleArray, a.cdata(), a.size());
+    } else if (value.IsHolding<PXR_NS::VtVec2fArray>()) {
+        const auto &a = value.UncheckedGet<PXR_NS::VtVec2fArray>();
+        take(RrInputTag::Vec2fArray, a.cdata(), a.size());
+    } else if (value.IsHolding<PXR_NS::VtVec3fArray>()) {
+        const auto &a = value.UncheckedGet<PXR_NS::VtVec3fArray>();
+        take(RrInputTag::Vec3fArray, a.cdata(), a.size());
+    }
+    return view;
+}
+
+/// One input set on a reader beside its reference: \p value (an array,
+/// or an int, float or double scalar) on the input at \p name, authored in
+/// the reference's session layer at Default, or, \p sampled, set with the
+/// sampled array API and authored as a time sample at the bake time.
+struct RigExecTestArraySet {
+    std::string name;
+    PXR_NS::VtValue value;
+    bool sampled = false;
+};
+
+/// The reference of \p sets at \p time: a fresh evaluator in \p mode,
+/// compiled on \p stage, then given each set's value in the session layer
+/// (at Default, or as a time sample at \p time), evaluated at \p time. The
+/// session layer is put back exactly. False with the reason.
+inline bool
+RigExecTestArrayReference(const PXR_NS::UsdStageRefPtr &stage,
+                          const PXR_NS::SdfPath &rigPath,
+                          rigExec::RigExecEvaluationMode mode,
+                          const std::vector<RigExecTestArraySet> &sets,
+                          double time, rigExec::RigExecRigPose *pose,
+                          std::string *error)
+{
+    rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetEvaluationMode(mode);
+    std::vector<std::string> notices;
+    if (!evaluator.Compile(&notices)) {
+        *error = "the reference did not compile";
+        return false;
+    }
+    PXR_NS::SdfLayerRefPtr saved = PXR_NS::SdfLayer::CreateAnonymous();
+    saved->TransferContent(stage->GetSessionLayer());
+    bool authored = true;
+    {
+        PXR_NS::UsdEditContext context(stage, stage->GetSessionLayer());
+        for (const RigExecTestArraySet &set : sets) {
+            const PXR_NS::UsdAttribute attribute =
+                stage->GetAttributeAtPath(PXR_NS::SdfPath(set.name));
+            authored = authored && attribute &&
+                       (set.sampled
+                            ? attribute.Set(set.value,
+                                            PXR_NS::UsdTimeCode(time))
+                            : attribute.Set(set.value));
+        }
+    }
+    if (authored) {
+        *pose = evaluator.Evaluate(PXR_NS::UsdTimeCode(time));
+    }
+    stage->GetSessionLayer()->TransferContent(saved);
+    if (!authored) {
+        *error = "the session layer refused a set";
+        return false;
+    }
+    if (!pose->valid || pose->bakedParityMismatches != 0 ||
+        pose->moverGraphParityMismatches != 0) {
+        *error = "the reference pose is invalid";
+        return false;
+    }
+    return true;
+}
+
+/// Sets \p sets on \p reader, which already ran at its bake time: arrays
+/// through SetInputArray or SetSampledInputArrayAt, scalars through
+/// SetInput. False with the reader's reason.
+inline bool
+RigExecTestApplyArraySets(rigExec::RigExecRuntimeReader *reader,
+                          const std::vector<RigExecTestArraySet> &sets,
+                          std::string *error)
+{
+    for (const RigExecTestArraySet &set : sets) {
+        size_t index = 0;
+        if (!reader->FindInput(set.name, &index)) {
+            *error = "no input " + set.name;
+            return false;
+        }
+        const rigExec::RigExecRuntimeArray view =
+            RigExecTestArrayView(set.value);
+        if (view.tag != rigExec::RrInputTag::Double) {
+            if (!(set.sampled ? reader->SetSampledInputArrayAt(index, view,
+                                                               error)
+                              : reader->SetInputArrayAt(index, view,
+                                                        error))) {
+                return false;
+            }
+            continue;
+        }
+        rigExec::RrInputValue scalar;
+        if (set.value.IsHolding<int>()) {
+            scalar.tag = rigExec::RrInputTag::Int;
+            scalar.i32 = set.value.UncheckedGet<int>();
+        } else if (set.value.IsHolding<float>()) {
+            scalar.tag = rigExec::RrInputTag::Float;
+            scalar.f32 = set.value.UncheckedGet<float>();
+        } else if (set.value.IsHolding<double>()) {
+            scalar.tag = rigExec::RrInputTag::Double;
+            scalar.f64 = set.value.UncheckedGet<double>();
+        } else {
+            *error = "no runtime form for the set of " + set.name;
+            return false;
+        }
+        if (!reader->SetInputAt(index, scalar, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// \p reader's last run against \p pose: the outputs, the property values
+/// and, unless \p outputsOnly, the diagnostics less the summary line and
+/// less the line a reference that rebuilt for a structural edit opens with
+/// (the binary never rebuilds). Appends at most twelve lines to \p diffs;
+/// true when nothing differs.
+inline bool
+RigExecCompareRuntimeRun(const rigExec::RigExecRigPose &pose,
+                         const rigExec::RigExecRuntimeReader &reader,
+                         std::vector<std::string> *diffs,
+                         bool outputsOnly = false)
+{
+    bool same = RigExecCompareRuntimeOutputs(pose, reader, diffs);
+    same = RigExecCompareRuntimeProperties(pose, reader, diffs) && same;
+    if (outputsOnly) {
+        return same;
+    }
+    std::vector<std::string> want =
+        RigExecTestWithoutSummary(pose.diagnostics);
+    if (!want.empty() && want.front() == "structural edit: epoch rebuilt") {
+        want.erase(want.begin());
+    }
+    const std::vector<std::string> got =
+        RigExecTestWithoutSummary(reader.GetDiagnostics());
+    if (want != got) {
+        same = false;
+        rigExecTestDrive::Push(diffs, "diagnostics differ: " +
+                                          std::to_string(want.size()) +
+                                          " baked line(s), " +
+                                          std::to_string(got.size()) +
+                                          " binary");
+        for (size_t i = 0; i < std::max(want.size(), got.size()); ++i) {
+            const std::string a = i < want.size() ? want[i] : "(none)";
+            const std::string b = i < got.size() ? got[i] : "(none)";
+            if (a != b) {
+                rigExecTestDrive::Push(diffs, "  baked [" + a.substr(0, 150) +
+                                                  "] binary [" +
+                                                  b.substr(0, 150) + "]");
+            }
         }
     }
     return same;

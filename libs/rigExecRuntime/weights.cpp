@@ -7,11 +7,13 @@
 // Gf -> Rr, TfToken comparisons -> token text comparisons, the
 // arithmetic untouched: float stays float, in the same order.
 // Where the baked step reads the stage per frame, the runtime reads the
-// stage values the bake captured (RrStatic). Scalar inputs are read over
-// the input slots (ReadWeight, the runtime form of RigExecBakedRead); the
-// point arrays a volume measures resolve at Open through two layers, in
-// order: a live (non-rest) path-read row for the attribute, else the
-// chain base of the chain whose target IS that attribute path. Chain
+// stage values the bake captured (RrStatic), or the array inputs the file
+// lists in their place (painted values and indices, the oracle's points).
+// Scalar inputs are read over the input slots (ReadWeight, the runtime
+// form of RigExecBakedRead); the point arrays a volume measures resolve at
+// Open through two layers, in order: a live (non-rest) path-read row for
+// the attribute, else the chain base of the chain whose target IS that
+// attribute path, each read through its input slot when it has one. Chain
 // targets are attribute paths (the prologue builds the base query on
 // GetAttributeAtPath of the target), so the second layer matches by
 // exact id, not by heuristics. Its values equal the baked gather's when
@@ -34,6 +36,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -76,12 +79,9 @@ struct RrWeightScratch {
     std::vector<Gathers> gathers;
     // Per weight object, its classified tokens.
     std::vector<RrWeightOracleKind> oracleKinds;
-    // The pool entries the oracle reads as static sample or curve points,
-    // as RrVec3f, each converted once.
-    std::vector<std::vector<RrVec3f>> oraclePoints;
-    // Per weight object, the oraclePoints index of its oracle_samples and
-    // oracle_curve; -1 for a pool id out of range.
-    std::vector<int32_t> oracleSamples, oracleCurve;
+    // Per weight object, the volume slot whose placement the oracle reads:
+    // the no_scale_avars slot whose path is the object's own, else -1.
+    std::vector<int32_t> volumeSlot;
 };
 
 bool
@@ -176,32 +176,25 @@ RrWeightSizeScratch(RrProgram *program, std::string *error)
         kind.unbounded = planeBounds == "unbounded";
         scratch->oracleKinds.push_back(kind);
     }
-    // The oracle's static points: only the pool entries a weight object
-    // names, the pool also holding every other point array of the file.
-    const std::vector<RigExecWireVec3fArray> &pool =
-        program->inputState.file->vec3fArrays;
-    std::unordered_map<int32_t, int32_t> converted;
-    const auto points = [&](int32_t id) -> int32_t {
-        if (id < 0 || size_t(id) >= pool.size()) {
-            return -1;
-        }
-        const auto found = converted.emplace(
-            id, int32_t(scratch->oraclePoints.size()));
-        if (found.second) {
-            std::vector<RrVec3f> out;
-            out.reserve(pool[size_t(id)].v.size());
-            for (const RigExecWireVec3f &p : pool[size_t(id)].v) {
-                out.push_back(RrVec3f(p[0], p[1], p[2]));
+    // A path names at most one slot, so an object has at most one volume.
+    // A hand-assembled program may carry no slot tables: no object then
+    // has a placement.
+    std::unordered_map<uint32_t, int32_t> volumeByPath;
+    if (program->slotMeta && program->constants) {
+        const std::vector<uint32_t> &paths = program->slotMeta->paths;
+        const std::vector<uint8_t> &noScale =
+            program->constants->noScaleAvars;
+        for (size_t i = 0; i < paths.size() && i < noScale.size(); ++i) {
+            if (noScale[i]) {
+                volumeByPath.emplace(paths[i], int32_t(i));
             }
-            scratch->oraclePoints.push_back(std::move(out));
         }
-        return found.first->second;
-    };
-    scratch->oracleSamples.reserve(objects.size());
-    scratch->oracleCurve.reserve(objects.size());
+    }
+    scratch->volumeSlot.reserve(objects.size());
     for (const RigExecWireWeightObject &object : objects) {
-        scratch->oracleSamples.push_back(points(object.oracleSamples));
-        scratch->oracleCurve.push_back(points(object.oracleCurve));
+        const auto volume = volumeByPath.find(object.path);
+        scratch->volumeSlot.push_back(
+            volume == volumeByPath.end() ? -1 : volume->second);
     }
     return true;
 }
@@ -239,30 +232,50 @@ _RrReadWeightFloat(const RrProgram *program, size_t object, int field)
     return 0.0f;
 }
 
-// Appends one attribute's points to a volume gather. A failed read --
-// no live (non-rest) path read, a known-absent mark, a mistyped holding,
-// or a chain with no base -- contributes nothing, exactly as a false
-// GetAttribute does in the baked gather.
+// The points one gather attribute reads this run when they are held in the
+// runtime's type: its live path-read row (a static array, or the elements
+// its input slots answer), else the base slot of the chain whose target it
+// is. Null otherwise; *\p wireBase then names that chain's base as the
+// bake captured it, or null for a failed read -- no row, a known-absent
+// mark, a mistyped holding, or a chain with no base.
+const std::vector<RrVec3f> *
+_RrGatherSource(const RrProgram *program, const RrWeightPointSource &source,
+                const std::vector<RigExecWireVec3f> **wireBase)
+{
+    *wireBase = nullptr;
+    if (source.row >= 0) {
+        return RrPathArray<RrVec3f>(program,
+                                    program->pathReads[size_t(source.row)]);
+    }
+    if (source.chain < 0) {
+        return nullptr;
+    }
+    const int32_t slot =
+        program->geometry->chains[size_t(source.chain)].baseSlot;
+    if (slot >= 0) {
+        return RrInputArray<RrVec3f>(program, uint32_t(slot));
+    }
+    *wireBase = program->statics.ChainBase(size_t(source.chain));
+    return nullptr;
+}
+
+// Appends one attribute's points to a volume gather. A failed read
+// contributes nothing, exactly as a false GetAttribute does in the baked
+// gather.
 void
 _RrGatherPoints(const RrProgram *program, const RrWeightPointSource &source,
                 std::vector<RrVec3f> *out)
 {
-    const RrStatic &statics = program->statics;
-    if (source.row >= 0) {
-        const RrPathValue &value = program->pathReads[size_t(source.row)].value;
-        if (value.tag == RrPathValue::Tag::Vec3fArray) {
-            for (const RigExecWireVec3f &p : value.vec3s) {
-                out->push_back(RrVec3f(p[0], p[1], p[2]));
-            }
-        }
+    const std::vector<RigExecWireVec3f> *wireBase = nullptr;
+    if (const std::vector<RrVec3f> *points =
+            _RrGatherSource(program, source, &wireBase)) {
+        out->insert(out->end(), points->begin(), points->end());
         return;
     }
-    const std::vector<RigExecWireVec3f> *base =
-        source.chain < 0 ? nullptr : statics.ChainBase(size_t(source.chain));
-    if (!base) {
+    if (!wireBase) {
         return;
     }
-    for (const RigExecWireVec3f &p : *base) {
+    for (const RigExecWireVec3f &p : *wireBase) {
         out->push_back(RrVec3f(p[0], p[1], p[2]));
     }
 }
@@ -273,17 +286,12 @@ size_t
 _RrGatherPointCount(const RrProgram *program,
                     const RrWeightPointSource &source)
 {
-    const RrStatic &statics = program->statics;
-    if (source.row >= 0) {
-        const RrPathValue &value = program->pathReads[size_t(source.row)].value;
-        if (value.tag == RrPathValue::Tag::Vec3fArray) {
-            return value.vec3s.size();
-        }
-        return 0;
+    const std::vector<RigExecWireVec3f> *wireBase = nullptr;
+    if (const std::vector<RrVec3f> *points =
+            _RrGatherSource(program, source, &wireBase)) {
+        return points->size();
     }
-    const std::vector<RigExecWireVec3f> *base =
-        source.chain < 0 ? nullptr : statics.ChainBase(size_t(source.chain));
-    return base ? base->size() : 0;
+    return wireBase ? wireBase->size() : 0;
 }
 
 void
@@ -919,11 +927,39 @@ _RrApplyAxisScales(const RrMat4d &worldToLocal, const RrVec3f &scales)
     return worldToLocal * divide;
 }
 
+// A painted array (rigExec:values or rigExec:indices) as a read at the
+// given time takes it, from the object's input slot: at Default
+// (\p atDefault) its authored value, else its Default-time default; at the
+// evaluation time any value it holds. \p none, an empty array, where the
+// file lists no input: the object paints no such array.
+template <class T>
+const std::vector<T> &
+_RrPainted(const RrProgram *program, int32_t slot,
+           const std::vector<T> &none, bool atDefault)
+{
+    if (slot < 0) {
+        return none;
+    }
+    const uint32_t s = uint32_t(slot);
+    const std::vector<T> *read =
+        atDefault && !RrInputArrayAuthored(program, s)
+            ? RrInputArrayDefaultOf<T>(program, s)
+            : RrInputArray<T>(program, s);
+    return read ? *read : none;
+}
+
 RrWeightPacket
 _RrBuildStaticPacket(const RrProgram *program,
                      const RigExecWireWeightObject &wire,
                      float defaultWeight)
 {
+    // The packet reads the painted arrays at Default.
+    const std::vector<float> noValues;
+    const std::vector<int32_t> noIndices;
+    const std::vector<float> &values =
+        _RrPainted(program, wire.valuesSlot, noValues, true);
+    const std::vector<int32_t> &indices =
+        _RrPainted(program, wire.indicesSlot, noIndices, true);
     RrWeightPacket packet;
     packet.representation = wire.representation;
     packet.rangePolicy = wire.rangePolicy;
@@ -940,13 +976,12 @@ _RrBuildStaticPacket(const RrProgram *program,
 
     if (_RrClassifyRepresentation(program, packet.representation) ==
         _RrRepSparse) {
-        const size_t paired =
-            std::min(wire.values.size(), wire.indices.size());
+        const size_t paired = std::min(values.size(), indices.size());
         std::vector<std::pair<int32_t, float>> pairs;
         for (size_t i = 0; i < paired; ++i) {
-            pairs.emplace_back(wire.indices[i], wire.values[i]);
+            pairs.emplace_back(indices[i], values[i]);
         }
-        if (wire.values.size() != wire.indices.size()) {
+        if (values.size() != indices.size()) {
             return packet;
         }
         std::sort(pairs.begin(), pairs.end());
@@ -958,7 +993,7 @@ _RrBuildStaticPacket(const RrProgram *program,
             packet.values.push_back(pairs[i].second);
         }
     } else {
-        packet.values = wire.values;
+        packet.values = values;
     }
     if (_RrClassifyRepresentation(program, packet.representation) ==
             _RrRepDense &&
@@ -1413,49 +1448,54 @@ _RrRunWeightPacket(RrProgram *program, size_t step, std::string *error)
     return true;
 }
 
-// The one VolumePlacements step: where every volume weight ended up,
-// over the frames the walk ended with. The evaluator's own routine,
-// which this mirrors rather than calls: a frame no matrix can be
-// built from leaves whatever the failed decomposition wrote (the
-// identity, over the identity seed) rather than skipping the entry.
+// One VolumePlacements step: where the volume weight at provider slot
+// `object` ended up, over the frame the walk ended with, written to that
+// slot of the program's slot-indexed volumePlacement. It mirrors the
+// shared RigExecVolumePlacement: the identity unless the frame is valid,
+// non-degenerate and finite, and then the identity-landmark map, a
+// failed decomposition leaving the identity seed. Every other volume
+// keeps what its own step last wrote.
 bool
 _RrRunVolumePlacements(RrProgram *program, size_t step,
                        std::string *error)
 {
     RrStore &store = program->store;
-    const size_t slots = program->slotMeta->paths.size();
-    if (store.finLast.size() < slots ||
-        (slots > 0 && store.fin.empty())) {
+    const RigExecWireStep &wire = (*program->steps)[step];
+    const std::vector<uint8_t> &noScale =
+        program->constants->noScaleAvars;
+    const size_t slot = size_t(wire.object);
+    if (wire.part != 1 || wire.object < 0 ||
+        slot >= program->slotMeta->paths.size() || slot >= noScale.size() ||
+        !noScale[slot]) {
+        if (error) {
+            *error = "weight step " + _RrStepLabel(program, step) +
+                     " places no volume slot";
+        }
+        return false;
+    }
+    if (slot >= store.finLast.size() || store.fin.empty() ||
+        slot >= store.volumePlacement.size() ||
+        slot >= store.volumePlaced.size()) {
         if (error) {
             *error = "weight step " + _RrStepLabel(program, step) +
                      " runs with no pose frames";
         }
         return false;
     }
-    const std::vector<uint8_t> &noScale =
-        program->constants->noScaleAvars;
-    store.weightFrames.clear();
-    for (size_t i = 0; i < slots; ++i) {
-        if (i >= noScale.size() || !noScale[i]) {
-            continue;
+    if (size_t(store.finLast[slot]) >= store.fin.size()) {
+        if (error) {
+            *error = "weight step " + _RrStepLabel(program, step) +
+                     " reads a pose frame beyond the pools";
         }
-        if (size_t(store.finLast[i]) >= store.fin.size()) {
-            if (error) {
-                *error = "weight step " +
-                         _RrStepLabel(program, step) +
-                         " reads a pose frame beyond the pools";
-            }
-            return false;
-        }
-        const RrPointFrame &frame =
-            store.fin[size_t(store.finLast[i])];
-        RrMat4d placement(1.0);
-        if (RrFrameUsable(frame)) {
-            RrPointsToMatrix(RrIdentityLandmarks(), frame.points,
-                             &placement);
-        }
-        store.weightFrames[program->slotMeta->paths[i]] = placement;
+        return false;
     }
+    const RrPointFrame &frame = store.fin[size_t(store.finLast[slot])];
+    RrMat4d placement(1.0);
+    if (RrFrameUsable(frame)) {
+        RrPointsToMatrix(RrIdentityLandmarks(), frame.points, &placement);
+    }
+    store.volumePlacement[slot] = placement;
+    store.volumePlaced[slot] = 1;
     return true;
 }
 
@@ -1465,9 +1505,10 @@ _RrRunVolumePlacements(RrProgram *program, size_t step,
 // off the stage arrives as follows: the object's composition and tokens
 // from its entry (tokens classified at Open), each scalar through
 // RrReadResolvedFloat with the oracle's own fallback at that read site
-// (the _ResolvedRead image), a volume's placement from store.weightFrames
-// (the VolumePlacements step's image of _volumeWeightMatrices, keyed by
-// the same path id), and the structural answers the bake recorded --
+// (the _ResolvedRead image), a volume's placement from the store's
+// volumePlacement (the program's slot-indexed volumePlacement, which the
+// VolumePlacements steps write) at the volume slot Open resolved from the
+// object's path, and the structural answers the bake recorded --
 // oracleStaticError, oraclePhaseError and the static sample and curve
 // points -- each consulted where the oracle would have computed it. Error
 // text is the oracle's, verbatim. A successful resolve leaves `weights`
@@ -1478,6 +1519,17 @@ bool _RrOracle(const RrProgram *program, const RrWeightScratch &scratch,
                size_t object, size_t count,
                const std::vector<RrVec3f> *current,
                std::vector<float> *weights, std::string *error);
+
+// The points the oracle reads raw at the evaluation time (its samples, or
+// a curve's points): input slot \p slot's elements when the file lists
+// one and it holds a value; null when it reads none.
+const std::vector<RrVec3f> *
+_RrOraclePoints(const RrProgram *program, int32_t slot)
+{
+    return slot >= 0 && RrInputHasValue(program, uint32_t(slot))
+               ? RrInputArray<RrVec3f>(program, uint32_t(slot))
+               : nullptr;
+}
 
 // _ResolveVolumeWeights: a combine folds its inputs; a volume measures the
 // samples about its rigid placement.
@@ -1527,13 +1579,18 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         return true;
     }
 
-    // The placement, scale and shear removed.
-    const auto placed = program->store.weightFrames.find(wire.path);
-    if (placed == program->store.weightFrames.end()) {
+    // The placement, scale and shear removed: the object's volume slot,
+    // once that slot's VolumePlacements step has run.
+    const RrStore &store = program->store;
+    const int32_t slot = scratch.volumeSlot[object];
+    if (slot < 0 || size_t(slot) >= store.volumePlaced.size() ||
+        size_t(slot) >= store.volumePlacement.size() ||
+        !store.volumePlaced[size_t(slot)]) {
         *error = who() + ": no resolved placement for this volume weight";
         return false;
     }
-    const RrMat4d rigid = _RrRemoveScaleShear(placed->second);
+    const RrMat4d rigid =
+        _RrRemoveScaleShear(store.volumePlacement[size_t(slot)]);
     const double det = rigid.GetDeterminant();
     if (!std::isfinite(det) || std::abs(det) < 1e-12) {
         *error = who() + ": degenerate volume placement";
@@ -1556,12 +1613,11 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         }
         samples = current;
     } else {
-        const int32_t at = scratch.oracleSamples[object];
-        if (at < 0) {
+        samples = _RrOraclePoints(program, wire.oracleSamplesSlot);
+        if (!samples) {
             *error = who() + ": could not read the points to sample";
             return false;
         }
-        samples = &scratch.oraclePoints[size_t(at)];
     }
     if (samples->size() != count) {
         *error = who() + ": sampled point count does not match the target";
@@ -1642,13 +1698,15 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         return true;
     }
     if (kind.type == Kind::Type::Curve) {
-        const int32_t at = scratch.oracleCurve[object];
-        if (at < 0) {
+        // An empty curve reads as none.
+        const std::vector<RrVec3f> *curvePoints =
+            _RrOraclePoints(program, wire.oracleCurveSlot);
+        if (!curvePoints || curvePoints->empty()) {
             *error =
                 who() + ": rigExec:curve must name exactly one points source";
             return false;
         }
-        _RrCurveWeightField(*samples, scratch.oraclePoints[size_t(at)],
+        _RrCurveWeightField(*samples, *curvePoints,
                             worldToLocal, falloffMin, falloffMax, invert,
                             strength, curve, weights);
         return true;
@@ -1724,6 +1782,28 @@ _RrOracle(const RrProgram *program, const RrWeightScratch &scratch,
     }
 
     if (kind.type == Kind::Type::Dynamic) {
+        // A sparse dynamic weight that paints its own support must paint
+        // the base's, read at the evaluation time. The bake records a
+        // mismatch of its own arrays as the static error; a listed indices
+        // input is checked here, as it stands this run.
+        if (wire.base >= 0 && wire.indicesSlot >= 0 &&
+            kind.representation == Kind::Representation::Sparse) {
+            const std::vector<int32_t> none;
+            const std::vector<int32_t> &mine =
+                _RrPainted(program, wire.indicesSlot, none, false);
+            if (!mine.empty()) {
+                const RigExecWireWeightObject &baseWire =
+                    program->geometry->weightObjects[size_t(wire.base)];
+                const std::vector<int32_t> &theirs = _RrPainted(
+                    program, baseWire.indicesSlot, none, false);
+                if (std::set<int32_t>(mine.begin(), mine.end()) !=
+                    std::set<int32_t>(theirs.begin(), theirs.end())) {
+                    *error = "dynamic/base sparse support mismatch on " +
+                             who();
+                    return false;
+                }
+            }
+        }
         // Base field first (forwarding the in-flight points), then
         // r_i = (b_i * d) * s + a.
         std::vector<float> base(count, 1.0f);
@@ -1754,8 +1834,12 @@ _RrOracle(const RrProgram *program, const RrWeightScratch &scratch,
         return true;
     }
 
-    // Static: the authored table.
-    const std::vector<float> &values = wire.values;
+    // Static: the authored table, its painted arrays read raw at the
+    // evaluation time.
+    const std::vector<float> noValues;
+    const std::vector<int32_t> noIndices;
+    const std::vector<float> &values =
+        _RrPainted(program, wire.valuesSlot, noValues, false);
     if (kind.representation == Kind::Representation::Constant) {
         if (!values.empty()) {
             *error = "constant weight must not author values on " + who();
@@ -1774,7 +1858,8 @@ _RrOracle(const RrProgram *program, const RrWeightScratch &scratch,
         }
         weights->assign(values.begin(), values.end());
     } else if (kind.representation == Kind::Representation::Sparse) {
-        const std::vector<int32_t> &indices = wire.indices;
+        const std::vector<int32_t> &indices =
+            _RrPainted(program, wire.indicesSlot, noIndices, false);
         if (indices.size() != values.size()) {
             *error = "sparse index/value size mismatch on " + who();
             return false;

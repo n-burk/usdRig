@@ -11,7 +11,10 @@
 
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3i.h"
+#include "pxr/base/tf/type.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
+#include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -146,6 +149,162 @@ _BinarySlotName(const _BinaryFile &file, uint32_t slot)
                : std::string();
 }
 
+/// The elements array value \p value names, as bytes: a pool entry's, or
+/// the expansion of the stored layout of the revision it names. False when
+/// it names none.
+bool
+_BinaryArrayBytes(const _BinaryFile &file,
+                  const rigExec::fb::RigExecWireValue &value,
+                  std::string *bytes)
+{
+    using Tag = rigExec::fb::InputTag;
+    using Source = rigExec::fb::ArraySource;
+    bytes->clear();
+    const auto take = [bytes](const void *data, size_t size) {
+        if (size > 0) {
+            bytes->assign(static_cast<const char *>(data), size);
+        }
+        return true;
+    };
+    if (value.arraySource != Source::Pool) {
+        if (!file.geometry ||
+            value.array >= file.geometry->revisionIndex.size()) {
+            return false;
+        }
+        const auto &at = file.geometry->revisionIndex[value.array];
+        const rigExec::fb::RigExecWireRevision &revision =
+            file.geometry->chains[size_t(at.first)]
+                .revisions[size_t(at.second)];
+        if (!revision.topology) {
+            return false;
+        }
+        std::vector<int32_t> indices;
+        std::vector<float> weights;
+        rigExec::RigExecFormatExpandTopology(*revision.topology, &indices,
+                                             &weights);
+        return value.arraySource == Source::SkinIndices
+                   ? take(indices.data(), indices.size() * sizeof(int32_t))
+                   : take(weights.data(), weights.size() * sizeof(float));
+    }
+    const uint32_t id = value.array;
+    switch (value.tag) {
+    case Tag::IntArray:
+        return id < file.intArrays.size() &&
+               take(file.intArrays[id].v.data(),
+                    file.intArrays[id].v.size() * sizeof(int32_t));
+    case Tag::FloatArray:
+        return id < file.floatArrays.size() &&
+               take(file.floatArrays[id].v.data(),
+                    file.floatArrays[id].v.size() * sizeof(float));
+    case Tag::DoubleArray:
+        return id < file.doubleArrays.size() &&
+               take(file.doubleArrays[id].v.data(),
+                    file.doubleArrays[id].v.size() * sizeof(double));
+    case Tag::Vec2fArray:
+        return id < file.vec2fArrays.size() &&
+               take(file.vec2fArrays[id].v.data(),
+                    file.vec2fArrays[id].v.size() *
+                        sizeof(rigExec::RigExecWireVec2f));
+    case Tag::Vec3fArray:
+        return id < file.vec3fArrays.size() &&
+               take(file.vec3fArrays[id].v.data(),
+                    file.vec3fArrays[id].v.size() *
+                        sizeof(rigExec::RigExecWireVec3f));
+    default:
+        return false;
+    }
+}
+
+/// The elements of input slot \p slot's default, as bytes.
+bool
+_BinarySlotBytes(const _BinaryFile &file, int64_t slot, std::string *bytes)
+{
+    return slot >= 0 && size_t(slot) < file.inputs.size() &&
+           _BinaryArrayBytes(file,
+                             file.values[file.inputs[size_t(slot)].value()],
+                             bytes);
+}
+
+/// Whether \p a holds an array of array input tag \p tag's element type.
+bool
+_BinaryHoldsArray(const UsdAttribute &a, rigExec::fb::InputTag tag)
+{
+    using Tag = rigExec::fb::InputTag;
+    if (!a || !a.GetTypeName().IsArray()) {
+        return false;
+    }
+    const TfType type = a.GetTypeName().GetType();
+    switch (tag) {
+    case Tag::IntArray:
+        return type == TfType::Find<VtIntArray>();
+    case Tag::FloatArray:
+        return type == TfType::Find<VtFloatArray>();
+    case Tag::DoubleArray:
+        return type == TfType::Find<VtDoubleArray>();
+    case Tag::Vec2fArray:
+        return type == TfType::Find<VtVec2fArray>();
+    case Tag::Vec3fArray:
+        return type == TfType::Find<VtVec3fArray>();
+    default:
+        return false;
+    }
+}
+
+/// \p a's array of \p tag at \p time, as bytes; false (and empty) when the
+/// typed Get fails.
+bool
+_BinaryStageArray(const UsdAttribute &a, rigExec::fb::InputTag tag,
+                  UsdTimeCode time, std::string *bytes)
+{
+    using Tag = rigExec::fb::InputTag;
+    bytes->clear();
+    const auto read = [&](auto *array) {
+        if (!a || !a.Get(array, time)) {
+            return false;
+        }
+        if (!array->empty()) {
+            bytes->assign(reinterpret_cast<const char *>(array->cdata()),
+                          array->size() * sizeof((*array)[0]));
+        }
+        return true;
+    };
+    switch (tag) {
+    case Tag::IntArray: {
+        VtIntArray v;
+        return read(&v);
+    }
+    case Tag::FloatArray: {
+        VtFloatArray v;
+        return read(&v);
+    }
+    case Tag::DoubleArray: {
+        VtDoubleArray v;
+        return read(&v);
+    }
+    case Tag::Vec2fArray: {
+        VtVec2fArray v;
+        return read(&v);
+    }
+    case Tag::Vec3fArray: {
+        VtVec3fArray v;
+        return read(&v);
+    }
+    default:
+        return false;
+    }
+}
+
+/// \p live's elements, as bytes.
+template <class Elements>
+std::string
+_BinaryBytesOf(const Elements &live)
+{
+    return live.empty()
+               ? std::string()
+               : std::string(reinterpret_cast<const char *>(live.data()),
+                             live.size() * sizeof(live[0]));
+}
+
 /// What one comparison counted, for the per-fixture summary line.
 struct _BinaryCompareStats {
     size_t reads = 0;
@@ -162,6 +321,24 @@ struct _BinaryCompareStats {
     size_t overrideNumbers = 0;
     size_t propertyChains = 0;
     size_t oracleFacts = 0;
+    size_t frameRecords = 0;
+    size_t recordLists = 0;
+    size_t pointBindings = 0;
+    size_t sampleBindings = 0;
+    /// Sample bindings that answered at the bake time, whose pool entry
+    /// holds the resolved input rather than the points the run consumed.
+    size_t answeredSamples = 0;
+    /// The array inputs, and the sites that read them: live and rest
+    /// path-read rows, blend samples, layout pairs, chain bases, painted
+    /// arrays and the oracle's points.
+    size_t arrayInputs = 0;
+    size_t arrayRows = 0;
+    size_t arrayRestRows = 0;
+    size_t arrayBlendSamples = 0;
+    size_t arrayLayouts = 0;
+    size_t arrayBases = 0;
+    size_t arrayPainted = 0;
+    size_t arrayOracle = 0;
 };
 
 _BinaryCompareStats *_binaryStats = nullptr;
@@ -861,7 +1038,6 @@ _BinaryCompareConstraint(
     }
     CHECK(int64_t(live.target) == int64_t(wire.target));
     _BinaryCheckEqual(live.targetSlots, wire.targetSlots);
-    _BinaryCompareFlags(live.snapshotTargets, wire.snapshotTargets);
     _BinaryCheckEqual(live.sources, wire.sources);
     _BinaryCheckEqual(live.sourceNatives, wire.sourceNatives);
     CHECK(live.sourcePaths.size() == wire.sourcePaths.size());
@@ -915,7 +1091,6 @@ _BinaryCompareConstraint(
           ((wire.flags & uint8_t(Flags::WorldUpRotationOnly)) != 0));
     CHECK(live.radialBlend ==
           ((wire.flags & uint8_t(Flags::RadialBlend)) != 0));
-    CHECK(live.snapshotAfter == wire.snapshotAfter);
     CHECK(live.singleChainIk == wire.singleChainIk);
     CHECK(uint8_t(live.ikMode) == wire.ikMode);
     CHECK(live.poleModeObject == wire.poleModeObject);
@@ -1071,6 +1246,31 @@ _BinaryCompareSpaceSwitches(
             CHECK(live.affectRotation[axis] == wire.affectRotation[axis]);
             CHECK(live.affectScale[axis] == wire.affectScale[axis]);
         }
+    }
+}
+
+/// The frame records, in the program's order, field by field; the writer
+/// by its path's text.
+void
+_BinaryCompareFrameRecords(const rigExec::RigExecBakedProgramImpl &program,
+                           const rigExec::fb::RigExecWireDomainPose &pose,
+                           const _BinaryFile &file)
+{
+    CHECK(program.frameRecords.size() == pose.frameRecords.size());
+    for (size_t i = 0; i < pose.frameRecords.size() &&
+                       i < program.frameRecords.size();
+         ++i) {
+        const rigExec::RigExecBakedFrameRecord &live = program.frameRecords[i];
+        const rigExec::fb::FrameRecord &wire = pose.frameRecords[i];
+        CHECK(int64_t(live.slot) == int64_t(wire.slot()));
+        CHECK(int64_t(live.commit) == int64_t(wire.commit()));
+        CHECK(int64_t(live.target) == int64_t(wire.target()));
+        CHECK(int64_t(live.position) == int64_t(wire.position()));
+        CHECK(live.version == wire.version());
+        CHECK(live.mover.GetString() == _BinaryText(file, wire.moverLabel()));
+    }
+    if (_binaryStats) {
+        _binaryStats->frameRecords += pose.frameRecords.size();
     }
 }
 
@@ -1266,7 +1466,6 @@ _BinaryCompareDomainPose(const rigExec::RigExecBakedProgramImpl &program,
         CHECK(pose.jointBindingJoints.empty());
     }
     CHECK(program.hasPropertyChains == pose.hasPropertyChains);
-    CHECK(program.phasedReads == pose.phasedReads);
     CHECK(program.publishWeightFields == pose.publishWeightFields);
     _BinaryCompareSpaceSwitches(program, pose.spaceSwitches, file);
     // The varying avar bindings, then the constant ones.
@@ -1288,6 +1487,7 @@ _BinaryCompareDomainPose(const rigExec::RigExecBakedProgramImpl &program,
     // The relative transforms the run's prologue read.
     _BinaryCompareMatrices(program.xformBase, pose.xformBase);
     CHECK(pose.overrideCount == program.overridden.size());
+    _BinaryCompareFrameRecords(program, pose, file);
 }
 
 // -- The geometry tables ---------------------------------------------------
@@ -1299,6 +1499,27 @@ _BinaryComparePhase(const rigExec::RigExecReadPhase &live,
 {
     CHECK(uint8_t(live.kind) == wire.kind);
     CHECK(live.prim.GetString() == _BinaryText(file, wire.prim));
+}
+
+/// A point binding against the program's: the input by text, the phase,
+/// the candidates in order and both flags. The program's id stays behind.
+void
+_BinaryComparePointsBinding(const rigExec::RigExecBakedPointsBinding &live,
+                            const rigExec::RigExecWirePointsBinding &wire,
+                            const _BinaryFile &file)
+{
+    CHECK(live.input.GetString() == _BinaryText(file, wire.inputPath));
+    _BinaryComparePhase(live.phase, wire.phase, file);
+    CHECK(live.candidates.size() == wire.candidates.size());
+    for (size_t k = 0;
+         k < live.candidates.size() && k < wire.candidates.size(); ++k) {
+        CHECK(int64_t(live.candidates[k].chain) ==
+              int64_t(wire.candidates[k].chain()));
+        CHECK(int64_t(live.candidates[k].version) ==
+              int64_t(wire.candidates[k].version()));
+    }
+    CHECK(live.finalRead == wire.finalRead);
+    CHECK(live.diagnoseMiss == wire.diagnoseMiss);
 }
 
 void
@@ -1380,38 +1601,33 @@ _BinaryCompareBinding(const rigExec::RigExecRevisionBinding &live,
     _BinaryComparePhase(live.transformPhase, wire.transformPhase, file);
 }
 
-/// The canonical dense form of \p live: each row's entries but (0, +-0),
-/// in order, then (0, +0.0f) padding. \p dropped counts the entries left
-/// out.
-void
-_BinaryCanonicalTopology(const rigExec::RigExecSkinTopology &live,
-                         std::vector<int32_t> *indices,
-                         std::vector<float> *weights, size_t *dropped)
+/// The entries the sparse form leaves out of \p live: each row's trailing
+/// run of (index 0, weight +0.0f), which its padding restores.
+size_t
+_BinaryTrailingPadding(const rigExec::RigExecSkinTopology &live)
 {
     const size_t width = live.elementSize > 0 ? size_t(live.elementSize) : 0;
-    indices->assign(live.indices.size(), 0);
-    weights->assign(live.weights.size(), 0.0f);
+    size_t dropped = 0;
     for (size_t p = 0; width && (p + 1) * width <= live.indices.size() &&
                        (p + 1) * width <= live.weights.size();
          ++p) {
-        size_t kept = 0;
-        for (size_t e = p * width; e < (p + 1) * width; ++e) {
-            if (live.indices[e] == 0 && live.weights[e] == 0.0f) {
-                ++*dropped;
-                continue;
+        for (size_t e = (p + 1) * width; e-- > p * width;) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &live.weights[e], sizeof bits);
+            if (live.indices[e] != 0 || bits != 0) {
+                break;
             }
-            (*indices)[p * width + kept] = int32_t(live.indices[e]);
-            (*weights)[p * width + kept] = live.weights[e];
-            ++kept;
+            ++dropped;
         }
     }
+    return dropped;
 }
 
 /// A stored topology against the program's dense one, with the same shape
 /// facts: in the sparse form, which holds exactly the layouts that are
-/// rows of an element size in [0, 65535] (none at 0), its expansion is the
-/// canonical form, bit for bit; in the raw form, which holds every other
-/// layout, it is the program's arrays, bit for bit.
+/// rows of an element size in [0, 65535] (none at 0), and in the raw form,
+/// which holds every other layout, its expansion is the program's arrays,
+/// bit for bit.
 void
 _BinaryCompareTopology(const rigExec::RigExecSkinTopology &live,
                        const rigExec::fb::RigExecWireSkinTopology *wire)
@@ -1427,15 +1643,11 @@ _BinaryCompareTopology(const rigExec::RigExecSkinTopology &live,
         (live.elementSize == 0 ? n == 0
                                : n % size_t(live.elementSize) == 0);
     CHECK(wire->raw == !sparseHolds);
-    size_t dropped = 0;
+    const size_t dropped = wire->raw ? 0 : _BinaryTrailingPadding(live);
     std::vector<int32_t> wantIndices, gotIndices;
     std::vector<float> wantWeights, gotWeights;
-    if (wire->raw) {
-        wantIndices.assign(live.indices.begin(), live.indices.end());
-        wantWeights.assign(live.weights.begin(), live.weights.end());
-    } else {
-        _BinaryCanonicalTopology(live, &wantIndices, &wantWeights, &dropped);
-    }
+    wantIndices.assign(live.indices.begin(), live.indices.end());
+    wantWeights.assign(live.weights.begin(), live.weights.end());
     rigExec::RigExecFormatExpandTopology(*wire, &gotIndices, &gotWeights);
     CHECK(wantIndices == gotIndices);
     CHECK(wantWeights.size() == gotWeights.size() &&
@@ -1464,6 +1676,7 @@ _BinaryCompareAttribute(const UsdAttribute &live, uint32_t path,
 
 void
 _BinaryCompareRevision(
+    const rigExec::RigExecBakedProgramImpl &program,
     const rigExec::RigExecBakedProgramImpl::GeomRevision &live,
     const rigExec::fb::RigExecWireRevision &wire, bool derived,
     const _BinaryFile &file)
@@ -1522,13 +1735,69 @@ _BinaryCompareRevision(
                       wireSample.pointCount);
                 CHECK(sample.layout->valid == wireSample.layoutValid);
             }
-            // The dense points the run's assembly consumed.
+            // The sample's resolved points input at the bake time. With no
+            // binding, or one that answered nothing, that is what the run's
+            // assembly consumed. A binding that answered made the run
+            // consume the version it resolves to, which playback computes
+            // from the same binding; the pool holds the input beside it.
             const auto *points =
                 _BinaryPoolPoints(file, wireSample.pointsValue);
-            CHECK(points && _BinarySamePoints(sample.lastPoints, *points));
+            const GfVec3f *resolved = nullptr;
+            size_t resolvedCount = 0;
+            const bool answered =
+                sample.pointBinding.id >= 0 &&
+                rigExec::RigExecBakedResolvePoints(
+                    program, sample.pointBinding, &resolved, &resolvedCount);
+            if (!answered) {
+                CHECK(points && _BinarySamePoints(sample.lastPoints, *points));
+            } else {
+                CHECK(program.resolvedInputs);
+                VtVec3fArray tail;
+                if (program.resolvedInputs) {
+                    program.resolvedInputs->GetAttribute(
+                        sample.points, UsdTimeCode(file.bakeTime), &tail);
+                }
+                CHECK(points && _BinarySamePoints(tail, *points));
+                // The run consumed exactly what the binding resolves to.
+                CHECK(sample.lastPoints.size() == resolvedCount &&
+                      (resolvedCount == 0 ||
+                       std::memcmp(sample.lastPoints.data(), resolved,
+                                   resolvedCount * sizeof(GfVec3f)) == 0));
+                if (_binaryStats) {
+                    ++_binaryStats->answeredSamples;
+                }
+            }
             _BinaryCompareResolvedFloat(sample.activation, 1.0f,
                                         wireSample.activationRead.get(),
                                         file);
+            // A dense sample reads its points through the slots, headed by
+            // its points attribute; a sparse one reads none.
+            if (wireSample.pointsRead) {
+                const _BinaryRead &read = *wireSample.pointsRead;
+                CHECK(sample.blendShape.IsEmpty() &&
+                      read.tag == rigExec::fb::InputTag::Vec3fArray &&
+                      !read.walk.empty() &&
+                      _BinarySlotName(file, read.walk[0]) ==
+                          sample.pointsPath.GetString());
+                if (_binaryStats) {
+                    ++_binaryStats->arrayBlendSamples;
+                }
+            } else {
+                CHECK(!sample.blendShape.IsEmpty() ||
+                      !_BinaryHoldsArray(sample.points,
+                                         rigExec::fb::InputTag::Vec3fArray));
+            }
+            // The versions a dense sample with a non-base phase is bound
+            // to; every other sample carries none.
+            const bool bound = sample.pointBinding.id >= 0;
+            CHECK(bound == bool(wireSample.pointBinding));
+            if (bound && wireSample.pointBinding) {
+                _BinaryComparePointsBinding(sample.pointBinding,
+                                            *wireSample.pointBinding, file);
+                if (_binaryStats) {
+                    ++_binaryStats->sampleBindings;
+                }
+            }
         }
     }
     _BinaryCheckEqual(live.influenceSlots, wire.influenceSlots);
@@ -1549,8 +1818,69 @@ _BinaryCompareRevision(
           int64_t(wire.driverFramesSolver));
     CHECK(live.finalPhase == wire.finalPhase);
     CHECK(live.skinTopologyFixed == wire.skinTopologyFixed);
-    CHECK(live.snapshotAfter == wire.snapshotAfter);
-    CHECK(live.readsSnapshots == wire.readsSnapshots);
+    // A fixed main skin's layout arrays are its inputs, defaulting to its
+    // stored layout's expansion.
+    {
+        const bool fixedSkin = !derived && live.skinTopologyFixed &&
+                               live.op == rigExec::RigExecRevisionOp::Skin;
+        const std::string mover = live.moverPath.GetString();
+        const bool listed = wire.jointIndicesSlot >= 0;
+        CHECK(listed == (wire.jointWeightsSlot >= 0));
+        if (listed) {
+            CHECK(fixedSkin);
+            CHECK(_BinarySlotName(file, uint32_t(wire.jointIndicesSlot)) ==
+                      mover + ".rigExec:jointIndices" &&
+                  _BinarySlotName(file, uint32_t(wire.jointWeightsSlot)) ==
+                      mover + ".rigExec:jointWeights");
+            if (live.topologyResolved && live.topology) {
+                std::string indices, weights;
+                CHECK(_BinarySlotBytes(file, wire.jointIndicesSlot,
+                                       &indices) &&
+                      indices == _BinaryBytesOf(live.topology->indices));
+                CHECK(_BinarySlotBytes(file, wire.jointWeightsSlot,
+                                       &weights) &&
+                      weights == _BinaryBytesOf(live.topology->weights));
+                CHECK(file.values[file.inputs[size_t(wire.jointIndicesSlot)]
+                                      .value()]
+                          .arraySource != rigExec::fb::ArraySource::Pool);
+            }
+            if (_binaryStats) {
+                ++_binaryStats->arrayLayouts;
+            }
+        } else if (fixedSkin && live.moverPrim) {
+            CHECK(!_BinaryHoldsArray(
+                      live.moverPrim.GetAttribute(
+                          TfToken("rigExec:jointIndices")),
+                      rigExec::fb::InputTag::IntArray) ||
+                  !_BinaryHoldsArray(
+                      live.moverPrim.GetAttribute(
+                          TfToken("rigExec:jointWeights")),
+                      rigExec::fb::InputTag::FloatArray));
+        }
+    }
+    // The frame records an AtPrim transform phase folds, and the versions
+    // each phased input is bound to, in binding.phases order.
+    _BinaryCheckEqual(live.transformRecords, wire.transformRecords);
+    CHECK(live.influenceRecords.size() == wire.influenceRecords.size());
+    for (size_t i = 0; i < live.influenceRecords.size() &&
+                       i < wire.influenceRecords.size();
+         ++i) {
+        _BinaryCheckEqual(live.influenceRecords[i],
+                          wire.influenceRecords[i].v);
+    }
+    CHECK(live.pointBindings.size() == wire.pointBindings.size());
+    for (size_t i = 0;
+         i < live.pointBindings.size() && i < wire.pointBindings.size();
+         ++i) {
+        _BinaryComparePointsBinding(live.pointBindings[i],
+                                    wire.pointBindings[i], file);
+    }
+    if (_binaryStats) {
+        _binaryStats->recordLists +=
+            (live.transformRecords.empty() ? 0 : 1) +
+            live.influenceRecords.size();
+        _binaryStats->pointBindings += wire.pointBindings.size();
+    }
     _BinaryCompareMatrices(live.packetInfluences, wire.packetInfluences);
     CHECK(live.chunks.size() == wire.chunks.size());
     for (size_t i = 0; i < wire.chunks.size() && i < live.chunks.size();
@@ -1607,6 +1937,23 @@ _BinaryCompareRevision(
     }
 }
 
+/// Painted array \p name of a weight object: its input, whose default
+/// holds \p live, the array Build folded; none for an empty one.
+template <class T>
+void
+_BinaryComparePainted(const _BinaryFile &file, int32_t slot,
+                      const std::string &name, const std::vector<T> &live)
+{
+    if (slot < 0) {
+        CHECK(live.empty());
+        return;
+    }
+    CHECK(_BinarySlotName(file, uint32_t(slot)) == name);
+    std::string bytes;
+    CHECK(_BinarySlotBytes(file, slot, &bytes) &&
+          bytes == _BinaryBytesOf(live));
+}
+
 /// A step-backed weight object against the program's, and the oracle
 /// facts of every entry against the oracle's own description at the bake
 /// time.
@@ -1623,8 +1970,12 @@ _BinaryCompareWeightObject(
           _BinaryText(file, wire.representation));
     CHECK(live.rangePolicy.GetString() ==
           _BinaryText(file, wire.rangePolicy));
-    _BinaryCheckEqual(live.values, wire.values);
-    _BinaryCheckEqual(live.indices, wire.indices);
+    _BinaryComparePainted(file, wire.valuesSlot,
+                          live.path.GetString() + ".rigExec:values",
+                          live.values);
+    _BinaryComparePainted(file, wire.indicesSlot,
+                          live.path.GetString() + ".rigExec:indices",
+                          live.indices);
     _BinaryCompareInput(live.defaultWeight, wire.defaultWeight, file);
     CHECK(int64_t(live.base) == int64_t(wire.base));
     _BinaryCheckEqual(live.inputs, wire.inputs);
@@ -1670,26 +2021,86 @@ _BinaryCompareWeightObject(
     _BinaryCheckEqual(live.falloffCurve, wire.falloffCurve);
 }
 
+/// Which weight objects of \p file the runtime's oracle resolves: a
+/// constraint's envelope, a property revision's envelope, a current-phase
+/// revision's field, and every base and input of one it resolves.
+std::vector<char>
+_BinaryOracleResolved(const _BinaryFile &file)
+{
+    const size_t n = file.geometry ? file.geometry->weightObjects.size() : 0;
+    std::vector<char> resolved(n, 0);
+    const auto mark = [&](int64_t index) {
+        if (index >= 0 && size_t(index) < n) {
+            resolved[size_t(index)] = 1;
+        }
+    };
+    if (file.pose) {
+        for (const auto &constraint : file.pose->constraints) {
+            mark(constraint.weightObjectIndex);
+        }
+    }
+    for (const auto &chain : file.propertyChains) {
+        for (const auto &revision : chain.revisions) {
+            mark(revision.envelope);
+        }
+    }
+    if (file.geometry) {
+        for (const auto &chain : file.geometry->chains) {
+            for (const auto &revision : chain.revisions) {
+                if (revision.weightCurrentPhase) {
+                    mark(revision.weightObject);
+                }
+            }
+        }
+    }
+    // An object composes only entries before it.
+    for (size_t i = n; i-- > 0;) {
+        if (!resolved[i]) {
+            continue;
+        }
+        const auto &object = file.geometry->weightObjects[i];
+        mark(object.base);
+        for (const int32_t input : object.inputs) {
+            mark(input);
+        }
+    }
+    return resolved;
+}
+
 void
 _BinaryCompareOracleFacts(const rigExec::RigExecRigEvaluator &evaluator,
                           const rigExec::fb::RigExecWireWeightObject &wire,
-                          double t, const _BinaryFile &file)
+                          double t, bool resolved, const _BinaryFile &file)
 {
     const SdfPath path(_BinaryText(file, wire.path));
     rigExec::RigExecWeightOracleFacts facts;
     rigExec::RigExecBakedDescribeWeightOracle(evaluator, path, UsdTimeCode(t),
                                               &facts);
     CHECK(facts.samplesInFlight == wire.samplesInFlight);
-    CHECK(facts.haveSamples == (wire.oracleSamples >= 0));
-    if (facts.haveSamples && wire.oracleSamples >= 0) {
-        const auto *points =
-            _BinaryPoolPoints(file, uint32_t(wire.oracleSamples));
-        CHECK(points && _BinarySamePoints(facts.samples, *points));
+    // The points the oracle samples, and a curve weight's curve, are
+    // inputs holding the facts' points. An entry the runtime's oracle
+    // resolves past its read phases names its samples exactly where it
+    // samples points it reads, and its curve wherever it reads a non-empty
+    // one; any other entry names neither.
+    const bool reached = resolved && facts.phaseError.empty();
+    CHECK((wire.oracleSamplesSlot >= 0) ==
+          (reached && !facts.samplesInFlight && facts.haveSamples));
+    CHECK(wire.oracleCurveSlot < 0 ||
+          (reached && _BinaryText(file, wire.type) == "RigExecCurveWeight"));
+    CHECK(!(reached && facts.haveCurve) || wire.oracleCurveSlot >= 0);
+    std::string bytes;
+    if (wire.oracleSamplesSlot >= 0) {
+        CHECK(_BinarySlotBytes(file, wire.oracleSamplesSlot, &bytes) &&
+              bytes == _BinaryBytesOf(facts.samples));
     }
-    CHECK(facts.haveCurve == (wire.oracleCurve >= 0));
-    if (facts.haveCurve && wire.oracleCurve >= 0) {
-        const auto *points = _BinaryPoolPoints(file, uint32_t(wire.oracleCurve));
-        CHECK(points && _BinarySamePoints(facts.curve, *points));
+    if (wire.oracleCurveSlot >= 0) {
+        CHECK(_BinarySlotBytes(file, wire.oracleCurveSlot, &bytes) &&
+              bytes == (facts.haveCurve ? _BinaryBytesOf(facts.curve)
+                                        : std::string()));
+    }
+    if (_binaryStats) {
+        _binaryStats->arrayOracle += (wire.oracleSamplesSlot >= 0 ? 1 : 0) +
+                                     (wire.oracleCurveSlot >= 0 ? 1 : 0);
     }
     if (_BinaryText(file, wire.type) == "RigExecPlaneWeight") {
         CHECK(facts.planeAxis.GetString() ==
@@ -1734,11 +2145,30 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
         const rigExec::fb::RigExecWireChain &wire = geometry.chains[i];
         CHECK(chain.target.GetString() == _BinaryText(file, wire.target));
         base(chain.haveBase, chain.lastBase, wire.haveBase, wire.base);
+        // A chain whose base reads names its target's points input, whose
+        // default is the base entry itself.
+        if (wire.baseSlot >= 0) {
+            const rigExec::fb::RigExecWireValue &value =
+                file.values[file.inputs[size_t(wire.baseSlot)].value()];
+            CHECK(chain.haveBase &&
+                  _BinarySlotName(file, uint32_t(wire.baseSlot)) ==
+                      chain.target.GetString() &&
+                  value.arraySource == rigExec::fb::ArraySource::Pool &&
+                  value.array == wire.base);
+            if (_binaryStats) {
+                ++_binaryStats->arrayBases;
+            }
+        } else {
+            CHECK(!chain.haveBase ||
+                  !_BinaryHoldsArray(
+                      program.stage->GetAttributeAtPath(chain.target),
+                      rigExec::fb::InputTag::Vec3fArray));
+        }
         CHECK(chain.revisions.size() == wire.revisions.size());
         for (size_t r = 0;
              r < wire.revisions.size() && r < chain.revisions.size(); ++r) {
-            _BinaryCompareRevision(chain.revisions[r], wire.revisions[r],
-                                   false, file);
+            _BinaryCompareRevision(program, chain.revisions[r],
+                                   wire.revisions[r], false, file);
         }
         CHECK(chain.derived.size() == wire.derived.size());
         for (size_t d = 0;
@@ -1750,7 +2180,7 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
                  wire.derived[d].base);
             CHECK(wire.derived[d].revision);
             if (wire.derived[d].revision) {
-                _BinaryCompareRevision(derived.revision,
+                _BinaryCompareRevision(program, derived.revision,
                                        *wire.derived[d].revision, true, file);
             }
         }
@@ -1785,6 +2215,7 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
     // The step-backed objects in the program's order, then the envelope-
     // only ones; every entry's oracle facts.
     CHECK(geometry.weightObjects.size() >= program.weightObjects.size());
+    const std::vector<char> resolved = _BinaryOracleResolved(file);
     for (size_t i = 0; i < geometry.weightObjects.size(); ++i) {
         const rigExec::fb::RigExecWireWeightObject &wire =
             geometry.weightObjects[i];
@@ -1792,8 +2223,21 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
             _BinaryCompareWeightObject(program.weightObjects[i], wire, file);
         } else {
             CHECK(wire.envelopeOnly);
+            const std::string path = _BinaryText(file, wire.path);
+            CHECK(wire.valuesSlot < 0 ||
+                  _BinarySlotName(file, uint32_t(wire.valuesSlot)) ==
+                      path + ".rigExec:values");
+            CHECK(wire.indicesSlot < 0 ||
+                  _BinarySlotName(file, uint32_t(wire.indicesSlot)) ==
+                      path + ".rigExec:indices");
         }
-        _BinaryCompareOracleFacts(evaluator, wire, file.bakeTime, file);
+        if (_binaryStats) {
+            _binaryStats->arrayPainted += (wire.valuesSlot >= 0 ? 1 : 0) +
+                                          (wire.indicesSlot >= 0 ? 1 : 0);
+        }
+        _BinaryCompareOracleFacts(evaluator, wire, file.bakeTime,
+                                  i < resolved.size() && resolved[i] != 0,
+                                  file);
     }
     CHECK(program.falloffLuts.size() == geometry.falloffPaths.size());
     CHECK(program.falloffLuts.size() == geometry.falloffLuts.size());
@@ -1960,12 +2404,41 @@ _BinaryComparePathReads(const rigExec::RigExecBakedProgramImpl &program,
     if (!file.geometry) {
         return;
     }
+    // A weight object's gathers, which key only the reads that answered.
+    std::set<std::string> gathers;
+    for (const auto &object : program.weightObjects) {
+        for (const auto &key : object.pointLeaves.decl.keys) {
+            gathers.insert(key.path.GetString());
+        }
+    }
     std::set<Key> rows;
     size_t readRows = 0, valueRows = 0;
     for (const rigExec::fb::RigExecWirePathRead &row :
          file.geometry->pathReads) {
         const Key key(_BinaryText(file, row.path), row.rest);
         CHECK(rows.insert(key).second);
+        // An array read bound to the slots: headed by its own attribute, at
+        // rest beside the enumerated Default-time value, live keyed by the
+        // enumeration or a gather's.
+        if (row.read && rigExec::RigExecFormatIsArrayTag(row.read->tag)) {
+            const _BinaryRead &read = *row.read;
+            CHECK(!row.headFallback && bool(row.value) == row.rest &&
+                  !read.walk.empty() &&
+                  _BinarySlotName(file, read.walk[0]) == key.first);
+            const auto found = first.find(key);
+            if (row.rest) {
+                CHECK(found != first.end() && row.value &&
+                      _BinarySamePathValue(found->second->value, *row.value,
+                                           file));
+            } else {
+                CHECK(found != first.end() || gathers.count(key.first));
+            }
+            if (_binaryStats) {
+                ++(row.rest ? _binaryStats->arrayRestRows
+                            : _binaryStats->arrayRows);
+            }
+            continue;
+        }
         CHECK(bool(row.value) != bool(row.read));
         if (row.read) {
             ++readRows;
@@ -2245,6 +2718,7 @@ _BinaryForEachRead(const _BinaryFile &file,
                 one(channel.weightRead);
                 for (const auto &sample : channel.samples) {
                     one(sample.activationRead);
+                    one(sample.pointsRead);
                 }
             }
         };
@@ -2338,9 +2812,63 @@ _BinaryCheckOverrides(const rigExec::RigExecBakedProgramImpl &program,
     }
 }
 
+/// The array slots a site reads at the evaluation time: every hop of a
+/// live array row or a blend sample's points read, every chain base,
+/// layout array and oracle point input. The others are read at Default.
+std::set<uint32_t>
+_BinaryLiveArraySlots(const _BinaryFile &file)
+{
+    std::set<uint32_t> live;
+    if (!file.geometry) {
+        return live;
+    }
+    const auto walk = [&](const _BinaryRead *read) {
+        if (read && rigExec::RigExecFormatIsArrayTag(read->tag)) {
+            live.insert(read->walk.begin(), read->walk.end());
+        }
+    };
+    const auto field = [&](int32_t slot) {
+        if (slot >= 0) {
+            live.insert(uint32_t(slot));
+        }
+    };
+    for (const auto &row : file.geometry->pathReads) {
+        if (!row.rest) {
+            walk(row.read.get());
+        }
+    }
+    const auto revision = [&](const rigExec::fb::RigExecWireRevision &r) {
+        field(r.jointIndicesSlot);
+        field(r.jointWeightsSlot);
+        for (const auto &channel : r.blendChannels) {
+            for (const auto &sample : channel.samples) {
+                walk(sample.pointsRead.get());
+            }
+        }
+    };
+    for (const auto &chain : file.geometry->chains) {
+        field(chain.baseSlot);
+        for (const auto &r : chain.revisions) {
+            revision(r);
+        }
+        for (const auto &d : chain.derived) {
+            if (d.revision) {
+                revision(*d.revision);
+            }
+        }
+    }
+    for (const auto &w : file.geometry->weightObjects) {
+        field(w.oracleSamplesSlot);
+        field(w.oracleCurveSlot);
+    }
+    return live;
+}
+
 /// Every slot is listed, typed as its attribute, flagged as its attribute
 /// reads at the bake time, and holds that typed Get's value bit for bit
-/// (a token by text), or the type's zero when the Get fails.
+/// (a token by text), or the type's zero when the Get fails. An array slot
+/// holds its attribute's array at the bake time where a site reads it at
+/// the time, else at Default, an empty one where the Get fails.
 void
 _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
 {
@@ -2348,6 +2876,7 @@ _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
     using Flags = rigExec::fb::InputSlotFlags;
     const UsdTimeCode time(file.bakeTime);
     CHECK(file.listedInputs == file.inputs.size());
+    const std::set<uint32_t> live = _BinaryLiveArraySlots(file);
     for (size_t s = 0; s < file.inputs.size(); ++s) {
         const rigExec::fb::InputSlot &slot = file.inputs[s];
         const std::string name = _BinaryText(file, slot.name());
@@ -2365,6 +2894,18 @@ _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
         CHECK(animated == ((slot.flags() & uint8_t(Flags::Animated)) != 0));
         const TfType type = a.GetTypeName().GetType();
         bool has = false, same = false;
+        if (rigExec::RigExecFormatIsArrayTag(slot.type())) {
+            CHECK(_BinaryHoldsArray(a, slot.type()));
+            std::string want, got;
+            has = _BinaryStageArray(
+                a, slot.type(),
+                live.count(uint32_t(s)) ? time : UsdTimeCode::Default(),
+                &want);
+            same = _BinaryArrayBytes(file, value, &got) && got == want;
+            if (_binaryStats) {
+                ++_binaryStats->arrayInputs;
+            }
+        }
         switch (slot.type()) {
         case Tag::Double: {
             double v = 0.0;
@@ -2436,6 +2977,8 @@ _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
                         : *value.vec3f == rigExec::RigExecWireVec3f{});
             break;
         }
+        default:
+            break;
         }
         CHECK(has == ((slot.flags() & uint8_t(Flags::HasValue)) != 0));
         if (!same) {

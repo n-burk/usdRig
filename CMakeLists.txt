@@ -258,6 +258,7 @@ add_library(rigExec::rigExecSampler ALIAS rigExecSampler)
 
 # rigExecBake: .rigexec baking from a compiled evaluator (M1).
 add_library(rigExecBake SHARED
+    libs/rigExecBake/arrayReads.cpp
     libs/rigExecBake/bake.cpp
     libs/rigExecBake/serialize.cpp
     libs/rigExecBake/computedCapture.cpp
@@ -682,7 +683,10 @@ add_test(NAME testRigExecRuntimeGeometry COMMAND testRigExecRuntimeGeometry
 
 # Inputs set on a binary against the same values authored in the session
 # layer, in the dynamic and baked evaluators: example inputs, held
-# space-switch indices and a ladder input a switch recomposes from.
+# space-switch indices and a ladder input a switch recomposes from; and
+# the array inputs the export lists (lattice cage, rest points, chain base,
+# skin layout, painted weights, topology, bind coordinates, blend sample
+# points, a gathered curve), authored and sampled.
 add_executable(testRigExecRuntimeInputs tests/testRigExecRuntimeInputs.cpp)
 target_link_libraries(testRigExecRuntimeInputs PRIVATE
     rigExec rigExecBake rigExecRuntime rigExecSampler)

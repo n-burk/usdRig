@@ -14,10 +14,13 @@
 // holding frame bytes, and a presentation without its identifier, orders
 // listed inputs as their composed texts, and handles a path tree 100000
 // prims deep; step labels match the program's; sparse skin topologies
-// encode canonically and expand back to the dense rows, every layout the
-// sparse form cannot hold is stored raw and verbatim, and the validated
+// encode losslessly and expand back to the layout bit for bit, every layout
+// the sparse form cannot hold is stored raw and verbatim, and the validated
 // flag holds to the evaluator's rules in both directions, in either form;
-// chunk tables hold to the shape the bake cuts.
+// chunk tables hold to the shape the bake cuts; array inputs (slots of each
+// array tag, their pool and layout defaults, the reads bound to them, and
+// the chain base, layout, painted and oracle slots) round-trip bit for bit,
+// and each rule of theirs refuses its violation with its exact message.
 // USD-free, like the format.
 #include "rigExecBinary/format.h"
 
@@ -725,7 +728,6 @@ _RichFile()
     fb::RigExecWireWeightObject weight;
     weight.path = _pWeight;
     weight.type = _pTokenStatic;
-    weight.values = _Fs(4, 2);
     weight.falloffCurve = _Fs(3, 1);
     for (auto *read :
          {&weight.defaultWeight, &weight.driver, &weight.scale, &weight.bias,
@@ -736,7 +738,6 @@ _RichFile()
           &weight.extentU, &weight.extentV}) {
         *read = _In(InputTag::Float);
     }
-    weight.oracleSamples = 1;
     weight.oracleStaticError = "static note";
     g.weightObjects.push_back(std::move(weight));
     g.falloffPaths = {_pWeight};
@@ -1085,8 +1086,7 @@ TestBitExactness()
     CHECK(r.partitionSameAsTopology && !r.partitionTopology);
     CHECK(_Same(o->geometry->deltaBaseMatrix, file.geometry->deltaBaseMatrix));
     const fb::RigExecWireWeightObject &w = o->geometry->weightObjects[0];
-    CHECK(_Same(w.values, file.geometry->weightObjects[0].values) &&
-          _Same(w.falloffCurve, file.geometry->weightObjects[0].falloffCurve));
+    CHECK(_Same(w.falloffCurve, file.geometry->weightObjects[0].falloffCurve));
     CHECK(w.oracleStaticError == "static note");
     CHECK(_Same(o->geometry->falloffLuts[0].v,
                 file.geometry->falloffLuts[0].v));
@@ -1200,31 +1200,31 @@ TestOpenRefusals()
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
     // The format version, named before any other table is read: the
-    // previous version, which cannot hold a raw skin layout, is refused
-    // with a re-export message, every other one with a rebake message, and
-    // the current one opens.
+    // previous version, which holds no array inputs, is refused with a
+    // re-export message, every other one with a rebake message, and the
+    // current one opens.
     RigExecWireFile versioned = _RichFile();
     for (const uint32_t version :
-         {3u, 4u, 5u, 6u, RigExecFormatVersion + 1}) {
+         {3u, 4u, 5u, 6u, 7u, RigExecFormatVersion + 1}) {
         _context = "open refusals: version " + std::to_string(version);
         versioned.formatVersion = version;
-        const bool previous = version == 6u;
+        const bool previous = version == 7u;
         CHECK(!_Open(_PackUnchecked(versioned), &why) &&
               _Contains(why, "format version " + std::to_string(version)) &&
-              _Contains(why, previous ? "re-export: raw skin layouts"
+              _Contains(why, previous ? "re-export: array inputs"
                                       : "rebake"));
         CHECK(previous || !_Contains(why, "re-export"));
     }
     _context = "open refusals";
-    versioned.formatVersion = 6;
+    versioned.formatVersion = 7;
     CHECK(!_Open(_PackUnchecked(versioned), &why) &&
-          why == "unsupported .rigexec format version 6 (this reader reads "
-                 "7); re-export: raw skin layouts");
+          why == "unsupported .rigexec format version 7 (this reader reads "
+                 "8); re-export: array inputs");
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
     CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
-    std::printf("format versions: 3, 4, 5 and %u refused with a rebake, 6 "
-                "with a re-export message; %u writes and opens\n",
+    std::printf("format versions: 3, 4, 5, 6 and %u refused with a rebake, "
+                "7 with a re-export message; %u writes and opens\n",
                 RigExecFormatVersion + 1, RigExecFormatVersion);
 
     // A verified buffer that breaks a rule.
@@ -3072,35 +3072,14 @@ _EvaluatorValidates(const std::vector<int32_t> &indices,
     return true;
 }
 
-/// The canonical dense form, from the definition: each row's entries other
-/// than (0, +-0) in order, then (0, +0.0f) padding.
-void
-_CanonicalDense(const std::vector<int32_t> &indices,
-                const std::vector<float> &weights, size_t width,
-                std::vector<int32_t> *outIndices,
-                std::vector<float> *outWeights)
-{
-    outIndices->assign(indices.size(), 0);
-    outWeights->assign(weights.size(), 0.0f);
-    for (size_t row = 0; width > 0 && row < indices.size() / width; ++row) {
-        size_t at = row * width;
-        for (size_t e = row * width; e < (row + 1) * width; ++e) {
-            if (indices[e] == 0 && weights[e] == 0.0f) {
-                continue;
-            }
-            (*outIndices)[at] = indices[e];
-            (*outWeights)[at] = weights[e];
-            ++at;
-        }
-    }
-}
-
-/// Sparse skin topologies: canonical encoding of dense rows with interior
-/// zeros of either sign, negative weights and non-finite weights; the
-/// counts and index vectors at their size boundaries; refusal of layouts
-/// that are not rectangular; every encoded layout validates, survives
-/// Write -> Open and expands to the canonical dense form; a kept (0, +-0)
-/// entry is refused.
+/// Sparse skin topologies: lossless encoding of dense rows with interior
+/// zeros of either sign, negative weights and non-finite weights, each row
+/// up to its trailing (0, +0) run; the counts and index vectors at their
+/// size boundaries; refusal of layouts that are not rectangular; every
+/// encoded layout validates, survives Write -> Open and expands to the
+/// layout it was written from, bit for bit; a kept trailing (0, +0) entry
+/// is refused, and a kept trailing (0, -0), a mid-row (0, +0) and a
+/// (0, NaN) are accepted.
 void
 TestSparseTopology()
 {
@@ -3111,8 +3090,8 @@ TestSparseTopology()
     // Encodes \p indices x \p weights over 7 influences, validated as the
     // evaluator would leave it, checks the encoding validates inside the
     // rich file, survives Write -> Open, re-encodes identically from its
-    // expansion, and expands to the canonical dense form bit for bit. The
-    // same encoding with its validated flag flipped is refused.
+    // expansion, and expands to the layout itself bit for bit. The same
+    // encoding with its validated flag flipped is refused.
     const auto encode = [&](const std::string &label,
                             const std::vector<int32_t> &indices,
                             const std::vector<float> &weights,
@@ -3135,10 +3114,10 @@ TestSparseTopology()
               sparse.influenceCount == 7 && sparse.validated == validated &&
               !sparse.raw && sparse.rawIndices.empty() &&
               sparse.rawWeights.empty());
-        std::vector<int32_t> wantIndices, gotIndices;
-        std::vector<float> wantWeights, gotWeights;
-        _CanonicalDense(indices, weights, size_t(elementSize), &wantIndices,
-                        &wantWeights);
+        const std::vector<int32_t> &wantIndices = indices;
+        const std::vector<float> &wantWeights = weights;
+        std::vector<int32_t> gotIndices;
+        std::vector<float> gotWeights;
         RigExecFormatExpandTopology(sparse, &gotIndices, &gotWeights);
         CHECK(gotIndices == wantIndices && _Same(gotWeights, wantWeights));
 
@@ -3193,37 +3172,40 @@ TestSparseTopology()
         return sparse;
     };
 
-    // Interior (0, +0) and (0, -0) entries are dropped; a zero weight at
-    // another index, a -0 at another index, a negative weight, a denormal
-    // and a NaN payload at index 0 are kept, in order.
+    // Each row keeps its entries up to its trailing (0, +0) run: interior
+    // (0, +0) and (0, -0) entries, a trailing (0, -0), a zero weight at
+    // another index, a negative weight, a denormal and a NaN payload at
+    // index 0 are kept, in order.
     const float denormal = _F(0x00000001u), nan = _F(0x7fc12345u);
     const std::vector<int32_t> indices = {2, 0, 3, 0, 0,   //
                                           0, 5, 0, 6, 0,   //
-                                          0, 0, 0, 0, 0};
+                                          0, 0, 0, 0, 0,   //
+                                          1, 0, 0, 0, 0};
     const std::vector<float> weights = {
-        0.5f, 0.0f,  -0.25f, -0.0f,  denormal,  //
-        0.0f, 0.0f,  1.0f,   -0.0f,  nan,       //
-        -0.0f, 0.0f, -0.0f,  0.0f,   -0.0f};
+        0.5f,  0.0f, -0.25f, -0.0f, denormal,  //
+        0.0f,  0.0f, 1.0f,   -0.0f, nan,       //
+        -0.0f, 0.0f, -0.0f,  0.0f,  0.0f,      //
+        0.75f, 0.0f, 0.0f,   0.0f,  0.0f};
     const fb::RigExecWireSkinTopology rows =
-        encode("interior zeros", indices, weights, 5, 3);
-    CHECK(rows.counts8 == std::vector<uint8_t>({3, 4, 0}) &&
+        encode("interior zeros", indices, weights, 5, 4);
+    CHECK(rows.counts8 == std::vector<uint8_t>({5, 5, 3, 1}) &&
           rows.counts16.empty());
     CHECK(rows.indexWidth == 1 &&
-          rows.indices8 == std::vector<uint8_t>({2, 3, 0, 5, 0, 6, 0}) &&
+          rows.indices8 == std::vector<uint8_t>({2, 0, 3, 0, 0,  //
+                                                 0, 5, 0, 6, 0,  //
+                                                 0, 0, 0,        //
+                                                 1}) &&
           rows.indices16.empty() && rows.indices32.empty());
-    CHECK(_Same(rows.weights, std::vector<float>({0.5f, -0.25f, denormal,
-                                                  0.0f, 1.0f, -0.0f, nan})));
+    CHECK(_Same(rows.weights,
+                std::vector<float>({0.5f, 0.0f, -0.25f, -0.0f, denormal,  //
+                                    0.0f, 0.0f, 1.0f, -0.0f, nan,         //
+                                    -0.0f, 0.0f, -0.0f,                   //
+                                    0.75f})));
     std::vector<int32_t> denseIndices;
     std::vector<float> denseWeights;
     RigExecFormatExpandTopology(rows, &denseIndices, &denseWeights);
     _context = "sparse topology: interior zeros";
-    CHECK(denseIndices == std::vector<int32_t>({2, 3, 0, 0, 0,  //
-                                                5, 0, 6, 0, 0,  //
-                                                0, 0, 0, 0, 0}));
-    CHECK(_Same(denseWeights,
-                std::vector<float>({0.5f, -0.25f, denormal, 0.0f, 0.0f,  //
-                                    0.0f, 1.0f, -0.0f, nan, 0.0f,        //
-                                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f})));
+    CHECK(denseIndices == indices && _Same(denseWeights, weights));
 
     // The counts vector by element size.
     for (const int32_t width : {255, 256}) {
@@ -3248,7 +3230,7 @@ TestSparseTopology()
     for (const auto &[largest, width] : widths) {
         const fb::RigExecWireSkinTopology wide =
             encode("largest index " + std::to_string(largest),
-                   {1, largest, 0, 0}, {0.5f, 0.0f, 0.0f, -0.0f}, 2, 2);
+                   {1, largest, 0, 0}, {0.5f, 0.0f, 0.0f, 0.0f}, 2, 2);
         CHECK(wide.indexWidth == width &&
               wide.indices8.size() == (width == 1 ? 2u : 0u) &&
               wide.indices16.size() == (width == 2 ? 2u : 0u) &&
@@ -3294,47 +3276,65 @@ TestSparseTopology()
     refuse("element size past 65535", {}, {}, 65536, 0,
            "element size 65536");
 
-    // The validator refuses a hand-made kept entry the canonical form
-    // drops, at any index width, and keeps a NaN weight at index 0.
-    const auto handMade = [&](uint8_t width, float weight) {
+    // The validator refuses a hand-made row whose last kept entry is the
+    // (0, +0) the sparse form drops, at any index width, and accepts a
+    // trailing (0, -0) and (0, NaN), which the writer keeps, and a (0, +0)
+    // before another entry.
+    const auto handMade = [&](uint8_t width, std::vector<uint32_t> kept,
+                              float weight) {
         fb::RigExecWireSkinTopology t;
         t.elementSize = 2;
         t.pointCount = 1;
         t.counts8 = {2};
         t.indexWidth = width;
-        if (width == 1) {
-            t.indices8 = {1, 0};
-        } else if (width == 2) {
-            t.indices16 = {1, 0};
-        } else {
-            t.indices32 = {1, 0};
+        for (const uint32_t index : kept) {
+            if (width == 1) {
+                t.indices8.push_back(uint8_t(index));
+            } else if (width == 2) {
+                t.indices16.push_back(uint16_t(index));
+            } else {
+                t.indices32.push_back(int32_t(index));
+            }
         }
-        t.weights = {0.5f, weight};
+        t.weights = kept[0] == 0 ? std::vector<float>{weight, 0.5f}
+                                 : std::vector<float>{0.5f, weight};
         RigExecWireFile file = _RichFile();
         file.geometry->chains[0].revisions[0].topology =
             std::make_unique<fb::RigExecWireSkinTopology>(t);
         return file;
     };
+    size_t refusedTrailing = 0, acceptedZeros = 0;
     for (const uint8_t width : {uint8_t(1), uint8_t(2), uint8_t(4)}) {
-        for (const float zero : {0.0f, -0.0f}) {
-            _context = "sparse topology: kept (0, " +
-                       std::string(std::signbit(zero) ? "-0" : "+0") +
-                       ") at width " + std::to_string(width);
-            CHECK(!RigExecFormatValidate(handMade(width, zero), &why) &&
-                  why == "geometry.chains[0].revisions[0].topology: kept "
-                         "entry 1 is (0, 0), which the sparse form drops");
-        }
-        _context = "sparse topology: kept (0, NaN) at width " +
+        _context = "sparse topology: kept trailing (0, +0) at width " +
                    std::to_string(width);
-        CHECK(RigExecFormatValidate(handMade(width, nan), &why));
+        CHECK(!RigExecFormatValidate(handMade(width, {1, 0}, 0.0f), &why) &&
+              why == "geometry.chains[0].revisions[0].topology: point 0 "
+                     "keeps a trailing (0, +0) entry, which the sparse "
+                     "form drops");
+        ++refusedTrailing;
+        for (const float weight : {-0.0f, nan}) {
+            _context = "sparse topology: kept trailing (0, " +
+                       std::string(std::isnan(weight) ? "NaN" : "-0") +
+                       ") at width " + std::to_string(width);
+            CHECK(RigExecFormatValidate(handMade(width, {1, 0}, weight),
+                                        &why));
+            ++acceptedZeros;
+        }
+        _context = "sparse topology: kept mid-row (0, +0) at width " +
+                   std::to_string(width);
+        CHECK(RigExecFormatValidate(handMade(width, {0, 1}, 0.0f), &why));
+        ++acceptedZeros;
     }
-    std::printf("sparse topology: %zu layouts encoded canonically, "
+    std::printf("sparse topology: %zu layouts encoded losslessly, "
                 "validated and expanded, each refused with its validated "
                 "flag flipped (%zu the evaluator's rules fail, %zu they "
-                "pass); 6 malformed layouts and 6 kept (0, +-0) entries "
-                "refused\n",
-                encoded, unvalidated, passing);
-    CHECK(encoded == 10 && unvalidated == 9 && passing == 1);
+                "pass); 6 malformed layouts and %zu kept trailing (0, +0) "
+                "entries refused, %zu kept (0, -0), (0, NaN) and mid-row "
+                "(0, +0) entries accepted\n",
+                encoded, unvalidated, passing, refusedTrailing,
+                acceptedZeros);
+    CHECK(encoded == 10 && unvalidated == 9 && passing == 1 &&
+          refusedTrailing == 3 && acceptedZeros == 9);
 }
 
 /// Raw skin layouts: RigExecFormatTopology stores verbatim every layout the
@@ -3865,6 +3865,574 @@ TestChunkTables()
                 "violations refused\n",
                 refused);
     CHECK(refused == 20);
+}
+
+// ----------------------------------------------------------------- arrays
+
+// Path ids the array file adds to the rich file's; each is also the id of
+// its name.
+enum : uint32_t {
+    _pJointIndices = 13,  // /Rig/Mover.rigExec:jointIndices
+    _pJointWeights = 14,  // /Rig/Mover.rigExec:jointWeights
+    _pValues = 15,        // /Rig/W.rigExec:values
+    _pIndices = 16,       // /Rig/W.rigExec:indices
+    _pSamples = 17,       // /Rig/Mesh.samples
+    _pCurve = 18,         // /Rig/Mesh.curve
+    _pKnots = 19,         // /Rig/Mover.knots
+    _pSt = 20,            // /Rig/Mover.st
+};
+
+// The unlisted slots the array file appends after the rich file's three.
+enum : uint32_t {
+    _sJointIndices = 3,
+    _sJointWeights = 4,
+    _sBase = 5,
+    _sValues = 6,
+    _sIndices = 7,
+    _sSamples = 8,
+    _sCurve = 9,
+    _sKnots = 10,
+    _sSt = 11,
+};
+
+// The array values the array file appends: revision 0's layout, each
+// pool's entry 1, and each pool's empty array.
+enum : uint32_t {
+    _vSkinIndices = _vCount,
+    _vSkinWeights,
+    _vPoints,
+    _vFloats,
+    _vInts,
+    _vDoubles,
+    _vVec2fs,
+    _vNoInts,
+    _vNoFloats,
+    _vNoDoubles,
+    _vNoVec2fs,
+    _vNoVec3fs,
+    _vArrayCount,
+};
+
+/// The rich file with an array input of each tag: revision 0 a fixed skin
+/// whose layout slots default to its stored layout, the chain's base slot,
+/// the weight object's painted and oracle slots, a blend sample's points
+/// read through a slot, and path reads bound to slots: a live Raw read, a
+/// rest Raw read holding its Default-time value, and a live Resolved read.
+RigExecWireFile
+_ArrayFile()
+{
+    RigExecWireFile f = _RichFile();
+    for (const char *name :
+         {"rigExec:jointIndices", "rigExec:jointWeights", "rigExec:values",
+          "rigExec:indices", "samples", "curve", "knots", "st"}) {
+        f.names.push_back(name);
+    }
+    const std::pair<uint32_t, uint32_t> properties[] = {
+        {_pMover, _pJointIndices}, {_pMover, _pJointWeights},
+        {_pWeight, _pValues},      {_pWeight, _pIndices},
+        {_pMesh, _pSamples},       {_pMesh, _pCurve},
+        {_pMover, _pKnots},        {_pMover, _pSt}};
+    for (const auto &[prim, id] : properties) {
+        f.paths.push_back(fb::PathNode(prim, id, PathKind::Property));
+    }
+
+    f.values.resize(_vArrayCount);
+    const auto array = [&](uint32_t id, InputTag tag, fb::ArraySource source,
+                           uint32_t at) {
+        f.values[id].tag = tag;
+        f.values[id].arraySource = source;
+        f.values[id].array = at;
+    };
+    using Source = fb::ArraySource;
+    array(_vSkinIndices, InputTag::IntArray, Source::SkinIndices, 0);
+    array(_vSkinWeights, InputTag::FloatArray, Source::SkinWeights, 0);
+    array(_vPoints, InputTag::Vec3fArray, Source::Pool, 1);
+    array(_vFloats, InputTag::FloatArray, Source::Pool, 1);
+    array(_vInts, InputTag::IntArray, Source::Pool, 1);
+    array(_vDoubles, InputTag::DoubleArray, Source::Pool, 1);
+    array(_vVec2fs, InputTag::Vec2fArray, Source::Pool, 1);
+    array(_vNoInts, InputTag::IntArray, Source::Pool, 0);
+    array(_vNoFloats, InputTag::FloatArray, Source::Pool, 0);
+    array(_vNoDoubles, InputTag::DoubleArray, Source::Pool, 0);
+    array(_vNoVec2fs, InputTag::Vec2fArray, Source::Pool, 0);
+    array(_vNoVec3fs, InputTag::Vec3fArray, Source::Pool, 0);
+
+    const uint8_t has = uint8_t(fb::InputSlotFlags::HasValue);
+    const auto slot = [&](uint32_t path, uint32_t value, InputTag tag) {
+        f.inputs.push_back(fb::InputSlot(path, value, -1, -1, tag, has));
+    };
+    slot(_pJointIndices, _vSkinIndices, InputTag::IntArray);
+    slot(_pJointWeights, _vSkinWeights, InputTag::FloatArray);
+    slot(_pMeshPoints, _vPoints, InputTag::Vec3fArray);
+    slot(_pValues, _vFloats, InputTag::FloatArray);
+    slot(_pIndices, _vInts, InputTag::IntArray);
+    slot(_pSamples, _vPoints, InputTag::Vec3fArray);
+    slot(_pCurve, _vPoints, InputTag::Vec3fArray);
+    slot(_pKnots, _vDoubles, InputTag::DoubleArray);
+    slot(_pSt, _vVec2fs, InputTag::Vec2fArray);
+
+    fb::RigExecWireDomainGeometry &g = *f.geometry;
+    fb::RigExecWireChain &chain = g.chains[0];
+    chain.baseSlot = int32_t(_sBase);
+    fb::RigExecWireRevision &revision = chain.revisions[0];
+    revision.op = uint8_t(fb::RevisionOp::Skin);
+    revision.skinTopologyFixed = true;
+    revision.topologyResolved = true;
+    revision.jointIndicesSlot = int32_t(_sJointIndices);
+    revision.jointWeightsSlot = int32_t(_sJointWeights);
+    fb::RigExecWireBlendSample &sample =
+        revision.blendChannels[0].samples[0];
+    sample.pointsPath = _pSamples;
+    sample.pointsRead =
+        _In(InputTag::Vec3fArray, ReadMode::Raw, {uint32_t(_sSamples)});
+    sample.pointsRead->constant = _vNoVec3fs;
+
+    fb::RigExecWireWeightObject &weight = g.weightObjects[0];
+    weight.valuesSlot = int32_t(_sValues);
+    weight.indicesSlot = int32_t(_sIndices);
+    weight.oracleSamplesSlot = int32_t(_sSamples);
+    weight.oracleCurveSlot = int32_t(_sCurve);
+
+    const auto read = [&](uint32_t path, bool rest, InputTag tag,
+                          ReadMode mode, uint32_t at, uint32_t constant) {
+        fb::RigExecWirePathRead row;
+        row.path = path;
+        row.rest = rest;
+        row.read = _In(tag, mode, {at});
+        row.read->constant = constant;
+        return row;
+    };
+    g.pathReads.push_back(read(_pValues, false, InputTag::FloatArray,
+                               ReadMode::Raw, _sValues, _vNoFloats));
+    g.pathReads.push_back(read(_pKnots, true, InputTag::DoubleArray,
+                               ReadMode::Raw, _sKnots, _vNoDoubles));
+    g.pathReads.back().value = std::make_unique<fb::RigExecWirePathValue>();
+    g.pathReads.back().value->tag = fb::PathTag::DoubleArray;
+    g.pathReads.back().value->array = 1;
+    g.pathReads.push_back(read(_pSt, false, InputTag::Vec2fArray,
+                               ReadMode::Resolved, _sSt, _vNoVec2fs));
+    return f;
+}
+
+/// Array inputs: the array file validates and survives Write -> Open ->
+/// Write bit for bit with every array field it holds; a slot whose read
+/// failed (no HasValue) defaults to the empty array; each rule of the array
+/// tags, sources, slots and reads refuses its violation with its exact
+/// message.
+void
+TestArrayInputs()
+{
+    _context = "array inputs";
+    std::string why;
+    const RigExecWireFile file = _ArrayFile();
+    CHECK(RigExecFormatValidate(file, &why));
+    if (!why.empty()) {
+        std::printf("  %s\n", why.c_str());
+    }
+    std::vector<uint8_t> bytes, again;
+    std::unique_ptr<RigExecWireFile> o;
+    CHECK(_Write(file, &bytes, &why));
+    if (!bytes.empty()) {
+        o = _Open(bytes, &why);
+    }
+    CHECK(o != nullptr);
+    if (o) {
+        CHECK(_Write(*o, &again) && again == bytes);
+        CHECK(o->values.size() == size_t(_vArrayCount));
+        for (size_t i = _vCount; i < o->values.size(); ++i) {
+            CHECK(o->values[i].tag == file.values[i].tag &&
+                  o->values[i].arraySource == file.values[i].arraySource &&
+                  o->values[i].array == file.values[i].array &&
+                  o->values[i].bits == 0);
+        }
+        CHECK(o->values[_vSkinWeights].arraySource ==
+                  fb::ArraySource::SkinWeights &&
+              o->values[_vPoints].array == 1);
+        CHECK(o->inputs.size() == 12 && o->listedInputs == 3 &&
+              o->inputs[_sSt].type() == InputTag::Vec2fArray &&
+              o->inputs[_sKnots].value() == _vDoubles);
+        const fb::RigExecWireChain &chain = o->geometry->chains[0];
+        const fb::RigExecWireRevision &r = chain.revisions[0];
+        CHECK(chain.baseSlot == int32_t(_sBase) &&
+              r.jointIndicesSlot == int32_t(_sJointIndices) &&
+              r.jointWeightsSlot == int32_t(_sJointWeights) &&
+              chain.derived[0].revision->jointIndicesSlot == -1);
+        const fb::RigExecWireBlendSample &sample =
+            r.blendChannels[0].samples[0];
+        CHECK(sample.pointsRead &&
+              sample.pointsRead->tag == InputTag::Vec3fArray &&
+              sample.pointsRead->mode == ReadMode::Raw &&
+              sample.pointsRead->walk ==
+                  std::vector<uint32_t>{uint32_t(_sSamples)});
+        const fb::RigExecWireWeightObject &w = o->geometry->weightObjects[0];
+        CHECK(w.valuesSlot == int32_t(_sValues) &&
+              w.indicesSlot == int32_t(_sIndices) &&
+              w.oracleSamplesSlot == int32_t(_sSamples) &&
+              w.oracleCurveSlot == int32_t(_sCurve));
+        const auto &rows = o->geometry->pathReads;
+        CHECK(rows.size() == 9);
+        if (rows.size() == 9) {
+            CHECK(rows[6].read && !rows[6].value &&
+                  rows[6].read->tag == InputTag::FloatArray);
+            CHECK(rows[7].rest && rows[7].read && rows[7].value &&
+                  rows[7].value->tag == fb::PathTag::DoubleArray &&
+                  rows[7].read->mode == ReadMode::Raw);
+            CHECK(rows[8].read && rows[8].read->mode == ReadMode::Resolved);
+        }
+    }
+    // An array whose read failed defaults to the empty array, unflagged.
+    {
+        RigExecWireFile empty = _ArrayFile();
+        empty.inputs[_sSt] = fb::InputSlot(_pSt, _vNoVec2fs, -1, -1,
+                                           InputTag::Vec2fArray, 0);
+        CHECK(RigExecFormatValidate(empty, &why));
+    }
+
+    int refused = 0;
+    const auto expect = [&](const char *name, const std::string &want,
+                            const std::function<void(RigExecWireFile &)>
+                                &mutate) {
+        _context = std::string("array inputs: ") + name;
+        RigExecWireFile f = _ArrayFile();
+        mutate(f);
+        std::string got;
+        const bool ok = RigExecFormatValidate(f, &got);
+        CHECK(!ok && got == want);
+        if (ok || got != want) {
+            std::printf("  got: %s\n  want: %s\n",
+                        ok ? "(accepted)" : got.c_str(), want.c_str());
+        }
+        ++refused;
+    };
+    using F = RigExecWireFile;
+    using Source = fb::ArraySource;
+    const auto has = uint8_t(fb::InputSlotFlags::HasValue);
+    const auto at = [](uint32_t value) { return std::to_string(value); };
+    const std::string revision = "geometry.chains[0].revisions[0]";
+    const std::string sample =
+        revision + ".blend_channels[0].samples[0].points_read";
+    const std::string weight = "geometry.weight_objects[0]";
+
+    // Values.
+    expect("an array source on a scalar",
+           "values[8]: an array source on a scalar value", [](F &f) {
+               f.values[_vBool].arraySource = Source::SkinIndices;
+           });
+    expect("an array id on a scalar",
+           "values[8]: an array source on a scalar value",
+           [](F &f) { f.values[_vBool].array = 1; });
+    expect("bits on an array",
+           "values[" + at(_vDoubles) + "]: bits or members on an array value",
+           [](F &f) { f.values[_vDoubles].bits = 1; });
+    expect("a member on an array",
+           "values[" + at(_vDoubles) + "]: its members do not match its tag",
+           [](F &f) {
+               f.values[_vDoubles].vec3f =
+                   std::make_unique<RigExecWireVec3f>(_V3f(0));
+           });
+    expect("an array source past the enum",
+           "values[" + at(_vInts) + "]: array source out of range",
+           [](F &f) { f.values[_vInts].arraySource = Source(3); });
+    for (const uint32_t id :
+         {uint32_t(_vInts), uint32_t(_vFloats), uint32_t(_vDoubles),
+          uint32_t(_vVec2fs), uint32_t(_vPoints)}) {
+        expect("a pool id past its pool",
+               "values[" + at(id) + "].array: pool id 2 out of range (2)",
+               [id](F &f) { f.values[id].array = 2; });
+    }
+    expect("skin weights on an int array",
+           "values[" + at(_vSkinIndices) +
+               "]: a skin layout source on a int[] value",
+           [](F &f) {
+               f.values[_vSkinIndices].arraySource = Source::SkinWeights;
+           });
+    expect("skin indices on a float array",
+           "values[" + at(_vSkinWeights) +
+               "]: a skin layout source on a float[] value",
+           [](F &f) {
+               f.values[_vSkinWeights].arraySource = Source::SkinIndices;
+           });
+    expect("a layout past the revisions",
+           "values[" + at(_vSkinIndices) + "].array: 1 out of range (1)",
+           [](F &f) { f.values[_vSkinIndices].array = 1; });
+    expect("a layout of a revision the epoch does not fix",
+           "values[" + at(_vSkinIndices) +
+               "]: revision 0 stores no fixed layout",
+           [](F &f) {
+               fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
+               r.jointIndicesSlot = -1;
+               r.jointWeightsSlot = -1;
+               r.skinTopologyFixed = false;
+           });
+    expect("a layout of a revision with no stored layout",
+           "values[" + at(_vSkinIndices) +
+               "]: revision 0 stores no fixed layout",
+           [](F &f) {
+               fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
+               r.jointIndicesSlot = -1;
+               r.jointWeightsSlot = -1;
+               r.topology.reset();
+               r.partitionSameAsTopology = false;
+           });
+
+    // Slots.
+    expect("an array slot naming a chain",
+           "inputs[" + at(_sKnots) +
+               "]: an array slot names a chain or a phased consumer",
+           [has](F &f) {
+               f.inputs[_sKnots] = fb::InputSlot(_pKnots, _vDoubles, 0, -1,
+                                                 InputTag::DoubleArray, has);
+           });
+    expect("an array slot naming a phased consumer",
+           "inputs[" + at(_sKnots) +
+               "]: an array slot names a chain or a phased consumer",
+           [has](F &f) {
+               f.inputs[_sKnots] = fb::InputSlot(_pKnots, _vDoubles, -1, 0,
+                                                 InputTag::DoubleArray, has);
+           });
+    expect("an array slot defaulting to another tag",
+           "inputs[" + at(_sKnots) + "]: malformed type, flags or default",
+           [has](F &f) {
+               f.inputs[_sKnots] = fb::InputSlot(_pKnots, _vFloats, -1, -1,
+                                                 InputTag::DoubleArray, has);
+           });
+
+    // Reads.
+    expect("a scalar read walking an array slot",
+           "pose.solvers[0].bend.walk[0]: slot " + at(_sKnots) +
+               " is an array input, which a scalar read never walks",
+           [](F &f) { f.pose->solvers[0].bend->walk = {_sKnots}; });
+    expect("an array read over a slot of another tag",
+           "geometry.path_reads[8].read.walk[0]: slot " + at(_sKnots) +
+               " holds double[], not the read's float2[]",
+           [](F &f) { f.geometry->pathReads[8].read->walk = {_sKnots}; });
+    expect("an array read walking on to another tag",
+           "geometry.path_reads[8].read.walk[1]: slot " + at(_sSamples) +
+               " holds float3[], not the read's float2[]",
+           [](F &f) {
+               f.geometry->pathReads[8].read->walk = {_sSt, _sSamples};
+           });
+    expect("a Baked array read",
+           "geometry.path_reads[8].read: read mode 0 is not admitted here",
+           [](F &f) {
+               f.geometry->pathReads[8].read->mode = ReadMode::Baked;
+           });
+    expect("an array read through a chain",
+           "geometry.path_reads[8].read: an array read crosses no chain "
+           "and reads no long way",
+           [](F &f) {
+               f.geometry->pathReads[8].read->flags =
+                   uint8_t(fb::InputReadFlags::ViaChain);
+           });
+    expect("an array read whose constant is a layout",
+           "geometry.path_reads[6].read: constant " + at(_vSkinWeights) +
+               " is not a pool array",
+           [](F &f) {
+               f.geometry->pathReads[6].read->constant = _vSkinWeights;
+           });
+    expect("an array read of a plugin mover",
+           "external_movers[0].inputs[0]: tag 9 is an array tag, which "
+           "this site does not read",
+           [](F &f) {
+               fb::RigExecWireRevision &r = f.geometry->chains[0].revisions[0];
+               r.jointIndicesSlot = -1;
+               r.jointWeightsSlot = -1;
+               _AddPlugin(f);
+               f.externalMovers[0].inputs[0] =
+                   _InValue(InputTag::FloatArray, ReadMode::Raw, {_sValues});
+               f.externalMovers[0].inputs[0].constant = _vNoFloats;
+           });
+    expect("a phased hop on an array slot",
+           "phased_consumers[0].hops[1]: slot " + at(_sKnots) +
+               " is an array input",
+           [](F &f) { f.phasedConsumers[0].hops = {1, _sKnots}; });
+
+    // Path reads bound to array slots.
+    expect("a rest array read without its value",
+           "geometry.path_reads[7]: an array read holds a value exactly "
+           "when it reads at rest",
+           [](F &f) { f.geometry->pathReads[7].value.reset(); });
+    expect("a live array read with a value",
+           "geometry.path_reads[8]: an array read holds a value exactly "
+           "when it reads at rest",
+           [](F &f) {
+               auto &row = f.geometry->pathReads[8];
+               row.value = std::make_unique<fb::RigExecWirePathValue>();
+               row.value->tag = fb::PathTag::Vec2fArray;
+           });
+    expect("a Resolved array read at rest",
+           "geometry.path_reads[7].read: an array read at rest is Raw",
+           [](F &f) {
+               f.geometry->pathReads[7].read->mode = ReadMode::Resolved;
+           });
+    expect("an array read headed by another attribute",
+           "geometry.path_reads[6].read: an array read headed by its own "
+           "attribute expected",
+           [](F &f) {
+               f.geometry->pathReads[6].read->walk = {_sJointWeights};
+           });
+    expect("an array read with the head fallback",
+           "geometry.path_reads[8]: head_fallback on an array read",
+           [](F &f) { f.geometry->pathReads[8].headFallback = true; });
+    expect("a rest value of another tag",
+           "geometry.path_reads[7].value: tag 9 is not the read's double[]",
+           [](F &f) {
+               f.geometry->pathReads[7].value->tag = fb::PathTag::FloatArray;
+           });
+
+    // Blend sample points.
+    expect("points read on a blend shape sample",
+           sample + ": on a sample with a blend shape", [](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0]
+                   .samples[0]
+                   .blendShape = _pMesh;
+           });
+    expect("points read of another tag", sample + ": tag 1, expected 12",
+           [](F &f) {
+               auto &read = f.geometry->chains[0].revisions[0]
+                                .blendChannels[0]
+                                .samples[0]
+                                .pointsRead;
+               read->tag = InputTag::Float;
+               read->constant = _vFloatNaN;
+           });
+    expect("points read off points_path",
+           sample + ": a read headed by points_path expected", [](F &f) {
+               f.geometry->chains[0].revisions[0].blendChannels[0]
+                   .samples[0]
+                   .pointsPath = _pCtlTx;
+           });
+
+    // The chain base.
+    expect("a base slot of another tag",
+           "geometry.chains[0].base_slot: slot " + at(_sValues) +
+               " is not a float3[] input",
+           [](F &f) { f.geometry->chains[0].baseSlot = _sValues; });
+    expect("a base slot past the slots",
+           "geometry.chains[0].base_slot: 12 out of range (12)",
+           [](F &f) { f.geometry->chains[0].baseSlot = 12; });
+    expect("a base slot without a base",
+           "geometry.chains[0].base_slot: a base slot on a chain without a "
+           "base",
+           [](F &f) {
+               f.geometry->chains[0].haveBase = false;
+               f.geometry->chains[0].base = 0;
+           });
+    expect("a base slot of another attribute",
+           "geometry.chains[0].base_slot: slot " + at(_sSamples) +
+               " is not the chain target's input",
+           [](F &f) { f.geometry->chains[0].baseSlot = _sSamples; });
+    expect("a base slot defaulting to another base",
+           "geometry.chains[0].base_slot: slot " + at(_sBase) +
+               "'s default is not the chain's base",
+           [](F &f) { f.geometry->chains[0].base = 0; });
+
+    // Layout slots.
+    expect("one layout slot alone",
+           revision + ": joint_indices_slot and joint_weights_slot are set "
+                      "together",
+           [](F &f) {
+               f.geometry->chains[0].revisions[0].jointWeightsSlot = -1;
+           });
+    expect("layout slots on a derived revision",
+           "geometry.chains[0].derived[0].revision: layout slots on a "
+           "revision that is not a main skin whose layout the epoch fixes",
+           [](F &f) {
+               fb::RigExecWireRevision &r =
+                   *f.geometry->chains[0].derived[0].revision;
+               r.jointIndicesSlot = int32_t(_sJointIndices);
+               r.jointWeightsSlot = int32_t(_sJointWeights);
+           });
+    expect("layout slots on a revision the epoch does not fix",
+           revision + ": layout slots on a revision that is not a main "
+                      "skin whose layout the epoch fixes",
+           [](F &f) {
+               f.geometry->chains[0].revisions[0].skinTopologyFixed = false;
+           });
+    expect("a layout slot of another tag",
+           revision + ".joint_indices_slot: slot " + at(_sValues) +
+               " is not a int[] input",
+           [](F &f) {
+               f.geometry->chains[0].revisions[0].jointIndicesSlot =
+                   int32_t(_sValues);
+           });
+    expect("a layout indices slot of another attribute",
+           revision + ".joint_indices_slot: slot " + at(_sIndices) +
+               " is not the mover's rigExec:jointIndices input",
+           [](F &f) {
+               f.geometry->chains[0].revisions[0].jointIndicesSlot =
+                   int32_t(_sIndices);
+           });
+    expect("a layout weights slot of another attribute",
+           revision + ".joint_weights_slot: slot " + at(_sValues) +
+               " is not the mover's rigExec:jointWeights input",
+           [](F &f) {
+               f.geometry->chains[0].revisions[0].jointWeightsSlot =
+                   int32_t(_sValues);
+           });
+    expect("a layout default naming another revision",
+           revision + ".joint_indices_slot: its default does not name this "
+                      "revision's layout",
+           [](F &f) {
+               _AddFailedPlugin(f);
+               f.values[_vSkinIndices].array = 1;
+           });
+    expect("a pool layout default beside a stored layout",
+           revision + ".joint_weights_slot: its default does not name this "
+                      "revision's layout",
+           [has](F &f) {
+               f.inputs[_sJointWeights] =
+                   fb::InputSlot(_pJointWeights, _vFloats, -1, -1,
+                                 InputTag::FloatArray, has);
+           });
+    expect("a stored-layout default with no stored layout",
+           revision + ".joint_indices_slot: its default names a layout this "
+                      "revision does not store",
+           [](F &f) {
+               f.geometry->chains[0].revisions[0].topologyResolved = false;
+           });
+
+    // Painted and oracle slots.
+    expect("a values slot of another tag",
+           weight + ".values_slot: slot " + at(_sIndices) +
+               " is not a float[] input",
+           [](F &f) {
+               f.geometry->weightObjects[0].valuesSlot = int32_t(_sIndices);
+           });
+    expect("an indices slot past the slots",
+           weight + ".indices_slot: 99 out of range (12)",
+           [](F &f) { f.geometry->weightObjects[0].indicesSlot = 99; });
+    expect("a values slot of another attribute",
+           weight + ".values_slot: slot " + at(_sJointWeights) +
+               " is not the object's rigExec:values input",
+           [](F &f) {
+               f.geometry->weightObjects[0].valuesSlot =
+                   int32_t(_sJointWeights);
+           });
+    expect("an indices slot of another attribute",
+           weight + ".indices_slot: slot " + at(_sJointIndices) +
+               " is not the object's rigExec:indices input",
+           [](F &f) {
+               f.geometry->weightObjects[0].indicesSlot =
+                   int32_t(_sJointIndices);
+           });
+    expect("an oracle curve slot of another tag",
+           weight + ".oracle_curve_slot: slot " + at(_sValues) +
+               " is not a float3[] input",
+           [](F &f) {
+               f.geometry->weightObjects[0].oracleCurveSlot =
+                   int32_t(_sValues);
+           });
+    expect("a painted default that is a layout",
+           weight + ".indices_slot: its default is not a pool array",
+           [has](F &f) {
+               f.inputs[_sIndices] = fb::InputSlot(
+                   _pIndices, _vSkinIndices, -1, -1, InputTag::IntArray, has);
+           });
+    std::printf("array inputs: the array file round-trips bit for bit; %d "
+                "array rule violations refused with their messages\n",
+                refused);
+    CHECK(refused == 55);
 }
 
 /// Offsets a test builds by hand in place of what Pack would write.
@@ -4410,6 +4978,7 @@ main()
     TestSparseTopology();
     TestRawTopology();
     TestChunkTables();
+    TestArrayInputs();
     TestBoundedOpen();
     TestPathOrder();
     TestDeepPaths();

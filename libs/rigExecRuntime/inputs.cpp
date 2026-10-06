@@ -219,6 +219,185 @@ _RrSlotDiffersFromDefault(const RrInputState &state, uint32_t slot)
                              state.values[state.file->inputs[slot].value()]);
 }
 
+// The bytes of one element of array tag \p tag.
+size_t
+_RrElementSize(RigExecWireInputTag tag)
+{
+    switch (tag) {
+    case RigExecWireInputTag::IntArray:
+        return sizeof(int32_t);
+    case RigExecWireInputTag::FloatArray:
+        return sizeof(float);
+    case RigExecWireInputTag::DoubleArray:
+        return sizeof(double);
+    case RigExecWireInputTag::Vec2fArray:
+        return sizeof(RrVec2f);
+    case RigExecWireInputTag::Vec3fArray:
+        return sizeof(RrVec3f);
+    default:
+        return 0;
+    }
+}
+
+// The elements of \p vector, a const std::vector of \p tag's element type.
+struct _RrElements {
+    const void *data = nullptr;
+    size_t count = 0;
+};
+
+template <class T>
+_RrElements
+_RrElementsOf(const void *vector)
+{
+    const std::vector<T> &v = *static_cast<const std::vector<T> *>(vector);
+    return {v.data(), v.size()};
+}
+
+_RrElements
+_RrVectorElements(RigExecWireInputTag tag, const void *vector)
+{
+    switch (tag) {
+    case RigExecWireInputTag::IntArray:
+        return _RrElementsOf<int32_t>(vector);
+    case RigExecWireInputTag::FloatArray:
+        return _RrElementsOf<float>(vector);
+    case RigExecWireInputTag::DoubleArray:
+        return _RrElementsOf<double>(vector);
+    case RigExecWireInputTag::Vec2fArray:
+        return _RrElementsOf<RrVec2f>(vector);
+    case RigExecWireInputTag::Vec3fArray:
+        return _RrElementsOf<RrVec3f>(vector);
+    default:
+        return {};
+    }
+}
+
+// \p buffer's vector of \p tag's element type.
+const void *
+_RrBufferVector(RigExecWireInputTag tag, const RrArrayBuffer &buffer)
+{
+    switch (tag) {
+    case RigExecWireInputTag::IntArray:
+        return &buffer.ints;
+    case RigExecWireInputTag::FloatArray:
+        return &buffer.floats;
+    case RigExecWireInputTag::DoubleArray:
+        return &buffer.doubles;
+    case RigExecWireInputTag::Vec2fArray:
+        return &buffer.vec2s;
+    case RigExecWireInputTag::Vec3fArray:
+        return &buffer.vec3s;
+    default:
+        return nullptr;
+    }
+}
+
+// \p out becomes a copy of the \p count elements at \p data, which may point
+// into \p out itself.
+template <class T>
+void
+_RrCopyInto(std::vector<T> *out, const void *data, size_t count)
+{
+    const T *first = static_cast<const T *>(data);
+    std::vector<T>(first, first + count).swap(*out);
+}
+
+// \p buffer's vector of \p tag's element type becomes a copy of the
+// \p count elements at \p data.
+void
+_RrAssign(RigExecWireInputTag tag, RrArrayBuffer *buffer, const void *data,
+          size_t count)
+{
+    switch (tag) {
+    case RigExecWireInputTag::IntArray:
+        _RrCopyInto(&buffer->ints, data, count);
+        break;
+    case RigExecWireInputTag::FloatArray:
+        _RrCopyInto(&buffer->floats, data, count);
+        break;
+    case RigExecWireInputTag::DoubleArray:
+        _RrCopyInto(&buffer->doubles, data, count);
+        break;
+    case RigExecWireInputTag::Vec2fArray:
+        _RrCopyInto(&buffer->vec2s, data, count);
+        break;
+    case RigExecWireInputTag::Vec3fArray:
+        _RrCopyInto(&buffer->vec3s, data, count);
+        break;
+    default:
+        break;
+    }
+}
+
+// Whether \p vector holds exactly \p count elements equal, byte for byte,
+// to the ones at \p data.
+bool
+_RrSameElements(RigExecWireInputTag tag, const void *vector, const void *data,
+                size_t count)
+{
+    const _RrElements held = _RrVectorElements(tag, vector);
+    return held.count == count &&
+           (count == 0 ||
+            std::memcmp(held.data, data, count * _RrElementSize(tag)) == 0);
+}
+
+// Array slot \p a's elements this run: its held set, else its default.
+const void *
+_RrArrayView(const RrArraySlot &a)
+{
+    return a.holdsSet ? _RrBufferVector(a.tag, a.held) : a.defaultVector;
+}
+
+// Pool entry \p id of \p tag's pool, as a const std::vector of its element
+// type: the file's own for int, float and double, the one Open converted
+// for float2 and float3.
+const void *
+_RrPoolVector(const RrInputState &state, RigExecWireInputTag tag, uint32_t id)
+{
+    const RigExecWireFile &file = *state.file;
+    switch (tag) {
+    case RigExecWireInputTag::IntArray:
+        return id < file.intArrays.size() ? &file.intArrays[id].v : nullptr;
+    case RigExecWireInputTag::FloatArray:
+        return id < file.floatArrays.size() ? &file.floatArrays[id].v
+                                            : nullptr;
+    case RigExecWireInputTag::DoubleArray:
+        return id < file.doubleArrays.size() ? &file.doubleArrays[id].v
+                                             : nullptr;
+    case RigExecWireInputTag::Vec2fArray: {
+        const auto found = state.vec2Pool.find(id);
+        return found == state.vec2Pool.end() ? nullptr : &found->second;
+    }
+    case RigExecWireInputTag::Vec3fArray: {
+        const auto found = state.vec3Pool.find(id);
+        return found == state.vec3Pool.end() ? nullptr : &found->second;
+    }
+    default:
+        return nullptr;
+    }
+}
+
+// A path value's array of \p tag, or null when it holds another.
+const void *
+_RrPathValueArray(const RrPathValue &value, RigExecWireInputTag tag)
+{
+    using Tag = RrPathValue::Tag;
+    switch (tag) {
+    case RigExecWireInputTag::IntArray:
+        return value.tag == Tag::IntArray ? &value.ints : nullptr;
+    case RigExecWireInputTag::FloatArray:
+        return value.tag == Tag::FloatArray ? &value.floats : nullptr;
+    case RigExecWireInputTag::DoubleArray:
+        return value.tag == Tag::DoubleArray ? &value.doubles : nullptr;
+    case RigExecWireInputTag::Vec2fArray:
+        return value.tag == Tag::Vec2fArray ? &value.vec2s : nullptr;
+    case RigExecWireInputTag::Vec3fArray:
+        return value.tag == Tag::Vec3fArray ? &value.vec3s : nullptr;
+    default:
+        return nullptr;
+    }
+}
+
 // Every read a weight object carries, in field order (RrWeightField).
 template <class Visit>
 void
@@ -359,6 +538,46 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     state.slotRan = state.slotCurrent;
     state.slotRanHasValue = state.slotHasValue;
     state.touchedFlag.assign(slots, 0);
+    state.slotChangedSinceRun.assign(slots, 0);
+    // The float2 and float3 pool entries an array value names, converted
+    // once; the other pools are read in place.
+    for (const fb::RigExecWireValue &value : file->values) {
+        if (value.arraySource != RigExecWireArraySource::Pool) {
+            continue;
+        }
+        const uint32_t id = value.array;
+        if (value.tag == RigExecWireInputTag::Vec2fArray &&
+            !state.vec2Pool.count(id)) {
+            std::vector<RrVec2f> &out = state.vec2Pool[id];
+            for (const RigExecWireVec2f &p : file->vec2fArrays[id].v) {
+                out.push_back(RrVec2f(p[0], p[1]));
+            }
+        }
+        if (value.tag == RigExecWireInputTag::Vec3fArray &&
+            !state.vec3Pool.count(id)) {
+            std::vector<RrVec3f> &out = state.vec3Pool[id];
+            for (const RigExecWireVec3f &p : file->vec3fArrays[id].v) {
+                out.push_back(RrVec3f(p[0], p[1], p[2]));
+            }
+        }
+    }
+    // The array slots, each on its default: a pool entry here, a stored
+    // layout's expansion once the geometry family built it.
+    state.arrayOf.assign(slots, -1);
+    for (size_t s = 0; s < slots; ++s) {
+        const RigExecWireInputSlot &slot = file->inputs[s];
+        if (!RigExecFormatIsArrayTag(slot.type())) {
+            continue;
+        }
+        RrArraySlot entry;
+        entry.tag = slot.type();
+        const fb::RigExecWireValue &value = file->values[slot.value()];
+        if (value.arraySource == RigExecWireArraySource::Pool) {
+            entry.defaultVector = _RrPoolVector(state, entry.tag, value.array);
+        }
+        state.arrayOf[s] = int32_t(state.arrays.size());
+        state.arrays.push_back(std::move(entry));
+    }
     // The token text the file holds, for SetInputToken: the empty token,
     // which the file writes as id 0, then each Token node's text, the
     // first node of a text winning.
@@ -877,10 +1096,16 @@ _RrPathValueOf(const RigExecWireFile &file, const RigExecWirePathValue &wire)
         out.floats = file.floatArrays[wire.array].v;
         break;
     case RigExecWirePathTag::Vec2fArray:
-        out.vec2s = file.vec2fArrays[wire.array].v;
+        out.vec2s.reserve(file.vec2fArrays[wire.array].v.size());
+        for (const RigExecWireVec2f &p : file.vec2fArrays[wire.array].v) {
+            out.vec2s.push_back(RrVec2f(p[0], p[1]));
+        }
         break;
     case RigExecWirePathTag::Vec3fArray:
-        out.vec3s = file.vec3fArrays[wire.array].v;
+        out.vec3s.reserve(file.vec3fArrays[wire.array].v.size());
+        for (const RigExecWireVec3f &p : file.vec3fArrays[wire.array].v) {
+            out.vec3s.push_back(RrVec3f(p[0], p[1], p[2]));
+        }
         break;
     case RigExecWirePathTag::DoubleArray:
         out.doubles = file.doubleArrays[wire.array].v;
@@ -925,12 +1150,18 @@ RrInputsBuildPathReads(RrProgram *program, std::string *error)
     table.reserve(rows.size());
     program->pathReadRows.clear();
     // The validator holds the rows sorted strictly by (path, rest), each a
-    // value or a read.
+    // value, a scalar read, or an array read (with its Default-time value
+    // at rest).
     for (const RigExecWirePathRead &row : rows) {
         RrPathRead entry;
         entry.path = row.path;
         entry.rest = row.rest;
-        if (row.read) {
+        if (row.read && RigExecFormatIsArrayTag(row.read->tag)) {
+            entry.read = &row;
+            if (row.value) {
+                entry.value = _RrPathValueOf(file, *row.value);
+            }
+        } else if (row.read) {
             RrPathValue probe;
             if (!RrPathValueFromRead(row, RrWireValue(), &probe)) {
                 return _RrFail(error, "a connection-following path read has "
@@ -968,8 +1199,50 @@ _RrTagName(RrInputTag tag)
         return "vec3d";
     case RrInputTag::Vec3f:
         return "vec3f";
+    case RrInputTag::IntArray:
+        return "int[]";
+    case RrInputTag::FloatArray:
+        return "float[]";
+    case RrInputTag::DoubleArray:
+        return "double[]";
+    case RrInputTag::Vec2fArray:
+        return "float2[]";
+    case RrInputTag::Vec3fArray:
+        return "float3[]";
     }
     return "unknown";
+}
+
+// Marks array slot \p slot for the next run, once; the first mark since
+// the last run keeps what that run read for the comparison.
+void
+_RrTouchArray(RrInputState &state, uint32_t slot, RrArraySlot &a)
+{
+    if (state.touchedFlag[slot]) {
+        return;
+    }
+    a.ranHeld = a.holdsSet;
+    if (a.holdsSet) {
+        a.ran = std::move(a.held);
+        a.held = RrArrayBuffer();
+    }
+    state.touchedFlag[slot] = 1;
+    state.touched.push_back(slot);
+}
+
+// Whether array slot \p slot holds other than its default.
+bool
+_RrArrayDiffersFromDefault(const RrInputState &state, uint32_t slot)
+{
+    const RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
+    return a.holdsSet ||
+           state.slotHasValue[slot] != state.slotDefaultHasValue[slot];
+}
+
+bool
+_RrIsArraySlot(const RrInputState &state, size_t slot)
+{
+    return slot < state.arrayOf.size() && state.arrayOf[slot] >= 0;
 }
 
 // Slot \p slot holds \p value (with \p has), the input cache follows, and
@@ -1003,6 +1276,10 @@ RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
     }
     const RigExecRuntimeInputInfo &info = state.inputInfo[index];
     const RrInputTag type = info.type;
+    if (RrInputTagIsArray(type)) {
+        return _RrFail(error, info.name + " is a " + _RrTagName(type) +
+                                  " input: set it with SetInputArray");
+    }
     // GetAttribute<float> narrows a double with static_cast<float>.
     const bool narrow =
         type == RrInputTag::Float && value.tag == RrInputTag::Double;
@@ -1078,9 +1355,227 @@ RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
             wire.vec3f[i] = value.vec3f[i];
         }
         break;
+    default:
+        break;
     }
     _RrStoreSlot(state, uint32_t(index), wire, true);
     return true;
+}
+
+bool
+RrInputsSetArray(RrProgram *program, size_t index,
+                 const RigExecRuntimeArray &value, bool authored,
+                 std::string *error)
+{
+    RrInputState &state = program->inputState;
+    if (index >= state.inputInfo.size()) {
+        return _RrFail(error, "no input at index " + std::to_string(index) +
+                                  "; the file lists " +
+                                  std::to_string(state.inputInfo.size()));
+    }
+    const RigExecRuntimeInputInfo &info = state.inputInfo[index];
+    if (!RrInputTagIsArray(info.type)) {
+        return _RrFail(error, info.name + " is a " + _RrTagName(info.type) +
+                                  " input, not an array");
+    }
+    if (value.tag != info.type) {
+        return _RrFail(error, info.name + " is a " + _RrTagName(info.type) +
+                                  " input, not a " + _RrTagName(value.tag));
+    }
+    if (value.count > 0 && !value.data) {
+        return _RrFail(error, info.name + ": no elements to copy");
+    }
+    if (authored && value.count != info.defaultCount) {
+        return _RrFail(error, info.name + " holds " +
+                                  std::to_string(info.defaultCount) +
+                                  " elements; an array set keeps that "
+                                  "count, not " +
+                                  std::to_string(value.count));
+    }
+    const uint32_t slot = uint32_t(index);
+    RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
+    const RigExecWireInputTag tag = a.tag;
+    // Compared bit for bit: a repeat only takes the set's kind.
+    if (state.slotHasValue[slot] &&
+        _RrSameElements(tag, _RrArrayView(a), value.data, value.count)) {
+        a.authored = authored;
+        return true;
+    }
+    _RrTouchArray(state, slot, a);
+    if (state.slotDefaultHasValue[slot] &&
+        _RrSameElements(tag, a.defaultVector, value.data, value.count)) {
+        a.holdsSet = false;
+        a.held = RrArrayBuffer();
+    } else {
+        _RrAssign(tag, &a.held, value.data, value.count);
+        a.holdsSet = true;
+    }
+    state.slotHasValue[slot] = 1;
+    a.authored = authored;
+    return true;
+}
+
+bool
+RrInputsGetArray(const RrProgram *program, size_t index,
+                 RigExecRuntimeArray *out)
+{
+    const RrInputState &state = program->inputState;
+    if (!out || index >= state.inputInfo.size() ||
+        !_RrIsArraySlot(state, index)) {
+        return false;
+    }
+    const RrArraySlot &a = state.arrays[size_t(state.arrayOf[index])];
+    const _RrElements elements = _RrVectorElements(a.tag, _RrArrayView(a));
+    out->tag = RrInputTag(uint8_t(a.tag));
+    out->data = elements.data;
+    out->count = elements.count;
+    return true;
+}
+
+void
+RrInputsBindArrayDefault(RrProgram *program, uint32_t slot,
+                         const void *vector)
+{
+    RrInputState &state = program->inputState;
+    if (_RrIsArraySlot(state, slot)) {
+        state.arrays[size_t(state.arrayOf[slot])].defaultVector = vector;
+    }
+}
+
+bool
+RrInputsFinishArrays(RrProgram *program, std::string *error)
+{
+    RrInputState &state = program->inputState;
+    for (size_t s = 0; s < state.arrayOf.size(); ++s) {
+        if (state.arrayOf[s] < 0) {
+            continue;
+        }
+        const RrArraySlot &a = state.arrays[size_t(state.arrayOf[s])];
+        if (!a.defaultVector) {
+            return _RrFail(error, "array input " +
+                                      program->TextOrEmpty(
+                                          state.file->inputs[s].name()) +
+                                      " has no default");
+        }
+        if (s < state.inputInfo.size()) {
+            state.inputInfo[s].defaultCount =
+                _RrVectorElements(a.tag, a.defaultVector).count;
+        }
+    }
+    return true;
+}
+
+const void *
+RrInputArrayValue(const RrProgram *program, uint32_t slot,
+                  RigExecWireInputTag tag)
+{
+    const RrInputState &state = program->inputState;
+    if (!_RrIsArraySlot(state, slot)) {
+        return nullptr;
+    }
+    const RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
+    return a.tag == tag ? _RrArrayView(a) : nullptr;
+}
+
+const void *
+RrInputArrayDefault(const RrProgram *program, uint32_t slot,
+                    RigExecWireInputTag tag)
+{
+    const RrInputState &state = program->inputState;
+    if (!_RrIsArraySlot(state, slot)) {
+        return nullptr;
+    }
+    const RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
+    return a.tag == tag ? a.defaultVector : nullptr;
+}
+
+bool
+RrInputArrayAuthored(const RrProgram *program, uint32_t slot)
+{
+    const RrInputState &state = program->inputState;
+    return _RrIsArraySlot(state, slot) &&
+           state.arrays[size_t(state.arrayOf[slot])].authored;
+}
+
+bool
+RrInputHasValue(const RrProgram *program, uint32_t slot)
+{
+    const RrInputState &state = program->inputState;
+    return slot < state.slotHasValue.size() && state.slotHasValue[slot] != 0;
+}
+
+bool
+RrInputDiffersFromDefault(const RrProgram *program, uint32_t slot)
+{
+    const RrInputState &state = program->inputState;
+    if (slot >= state.slotHasValue.size()) {
+        return false;
+    }
+    return _RrIsArraySlot(state, slot)
+               ? _RrArrayDiffersFromDefault(state, slot)
+               : _RrSlotDiffersFromDefault(state, slot);
+}
+
+bool
+RrInputChangedSinceRun(const RrProgram *program, uint32_t slot)
+{
+    const RrInputState &state = program->inputState;
+    return slot < state.slotChangedSinceRun.size() &&
+           state.slotChangedSinceRun[slot] != 0;
+}
+
+int32_t
+RrArrayReadSlot(const RrProgram *program, const RigExecWireInput &read)
+{
+    const RrInputState &state = program->inputState;
+    if (read.mode == RigExecWireReadMode::Raw) {
+        return !read.walk.empty() && state.slotHasValue[read.walk[0]]
+                   ? int32_t(read.walk[0])
+                   : -1;
+    }
+    for (size_t k = read.walk.size(); k-- > 0;) {
+        if (state.slotHasValue[read.walk[k]]) {
+            return int32_t(read.walk[k]);
+        }
+    }
+    return -1;
+}
+
+const void *
+RrArrayReadValue(const RrProgram *program, const RigExecWireInput &read,
+                 RigExecWireInputTag tag)
+{
+    const RrInputState &state = program->inputState;
+    if (read.tag != tag) {
+        return nullptr;
+    }
+    const int32_t slot = RrArrayReadSlot(program, read);
+    if (slot >= 0) {
+        return RrInputArrayValue(program, uint32_t(slot), tag);
+    }
+    return _RrPoolVector(state, tag, state.file->values[read.constant].array);
+}
+
+const void *
+RrPathArrayValue(const RrProgram *program, const RrPathRead &row,
+                 RigExecWireInputTag tag)
+{
+    const RigExecWireInput *read = row.read ? row.read->read.get() : nullptr;
+    if (!read || !RigExecFormatIsArrayTag(read->tag)) {
+        return _RrPathValueArray(row.value, tag);
+    }
+    if (read->tag != tag) {
+        return nullptr;
+    }
+    // A Default-time read takes an authored value only; a sampled one
+    // stands at its own time.
+    if (row.rest) {
+        const uint32_t head = read->walk[0];
+        return RrInputArrayAuthored(program, head)
+                   ? RrInputArrayValue(program, head, tag)
+                   : _RrPathValueArray(row.value, tag);
+    }
+    return RrArrayReadValue(program, *read, tag);
 }
 
 bool
@@ -1121,6 +1616,18 @@ RrInputsReset(RrProgram *program, size_t index)
     if (index >= state.inputInfo.size()) {
         return;
     }
+    if (_RrIsArraySlot(state, index)) {
+        const uint32_t slot = uint32_t(index);
+        RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
+        if (_RrArrayDiffersFromDefault(state, slot)) {
+            _RrTouchArray(state, slot, a);
+            a.holdsSet = false;
+            a.held = RrArrayBuffer();
+            state.slotHasValue[slot] = state.slotDefaultHasValue[slot];
+        }
+        a.authored = false;
+        return;
+    }
     const RigExecWireInputSlot &slot = state.file->inputs[index];
     _RrStoreSlot(state, uint32_t(index), state.values[slot.value()],
                  state.slotDefaultHasValue[index] != 0);
@@ -1135,6 +1642,11 @@ RrInputsClear(RrProgram *program, size_t index, std::string *error)
                                   "; the file lists " +
                                   std::to_string(state.inputInfo.size()));
     }
+    if (_RrIsArraySlot(state, index)) {
+        return _RrFail(error, state.inputInfo[index].name +
+                                  " is an array input; ResetInput restores "
+                                  "it");
+    }
     const RigExecWireInputSlot &slot = state.file->inputs[index];
     _RrStoreSlot(state, uint32_t(index), state.values[slot.value()], false);
     return true;
@@ -1147,12 +1659,41 @@ RrInputsApplyTouched(RrProgram *program)
     RrStore &store = program->store;
     const std::vector<RigExecWireInputSlot> &slots = state.file->inputs;
     const uint8_t animated = uint8_t(RigExecWireInputSlotFlags::Animated);
+    for (const uint32_t s : state.changedSlots) {
+        state.slotChangedSinceRun[s] = 0;
+    }
+    state.changedSlots.clear();
+    const auto record = [&state](uint32_t s) {
+        state.slotChangedSinceRun[s] = 1;
+        state.changedSlots.push_back(s);
+    };
     for (const uint32_t s : state.touched) {
         state.touchedFlag[s] = 0;
+        // An array changes when its elements or HasValue moved against
+        // what the last run read. Its readers run every Execute or compare
+        // by value, so it raises no override number and no time change.
+        if (_RrIsArraySlot(state, s)) {
+            RrArraySlot &a = state.arrays[size_t(state.arrayOf[s])];
+            const void *ran =
+                a.ranHeld ? _RrBufferVector(a.tag, a.ran) : a.defaultVector;
+            const _RrElements before = _RrVectorElements(a.tag, ran);
+            const bool changed =
+                state.slotHasValue[s] != state.slotRanHasValue[s] ||
+                !_RrSameElements(a.tag, _RrArrayView(a), before.data,
+                                 before.count);
+            state.slotRanHasValue[s] = state.slotHasValue[s];
+            a.ran = RrArrayBuffer();
+            a.ranHeld = false;
+            if (changed) {
+                record(s);
+            }
+            continue;
+        }
         // An animated input is what a time change moves: it never flags a
         // read, or setting it would dirty what only an edit dirties.
         if ((slots[s].flags() & animated) != 0) {
             store.animatedTouched = true;
+            record(s);
             continue;
         }
         // Compared with what the last run read, not with the default: a
@@ -1164,6 +1705,7 @@ RrInputsApplyTouched(RrProgram *program)
         if (changed) {
             state.slotRan[s] = state.slotCurrent[s];
             state.slotRanHasValue[s] = state.slotHasValue[s];
+            record(s);
         }
         for (uint32_t k = state.slotOverrideBegin[s];
              k < state.slotOverrideBegin[s + 1]; ++k) {

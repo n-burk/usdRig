@@ -962,6 +962,17 @@ _FormatInput(const rigExec::RrInputValue &value,
     case rigExec::RrInputTag::Vec3f:
         return "vec3f " + FormatF(value.vec3f[0]) + " " +
                FormatF(value.vec3f[1]) + " " + FormatF(value.vec3f[2]);
+    // An array input's value carries its tag alone.
+    case rigExec::RrInputTag::IntArray:
+        return "int[]";
+    case rigExec::RrInputTag::FloatArray:
+        return "float[]";
+    case rigExec::RrInputTag::DoubleArray:
+        return "double[]";
+    case rigExec::RrInputTag::Vec2fArray:
+        return "float2[]";
+    case rigExec::RrInputTag::Vec3fArray:
+        return "float3[]";
     }
     return "unknown";
 }
@@ -1029,6 +1040,9 @@ _SameSampled(const VtValue &read, const rigExec::RrInputValue &value,
             }
         }
         return true;
+    default:
+        // The sampler never samples an array input.
+        return false;
     }
     return false;
 }
@@ -1050,7 +1064,8 @@ struct _SampledCheck {
 // program classifies it; one that crosses a property chain reads the
 // chain's result and is left out. Every Animated input no program input
 // read that way (one a geometry assembly or the computed section reads) is
-// compared with its own attribute's typed value at \p time.
+// compared with its own attribute's typed value at \p time. Array inputs,
+// which the sampler does not sample, are left out.
 _SampledCheck
 _VerifySampledInputs(const rigExec::RigExecRigEvaluator &evaluator,
                      const rigExec::RigExecRuntimeReader &reader,
@@ -1100,7 +1115,8 @@ _VerifySampledInputs(const rigExec::RigExecRigEvaluator &evaluator,
             const std::string name = attribute.GetPath().GetString();
             size_t index = 0;
             if (!reader.FindInput(name, &index) ||
-                !reader.GetInputInfo(index).animated) {
+                !reader.GetInputInfo(index).animated ||
+                rigExec::RrInputTagIsArray(reader.GetInputInfo(index).type)) {
                 return;
             }
             visited[index] = 1;
@@ -1113,7 +1129,9 @@ _VerifySampledInputs(const rigExec::RigExecRigEvaluator &evaluator,
     for (size_t index = 0; index < visited.size(); ++index) {
         const rigExec::RigExecRuntimeInputInfo &info =
             reader.GetInputInfo(index);
-        if (visited[index] || !info.animated) {
+        // The sampler leaves array inputs at their defaults.
+        if (visited[index] || !info.animated ||
+            rigExec::RrInputTagIsArray(info.type)) {
             continue;
         }
         const UsdAttribute attribute =

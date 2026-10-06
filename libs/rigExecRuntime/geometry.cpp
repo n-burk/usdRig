@@ -4,10 +4,12 @@
 // driven by the movers in libs/rigExec/moverGraph.cpp and the kernels in
 // libs/rigExecMath). The scalars an assembler reads through their
 // connections, blend channel weights and default weights are read over the
-// input slots; the remaining stage reads replay from the bake's captured
-// path reads (RrStatic); epoch state (skin layouts, blend shapes, partitions)
-// replays from the wire geometry tables. Bitwise: same ops in the same
-// order, float stays float.
+// input slots, and so is every array the file lists as an input (path-read
+// array rows, blend sample points, chain bases, fixed skin layouts); the
+// remaining stage reads replay from the bake's captured path reads
+// (RrStatic); epoch state (skin layouts, blend shapes, partitions) replays
+// from the wire geometry tables. Bitwise: same ops in the same order, float
+// stays float.
 
 #include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
@@ -2869,6 +2871,11 @@ struct RrGeometryScratch {
         bool chunked = false;
         std::shared_ptr<const RrGeoSkinTopology> topology;
         bool topologyResolved = false;
+        // A fixed revision's layout as its layout slots describe it (the
+        // live SkinTopology op's handle): the Open layout while they stand
+        // at their defaults, else one built from them, kept until they
+        // change. The prologue adopts it.
+        std::shared_ptr<const RrGeoSkinTopology> layoutHandle;
         std::shared_ptr<const RrGeoSkinTopology> partitionTopology;
         std::vector<float> envelope;
         bool envelopeOk = false;
@@ -2886,6 +2893,11 @@ struct RrGeometryScratch {
         bool weightFieldPublished = false;
         std::vector<RrVec3f> lastAuxPoints;
         std::string resultStatus;
+        // Per entry of the wire revision's point_bindings, the chain
+        // version its assembly read: null where the binding answered
+        // nothing and the site reads its resolved input. Sized at Open,
+        // filled by each assembly before any site reads it.
+        std::vector<const std::vector<RrVec3f> *> phasedPoints;
         // The stage reads the assembly makes, resolved at Open. Per
         // mover-relative attribute, its property node (0: none); per
         // binding handle, its path. Per time (0 live, 1 rest) and read,
@@ -2908,9 +2920,11 @@ struct RrGeometryScratch {
         }
     };
     struct Chain {
-        // The base points the bake captured, converted at Open; haveBase
-        // is false when the file holds none.
-        std::vector<RrVec3f> base;
+        // The base points: the target's points input when the file lists
+        // one (baseSlot), else the ones the bake captured, converted at
+        // Open (staticBase). haveBase is false when the file holds none.
+        int32_t baseSlot = -1;
+        std::vector<RrVec3f> staticBase;
         bool haveBase = false;
         std::vector<RrVec3f> lastBase;
         bool haveResult = false;
@@ -3019,23 +3033,6 @@ RrGeoPathRead(const RrGeometryScratch *scratch, const RrGeoRead &read)
         return nullptr;
     }
     return &(*scratch->pathReads)[size_t(read.row)].value;
-}
-
-// The snapshot store's path text: a path node's text, or token text an
-// input set interned. \p context is the RrProgram.
-const std::string *
-RrGeoSnapshotText(uint32_t id, void *context)
-{
-    const RrProgram *program = static_cast<const RrProgram *>(context);
-    if (id < program->nodeText.size()) {
-        return &program->nodeText[id];
-    }
-    const RrInputState &state = program->inputState;
-    if (id < state.extraTokenBase ||
-        size_t(id - state.extraTokenBase) >= state.extraTokens.size()) {
-        return nullptr;
-    }
-    return &state.extraTokens[size_t(id - state.extraTokenBase)];
 }
 
 RrGeoWeightPacket
@@ -3159,76 +3156,67 @@ RrGeoReadToken(const RrProgram *program,
     return fallback;
 }
 
+// An array site's read of row \p at this run (RrPathArray: a static value,
+// or the elements its input slots answer at the site's time), copied into
+// \p out; empty when the row holds no array of the site's type.
+template <class T>
 void
-RrGeoReadVec3fArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
-                    const RrSnapshotValue *overlay, std::vector<RrVec3f> *out)
+RrGeoReadArray(const RrProgram *program, const RrGeometryScratch *scratch,
+               const RrGeoRead &at, std::vector<T> *out)
 {
-    if (overlay && overlay->tag == RrSnapshotValue::Tag::Points) {
-        *out = overlay->points;
-        return;
-    }
-    const RrPathValue *read = RrGeoPathRead(scratch, at);
-    if (read && read->tag == RrPathValue::Tag::Vec3fArray) {
-        out->clear();
-        out->reserve(read->vec3s.size());
-        for (const RigExecWireVec3f &p : read->vec3s) {
-            out->push_back(RrVec3f(p[0], p[1], p[2]));
-        }
+    const std::vector<T> *read =
+        at.row < 0
+            ? nullptr
+            : RrPathArray<T>(program, (*scratch->pathReads)[size_t(at.row)]);
+    if (read) {
+        out->assign(read->begin(), read->end());
         return;
     }
     out->clear();
 }
 
 void
-RrGeoReadIntArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
-                  std::vector<int> *out)
+RrGeoReadVec3fArray(const RrProgram *program,
+                    const RrGeometryScratch *scratch, const RrGeoRead &at,
+                    const std::vector<RrVec3f> *overlay,
+                    std::vector<RrVec3f> *out)
 {
-    const RrPathValue *read = RrGeoPathRead(scratch, at);
-    if (read && read->tag == RrPathValue::Tag::IntArray) {
-        out->assign(read->ints.begin(), read->ints.end());
+    if (overlay) {
+        *out = *overlay;
         return;
     }
-    out->clear();
+    RrGeoReadArray(program, scratch, at, out);
 }
 
 void
-RrGeoReadFloatArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
+RrGeoReadIntArray(const RrProgram *program, const RrGeometryScratch *scratch,
+                  const RrGeoRead &at, std::vector<int> *out)
+{
+    RrGeoReadArray(program, scratch, at, out);
+}
+
+void
+RrGeoReadFloatArray(const RrProgram *program,
+                    const RrGeometryScratch *scratch, const RrGeoRead &at,
                     std::vector<float> *out)
 {
-    const RrPathValue *read = RrGeoPathRead(scratch, at);
-    if (read && read->tag == RrPathValue::Tag::FloatArray) {
-        *out = read->floats;
-        return;
-    }
-    out->clear();
+    RrGeoReadArray(program, scratch, at, out);
 }
 
 void
-RrGeoReadVec2fArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
+RrGeoReadVec2fArray(const RrProgram *program,
+                    const RrGeometryScratch *scratch, const RrGeoRead &at,
                     std::vector<RrVec2f> *out)
 {
-    const RrPathValue *read = RrGeoPathRead(scratch, at);
-    if (read && read->tag == RrPathValue::Tag::Vec2fArray) {
-        out->clear();
-        out->reserve(read->vec2s.size());
-        for (const RigExecWireVec2f &p : read->vec2s) {
-            out->push_back(RrVec2f(p[0], p[1]));
-        }
-        return;
-    }
-    out->clear();
+    RrGeoReadArray(program, scratch, at, out);
 }
 
 void
-RrGeoReadDoubleArray(const RrGeometryScratch *scratch, const RrGeoRead &at,
+RrGeoReadDoubleArray(const RrProgram *program,
+                     const RrGeometryScratch *scratch, const RrGeoRead &at,
                      std::vector<double> *out)
 {
-    const RrPathValue *read = RrGeoPathRead(scratch, at);
-    if (read && read->tag == RrPathValue::Tag::DoubleArray) {
-        *out = read->doubles;
-        return;
-    }
-    out->clear();
+    RrGeoReadArray(program, scratch, at, out);
 }
 
 RrVec3i
@@ -3253,25 +3241,19 @@ RrGeoReadInt(const RrGeometryScratch *scratch, const RrGeoRead &at,
     return fallback;
 }
 
-// The revision's phase overlay: snapshot values for the binding's declared
-// phase inputs, looked up when the assembler reaches a phased site.
-const RrSnapshotValue *
-RrGeoPhaseOverlay(RrProgram *program,
-                  const RigExecWireRevisionBinding &binding, uint32_t path)
+// The revision's phase overlay (RigExecBakedOverlayPointReads): the points
+// the point binding of input \p path resolved to in this assembly's
+// prologue, or null -- no binding, or one that answered nothing -- for the
+// resolved input.
+const std::vector<RrVec3f> *
+RrGeoPhaseOverlay(const RrGeometryScratch::Revision &rev,
+                  const RigExecWireRevision &wire, uint32_t path)
 {
-    for (size_t i = 0; i < binding.phaseInputs.size() &&
-                       i < binding.phases.size();
-         ++i) {
-        if (binding.phaseInputs[i] != path) {
-            continue;
+    for (size_t i = 0;
+         i < wire.pointBindings.size() && i < rev.phasedPoints.size(); ++i) {
+        if (wire.pointBindings[i].inputPath == path) {
+            return rev.phasedPoints[i];
         }
-        const RigExecWireReadPhase &phase = binding.phases[i];
-        if (phase.kind == 0) {
-            return nullptr;  // base: the stage value, no overlay
-        }
-        return program->store.runSnapshots.Lookup(
-            path, phase.kind, phase.prim, binding.moverPath,
-            RrGeoSnapshotText, program);
     }
     return nullptr;
 }
@@ -3323,6 +3305,30 @@ RrGeoResolveReads(const std::vector<RrPathRead> &table,
 }
 
 }  // namespace
+
+bool
+RrGeometryPartitionStaleForTesting(const RrProgram *program,
+                                   const std::string &moverPath)
+{
+    const auto *scratch =
+        static_cast<const RrGeometryScratch *>(program->geo.get());
+    if (!scratch) {
+        return false;
+    }
+    const RigExecWireDomainGeometry &geo = *program->geometry;
+    for (size_t c = 0; c < geo.chains.size() && c < scratch->chains.size();
+         ++c) {
+        const auto &revisions = geo.chains[c].revisions;
+        for (size_t r = 0; r < revisions.size() &&
+                           r < scratch->chains[c].revisions.size();
+             ++r) {
+            if (program->TextOrEmpty(revisions[r].moverPath) == moverPath) {
+                return scratch->chains[c].revisions[r].partitionStale;
+            }
+        }
+    }
+    return false;
+}
 
 bool
 RrGeometrySizeScratch(RrProgram *program, std::string *error)
@@ -3435,6 +3441,7 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
                 rev.topology = topology;
                 scratch->epochTopologies[id] = rev.topology;
             }
+            rev.layoutHandle = scratch->epochTopologies[id];
             rev.partitionTopology =
                 wire.partitionSameAsTopology
                     ? topology
@@ -3445,6 +3452,7 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
             rev.partitionPointCount = size_t(wire.partitionPointCount);
             store.revisionPublish[id].weightFieldTarget =
                 wire.weightFieldTarget;
+            rev.phasedPoints.assign(wire.pointBindings.size(), nullptr);
             RrGeoResolveReads(program->pathReads, properties, wire, &rev);
         }
     }
@@ -3461,6 +3469,8 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
             }
             return false;
         }
+        scratch->derived[d].revision.phasedPoints.assign(
+            wire.pointBindings.size(), nullptr);
         RrGeoResolveReads(program->pathReads, properties, wire,
                           &scratch->derived[d].revision);
     }
@@ -3474,12 +3484,37 @@ RrGeometrySizeScratch(RrProgram *program, std::string *error)
             out->push_back(RrVec3f(p[0], p[1], p[2]));
         }
     };
+    // A chain with a base slot reads it every run instead.
     for (size_t c = 0; c < geo.chains.size(); ++c) {
         RrGeometryScratch::Chain &chain = scratch->chains[c];
         const std::vector<RigExecWireVec3f> *base = statics.ChainBase(c);
         chain.haveBase = base != nullptr;
-        if (base) {
-            convert(*base, &chain.base);
+        chain.baseSlot = geo.chains[c].baseSlot;
+        if (base && chain.baseSlot < 0) {
+            convert(*base, &chain.staticBase);
+        }
+    }
+    // A layout slot's default is its stored layout's expansion.
+    {
+        const RrInputState &inputs = program->inputState;
+        for (size_t s = 0; s < inputs.arrayOf.size(); ++s) {
+            if (inputs.arrayOf[s] < 0) {
+                continue;
+            }
+            const fb::RigExecWireValue &value =
+                file.values[file.inputs[s].value()];
+            if (value.arraySource == RigExecWireArraySource::Pool ||
+                value.array >= scratch->epochTopologies.size() ||
+                !scratch->epochTopologies[value.array]) {
+                continue;
+            }
+            const RrGeoSkinTopology &layout =
+                *scratch->epochTopologies[value.array];
+            RrInputsBindArrayDefault(
+                program, uint32_t(s),
+                value.arraySource == RigExecWireArraySource::SkinIndices
+                    ? static_cast<const void *>(&layout.indices)
+                    : static_cast<const void *>(&layout.weights));
         }
     }
     for (size_t d = 0; d < geo.derivedIndex.size(); ++d) {
@@ -3574,47 +3609,52 @@ RrGeoStepLabel(const RrProgram *program, size_t step)
                               : std::to_string(step));
 }
 
-// The points entering (r == 0: the base; else after r - 1) and after
-// revision r of a scratch chain. Ports of PointsBefore/PointsAfter.
+// The points of version \p version of \p chain (the program's PointsAt):
+// 0 is the authored base, v > 0 what revision v - 1's fuse left, which is
+// the output of the revision its currentSource names, or the base when it
+// names none. Null for a version past the chain's revisions, which Open's
+// validation refuses.
+const std::vector<RrVec3f> *
+RrGeoPointsVersion(const RrGeometryScratch::Chain &chain, size_t version)
+{
+    if (version > chain.revisions.size()) {
+        return nullptr;
+    }
+    const int source =
+        version == 0 ? -1 : chain.revisions[version - 1].currentSource;
+    if (source < 0) {
+        return &chain.lastBase;
+    }
+    if (size_t(source) >= chain.revisions.size()) {
+        return nullptr;
+    }
+    return &chain.revisions[size_t(source)].output;
+}
+
+// The points entering revision r of a scratch chain (version r) and after
+// it (version r + 1), as a pointer and a count; a null pointer for none.
 void
 RrGeoPointsBefore(const RrGeometryScratch::Chain &chain, size_t r,
                   const RrVec3f **points, size_t *count)
 {
-    static const RrVec3f *empty = nullptr;
     if (!points || !count) {
         return;
     }
-    const int source =
-        r == 0 ? -1 : chain.revisions[r - 1].currentSource;
-    if (source < 0) {
-        *points = chain.lastBase.empty() ? empty : chain.lastBase.data();
-        *count = chain.lastBase.size();
-        return;
-    }
-    const std::vector<RrVec3f> &out =
-        chain.revisions[size_t(source)].output;
-    *points = out.empty() ? empty : out.data();
-    *count = out.size();
+    const std::vector<RrVec3f> *version = RrGeoPointsVersion(chain, r);
+    *points = version && !version->empty() ? version->data() : nullptr;
+    *count = version ? version->size() : 0;
 }
 
 void
 RrGeoPointsAfter(const RrGeometryScratch::Chain &chain, size_t r,
                  const RrVec3f **points, size_t *count)
 {
-    static const RrVec3f *empty = nullptr;
     if (!points || !count) {
         return;
     }
-    const int source = chain.revisions[r].currentSource;
-    if (source < 0) {
-        *points = chain.lastBase.empty() ? empty : chain.lastBase.data();
-        *count = chain.lastBase.size();
-        return;
-    }
-    const std::vector<RrVec3f> &out =
-        chain.revisions[size_t(source)].output;
-    *points = out.empty() ? empty : out.data();
-    *count = out.size();
+    const std::vector<RrVec3f> *version = RrGeoPointsVersion(chain, r + 1);
+    *points = version && !version->empty() ? version->data() : nullptr;
+    *count = version ? version->size() : 0;
 }
 
 std::string
@@ -3634,42 +3674,59 @@ RrGeoPhaseName(const RrProgram *program, const RigExecWireReadPhase &phase)
     }
 }
 
-// The revision's overlay loop: every declared phase is looked up, a hit
-// overrides that input path for the assembly below, and a miss the author
-// did not mean as "preceding" is diagnosed. The overlay only ever affects
-// Vec3fArray and Matrix sites -- the snapshot store holds nothing else,
-// so every scalar read misses it by type exactly as the baked one does.
-void
-RrGeoResolveRevisionPhases(RrProgram *program,
-                           const RigExecWireRevision &wire,
-                           std::vector<std::string> *diagnostics)
+// The points \p binding resolves to this run (RigExecBakedResolvePoints):
+// its first candidate whose chain read a base -- the chain's published
+// points for a final read, else that version -- or null for the tail, when
+// the reader reads its resolved input. A candidate past the chains, which
+// Open's validation refuses, answers nothing.
+const std::vector<RrVec3f> *
+RrGeoResolvePoints(const RrGeometryScratch &scratch,
+                   const RigExecWirePointsBinding &binding)
 {
-    const RigExecWireRevisionBinding &binding = *wire.binding;
-    const size_t count =
-        std::min(binding.phaseInputs.size(), binding.phases.size());
-    for (size_t i = 0; i < count; ++i) {
-        const uint32_t path = binding.phaseInputs[i];
-        const RigExecWireReadPhase &phase = binding.phases[i];
-        if (phase.kind == 0) {
-            // Base: the stage value, which nothing is recorded for --
-            // and which the baked loop therefore reports as unresolvable.
-            if (diagnostics) {
-                diagnostics->push_back(
-                    "diag " + program->TextOrEmpty(wire.moverPath) +
-                    ": read phase 'base' for " +
-                    program->TextOrEmpty(path) +
-                    " resolved to nothing; read the authored base");
-            }
+    for (const RigExecWirePointVersion &candidate : binding.candidates) {
+        if (candidate.chain() < 0 ||
+            size_t(candidate.chain()) >= scratch.chains.size()) {
             continue;
         }
-        const RrSnapshotValue *recorded = program->store.runSnapshots.Lookup(
-            path, phase.kind, phase.prim, wire.moverPath,
-            RrGeoSnapshotText, program);
-        if (!recorded && phase.kind != 1 && diagnostics) {
+        const RrGeometryScratch::Chain &chain =
+            scratch.chains[size_t(candidate.chain())];
+        if (!chain.haveBase) {
+            continue;
+        }
+        if (binding.finalRead) {
+            return &chain.result;
+        }
+        if (candidate.version() < 0) {
+            return nullptr;
+        }
+        return RrGeoPointsVersion(chain, size_t(candidate.version()));
+    }
+    return nullptr;
+}
+
+// The revision's overlay prologue (RigExecBakedOverlayPointReads): each
+// point binding, in binding order, resolves to the chain version it reads
+// for the sites below, and a tail the author did not mean as "preceding"
+// is diagnosed. The overlay only ever serves Vec3fArray sites; every other
+// read misses it, as the baked one does.
+void
+RrGeoResolveRevisionPhases(RrProgram *program,
+                           const RrGeometryScratch &scratch,
+                           const RigExecWireRevision &wire,
+                           RrGeometryScratch::Revision *rev,
+                           std::vector<std::string> *diagnostics)
+{
+    for (size_t i = 0;
+         i < wire.pointBindings.size() && i < rev->phasedPoints.size(); ++i) {
+        const RigExecWirePointsBinding &binding = wire.pointBindings[i];
+        const std::vector<RrVec3f> *answer =
+            RrGeoResolvePoints(scratch, binding);
+        rev->phasedPoints[i] = answer;
+        if (!answer && binding.diagnoseMiss && diagnostics) {
             diagnostics->push_back(
                 "diag " + program->TextOrEmpty(wire.moverPath) +
-                ": read phase '" + RrGeoPhaseName(program, phase) + "' for " +
-                program->TextOrEmpty(path) +
+                ": read phase '" + RrGeoPhaseName(program, binding.phase) +
+                "' for " + program->TextOrEmpty(binding.inputPath) +
                 " resolved to nothing; read the authored base");
         }
     }
@@ -3742,10 +3799,9 @@ RrGeoReadBindingVec3fArray(const RrGeoAssembleInputs &in,
     // Rest reads pass resolved=nullptr on the baked path: the phase
     // overlay only ever serves a live (time) read. A Default read
     // always replays the authored value.
-    const RrSnapshotValue *overlay =
-        at.rest ? nullptr
-                : RrGeoPhaseOverlay(in.program, *in.wire->binding, at.path);
-    RrGeoReadVec3fArray(in.scratch, at, overlay, out);
+    const std::vector<RrVec3f> *overlay =
+        at.rest ? nullptr : RrGeoPhaseOverlay(*in.rev, *in.wire, at.path);
+    RrGeoReadVec3fArray(in.program, in.scratch, at, overlay, out);
 }
 
 // Mover-relative attribute \p attr and binding handle \p which of the
@@ -3765,10 +3821,12 @@ RrGeoBindingRead(const RrGeoAssembleInputs &in, RrGeoBinding which,
 }
 
 // The blend channels: each channel's weight and each sample's activation
-// read over the slots, and the dense points the baked gather consumed, as
-// Open converted them, in binding order, each channel's samples
-// stable-sorted by activation. Sparse samples take the layout Open built
-// out of the sample's fields.
+// read over the slots, in binding order, each channel's samples
+// stable-sorted by activation. A dense sample with a point binding reads
+// the chain version it resolves to this run; one with no binding, or whose
+// binding answers nothing, reads its points read over the slots, or else
+// its resolved points as Open converted them. Sparse samples take the
+// layout Open built out of the sample's fields.
 bool
 RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
                          const std::vector<RrVec3f> &base,
@@ -3801,10 +3859,26 @@ RrGeoAssembleBlendDeltas(const RrGeoAssembleInputs &in,
             RrGeoBlendSampleData sample;
             sample.activation = RrReadBlendActivation(
                 in.program, in.chain, in.revision, in.derived, c, s);
-            sample.points = points && c < points->size() &&
-                                    s < (*points)[c].size()
-                                ? (*points)[c][s]
-                                : &in.scratch->noPoints;
+            const std::vector<RrVec3f> *phased =
+                boundSample.pointBinding
+                    ? RrGeoResolvePoints(*in.scratch,
+                                         *boundSample.pointBinding)
+                    : nullptr;
+            const std::vector<RrVec3f> *read =
+                !phased && boundSample.pointsRead
+                    ? RrArrayRead<RrVec3f>(in.program,
+                                           *boundSample.pointsRead)
+                    : nullptr;
+            if (phased) {
+                sample.points = phased;
+            } else if (boundSample.pointsRead) {
+                sample.points = read ? read : &in.scratch->noPoints;
+            } else {
+                sample.points = points && c < points->size() &&
+                                        s < (*points)[c].size()
+                                    ? (*points)[c][s]
+                                    : &in.scratch->noPoints;
+            }
             if (boundSample.blendShape && layouts && c < layouts->size() &&
                 s < (*layouts)[c].size()) {
                 sample.layout = (*layouts)[c][s];
@@ -3923,9 +3997,11 @@ RrGeoAssembleSkin(const RrGeoAssembleInputs &in,
         return;
     }
     // The cache refused this mover: the layout reads per frame.
-    RrGeoReadIntArray(in.scratch, RrGeoAttrRead(in, RrGeoAttrJointIndices),
+    RrGeoReadIntArray(in.program, in.scratch,
+                      RrGeoAttrRead(in, RrGeoAttrJointIndices),
                       &params->skinIndices);
-    RrGeoReadFloatArray(in.scratch, RrGeoAttrRead(in, RrGeoAttrJointWeights),
+    RrGeoReadFloatArray(in.program, in.scratch,
+                        RrGeoAttrRead(in, RrGeoAttrJointWeights),
                         &params->skinWeights);
     params->skinElementSize = RrGeoReadInt(
         in.scratch, RrGeoAttrRead(in, RrGeoAttrElementSize), 1);
@@ -4033,10 +4109,10 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
         }
         const size_t bs = table.size() - t - s - bt;
         std::vector<float> weights, baseWeights;
-        RrGeoReadFloatArray(in.scratch,
+        RrGeoReadFloatArray(in.program, in.scratch,
                             RrGeoAttrRead(in, RrGeoAttrDriverWeights),
                             &weights);
-        RrGeoReadFloatArray(in.scratch,
+        RrGeoReadFloatArray(in.program, in.scratch,
                             RrGeoAttrRead(in, RrGeoAttrDriverBaseWeights),
                             &baseWeights);
         const auto pick = [](size_t count, size_t j) {
@@ -4144,7 +4220,7 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
     }
     {
         std::vector<int> order;
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindDriverCurveOrder,
                                            true),
                           &order);
@@ -4152,14 +4228,14 @@ RrGeoAssembleWire(const RrGeoAssembleInputs &in,
             params->curveOrder = order[0];
         }
     }
-    RrGeoReadDoubleArray(in.scratch,
+    RrGeoReadDoubleArray(in.program, in.scratch,
                          RrGeoBindingRead(in, RrGeoBindDriverCurveKnots, true),
                          &params->curveKnots);
     params->dropoffDistance = double(RrGeoReadFloat(
         in.program, in.scratch, RrGeoAttrRead(in, RrGeoAttrDropoffDistance),
         0.0f));
     if (in.wire->binding->bindCoords != 0) {
-        RrGeoReadVec2fArray(in.scratch,
+        RrGeoReadVec2fArray(in.program, in.scratch,
                             RrGeoBindingRead(in, RrGeoBindBindCoords),
                             &params->wireBindCoords);
     }
@@ -4187,7 +4263,7 @@ RrGeoAssembleRibbon(const RrGeoAssembleInputs &in, bool emitGuides,
     }
     params->frames = *frames;
     if (!emitGuides) {
-        RrGeoReadVec2fArray(in.scratch,
+        RrGeoReadVec2fArray(in.program, in.scratch,
                             RrGeoBindingRead(in, RrGeoBindBindCoords),
                             &params->bindCoords);
         params->valid = !params->bindCoords.empty();
@@ -4202,14 +4278,15 @@ RrGeoAssembleDerived(const RrGeoAssembleInputs &in,
                      RrGeoMoverParameters *params)
 {
     params->auxPoints = base;
-    RrGeoReadIntArray(in.scratch,
+    RrGeoReadIntArray(in.program, in.scratch,
                       RrGeoBindingRead(in, RrGeoBindTopologyCounts),
                       &params->topologyCounts);
-    RrGeoReadIntArray(in.scratch,
+    RrGeoReadIntArray(in.program, in.scratch,
                       RrGeoBindingRead(in, RrGeoBindTopologyIndices),
                       &params->topologyIndices);
     if (recomputeExtent) {
-        RrGeoReadFloatArray(in.scratch, RrGeoBindingRead(in, RrGeoBindWidths),
+        RrGeoReadFloatArray(in.program, in.scratch,
+                            RrGeoBindingRead(in, RrGeoBindWidths),
                             &params->widths);
     }
     params->valid =
@@ -4218,9 +4295,10 @@ RrGeoAssembleDerived(const RrGeoAssembleInputs &in,
 }
 
 // A plugin mover's packet: its playback state, the frame bytes of the
-// bake's run (the entry's v2_frame), and its phased point inputs out of
-// this run's snapshots. No kernel here makes it a valid no-op; no frame
-// bytes -- the bake's assembly failed -- leave it invalid.
+// bake's run (the entry's v2_frame), and its phased point inputs: per
+// phase input, whether its point binding answered this run and the points
+// it answered with. No kernel here makes it a valid no-op; no frame bytes
+// -- the bake's assembly failed -- leave it invalid.
 void
 RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
                       RrGeoMoverParameters *params)
@@ -4247,14 +4325,12 @@ RrGeoAssembleExternal(const RrGeoAssembleInputs &in,
     for (size_t i = 0;
          i < binding.phaseInputs.size() && i < binding.phases.size(); ++i) {
         const uint32_t path = binding.phaseInputs[i];
-        const RrSnapshotValue *overlay =
-            RrGeoPhaseOverlay(in.program, binding, path);
-        const bool have =
-            overlay && overlay->tag == RrSnapshotValue::Tag::Points;
+        const std::vector<RrVec3f> *answer =
+            RrGeoPhaseOverlay(*in.rev, *in.wire, path);
         params->externalPhasedPaths.push_back(program.TextOrEmpty(path));
-        params->externalPhasedHave.push_back(have ? 1 : 0);
-        params->externalPhased.push_back(have ? overlay->points
-                                              : std::vector<RrVec3f>());
+        params->externalPhasedHave.push_back(answer ? 1 : 0);
+        params->externalPhased.push_back(answer ? *answer
+                                                : std::vector<RrVec3f>());
     }
     params->valid = true;
 }
@@ -4266,7 +4342,8 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
 {
     RrGeoMoverParameters params;
     const int op = int(in.wire->op);
-    RrGeoResolveRevisionPhases(in.program, *in.wire, in.diagnostics);
+    RrGeoResolveRevisionPhases(in.program, *in.scratch, *in.wire, in.rev,
+                               in.diagnostics);
     if (op == RrGeoOpMatrix) {
         RrGeoAssembleMatrix(in, &params);
         return params;
@@ -4307,10 +4384,10 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         break;
     case RrGeoOpSmooth:
         params.strength = 1.0f;
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyCounts),
                           &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyIndices),
                           &params.topologyIndices);
         params.valid = !params.topologyCounts.empty();
@@ -4322,10 +4399,10 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         RrGeoReadBindingVec3fArray(in, attr(RrGeoAttrRestPoints, true),
                                  &params.restPoints);
         if (params.restPoints.empty()) params.restPoints = base;
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyCounts),
                           &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyIndices),
                           &params.topologyIndices);
         params.mushIterations = RrGeoReadInt(in.scratch,
@@ -4348,10 +4425,10 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         RrGeoReadBindingVec3fArray(in, attr(RrGeoAttrRestPoints, true),
                                  &params.restPoints);
         if (params.restPoints.empty()) params.restPoints = base;
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyCounts),
                           &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyIndices),
                           &params.topologyIndices);
         auto &settings = params.wrinkleSettings;
@@ -4381,8 +4458,9 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
             attr(RrGeoAttrMaxDisplacement), 0.2f);
         settings.pinBorders = RrGeoReadBool(in.scratch,
             attr(RrGeoAttrPinBorders), true);
-        RrGeoReadIntArray(in.scratch, attr(RrGeoAttrPinPoints, true),
-                         &settings.pinPoints);
+        RrGeoReadIntArray(in.program, in.scratch,
+                          attr(RrGeoAttrPinPoints, true),
+                          &settings.pinPoints);
         settings.tangentPlaneCollisions = RrGeoReadBool(in.scratch,
             attr(RrGeoAttrTangentPlaneCollisions), true);
         settings.tangentPlaneInset = RrGeoReadFloat(in.program, in.scratch,
@@ -4402,10 +4480,10 @@ RrGeoAssembleRevision(const RrGeoAssembleInputs &in)
         RrGeoReadBindingVec3fArray(
             in, RrGeoBindingRead(in, RrGeoBindSurfacePoints),
             &params.auxPoints);
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyCounts),
                           &params.topologyCounts);
-        RrGeoReadIntArray(in.scratch,
+        RrGeoReadIntArray(in.program, in.scratch,
                           RrGeoBindingRead(in, RrGeoBindTopologyIndices),
                           &params.topologyIndices);
         params.valid =
@@ -4496,14 +4574,39 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
         rev->transform = store.deltaValues[size_t(wire.constraintDelta)];
         rev->haveTransform = true;
     }
+    // An AtPrim phase reads the provider as one named writer left it, out of
+    // the frame records bound at bake time, after the delta as the baked
+    // fold orders them. The first record of a list whose FrameMatrix step
+    // found it valid answers (the newest the walk made under the phase's
+    // prim); a list with none valid leaves the dense-table matrix, silently.
+    // `found` says whether one answered.
+    const auto phased = [&](const std::vector<uint32_t> &records,
+                            RrMat4d *matrix, bool *found) {
+        *found = false;
+        for (const uint32_t record : records) {
+            if (size_t(record) >= store.frameMatrixValid.size() ||
+                size_t(record) >= store.frameMatrix.size()) {
+                if (error) {
+                    *error = "a frame record list names no frame record";
+                }
+                return false;
+            }
+            if (store.frameMatrixValid[size_t(record)]) {
+                *matrix = store.frameMatrix[size_t(record)];
+                *found = true;
+                return true;
+            }
+        }
+        return true;
+    };
     const bool atPrim = wire.binding->transformPhase.kind == 3;
     if (atPrim) {
-        const RrSnapshotValue *recorded = store.runSnapshots.Lookup(
-            wire.binding->transform, wire.binding->transformPhase.kind,
-            wire.binding->transformPhase.prim, wire.moverPath,
-            RrGeoSnapshotText, program);
-        if (recorded && recorded->tag == RrSnapshotValue::Tag::Matrix) {
-            rev->transform = recorded->matrix;
+        bool found = false;
+        if (!phased(wire.transformRecords, &rev->transform, &found)) {
+            return false;
+        }
+        if (found) {
+            // Set rather than left alone, as the baked fold does.
             rev->haveTransform = true;
         }
     }
@@ -4566,15 +4669,13 @@ RrGeoFoldInfluences(RrProgram *program, RrGeometryScratch *scratch,
             return false;
         }
         RrMat4d entry = *matrix;
-        if (atPrim && k < wire.binding->influences.size()) {
-            const RrSnapshotValue *recorded = store.runSnapshots.Lookup(
-                wire.binding->influences[k],
-                wire.binding->transformPhase.kind,
-                wire.binding->transformPhase.prim, wire.moverPath,
-                RrGeoSnapshotText, program);
-            if (recorded &&
-                recorded->tag == RrSnapshotValue::Tag::Matrix) {
-                entry = recorded->matrix;
+        // Per entry, the entry's own provider's records: a matrix mover's
+        // reference providers. The Matrix op does not read them, but its
+        // packet carries this table into the executed decision.
+        if (atPrim && k < wire.influenceRecords.size()) {
+            bool found = false;
+            if (!phased(wire.influenceRecords[k].v, &entry, &found)) {
+                return false;
             }
         }
         if (rev->influences[k] != entry) {
@@ -4755,138 +4856,24 @@ RrGeoFuseWholeRevision(const RrGeometryScratch::Chain &chain,
                           count, true, useSimd);
 }
 
-// The partition re-cut, for the frame an epoch-fixed layout moved under.
-// A port of RigExecBakedPartitionRevision.
-
-bool
-RrGeoChunkIsSubset(const std::vector<int32_t> &a,
-                   const std::vector<int32_t> &b)
-{
-    size_t j = 0;
-    for (const int32_t value : a) {
-        while (j < b.size() && b[j] < value) {
-            ++j;
-        }
-        if (j >= b.size() || b[j] != value) {
-            return false;
-        }
-    }
-    return true;
-}
-
+// A port of RigExecBakedAdoptPartition. The chunk keys stay Build's,
+// because each chunk step's reads were declared from its key: a layout
+// is adopted as the partition only when it holds the indices and element
+// size the keys were cut from (\p build, the file's partition layout).
+// Otherwise the partition stays, and partitionStale runs the revision
+// whole until a layout with Build's arrays returns.
 void
-RrGeoPartitionRevision(const RrGeoSettings &settings,
-                       RrGeometryScratch::Revision *rev, size_t influences,
-                       const int *indices, size_t indexCount,
-                       int elementSize, int chunkCount)
+RrGeoAdoptPartition(RrGeometryScratch::Revision *rev,
+                    const RrGeoSkinTopology *build)
 {
-    const size_t slots = elementSize < 1 ? 0 : size_t(elementSize);
-    const size_t points = slots ? indexCount / slots : 0;
-    rev->partitionElementSize = elementSize;
-    rev->partitionIndexCount = indexCount;
-    rev->partitionPointCount = points;
-
-    size_t target = settings.chunkVertexTarget;
-    size_t count = std::max<size_t>(1, (points + target - 1) / target);
-    if (count > settings.chunkCap) {
-        count = settings.chunkCap;
-        target = std::max<size_t>(1, (points + count - 1) / count);
-        count = std::max<size_t>(1, (points + target - 1) / target);
+    if (!rev->chunked || !rev->topology ||
+        rev->topology == rev->partitionTopology) {
+        return;
     }
-
-    std::vector<RrGeometryScratch::Chunk> chunks;
-    chunks.reserve(count);
-    std::vector<char> claimed(influences, 0);
-    for (size_t c = 0; c < count; ++c) {
-        RrGeometryScratch::Chunk chunk;
-        chunk.begin = int(std::min(points, c * target));
-        chunk.end = int(c + 1 == count
-                            ? points
-                            : std::min(points, (c + 1) * target));
-        for (size_t point = size_t(chunk.begin);
-             point < size_t(chunk.end); ++point) {
-            for (size_t slot = 0; slot < slots; ++slot) {
-                const int index = indices[point * slots + slot];
-                if (index < 0 || size_t(index) >= influences ||
-                    claimed[size_t(index)]) {
-                    continue;
-                }
-                claimed[size_t(index)] = 1;
-                chunk.key.push_back(index);
-            }
-        }
-        std::sort(chunk.key.begin(), chunk.key.end());
-        for (const int32_t index : chunk.key) {
-            claimed[size_t(index)] = 0;
-        }
-        chunks.push_back(std::move(chunk));
+    if (build && rev->topology->elementSize == build->elementSize &&
+        rev->topology->indices == build->indices) {
+        rev->partitionTopology = rev->topology;
     }
-
-    for (size_t i = 0; i + 1 < chunks.size();) {
-        const size_t merged = size_t(chunks[i + 1].end - chunks[i].begin);
-        const bool contains =
-            RrGeoChunkIsSubset(chunks[i].key, chunks[i + 1].key);
-        const bool contained =
-            RrGeoChunkIsSubset(chunks[i + 1].key, chunks[i].key);
-        if (merged <= target && (contains || contained)) {
-            chunks[i].end = chunks[i + 1].end;
-            if (contains) {
-                chunks[i].key = chunks[i + 1].key;
-            }
-            chunks.erase(chunks.begin() + long(i) + 1);
-        } else {
-            ++i;
-        }
-    }
-
-    if (chunkCount > 0) {
-        while (chunks.size() > size_t(chunkCount)) {
-            size_t best = 0;
-            for (size_t i = 1; i + 1 < chunks.size(); ++i) {
-                if (chunks[i + 1].end - chunks[i].begin <
-                    chunks[best + 1].end - chunks[best].begin) {
-                    best = i;
-                }
-            }
-            std::vector<int32_t> key;
-            std::set_union(chunks[best].key.begin(),
-                           chunks[best].key.end(),
-                           chunks[best + 1].key.begin(),
-                           chunks[best + 1].key.end(),
-                           std::back_inserter(key));
-            chunks[best].key = std::move(key);
-            chunks[best].end = chunks[best + 1].end;
-            chunks.erase(chunks.begin() + long(best) + 1);
-        }
-        while (chunks.size() < size_t(chunkCount)) {
-            RrGeometryScratch::Chunk chunk;
-            chunk.begin = int(points);
-            chunk.end = int(points);
-            chunks.push_back(std::move(chunk));
-        }
-    }
-
-    const bool keyed = chunks.size() > 1;
-    const RrMat4d identity = RrGeoIdentity();
-    for (RrGeometryScratch::Chunk &chunk : chunks) {
-        chunk.ok = false;
-        chunk.keyChanged = false;
-        chunk.palette.clear();
-        if (!keyed) {
-            chunk.key.clear();
-            chunk.transforms.clear();
-            chunk.rows.clear();
-            continue;
-        }
-        chunk.transforms.assign(influences, identity);
-        chunk.rows.assign(influences * size_t(RrGeoSkinRowStride), 0.0f);
-        for (size_t t = 0; t < influences; ++t) {
-            RrGeoNarrowSkinRows(chunk.transforms[t],
-                                &chunk.rows[t * size_t(RrGeoSkinRowStride)]);
-        }
-    }
-    rev->chunks = std::move(chunks);
-    rev->chunked = keyed;
 }
 
 void
@@ -4901,7 +4888,128 @@ RrGeoResetRevision(RrGeometryScratch::Revision *rev)
     rev->lastStatus = RrGeoMoverStatus();
 }
 
+// \p chain's base points this run: its base slot's elements, else the ones
+// the bake captured.
+const std::vector<RrVec3f> &
+RrGeoChainBase(const RrProgram *program,
+               const RrGeometryScratch::Chain &chain)
+{
+    if (chain.baseSlot >= 0) {
+        if (const std::vector<RrVec3f> *held =
+                RrInputArray<RrVec3f>(program, uint32_t(chain.baseSlot))) {
+            return *held;
+        }
+    }
+    return chain.staticBase;
+}
+
+// A port of RigExecBakedRunLayoutOp over a fixed revision's layout slots
+// (\p wire's jointIndices and jointWeights, and the slots its elementSize
+// read walks): once any of them changed, the Open layout when all stand at
+// their defaults, else RigExecBuildSkinTopology's layout of their values,
+// validated by the evaluator's rule. Either one equal by value to the
+// layout standing keeps that one, as the op keeps its candidate and runs
+// only for a value change: the slots change by their bits, so a -0 weight
+// for a +0 one changes them, never the layout. A revision without layout
+// slots keeps the Open layout.
+void
+RrGeoRunLayoutOp(const RrProgram *program, const RrGeometryScratch &scratch,
+                 const RigExecWireRevision &wire, size_t id,
+                 RrGeometryScratch::Revision *rev)
+{
+    const std::shared_ptr<const RrGeoSkinTopology> &open =
+        scratch.epochTopologies[id];
+    if (!open || wire.jointIndicesSlot < 0 || wire.jointWeightsSlot < 0) {
+        rev->layoutHandle = open;
+        return;
+    }
+    const uint32_t indicesSlot = uint32_t(wire.jointIndicesSlot);
+    const uint32_t weightsSlot = uint32_t(wire.jointWeightsSlot);
+    const int32_t sizeRow = rev->attrRead[0][size_t(RrGeoAttrElementSize)];
+    const RrPathRead *size =
+        sizeRow < 0 ? nullptr : &(*scratch.pathReads)[size_t(sizeRow)];
+    const std::vector<uint32_t> *sizeWalk =
+        size && size->read && size->read->read ? &size->read->read->walk
+                                               : nullptr;
+    bool changed = RrInputChangedSinceRun(program, indicesSlot) ||
+                   RrInputChangedSinceRun(program, weightsSlot);
+    bool atDefault = !RrInputDiffersFromDefault(program, indicesSlot) &&
+                     !RrInputDiffersFromDefault(program, weightsSlot);
+    if (sizeWalk) {
+        for (const uint32_t slot : *sizeWalk) {
+            changed = changed || RrInputChangedSinceRun(program, slot);
+            atDefault =
+                atDefault && !RrInputDiffersFromDefault(program, slot);
+        }
+    }
+    if (!changed) {
+        return;
+    }
+    if (atDefault) {
+        if (!rev->layoutHandle || !(*rev->layoutHandle == *open)) {
+            rev->layoutHandle = open;
+        }
+        return;
+    }
+    const std::vector<int32_t> *indices =
+        RrInputArray<int32_t>(program, indicesSlot);
+    const std::vector<float> *weights =
+        RrInputArray<float>(program, weightsSlot);
+    if (!indices || !weights) {
+        rev->layoutHandle = open;
+        return;
+    }
+    // The leaf's fallback, 1, when the site reads no element size.
+    const int elementSize =
+        size && size->value.tag == RrPathValue::Tag::Int ? size->value.i32
+                                                         : 1;
+    auto built = std::make_shared<RrGeoSkinTopology>();
+    built->indices.assign(indices->begin(), indices->end());
+    built->weights.assign(weights->begin(), weights->end());
+    built->elementSize = elementSize;
+    built->influenceCount = wire.influenceSlots.size();
+    if (elementSize >= 1 && built->indices.size() == built->weights.size() &&
+        built->indices.size() % size_t(elementSize) == 0) {
+        built->pointCount = built->indices.size() / size_t(elementSize);
+    }
+    built->validated = RigExecFormatSkinLayoutValidates(
+        built->indices.data(), built->indices.size(), built->weights.data(),
+        built->weights.size(), elementSize, built->influenceCount);
+    if (rev->layoutHandle && *rev->layoutHandle == *built) {
+        return;
+    }
+    rev->layoutHandle = std::move(built);
+}
+
 }  // namespace
+
+bool
+RrGeometrySkinLayoutIsOpenForTesting(const RrProgram *program,
+                                     const std::string &moverPath)
+{
+    const auto *scratch =
+        static_cast<const RrGeometryScratch *>(program->geo.get());
+    if (!scratch) {
+        return false;
+    }
+    const RigExecWireDomainGeometry &geo = *program->geometry;
+    for (size_t c = 0; c < geo.chains.size() && c < scratch->chains.size();
+         ++c) {
+        const auto &revisions = geo.chains[c].revisions;
+        for (size_t r = 0; r < revisions.size() &&
+                           r < scratch->chains[c].revisions.size();
+             ++r) {
+            if (program->TextOrEmpty(revisions[r].moverPath) != moverPath) {
+                continue;
+            }
+            const size_t id = size_t(geo.chainRevisionBegin[c] + int(r));
+            const auto &topology = scratch->chains[c].revisions[r].topology;
+            return topology && id < scratch->epochTopologies.size() &&
+                   topology == scratch->epochTopologies[id];
+        }
+    }
+    return false;
+}
 
 bool
 RrPrologueGeometry(RrProgram *program,
@@ -4936,14 +5044,16 @@ RrPrologueGeometry(RrProgram *program,
                             &entry.value);
     }
 
-    // Base points are the ones Open converted. lastBase only ever takes
-    // a copy of them, so a lastBase equal to them already holds their bits
-    // and is copied again only when dirty.
+    // Base points are the base slot's elements this run, or the ones Open
+    // converted. lastBase only ever takes a copy of them, so a lastBase
+    // equal to them already holds their bits and is copied again only when
+    // dirty; a set of another count resets the chain as live's does.
     for (size_t c = 0; c < geo.chains.size(); ++c) {
         const RigExecWireChain &wireChain = geo.chains[c];
         RrGeometryScratch::Chain &chain = scratch->chains[c];
         const bool haveBase = chain.haveBase;
-        const std::vector<RrVec3f> &basePoints = chain.base;
+        const std::vector<RrVec3f> &basePoints =
+            RrGeoChainBase(program, chain);
         if (c < store.chainHaveBase.size()) {
             store.chainHaveBase[c] = haveBase ? 1 : 0;
         }
@@ -4991,31 +5101,17 @@ RrPrologueGeometry(RrProgram *program,
             RrGeometryScratch::Revision &rev = chain.revisions[r];
             const size_t id =
                 size_t(geo.chainRevisionBegin[c] + int(r));
-            // Epoch-fixed skin layouts: the same pointer while the
-            // binding did not move. Compared by value here because the
-            // file can carry two copies of one layout; adopting the
-            // resolved handle reproduces the baked pointer identity.
+            // Epoch-fixed skin layouts: the same pointer while the layout
+            // slots did not move. The partition takes it only when it
+            // holds the arrays Build cut the chunk keys from.
             if (wire.skinTopologyFixed && id < scratch->epochTopologies.size()) {
-                rev.topology = scratch->epochTopologies[id];
+                RrGeoRunLayoutOp(program, *scratch, wire, id, &rev);
+                rev.topology = rev.layoutHandle;
                 rev.topologyResolved = true;
-                const bool sameLayout =
-                    (rev.topology == rev.partitionTopology) ||
-                    (rev.topology && rev.partitionTopology &&
-                     *rev.topology == *rev.partitionTopology);
-                if (rev.chunked && !sameLayout) {
-                    if (rev.topology) {
-                        RrGeoPartitionRevision(
-                            program->geoSettings, &rev,
-                            wire.influenceSlots.size(),
-                            rev.topology->indices.data(),
-                            rev.topology->indices.size(),
-                            rev.topology->elementSize,
-                            int(rev.chunks.size()));
-                        rev.partitionTopology = rev.topology;
-                    }
-                } else if (rev.topology) {
-                    rev.partitionTopology = rev.topology;
-                }
+                RrGeoAdoptPartition(
+                    &rev, id < scratch->epochPartitionTopologies.size()
+                              ? scratch->epochPartitionTopologies[id].get()
+                              : nullptr);
             }
         }
         for (size_t d = 0; d < wireChain.derived.size(); ++d) {
@@ -5183,12 +5279,14 @@ RrGeoRunProjectorTarget(RrProgram *program, RrGeometryScratch *scratch,
     in.hasSpace = named[2] && resolved[2];
     in.spaceFinal = fin[2];
     std::vector<int> counts, indices;
-    RrGeoReadIntArray(scratch, RrGeoBindingRead(rev, RrGeoBindTopologyCounts),
+    RrGeoReadIntArray(program, scratch,
+                      RrGeoBindingRead(rev, RrGeoBindTopologyCounts),
                       &counts);
-    RrGeoReadIntArray(scratch,
+    RrGeoReadIntArray(program, scratch,
                       RrGeoBindingRead(rev, RrGeoBindTopologyIndices),
                       &indices);
-    const std::vector<RrVec3f> &basePoints = scratch->chains[chainIndex].base;
+    const std::vector<RrVec3f> &basePoints =
+        RrGeoChainBase(program, scratch->chains[chainIndex]);
     const std::vector<RrVec3f> &finalPoints = scratch->chains[chainIndex].result;
     publish.haveMatrix = RigExecSolveSurfaceProjectorT(
         in, basePoints, finalPoints, counts, indices,
@@ -5379,10 +5477,6 @@ RrGeoRunChainStatusStep(RrProgram *program, RrGeometryScratch *scratch,
     }
     chain.result.swap(chain.spare);
     chain.haveResult = true;
-    RrSnapshotValue final;
-    final.tag = RrSnapshotValue::Tag::Points;
-    final.points = chain.result;
-    output.snapshots.RecordFinal(geo.chains[size_t(object)].target, final);
     if (size_t(object) < store.chainPublish.size()) {
         store.chainPublish[size_t(object)].haveBase = true;
         store.chainPublish[size_t(object)].result = chain.result;
@@ -5748,17 +5842,6 @@ RrGeoRunRevisionFuseStep(RrProgram *program, RrGeometryScratch *scratch,
     }
     if (id >= 0 && size_t(id) < store.revisionPublish.size()) {
         store.revisionPublish[size_t(id)].resultStatus = rev.resultStatus;
-    }
-    if (wire.snapshotAfter) {
-        const RrVec3f *points = nullptr;
-        size_t count = 0;
-        RrGeoPointsAfter(chain, revisionIndex, &points, &count);
-        RrSnapshotValue value;
-        value.tag = RrSnapshotValue::Tag::Points;
-        if (count > 0 && points) {
-            value.points.assign(points, points + count);
-        }
-        output.snapshots.Record(wire.target, wire.moverPath, value);
     }
     (void)error;
     return true;

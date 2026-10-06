@@ -51,12 +51,13 @@ bool RigExecSampleInputAt(const PXR_NS::UsdAttribute &attribute,
 
 class RigExecInputSampler {
 public:
-    /// Resolves every listed input of \p reader to the attribute of
+    /// Resolves every listed scalar input of \p reader to the attribute of
     /// \p stage at the input's path. An input the stage lacks, or whose
     /// attribute holds another value type, keeps its bake-time default and
     /// gets one warning (GetWarnings). Notes the inputs the file marks
-    /// Animated. The reader's defaults count as sampled at its bake time.
-    /// False with the reason when \p stage is null.
+    /// Animated. Array inputs are not sampled: they keep their value until
+    /// something sets them. The reader's defaults count as sampled at its
+    /// bake time. False with the reason when \p stage is null.
     bool Bind(const PXR_NS::UsdStagePtr &stage,
               const RigExecRuntimeReader &reader, std::string *error);
 

@@ -116,8 +116,8 @@ public:
 
     // The inputs: every attribute a read of the rig walks, sorted by path.
     size_t GetInputCount() const;
-    // Input \p index's name, type, animation flag and bake-time default;
-    // an empty info past the count.
+    // Input \p index's name, type, animation flag and bake-time default
+    // (an array input's element count); an empty info past the count.
     const RigExecRuntimeInputInfo &GetInputInfo(size_t index) const;
     // The index of the input at attribute path \p name.
     bool FindInput(const std::string &name, size_t *index) const;
@@ -152,14 +152,40 @@ public:
     // the steps that read it report it as the evaluators do.
     bool SetSampledInputAt(size_t index, const RrInputValue &value,
                            std::string *error);
+    // Array inputs (an int[], float[], double[], float2[] or float3[]
+    // attribute). The authored value of array attribute \p name becomes a
+    // copy of \p value's elements, which every read of it then takes, the
+    // Default-time ones included. It keeps the default's element count
+    // (GetInputInfo's defaultCount). False with the reason, and nothing
+    // changes, for an unknown name, a scalar input, another element type,
+    // elements without data, or another count. A scalar's SetInput refuses
+    // an array input.
+    bool SetInputArray(const std::string &name,
+                       const RigExecRuntimeArray &value, std::string *error);
+    // SetInputArray by index.
+    bool SetInputArrayAt(size_t index, const RigExecRuntimeArray &value,
+                         std::string *error);
+    // The stage's own value of array input \p index at a sampled time, of
+    // any count: the reads at the evaluation time take it, the Default-time
+    // ones keep theirs, and each reader judges the count as the evaluators
+    // judge the stage's.
+    bool SetSampledInputArrayAt(size_t index, const RigExecRuntimeArray &value,
+                                std::string *error);
+    // Array input \p index's elements: its default, or the value last set.
+    // The view stays valid until the next set or reset of that input; a
+    // default view points into the reader's own storage. False past the
+    // count or for a scalar input.
+    bool GetInputArrayAt(size_t index, RigExecRuntimeArray *out) const;
     // Input \p name holds no value, as an attribute whose typed read fails
     // (a blocked sample, or Default on an attribute keyed alone): every
     // read falls back as it does over such an attribute. False with the
-    // reason for an unknown name.
+    // reason for an unknown name or an array input, which ResetInput
+    // restores.
     bool ClearInput(const std::string &name, std::string *error);
     // ClearInput by index.
     bool ClearInputAt(size_t index, std::string *error);
-    // Input \p name returns to its bake-time default.
+    // Input \p name returns to its bake-time default (an array input's
+    // set, authored or sampled, ends).
     bool ResetInput(const std::string &name, std::string *error);
     void ResetInputs();
     // Says time moved: the next Execute recomputes what a time change
@@ -209,6 +235,15 @@ public:
     // Test-only: whether the skin and matrix kernels take the SIMD path,
     // as RIGEXEC_ENABLE_SIMD said when this reader opened.
     bool GetSimdEnabledForTesting() const;
+
+    // Test-only: whether the last Execute found the partition of mover
+    // \p moverPath's chain revision stale, so that revision ran whole.
+    bool GetPartitionStaleForTesting(const std::string &moverPath) const;
+
+    // Test-only: whether the last Execute's layout of mover \p moverPath's
+    // chain revision is the one Open expanded from the file, the same
+    // object.
+    bool GetSkinLayoutIsOpenForTesting(const std::string &moverPath) const;
 
     // Test-only: whether the last Execute ran step \p step: a source step
     // always, any other when the closure ran its cluster. False past the

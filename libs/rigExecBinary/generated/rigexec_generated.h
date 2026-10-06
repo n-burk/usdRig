@@ -52,6 +52,10 @@ struct SplineIkParams;
 
 struct SlotRange;
 
+struct FrameRecord;
+
+struct PointVersion;
+
 struct PathNode;
 
 struct InputSlot;
@@ -192,6 +196,10 @@ struct DomainPose;
 struct DomainPoseBuilder;
 struct RigExecWireDomainPose;
 
+struct PointsBinding;
+struct PointsBindingBuilder;
+struct RigExecWirePointsBinding;
+
 struct BlendSampleBinding;
 struct BlendSampleBindingBuilder;
 struct RigExecWireBlendSampleBinding;
@@ -302,6 +310,10 @@ inline const ::flatbuffers::TypeTable *SplineIkParamsTypeTable();
 
 inline const ::flatbuffers::TypeTable *SlotRangeTypeTable();
 
+inline const ::flatbuffers::TypeTable *FrameRecordTypeTable();
+
+inline const ::flatbuffers::TypeTable *PointVersionTypeTable();
+
 inline const ::flatbuffers::TypeTable *PathNodeTypeTable();
 
 inline const ::flatbuffers::TypeTable *InputSlotTypeTable();
@@ -374,6 +386,8 @@ inline const ::flatbuffers::TypeTable *AvarBindingTypeTable();
 
 inline const ::flatbuffers::TypeTable *DomainPoseTypeTable();
 
+inline const ::flatbuffers::TypeTable *PointsBindingTypeTable();
+
 inline const ::flatbuffers::TypeTable *BlendSampleBindingTypeTable();
 
 inline const ::flatbuffers::TypeTable *BlendSampleBindingListTypeTable();
@@ -412,7 +426,8 @@ inline const ::flatbuffers::TypeTable *ExternalMoverTypeTable();
 
 inline const ::flatbuffers::TypeTable *FileTypeTable();
 
-/// Value type of an input slot, a read or a constant.
+/// Value type of an input slot, a read or a constant. The array tags hold
+/// int, float, double, float2 and float3 elements.
 enum class InputTag : uint8_t {
   Double = 0,
   Float = 1,
@@ -422,11 +437,16 @@ enum class InputTag : uint8_t {
   Token = 5,
   Vec3d = 6,
   Vec3f = 7,
+  IntArray = 8,
+  FloatArray = 9,
+  DoubleArray = 10,
+  Vec2fArray = 11,
+  Vec3fArray = 12,
   MIN = Double,
-  MAX = Vec3f
+  MAX = Vec3fArray
 };
 
-inline const InputTag (&EnumValuesInputTag())[8] {
+inline const InputTag (&EnumValuesInputTag())[13] {
   static const InputTag values[] = {
     InputTag::Double,
     InputTag::Float,
@@ -435,13 +455,18 @@ inline const InputTag (&EnumValuesInputTag())[8] {
     InputTag::Matrix4d,
     InputTag::Token,
     InputTag::Vec3d,
-    InputTag::Vec3f
+    InputTag::Vec3f,
+    InputTag::IntArray,
+    InputTag::FloatArray,
+    InputTag::DoubleArray,
+    InputTag::Vec2fArray,
+    InputTag::Vec3fArray
   };
   return values;
 }
 
 inline const char * const *EnumNamesInputTag() {
-  static const char * const names[9] = {
+  static const char * const names[14] = {
     "Double",
     "Float",
     "Bool",
@@ -450,15 +475,58 @@ inline const char * const *EnumNamesInputTag() {
     "Token",
     "Vec3d",
     "Vec3f",
+    "IntArray",
+    "FloatArray",
+    "DoubleArray",
+    "Vec2fArray",
+    "Vec3fArray",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameInputTag(InputTag e) {
-  if (::flatbuffers::IsOutRange(e, InputTag::Double, InputTag::Vec3f)) return "";
+  if (::flatbuffers::IsOutRange(e, InputTag::Double, InputTag::Vec3fArray)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesInputTag()[index];
+}
+
+/// Where an array Value's elements live.
+enum class ArraySource : uint8_t {
+  /// The pool its tag names, at `array` (0 = the empty array).
+  Pool = 0,
+  /// The dense indices of the stored topology of revision `array`, a flat
+  /// revision id as the revision's steps name it.
+  SkinIndices = 1,
+  /// The dense weights of that topology.
+  SkinWeights = 2,
+  MIN = Pool,
+  MAX = SkinWeights
+};
+
+inline const ArraySource (&EnumValuesArraySource())[3] {
+  static const ArraySource values[] = {
+    ArraySource::Pool,
+    ArraySource::SkinIndices,
+    ArraySource::SkinWeights
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesArraySource() {
+  static const char * const names[4] = {
+    "Pool",
+    "SkinIndices",
+    "SkinWeights",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameArraySource(ArraySource e) {
+  if (::flatbuffers::IsOutRange(e, ArraySource::Pool, ArraySource::SkinWeights)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesArraySource()[index];
 }
 
 /// How an Input resolves its walk.
@@ -550,7 +618,8 @@ enum class InputSlotFlags : uint8_t {
   Listed = 1,
   /// ValueMightBeTimeVarying() || GetNumTimeSamples() > 0 on the baked stage.
   Animated = 2,
-  /// The typed Get at bake_time succeeded.
+  /// The typed Get the default comes from succeeded: at bake_time, or at
+  /// Default for an array input read only at Default.
   HasValue = 4,
   NONE = 0,
   ANY = 7
@@ -620,7 +689,10 @@ inline const char *EnumNamePathKind(PathKind e) {
   return EnumNamesPathKind()[index];
 }
 
-/// RigExecBakedSlotDomain, in the same order.
+/// RigExecBakedSlotDomain, in the same order. Snapshots (25) is reserved:
+/// no step declares it, and Open refuses a file whose step does.
+/// FrameMatrix holds one frame record's matrix and valid byte, by index
+/// into pose.frame_records.
 enum class SlotDomain : uint8_t {
   Avars = 0,
   PoseBase = 1,
@@ -648,11 +720,12 @@ enum class SlotDomain : uint8_t {
   WeightFrames = 23,
   PoseWeight = 24,
   Snapshots = 25,
+  FrameMatrix = 26,
   MIN = Avars,
-  MAX = Snapshots
+  MAX = FrameMatrix
 };
 
-inline const SlotDomain (&EnumValuesSlotDomain())[26] {
+inline const SlotDomain (&EnumValuesSlotDomain())[27] {
   static const SlotDomain values[] = {
     SlotDomain::Avars,
     SlotDomain::PoseBase,
@@ -679,13 +752,14 @@ inline const SlotDomain (&EnumValuesSlotDomain())[26] {
     SlotDomain::WeightPacket,
     SlotDomain::WeightFrames,
     SlotDomain::PoseWeight,
-    SlotDomain::Snapshots
+    SlotDomain::Snapshots,
+    SlotDomain::FrameMatrix
   };
   return values;
 }
 
 inline const char * const *EnumNamesSlotDomain() {
-  static const char * const names[27] = {
+  static const char * const names[28] = {
     "Avars",
     "PoseBase",
     "PoseFin",
@@ -712,18 +786,20 @@ inline const char * const *EnumNamesSlotDomain() {
     "WeightFrames",
     "PoseWeight",
     "Snapshots",
+    "FrameMatrix",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameSlotDomain(SlotDomain e) {
-  if (::flatbuffers::IsOutRange(e, SlotDomain::Avars, SlotDomain::Snapshots)) return "";
+  if (::flatbuffers::IsOutRange(e, SlotDomain::Avars, SlotDomain::FrameMatrix)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesSlotDomain()[index];
 }
 
-/// RigExecBakedStepKind, in the same order.
+/// RigExecBakedStepKind, in the same order. SnapshotFinals (8) is reserved:
+/// never written, and Open refuses a file that holds one.
 enum class StepKind : uint8_t {
   ComposeSubtree = 0,
   Solve = 1,
@@ -743,11 +819,12 @@ enum class StepKind : uint8_t {
   RevisionFuse = 15,
   ChainStatus = 16,
   Derived = 17,
+  FrameMatrix = 18,
   MIN = ComposeSubtree,
-  MAX = Derived
+  MAX = FrameMatrix
 };
 
-inline const StepKind (&EnumValuesStepKind())[18] {
+inline const StepKind (&EnumValuesStepKind())[19] {
   static const StepKind values[] = {
     StepKind::ComposeSubtree,
     StepKind::Solve,
@@ -766,13 +843,14 @@ inline const StepKind (&EnumValuesStepKind())[18] {
     StepKind::RevisionChunk,
     StepKind::RevisionFuse,
     StepKind::ChainStatus,
-    StepKind::Derived
+    StepKind::Derived,
+    StepKind::FrameMatrix
   };
   return values;
 }
 
 inline const char * const *EnumNamesStepKind() {
-  static const char * const names[19] = {
+  static const char * const names[20] = {
     "ComposeSubtree",
     "Solve",
     "SolverCommit",
@@ -791,13 +869,14 @@ inline const char * const *EnumNamesStepKind() {
     "RevisionFuse",
     "ChainStatus",
     "Derived",
+    "FrameMatrix",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameStepKind(StepKind e) {
-  if (::flatbuffers::IsOutRange(e, StepKind::ComposeSubtree, StepKind::Derived)) return "";
+  if (::flatbuffers::IsOutRange(e, StepKind::ComposeSubtree, StepKind::FrameMatrix)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesStepKind()[index];
 }
@@ -2022,6 +2101,107 @@ struct SlotRange::Traits {
   using type = SlotRange;
 };
 
+/// One provider frame as one writer of its stack (a constraint or a solver
+/// commit) left it, for an AtPrim read phase on rigExec:transform. Its
+/// FrameMatrix step (object = this record's index) writes the matrix and a
+/// valid byte on every run.
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) FrameRecord FLATBUFFERS_FINAL_CLASS {
+ private:
+  uint32_t slot_;
+  uint32_t commit_;
+  int32_t target_;
+  int32_t position_;
+  uint32_t version_;
+  uint32_t moverLabel_;
+
+ public:
+  struct Traits;
+  static const ::flatbuffers::TypeTable *MiniReflectTypeTable() {
+    return FrameRecordTypeTable();
+  }
+  FrameRecord()
+      : slot_(0),
+        commit_(0),
+        target_(0),
+        position_(0),
+        version_(0),
+        moverLabel_(0) {
+  }
+  FrameRecord(uint32_t _slot, uint32_t _commit, int32_t _target, int32_t _position, uint32_t _version, uint32_t _moverLabel)
+      : slot_(::flatbuffers::EndianScalar(_slot)),
+        commit_(::flatbuffers::EndianScalar(_commit)),
+        target_(::flatbuffers::EndianScalar(_target)),
+        position_(::flatbuffers::EndianScalar(_position)),
+        version_(::flatbuffers::EndianScalar(_version)),
+        moverLabel_(::flatbuffers::EndianScalar(_moverLabel)) {
+  }
+  /// The provider slot.
+  uint32_t slot() const {
+    return ::flatbuffers::EndianScalar(slot_);
+  }
+  /// The writer's commit: an index into pose.commits.
+  uint32_t commit() const {
+    return ::flatbuffers::EndianScalar(commit_);
+  }
+  /// A constraint's record: the provider's position in its target_slots;
+  /// -1 for a solver's.
+  int32_t target() const {
+    return ::flatbuffers::EndianScalar(target_);
+  }
+  /// A solver's record: the provider's position in the commit's slots,
+  /// whose present byte gates it; -1 for a constraint's.
+  int32_t position() const {
+    return ::flatbuffers::EndianScalar(position_);
+  }
+  /// The PoseFin version the record reads: the commit's last version of
+  /// the slot.
+  uint32_t version() const {
+    return ::flatbuffers::EndianScalar(version_);
+  }
+  /// Path id of the writer, for diagnostics.
+  uint32_t moverLabel() const {
+    return ::flatbuffers::EndianScalar(moverLabel_);
+  }
+};
+FLATBUFFERS_STRUCT_END(FrameRecord, 24);
+
+struct FrameRecord::Traits {
+  using type = FrameRecord;
+};
+
+/// One version of a chain's running points: 0 the authored base, v > 0
+/// what the fuse of the chain's revision v - 1 left.
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) PointVersion FLATBUFFERS_FINAL_CLASS {
+ private:
+  int32_t chain_;
+  int32_t version_;
+
+ public:
+  struct Traits;
+  static const ::flatbuffers::TypeTable *MiniReflectTypeTable() {
+    return PointVersionTypeTable();
+  }
+  PointVersion()
+      : chain_(0),
+        version_(0) {
+  }
+  PointVersion(int32_t _chain, int32_t _version)
+      : chain_(::flatbuffers::EndianScalar(_chain)),
+        version_(::flatbuffers::EndianScalar(_version)) {
+  }
+  int32_t chain() const {
+    return ::flatbuffers::EndianScalar(chain_);
+  }
+  int32_t version() const {
+    return ::flatbuffers::EndianScalar(version_);
+  }
+};
+FLATBUFFERS_STRUCT_END(PointVersion, 8);
+
+struct PointVersion::Traits {
+  using type = PointVersion;
+};
+
 /// One node of the path tree. A prim's text is text(parent) + "/" + name
 /// (parent 0: a child of the pseudo-root); a property's is text(parent) +
 /// "." + name; a token's is name. parent < the node's own index.
@@ -2112,8 +2292,11 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) InputSlot FLATBUFFERS_FINAL_CLASS {
   uint32_t name() const {
     return ::flatbuffers::EndianScalar(name_);
   }
-  /// values[]: the attribute's value at bake_time (a typed zero when
-  /// HasValue is unset). This is the input's default.
+  /// values[]: the input's default, the attribute's value at bake_time (a
+  /// typed zero, or the empty array, when HasValue is unset). An array
+  /// input's names its elements; one read only at Default (by rest reads,
+  /// or a weight object's painted arrays, which its packet folds at
+  /// Default) holds the attribute's value at Default instead.
   uint32_t value() const {
     return ::flatbuffers::EndianScalar(value_);
   }
@@ -2147,6 +2330,8 @@ struct RigExecWireValue : public ::flatbuffers::NativeTable {
   std::unique_ptr<::rigExec::RigExecWireMatrix4d> matrix{};
   std::unique_ptr<::rigExec::RigExecWireVec3d> vec3d{};
   std::unique_ptr<::rigExec::RigExecWireVec3f> vec3f{};
+  rigExec::fb::ArraySource arraySource = rigExec::fb::ArraySource::Pool;
+  uint32_t array = 0;
   RigExecWireValue() = default;
   RigExecWireValue(const RigExecWireValue &o);
   RigExecWireValue(RigExecWireValue&&) FLATBUFFERS_NOEXCEPT = default;
@@ -2166,7 +2351,9 @@ struct Value FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_BITS = 6,
     VT_MATRIX = 8,
     VT_VEC3D = 10,
-    VT_VEC3F = 12
+    VT_VEC3F = 12,
+    VT_ARRAYSOURCE = 14,
+    VT_ARRAY = 16
   };
   rigExec::fb::InputTag tag() const {
     return static_cast<rigExec::fb::InputTag>(GetField<uint8_t>(VT_TAG, 0));
@@ -2187,6 +2374,14 @@ struct Value FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const rigExec::fb::Vec3f *vec3f() const {
     return GetStruct<const rigExec::fb::Vec3f *>(VT_VEC3F);
   }
+  /// Array tags only: where the elements live, and the pool id or flat
+  /// revision id there. A scalar leaves both at their defaults.
+  rigExec::fb::ArraySource arraySource() const {
+    return static_cast<rigExec::fb::ArraySource>(GetField<uint8_t>(VT_ARRAYSOURCE, 0));
+  }
+  uint32_t array() const {
+    return GetField<uint32_t>(VT_ARRAY, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -2195,6 +2390,8 @@ struct Value FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<rigExec::fb::Matrix4d>(verifier, VT_MATRIX, 8) &&
            VerifyField<rigExec::fb::Vec3d>(verifier, VT_VEC3D, 8) &&
            VerifyField<rigExec::fb::Vec3f>(verifier, VT_VEC3F, 4) &&
+           VerifyField<uint8_t>(verifier, VT_ARRAYSOURCE, 1) &&
+           VerifyField<uint32_t>(verifier, VT_ARRAY, 4) &&
            verifier.EndTable();
   }
   RigExecWireValue *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2221,6 +2418,12 @@ struct ValueBuilder {
   void add_vec3f(const rigExec::fb::Vec3f *vec3f) {
     fbb_.AddStruct(Value::VT_VEC3F, vec3f);
   }
+  void add_arraySource(rigExec::fb::ArraySource arraySource) {
+    fbb_.AddElement<uint8_t>(Value::VT_ARRAYSOURCE, static_cast<uint8_t>(arraySource), 0);
+  }
+  void add_array(uint32_t array) {
+    fbb_.AddElement<uint32_t>(Value::VT_ARRAY, array, 0);
+  }
   explicit ValueBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -2238,12 +2441,16 @@ inline ::flatbuffers::Offset<Value> CreateValue(
     uint64_t bits = 0,
     const rigExec::fb::Matrix4d *matrix = nullptr,
     const rigExec::fb::Vec3d *vec3d = nullptr,
-    const rigExec::fb::Vec3f *vec3f = nullptr) {
+    const rigExec::fb::Vec3f *vec3f = nullptr,
+    rigExec::fb::ArraySource arraySource = rigExec::fb::ArraySource::Pool,
+    uint32_t array = 0) {
   ValueBuilder builder_(_fbb);
   builder_.add_bits(bits);
+  builder_.add_array(array);
   builder_.add_vec3f(vec3f);
   builder_.add_vec3d(vec3d);
   builder_.add_matrix(matrix);
+  builder_.add_arraySource(arraySource);
   builder_.add_tag(tag);
   return builder_.Finish();
 }
@@ -3775,7 +3982,7 @@ struct RigExecWireStep : public ::flatbuffers::NativeTable {
 };
 
 /// One step: identity, declared ranges, edges, dirtiness, schedule. Labels
-/// are rebuilt from the tables.
+/// are rebuilt from the tables (RigExecFormatStepLabel).
 struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef RigExecWireStep NativeTableType;
   typedef StepBuilder Builder;
@@ -3805,9 +4012,16 @@ struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   rigExec::fb::StepKind kind() const {
     return static_cast<rigExec::fb::StepKind>(GetField<uint8_t>(VT_KIND, 0));
   }
+  /// What the step works on, by kind: a compose group, a solver, a commit,
+  /// a provider slot (ProviderMatrix; VolumePlacements, the volume's slot),
+  /// a pose interpolator, a weight object, a revision id, a chain, a
+  /// derived id, or a pose.frame_records index (FrameMatrix).
   int32_t object() const {
     return GetField<int32_t>(VT_OBJECT, -1);
   }
+  /// The part of it: a RevisionChunk's vertex chunk, a PropagateChunk's
+  /// pair chunk, a ProviderMatrix's phase (1 final, 0 base), 1 for the
+  /// per-volume VolumePlacements step; -1 where unused.
   int32_t part() const {
     return GetField<int32_t>(VT_PART, -1);
   }
@@ -6417,7 +6631,6 @@ struct RigExecWireConstraint : public ::flatbuffers::NativeTable {
   int32_t weightObjectIndex = -1;
   int32_t target = -1;
   std::vector<int32_t> targetSlots{};
-  std::vector<uint8_t> snapshotTargets{};
   std::vector<int32_t> sources{};
   std::vector<int32_t> sourceNatives{};
   std::vector<uint32_t> sourcePaths{};
@@ -6456,7 +6669,6 @@ struct RigExecWireConstraint : public ::flatbuffers::NativeTable {
   bool worldUpObjectNamed = false;
   int32_t spaceSlot = -1;
   uint8_t flags = 0;
-  bool snapshotAfter = false;
   bool singleChainIk = false;
   uint8_t ikMode = 0;
   bool poleModeObject = false;
@@ -6489,58 +6701,56 @@ struct Constraint FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_WEIGHTOBJECTINDEX = 10,
     VT_TARGET = 12,
     VT_TARGETSLOTS = 14,
-    VT_SNAPSHOTTARGETS = 16,
-    VT_SOURCES = 18,
-    VT_SOURCENATIVES = 20,
-    VT_SOURCEPATHS = 22,
-    VT_ARRAYS = 24,
-    VT_ENABLED = 26,
-    VT_DEFAULTWEIGHT = 28,
-    VT_OFFSET = 30,
-    VT_AFFECTX = 32,
-    VT_AFFECTY = 34,
-    VT_AFFECTZ = 36,
-    VT_TX = 38,
-    VT_TY = 40,
-    VT_TZ = 42,
-    VT_RX = 44,
-    VT_RY = 46,
-    VT_RZ = 48,
-    VT_SX = 50,
-    VT_SY = 52,
-    VT_SZ = 54,
-    VT_ORDER = 56,
-    VT_AIMVECTOR = 58,
-    VT_UPVECTOR = 60,
-    VT_ROTATIONOFFSET = 62,
-    VT_WORLDUPVECTOR = 64,
-    VT_AIMAXISFALLBACK = 66,
-    VT_AIMVECTORAUTHORED = 68,
-    VT_PRESERVEINPUTUP = 70,
-    VT_WORLDUPTYPE = 72,
-    VT_SCENEUP = 74,
-    VT_POINTSTARGET = 76,
-    VT_DELTABASEPATH = 78,
-    VT_DELTABASE = 80,
-    VT_WORLDUPOBJECT = 82,
-    VT_WORLDUPNATIVE = 84,
-    VT_WORLDUPPATH = 86,
-    VT_WORLDUPOBJECTNAMED = 88,
-    VT_SPACESLOT = 90,
-    VT_FLAGS = 92,
-    VT_SNAPSHOTAFTER = 94,
-    VT_SINGLECHAINIK = 96,
-    VT_IKMODE = 98,
-    VT_POLEMODEOBJECT = 100,
-    VT_USEANIMATEDTS = 102,
-    VT_IKRESTLIVE = 104,
-    VT_EFFECTOR = 106,
-    VT_EFFECTORNATIVE = 108,
-    VT_EFFECTORPATH = 110,
-    VT_POLEOBJECTS = 112,
-    VT_POLEOBJECTNATIVES = 114,
-    VT_POLEVECTOR = 116,
-    VT_TWISTDEGREES = 118
+    VT_SOURCES = 16,
+    VT_SOURCENATIVES = 18,
+    VT_SOURCEPATHS = 20,
+    VT_ARRAYS = 22,
+    VT_ENABLED = 24,
+    VT_DEFAULTWEIGHT = 26,
+    VT_OFFSET = 28,
+    VT_AFFECTX = 30,
+    VT_AFFECTY = 32,
+    VT_AFFECTZ = 34,
+    VT_TX = 36,
+    VT_TY = 38,
+    VT_TZ = 40,
+    VT_RX = 42,
+    VT_RY = 44,
+    VT_RZ = 46,
+    VT_SX = 48,
+    VT_SY = 50,
+    VT_SZ = 52,
+    VT_ORDER = 54,
+    VT_AIMVECTOR = 56,
+    VT_UPVECTOR = 58,
+    VT_ROTATIONOFFSET = 60,
+    VT_WORLDUPVECTOR = 62,
+    VT_AIMAXISFALLBACK = 64,
+    VT_AIMVECTORAUTHORED = 66,
+    VT_PRESERVEINPUTUP = 68,
+    VT_WORLDUPTYPE = 70,
+    VT_SCENEUP = 72,
+    VT_POINTSTARGET = 74,
+    VT_DELTABASEPATH = 76,
+    VT_DELTABASE = 78,
+    VT_WORLDUPOBJECT = 80,
+    VT_WORLDUPNATIVE = 82,
+    VT_WORLDUPPATH = 84,
+    VT_WORLDUPOBJECTNAMED = 86,
+    VT_SPACESLOT = 88,
+    VT_FLAGS = 90,
+    VT_SINGLECHAINIK = 92,
+    VT_IKMODE = 94,
+    VT_POLEMODEOBJECT = 96,
+    VT_USEANIMATEDTS = 98,
+    VT_IKRESTLIVE = 100,
+    VT_EFFECTOR = 102,
+    VT_EFFECTORNATIVE = 104,
+    VT_EFFECTORPATH = 106,
+    VT_POLEOBJECTS = 108,
+    VT_POLEOBJECTNATIVES = 110,
+    VT_POLEVECTOR = 112,
+    VT_TWISTDEGREES = 114
   };
   uint32_t path() const {
     return GetField<uint32_t>(VT_PATH, 0);
@@ -6562,10 +6772,6 @@ struct Constraint FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const ::flatbuffers::Vector<int32_t> *targetSlots() const {
     return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_TARGETSLOTS);
-  }
-  /// 0/1.
-  const ::flatbuffers::Vector<uint8_t> *snapshotTargets() const {
-    return GetPointer<const ::flatbuffers::Vector<uint8_t> *>(VT_SNAPSHOTTARGETS);
   }
   const ::flatbuffers::Vector<int32_t> *sources() const {
     return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_SOURCES);
@@ -6685,9 +6891,6 @@ struct Constraint FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint8_t flags() const {
     return GetField<uint8_t>(VT_FLAGS, 0);
   }
-  bool snapshotAfter() const {
-    return GetField<uint8_t>(VT_SNAPSHOTAFTER, 0) != 0;
-  }
   bool singleChainIk() const {
     return GetField<uint8_t>(VT_SINGLECHAINIK, 0) != 0;
   }
@@ -6736,8 +6939,6 @@ struct Constraint FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_TARGET, 4) &&
            VerifyOffset(verifier, VT_TARGETSLOTS) &&
            verifier.VerifyVector(targetSlots()) &&
-           VerifyOffset(verifier, VT_SNAPSHOTTARGETS) &&
-           verifier.VerifyVector(snapshotTargets()) &&
            VerifyOffset(verifier, VT_SOURCES) &&
            verifier.VerifyVector(sources()) &&
            VerifyOffset(verifier, VT_SOURCENATIVES) &&
@@ -6798,7 +6999,6 @@ struct Constraint FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint8_t>(verifier, VT_WORLDUPOBJECTNAMED, 1) &&
            VerifyField<int32_t>(verifier, VT_SPACESLOT, 4) &&
            VerifyField<uint8_t>(verifier, VT_FLAGS, 1) &&
-           VerifyField<uint8_t>(verifier, VT_SNAPSHOTAFTER, 1) &&
            VerifyField<uint8_t>(verifier, VT_SINGLECHAINIK, 1) &&
            VerifyField<uint8_t>(verifier, VT_IKMODE, 1) &&
            VerifyField<uint8_t>(verifier, VT_POLEMODEOBJECT, 1) &&
@@ -6844,9 +7044,6 @@ struct ConstraintBuilder {
   }
   void add_targetSlots(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> targetSlots) {
     fbb_.AddOffset(Constraint::VT_TARGETSLOTS, targetSlots);
-  }
-  void add_snapshotTargets(::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> snapshotTargets) {
-    fbb_.AddOffset(Constraint::VT_SNAPSHOTTARGETS, snapshotTargets);
   }
   void add_sources(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> sources) {
     fbb_.AddOffset(Constraint::VT_SOURCES, sources);
@@ -6962,9 +7159,6 @@ struct ConstraintBuilder {
   void add_flags(uint8_t flags) {
     fbb_.AddElement<uint8_t>(Constraint::VT_FLAGS, flags, 0);
   }
-  void add_snapshotAfter(bool snapshotAfter) {
-    fbb_.AddElement<uint8_t>(Constraint::VT_SNAPSHOTAFTER, static_cast<uint8_t>(snapshotAfter), 0);
-  }
   void add_singleChainIk(bool singleChainIk) {
     fbb_.AddElement<uint8_t>(Constraint::VT_SINGLECHAINIK, static_cast<uint8_t>(singleChainIk), 0);
   }
@@ -7041,7 +7235,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraint(
     int32_t weightObjectIndex = -1,
     int32_t target = -1,
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> targetSlots = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> snapshotTargets = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> sources = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> sourceNatives = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> sourcePaths = 0,
@@ -7080,7 +7273,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraint(
     bool worldUpObjectNamed = false,
     int32_t spaceSlot = -1,
     uint8_t flags = 0,
-    bool snapshotAfter = false,
     bool singleChainIk = false,
     uint8_t ikMode = 0,
     bool poleModeObject = false,
@@ -7135,7 +7327,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraint(
   builder_.add_sourcePaths(sourcePaths);
   builder_.add_sourceNatives(sourceNatives);
   builder_.add_sources(sources);
-  builder_.add_snapshotTargets(snapshotTargets);
   builder_.add_targetSlots(targetSlots);
   builder_.add_target(target);
   builder_.add_weightObjectIndex(weightObjectIndex);
@@ -7146,7 +7337,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraint(
   builder_.add_poleModeObject(poleModeObject);
   builder_.add_ikMode(ikMode);
   builder_.add_singleChainIk(singleChainIk);
-  builder_.add_snapshotAfter(snapshotAfter);
   builder_.add_flags(flags);
   builder_.add_worldUpObjectNamed(worldUpObjectNamed);
   builder_.add_preserveInputUp(preserveInputUp);
@@ -7168,7 +7358,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraintDirect(
     int32_t weightObjectIndex = -1,
     int32_t target = -1,
     const std::vector<int32_t> *targetSlots = nullptr,
-    const std::vector<uint8_t> *snapshotTargets = nullptr,
     const std::vector<int32_t> *sources = nullptr,
     const std::vector<int32_t> *sourceNatives = nullptr,
     const std::vector<uint32_t> *sourcePaths = nullptr,
@@ -7207,7 +7396,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraintDirect(
     bool worldUpObjectNamed = false,
     int32_t spaceSlot = -1,
     uint8_t flags = 0,
-    bool snapshotAfter = false,
     bool singleChainIk = false,
     uint8_t ikMode = 0,
     bool poleModeObject = false,
@@ -7221,7 +7409,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraintDirect(
     ::flatbuffers::Offset<rigExec::fb::Input> poleVector = 0,
     ::flatbuffers::Offset<rigExec::fb::Input> twistDegrees = 0) {
   auto targetSlots__ = targetSlots ? _fbb.CreateVector<int32_t>(*targetSlots) : 0;
-  auto snapshotTargets__ = snapshotTargets ? _fbb.CreateVector<uint8_t>(*snapshotTargets) : 0;
   auto sources__ = sources ? _fbb.CreateVector<int32_t>(*sources) : 0;
   auto sourceNatives__ = sourceNatives ? _fbb.CreateVector<int32_t>(*sourceNatives) : 0;
   auto sourcePaths__ = sourcePaths ? _fbb.CreateVector<uint32_t>(*sourcePaths) : 0;
@@ -7236,7 +7423,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraintDirect(
       weightObjectIndex,
       target,
       targetSlots__,
-      snapshotTargets__,
       sources__,
       sourceNatives__,
       sourcePaths__,
@@ -7275,7 +7461,6 @@ inline ::flatbuffers::Offset<Constraint> CreateConstraintDirect(
       worldUpObjectNamed,
       spaceSlot,
       flags,
-      snapshotAfter,
       singleChainIk,
       ikMode,
       poleModeObject,
@@ -7576,6 +7761,11 @@ struct Commit FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::AncestorReadList>> *poleAncestors() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::AncestorReadList>> *>(VT_POLEANCESTORS);
   }
+  /// A constraint commit's exit flags as the bake's run left them, kept
+  /// for comparison only: whether its exit records at all, and whether it
+  /// records every target or the first alone. Playback never reads them:
+  /// the commit's constraint step recomputes both on every run, and its
+  /// FrameMatrix steps gate on what that run computed.
   bool recordAfter() const {
     return GetField<uint8_t>(VT_RECORDAFTER, 1) != 0;
   }
@@ -8813,12 +9003,12 @@ struct RigExecWireDomainPose : public ::flatbuffers::NativeTable {
   std::vector<rigExec::fb::RigExecWireUintList> jointBindingSolvers{};
   std::vector<rigExec::fb::RigExecWireIntList> jointBindingElements{};
   bool hasPropertyChains = false;
-  bool phasedReads = false;
   bool publishWeightFields = true;
   std::vector<rigExec::fb::RigExecWireSpaceSwitch> spaceSwitches{};
   std::vector<rigExec::fb::RigExecWireAvarBinding> avarBindings{};
   std::vector<::rigExec::RigExecWireMatrix4d> xformBase{};
   uint32_t overrideCount = 0;
+  std::vector<rigExec::fb::FrameRecord> frameRecords{};
 };
 
 /// Every table the pose-half steps index, plus the publication inputs the
@@ -8849,12 +9039,12 @@ struct DomainPose FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_JOINTBINDINGSOLVERS = 34,
     VT_JOINTBINDINGELEMENTS = 36,
     VT_HASPROPERTYCHAINS = 38,
-    VT_PHASEDREADS = 40,
-    VT_PUBLISHWEIGHTFIELDS = 42,
-    VT_SPACESWITCHES = 44,
-    VT_AVARBINDINGS = 46,
-    VT_XFORMBASE = 48,
-    VT_OVERRIDECOUNT = 50
+    VT_PUBLISHWEIGHTFIELDS = 40,
+    VT_SPACESWITCHES = 42,
+    VT_AVARBINDINGS = 44,
+    VT_XFORMBASE = 46,
+    VT_OVERRIDECOUNT = 48,
+    VT_FRAMERECORDS = 50
   };
   /// One per slot.
   const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Ladder>> *ladders() const {
@@ -8916,9 +9106,6 @@ struct DomainPose FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool hasPropertyChains() const {
     return GetField<uint8_t>(VT_HASPROPERTYCHAINS, 0) != 0;
   }
-  bool phasedReads() const {
-    return GetField<uint8_t>(VT_PHASEDREADS, 0) != 0;
-  }
   bool publishWeightFields() const {
     return GetField<uint8_t>(VT_PUBLISHWEIGHTFIELDS, 1) != 0;
   }
@@ -8938,6 +9125,11 @@ struct DomainPose FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// [0, override_count).
   uint32_t overrideCount() const {
     return GetField<uint32_t>(VT_OVERRIDECOUNT, 0);
+  }
+  /// Every frame record an AtPrim transform phase can read, in walk order;
+  /// FrameMatrix steps evaluate them.
+  const ::flatbuffers::Vector<const rigExec::fb::FrameRecord *> *frameRecords() const {
+    return GetPointer<const ::flatbuffers::Vector<const rigExec::fb::FrameRecord *> *>(VT_FRAMERECORDS);
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -8987,7 +9179,6 @@ struct DomainPose FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(jointBindingElements()) &&
            verifier.VerifyVectorOfTables(jointBindingElements()) &&
            VerifyField<uint8_t>(verifier, VT_HASPROPERTYCHAINS, 1) &&
-           VerifyField<uint8_t>(verifier, VT_PHASEDREADS, 1) &&
            VerifyField<uint8_t>(verifier, VT_PUBLISHWEIGHTFIELDS, 1) &&
            VerifyOffset(verifier, VT_SPACESWITCHES) &&
            verifier.VerifyVector(spaceSwitches()) &&
@@ -8998,6 +9189,8 @@ struct DomainPose FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_XFORMBASE) &&
            verifier.VerifyVector(xformBase()) &&
            VerifyField<uint32_t>(verifier, VT_OVERRIDECOUNT, 4) &&
+           VerifyOffset(verifier, VT_FRAMERECORDS) &&
+           verifier.VerifyVector(frameRecords()) &&
            verifier.EndTable();
   }
   RigExecWireDomainPose *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -9063,9 +9256,6 @@ struct DomainPoseBuilder {
   void add_hasPropertyChains(bool hasPropertyChains) {
     fbb_.AddElement<uint8_t>(DomainPose::VT_HASPROPERTYCHAINS, static_cast<uint8_t>(hasPropertyChains), 0);
   }
-  void add_phasedReads(bool phasedReads) {
-    fbb_.AddElement<uint8_t>(DomainPose::VT_PHASEDREADS, static_cast<uint8_t>(phasedReads), 0);
-  }
   void add_publishWeightFields(bool publishWeightFields) {
     fbb_.AddElement<uint8_t>(DomainPose::VT_PUBLISHWEIGHTFIELDS, static_cast<uint8_t>(publishWeightFields), 1);
   }
@@ -9080,6 +9270,9 @@ struct DomainPoseBuilder {
   }
   void add_overrideCount(uint32_t overrideCount) {
     fbb_.AddElement<uint32_t>(DomainPose::VT_OVERRIDECOUNT, overrideCount, 0);
+  }
+  void add_frameRecords(::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::FrameRecord *>> frameRecords) {
+    fbb_.AddOffset(DomainPose::VT_FRAMERECORDS, frameRecords);
   }
   explicit DomainPoseBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -9112,13 +9305,14 @@ inline ::flatbuffers::Offset<DomainPose> CreateDomainPose(
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::UintList>>> jointBindingSolvers = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::IntList>>> jointBindingElements = 0,
     bool hasPropertyChains = false,
-    bool phasedReads = false,
     bool publishWeightFields = true,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::SpaceSwitch>>> spaceSwitches = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::AvarBinding>>> avarBindings = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::Matrix4d *>> xformBase = 0,
-    uint32_t overrideCount = 0) {
+    uint32_t overrideCount = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::FrameRecord *>> frameRecords = 0) {
   DomainPoseBuilder builder_(_fbb);
+  builder_.add_frameRecords(frameRecords);
   builder_.add_overrideCount(overrideCount);
   builder_.add_xformBase(xformBase);
   builder_.add_avarBindings(avarBindings);
@@ -9140,7 +9334,6 @@ inline ::flatbuffers::Offset<DomainPose> CreateDomainPose(
   builder_.add_ladderOverrides(ladderOverrides);
   builder_.add_ladders(ladders);
   builder_.add_publishWeightFields(publishWeightFields);
-  builder_.add_phasedReads(phasedReads);
   builder_.add_hasPropertyChains(hasPropertyChains);
   builder_.add_ladderVarying(ladderVarying);
   return builder_.Finish();
@@ -9171,12 +9364,12 @@ inline ::flatbuffers::Offset<DomainPose> CreateDomainPoseDirect(
     const std::vector<::flatbuffers::Offset<rigExec::fb::UintList>> *jointBindingSolvers = nullptr,
     const std::vector<::flatbuffers::Offset<rigExec::fb::IntList>> *jointBindingElements = nullptr,
     bool hasPropertyChains = false,
-    bool phasedReads = false,
     bool publishWeightFields = true,
     const std::vector<::flatbuffers::Offset<rigExec::fb::SpaceSwitch>> *spaceSwitches = nullptr,
     const std::vector<::flatbuffers::Offset<rigExec::fb::AvarBinding>> *avarBindings = nullptr,
     const std::vector<rigExec::fb::Matrix4d> *xformBase = nullptr,
-    uint32_t overrideCount = 0) {
+    uint32_t overrideCount = 0,
+    const std::vector<rigExec::fb::FrameRecord> *frameRecords = nullptr) {
   auto ladders__ = ladders ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Ladder>>(*ladders) : 0;
   auto ladderOverrides__ = ladderOverrides ? _fbb.CreateVector<int32_t>(*ladderOverrides) : 0;
   auto restChainVaries__ = restChainVaries ? _fbb.CreateVector<uint8_t>(*restChainVaries) : 0;
@@ -9196,6 +9389,7 @@ inline ::flatbuffers::Offset<DomainPose> CreateDomainPoseDirect(
   auto spaceSwitches__ = spaceSwitches ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::SpaceSwitch>>(*spaceSwitches) : 0;
   auto avarBindings__ = avarBindings ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::AvarBinding>>(*avarBindings) : 0;
   auto xformBase__ = xformBase ? _fbb.CreateVectorOfStructs<rigExec::fb::Matrix4d>(*xformBase) : 0;
+  auto frameRecords__ = frameRecords ? _fbb.CreateVectorOfStructs<rigExec::fb::FrameRecord>(*frameRecords) : 0;
   return rigExec::fb::CreateDomainPose(
       _fbb,
       ladders__,
@@ -9216,15 +9410,148 @@ inline ::flatbuffers::Offset<DomainPose> CreateDomainPoseDirect(
       jointBindingSolvers__,
       jointBindingElements__,
       hasPropertyChains,
-      phasedReads,
       publishWeightFields,
       spaceSwitches__,
       avarBindings__,
       xformBase__,
-      overrideCount);
+      overrideCount,
+      frameRecords__);
 }
 
 ::flatbuffers::Offset<DomainPose> CreateDomainPose(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireDomainPose *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct RigExecWirePointsBinding : public ::flatbuffers::NativeTable {
+  typedef PointsBinding TableType;
+  uint32_t inputPath = 0;
+  ::rigExec::RigExecWireReadPhase phase{};
+  std::vector<rigExec::fb::PointVersion> candidates{};
+  bool finalRead = false;
+  bool diagnoseMiss = false;
+};
+
+/// A phased point read, bound at bake to the chain versions it may read.
+/// The first candidate whose chain read a base this run answers; with none,
+/// the reader reads its resolved input.
+struct PointsBinding FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef RigExecWirePointsBinding NativeTableType;
+  typedef PointsBindingBuilder Builder;
+  struct Traits;
+  static const ::flatbuffers::TypeTable *MiniReflectTypeTable() {
+    return PointsBindingTypeTable();
+  }
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_INPUTPATH = 4,
+    VT_PHASE = 6,
+    VT_CANDIDATES = 8,
+    VT_FINALREAD = 10,
+    VT_DIAGNOSEMISS = 12
+  };
+  /// Path id of the chain target the reader reads, which the overlay sets.
+  uint32_t inputPath() const {
+    return GetField<uint32_t>(VT_INPUTPATH, 0);
+  }
+  /// As declared; the diagnostic names it.
+  const rigExec::fb::ReadPhase *phase() const {
+    return GetStruct<const rigExec::fb::ReadPhase *>(VT_PHASE);
+  }
+  /// Newest first. For a final_read the one candidate is the chain's
+  /// published points, at version = the chain's revision count.
+  const ::flatbuffers::Vector<const rigExec::fb::PointVersion *> *candidates() const {
+    return GetPointer<const ::flatbuffers::Vector<const rigExec::fb::PointVersion *> *>(VT_CANDIDATES);
+  }
+  bool finalRead() const {
+    return GetField<uint8_t>(VT_FINALREAD, 0) != 0;
+  }
+  /// A miss says the phase resolved to nothing; never set on a blend
+  /// sample.
+  bool diagnoseMiss() const {
+    return GetField<uint8_t>(VT_DIAGNOSEMISS, 0) != 0;
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_INPUTPATH, 4) &&
+           VerifyField<rigExec::fb::ReadPhase>(verifier, VT_PHASE, 4) &&
+           VerifyOffset(verifier, VT_CANDIDATES) &&
+           verifier.VerifyVector(candidates()) &&
+           VerifyField<uint8_t>(verifier, VT_FINALREAD, 1) &&
+           VerifyField<uint8_t>(verifier, VT_DIAGNOSEMISS, 1) &&
+           verifier.EndTable();
+  }
+  RigExecWirePointsBinding *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(RigExecWirePointsBinding *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<PointsBinding> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWirePointsBinding* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct PointsBindingBuilder {
+  typedef PointsBinding Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_inputPath(uint32_t inputPath) {
+    fbb_.AddElement<uint32_t>(PointsBinding::VT_INPUTPATH, inputPath, 0);
+  }
+  void add_phase(const rigExec::fb::ReadPhase *phase) {
+    fbb_.AddStruct(PointsBinding::VT_PHASE, phase);
+  }
+  void add_candidates(::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::PointVersion *>> candidates) {
+    fbb_.AddOffset(PointsBinding::VT_CANDIDATES, candidates);
+  }
+  void add_finalRead(bool finalRead) {
+    fbb_.AddElement<uint8_t>(PointsBinding::VT_FINALREAD, static_cast<uint8_t>(finalRead), 0);
+  }
+  void add_diagnoseMiss(bool diagnoseMiss) {
+    fbb_.AddElement<uint8_t>(PointsBinding::VT_DIAGNOSEMISS, static_cast<uint8_t>(diagnoseMiss), 0);
+  }
+  explicit PointsBindingBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<PointsBinding> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<PointsBinding>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<PointsBinding> CreatePointsBinding(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t inputPath = 0,
+    const rigExec::fb::ReadPhase *phase = nullptr,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::PointVersion *>> candidates = 0,
+    bool finalRead = false,
+    bool diagnoseMiss = false) {
+  PointsBindingBuilder builder_(_fbb);
+  builder_.add_candidates(candidates);
+  builder_.add_phase(phase);
+  builder_.add_inputPath(inputPath);
+  builder_.add_diagnoseMiss(diagnoseMiss);
+  builder_.add_finalRead(finalRead);
+  return builder_.Finish();
+}
+
+struct PointsBinding::Traits {
+  using type = PointsBinding;
+  static auto constexpr Create = CreatePointsBinding;
+};
+
+inline ::flatbuffers::Offset<PointsBinding> CreatePointsBindingDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t inputPath = 0,
+    const rigExec::fb::ReadPhase *phase = nullptr,
+    const std::vector<rigExec::fb::PointVersion> *candidates = nullptr,
+    bool finalRead = false,
+    bool diagnoseMiss = false) {
+  auto candidates__ = candidates ? _fbb.CreateVectorOfStructs<rigExec::fb::PointVersion>(*candidates) : 0;
+  return rigExec::fb::CreatePointsBinding(
+      _fbb,
+      inputPath,
+      phase,
+      candidates__,
+      finalRead,
+      diagnoseMiss);
+}
+
+::flatbuffers::Offset<PointsBinding> CreatePointsBinding(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWirePointsBinding *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct RigExecWireBlendSampleBinding : public ::flatbuffers::NativeTable {
   typedef BlendSampleBinding TableType;
@@ -9821,6 +10148,8 @@ struct RigExecWireBlendSample : public ::flatbuffers::NativeTable {
   bool layoutValid = false;
   uint32_t pointsValue = 0;
   std::unique_ptr<rigExec::fb::RigExecWireInput> activationRead{};
+  std::unique_ptr<rigExec::fb::RigExecWirePointsBinding> pointBinding{};
+  std::unique_ptr<rigExec::fb::RigExecWireInput> pointsRead{};
   RigExecWireBlendSample() = default;
   RigExecWireBlendSample(const RigExecWireBlendSample &o);
   RigExecWireBlendSample(RigExecWireBlendSample&&) FLATBUFFERS_NOEXCEPT = default;
@@ -9851,7 +10180,9 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_POINTCOUNT = 26,
     VT_LAYOUTVALID = 28,
     VT_POINTSVALUE = 30,
-    VT_ACTIVATIONREAD = 32
+    VT_ACTIVATIONREAD = 32,
+    VT_POINTBINDING = 34,
+    VT_POINTSREAD = 36
   };
   uint32_t samplePath() const {
     return GetField<uint32_t>(VT_SAMPLEPATH, 0);
@@ -9893,8 +10224,9 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool layoutValid() const {
     return GetField<uint8_t>(VT_LAYOUTVALID, 0) != 0;
   }
-  /// vec3f_arrays[]: the dense points at bake_time; a phased sample falls
-  /// back to them.
+  /// vec3f_arrays[]: the sample's resolved points input at bake_time. A
+  /// sample with a point_binding reads them only when its binding answers
+  /// nothing; otherwise it reads the version the binding resolves to.
   uint32_t pointsValue() const {
     return GetField<uint32_t>(VT_POINTSVALUE, 0);
   }
@@ -9902,6 +10234,17 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// before the channel's samples are stable-sorted by it.
   const rigExec::fb::Input *activationRead() const {
     return GetPointer<const rigExec::fb::Input *>(VT_ACTIVATIONREAD);
+  }
+  /// A dense sample with a non-base phase: the versions its points read.
+  /// Absent on every other sample.
+  const rigExec::fb::PointsBinding *pointBinding() const {
+    return GetPointer<const rigExec::fb::PointsBinding *>(VT_POINTBINDING);
+  }
+  /// A dense sample's points read through the input slots (Vec3fArray,
+  /// Raw over points_path or Resolved over its connection walk), read in
+  /// place of points_value; absent where they are static.
+  const rigExec::fb::Input *pointsRead() const {
+    return GetPointer<const rigExec::fb::Input *>(VT_POINTSREAD);
   }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
@@ -9924,6 +10267,10 @@ struct BlendSample FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_POINTSVALUE, 4) &&
            VerifyOffsetRequired(verifier, VT_ACTIVATIONREAD) &&
            verifier.VerifyTable(activationRead()) &&
+           VerifyOffset(verifier, VT_POINTBINDING) &&
+           verifier.VerifyTable(pointBinding()) &&
+           VerifyOffset(verifier, VT_POINTSREAD) &&
+           verifier.VerifyTable(pointsRead()) &&
            verifier.EndTable();
   }
   RigExecWireBlendSample *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -9980,6 +10327,12 @@ struct BlendSampleBuilder {
   void add_activationRead(::flatbuffers::Offset<rigExec::fb::Input> activationRead) {
     fbb_.AddOffset(BlendSample::VT_ACTIVATIONREAD, activationRead);
   }
+  void add_pointBinding(::flatbuffers::Offset<rigExec::fb::PointsBinding> pointBinding) {
+    fbb_.AddOffset(BlendSample::VT_POINTBINDING, pointBinding);
+  }
+  void add_pointsRead(::flatbuffers::Offset<rigExec::fb::Input> pointsRead) {
+    fbb_.AddOffset(BlendSample::VT_POINTSREAD, pointsRead);
+  }
   explicit BlendSampleBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -10008,9 +10361,13 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSample(
     uint64_t pointCount = 0,
     bool layoutValid = false,
     uint32_t pointsValue = 0,
-    ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0) {
+    ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0,
+    ::flatbuffers::Offset<rigExec::fb::PointsBinding> pointBinding = 0,
+    ::flatbuffers::Offset<rigExec::fb::Input> pointsRead = 0) {
   BlendSampleBuilder builder_(_fbb);
   builder_.add_pointCount(pointCount);
+  builder_.add_pointsRead(pointsRead);
+  builder_.add_pointBinding(pointBinding);
   builder_.add_activationRead(activationRead);
   builder_.add_pointsValue(pointsValue);
   builder_.add_indices(indices);
@@ -10049,7 +10406,9 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSampleDirect(
     uint64_t pointCount = 0,
     bool layoutValid = false,
     uint32_t pointsValue = 0,
-    ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0) {
+    ::flatbuffers::Offset<rigExec::fb::Input> activationRead = 0,
+    ::flatbuffers::Offset<rigExec::fb::PointsBinding> pointBinding = 0,
+    ::flatbuffers::Offset<rigExec::fb::Input> pointsRead = 0) {
   auto offsets__ = offsets ? _fbb.CreateVectorOfStructs<rigExec::fb::Vec3f>(*offsets) : 0;
   auto indices__ = indices ? _fbb.CreateVector<int32_t>(*indices) : 0;
   return rigExec::fb::CreateBlendSample(
@@ -10068,7 +10427,9 @@ inline ::flatbuffers::Offset<BlendSample> CreateBlendSampleDirect(
       pointCount,
       layoutValid,
       pointsValue,
-      activationRead);
+      activationRead,
+      pointBinding,
+      pointsRead);
 }
 
 ::flatbuffers::Offset<BlendSample> CreateBlendSample(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireBlendSample *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -10341,11 +10702,11 @@ struct RigExecWireSkinTopology : public ::flatbuffers::NativeTable {
 /// One skin mover's per-point influence layout, in one of two forms, and
 /// only one per layout:
 /// - sparse, for every layout whose indices and weights are rows of an
-///   element_size in [0, 65535] (none at element_size 0). Kept: every
-///   entry except one whose index is 0 and whose weight is zero (either
-///   sign), which reads exactly as padding does. Expanded, each point
-///   holds its kept (index, weight) entries in their original order, then
-///   (0, +0.0f) padding up to element_size.
+///   element_size in [0, 65535] (none at element_size 0). Kept: each row's
+///   entries before its trailing run of (index 0, weight +0.0f) entries,
+///   which the padding restores. Expanded, each point holds its kept
+///   (index, weight) entries in their original order, then (0, +0.0f)
+///   padding up to element_size: the layout bit for bit.
 /// - raw, for every layout the sparse form cannot hold (an element_size
 ///   below 0 or past 65535, entries at element_size 0, indices and
 ///   weights of different lengths, or entries short of a whole row):
@@ -10767,10 +11128,14 @@ struct PathRead FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool rest() const {
     return GetField<uint8_t>(VT_REST, 0) != 0;
   }
+  /// The static value; on a rest array read, the attribute's Default-time
+  /// value, read while its slot holds no authored value.
   const rigExec::fb::PathValue *value() const {
     return GetPointer<const rigExec::fb::PathValue *>(VT_VALUE);
   }
-  /// A connection-following site (Resolved). walk[0] is `path`.
+  /// A connection-following scalar site (Resolved), or an array read (Raw
+  /// over path's slot or Resolved over its connection walk; Raw at rest).
+  /// walk[0] is `path`.
   const rigExec::fb::Input *read() const {
     return GetPointer<const rigExec::fb::Input *>(VT_READ);
   }
@@ -10865,8 +11230,6 @@ struct RigExecWireRevision : public ::flatbuffers::NativeTable {
   int32_t driverFramesSolver = -1;
   bool finalPhase = false;
   bool skinTopologyFixed = false;
-  bool snapshotAfter = false;
-  bool readsSnapshots = false;
   std::vector<::rigExec::RigExecWireMatrix4d> packetInfluences{};
   std::vector<rigExec::fb::RigExecWireChunk> chunks{};
   int32_t chunkBase = 0;
@@ -10888,6 +11251,11 @@ struct RigExecWireRevision : public ::flatbuffers::NativeTable {
   std::vector<uint32_t> shaderDials{};
   ::rigExec::RigExecWireMatrix4d meshWorldInverse{};
   std::unique_ptr<rigExec::fb::RigExecWireInput> defaultWeight{};
+  std::vector<uint32_t> transformRecords{};
+  std::vector<rigExec::fb::RigExecWireUintList> influenceRecords{};
+  std::vector<rigExec::fb::RigExecWirePointsBinding> pointBindings{};
+  int32_t jointIndicesSlot = -1;
+  int32_t jointWeightsSlot = -1;
   RigExecWireRevision() = default;
   RigExecWireRevision(const RigExecWireRevision &o);
   RigExecWireRevision(RigExecWireRevision&&) FLATBUFFERS_NOEXCEPT = default;
@@ -10917,29 +11285,32 @@ struct Revision FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_DRIVERFRAMESSOLVER = 26,
     VT_FINALPHASE = 28,
     VT_SKINTOPOLOGYFIXED = 30,
-    VT_SNAPSHOTAFTER = 32,
-    VT_READSSNAPSHOTS = 34,
-    VT_PACKETINFLUENCES = 36,
-    VT_CHUNKS = 38,
-    VT_CHUNKBASE = 40,
-    VT_PARTITIONTOPOLOGY = 42,
-    VT_PARTITIONSAMEASTOPOLOGY = 44,
-    VT_PARTITIONELEMENTSIZE = 46,
-    VT_PARTITIONINDEXCOUNT = 48,
-    VT_PARTITIONPOINTCOUNT = 50,
-    VT_CHUNKED = 52,
-    VT_PARTITIONCANDIDATES = 54,
-    VT_PARTITIONREADYMIN = 56,
-    VT_PARTITIONREADYMAX = 58,
-    VT_WEIGHTOBJECT = 60,
-    VT_WEIGHTOPERATIONDOMAIN = 62,
-    VT_WEIGHTFIELDTARGET = 64,
-    VT_WEIGHTCURRENTPHASE = 66,
-    VT_TOPOLOGY = 68,
-    VT_TOPOLOGYRESOLVED = 70,
-    VT_SHADERDIALS = 72,
-    VT_MESHWORLDINVERSE = 74,
-    VT_DEFAULTWEIGHT = 76
+    VT_PACKETINFLUENCES = 32,
+    VT_CHUNKS = 34,
+    VT_CHUNKBASE = 36,
+    VT_PARTITIONTOPOLOGY = 38,
+    VT_PARTITIONSAMEASTOPOLOGY = 40,
+    VT_PARTITIONELEMENTSIZE = 42,
+    VT_PARTITIONINDEXCOUNT = 44,
+    VT_PARTITIONPOINTCOUNT = 46,
+    VT_CHUNKED = 48,
+    VT_PARTITIONCANDIDATES = 50,
+    VT_PARTITIONREADYMIN = 52,
+    VT_PARTITIONREADYMAX = 54,
+    VT_WEIGHTOBJECT = 56,
+    VT_WEIGHTOPERATIONDOMAIN = 58,
+    VT_WEIGHTFIELDTARGET = 60,
+    VT_WEIGHTCURRENTPHASE = 62,
+    VT_TOPOLOGY = 64,
+    VT_TOPOLOGYRESOLVED = 66,
+    VT_SHADERDIALS = 68,
+    VT_MESHWORLDINVERSE = 70,
+    VT_DEFAULTWEIGHT = 72,
+    VT_TRANSFORMRECORDS = 74,
+    VT_INFLUENCERECORDS = 76,
+    VT_POINTBINDINGS = 78,
+    VT_JOINTINDICESSLOT = 80,
+    VT_JOINTWEIGHTSSLOT = 82
   };
   uint32_t moverPath() const {
     return GetField<uint32_t>(VT_MOVERPATH, 0);
@@ -10985,12 +11356,6 @@ struct Revision FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   bool skinTopologyFixed() const {
     return GetField<uint8_t>(VT_SKINTOPOLOGYFIXED, 0) != 0;
-  }
-  bool snapshotAfter() const {
-    return GetField<uint8_t>(VT_SNAPSHOTAFTER, 0) != 0;
-  }
-  bool readsSnapshots() const {
-    return GetField<uint8_t>(VT_READSSNAPSHOTS, 0) != 0;
   }
   const ::flatbuffers::Vector<const rigExec::fb::Matrix4d *> *packetInfluences() const {
     return GetPointer<const ::flatbuffers::Vector<const rigExec::fb::Matrix4d *> *>(VT_PACKETINFLUENCES);
@@ -11063,6 +11428,29 @@ struct Revision FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const rigExec::fb::Input *defaultWeight() const {
     return GetPointer<const rigExec::fb::Input *>(VT_DEFAULTWEIGHT);
   }
+  /// For an AtPrim binding.transform_phase only: pose.frame_records indices
+  /// of the transform provider, newest first. The fold takes the first
+  /// valid one, else keeps the dense-table matrix.
+  const ::flatbuffers::Vector<uint32_t> *transformRecords() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_TRANSFORMRECORDS);
+  }
+  /// The same per influence_slots entry, or empty.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::UintList>> *influenceRecords() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::UintList>> *>(VT_INFLUENCERECORDS);
+  }
+  /// One per binding.phase_inputs entry, in its order.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::PointsBinding>> *pointBindings() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::PointsBinding>> *>(VT_POINTBINDINGS);
+  }
+  /// A main skin_topology_fixed revision's rigExec:jointIndices (IntArray)
+  /// and rigExec:jointWeights (FloatArray) input slots, both or neither;
+  /// -1 for none. With a stored layout their defaults are its expansion.
+  int32_t jointIndicesSlot() const {
+    return GetField<int32_t>(VT_JOINTINDICESSLOT, -1);
+  }
+  int32_t jointWeightsSlot() const {
+    return GetField<int32_t>(VT_JOINTWEIGHTSSLOT, -1);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -11084,8 +11472,6 @@ struct Revision FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_DRIVERFRAMESSOLVER, 4) &&
            VerifyField<uint8_t>(verifier, VT_FINALPHASE, 1) &&
            VerifyField<uint8_t>(verifier, VT_SKINTOPOLOGYFIXED, 1) &&
-           VerifyField<uint8_t>(verifier, VT_SNAPSHOTAFTER, 1) &&
-           VerifyField<uint8_t>(verifier, VT_READSSNAPSHOTS, 1) &&
            VerifyOffset(verifier, VT_PACKETINFLUENCES) &&
            verifier.VerifyVector(packetInfluences()) &&
            VerifyOffset(verifier, VT_CHUNKS) &&
@@ -11114,6 +11500,16 @@ struct Revision FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<rigExec::fb::Matrix4d>(verifier, VT_MESHWORLDINVERSE, 8) &&
            VerifyOffset(verifier, VT_DEFAULTWEIGHT) &&
            verifier.VerifyTable(defaultWeight()) &&
+           VerifyOffset(verifier, VT_TRANSFORMRECORDS) &&
+           verifier.VerifyVector(transformRecords()) &&
+           VerifyOffset(verifier, VT_INFLUENCERECORDS) &&
+           verifier.VerifyVector(influenceRecords()) &&
+           verifier.VerifyVectorOfTables(influenceRecords()) &&
+           VerifyOffset(verifier, VT_POINTBINDINGS) &&
+           verifier.VerifyVector(pointBindings()) &&
+           verifier.VerifyVectorOfTables(pointBindings()) &&
+           VerifyField<int32_t>(verifier, VT_JOINTINDICESSLOT, 4) &&
+           VerifyField<int32_t>(verifier, VT_JOINTWEIGHTSSLOT, 4) &&
            verifier.EndTable();
   }
   RigExecWireRevision *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -11166,12 +11562,6 @@ struct RevisionBuilder {
   }
   void add_skinTopologyFixed(bool skinTopologyFixed) {
     fbb_.AddElement<uint8_t>(Revision::VT_SKINTOPOLOGYFIXED, static_cast<uint8_t>(skinTopologyFixed), 0);
-  }
-  void add_snapshotAfter(bool snapshotAfter) {
-    fbb_.AddElement<uint8_t>(Revision::VT_SNAPSHOTAFTER, static_cast<uint8_t>(snapshotAfter), 0);
-  }
-  void add_readsSnapshots(bool readsSnapshots) {
-    fbb_.AddElement<uint8_t>(Revision::VT_READSSNAPSHOTS, static_cast<uint8_t>(readsSnapshots), 0);
   }
   void add_packetInfluences(::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::Matrix4d *>> packetInfluences) {
     fbb_.AddOffset(Revision::VT_PACKETINFLUENCES, packetInfluences);
@@ -11236,6 +11626,21 @@ struct RevisionBuilder {
   void add_defaultWeight(::flatbuffers::Offset<rigExec::fb::Input> defaultWeight) {
     fbb_.AddOffset(Revision::VT_DEFAULTWEIGHT, defaultWeight);
   }
+  void add_transformRecords(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> transformRecords) {
+    fbb_.AddOffset(Revision::VT_TRANSFORMRECORDS, transformRecords);
+  }
+  void add_influenceRecords(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::UintList>>> influenceRecords) {
+    fbb_.AddOffset(Revision::VT_INFLUENCERECORDS, influenceRecords);
+  }
+  void add_pointBindings(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::PointsBinding>>> pointBindings) {
+    fbb_.AddOffset(Revision::VT_POINTBINDINGS, pointBindings);
+  }
+  void add_jointIndicesSlot(int32_t jointIndicesSlot) {
+    fbb_.AddElement<int32_t>(Revision::VT_JOINTINDICESSLOT, jointIndicesSlot, -1);
+  }
+  void add_jointWeightsSlot(int32_t jointWeightsSlot) {
+    fbb_.AddElement<int32_t>(Revision::VT_JOINTWEIGHTSSLOT, jointWeightsSlot, -1);
+  }
   explicit RevisionBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -11264,8 +11669,6 @@ inline ::flatbuffers::Offset<Revision> CreateRevision(
     int32_t driverFramesSolver = -1,
     bool finalPhase = false,
     bool skinTopologyFixed = false,
-    bool snapshotAfter = false,
-    bool readsSnapshots = false,
     ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::Matrix4d *>> packetInfluences = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Chunk>>> chunks = 0,
     int32_t chunkBase = 0,
@@ -11286,11 +11689,21 @@ inline ::flatbuffers::Offset<Revision> CreateRevision(
     bool topologyResolved = false,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> shaderDials = 0,
     const rigExec::fb::Matrix4d *meshWorldInverse = nullptr,
-    ::flatbuffers::Offset<rigExec::fb::Input> defaultWeight = 0) {
+    ::flatbuffers::Offset<rigExec::fb::Input> defaultWeight = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> transformRecords = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::UintList>>> influenceRecords = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::PointsBinding>>> pointBindings = 0,
+    int32_t jointIndicesSlot = -1,
+    int32_t jointWeightsSlot = -1) {
   RevisionBuilder builder_(_fbb);
   builder_.add_partitionCandidates(partitionCandidates);
   builder_.add_partitionPointCount(partitionPointCount);
   builder_.add_partitionIndexCount(partitionIndexCount);
+  builder_.add_jointWeightsSlot(jointWeightsSlot);
+  builder_.add_jointIndicesSlot(jointIndicesSlot);
+  builder_.add_pointBindings(pointBindings);
+  builder_.add_influenceRecords(influenceRecords);
+  builder_.add_transformRecords(transformRecords);
   builder_.add_defaultWeight(defaultWeight);
   builder_.add_meshWorldInverse(meshWorldInverse);
   builder_.add_shaderDials(shaderDials);
@@ -11320,8 +11733,6 @@ inline ::flatbuffers::Offset<Revision> CreateRevision(
   builder_.add_weightOperationDomain(weightOperationDomain);
   builder_.add_chunked(chunked);
   builder_.add_partitionSameAsTopology(partitionSameAsTopology);
-  builder_.add_readsSnapshots(readsSnapshots);
-  builder_.add_snapshotAfter(snapshotAfter);
   builder_.add_skinTopologyFixed(skinTopologyFixed);
   builder_.add_finalPhase(finalPhase);
   builder_.add_op(op);
@@ -11349,8 +11760,6 @@ inline ::flatbuffers::Offset<Revision> CreateRevisionDirect(
     int32_t driverFramesSolver = -1,
     bool finalPhase = false,
     bool skinTopologyFixed = false,
-    bool snapshotAfter = false,
-    bool readsSnapshots = false,
     const std::vector<rigExec::fb::Matrix4d> *packetInfluences = nullptr,
     const std::vector<::flatbuffers::Offset<rigExec::fb::Chunk>> *chunks = nullptr,
     int32_t chunkBase = 0,
@@ -11371,12 +11780,20 @@ inline ::flatbuffers::Offset<Revision> CreateRevisionDirect(
     bool topologyResolved = false,
     const std::vector<uint32_t> *shaderDials = nullptr,
     const rigExec::fb::Matrix4d *meshWorldInverse = nullptr,
-    ::flatbuffers::Offset<rigExec::fb::Input> defaultWeight = 0) {
+    ::flatbuffers::Offset<rigExec::fb::Input> defaultWeight = 0,
+    const std::vector<uint32_t> *transformRecords = nullptr,
+    const std::vector<::flatbuffers::Offset<rigExec::fb::UintList>> *influenceRecords = nullptr,
+    const std::vector<::flatbuffers::Offset<rigExec::fb::PointsBinding>> *pointBindings = nullptr,
+    int32_t jointIndicesSlot = -1,
+    int32_t jointWeightsSlot = -1) {
   auto blendChannels__ = blendChannels ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::BlendChannel>>(*blendChannels) : 0;
   auto influenceSlots__ = influenceSlots ? _fbb.CreateVector<int32_t>(*influenceSlots) : 0;
   auto packetInfluences__ = packetInfluences ? _fbb.CreateVectorOfStructs<rigExec::fb::Matrix4d>(*packetInfluences) : 0;
   auto chunks__ = chunks ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Chunk>>(*chunks) : 0;
   auto shaderDials__ = shaderDials ? _fbb.CreateVector<uint32_t>(*shaderDials) : 0;
+  auto transformRecords__ = transformRecords ? _fbb.CreateVector<uint32_t>(*transformRecords) : 0;
+  auto influenceRecords__ = influenceRecords ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::UintList>>(*influenceRecords) : 0;
+  auto pointBindings__ = pointBindings ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::PointsBinding>>(*pointBindings) : 0;
   return rigExec::fb::CreateRevision(
       _fbb,
       moverPath,
@@ -11393,8 +11810,6 @@ inline ::flatbuffers::Offset<Revision> CreateRevisionDirect(
       driverFramesSolver,
       finalPhase,
       skinTopologyFixed,
-      snapshotAfter,
-      readsSnapshots,
       packetInfluences__,
       chunks__,
       chunkBase,
@@ -11415,7 +11830,12 @@ inline ::flatbuffers::Offset<Revision> CreateRevisionDirect(
       topologyResolved,
       shaderDials__,
       meshWorldInverse,
-      defaultWeight);
+      defaultWeight,
+      transformRecords__,
+      influenceRecords__,
+      pointBindings__,
+      jointIndicesSlot,
+      jointWeightsSlot);
 }
 
 ::flatbuffers::Offset<Revision> CreateRevision(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireRevision *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -11529,6 +11949,7 @@ struct RigExecWireChain : public ::flatbuffers::NativeTable {
   std::vector<rigExec::fb::RigExecWireDerived> derived{};
   bool haveBase = false;
   uint32_t base = 0;
+  int32_t baseSlot = -1;
 };
 
 struct Chain FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -11543,7 +11964,8 @@ struct Chain FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_REVISIONS = 6,
     VT_DERIVED = 8,
     VT_HAVEBASE = 10,
-    VT_BASE = 12
+    VT_BASE = 12,
+    VT_BASESLOT = 14
   };
   uint32_t target() const {
     return GetField<uint32_t>(VT_TARGET, 0);
@@ -11561,6 +11983,11 @@ struct Chain FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint32_t base() const {
     return GetField<uint32_t>(VT_BASE, 0);
   }
+  /// The target's points input slot (Vec3fArray), whose default is `base`;
+  /// -1 for none.
+  int32_t baseSlot() const {
+    return GetField<int32_t>(VT_BASESLOT, -1);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -11573,6 +12000,7 @@ struct Chain FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(derived()) &&
            VerifyField<uint8_t>(verifier, VT_HAVEBASE, 1) &&
            VerifyField<uint32_t>(verifier, VT_BASE, 4) &&
+           VerifyField<int32_t>(verifier, VT_BASESLOT, 4) &&
            verifier.EndTable();
   }
   RigExecWireChain *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -11599,6 +12027,9 @@ struct ChainBuilder {
   void add_base(uint32_t base) {
     fbb_.AddElement<uint32_t>(Chain::VT_BASE, base, 0);
   }
+  void add_baseSlot(int32_t baseSlot) {
+    fbb_.AddElement<int32_t>(Chain::VT_BASESLOT, baseSlot, -1);
+  }
   explicit ChainBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -11616,8 +12047,10 @@ inline ::flatbuffers::Offset<Chain> CreateChain(
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Revision>>> revisions = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<rigExec::fb::Derived>>> derived = 0,
     bool haveBase = false,
-    uint32_t base = 0) {
+    uint32_t base = 0,
+    int32_t baseSlot = -1) {
   ChainBuilder builder_(_fbb);
+  builder_.add_baseSlot(baseSlot);
   builder_.add_base(base);
   builder_.add_derived(derived);
   builder_.add_revisions(revisions);
@@ -11637,7 +12070,8 @@ inline ::flatbuffers::Offset<Chain> CreateChainDirect(
     const std::vector<::flatbuffers::Offset<rigExec::fb::Revision>> *revisions = nullptr,
     const std::vector<::flatbuffers::Offset<rigExec::fb::Derived>> *derived = nullptr,
     bool haveBase = false,
-    uint32_t base = 0) {
+    uint32_t base = 0,
+    int32_t baseSlot = -1) {
   auto revisions__ = revisions ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Revision>>(*revisions) : 0;
   auto derived__ = derived ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Derived>>(*derived) : 0;
   return rigExec::fb::CreateChain(
@@ -11646,7 +12080,8 @@ inline ::flatbuffers::Offset<Chain> CreateChainDirect(
       revisions__,
       derived__,
       haveBase,
-      base);
+      base,
+      baseSlot);
 }
 
 ::flatbuffers::Offset<Chain> CreateChain(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireChain *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -11657,8 +12092,6 @@ struct RigExecWireWeightObject : public ::flatbuffers::NativeTable {
   uint32_t type = 0;
   uint32_t representation = 0;
   uint32_t rangePolicy = 0;
-  std::vector<float> values{};
-  std::vector<int32_t> indices{};
   std::unique_ptr<rigExec::fb::RigExecWireInput> defaultWeight{};
   int32_t base = -1;
   std::vector<int32_t> inputs{};
@@ -11696,12 +12129,14 @@ struct RigExecWireWeightObject : public ::flatbuffers::NativeTable {
   std::vector<float> falloffCurve{};
   bool envelopeOnly = false;
   bool samplesInFlight = false;
-  int32_t oracleSamples = -1;
-  int32_t oracleCurve = -1;
   uint32_t oraclePlaneAxis = 0;
   uint32_t oraclePlaneBounds = 0;
   std::string oraclePhaseError{};
   std::string oracleStaticError{};
+  int32_t valuesSlot = -1;
+  int32_t indicesSlot = -1;
+  int32_t oracleSamplesSlot = -1;
+  int32_t oracleCurveSlot = -1;
   RigExecWireWeightObject() = default;
   RigExecWireWeightObject(const RigExecWireWeightObject &o);
   RigExecWireWeightObject(RigExecWireWeightObject&&) FLATBUFFERS_NOEXCEPT = default;
@@ -11723,8 +12158,6 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_TYPE = 6,
     VT_REPRESENTATION = 8,
     VT_RANGEPOLICY = 10,
-    VT_VALUES = 12,
-    VT_INDICES = 14,
     VT_DEFAULTWEIGHT = 16,
     VT_BASE = 18,
     VT_INPUTS = 20,
@@ -11762,12 +12195,14 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_FALLOFFCURVE = 84,
     VT_ENVELOPEONLY = 86,
     VT_SAMPLESINFLIGHT = 88,
-    VT_ORACLESAMPLES = 90,
-    VT_ORACLECURVE = 92,
     VT_ORACLEPLANEAXIS = 94,
     VT_ORACLEPLANEBOUNDS = 96,
     VT_ORACLEPHASEERROR = 98,
-    VT_ORACLESTATICERROR = 100
+    VT_ORACLESTATICERROR = 100,
+    VT_VALUESSLOT = 102,
+    VT_INDICESSLOT = 104,
+    VT_ORACLESAMPLESSLOT = 106,
+    VT_ORACLECURVESLOT = 108
   };
   uint32_t path() const {
     return GetField<uint32_t>(VT_PATH, 0);
@@ -11783,12 +12218,6 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// Token.
   uint32_t rangePolicy() const {
     return GetField<uint32_t>(VT_RANGEPOLICY, 0);
-  }
-  const ::flatbuffers::Vector<float> *values() const {
-    return GetPointer<const ::flatbuffers::Vector<float> *>(VT_VALUES);
-  }
-  const ::flatbuffers::Vector<int32_t> *indices() const {
-    return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_INDICES);
   }
   const rigExec::fb::Input *defaultWeight() const {
     return GetPointer<const rigExec::fb::Input *>(VT_DEFAULTWEIGHT);
@@ -11909,17 +12338,6 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool samplesInFlight() const {
     return GetField<uint8_t>(VT_SAMPLESINFLIGHT, 0) != 0;
   }
-  /// vec3f_arrays[]: the points a volume not in flight samples at bake_time
-  /// (rigExec:sampleSource, else rigExec:weightTarget); -1 when neither
-  /// reads.
-  int32_t oracleSamples() const {
-    return GetField<int32_t>(VT_ORACLESAMPLES, -1);
-  }
-  /// vec3f_arrays[]: a curve volume's rigExec:curve points at bake_time; -1
-  /// when it does not read or is empty.
-  int32_t oracleCurve() const {
-    return GetField<int32_t>(VT_ORACLECURVE, -1);
-  }
   /// A plane volume's rigExec:planeAxis and rigExec:planeBounds as the
   /// oracle reads them (the fallback only when the attribute is absent);
   /// Token path ids, 0 for every other type.
@@ -11938,6 +12356,25 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *oracleStaticError() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ORACLESTATICERROR);
   }
+  /// Input slots, -1 for none: the painted rigExec:values (FloatArray)
+  /// and rigExec:indices (IntArray), whose defaults are their values at
+  /// Default; and, for an object the oracle resolves, the points a volume
+  /// not in flight samples (rigExec:sampleSource, else
+  /// rigExec:weightTarget) and a curve volume's rigExec:curve points
+  /// (Vec3fArray, each at the attribute the oracle resolves its
+  /// relationship to), read at the time.
+  int32_t valuesSlot() const {
+    return GetField<int32_t>(VT_VALUESSLOT, -1);
+  }
+  int32_t indicesSlot() const {
+    return GetField<int32_t>(VT_INDICESSLOT, -1);
+  }
+  int32_t oracleSamplesSlot() const {
+    return GetField<int32_t>(VT_ORACLESAMPLESSLOT, -1);
+  }
+  int32_t oracleCurveSlot() const {
+    return GetField<int32_t>(VT_ORACLECURVESLOT, -1);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -11945,10 +12382,6 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint32_t>(verifier, VT_TYPE, 4) &&
            VerifyField<uint32_t>(verifier, VT_REPRESENTATION, 4) &&
            VerifyField<uint32_t>(verifier, VT_RANGEPOLICY, 4) &&
-           VerifyOffset(verifier, VT_VALUES) &&
-           verifier.VerifyVector(values()) &&
-           VerifyOffset(verifier, VT_INDICES) &&
-           verifier.VerifyVector(indices()) &&
            VerifyOffsetRequired(verifier, VT_DEFAULTWEIGHT) &&
            verifier.VerifyTable(defaultWeight()) &&
            VerifyField<int32_t>(verifier, VT_BASE, 4) &&
@@ -12015,14 +12448,16 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(falloffCurve()) &&
            VerifyField<uint8_t>(verifier, VT_ENVELOPEONLY, 1) &&
            VerifyField<uint8_t>(verifier, VT_SAMPLESINFLIGHT, 1) &&
-           VerifyField<int32_t>(verifier, VT_ORACLESAMPLES, 4) &&
-           VerifyField<int32_t>(verifier, VT_ORACLECURVE, 4) &&
            VerifyField<uint32_t>(verifier, VT_ORACLEPLANEAXIS, 4) &&
            VerifyField<uint32_t>(verifier, VT_ORACLEPLANEBOUNDS, 4) &&
            VerifyOffset(verifier, VT_ORACLEPHASEERROR) &&
            verifier.VerifyString(oraclePhaseError()) &&
            VerifyOffset(verifier, VT_ORACLESTATICERROR) &&
            verifier.VerifyString(oracleStaticError()) &&
+           VerifyField<int32_t>(verifier, VT_VALUESSLOT, 4) &&
+           VerifyField<int32_t>(verifier, VT_INDICESSLOT, 4) &&
+           VerifyField<int32_t>(verifier, VT_ORACLESAMPLESSLOT, 4) &&
+           VerifyField<int32_t>(verifier, VT_ORACLECURVESLOT, 4) &&
            verifier.EndTable();
   }
   RigExecWireWeightObject *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -12045,12 +12480,6 @@ struct WeightObjectBuilder {
   }
   void add_rangePolicy(uint32_t rangePolicy) {
     fbb_.AddElement<uint32_t>(WeightObject::VT_RANGEPOLICY, rangePolicy, 0);
-  }
-  void add_values(::flatbuffers::Offset<::flatbuffers::Vector<float>> values) {
-    fbb_.AddOffset(WeightObject::VT_VALUES, values);
-  }
-  void add_indices(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> indices) {
-    fbb_.AddOffset(WeightObject::VT_INDICES, indices);
   }
   void add_defaultWeight(::flatbuffers::Offset<rigExec::fb::Input> defaultWeight) {
     fbb_.AddOffset(WeightObject::VT_DEFAULTWEIGHT, defaultWeight);
@@ -12163,12 +12592,6 @@ struct WeightObjectBuilder {
   void add_samplesInFlight(bool samplesInFlight) {
     fbb_.AddElement<uint8_t>(WeightObject::VT_SAMPLESINFLIGHT, static_cast<uint8_t>(samplesInFlight), 0);
   }
-  void add_oracleSamples(int32_t oracleSamples) {
-    fbb_.AddElement<int32_t>(WeightObject::VT_ORACLESAMPLES, oracleSamples, -1);
-  }
-  void add_oracleCurve(int32_t oracleCurve) {
-    fbb_.AddElement<int32_t>(WeightObject::VT_ORACLECURVE, oracleCurve, -1);
-  }
   void add_oraclePlaneAxis(uint32_t oraclePlaneAxis) {
     fbb_.AddElement<uint32_t>(WeightObject::VT_ORACLEPLANEAXIS, oraclePlaneAxis, 0);
   }
@@ -12180,6 +12603,18 @@ struct WeightObjectBuilder {
   }
   void add_oracleStaticError(::flatbuffers::Offset<::flatbuffers::String> oracleStaticError) {
     fbb_.AddOffset(WeightObject::VT_ORACLESTATICERROR, oracleStaticError);
+  }
+  void add_valuesSlot(int32_t valuesSlot) {
+    fbb_.AddElement<int32_t>(WeightObject::VT_VALUESSLOT, valuesSlot, -1);
+  }
+  void add_indicesSlot(int32_t indicesSlot) {
+    fbb_.AddElement<int32_t>(WeightObject::VT_INDICESSLOT, indicesSlot, -1);
+  }
+  void add_oracleSamplesSlot(int32_t oracleSamplesSlot) {
+    fbb_.AddElement<int32_t>(WeightObject::VT_ORACLESAMPLESSLOT, oracleSamplesSlot, -1);
+  }
+  void add_oracleCurveSlot(int32_t oracleCurveSlot) {
+    fbb_.AddElement<int32_t>(WeightObject::VT_ORACLECURVESLOT, oracleCurveSlot, -1);
   }
   explicit WeightObjectBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -12217,8 +12652,6 @@ inline ::flatbuffers::Offset<WeightObject> CreateWeightObject(
     uint32_t type = 0,
     uint32_t representation = 0,
     uint32_t rangePolicy = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<float>> values = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> indices = 0,
     ::flatbuffers::Offset<rigExec::fb::Input> defaultWeight = 0,
     int32_t base = -1,
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> inputs = 0,
@@ -12256,20 +12689,24 @@ inline ::flatbuffers::Offset<WeightObject> CreateWeightObject(
     ::flatbuffers::Offset<::flatbuffers::Vector<float>> falloffCurve = 0,
     bool envelopeOnly = false,
     bool samplesInFlight = false,
-    int32_t oracleSamples = -1,
-    int32_t oracleCurve = -1,
     uint32_t oraclePlaneAxis = 0,
     uint32_t oraclePlaneBounds = 0,
     ::flatbuffers::Offset<::flatbuffers::String> oraclePhaseError = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> oracleStaticError = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> oracleStaticError = 0,
+    int32_t valuesSlot = -1,
+    int32_t indicesSlot = -1,
+    int32_t oracleSamplesSlot = -1,
+    int32_t oracleCurveSlot = -1) {
   WeightObjectBuilder builder_(_fbb);
   builder_.add_costElements(costElements);
+  builder_.add_oracleCurveSlot(oracleCurveSlot);
+  builder_.add_oracleSamplesSlot(oracleSamplesSlot);
+  builder_.add_indicesSlot(indicesSlot);
+  builder_.add_valuesSlot(valuesSlot);
   builder_.add_oracleStaticError(oracleStaticError);
   builder_.add_oraclePhaseError(oraclePhaseError);
   builder_.add_oraclePlaneBounds(oraclePlaneBounds);
   builder_.add_oraclePlaneAxis(oraclePlaneAxis);
-  builder_.add_oracleCurve(oracleCurve);
-  builder_.add_oracleSamples(oracleSamples);
   builder_.add_falloffCurve(falloffCurve);
   builder_.add_curveValid(curveValid);
   builder_.add_curvePoints(curvePoints);
@@ -12304,8 +12741,6 @@ inline ::flatbuffers::Offset<WeightObject> CreateWeightObject(
   builder_.add_inputs(inputs);
   builder_.add_base(base);
   builder_.add_defaultWeight(defaultWeight);
-  builder_.add_indices(indices);
-  builder_.add_values(values);
   builder_.add_rangePolicy(rangePolicy);
   builder_.add_representation(representation);
   builder_.add_type(type);
@@ -12326,8 +12761,6 @@ inline ::flatbuffers::Offset<WeightObject> CreateWeightObjectDirect(
     uint32_t type = 0,
     uint32_t representation = 0,
     uint32_t rangePolicy = 0,
-    const std::vector<float> *values = nullptr,
-    const std::vector<int32_t> *indices = nullptr,
     ::flatbuffers::Offset<rigExec::fb::Input> defaultWeight = 0,
     int32_t base = -1,
     const std::vector<int32_t> *inputs = nullptr,
@@ -12365,14 +12798,14 @@ inline ::flatbuffers::Offset<WeightObject> CreateWeightObjectDirect(
     const std::vector<float> *falloffCurve = nullptr,
     bool envelopeOnly = false,
     bool samplesInFlight = false,
-    int32_t oracleSamples = -1,
-    int32_t oracleCurve = -1,
     uint32_t oraclePlaneAxis = 0,
     uint32_t oraclePlaneBounds = 0,
     const char *oraclePhaseError = nullptr,
-    const char *oracleStaticError = nullptr) {
-  auto values__ = values ? _fbb.CreateVector<float>(*values) : 0;
-  auto indices__ = indices ? _fbb.CreateVector<int32_t>(*indices) : 0;
+    const char *oracleStaticError = nullptr,
+    int32_t valuesSlot = -1,
+    int32_t indicesSlot = -1,
+    int32_t oracleSamplesSlot = -1,
+    int32_t oracleCurveSlot = -1) {
   auto inputs__ = inputs ? _fbb.CreateVector<int32_t>(*inputs) : 0;
   auto combineTargetPoints__ = combineTargetPoints ? _fbb.CreateVector<uint32_t>(*combineTargetPoints) : 0;
   auto combineTargetValid__ = combineTargetValid ? _fbb.CreateVector<uint8_t>(*combineTargetValid) : 0;
@@ -12391,8 +12824,6 @@ inline ::flatbuffers::Offset<WeightObject> CreateWeightObjectDirect(
       type,
       representation,
       rangePolicy,
-      values__,
-      indices__,
       defaultWeight,
       base,
       inputs__,
@@ -12430,12 +12861,14 @@ inline ::flatbuffers::Offset<WeightObject> CreateWeightObjectDirect(
       falloffCurve__,
       envelopeOnly,
       samplesInFlight,
-      oracleSamples,
-      oracleCurve,
       oraclePlaneAxis,
       oraclePlaneBounds,
       oraclePhaseError__,
-      oracleStaticError__);
+      oracleStaticError__,
+      valuesSlot,
+      indicesSlot,
+      oracleSamplesSlot,
+      oracleCurveSlot);
 }
 
 ::flatbuffers::Offset<WeightObject> CreateWeightObject(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireWeightObject *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -13874,7 +14307,9 @@ inline RigExecWireValue::RigExecWireValue(const RigExecWireValue &o)
         bits(o.bits),
         matrix((o.matrix) ? new ::rigExec::RigExecWireMatrix4d(*o.matrix) : nullptr),
         vec3d((o.vec3d) ? new ::rigExec::RigExecWireVec3d(*o.vec3d) : nullptr),
-        vec3f((o.vec3f) ? new ::rigExec::RigExecWireVec3f(*o.vec3f) : nullptr) {
+        vec3f((o.vec3f) ? new ::rigExec::RigExecWireVec3f(*o.vec3f) : nullptr),
+        arraySource(o.arraySource),
+        array(o.array) {
 }
 
 inline RigExecWireValue &RigExecWireValue::operator=(RigExecWireValue o) FLATBUFFERS_NOEXCEPT {
@@ -13883,6 +14318,8 @@ inline RigExecWireValue &RigExecWireValue::operator=(RigExecWireValue o) FLATBUF
   std::swap(matrix, o.matrix);
   std::swap(vec3d, o.vec3d);
   std::swap(vec3f, o.vec3f);
+  std::swap(arraySource, o.arraySource);
+  std::swap(array, o.array);
   return *this;
 }
 
@@ -13900,6 +14337,8 @@ inline void Value::UnPackTo(RigExecWireValue *_o, const ::flatbuffers::resolver_
   { auto _e = matrix(); if (_e) _o->matrix = std::unique_ptr<::rigExec::RigExecWireMatrix4d>(new ::rigExec::RigExecWireMatrix4d(::flatbuffers::UnPackMatrix4d(*_e))); }
   { auto _e = vec3d(); if (_e) _o->vec3d = std::unique_ptr<::rigExec::RigExecWireVec3d>(new ::rigExec::RigExecWireVec3d(::flatbuffers::UnPackVec3d(*_e))); }
   { auto _e = vec3f(); if (_e) _o->vec3f = std::unique_ptr<::rigExec::RigExecWireVec3f>(new ::rigExec::RigExecWireVec3f(::flatbuffers::UnPackVec3f(*_e))); }
+  { auto _e = arraySource(); _o->arraySource = _e; }
+  { auto _e = array(); _o->array = _e; }
 }
 
 inline ::flatbuffers::Offset<Value> CreateValue(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireValue *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -13915,13 +14354,17 @@ inline ::flatbuffers::Offset<Value> Value::Pack(::flatbuffers::FlatBufferBuilder
   auto _matrix = rigExec::fb::Matrix4d{}; if (_o->matrix) _matrix = ::flatbuffers::Pack(*_o->matrix);
   auto _vec3d = rigExec::fb::Vec3d{}; if (_o->vec3d) _vec3d = ::flatbuffers::Pack(*_o->vec3d);
   auto _vec3f = rigExec::fb::Vec3f{}; if (_o->vec3f) _vec3f = ::flatbuffers::Pack(*_o->vec3f);
+  auto _arraySource = _o->arraySource;
+  auto _array = _o->array;
   return rigExec::fb::CreateValue(
       _fbb,
       _tag,
       _bits,
       _o->matrix ? &_matrix : nullptr,
       _o->vec3d ? &_vec3d : nullptr,
-      _o->vec3f ? &_vec3f : nullptr);
+      _o->vec3f ? &_vec3f : nullptr,
+      _arraySource,
+      _array);
 }
 
 inline RigExecWireIntArray *IntArray::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -15259,7 +15702,6 @@ inline RigExecWireConstraint::RigExecWireConstraint(const RigExecWireConstraint 
         weightObjectIndex(o.weightObjectIndex),
         target(o.target),
         targetSlots(o.targetSlots),
-        snapshotTargets(o.snapshotTargets),
         sources(o.sources),
         sourceNatives(o.sourceNatives),
         sourcePaths(o.sourcePaths),
@@ -15298,7 +15740,6 @@ inline RigExecWireConstraint::RigExecWireConstraint(const RigExecWireConstraint 
         worldUpObjectNamed(o.worldUpObjectNamed),
         spaceSlot(o.spaceSlot),
         flags(o.flags),
-        snapshotAfter(o.snapshotAfter),
         singleChainIk(o.singleChainIk),
         ikMode(o.ikMode),
         poleModeObject(o.poleModeObject),
@@ -15320,7 +15761,6 @@ inline RigExecWireConstraint &RigExecWireConstraint::operator=(RigExecWireConstr
   std::swap(weightObjectIndex, o.weightObjectIndex);
   std::swap(target, o.target);
   std::swap(targetSlots, o.targetSlots);
-  std::swap(snapshotTargets, o.snapshotTargets);
   std::swap(sources, o.sources);
   std::swap(sourceNatives, o.sourceNatives);
   std::swap(sourcePaths, o.sourcePaths);
@@ -15359,7 +15799,6 @@ inline RigExecWireConstraint &RigExecWireConstraint::operator=(RigExecWireConstr
   std::swap(worldUpObjectNamed, o.worldUpObjectNamed);
   std::swap(spaceSlot, o.spaceSlot);
   std::swap(flags, o.flags);
-  std::swap(snapshotAfter, o.snapshotAfter);
   std::swap(singleChainIk, o.singleChainIk);
   std::swap(ikMode, o.ikMode);
   std::swap(poleModeObject, o.poleModeObject);
@@ -15390,7 +15829,6 @@ inline void Constraint::UnPackTo(RigExecWireConstraint *_o, const ::flatbuffers:
   { auto _e = weightObjectIndex(); _o->weightObjectIndex = _e; }
   { auto _e = target(); _o->target = _e; }
   { auto _e = targetSlots(); if (_e) { _o->targetSlots.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->targetSlots[_i] = _e->Get(_i); } } else { _o->targetSlots.resize(0); } }
-  { auto _e = snapshotTargets(); if (_e) { _o->snapshotTargets.resize(_e->size()); std::copy(_e->begin(), _e->end(), _o->snapshotTargets.begin()); } }
   { auto _e = sources(); if (_e) { _o->sources.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->sources[_i] = _e->Get(_i); } } else { _o->sources.resize(0); } }
   { auto _e = sourceNatives(); if (_e) { _o->sourceNatives.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->sourceNatives[_i] = _e->Get(_i); } } else { _o->sourceNatives.resize(0); } }
   { auto _e = sourcePaths(); if (_e) { _o->sourcePaths.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->sourcePaths[_i] = _e->Get(_i); } } else { _o->sourcePaths.resize(0); } }
@@ -15429,7 +15867,6 @@ inline void Constraint::UnPackTo(RigExecWireConstraint *_o, const ::flatbuffers:
   { auto _e = worldUpObjectNamed(); _o->worldUpObjectNamed = _e; }
   { auto _e = spaceSlot(); _o->spaceSlot = _e; }
   { auto _e = flags(); _o->flags = _e; }
-  { auto _e = snapshotAfter(); _o->snapshotAfter = _e; }
   { auto _e = singleChainIk(); _o->singleChainIk = _e; }
   { auto _e = ikMode(); _o->ikMode = _e; }
   { auto _e = poleModeObject(); _o->poleModeObject = _e; }
@@ -15458,7 +15895,6 @@ inline ::flatbuffers::Offset<Constraint> Constraint::Pack(::flatbuffers::FlatBuf
   auto _weightObjectIndex = _o->weightObjectIndex;
   auto _target = _o->target;
   auto _targetSlots = _o->targetSlots.size() ? _fbb.CreateVector(_o->targetSlots) : 0;
-  auto _snapshotTargets = _o->snapshotTargets.size() ? _fbb.CreateVector(_o->snapshotTargets) : 0;
   auto _sources = _o->sources.size() ? _fbb.CreateVector(_o->sources) : 0;
   auto _sourceNatives = _o->sourceNatives.size() ? _fbb.CreateVector(_o->sourceNatives) : 0;
   auto _sourcePaths = _o->sourcePaths.size() ? _fbb.CreateVector(_o->sourcePaths) : 0;
@@ -15497,7 +15933,6 @@ inline ::flatbuffers::Offset<Constraint> Constraint::Pack(::flatbuffers::FlatBuf
   auto _worldUpObjectNamed = _o->worldUpObjectNamed;
   auto _spaceSlot = _o->spaceSlot;
   auto _flags = _o->flags;
-  auto _snapshotAfter = _o->snapshotAfter;
   auto _singleChainIk = _o->singleChainIk;
   auto _ikMode = _o->ikMode;
   auto _poleModeObject = _o->poleModeObject;
@@ -15518,7 +15953,6 @@ inline ::flatbuffers::Offset<Constraint> Constraint::Pack(::flatbuffers::FlatBuf
       _weightObjectIndex,
       _target,
       _targetSlots,
-      _snapshotTargets,
       _sources,
       _sourceNatives,
       _sourcePaths,
@@ -15557,7 +15991,6 @@ inline ::flatbuffers::Offset<Constraint> Constraint::Pack(::flatbuffers::FlatBuf
       _worldUpObjectNamed,
       _spaceSlot,
       _flags,
-      _snapshotAfter,
       _singleChainIk,
       _ikMode,
       _poleModeObject,
@@ -16041,12 +16474,12 @@ inline void DomainPose::UnPackTo(RigExecWireDomainPose *_o, const ::flatbuffers:
   { auto _e = jointBindingSolvers(); if (_e) { _o->jointBindingSolvers.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->jointBindingSolvers[_i] = *std::unique_ptr<rigExec::fb::RigExecWireUintList>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->jointBindingSolvers.resize(0); } }
   { auto _e = jointBindingElements(); if (_e) { _o->jointBindingElements.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->jointBindingElements[_i] = *std::unique_ptr<rigExec::fb::RigExecWireIntList>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->jointBindingElements.resize(0); } }
   { auto _e = hasPropertyChains(); _o->hasPropertyChains = _e; }
-  { auto _e = phasedReads(); _o->phasedReads = _e; }
   { auto _e = publishWeightFields(); _o->publishWeightFields = _e; }
   { auto _e = spaceSwitches(); if (_e) { _o->spaceSwitches.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->spaceSwitches[_i] = *std::unique_ptr<rigExec::fb::RigExecWireSpaceSwitch>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->spaceSwitches.resize(0); } }
   { auto _e = avarBindings(); if (_e) { _o->avarBindings.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->avarBindings[_i] = *std::unique_ptr<rigExec::fb::RigExecWireAvarBinding>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->avarBindings.resize(0); } }
   { auto _e = xformBase(); if (_e) { _o->xformBase.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->xformBase[_i] = ::flatbuffers::UnPackMatrix4d(*_e->Get(_i)); } } else { _o->xformBase.resize(0); } }
   { auto _e = overrideCount(); _o->overrideCount = _e; }
+  { auto _e = frameRecords(); if (_e) { _o->frameRecords.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->frameRecords[_i] = *_e->Get(_i); } } else { _o->frameRecords.resize(0); } }
 }
 
 inline ::flatbuffers::Offset<DomainPose> CreateDomainPose(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireDomainPose *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -16075,12 +16508,12 @@ inline ::flatbuffers::Offset<DomainPose> DomainPose::Pack(::flatbuffers::FlatBuf
   auto _jointBindingSolvers = _o->jointBindingSolvers.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::UintList>> (_o->jointBindingSolvers.size(), [](size_t i, _VectorArgs *__va) { return CreateUintList(*__va->__fbb, &(__va->__o->jointBindingSolvers[i]), __va->__rehasher); }, &_va ) : 0;
   auto _jointBindingElements = _o->jointBindingElements.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::IntList>> (_o->jointBindingElements.size(), [](size_t i, _VectorArgs *__va) { return CreateIntList(*__va->__fbb, &(__va->__o->jointBindingElements[i]), __va->__rehasher); }, &_va ) : 0;
   auto _hasPropertyChains = _o->hasPropertyChains;
-  auto _phasedReads = _o->phasedReads;
   auto _publishWeightFields = _o->publishWeightFields;
   auto _spaceSwitches = _o->spaceSwitches.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::SpaceSwitch>> (_o->spaceSwitches.size(), [](size_t i, _VectorArgs *__va) { return CreateSpaceSwitch(*__va->__fbb, &(__va->__o->spaceSwitches[i]), __va->__rehasher); }, &_va ) : 0;
   auto _avarBindings = _o->avarBindings.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::AvarBinding>> (_o->avarBindings.size(), [](size_t i, _VectorArgs *__va) { return CreateAvarBinding(*__va->__fbb, &(__va->__o->avarBindings[i]), __va->__rehasher); }, &_va ) : 0;
   auto _xformBase = _o->xformBase.size() ? _fbb.CreateVectorOfNativeStructs<rigExec::fb::Matrix4d, ::rigExec::RigExecWireMatrix4d>(_o->xformBase, ::flatbuffers::PackMatrix4d) : 0;
   auto _overrideCount = _o->overrideCount;
+  auto _frameRecords = _o->frameRecords.size() ? _fbb.CreateVectorOfStructs(_o->frameRecords) : 0;
   return rigExec::fb::CreateDomainPose(
       _fbb,
       _ladders,
@@ -16101,12 +16534,50 @@ inline ::flatbuffers::Offset<DomainPose> DomainPose::Pack(::flatbuffers::FlatBuf
       _jointBindingSolvers,
       _jointBindingElements,
       _hasPropertyChains,
-      _phasedReads,
       _publishWeightFields,
       _spaceSwitches,
       _avarBindings,
       _xformBase,
-      _overrideCount);
+      _overrideCount,
+      _frameRecords);
+}
+
+inline RigExecWirePointsBinding *PointsBinding::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::make_unique<RigExecWirePointsBinding>();
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void PointsBinding::UnPackTo(RigExecWirePointsBinding *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = inputPath(); _o->inputPath = _e; }
+  { auto _e = phase(); if (_e) _o->phase = ::flatbuffers::UnPackReadPhase(*_e); }
+  { auto _e = candidates(); if (_e) { _o->candidates.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->candidates[_i] = *_e->Get(_i); } } else { _o->candidates.resize(0); } }
+  { auto _e = finalRead(); _o->finalRead = _e; }
+  { auto _e = diagnoseMiss(); _o->diagnoseMiss = _e; }
+}
+
+inline ::flatbuffers::Offset<PointsBinding> CreatePointsBinding(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWirePointsBinding *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return PointsBinding::Pack(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<PointsBinding> PointsBinding::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWirePointsBinding* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RigExecWirePointsBinding* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _inputPath = _o->inputPath;
+  auto _phase = ::flatbuffers::PackReadPhase(_o->phase);
+  auto _candidates = _o->candidates.size() ? _fbb.CreateVectorOfStructs(_o->candidates) : 0;
+  auto _finalRead = _o->finalRead;
+  auto _diagnoseMiss = _o->diagnoseMiss;
+  return rigExec::fb::CreatePointsBinding(
+      _fbb,
+      _inputPath,
+      &_phase,
+      _candidates,
+      _finalRead,
+      _diagnoseMiss);
 }
 
 inline RigExecWireBlendSampleBinding *BlendSampleBinding::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -16286,7 +16757,9 @@ inline RigExecWireBlendSample::RigExecWireBlendSample(const RigExecWireBlendSamp
         pointCount(o.pointCount),
         layoutValid(o.layoutValid),
         pointsValue(o.pointsValue),
-        activationRead((o.activationRead) ? new rigExec::fb::RigExecWireInput(*o.activationRead) : nullptr) {
+        activationRead((o.activationRead) ? new rigExec::fb::RigExecWireInput(*o.activationRead) : nullptr),
+        pointBinding((o.pointBinding) ? new rigExec::fb::RigExecWirePointsBinding(*o.pointBinding) : nullptr),
+        pointsRead((o.pointsRead) ? new rigExec::fb::RigExecWireInput(*o.pointsRead) : nullptr) {
 }
 
 inline RigExecWireBlendSample &RigExecWireBlendSample::operator=(RigExecWireBlendSample o) FLATBUFFERS_NOEXCEPT {
@@ -16305,6 +16778,8 @@ inline RigExecWireBlendSample &RigExecWireBlendSample::operator=(RigExecWireBlen
   std::swap(layoutValid, o.layoutValid);
   std::swap(pointsValue, o.pointsValue);
   std::swap(activationRead, o.activationRead);
+  std::swap(pointBinding, o.pointBinding);
+  std::swap(pointsRead, o.pointsRead);
   return *this;
 }
 
@@ -16332,6 +16807,8 @@ inline void BlendSample::UnPackTo(RigExecWireBlendSample *_o, const ::flatbuffer
   { auto _e = layoutValid(); _o->layoutValid = _e; }
   { auto _e = pointsValue(); _o->pointsValue = _e; }
   { auto _e = activationRead(); if (_e) { if(_o->activationRead) { _e->UnPackTo(_o->activationRead.get(), _resolver); } else { _o->activationRead = std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->UnPack(_resolver)); } } else if (_o->activationRead) { _o->activationRead.reset(); } }
+  { auto _e = pointBinding(); if (_e) { if(_o->pointBinding) { _e->UnPackTo(_o->pointBinding.get(), _resolver); } else { _o->pointBinding = std::unique_ptr<rigExec::fb::RigExecWirePointsBinding>(_e->UnPack(_resolver)); } } else if (_o->pointBinding) { _o->pointBinding.reset(); } }
+  { auto _e = pointsRead(); if (_e) { if(_o->pointsRead) { _e->UnPackTo(_o->pointsRead.get(), _resolver); } else { _o->pointsRead = std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->UnPack(_resolver)); } } else if (_o->pointsRead) { _o->pointsRead.reset(); } }
 }
 
 inline ::flatbuffers::Offset<BlendSample> CreateBlendSample(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireBlendSample *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -16357,6 +16834,8 @@ inline ::flatbuffers::Offset<BlendSample> BlendSample::Pack(::flatbuffers::FlatB
   auto _layoutValid = _o->layoutValid;
   auto _pointsValue = _o->pointsValue;
   auto _activationRead = _o->activationRead ? CreateInput(_fbb, _o->activationRead.get(), _rehasher) : 0;
+  auto _pointBinding = _o->pointBinding ? CreatePointsBinding(_fbb, _o->pointBinding.get(), _rehasher) : 0;
+  auto _pointsRead = _o->pointsRead ? CreateInput(_fbb, _o->pointsRead.get(), _rehasher) : 0;
   return rigExec::fb::CreateBlendSample(
       _fbb,
       _samplePath,
@@ -16373,7 +16852,9 @@ inline ::flatbuffers::Offset<BlendSample> BlendSample::Pack(::flatbuffers::FlatB
       _pointCount,
       _layoutValid,
       _pointsValue,
-      _activationRead);
+      _activationRead,
+      _pointBinding,
+      _pointsRead);
 }
 
 inline RigExecWireBlendChannel::RigExecWireBlendChannel(const RigExecWireBlendChannel &o)
@@ -16663,8 +17144,6 @@ inline RigExecWireRevision::RigExecWireRevision(const RigExecWireRevision &o)
         driverFramesSolver(o.driverFramesSolver),
         finalPhase(o.finalPhase),
         skinTopologyFixed(o.skinTopologyFixed),
-        snapshotAfter(o.snapshotAfter),
-        readsSnapshots(o.readsSnapshots),
         packetInfluences(o.packetInfluences),
         chunks(o.chunks),
         chunkBase(o.chunkBase),
@@ -16685,7 +17164,12 @@ inline RigExecWireRevision::RigExecWireRevision(const RigExecWireRevision &o)
         topologyResolved(o.topologyResolved),
         shaderDials(o.shaderDials),
         meshWorldInverse(o.meshWorldInverse),
-        defaultWeight((o.defaultWeight) ? new rigExec::fb::RigExecWireInput(*o.defaultWeight) : nullptr) {
+        defaultWeight((o.defaultWeight) ? new rigExec::fb::RigExecWireInput(*o.defaultWeight) : nullptr),
+        transformRecords(o.transformRecords),
+        influenceRecords(o.influenceRecords),
+        pointBindings(o.pointBindings),
+        jointIndicesSlot(o.jointIndicesSlot),
+        jointWeightsSlot(o.jointWeightsSlot) {
 }
 
 inline RigExecWireRevision &RigExecWireRevision::operator=(RigExecWireRevision o) FLATBUFFERS_NOEXCEPT {
@@ -16703,8 +17187,6 @@ inline RigExecWireRevision &RigExecWireRevision::operator=(RigExecWireRevision o
   std::swap(driverFramesSolver, o.driverFramesSolver);
   std::swap(finalPhase, o.finalPhase);
   std::swap(skinTopologyFixed, o.skinTopologyFixed);
-  std::swap(snapshotAfter, o.snapshotAfter);
-  std::swap(readsSnapshots, o.readsSnapshots);
   std::swap(packetInfluences, o.packetInfluences);
   std::swap(chunks, o.chunks);
   std::swap(chunkBase, o.chunkBase);
@@ -16726,6 +17208,11 @@ inline RigExecWireRevision &RigExecWireRevision::operator=(RigExecWireRevision o
   std::swap(shaderDials, o.shaderDials);
   std::swap(meshWorldInverse, o.meshWorldInverse);
   std::swap(defaultWeight, o.defaultWeight);
+  std::swap(transformRecords, o.transformRecords);
+  std::swap(influenceRecords, o.influenceRecords);
+  std::swap(pointBindings, o.pointBindings);
+  std::swap(jointIndicesSlot, o.jointIndicesSlot);
+  std::swap(jointWeightsSlot, o.jointWeightsSlot);
   return *this;
 }
 
@@ -16752,8 +17239,6 @@ inline void Revision::UnPackTo(RigExecWireRevision *_o, const ::flatbuffers::res
   { auto _e = driverFramesSolver(); _o->driverFramesSolver = _e; }
   { auto _e = finalPhase(); _o->finalPhase = _e; }
   { auto _e = skinTopologyFixed(); _o->skinTopologyFixed = _e; }
-  { auto _e = snapshotAfter(); _o->snapshotAfter = _e; }
-  { auto _e = readsSnapshots(); _o->readsSnapshots = _e; }
   { auto _e = packetInfluences(); if (_e) { _o->packetInfluences.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->packetInfluences[_i] = ::flatbuffers::UnPackMatrix4d(*_e->Get(_i)); } } else { _o->packetInfluences.resize(0); } }
   { auto _e = chunks(); if (_e) { _o->chunks.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->chunks[_i] = *std::unique_ptr<rigExec::fb::RigExecWireChunk>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->chunks.resize(0); } }
   { auto _e = chunkBase(); _o->chunkBase = _e; }
@@ -16775,6 +17260,11 @@ inline void Revision::UnPackTo(RigExecWireRevision *_o, const ::flatbuffers::res
   { auto _e = shaderDials(); if (_e) { _o->shaderDials.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->shaderDials[_i] = _e->Get(_i); } } else { _o->shaderDials.resize(0); } }
   { auto _e = meshWorldInverse(); if (_e) _o->meshWorldInverse = ::flatbuffers::UnPackMatrix4d(*_e); }
   { auto _e = defaultWeight(); if (_e) { if(_o->defaultWeight) { _e->UnPackTo(_o->defaultWeight.get(), _resolver); } else { _o->defaultWeight = std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->UnPack(_resolver)); } } else if (_o->defaultWeight) { _o->defaultWeight.reset(); } }
+  { auto _e = transformRecords(); if (_e) { _o->transformRecords.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->transformRecords[_i] = _e->Get(_i); } } else { _o->transformRecords.resize(0); } }
+  { auto _e = influenceRecords(); if (_e) { _o->influenceRecords.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->influenceRecords[_i] = *std::unique_ptr<rigExec::fb::RigExecWireUintList>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->influenceRecords.resize(0); } }
+  { auto _e = pointBindings(); if (_e) { _o->pointBindings.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->pointBindings[_i] = *std::unique_ptr<rigExec::fb::RigExecWirePointsBinding>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->pointBindings.resize(0); } }
+  { auto _e = jointIndicesSlot(); _o->jointIndicesSlot = _e; }
+  { auto _e = jointWeightsSlot(); _o->jointWeightsSlot = _e; }
 }
 
 inline ::flatbuffers::Offset<Revision> CreateRevision(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireRevision *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -16799,8 +17289,6 @@ inline ::flatbuffers::Offset<Revision> Revision::Pack(::flatbuffers::FlatBufferB
   auto _driverFramesSolver = _o->driverFramesSolver;
   auto _finalPhase = _o->finalPhase;
   auto _skinTopologyFixed = _o->skinTopologyFixed;
-  auto _snapshotAfter = _o->snapshotAfter;
-  auto _readsSnapshots = _o->readsSnapshots;
   auto _packetInfluences = _o->packetInfluences.size() ? _fbb.CreateVectorOfNativeStructs<rigExec::fb::Matrix4d, ::rigExec::RigExecWireMatrix4d>(_o->packetInfluences, ::flatbuffers::PackMatrix4d) : 0;
   auto _chunks = _o->chunks.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Chunk>> (_o->chunks.size(), [](size_t i, _VectorArgs *__va) { return CreateChunk(*__va->__fbb, &(__va->__o->chunks[i]), __va->__rehasher); }, &_va ) : 0;
   auto _chunkBase = _o->chunkBase;
@@ -16822,6 +17310,11 @@ inline ::flatbuffers::Offset<Revision> Revision::Pack(::flatbuffers::FlatBufferB
   auto _shaderDials = _o->shaderDials.size() ? _fbb.CreateVector(_o->shaderDials) : 0;
   auto _meshWorldInverse = ::flatbuffers::PackMatrix4d(_o->meshWorldInverse);
   auto _defaultWeight = _o->defaultWeight ? CreateInput(_fbb, _o->defaultWeight.get(), _rehasher) : 0;
+  auto _transformRecords = _o->transformRecords.size() ? _fbb.CreateVector(_o->transformRecords) : 0;
+  auto _influenceRecords = _o->influenceRecords.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::UintList>> (_o->influenceRecords.size(), [](size_t i, _VectorArgs *__va) { return CreateUintList(*__va->__fbb, &(__va->__o->influenceRecords[i]), __va->__rehasher); }, &_va ) : 0;
+  auto _pointBindings = _o->pointBindings.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::PointsBinding>> (_o->pointBindings.size(), [](size_t i, _VectorArgs *__va) { return CreatePointsBinding(*__va->__fbb, &(__va->__o->pointBindings[i]), __va->__rehasher); }, &_va ) : 0;
+  auto _jointIndicesSlot = _o->jointIndicesSlot;
+  auto _jointWeightsSlot = _o->jointWeightsSlot;
   return rigExec::fb::CreateRevision(
       _fbb,
       _moverPath,
@@ -16838,8 +17331,6 @@ inline ::flatbuffers::Offset<Revision> Revision::Pack(::flatbuffers::FlatBufferB
       _driverFramesSolver,
       _finalPhase,
       _skinTopologyFixed,
-      _snapshotAfter,
-      _readsSnapshots,
       _packetInfluences,
       _chunks,
       _chunkBase,
@@ -16860,7 +17351,12 @@ inline ::flatbuffers::Offset<Revision> Revision::Pack(::flatbuffers::FlatBufferB
       _topologyResolved,
       _shaderDials,
       &_meshWorldInverse,
-      _defaultWeight);
+      _defaultWeight,
+      _transformRecords,
+      _influenceRecords,
+      _pointBindings,
+      _jointIndicesSlot,
+      _jointWeightsSlot);
 }
 
 inline RigExecWireDerived::RigExecWireDerived(const RigExecWireDerived &o)
@@ -16927,6 +17423,7 @@ inline void Chain::UnPackTo(RigExecWireChain *_o, const ::flatbuffers::resolver_
   { auto _e = derived(); if (_e) { _o->derived.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->derived[_i] = *std::unique_ptr<rigExec::fb::RigExecWireDerived>(_e->Get(_i)->UnPack(_resolver)); } } else { _o->derived.resize(0); } }
   { auto _e = haveBase(); _o->haveBase = _e; }
   { auto _e = base(); _o->base = _e; }
+  { auto _e = baseSlot(); _o->baseSlot = _e; }
 }
 
 inline ::flatbuffers::Offset<Chain> CreateChain(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireChain *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -16942,13 +17439,15 @@ inline ::flatbuffers::Offset<Chain> Chain::Pack(::flatbuffers::FlatBufferBuilder
   auto _derived = _o->derived.size() ? _fbb.CreateVector<::flatbuffers::Offset<rigExec::fb::Derived>> (_o->derived.size(), [](size_t i, _VectorArgs *__va) { return CreateDerived(*__va->__fbb, &(__va->__o->derived[i]), __va->__rehasher); }, &_va ) : 0;
   auto _haveBase = _o->haveBase;
   auto _base = _o->base;
+  auto _baseSlot = _o->baseSlot;
   return rigExec::fb::CreateChain(
       _fbb,
       _target,
       _revisions,
       _derived,
       _haveBase,
-      _base);
+      _base,
+      _baseSlot);
 }
 
 inline RigExecWireWeightObject::RigExecWireWeightObject(const RigExecWireWeightObject &o)
@@ -16956,8 +17455,6 @@ inline RigExecWireWeightObject::RigExecWireWeightObject(const RigExecWireWeightO
         type(o.type),
         representation(o.representation),
         rangePolicy(o.rangePolicy),
-        values(o.values),
-        indices(o.indices),
         defaultWeight((o.defaultWeight) ? new rigExec::fb::RigExecWireInput(*o.defaultWeight) : nullptr),
         base(o.base),
         inputs(o.inputs),
@@ -16995,12 +17492,14 @@ inline RigExecWireWeightObject::RigExecWireWeightObject(const RigExecWireWeightO
         falloffCurve(o.falloffCurve),
         envelopeOnly(o.envelopeOnly),
         samplesInFlight(o.samplesInFlight),
-        oracleSamples(o.oracleSamples),
-        oracleCurve(o.oracleCurve),
         oraclePlaneAxis(o.oraclePlaneAxis),
         oraclePlaneBounds(o.oraclePlaneBounds),
         oraclePhaseError(o.oraclePhaseError),
-        oracleStaticError(o.oracleStaticError) {
+        oracleStaticError(o.oracleStaticError),
+        valuesSlot(o.valuesSlot),
+        indicesSlot(o.indicesSlot),
+        oracleSamplesSlot(o.oracleSamplesSlot),
+        oracleCurveSlot(o.oracleCurveSlot) {
 }
 
 inline RigExecWireWeightObject &RigExecWireWeightObject::operator=(RigExecWireWeightObject o) FLATBUFFERS_NOEXCEPT {
@@ -17008,8 +17507,6 @@ inline RigExecWireWeightObject &RigExecWireWeightObject::operator=(RigExecWireWe
   std::swap(type, o.type);
   std::swap(representation, o.representation);
   std::swap(rangePolicy, o.rangePolicy);
-  std::swap(values, o.values);
-  std::swap(indices, o.indices);
   std::swap(defaultWeight, o.defaultWeight);
   std::swap(base, o.base);
   std::swap(inputs, o.inputs);
@@ -17047,12 +17544,14 @@ inline RigExecWireWeightObject &RigExecWireWeightObject::operator=(RigExecWireWe
   std::swap(falloffCurve, o.falloffCurve);
   std::swap(envelopeOnly, o.envelopeOnly);
   std::swap(samplesInFlight, o.samplesInFlight);
-  std::swap(oracleSamples, o.oracleSamples);
-  std::swap(oracleCurve, o.oracleCurve);
   std::swap(oraclePlaneAxis, o.oraclePlaneAxis);
   std::swap(oraclePlaneBounds, o.oraclePlaneBounds);
   std::swap(oraclePhaseError, o.oraclePhaseError);
   std::swap(oracleStaticError, o.oracleStaticError);
+  std::swap(valuesSlot, o.valuesSlot);
+  std::swap(indicesSlot, o.indicesSlot);
+  std::swap(oracleSamplesSlot, o.oracleSamplesSlot);
+  std::swap(oracleCurveSlot, o.oracleCurveSlot);
   return *this;
 }
 
@@ -17069,8 +17568,6 @@ inline void WeightObject::UnPackTo(RigExecWireWeightObject *_o, const ::flatbuff
   { auto _e = type(); _o->type = _e; }
   { auto _e = representation(); _o->representation = _e; }
   { auto _e = rangePolicy(); _o->rangePolicy = _e; }
-  { auto _e = values(); if (_e) { _o->values.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->values[_i] = _e->Get(_i); } } else { _o->values.resize(0); } }
-  { auto _e = indices(); if (_e) { _o->indices.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->indices[_i] = _e->Get(_i); } } else { _o->indices.resize(0); } }
   { auto _e = defaultWeight(); if (_e) { if(_o->defaultWeight) { _e->UnPackTo(_o->defaultWeight.get(), _resolver); } else { _o->defaultWeight = std::unique_ptr<rigExec::fb::RigExecWireInput>(_e->UnPack(_resolver)); } } else if (_o->defaultWeight) { _o->defaultWeight.reset(); } }
   { auto _e = base(); _o->base = _e; }
   { auto _e = inputs(); if (_e) { _o->inputs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->inputs[_i] = _e->Get(_i); } } else { _o->inputs.resize(0); } }
@@ -17108,12 +17605,14 @@ inline void WeightObject::UnPackTo(RigExecWireWeightObject *_o, const ::flatbuff
   { auto _e = falloffCurve(); if (_e) { _o->falloffCurve.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->falloffCurve[_i] = _e->Get(_i); } } else { _o->falloffCurve.resize(0); } }
   { auto _e = envelopeOnly(); _o->envelopeOnly = _e; }
   { auto _e = samplesInFlight(); _o->samplesInFlight = _e; }
-  { auto _e = oracleSamples(); _o->oracleSamples = _e; }
-  { auto _e = oracleCurve(); _o->oracleCurve = _e; }
   { auto _e = oraclePlaneAxis(); _o->oraclePlaneAxis = _e; }
   { auto _e = oraclePlaneBounds(); _o->oraclePlaneBounds = _e; }
   { auto _e = oraclePhaseError(); if (_e) _o->oraclePhaseError = _e->str(); }
   { auto _e = oracleStaticError(); if (_e) _o->oracleStaticError = _e->str(); }
+  { auto _e = valuesSlot(); _o->valuesSlot = _e; }
+  { auto _e = indicesSlot(); _o->indicesSlot = _e; }
+  { auto _e = oracleSamplesSlot(); _o->oracleSamplesSlot = _e; }
+  { auto _e = oracleCurveSlot(); _o->oracleCurveSlot = _e; }
 }
 
 inline ::flatbuffers::Offset<WeightObject> CreateWeightObject(::flatbuffers::FlatBufferBuilder &_fbb, const RigExecWireWeightObject *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17128,8 +17627,6 @@ inline ::flatbuffers::Offset<WeightObject> WeightObject::Pack(::flatbuffers::Fla
   auto _type = _o->type;
   auto _representation = _o->representation;
   auto _rangePolicy = _o->rangePolicy;
-  auto _values = _o->values.size() ? _fbb.CreateVector(_o->values) : 0;
-  auto _indices = _o->indices.size() ? _fbb.CreateVector(_o->indices) : 0;
   auto _defaultWeight = _o->defaultWeight ? CreateInput(_fbb, _o->defaultWeight.get(), _rehasher) : 0;
   auto _base = _o->base;
   auto _inputs = _o->inputs.size() ? _fbb.CreateVector(_o->inputs) : 0;
@@ -17167,20 +17664,20 @@ inline ::flatbuffers::Offset<WeightObject> WeightObject::Pack(::flatbuffers::Fla
   auto _falloffCurve = _o->falloffCurve.size() ? _fbb.CreateVector(_o->falloffCurve) : 0;
   auto _envelopeOnly = _o->envelopeOnly;
   auto _samplesInFlight = _o->samplesInFlight;
-  auto _oracleSamples = _o->oracleSamples;
-  auto _oracleCurve = _o->oracleCurve;
   auto _oraclePlaneAxis = _o->oraclePlaneAxis;
   auto _oraclePlaneBounds = _o->oraclePlaneBounds;
   auto _oraclePhaseError = _o->oraclePhaseError.empty() ? 0 : _fbb.CreateString(_o->oraclePhaseError);
   auto _oracleStaticError = _o->oracleStaticError.empty() ? 0 : _fbb.CreateString(_o->oracleStaticError);
+  auto _valuesSlot = _o->valuesSlot;
+  auto _indicesSlot = _o->indicesSlot;
+  auto _oracleSamplesSlot = _o->oracleSamplesSlot;
+  auto _oracleCurveSlot = _o->oracleCurveSlot;
   return rigExec::fb::CreateWeightObject(
       _fbb,
       _path,
       _type,
       _representation,
       _rangePolicy,
-      _values,
-      _indices,
       _defaultWeight,
       _base,
       _inputs,
@@ -17218,12 +17715,14 @@ inline ::flatbuffers::Offset<WeightObject> WeightObject::Pack(::flatbuffers::Fla
       _falloffCurve,
       _envelopeOnly,
       _samplesInFlight,
-      _oracleSamples,
-      _oracleCurve,
       _oraclePlaneAxis,
       _oraclePlaneBounds,
       _oraclePhaseError,
-      _oracleStaticError);
+      _oracleStaticError,
+      _valuesSlot,
+      _indicesSlot,
+      _oracleSamplesSlot,
+      _oracleCurveSlot);
 }
 
 inline RigExecWireDomainGeometry *DomainGeometry::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -17668,13 +18167,33 @@ inline const ::flatbuffers::TypeTable *InputTagTypeTable() {
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::InputTagTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_ENUM, 8, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_ENUM, 13, type_codes, type_refs, nullptr, nullptr, nullptr
+  };
+  return &tt;
+}
+
+inline const ::flatbuffers::TypeTable *ArraySourceTypeTable() {
+  static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 }
+  };
+  static const ::flatbuffers::TypeFunction type_refs[] = {
+    rigExec::fb::ArraySourceTypeTable
+  };
+  static const ::flatbuffers::TypeTable tt = {
+    ::flatbuffers::ST_ENUM, 3, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -17770,13 +18289,14 @@ inline const ::flatbuffers::TypeTable *SlotDomainTypeTable() {
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::SlotDomainTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_ENUM, 26, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_ENUM, 27, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -17800,13 +18320,14 @@ inline const ::flatbuffers::TypeTable *StepKindTypeTable() {
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 },
+    { ::flatbuffers::ET_UCHAR, 0, 0 },
     { ::flatbuffers::ET_UCHAR, 0, 0 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::StepKindTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_ENUM, 18, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_ENUM, 19, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -18284,6 +18805,34 @@ inline const ::flatbuffers::TypeTable *SlotRangeTypeTable() {
   return &tt;
 }
 
+inline const ::flatbuffers::TypeTable *FrameRecordTypeTable() {
+  static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_UINT, 0, -1 }
+  };
+  static const int64_t values[] = { 0, 4, 8, 12, 16, 20, 24 };
+  static const ::flatbuffers::TypeTable tt = {
+    ::flatbuffers::ST_STRUCT, 6, type_codes, nullptr, nullptr, values, nullptr
+  };
+  return &tt;
+}
+
+inline const ::flatbuffers::TypeTable *PointVersionTypeTable() {
+  static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 }
+  };
+  static const int64_t values[] = { 0, 4, 8 };
+  static const ::flatbuffers::TypeTable tt = {
+    ::flatbuffers::ST_STRUCT, 2, type_codes, nullptr, nullptr, values, nullptr
+  };
+  return &tt;
+}
+
 inline const ::flatbuffers::TypeTable *PathNodeTypeTable() {
   static const ::flatbuffers::TypeCode type_codes[] = {
     { ::flatbuffers::ET_UINT, 0, -1 },
@@ -18325,16 +18874,19 @@ inline const ::flatbuffers::TypeTable *ValueTypeTable() {
     { ::flatbuffers::ET_ULONG, 0, -1 },
     { ::flatbuffers::ET_SEQUENCE, 0, 1 },
     { ::flatbuffers::ET_SEQUENCE, 0, 2 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 3 }
+    { ::flatbuffers::ET_SEQUENCE, 0, 3 },
+    { ::flatbuffers::ET_UCHAR, 0, 4 },
+    { ::flatbuffers::ET_UINT, 0, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::InputTagTypeTable,
     rigExec::fb::Matrix4dTypeTable,
     rigExec::fb::Vec3dTypeTable,
-    rigExec::fb::Vec3fTypeTable
+    rigExec::fb::Vec3fTypeTable,
+    rigExec::fb::ArraySourceTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 5, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 7, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -18813,7 +19365,6 @@ inline const ::flatbuffers::TypeTable *ConstraintTypeTable() {
     { ::flatbuffers::ET_INT, 0, -1 },
     { ::flatbuffers::ET_INT, 0, -1 },
     { ::flatbuffers::ET_INT, 1, -1 },
-    { ::flatbuffers::ET_UCHAR, 1, -1 },
     { ::flatbuffers::ET_INT, 1, -1 },
     { ::flatbuffers::ET_INT, 1, -1 },
     { ::flatbuffers::ET_UINT, 1, -1 },
@@ -18853,7 +19404,6 @@ inline const ::flatbuffers::TypeTable *ConstraintTypeTable() {
     { ::flatbuffers::ET_INT, 0, -1 },
     { ::flatbuffers::ET_UCHAR, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
-    { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_UCHAR, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
@@ -18871,7 +19421,7 @@ inline const ::flatbuffers::TypeTable *ConstraintTypeTable() {
     rigExec::fb::Vec3dTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 58, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 56, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19065,11 +19615,11 @@ inline const ::flatbuffers::TypeTable *DomainPoseTypeTable() {
     { ::flatbuffers::ET_SEQUENCE, 1, 10 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
-    { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_SEQUENCE, 1, 11 },
     { ::flatbuffers::ET_SEQUENCE, 1, 12 },
     { ::flatbuffers::ET_SEQUENCE, 1, 13 },
-    { ::flatbuffers::ET_UINT, 0, -1 }
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 14 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::LadderTypeTable,
@@ -19085,10 +19635,29 @@ inline const ::flatbuffers::TypeTable *DomainPoseTypeTable() {
     rigExec::fb::IntListTypeTable,
     rigExec::fb::SpaceSwitchTypeTable,
     rigExec::fb::AvarBindingTypeTable,
-    rigExec::fb::Matrix4dTypeTable
+    rigExec::fb::Matrix4dTypeTable,
+    rigExec::fb::FrameRecordTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
     ::flatbuffers::ST_TABLE, 24, type_codes, type_refs, nullptr, nullptr, nullptr
+  };
+  return &tt;
+}
+
+inline const ::flatbuffers::TypeTable *PointsBindingTypeTable() {
+  static const ::flatbuffers::TypeCode type_codes[] = {
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 0 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 1 },
+    { ::flatbuffers::ET_BOOL, 0, -1 },
+    { ::flatbuffers::ET_BOOL, 0, -1 }
+  };
+  static const ::flatbuffers::TypeFunction type_refs[] = {
+    rigExec::fb::ReadPhaseTypeTable,
+    rigExec::fb::PointVersionTypeTable
+  };
+  static const ::flatbuffers::TypeTable tt = {
+    ::flatbuffers::ST_TABLE, 5, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19177,15 +19746,18 @@ inline const ::flatbuffers::TypeTable *BlendSampleTypeTable() {
     { ::flatbuffers::ET_ULONG, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 2 },
+    { ::flatbuffers::ET_SEQUENCE, 0, 3 },
     { ::flatbuffers::ET_SEQUENCE, 0, 2 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::ReadPhaseTypeTable,
     rigExec::fb::Vec3fTypeTable,
-    rigExec::fb::InputTypeTable
+    rigExec::fb::InputTypeTable,
+    rigExec::fb::PointsBindingTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 15, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 17, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19299,8 +19871,6 @@ inline const ::flatbuffers::TypeTable *RevisionTypeTable() {
     { ::flatbuffers::ET_INT, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
-    { ::flatbuffers::ET_BOOL, 0, -1 },
-    { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_SEQUENCE, 1, 2 },
     { ::flatbuffers::ET_SEQUENCE, 1, 3 },
     { ::flatbuffers::ET_INT, 0, -1 },
@@ -19321,7 +19891,12 @@ inline const ::flatbuffers::TypeTable *RevisionTypeTable() {
     { ::flatbuffers::ET_BOOL, 0, -1 },
     { ::flatbuffers::ET_UINT, 1, -1 },
     { ::flatbuffers::ET_SEQUENCE, 0, 2 },
-    { ::flatbuffers::ET_SEQUENCE, 0, 5 }
+    { ::flatbuffers::ET_SEQUENCE, 0, 5 },
+    { ::flatbuffers::ET_UINT, 1, -1 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 6 },
+    { ::flatbuffers::ET_SEQUENCE, 1, 7 },
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::RevisionBindingTypeTable,
@@ -19329,10 +19904,12 @@ inline const ::flatbuffers::TypeTable *RevisionTypeTable() {
     rigExec::fb::Matrix4dTypeTable,
     rigExec::fb::ChunkTypeTable,
     rigExec::fb::SkinTopologyTypeTable,
-    rigExec::fb::InputTypeTable
+    rigExec::fb::InputTypeTable,
+    rigExec::fb::UintListTypeTable,
+    rigExec::fb::PointsBindingTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 37, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 40, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19359,14 +19936,15 @@ inline const ::flatbuffers::TypeTable *ChainTypeTable() {
     { ::flatbuffers::ET_SEQUENCE, 1, 0 },
     { ::flatbuffers::ET_SEQUENCE, 1, 1 },
     { ::flatbuffers::ET_BOOL, 0, -1 },
-    { ::flatbuffers::ET_UINT, 0, -1 }
+    { ::flatbuffers::ET_UINT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::RevisionTypeTable,
     rigExec::fb::DerivedTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 5, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 6, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }
@@ -19421,13 +19999,17 @@ inline const ::flatbuffers::TypeTable *WeightObjectTypeTable() {
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_UINT, 0, -1 },
     { ::flatbuffers::ET_STRING, 0, -1 },
-    { ::flatbuffers::ET_STRING, 0, -1 }
+    { ::flatbuffers::ET_STRING, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 },
+    { ::flatbuffers::ET_INT, 0, -1 }
   };
   static const ::flatbuffers::TypeFunction type_refs[] = {
     rigExec::fb::InputTypeTable
   };
   static const ::flatbuffers::TypeTable tt = {
-    ::flatbuffers::ST_TABLE, 49, type_codes, type_refs, nullptr, nullptr, nullptr
+    ::flatbuffers::ST_TABLE, 53, type_codes, type_refs, nullptr, nullptr, nullptr
   };
   return &tt;
 }

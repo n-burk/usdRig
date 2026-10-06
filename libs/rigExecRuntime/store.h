@@ -2,8 +2,9 @@
 // RrProgram owns the opened file and the tables Open derives from it;
 // RrStore owns every framework-visible slot domain: the avar table, the
 // SSA fin/base version pools, matrices, aggregates, commit scratch, the
-// prologue's retained arrays and their lasts, snapshots, step outputs and
-// the override flags. Every input a step reads is evaluated over the
+// prologue's retained arrays and their lasts, the frame records and volume
+// placements the steps keep across runs, step outputs and the override
+// flags. Every input a step reads is evaluated over the
 // input slots (inputs.h); every other stage value it reads is static data
 // the bake captured into the file, read through RrStatic. Family .cpps own
 // their private scratch (solver live rests, revision packets, weight
@@ -206,7 +207,20 @@ struct RrStore {
     std::vector<RrChainPublish> chainPublish;
     std::vector<RrDerivedPublish> derivedPublish;
     std::vector<RrWeightPacket> weightPackets;
-    std::map<uint32_t, RrMat4d> weightFrames;
+    // Per provider slot, what that volume's VolumePlacements step last
+    // wrote (the program's slot-indexed volumePlacement) and whether it has
+    // run. Sized at Open and never cleared, so a step the closure skipped
+    // keeps its placement. The oracle and the published weight frames
+    // read them.
+    std::vector<RrMat4d> volumePlacement;
+    std::vector<char> volumePlaced;
+    // Per pose.frame_records entry, what its FrameMatrix step last wrote:
+    // the provider matrix as the record's writer left it, and whether the
+    // writer recorded it (identity and 0 where it did not). Sized at Open
+    // and never cleared, so a step the closure skipped keeps its record.
+    // An AtPrim transform phase reads them in the fold.
+    std::vector<RrMat4d> frameMatrix;
+    std::vector<char> frameMatrixValid;
     std::vector<float> poseWeights;
     // One flag per override number (RigExecBakedProgramImpl::overridden),
     // set while an input on the read's walk that is not Animated holds
@@ -228,7 +242,6 @@ struct RrStore {
     std::map<uint32_t, RrMat4d> movedMatrices;
     std::map<uint32_t, RrWeightFieldPublish> weightFields;
     std::vector<char> jointMatrixPublished;
-    RrSnapshots runSnapshots;
     std::vector<RrStepOutput> stepOutputs;
     std::vector<uint64_t> closedWords;
     // The steps the last Execute ran, by index, in the order it ran them.
@@ -304,7 +317,9 @@ struct RrStatic {
     {
         return file->pose->constraintArrays[k].poleDiagnostics;
     }
-    /// Geometry chain \p chain's base points, or null when it has none.
+    /// Geometry chain \p chain's base points as the bake captured them, or
+    /// null when it has none. A chain with a base slot reads that slot
+    /// instead (RrGeoChainBase, the weight gathers).
     const std::vector<RigExecWireVec3f> *ChainBase(size_t chain) const
     {
         const RigExecWireChain &wire = file->geometry->chains[chain];
@@ -361,11 +376,6 @@ struct RrRegisteredRead {
 struct RrGeoSettings {
     /// RIGEXEC_ENABLE_SIMD: the skin and matrix kernels take the SSE2 path.
     bool useSimd = true;
-    /// RIGEXEC_BAKED_CHUNK_VERTS: vertices one chunk of a re-cut covers
-    /// before the cap; at least 1.
-    size_t chunkVertexTarget = 4096;
-    /// RIGEXEC_BAKED_MAX_CHUNKS: the most chunks a re-cut makes; at least 1.
-    size_t chunkCap = 32;
 };
 
 // The opened program plus its working state. The table pointers borrow
@@ -548,6 +558,16 @@ struct RrProgram {
 // Family scratch sizing at Open.
 bool RrPoseSizeScratch(RrProgram *program, std::string *error);
 bool RrGeometrySizeScratch(RrProgram *program, std::string *error);
+/// Test-only: whether the last Execute found mover \p moverPath's chain
+/// revision partition stale, so the revision ran whole. False when no chain
+/// revision moves for it.
+bool RrGeometryPartitionStaleForTesting(const RrProgram *program,
+                                        const std::string &moverPath);
+/// Test-only: whether the last Execute's layout of mover \p moverPath's
+/// chain revision is the one Open expanded from the file. False when no
+/// chain revision moves for it, or it has no layout.
+bool RrGeometrySkinLayoutIsOpenForTesting(const RrProgram *program,
+                                          const std::string &moverPath);
 bool RrWeightSizeScratch(RrProgram *program, std::string *error);
 /// Classifies the file's property chains and sizes the publish entries.
 /// Runs after the reads are bound.
