@@ -109,6 +109,7 @@ add_library(rigExec SHARED
     libs/rigExec/bakedProperties.cpp
     libs/rigExec/bakedSchedule.cpp
     libs/rigExec/bakedTrace.cpp
+    libs/rigExec/bakedUpstream.cpp
     libs/rigExec/bakedGeometry.cpp
     libs/rigExec/bakedWeights.cpp
     libs/rigExec/bakedVerify.cpp
@@ -1312,6 +1313,20 @@ add_test(NAME testRigExecRestOps COMMAND testRigExecRestOps
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 rigexec_add_baked_parity_test(testRigExecRestOps REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# Upstream inputs through the evaluator API: authored-level values in the
+# dynamic walk and the baked program, each equal to a stage authoring the
+# value and back to the authored pose once lifted; the dropped keys; the
+# interim bake guard; and the admission sets equal to the exporter's
+# listed inputs and oracle-read objects.
+add_executable(testRigExecUpstreamInputs tests/testRigExecUpstreamInputs.cpp)
+target_link_libraries(testRigExecUpstreamInputs PRIVATE rigExecBake)
+target_compile_definitions(testRigExecUpstreamInputs PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecUpstreamInputs COMMAND testRigExecUpstreamInputs
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+rigexec_add_baked_parity_test(testRigExecUpstreamInputs REQUIRE_BAKE
+    CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecScopedClears tests/testRigExecScopedClears.cpp)
 target_link_libraries(testRigExecScopedClears PRIVATE rigExec)

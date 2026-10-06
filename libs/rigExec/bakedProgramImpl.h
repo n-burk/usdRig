@@ -317,25 +317,35 @@ template <class T>
 inline T
 RigExecBakedRead(const RigExecBakedInput<T> &input,
                  const RigExecResolvedInputs &resolved, UsdTimeCode time,
-                 const std::vector<char> *overridden = nullptr)
+                 const std::vector<char> *overridden = nullptr,
+                 const std::map<SdfPath, VtValue> *upstream = nullptr,
+                 const std::vector<char> *upstreamOn = nullptr)
 {
     RIGEXEC_PURITY_CHECK();
     T value = input.constant;
+    const auto flagged = [&input](const std::vector<char> *flags) {
+        return input.overrideIndex >= 0 && flags &&
+               size_t(input.overrideIndex) < flags->size() &&
+               (*flags)[size_t(input.overrideIndex)];
+    };
     // A held drag is placed by reading THE LONG WAY. GetAttribute is the same
     // walk exec's accessor performs and _resolvedInputs already carries the
     // override, so the answer is the dynamic one rather than a second
     // approximation of it -- and the pinned query, which knows nothing about
-    // the drag, is bypassed for as long as it stands.
-    if (input.overrideIndex >= 0 && overridden &&
-        (*overridden)[size_t(input.overrideIndex)]) {
-        resolved.GetAttribute(input.head, time, &value);
+    // the drag, is bypassed for as long as it stands. An upstream value on
+    // a hop is read the same way, through the upstream layer in front of
+    // the stage.
+    if (flagged(overridden) || flagged(upstreamOn)) {
+        resolved.GetAttributeOverStageLayer(input.head, time, upstream,
+                                            &value);
         return value;
     }
     if (!input.varying) {
         return value;
     }
     if (input.resolvedAttr) {
-        resolved.GetAttribute(input.resolvedAttr, time, &value);
+        resolved.GetAttributeOverStageLayer(input.resolvedAttr, time,
+                                            upstream, &value);
         return value;
     }
     if (input.query.IsValid()) {
@@ -3360,6 +3370,26 @@ struct RigExecBakedProgramImpl {
     /// under a path whose value differs between the two is re-sampled.
     std::map<SdfPath, VtValue> routedOverrides;
     std::map<SdfPath, VtValue> lastRoutedOverrides;
+    /// The upstream layer (RigExecBakedProgram::SetUpstreamInputs): this
+    /// run's admitted values by path, and the table the last prologue
+    /// placed. Every hop read through the layer answers from `upstream`
+    /// before the stage; the prologue compares the two by value (rule 8).
+    std::map<SdfPath, VtValue> upstream;
+    std::map<SdfPath, VtValue> lastUpstream;
+    /// Per override number: an upstream value stands on a hop of its walk,
+    /// so its binding reads the long way, through the layer.
+    std::vector<char> upstreamOn;
+    /// Per override number: a value on a hop of its walk was placed, moved
+    /// or lifted this run. The closure's override seed; never a standing
+    /// flag, so a value that stays costs nothing.
+    std::vector<char> upstreamChanged;
+    /// Something in `upstream` moved this run.
+    bool upstreamMovedThisRun = false;
+    /// RigExecBakedProgram::GetUpstreamAdmissible and GetUpstreamOracle,
+    /// built on first use (`upstreamSetsBuilt`).
+    std::map<SdfPath, TfType> upstreamAdmissible;
+    std::set<SdfPath> upstreamOracle;
+    bool upstreamSetsBuilt = false;
     /// Leaves re-read by every sample so far, Build's included. Test
     /// observable; written only by the sampler.
     uint64_t leafSamples = 0;
@@ -3669,11 +3699,14 @@ void RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
 ///  6. a value in `routedOverrides` that differs from `lastRoutedOverrides`
 ///     on one of its paths;
 ///  7. for a binding with a reader walk, a head leaf, override slot or
-///     declared version of that walk that moved (`readerWalkMoved`).
+///     declared version of that walk that moved (`readerWalkMoved`);
+///  8. an upstream value placed, moved or lifted on one of its paths
+///     (RigExecBakedPlaceUpstream sets `mustSample`).
 /// Every other leaf keeps its value: none of its read's inputs can have
 /// moved for it. A binding with a reader walk is read through it
-/// (RigExecBakedReadWalked), any other through RigExecBakedRead. Owning
-/// thread, prologue only.
+/// (RigExecBakedReadWalked), any other through RigExecBakedRead, the long
+/// way through the upstream layer while a value stands on its number
+/// (`upstreamOn`). Owning thread, prologue only.
 ///
 /// \p pass splits the live prologue around the head tier: BeforeHead reads
 /// every leaf but the chain-routed ones (a binding with `resolvedAttr` or a
@@ -3681,6 +3714,17 @@ void RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
 /// ChainRouted reads the rest once the property chains are published and
 /// RigExecBakedNoteReaderWalks has run. All does both, in one pass.
 enum class RigExecBakedLeafPass : uint8_t { All, BeforeHead, ChainRouted };
+
+/// Prologue step 1's upstream half, after the resolved inputs are cleared
+/// and before the interactive overrides are placed. Compares `upstream`
+/// with `lastUpstream` by value; for every path placed, moved or lifted
+/// (rule 8) it marks the leaves `leafByPath` files there and sets
+/// `upstreamChanged` for the override numbers filed there, and it rebuilds
+/// `upstreamOn`. Then places every value on an `upstreamOracle` path into
+/// the resolved inputs. `upstreamChanged` holds this run's moves only.
+/// Owning thread.
+void RigExecBakedPlaceUpstream(RigExecBakedProgramImpl *program);
+
 void RigExecBakedSampleLeaves(
     RigExecBakedProgramImpl *program, UsdTimeCode time, bool all,
     RigExecBakedLeafPass pass = RigExecBakedLeafPass::All);
@@ -3791,18 +3835,24 @@ bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
                                    int walk, GfVec3f *out);
 
 /// RigExecBakedRead for a binding with a reader walk: the walk read while
-/// an override stands on its number or the binding varies (the walk is the
-/// one from its head), else its constant.
+/// an override or an upstream value (\p upstreamOn) stands on its number or
+/// the binding varies (the walk is the one from its head, over head leaves
+/// that read the upstream layer), else its constant.
 template <class T>
 inline T
 RigExecBakedReadWalked(const RigExecBakedProgramImpl &program,
                        const RigExecBakedInput<T> &input,
-                       const std::vector<char> &overridden)
+                       const std::vector<char> &overridden,
+                       const std::vector<char> *upstreamOn = nullptr)
 {
     T value = input.constant;
-    const bool flagged = input.overrideIndex >= 0 &&
-                         size_t(input.overrideIndex) < overridden.size() &&
-                         overridden[size_t(input.overrideIndex)];
+    const auto on = [&input](const std::vector<char> &flags) {
+        return input.overrideIndex >= 0 &&
+               size_t(input.overrideIndex) < flags.size() &&
+               flags[size_t(input.overrideIndex)];
+    };
+    const bool flagged =
+        on(overridden) || (upstreamOn && on(*upstreamOn));
     if (flagged || input.varying) {
         RigExecBakedResolveReaderWalk(program, input.walk, &value);
     }

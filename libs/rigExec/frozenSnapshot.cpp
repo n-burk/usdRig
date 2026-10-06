@@ -222,6 +222,17 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.leafByPath = src.leafByPath;
     D.routedOverrides = src.routedOverrides;
     D.lastRoutedOverrides = src.lastRoutedOverrides;
+    // The admission sets travel; live's upstream values do not (no frozen
+    // job carries any yet), so the clone's layer starts empty and reads
+    // every hop off its own samples.
+    D.upstreamAdmissible = src.upstreamAdmissible;
+    D.upstreamOracle = src.upstreamOracle;
+    D.upstreamSetsBuilt = src.upstreamSetsBuilt;
+    D.upstream.clear();
+    D.lastUpstream.clear();
+    D.upstreamOn.assign(src.upstreamOn.size(), 0);
+    D.upstreamChanged.assign(src.upstreamChanged.size(), 0);
+    D.upstreamMovedThisRun = false;
     D.leafSamples = src.leafSamples;
     // The path leaves' bookkeeping. Their values ride the chains and weight
     // objects above; a frozen job takes its revisions' and derived targets'
@@ -294,6 +305,14 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                     "UI-thread memo path, never a background job");
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    // A job samples no upstream value, while live's leaves and avar slots
+    // hold the ones it placed until a generation lifts them: a clone would
+    // answer neither the upstream nor the authored pose.
+    if (!evaluator.GetUpstreamInputPaths().empty() || !B.upstream.empty() ||
+        !B.lastUpstream.empty()) {
+        return fail("upstream inputs standing: frozen jobs do not carry "
+                    "them");
+    }
     // Property chains are supported: the worker runs the head tier from
     // sampled head leaves and resolves every read a chain or record can
     // answer through its reader walk -- except a revision whose envelope is

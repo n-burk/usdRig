@@ -363,6 +363,11 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     }
     const RigExecBakedProgramImpl &L = live.GetStepGraph();
     const RigExecBakedProgramImpl &S = base.program;
+    // Live's avar slots hold its upstream values, which a job never
+    // samples; RigExecCanFreezeProgram refuses the re-freeze as well.
+    if (!L.upstream.empty() || !L.lastUpstream.empty()) {
+        return fail("upstream inputs standing: re-freeze, do not patch");
+    }
     // The same program object, or at least the same shape: a rebuild is
     // re-frozen, never patched.
     if (S.avarConstantBindings.size() != L.avarConstantBindings.size() ||

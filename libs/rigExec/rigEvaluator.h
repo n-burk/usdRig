@@ -530,6 +530,33 @@ public:
         return !_interactiveOverrides.empty();
     }
 
+    /// Values an upstream scene index publishes for authored attributes:
+    /// authored-level, so each replaces the stage value of its attribute at
+    /// every time, below any interactive override on the same key. Each
+    /// entry names an attribute (\p attribute set, no computation). The list
+    /// replaces the last one; an empty list lifts every value. Setting it
+    /// does not evaluate.
+    ///
+    /// A value is admitted only on an attribute that is unconnected, has a
+    /// stage value, holds one of the eight input-slot types the value holds
+    /// exactly, and (while a baked program stands) is read through a read a
+    /// bake lists as an input. Every other key is ignored, and each
+    /// generation reports "upstream input <path>: <reason>; ignored".
+    /// Admission is re-decided at every Evaluate, against the program then
+    /// standing.
+    void SetUpstreamInputs(std::vector<RigExecValueOverride> inputs);
+
+    /// Whether the caller has upstream values set (admitted or not).
+    bool HasUpstreamInputs() const { return !_upstreamRequested.empty(); }
+
+    /// The list SetUpstreamInputs last received.
+    const std::vector<RigExecValueOverride> &GetUpstreamInputs() const {
+        return _upstreamRequested;
+    }
+
+    /// The admitted keys, sorted.
+    std::vector<SdfPath> GetUpstreamInputPaths() const;
+
     /// Whether each generation resolves RigExecRigPose::weightFields.
     ///
     /// The influence overlay is a per-POINT field: resolving it walks every
@@ -929,6 +956,21 @@ private:
     /// of the ordering rule, because a second copy is a second answer.
     void _ApplyInteractiveOverridesToResolved(
         RigExecResolvedInputs *resolved) const;
+    /// The same for _valueInputs, as _EvaluateDynamic places them.
+    void _ApplyValueInputsToResolved(RigExecResolvedInputs *resolved) const;
+
+    /// Re-decides which of _upstreamRequested are admitted, against the
+    /// stage and the program standing now, and installs the answer
+    /// (_SetUpstreamAdmitted). Owning thread.
+    void _AdmitUpstreamInputs();
+    /// Installs \p admitted (sorted by path) and its drop lines: rebuilds
+    /// _valueInputs and drops the skin layouts and blend shapes a placed,
+    /// moved or lifted value can reach. A list equal to the standing one
+    /// changes nothing.
+    void _SetUpstreamAdmitted(std::vector<RigExecValueOverride> admitted,
+                              std::vector<std::string> dropLines);
+    /// _upstreamAdmitted merged with _interactiveOverrides into _valueInputs.
+    void _RebuildValueInputs();
 
     /// Builds the baked program for the current epoch, or drops it. No-op
     /// unless the mode asks for one and the epoch is settled.
@@ -1632,6 +1674,18 @@ private:
     RigExecStaticInputCache _staticInputs;
     /// Uncommitted manipulation values; see SetInteractiveOverrides.
     std::vector<RigExecValueOverride> _interactiveOverrides;
+    /// SetUpstreamInputs' list as given, the admitted part of it (sorted by
+    /// path, one entry per attribute) and the drop lines each generation
+    /// reports.
+    std::vector<RigExecValueOverride> _upstreamRequested;
+    std::vector<RigExecValueOverride> _upstreamAdmitted;
+    std::vector<std::string> _upstreamDropLines;
+    /// The values the dynamic walk places: the admitted upstream values
+    /// merged with _interactiveOverrides, interactive winning on a key.
+    /// Rebuilt by SetInteractiveOverrides, ClearInteractiveOverrides and
+    /// every change of the admitted list; read wherever the walk decides
+    /// what value an attribute holds or whether a cache still holds.
+    std::vector<RigExecValueOverride> _valueInputs;
 
     /// What every chain held at every point in the walk this generation.
     ///
@@ -2392,6 +2446,31 @@ private:
     /// private because they are not a published surface -- not because the
     /// one class whose whole job is to flatten them should re-derive them.
     friend class RigExecBakedProgram;
+};
+
+/// Lifts \p evaluator's upstream values for its lifetime and puts the same
+/// list back when it ends. Lifting and placing them again are ordinary
+/// upstream changes, so the next generation applies them with no rebuild.
+class RigExecScopedUpstreamSuspension
+{
+public:
+    explicit RigExecScopedUpstreamSuspension(RigExecRigEvaluator &evaluator)
+        : _evaluator(evaluator), _saved(evaluator.GetUpstreamInputs())
+    {
+        _evaluator.SetUpstreamInputs({});
+    }
+    ~RigExecScopedUpstreamSuspension()
+    {
+        _evaluator.SetUpstreamInputs(std::move(_saved));
+    }
+    RigExecScopedUpstreamSuspension(const RigExecScopedUpstreamSuspension &) =
+        delete;
+    RigExecScopedUpstreamSuspension &operator=(
+        const RigExecScopedUpstreamSuspension &) = delete;
+
+private:
+    RigExecRigEvaluator &_evaluator;
+    std::vector<RigExecValueOverride> _saved;
 };
 
 /// Test and diagnostic access to the constraint handler registry -- the one

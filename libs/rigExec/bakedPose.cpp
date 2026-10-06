@@ -2804,9 +2804,13 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
         }
         pool.mustSample[k] = 0;
         ++B.leafSamples;
+        // An upstream value on a hop reads the long way through the layer;
+        // rule 8 marked the leaf when it was placed, moved or lifted.
         const Stored value =
-            walked ? Stored(RigExecBakedReadWalked(B, input, B.overridden))
-                   : Stored(RigExecBakedRead(input, R, time, &B.overridden));
+            walked ? Stored(RigExecBakedReadWalked(B, input, B.overridden,
+                                                   &B.upstreamOn))
+                   : Stored(RigExecBakedRead(input, R, time, &B.overridden,
+                                             &B.upstream, &B.upstreamOn));
         pool.changed[k] = _LeafSame(value, pool.value[k]) ? 0 : 1;
         pool.value[k] = value;
         if (walked && pool.changed[k]) {
@@ -3310,15 +3314,13 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     // slot holds the dragged value until something writes the constant back
     // over it. Once per run: the pass and the flag update are the prologue's,
     // not a step's, so no arrangement of the graph can perform them twice.
-    if (B.anyOverridden || B.avarsDisturbed) {
+    // An upstream value placed, moved or lifted on a constant avar runs it
+    // too; each slot takes its leaf, which is the constant unless a drag or
+    // an upstream value stands there, so a standing upstream value survives
+    // a drag on another avar.
+    if (B.anyOverridden || B.avarsDisturbed || B.upstreamMovedThisRun) {
         for (const auto &binding : B.avarConstantBindings) {
-            // A promoted binding is varying, and its leaf holds the long
-            // way's answer whether or not a drag stands on it.
-            B.avars[binding.slot] =
-                (B.overridden[size_t(binding.input.overrideIndex)] ||
-                 binding.input.varying)
-                    ? RigExecBakedLeafRead(B, binding.input)
-                    : binding.input.constant;
+            B.avars[binding.slot] = RigExecBakedLeaf(B, binding.input);
         }
         B.avarsDisturbed = B.anyOverridden;
     }
@@ -3864,10 +3866,17 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
     const auto rd = [&B](const auto &input) {
         return RigExecBakedLeafRead(B, input);
     };
+    // Whether a solver input is read from its leaf rather than the
+    // parameters Build folded: it varies, or a drag or an upstream value
+    // stands on it.
     const auto live = [&](const auto &input) {
-        return input.varying ||
-               (input.overrideIndex >= 0 &&
-                B.overridden[size_t(input.overrideIndex)]);
+        const auto flagged = [&input](const std::vector<char> &flags) {
+            return input.overrideIndex >= 0 &&
+                   size_t(input.overrideIndex) < flags.size() &&
+                   flags[size_t(input.overrideIndex)];
+        };
+        return input.varying || flagged(B.overridden) ||
+               flagged(B.upstreamOn);
     };
 
     switch (step->kind) {

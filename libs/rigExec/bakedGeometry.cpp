@@ -3250,7 +3250,8 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
         VtValue value =
             walk >= 0 ? RigExecBakedSampleWalkedPathLeaf(B, key, walk)
                       : RigExecSampleRevisionLeaf(key, leaves->attributes[k],
-                                                  B.resolvedInputs, time);
+                                                  B.resolvedInputs, time,
+                                                  &B.upstream);
         leaves->changed[k] = value == leaves->values[k] ? 0 : 1;
         leaves->values[k] = std::move(value);
         if (walk >= 0 && leaves->changed[k]) {
@@ -3389,7 +3390,7 @@ RigExecBakedSampleLayoutLeaves(RigExecBakedProgramImpl *program,
             ++B.pathLeafSamples;
             VtValue value = RigExecSampleRevisionLeaf(
                 leaves.decl.keys[k], leaves.attributes[k], B.resolvedInputs,
-                time);
+                time, &B.upstream);
             leaves.changed[k] = value == leaves.values[k] ? 0 : 1;
             leaves.values[k] = std::move(value);
         }
@@ -3501,7 +3502,8 @@ RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
         for (size_t k = 0; k < fresh.layoutLeaves.decl.keys.size(); ++k) {
             fresh.layoutLeaves.values.push_back(RigExecSampleRevisionLeaf(
                 fresh.layoutLeaves.decl.keys[k],
-                fresh.layoutLeaves.attributes[k], B.resolvedInputs, time));
+                fresh.layoutLeaves.attributes[k], B.resolvedInputs, time,
+                &B.upstream));
         }
         RigExecBakedRunLayoutOp(&fresh);
         const auto &held = revision->layoutHandle;

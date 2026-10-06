@@ -1594,9 +1594,13 @@ RigExecProgramAvarPatch(RigExecBakedProgramImpl *B, size_t bindingIndex,
     binding.input.constant = value;
     B->avarConstants[binding.slot] = value;
     const int overrideIndex = binding.input.overrideIndex;
-    const bool dragged = overrideIndex >= 0 &&
-                         size_t(overrideIndex) < B->overridden.size() &&
-                         B->overridden[size_t(overrideIndex)];
+    // A drag or an upstream value standing on the avar keeps its slot: the
+    // patched constant is the authored value beneath it.
+    const auto flagged = [overrideIndex](const std::vector<char> &flags) {
+        return overrideIndex >= 0 && size_t(overrideIndex) < flags.size() &&
+               flags[size_t(overrideIndex)];
+    };
+    const bool dragged = flagged(B->overridden) || flagged(B->upstreamOn);
     if (!dragged) {
         B->avars[binding.slot] = value;
     }
@@ -3894,6 +3898,9 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // way a slot is kept is the answer it offered.
         B.resolvedInputs->Clear();
         B.chainSnapshots->Clear();
+        // Upstream values: what moved since the last run marks the leaves
+        // it reaches, and the oracle's paths take their values.
+        RigExecBakedPlaceUpstream(&B);
         // Interactive overrides are applied before the property chains, as
         // _EvaluateDynamic applies them: a drag on a chain's target is its
         // base, and the chain publishes its own result in the drag's place.

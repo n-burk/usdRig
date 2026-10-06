@@ -335,6 +335,7 @@ bool RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
 /// Checks the same sampling/worker support contract as FreezeProgram without
 /// cloning its slot state. UI thread only. Unsupported rigs must use a cache
 /// key fenced by stage edits and frame time, not an incomplete sampled digest.
+/// Refuses while the evaluator's upstream inputs stand, which no job carries.
 bool RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                              std::string *error = nullptr);
 

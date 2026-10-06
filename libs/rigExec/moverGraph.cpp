@@ -2778,7 +2778,7 @@ template <class T>
 T
 _LeafRead(RigExecRevisionLeafFlavour flavour, const SdfPath &path,
           const UsdAttribute &a, const RigExecResolvedInputs *resolved,
-          UsdTimeCode time, T value)
+          const std::map<SdfPath, VtValue> *layer, UsdTimeCode time, T value)
 {
     switch (flavour) {
     case RigExecRevisionLeafFlavour::Raw:
@@ -2788,7 +2788,8 @@ _LeafRead(RigExecRevisionLeafFlavour flavour, const SdfPath &path,
         return value;
     case RigExecRevisionLeafFlavour::Resolved:
         if (a) {
-            if (resolved && resolved->GetAttribute(a, time, &value)) {
+            if (resolved &&
+                resolved->GetAttributeOverStageLayer(a, time, layer, &value)) {
                 return value;
             }
             a.Get(&value, time);
@@ -2796,7 +2797,7 @@ _LeafRead(RigExecRevisionLeafFlavour flavour, const SdfPath &path,
         return value;
     case RigExecRevisionLeafFlavour::ResolvedOnly:
         if (resolved) {
-            resolved->GetAttribute(a, time, &value);
+            resolved->GetAttributeOverStageLayer(a, time, layer, &value);
         }
         return value;
     case RigExecRevisionLeafFlavour::OverlayThenRaw:
@@ -2816,12 +2817,14 @@ _LeafRead(RigExecRevisionLeafFlavour flavour, const SdfPath &path,
 template <class T>
 VtValue
 _LeafSample(const RigExecRevisionLeafKey &key, const UsdAttribute &a,
-            const RigExecResolvedInputs *resolved, UsdTimeCode time)
+            const RigExecResolvedInputs *resolved,
+            const std::map<SdfPath, VtValue> *layer, UsdTimeCode time)
 {
     const T fallback =
         key.fallback.IsHolding<T>() ? key.fallback.UncheckedGet<T>() : T();
     return VtValue(
-        _LeafRead<T>(key.flavour, key.path, a, resolved, time, fallback));
+        _LeafRead<T>(key.flavour, key.path, a, resolved, layer, time,
+                     fallback));
 }
 
 }  // namespace
@@ -2830,7 +2833,8 @@ VtValue
 RigExecSampleRevisionLeaf(const RigExecRevisionLeafKey &key,
                           const UsdAttribute &attribute,
                           const RigExecResolvedInputs *resolved,
-                          UsdTimeCode time)
+                          UsdTimeCode time,
+                          const std::map<SdfPath, VtValue> *upstream)
 {
     if (key.flavour == RigExecRevisionLeafFlavour::Present) {
         return VtValue(resolved && resolved->Find(key.path) != nullptr);
@@ -2845,41 +2849,47 @@ RigExecSampleRevisionLeaf(const RigExecRevisionLeafKey &key,
     }
     switch (key.type) {
     case RigExecRevisionLeafType::Bool:
-        return _LeafSample<bool>(key, attribute, resolved, at);
+        return _LeafSample<bool>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::Int:
-        return _LeafSample<int>(key, attribute, resolved, at);
+        return _LeafSample<int>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::Float:
-        return _LeafSample<float>(key, attribute, resolved, at);
+        return _LeafSample<float>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::Token:
-        return _LeafSample<TfToken>(key, attribute, resolved, at);
+        return _LeafSample<TfToken>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::IntArray:
-        return _LeafSample<VtIntArray>(key, attribute, resolved, at);
+        return _LeafSample<VtIntArray>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::FloatArray:
-        return _LeafSample<VtFloatArray>(key, attribute, resolved, at);
+        return _LeafSample<VtFloatArray>(key, attribute, resolved, upstream,
+                                         at);
     case RigExecRevisionLeafType::Vec2fArray:
-        return _LeafSample<VtArray<GfVec2f>>(key, attribute, resolved, at);
+        return _LeafSample<VtArray<GfVec2f>>(key, attribute, resolved,
+                                             upstream, at);
     case RigExecRevisionLeafType::Vec3fArray:
-        return _LeafSample<VtVec3fArray>(key, attribute, resolved, at);
+        return _LeafSample<VtVec3fArray>(key, attribute, resolved, upstream,
+                                         at);
     case RigExecRevisionLeafType::Vec3i:
-        return _LeafSample<GfVec3i>(key, attribute, resolved, at);
+        return _LeafSample<GfVec3i>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::Vec3d:
-        return _LeafSample<GfVec3d>(key, attribute, resolved, at);
+        return _LeafSample<GfVec3d>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::Matrix4d:
-        return _LeafSample<GfMatrix4d>(key, attribute, resolved, at);
+        return _LeafSample<GfMatrix4d>(key, attribute, resolved, upstream, at);
     case RigExecRevisionLeafType::DoubleArray:
-        return _LeafSample<VtDoubleArray>(key, attribute, resolved, at);
+        return _LeafSample<VtDoubleArray>(key, attribute, resolved, upstream,
+                                          at);
     case RigExecRevisionLeafType::Dial: {
         // RigExecReadProjectorTarget's dial read, through \p resolved.
         double value = 0.0;
         const UsdAttribute &a = attribute;
         if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
             float asFloat = 0.0f;
-            if (!(resolved && resolved->GetAttribute(a, at, &asFloat))) {
+            if (!(resolved && resolved->GetAttributeOverStageLayer(
+                                  a, at, upstream, &asFloat))) {
                 a.Get(&asFloat, at);
             }
             value = double(asFloat);
         } else if (a) {
-            if (!(resolved && resolved->GetAttribute(a, at, &value))) {
+            if (!(resolved && resolved->GetAttributeOverStageLayer(
+                                  a, at, upstream, &value))) {
                 a.Get(&value, at);
             }
         }

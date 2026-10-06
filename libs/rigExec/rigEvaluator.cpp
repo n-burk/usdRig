@@ -249,6 +249,9 @@ RigExecRigEvaluator::_EnsureScopedClearShadow()
     if (!_interactiveOverrides.empty()) {
         shadow->SetInteractiveOverrides(_interactiveOverrides);
     }
+    if (!_upstreamRequested.empty()) {
+        shadow->SetUpstreamInputs(_upstreamRequested);
+    }
     _scopedClearShadow = std::move(shadow);
 }
 
@@ -376,11 +379,21 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
         !_BakeBailMemoMatches()) {
         _RebuildBakedProgram();
     }
+    // Upstream values are admitted against the epoch and program that now
+    // stand, and every generation, either path, reports the keys it drops.
+    if (!_upstreamRequested.empty() || !_upstreamAdmitted.empty()) {
+        _AdmitUpstreamInputs();
+        settled.insert(settled.end(), _upstreamDropLines.begin(),
+                       _upstreamDropLines.end());
+    }
     // An override the program cannot place would make it answer a question
     // nobody asked; that generation runs dynamically instead.
     bool overridesPlaceable = true;
     {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Evaluate.PlaceOverrides", "evaluate");
+        if (_bakedProgram) {
+            _bakedProgram->SetUpstreamInputs(_upstreamAdmitted);
+        }
         overridesPlaceable = !_bakedProgram ||
             _bakedProgram->SetOverrides(_interactiveOverrides);
         if (_bakedProgram) {
@@ -765,7 +778,18 @@ RigExecRigEvaluator::_RebuildBakedProgram(
 bool
 RigExecRigEvaluator::IsBakeable(std::vector<std::string> *reasons) const
 {
-    return RigExecBakedProgram::IsBakeable(*this, reasons);
+    bool bakeable = RigExecBakedProgram::IsBakeable(*this, reasons);
+    // Here and not in the program's own check, which Build asks: a standing
+    // upstream value must not refuse the program, only a bake, until the
+    // exporter lists such values as inputs.
+    if (HasUpstreamInputs()) {
+        if (reasons) {
+            reasons->push_back("upstream inputs standing (the exporter does "
+                               "not expose them yet)");
+        }
+        bakeable = false;
+    }
+    return bakeable;
 }
 
 size_t

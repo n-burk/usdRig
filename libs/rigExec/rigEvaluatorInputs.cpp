@@ -487,7 +487,10 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     }
     // Asked of BOTH sets before either is dropped: an override being lifted
     // off a layout attribute moves the value the layout was read with just
-    // as much as one being placed on it.
+    // as much as one being placed on it. The predicates read keys alone, so
+    // the two sets also cover every entry of _valueInputs this moves (an
+    // upstream value under a lifted override re-emerges at a key the old
+    // set names).
     const bool touchesLayout =
         _OverridesReachSkinLayout(_interactiveOverrides) ||
         _OverridesReachSkinLayout(overrides);
@@ -495,6 +498,7 @@ RigExecRigEvaluator::SetInteractiveOverrides(
         _OverridesReachBlendShapes(_interactiveOverrides) ||
         _OverridesReachBlendShapes(overrides);
     _interactiveOverrides = std::move(overrides);
+    _RebuildValueInputs();
     // The static-input cache is NOT dropped here. It used to be, as defence
     // in depth, on the reasoning that this "costs one map clear per drag
     // start" -- but a manipulator calls this on EVERY MOUSE SAMPLE, not once
@@ -563,6 +567,7 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
     const bool touchesShapes =
         _OverridesReachBlendShapes(_interactiveOverrides);
     _interactiveOverrides.clear();
+    _RebuildValueInputs();
     // Both halves of a drag treat the caches the same way. The static-input
     // cache is kept on the way out for the same reasons it is kept on the
     // way in (see SetInteractiveOverrides): it never holds an override, so
@@ -583,6 +588,157 @@ RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
 {
     _ApplyInteractiveOverrides(_interactiveOverrides, /* overrides = */
                                nullptr, resolved);
+}
+
+void
+RigExecRigEvaluator::_ApplyValueInputsToResolved(
+    RigExecResolvedInputs *resolved) const
+{
+    _ApplyInteractiveOverrides(_valueInputs, /* overrides = */ nullptr,
+                               resolved);
+}
+
+void
+RigExecRigEvaluator::_RebuildValueInputs()
+{
+    // With no upstream value the list IS the interactive one, entry for
+    // entry, so every reader sees exactly what it saw before.
+    if (_upstreamAdmitted.empty()) {
+        _valueInputs = _interactiveOverrides;
+        return;
+    }
+    _valueInputs = _upstreamAdmitted;
+    _ApplyInteractiveOverrides(_interactiveOverrides, &_valueInputs,
+                               /* resolved = */ nullptr);
+}
+
+void
+RigExecRigEvaluator::SetUpstreamInputs(
+    std::vector<RigExecValueOverride> inputs)
+{
+    if (_scopedClearShadow) {
+        _scopedClearShadow->SetUpstreamInputs(inputs);
+    }
+    _upstreamRequested = std::move(inputs);
+    _AdmitUpstreamInputs();
+}
+
+std::vector<SdfPath>
+RigExecRigEvaluator::GetUpstreamInputPaths() const
+{
+    std::vector<SdfPath> paths;
+    paths.reserve(_upstreamAdmitted.size());
+    for (const RigExecValueOverride &o : _upstreamAdmitted) {
+        paths.push_back(o.prim.AppendProperty(o.attribute));
+    }
+    return paths;
+}
+
+void
+RigExecRigEvaluator::_AdmitUpstreamInputs()
+{
+    std::vector<RigExecValueOverride> admitted;
+    std::vector<std::string> dropLines;
+    if (_upstreamRequested.empty()) {
+        _SetUpstreamAdmitted(std::move(admitted), std::move(dropLines));
+        return;
+    }
+    // Condition 3 against the program standing now. With none (an epoch
+    // that cannot bake, or a mode that runs no program) conditions 1 and 2
+    // decide: the walk reads every attribute through the same overlay, and
+    // such an epoch has no file to agree with.
+    const std::map<SdfPath, TfType> *listed =
+        _bakedProgram ? &_bakedProgram->GetUpstreamAdmissible() : nullptr;
+    // One entry per attribute, the last given winning, sorted by path.
+    std::map<SdfPath, const RigExecValueOverride *> byPath;
+    for (const RigExecValueOverride &o : _upstreamRequested) {
+        const SdfPath path = o.attribute.IsEmpty() || o.prim.IsEmpty()
+                                 ? SdfPath()
+                                 : o.prim.AppendProperty(o.attribute);
+        const auto drop = [&](const std::string &reason) {
+            dropLines.push_back(
+                "upstream input " +
+                (path.IsEmpty() ? o.prim.GetString() : path.GetString()) +
+                ": " + reason + "; ignored");
+        };
+        if (path.IsEmpty() || !o.computation.IsEmpty()) {
+            drop("names no attribute");
+            continue;
+        }
+        const UsdAttribute attribute =
+            _stage ? _stage->GetAttributeAtPath(path) : UsdAttribute();
+        if (!attribute) {
+            drop("no attribute stands there");
+            continue;
+        }
+        if (!_AuthoredConnections(attribute).empty()) {
+            drop("the attribute is connected");
+            continue;
+        }
+        if (!attribute.HasValue()) {
+            drop("the attribute has no stage value");
+            continue;
+        }
+        const SdfValueTypeName typeName = attribute.GetTypeName();
+        const TfType type = typeName.GetType();
+        if (!RigExecUpstreamSlotType(typeName)) {
+            drop(typeName.IsArray()
+                     ? std::string("array values are not admitted")
+                     : "no input slot holds a " +
+                           typeName.GetAsToken().GetString());
+            continue;
+        }
+        if (o.value.GetType() != type) {
+            drop("a " + o.value.GetTypeName() + " value on a " +
+                 typeName.GetAsToken().GetString() + " attribute");
+            continue;
+        }
+        if (listed && !listed->count(path)) {
+            drop("no listed read reaches it");
+            continue;
+        }
+        byPath[path] = &o;
+    }
+    admitted.reserve(byPath.size());
+    for (const auto &[path, o] : byPath) {
+        admitted.push_back(*o);
+    }
+    _SetUpstreamAdmitted(std::move(admitted), std::move(dropLines));
+}
+
+void
+RigExecRigEvaluator::_SetUpstreamAdmitted(
+    std::vector<RigExecValueOverride> admitted,
+    std::vector<std::string> dropLines)
+{
+    _upstreamDropLines = std::move(dropLines);
+    if (admitted == _upstreamAdmitted) {
+        return;
+    }
+    // The entries placed, moved or lifted. The skin layouts and blend
+    // shapes are read through the overlay these values ride, so the reach
+    // test an interactive change takes decides what they drop.
+    std::vector<RigExecValueOverride> moved;
+    for (const RigExecValueOverride &o : admitted) {
+        if (std::find(_upstreamAdmitted.begin(), _upstreamAdmitted.end(),
+                      o) == _upstreamAdmitted.end()) {
+            moved.push_back(o);
+        }
+    }
+    for (const RigExecValueOverride &o : _upstreamAdmitted) {
+        if (std::find(admitted.begin(), admitted.end(), o) ==
+            admitted.end()) {
+            moved.push_back(o);
+        }
+    }
+    _upstreamAdmitted = std::move(admitted);
+    _RebuildValueInputs();
+    if (_OverridesReachSkinLayout(moved)) {
+        _skinTopologies.Clear();
+    }
+    if (_OverridesReachBlendShapes(moved)) {
+        _blendSampleShapes.Clear();
+    }
 }
 
 } // namespace rigExec

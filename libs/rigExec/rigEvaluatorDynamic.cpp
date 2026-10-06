@@ -162,9 +162,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // revises it as it would the value authored there and publishes its own
     // result in the override's place, so every reader sees during the drag
     // what it sees once the value is authored (_EvaluatePropertyChains).
-    if (!_interactiveOverrides.empty()) {
+    // Admitted upstream values ride the same list (_valueInputs): each
+    // stands on an unconnected attribute that has a stage value, so the
+    // answer is the one that value authored there gives.
+    if (!_valueInputs.empty()) {
         _ApplyInteractiveOverrides(
-            _interactiveOverrides, &baseOverrides, &_resolvedInputs);
+            _valueInputs, &baseOverrides, &_resolvedInputs);
     }
     if (!_propertyChains.empty()) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PropertyChains", "property");
@@ -756,7 +759,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // any other attribute can reach a rest frame. A computation override
         // names a computation this cannot inspect, so it counts.
         const bool restOverridden = [this]() {
-            for (const RigExecValueOverride &o : _interactiveOverrides) {
+            for (const RigExecValueOverride &o : _valueInputs) {
                 if (o.attribute.IsEmpty() ||
                     _IsRestInputName(_restInputNames, o.attribute)) {
                     return true;
@@ -1758,7 +1761,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         return _taps->EvaluateWithSuppliedResults(time, overrides, std::move(supplied));
     };
     const bool authCacheHit = !_authSnapshotDirty &&
-                              _interactiveOverrides.empty() &&
+                              _valueInputs.empty() &&
                               _authSnapTimeKeyed.count(time) > 0;
     const bool overlapSnapshot = _connectedPoseTaps.empty() &&
                                  RigExecParallelEvaluationEnabled() &&
@@ -1863,7 +1866,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     // No cache under a held drag: the key is (tail, time) but
                     // the result depends on baseOverrides too, which the drag
                     // is part of. See the note where the tail is assembled.
-                    hit = (!batch.dirty && _interactiveOverrides.empty())
+                    hit = (!batch.dirty && _valueInputs.empty())
                         ? batch.cache.Find(tail, time)
                         : nullptr;
                 }
@@ -1886,7 +1889,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                             "solver dependency level evaluation incomplete");
                         return pose;
                     }
-                    if (_interactiveOverrides.empty()) {
+                    if (_valueInputs.empty()) {
                         batch.cache.Store(tail, time, refreshed);
                         // Cleared only beside the store: an edit that dirtied
                         // the batch ahead of a drag must still force a
@@ -1941,7 +1944,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     }
                 }
                 batch.taps->ConsumeDirty();
-                const bool dragging = !_interactiveOverrides.empty();
+                const bool dragging = !_valueInputs.empty();
                 bool anyDirty = false;
                 for (size_t index : members) {
                     anyDirty = anyDirty || _solverBatches[index].dirty;
@@ -2692,7 +2695,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // thread computed it -- this one, after the join.
     const auto storeAuthSnapshot = [&]() {
         if (snapshot.IsValid() && snapshot.IsComplete() &&
-            _interactiveOverrides.empty()) {
+            _valueInputs.empty()) {
             if (_authSnapTimeKeyed.size() >= 4)
                 _authSnapTimeKeyed.erase(_authSnapTimeKeyed.begin());
             _authSnapTimeKeyed.emplace(time, snapshot);
@@ -2722,7 +2725,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // flag is drained, not consulted (it fires across sibling frames
         // sharing the system).
         bool authResolved = false;
-        if (!_authSnapshotDirty && _interactiveOverrides.empty()) {
+        if (!_authSnapshotDirty && _valueInputs.empty()) {
             const auto tk = _authSnapTimeKeyed.find(time);
             if (tk != _authSnapTimeKeyed.end()) {
                 snapshot = tk->second;

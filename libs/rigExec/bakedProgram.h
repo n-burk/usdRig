@@ -27,15 +27,24 @@
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include "pxr/base/tf/type.h"
+#include "pxr/usd/sdf/valueTypeName.h"
+
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+
+/// Whether a value of \p typeName fits a .rigexec input slot: a scalar,
+/// token, 4x4 double matrix or 3-vector of either precision, any role. No
+/// array does. Upstream admission condition 2.
+bool RigExecUpstreamSlotType(const SdfValueTypeName &typeName);
 
 class RigExecRigEvaluator;
 struct RigExecRigPose;
@@ -441,6 +450,29 @@ public:
     /// return false so the caller runs the generation dynamically. A wrong
     /// baked answer is never one of the outcomes.
     bool SetOverrides(const std::vector<RigExecValueOverride> &overrides);
+
+    /// This run's admitted upstream values (RigExecRigEvaluator::
+    /// SetUpstreamInputs), sorted by path, attribute entries only. They
+    /// are authored-level: the next run's prologue compares them by value
+    /// with what the last run placed and re-reads only the leaves under a
+    /// value placed, moved or lifted; every such leaf reads through the
+    /// upstream layer (RigExecResolvedInputs::GetAttributeOverStageLayer).
+    /// A standing value that did not move costs nothing.
+    void SetUpstreamInputs(const std::vector<RigExecValueOverride> &inputs);
+
+    /// Path -> value type of every attribute a read the bake lists as an
+    /// input slot walks: the hops of every registered binding, of the
+    /// property chains (targets, revision inputs, phased consumers and
+    /// their hops), of the envelope-only weight objects' six reads and of
+    /// the geometry assembly's scalar reads. Admission condition 3.
+    /// Built on first use, on the owning thread, and kept for the program.
+    const std::map<SdfPath, TfType> &GetUpstreamAdmissible() const;
+    /// Every hop of every scalar read of a weight object the volatile
+    /// oracle resolves (a constraint or property-mover envelope, a
+    /// current-phase field, and every object those compose). An upstream
+    /// value at one of these paths is placed into the generation's resolved
+    /// inputs too, which is what the oracle reads. Built with the above.
+    const std::set<SdfPath> &GetUpstreamOracle() const;
 
     /// Whether a run resolves RigExecRigPose::weightFields, following
     /// RigExecRigEvaluator::SetPublishWeightFields: the per-point overlay

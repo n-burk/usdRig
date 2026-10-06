@@ -2454,13 +2454,20 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
             }
         }
         const bool edited = B.anyEdited;
+        // An upstream value seeds its readers only in the run it was
+        // placed, moved or lifted (`upstreamChanged`): a standing one
+        // costs nothing.
+        const bool upstreamMoved = B.upstreamMovedThisRun;
         for (const int index : cones.overrideSteps) {
             const RigExecBakedStep &step = B.steps[size_t(index)];
             for (const int input : step.overrideInputs) {
                 if (B.overridden[size_t(input)] ||
                     B.lastOverridden[size_t(input)] ||
                     (edited && size_t(input) < B.edited.size() &&
-                     B.edited[size_t(input)])) {
+                     B.edited[size_t(input)]) ||
+                    (upstreamMoved &&
+                     size_t(input) < B.upstreamChanged.size() &&
+                     B.upstreamChanged[size_t(input)])) {
                     dirty.Set(index);
                     break;
                 }

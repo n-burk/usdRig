@@ -1273,7 +1273,15 @@ RigExecBakedSampleHeadLeaves(RigExecBakedProgramImpl *program,
         }
         leaf.mustSample = 0;
         ++B.headLeafSamples;
-        VtValue value = SampleHead(leaf, time);
+        // The upstream layer stands where the stage value stood (rule 8
+        // marks the leaf when a value there is placed, moved or lifted).
+        const auto upstream =
+            B.upstream.empty() ? B.upstream.end() : B.upstream.find(leaf.path);
+        VtValue value =
+            upstream != B.upstream.end() && leaf.typeMatches &&
+                    RigExecBakedHeadLeafHolds(leaf, upstream->second)
+                ? upstream->second
+                : SampleHead(leaf, time);
         leaf.changed = RigExecBakedHeadValueSame(value, leaf.value) ? 0 : 1;
         leaf.value = std::move(value);
     }
@@ -1733,7 +1741,7 @@ RigExecBakedProgram::_EvaluateChainsDetached(
     // pointing at the live object once it is swapped back.
     RigExecResolvedInputs live;
     std::swap(E._resolvedInputs, live);
-    E._ApplyInteractiveOverridesToResolved(&E._resolvedInputs);
+    E._ApplyValueInputsToResolved(&E._resolvedInputs);
     std::unique_ptr<RigExecPropertyChainBindings> saved =
         std::move(E._propertyChainBindings);
     E._EvaluatePropertyChains(time, results, nullptr, lines);

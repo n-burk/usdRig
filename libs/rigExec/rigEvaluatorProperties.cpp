@@ -354,7 +354,7 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
     RigExecPropertyChainBindings &bindings = *_propertyChainBindings;
     const bool timeMoved = !bindings.haveLast || time != bindings.lastTime;
     std::unordered_map<SdfPath, VtValue, SdfPath::Hash> nowOverrides;
-    for (const RigExecValueOverride &o : _interactiveOverrides) {
+    for (const RigExecValueOverride &o : _valueInputs) {
         if (!o.attribute.IsEmpty()) {
             nowOverrides[o.prim.AppendProperty(o.attribute)] = o.value;
         }

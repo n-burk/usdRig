@@ -1970,6 +1970,8 @@ TestTheAlwaysSetIsUnchangedUntilT1(const std::string &examples)
             {"space_switch_dial.usda", {0, 0x14650fb0739d0383ull}},
             {"space_switch_nested.usda", {0, 0x14650fb0739d0383ull}},
             {"space_switch_same_round.usda", {0, 0x14650fb0739d0383ull}},
+            // Not in that recording: its meshes author no extent.
+            {"upstream_inputs.usda", {0, 0x14650fb0739d0383ull}},
             {"volume_placements.usda", {6, 0x88e3f470ded483ebull}},
         };
     std::vector<std::string> files;

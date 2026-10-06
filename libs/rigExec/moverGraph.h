@@ -472,6 +472,79 @@ public:
         return false;
     }
 
+    /// GetAttribute with \p layer in front of every hop's stage read: each
+    /// hop answers from this overlay first (exact type, as GetAttribute),
+    /// and where none does, the deepest hop \p layer holds as T or the
+    /// stage can read answers, the layer first. \p layer holds
+    /// authored-level values (the upstream inputs), so the answer is the
+    /// one a stage authoring them gives. The static-input cache is not
+    /// consulted while \p layer holds anything; a null or empty layer is
+    /// GetAttribute exactly.
+    template <class T>
+    bool GetAttributeOverStageLayer(
+        const UsdAttribute &attribute, UsdTimeCode time,
+        const std::map<SdfPath, VtValue> *layer, T *out) const {
+        if (!layer || layer->empty()) {
+            return GetAttribute(attribute, time, out);
+        }
+        RIGEXEC_PURITY_CHECK();
+        if (!out) {
+            return false;
+        }
+        const auto fromLayer = [layer](const SdfPath &path, T *value) {
+            const auto it = layer->find(path);
+            if (it == layer->end() || !it->second.IsHolding<T>()) {
+                return false;
+            }
+            *value = it->second.UncheckedGet<T>();
+            return true;
+        };
+        if constexpr (std::is_same<T, float>::value) {
+            if (attribute &&
+                attribute.GetTypeName() == SdfValueTypeNames->Double) {
+                double wide = 0.0;
+                if (!GetAttributeOverStageLayer<double>(attribute, time,
+                                                        layer, &wide)) {
+                    return false;
+                }
+                return _CoerceFromDouble(wide, out);
+            }
+        }
+        std::set<SdfPath> visiting;
+        std::vector<UsdAttribute> fallback;
+        UsdAttribute a = attribute;
+        while (a && visiting.insert(a.GetPath()).second) {
+            if (Get(a.GetPath(), out)) {
+                return true;
+            }
+            if constexpr (std::is_same<T, float>::value) {
+                if (a.GetTypeName() == SdfValueTypeNames->Double) {
+                    double wide = 0.0;
+                    if (!GetAttributeOverStageLayer<double>(a, time, layer,
+                                                            &wide)) {
+                        return false;
+                    }
+                    return _CoerceFromDouble(wide, out);
+                }
+            }
+            fallback.push_back(a);
+            SdfPathVector connections;
+            if (a.HasAuthoredConnections()) {
+                a.GetConnections(&connections);
+            }
+            if (connections.size() != 1) {
+                break;
+            }
+            a = a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
+        }
+        for (auto it = fallback.rbegin(); it != fallback.rend(); ++it) {
+            if (fromLayer(it->GetPath(), out) || it->Get(out, time)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool IsEmpty() const { return _values.empty(); }
     size_t GetSize() const { return _values.size(); }
     /// Whether \p other holds the same values at the same paths.
@@ -1773,11 +1846,15 @@ void RigExecDeclareSkinLayoutLeaves(const SdfPath &moverPath,
 /// The value \p key's read site answers at \p time (Default for an
 /// AtDefault key) through \p resolved, or the key's fallback when it finds
 /// nothing. \p attribute is the attribute at the key's path, invalid when
-/// none stands there. Reads the stage: owning thread only.
-VtValue RigExecSampleRevisionLeaf(const RigExecRevisionLeafKey &key,
-                                  const UsdAttribute &attribute,
-                                  const RigExecResolvedInputs *resolved,
-                                  UsdTimeCode time);
+/// none stands there. A non-empty \p upstream is the upstream layer: every
+/// stage read a connection-following flavour (and its head fallback) makes
+/// answers from it first (GetAttributeOverStageLayer); Raw and
+/// OverlayThenRaw reads never consult it. Reads the stage: owning thread
+/// only.
+VtValue RigExecSampleRevisionLeaf(
+    const RigExecRevisionLeafKey &key, const UsdAttribute &attribute,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    const std::map<SdfPath, VtValue> *upstream = nullptr);
 
 /// The attributes \p key's read can reach from \p attribute: the attribute
 /// itself, and for a connection-following flavour every hop of the
