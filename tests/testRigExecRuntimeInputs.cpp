@@ -26,7 +26,9 @@
 // nothing.
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/bake.h"
+#include "rigExecBake/staticReport.h"
 #include "rigExecRuntime/runtime.h"
+#include "rigExecRuntime/stageArrayInputs.h"
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
@@ -996,8 +998,8 @@ _TestLatticeArray(const UsdStageRefPtr &stage)
         }
     }
 
-    // The sampler leaves an array input alone: no warning, no sample, and
-    // the default view after a sample at another time.
+    // Both cage reads share a slot: stage sampling changes only its AtTime
+    // side; the bind cage keeps its captured Default value.
     {
         RigExecTestPlayer player;
         CHECK(player.Open(listed, stage, &error));
@@ -1008,18 +1010,33 @@ _TestLatticeArray(const UsdStageRefPtr &stage)
                 input.animated && !RrInputTagIsArray(input.type) ? 1 : 0;
         }
         CHECK(player.Sampler().GetWarnings().empty() &&
-              player.Sampler().GetAnimatedCount() == animatedScalars);
+              player.Sampler().GetAnimatedCount() == animatedScalars +
+                  RigExecRuntimeStageArrayInputs::Enumerate(*player.operator->()).size());
         CHECK(player.Play(1036.0, &error));
         RigExecRuntimeArray sampled;
         CHECK(player->GetInputArrayAt(index, &sampled) &&
               sampled.count == 12);
         RigExecRuntimeArray atOpen;
         std::unique_ptr<RigExecRuntimeReader> fresh = _OpenRun(label, listed);
+        VtVec3fArray atTime;
+        CHECK(stage->GetAttributeAtPath(SdfPath(cage))
+                  .Get(&atTime, UsdTimeCode(1036.0)));
+        CHECK(atTime.size() == sampled.count &&
+              std::memcmp(sampled.data, atTime.cdata(),
+                          sizeof(GfVec3f) * sampled.count) == 0);
         CHECK(fresh && fresh->GetInputArrayAt(index, &atOpen) &&
               std::memcmp(sampled.data, atOpen.data,
-                          sizeof(GfVec3f) * 12) == 0);
+                          sizeof(GfVec3f) * 12) != 0);
+        for (const auto mode : {RigExecEvaluationMode::Dynamic,
+                                RigExecEvaluationMode::Baked}) {
+            RigExecRigPose pose;
+            CHECK(RigExecTestArrayReference(stage, rigPath, mode, {}, 1036.0,
+                                             &pose, &error));
+            std::vector<std::string> diffs;
+            CHECK(RigExecCompareRuntimeRun(pose, *player.operator->(), &diffs));
+        }
         std::printf("%s: the sampler samples %zu input(s) of %zu, the "
-                    "array left at its default\n",
+                    "array sampled at playback time\n",
                     label.c_str(), player.Sampler().GetAnimatedCount(),
                     player->GetInputCount());
     }
@@ -1404,6 +1421,121 @@ _TestPaintedArrays(const UsdStageRefPtr &stage)
         _Reference::EditedOutputs);
 }
 
+// Real numeric-time samples, not public setter simulations. A second reader
+// holds only this array at its bake value at the same frame, proving that the
+// array (rather than an unrelated animated scalar) changes the published pose.
+static void
+_CheckStageArraySamples(const std::string &label, const UsdStageRefPtr &stage,
+                        const SdfPath &rigPath, const std::string &name,
+                        double time, const VtValue &initial,
+                        const VtValue &changed, const VtValue &invalid,
+                        const VtValue &extra = VtValue())
+{
+    const UsdAttribute attribute = stage->GetAttributeAtPath(SdfPath(name));
+    CHECK(attribute);
+    if (!attribute) return;
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        // A single key marks the original file Animated without making a
+        // fixed skin layout time-varying at export. Later keys arrive live.
+        CHECK(attribute.Set(initial, UsdTimeCode(time)));
+    }
+    std::vector<uint8_t> bytes;
+    if (!_BakeArrays(label, stage, rigPath, time, &bytes)) return;
+    auto reader = _OpenRun(label, bytes);
+    auto held = _OpenRun(label + " held", bytes);
+    CHECK(reader && held);
+    if (!reader || !held) return;
+    const auto slots = RigExecRuntimeStageArrayInputs::Enumerate(*reader);
+    const auto found = std::find_if(slots.begin(), slots.end(),
+        [&](const auto &info) { return info.name == name; });
+    CHECK(found != slots.end());
+    if (found == slots.end()) return;
+    const auto rejectSlot = [&](size_t slot) {
+        std::string why;
+        const std::string expected = "no sampled array at slot " +
+                                     std::to_string(slot);
+        CHECK(!RigExecRuntimeStageArrayInputs::CanSample(*reader, slot));
+        CHECK(!RigExecRuntimeStageArrayInputs::SetSample(
+            *reader, slot, RigExecTestArrayView(initial), &why));
+        CHECK(why == expected);
+        why.clear();
+        CHECK(!RigExecRuntimeStageArrayInputs::ClearSample(*reader, slot, &why));
+        CHECK(why == expected);
+    };
+    const auto file = RigExecTestUnpack(bytes);
+    CHECK(file);
+    if (file) rejectSlot(file->inputs.size());
+    bool scalarChecked = false;
+    for (size_t slot = 0; slot < reader->GetInputCount(); ++slot) {
+        if (!RrInputTagIsArray(reader->GetInputInfo(slot).type)) {
+            rejectSlot(slot);
+            scalarChecked = true;
+            break;
+        }
+    }
+    CHECK(scalarChecked);
+    std::string bridgeError;
+    CHECK(reader->Execute(&bridgeError));
+    CHECK(_SameOutputs(*reader, *held));
+    {
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        evaluator.Evaluate(UsdTimeCode(time));
+        std::vector<RigExecBakeStaticEntry> entries;
+        std::string why;
+        CHECK(RigExecBakeStaticReport(evaluator, &entries, &why));
+        CHECK(std::none_of(entries.begin(), entries.end(),
+            [&](const auto &entry) { return entry.source == name; }));
+    }
+    CHECK(file && found->slot < file->inputs.size() &&
+          (file->inputs[found->slot].flags() &
+           uint8_t(fb::InputSlotFlags::Animated)) != 0);
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        CHECK(attribute.Set(changed, UsdTimeCode(time + 1)));
+        CHECK(attribute.Set(invalid, UsdTimeCode(time + 2)));
+        CHECK(attribute.Set(initial, UsdTimeCode(time + 3)));
+        if (!extra.IsEmpty()) {
+            CHECK(attribute.Set(extra, UsdTimeCode(time + 4)));
+            CHECK(attribute.Set(initial, UsdTimeCode(time + 5)));
+        }
+    }
+    RigExecInputSampler sampler, heldSampler;
+    std::string error;
+    CHECK(sampler.Bind(stage, *reader, &error));
+    CHECK(heldSampler.Bind(stage, *held, &error));
+    CHECK(sampler.GetWarnings().empty());
+    for (int step = 1; step <= (extra.IsEmpty() ? 3 : 5); ++step) {
+        const double frame = time + step;
+        CHECK(RigExecTestDrive(reader.get(), &sampler, frame, &error));
+        for (const auto mode : {RigExecEvaluationMode::Dynamic,
+                                RigExecEvaluationMode::Baked}) {
+            RigExecRigPose pose;
+            CHECK(RigExecTestArrayReference(stage, rigPath, mode, {}, frame,
+                                             &pose, &error));
+            std::vector<std::string> diffs;
+            const bool equal = RigExecCompareRuntimeRun(pose, *reader, &diffs);
+            CHECK(equal);
+            for (const auto &line : diffs)
+                std::printf("%s frame %g: %s\n", label.c_str(), frame,
+                            line.c_str());
+        }
+        if (step == 1) {
+            CHECK(RigExecTestDrive(held.get(), &heldSampler, frame, &error));
+            CHECK(RigExecRuntimeStageArrayInputs::SetSample(
+                *held, found->slot, RigExecTestArrayView(initial), &error));
+            CHECK(held->Execute(&error));
+            CHECK(!_SameOutputs(*reader, *held));
+        }
+        bool sampled = true;
+        CHECK(sampler.Apply(UsdTimeCode(frame), reader.get(), &error, &sampled));
+        CHECK(!sampled);
+    }
+    // Sampling arbitrary counts never relaxes the authored count contract.
+    CHECK(!reader->SetInputArray(name, RigExecTestArrayView(invalid), &error));
+}
+
 // The array inputs of example rigs no case above reaches, each listed by
 // the export with every read of it bound, and an authored set against the
 // same value authored in the session layer: a mesh's topology (01, two
@@ -1498,6 +1630,31 @@ _TestExampleArrays(const std::string &examples)
         }
         _CheckArraySets(label + " authored", stage, rigPath, bytes,
                         {{c.attribute, c.edit(held), false}}, true);
+        VtValue invalid;
+        switch (c.tag) {
+        case fb::InputTag::IntArray: {
+            const auto &indices = held.Get<VtIntArray>();
+            CHECK(indices.size() >= 6);
+            // One complete quad followed by an incomplete second face.
+            invalid = VtValue(VtIntArray(indices.begin(), indices.begin() + 6));
+            break;
+        }
+        case fb::InputTag::Vec2fArray: invalid = VtValue(VtVec2fArray()); break;
+        case fb::InputTag::Vec3fArray: invalid = VtValue(VtVec3fArray()); break;
+        default: CHECK(false); break;
+        }
+        if (std::string(c.stage) == "05_TwistRibbonSpine.usda") {
+            // RibbonIk's structural driver is outside the sampled leaf table.
+            // Hold it in a stronger Default while testing the real UV leaf.
+            const auto driver = stage->GetAttributeAtPath(
+                SdfPath("/SpineAsset/Geom/SpineCurve.points"));
+            VtVec3fArray points;
+            CHECK(driver.Get(&points, UsdTimeCode(c.time)));
+            UsdEditContext context(stage, stage->GetSessionLayer());
+            CHECK(driver.Set(points));
+        }
+        _CheckStageArraySamples(label + " stage samples", stage, rigPath,
+                                c.attribute, c.time, held, c.edit(held), invalid);
     }
 }
 
@@ -1660,6 +1817,66 @@ main(int argc, char **argv)
         _TestPaintedArrays(stage);
     }
     _TestExampleArrays(examples);
+    // Extent widths accept one width, ignore malformed counts, and recover.
+    // FrameGuides has three points; its extent is published as a property.
+    if (const auto stage = _Open(examples + "/../docs/examples/curve_mover.usda")) {
+        const std::string name = "/CurveAsset/Geom/FrameGuides.widths";
+        VtFloatArray initial;
+        CHECK(stage->GetAttributeAtPath(SdfPath(name)).Get(&initial));
+        CHECK(initial.size() == 3);
+        _CheckStageArraySamples("extent malformed widths", stage, _FindRig(stage),
+            name, 1001.0, VtValue(initial), VtValue(VtFloatArray{1.2f}),
+            VtValue(VtFloatArray{0.4f, 0.8f}), VtValue(VtFloatArray()));
+    }
+    // Delta mush's short topology must pass through rather than refuse the
+    // stage sample globally. Exact live parity includes its published status.
+    if (const auto stage = _Open(fixtures + "/computed_path_reads.usda")) {
+        const std::string name = "/PathReadAsset/Geom/Ball.faceVertexIndices";
+        VtIntArray initial;
+        CHECK(stage->GetAttributeAtPath(SdfPath(name)).Get(&initial));
+        CHECK(initial.size() >= 6);
+        VtIntArray changed = initial;
+        std::reverse(changed.begin(), changed.begin() + 3);
+        _CheckStageArraySamples("smooth short topology", stage, _FindRig(stage),
+            name, 1.0, VtValue(initial), VtValue(changed),
+            VtValue(VtIntArray(initial.begin(), initial.begin() + 4)));
+    }
+    if (const UsdStageRefPtr stage =
+            _Open(fixtures + "/oneloop_two_limbs.usda")) {
+        const std::string name =
+            "/LimbsAsset/Rig/Movers/MeshASkin.rigExec:jointWeights";
+        VtFloatArray initial;
+        CHECK(stage->GetAttributeAtPath(SdfPath(name)).Get(&initial));
+        {
+            UsdEditContext context(stage, stage->GetSessionLayer());
+            CHECK(stage->GetAttributeAtPath(SdfPath(name))
+                      .Set(initial, UsdTimeCode(5)));
+        }
+        RigExecRigEvaluator evaluator(stage, _FindRig(stage));
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        std::vector<std::string> notices;
+        CHECK(evaluator.Compile(&notices));
+        std::vector<std::string> reasons;
+        CHECK(!evaluator.IsBakeable(&reasons));
+        const std::string reason =
+            "time-varying or connected rigExec:jointWeights: " +
+            SdfPath(name).GetPrimPath().GetString();
+        CHECK(reasons == std::vector<std::string>{reason});
+        RigExecBakeOpts opts;
+        opts.time = 5;
+        RigExecBakeResult result;
+        result.bytes = {42};
+        result.upstreamInputs = {"sentinel"};
+        result.pathReadsWritten = 17;
+        result.pathReadsEnumerated = 19;
+        std::string error;
+        CHECK(!RigExecBakeToBinary(evaluator, opts, &result, &error));
+        CHECK(error == "epoch is not bakeable\n  " + reason);
+        CHECK(result.bytes == std::vector<uint8_t>{42});
+        CHECK(result.upstreamInputs == std::vector<std::string>{"sentinel"});
+        CHECK(result.pathReadsWritten == 17 && result.pathReadsEnumerated == 19);
+    }
+
     std::printf("array inputs: %d of %d case(s) == session edit\n",
                 arrayMatched, arrayCases);
     CHECK(arrayMatched == arrayCases && arrayCases == 18);

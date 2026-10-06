@@ -839,7 +839,7 @@ rigexec_add_verify_binary_test(NAME computed_ik_space
 # follows the keyed double3, matrix4d and float reads at every frame.
 rigexec_add_verify_binary_test(NAME computed_path_reads
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/computed_path_reads.usda"
-    FRAMES 1,4,7,10 TIME 10 CLASS static
+    FRAMES 1,4,7,10 TIME 10 CLASS inputs
     DRAGS "/PathReadAsset/Rig/Controls/Dial.avars:amount,/PathReadAsset/Rig/Dials.gain,/PathReadAsset/Rig/Dials.held,/PathReadAsset/Rig/Movers/Mush.inputs:step")
 rigexec_add_verify_binary_test(NAME computed_path_reads_held_points
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecPathReadsHeldPoints.usda"
@@ -868,7 +868,8 @@ endforeach()
 # are outside the runtime output contract verify-binary compares).
 rigexec_add_verify_binary_test(NAME projector_spaces
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/projector_spaces.usda"
-    FRAMES 1,4,7,10)
+    FRAMES 1,4,7,10 TIME 7 CLASS inputs
+    DRAGS "/ProjectorAsset/Rig/Controls/Driver.avars:tx")
 
 # One VolumePlacements step per volume (part 1), each writing its own
 # WeightFrames slot, and a current-phase field reading both placements.
@@ -888,11 +889,11 @@ rigexec_add_verify_binary_test(NAME volume_placements
 # chunk, staleness and re-cut paths.
 rigexec_add_verify_binary_test(NAME raw_skin_layouts
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/raw_skin_layouts.usda"
-    FRAMES 1,4,7,10 TIME 1 CLASS static
+    FRAMES 1,4,7,10 TIME 1 CLASS inputs
     DRAGS "/RawSkinAsset/Rig/Controls/C0.avars:rz,/RawSkinAsset/Rig/Controls/C0/C1.avars:rz")
 rigexec_add_verify_binary_test(NAME raw_skin_layouts_chunked
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/raw_skin_layouts.usda"
-    FRAMES 1,4,7,10 TIME 1 CLASS static
+    FRAMES 1,4,7,10 TIME 1 CLASS inputs
     DRAGS "/RawSkinAsset/Rig/Controls/C0.avars:rz,/RawSkinAsset/Rig/Controls/C0/C1.avars:rz")
 rigexec_add_verify_binary_test(NAME oneloop_two_limbs_chunked
     STAGE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/oneloop_two_limbs.usda"

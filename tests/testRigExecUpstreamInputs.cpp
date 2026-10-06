@@ -21,9 +21,11 @@
 #include "rigExec/frozenContext.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/bake.h"
+#include "rigExecBake/staticReport.h"
 #include "rigExecBake/computedCapture.h"
 #include "rigExecBake/pathTable.h"
 #include "rigExecImaging/playback.h"
+#include "rigExecRuntime/stageArrayInputs.h"
 #include "rigExecRuntimeDrive.h"
 
 #include "pxr/base/gf/matrix4d.h"
@@ -2401,21 +2403,246 @@ TestAPlaybackTokenKey()
     }
 }
 
-// Deferred to the runtime session (W.5): enable when AI (W.3.11, format 8)
-// merges. The .rigexec legs of the array cases above, each on a playback
-// session of a bake made with no upstream value, against live with the
-// array standing and after the lift: chain base points, jointWeights,
-// chunked jointIndices (partition stale while standing), the invalid
-// layout (per-set validation fails the mover), time-varying jointWeights
-// (one SetInputArray per frame), the lattice cage (AtDefault and AtTime
-// reads both see the value); and the array keys of the playback-parity
-// case with the admission hook on (live admits them; playback finds no
-// array input until AI).
+// Double arrays currently have a real Default-only leaf: wire knots.
+// Numeric animation marks its slot Animated but must not make it sampled.
+void
+TestDefaultOnlyKnotsLift()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    CHECK(stage->GetRootLayer()->ImportFromString(R"USD(#usda 1.0
+ def Xform "Asset" {
+  def RigExecRoot "Rig" {
+   uniform token rigExec:partition = "Asset"
+   def Scope "Movers" {
+    def RigExecCurveMover "Wire" (prepend apiSchemas = ["RigExecMoverAPI"]) {
+     uniform token rigExec:mode = "wire"
+     rel rigExec:moves = </Asset/Mesh.points>
+     rel rigExec:driverCurve = </Asset/Curve>
+     rel rigExec:bindCoordinates = </Asset/Bind.st>
+    }
+   }
+  }
+  def Mesh "Mesh" {
+   point3f[] points = [(0.25, 0, 0), (0.75, 0, 0)]
+  }
+  def Scope "Bind" {
+   float2[] st = [(0.25, 0), (0.75, 0)]
+  }
+  def NurbsCurves "Curve" {
+   int[] curveVertexCounts = [2]
+   int[] order = [2]
+   double[] knots = [0, 0, 1, 1]
+   double[] knots.timeSamples = {1: [0, 0, 1, 1], 3: [0, 0, 3, 3]}
+   point3f[] points = [(0, 0, 0), (1, 0, 0)]
+   point3f[] points.timeSamples = {
+    1: [(0, 0, 0), (1, 0, 0)],
+    3: [(0, 0, 0), (1, 1, 0)]
+   }
+  }
+ }
+)USD"));
+    const SdfPath rig("/Asset/Rig"), path("/Asset/Curve.knots");
+    auto evaluator = Make(stage, rig, BakedMode());
+    evaluator->Evaluate(UsdTimeCode(1));
+    RigExecBakedPlayback play(stage, rig,
+                              std::make_shared<RigExecSnapshotStore>());
+    std::string error;
+    CHECK(play.Open(WriteBake(*evaluator, 1, "default_only_knots"), &error));
+    const auto reader = play.GetReaderForTesting();
+    CHECK(reader);
+    if (!reader) return;
+    size_t index = 0;
+    const bool listed = reader->FindInput(path.GetString(), &index);
+    CHECK(listed);
+    if (!listed) return;
+    CHECK(reader->GetInputInfo(index).type == RrInputTag::DoubleArray &&
+          reader->GetInputInfo(index).animated);
+    CHECK(!RigExecRuntimeStageArrayInputs::CanSample(*reader, index));
+    const VtDoubleArray initial{0, 0, 1, 1};
+    const VtDoubleArray standing{0, 0, 2, 2};
+    std::vector<uint8_t> bridgeBytes;
+    CHECK(RigExecTestBakeAt(*evaluator, 1, &bridgeBytes, &error));
+    auto bridgeReader = RigExecRuntimeReader::Open(
+        bridgeBytes.data(), bridgeBytes.size(), &error);
+    CHECK(bridgeReader);
+    if (!bridgeReader) return;
+    const std::string bridgeRefusal = "no sampled array at slot " +
+                                      std::to_string(index);
+    CHECK(!RigExecRuntimeStageArrayInputs::SetSample(
+        *bridgeReader, index,
+        RigExecTestArrayView(VtValue(standing)), &error));
+    CHECK(error == bridgeRefusal);
+    error.clear();
+    CHECK(!RigExecRuntimeStageArrayInputs::ClearSample(
+        *bridgeReader, index, &error));
+    CHECK(error == bridgeRefusal);
+    const auto checkValue = [&](const VtDoubleArray &expected) {
+        RigExecRuntimeArray value;
+        CHECK(reader->GetInputArrayAt(index, &value));
+        CHECK(value.count == expected.size());
+        CHECK(value.count == expected.size() &&
+              std::memcmp(value.data, expected.cdata(),
+                          sizeof(double) * expected.size()) == 0);
+    };
+    for (const bool move : {false, true}) {
+        const auto input = std::vector<RigExecValueOverride>{
+            Up(path, VtValue(standing))};
+        evaluator->SetUpstreamInputs(input);
+        play.SetUpstreamInputs(UpstreamList(input));
+        CHECK(play.EvaluateAndPublishResult(UsdTimeCode(1)).ok);
+        checkValue(standing);
+        CheckSameRun("Default-only knots standing", evaluator->Evaluate(UsdTimeCode(1)), reader);
+        evaluator->SetUpstreamInputs({});
+        play.SetUpstreamInputs(UpstreamList({}));
+        const double frame = move ? 3 : 1;
+        CHECK(play.EvaluateAndPublishResult(UsdTimeCode(frame)).ok);
+        checkValue(initial);
+        CheckSameRun("Default-only knots lift", evaluator->Evaluate(UsdTimeCode(frame)), reader);
+    }
+    std::vector<RigExecBakeStaticEntry> entries;
+    CHECK(RigExecBakeStaticReport(*evaluator, &entries, &error));
+    CHECK(std::any_of(entries.begin(), entries.end(), [&](const auto &entry) {
+        return entry.source == path.GetString();
+    }));
+}
+
+// Real array playback sessions compare with standing upstream values.
 void
 TestTheArrayPlaybackLegs()
 {
-    std::printf("case: array playback legs: SKIPPED (enable when AI "
-                "(W.3.11, format 8) merges; runtime session, W.5)\n");
+    TestDefaultOnlyKnotsLift();
+    const std::string limbs = Fixture("upstream_inputs.usda");
+    VtVec3fArray points = AuthoredArray<VtVec3fArray>(limbs, kMeshAPoints);
+    for (GfVec3f &p : points) { p[1] += 1.0f; }
+    CheckPlaybackParity("array chain base", limbs, kLimbsRig, 5,
+                        {Up(kMeshAPoints, VtValue(points))});
+    VtFloatArray weights = AuthoredArray<VtFloatArray>(limbs, kJointWeights);
+    weights[0] = weights[1] = 0.5f;
+    CheckPlaybackParity("array skin weights", limbs, kLimbsRig, 5,
+                        {Up(kJointWeights, VtValue(weights))});
+    VtIntArray indices = AuthoredArray<VtIntArray>(limbs, kJointIndices);
+    indices[0] = 1;
+    indices[1] = 0;
+    CheckPlaybackParity("array skin indices", limbs, kLimbsRig, 5,
+                        {Up(kJointIndices, VtValue(indices))});
+    weights.pop_back();
+    CheckPlaybackParity("array count refused", limbs, kLimbsRig, 5,
+                        {Up(kJointWeights, VtValue(weights))});
+    indices[3] = 2;
+    CheckPlaybackParity("array invalid skin layout", limbs, kLimbsRig, 5,
+                        {Up(kJointIndices, VtValue(indices))});
+    const std::string chunked = Fixture("upstream_inputs_chunked.usda");
+    VtIntArray chunkIndices =
+        AuthoredArray<VtIntArray>(chunked, kJointIndices);
+    chunkIndices[0] = 1;
+    CheckPlaybackParity("array chunked indices", chunked, kLimbsRig, 5,
+                        {Up(kJointIndices, VtValue(chunkIndices))});
+
+    // A genuinely Animated unweighted chain supports changing stage counts;
+    // animated skin layouts remain an explicit original-export refusal.
+    const SdfPath sampledRig("/SampleAsset/Rig");
+    const SdfPath sampledPath("/SampleAsset/Geom/P.points");
+    const auto varyingStage = UsdStage::CreateInMemory();
+    varyingStage->DefinePrim(sampledRig, TfToken("RigExecRoot"));
+    const auto pointsPrim = varyingStage->DefinePrim(
+        sampledPath.GetPrimPath(), TfToken("Points"));
+    const auto attr = pointsPrim.CreateAttribute(
+        TfToken("points"), SdfValueTypeNames->Point3fArray);
+    const VtVec3fArray initial{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                             GfVec3f(0, 1, 0)};
+    CHECK(attr.Set(initial));
+    CHECK(attr.Set(initial, UsdTimeCode(3)));
+    VtVec3fArray stageMoved = initial;
+    for (auto &point : stageMoved) point[0] += 0.25f;
+    CHECK(attr.Set(stageMoved, UsdTimeCode(7)));
+    CHECK(attr.Set(initial, UsdTimeCode(9)));
+    VtVec3fArray shortStage = initial;
+    shortStage.pop_back();
+    CHECK(attr.Set(shortStage, UsdTimeCode(10)));
+    const auto joint = varyingStage->DefinePrim(
+        sampledRig.AppendPath(SdfPath("Joints/J")), TfToken("RigExecJoint"));
+    CHECK(joint.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+              .Set(2.0));
+    const auto mover = varyingStage->DefinePrim(
+        sampledRig.AppendPath(SdfPath("Movers/Move")), TfToken("RigExecMatrixMover"));
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+    CHECK(mover.CreateRelationship(TfToken("rigExec:moves"))
+              .SetTargets({sampledPath}));
+    CHECK(mover.CreateRelationship(TfToken("rigExec:transform"))
+              .SetTargets({joint.GetPath()}));
+    auto evaluator = Make(varyingStage, sampledRig, BakedMode());
+    auto dynamic = Make(varyingStage, sampledRig, RigExecEvaluationMode::Dynamic);
+    evaluator->Evaluate(UsdTimeCode(3));
+    RigExecBakedPlayback play(varyingStage, sampledRig,
+                              std::make_shared<RigExecSnapshotStore>());
+    std::string error;
+    const bool opened = play.Open(
+        WriteBake(*evaluator, 3, "array_varying_source"), &error);
+    CHECK(opened && play.GetReaderForTesting());
+    if (!opened || !play.GetReaderForTesting()) return;
+    size_t slot = 0;
+    const bool listed = play.GetReaderForTesting()->FindInput(
+        sampledPath.GetString(), &slot);
+    CHECK(listed);
+    if (!listed) return;
+    CHECK(play.GetReaderForTesting()->GetInputInfo(slot).animated);
+    const auto set = [&](const std::vector<RigExecValueOverride> &inputs) {
+        evaluator->SetUpstreamInputs(inputs);
+        dynamic->SetUpstreamInputs(inputs);
+        play.SetUpstreamInputs(UpstreamList(inputs));
+    };
+    const auto compare = [&](const char *what, double frame) {
+        CHECK(play.EvaluateAndPublishResult(UsdTimeCode(frame)).ok);
+        CheckSameRun(std::string(what) + " baked",
+                     evaluator->Evaluate(UsdTimeCode(frame)), play.GetReaderForTesting());
+        CheckSameRun(std::string(what) + " dynamic",
+                     dynamic->Evaluate(UsdTimeCode(frame)), play.GetReaderForTesting());
+    };
+    VtVec3fArray standing = initial;
+    standing[0][0] = 0.6f;
+    const std::vector<RigExecValueOverride> input{Up(sampledPath, VtValue(standing))};
+    set(input);
+    for (const double frame : {3., 5., 6., 7.}) {
+        compare("array unchanged standing source", frame);
+        CHECK(evaluator->GetUpstreamInputPaths() == PathsOf(input));
+        CHECK(play.GetUpstreamInputPaths() == PathsOf(input));
+        if (frame == 5) {
+            auto unedited = Make(varyingStage, sampledRig, BakedMode());
+            std::vector<std::string> diffs;
+            CHECK(!RigExecCompareRuntimeOutputs(unedited->Evaluate(UsdTimeCode(frame)),
+                                                 *play.GetReaderForTesting(), &diffs));
+        }
+        CHECK(play.EvaluateAndPublishResult(UsdTimeCode(frame)).ok);
+        CHECK(play.GetReaderForTesting()->GetCounters().revisionsExecuted == 0);
+    }
+    const std::vector<RigExecValueOverride> bad{Up(sampledPath, VtValue(shortStage))};
+    set(bad);
+    compare("array same-time admission refusal lifts standing key", 7);
+    CHECK(play.GetUpstreamInputPaths().empty());
+    CHECK(play.GetUpstreamDropLines() == DropLines(evaluator->Evaluate(UsdTimeCode(7))));
+    set(input);
+    compare("array reinstall standing key", 7);
+    set({});
+    compare("array moving-time lift", 8);
+    set(bad);
+    compare("array first admission refusal", 9);
+    // Live admits this frame's two points; authored runtime sets keep three.
+    set(bad);
+    compare("array runtime first-refusal restores short stage sample", 10);
+    CHECK(evaluator->GetUpstreamInputPaths() == PathsOf(bad));
+    CHECK(play.GetUpstreamInputPaths().empty());
+    CHECK(play.GetUpstreamDropLines() == std::vector<std::string>{
+        "upstream input " + sampledPath.GetString() + ": " +
+        sampledPath.GetString() + " holds 3 elements; an array set keeps that count, not 2; ignored"});
+
+    const std::string lattice = Example("06_LatticeBulge.usda");
+    const SdfPath cage("/LatticeAsset/Geom/Cage.points");
+    const UsdStageRefPtr stage = UsdStage::Open(lattice);
+    VtVec3fArray bulged;
+    CHECK(stage->GetAttributeAtPath(cage).Get(&bulged, UsdTimeCode(1024)));
+    CheckPlaybackParity("array lattice Both identity", lattice,
+                        SdfPath("/LatticeAsset/Rig"), 1024,
+                        {Up(cage, VtValue(bulged))});
 }
 
 // A standing upstream list is reported, never printed into file defaults.

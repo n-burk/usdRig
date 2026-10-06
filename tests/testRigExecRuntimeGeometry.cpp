@@ -10,6 +10,8 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/format.h"
 #include "rigExecRuntime/runtime.h"
+#include "rigExecRuntime/stageArrayInputs.h"
+#include "rigExecSampler/inputSampler.h"
 #include "rigExecExampleFixtures.h"
 
 #include "pxr/base/gf/math.h"
@@ -1695,17 +1697,14 @@ TestEmptyPlaneAxis()
     std::printf("%s: checked\n", name);
 }
 
-// The file's weight objects hold the oracle's static sample and curve
-// points (geometry.weight_objects oracle_samples and oracle_curve) at the
-// bake time. A current-phase field that reads animated ones still bakes --
-// the binary holds them at that time only -- and the static report names
-// the object and the attribute; the same stage unanimated reports
-// nothing.
+// Animated oracle/gather arrays are omitted from static reporting only
+// when original-file stage transport actually reaches their private slots.
 static void
 TestAnimatedStaticPointsReported()
 {
-    const auto report = [&](const _MixOptions &options) {
-        const UsdStageRefPtr stage = _VolumeMixStage(options);
+    const auto report = [&](const _MixOptions &options,
+                            const std::string &sampledPath) {
+        const auto stage = _VolumeMixStage(options);
         RigExecRigEvaluator evaluator(stage, _FindRig(stage));
         evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
         RigExecBakeOpts opts;
@@ -1713,38 +1712,42 @@ TestAnimatedStaticPointsReported()
         RigExecBakeResult result;
         std::string error;
         CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
-        if (!error.empty()) {
-            std::printf("animated static points bake: %s\n", error.c_str());
+        if (!sampledPath.empty()) {
+            const auto file = RigExecTestUnpack(result.bytes);
+            auto reader = RigExecRuntimeReader::Open(
+                result.bytes.data(), result.bytes.size(), &error);
+            CHECK(file && reader);
+            if (file && reader) {
+                const int64_t slot = RigExecTestSlotOf(*file, sampledPath);
+                CHECK(slot >= int64_t(file->listedInputs) &&
+                      slot < int64_t(file->inputs.size()));
+                size_t publicIndex = 0;
+                CHECK(!reader->FindInput(sampledPath, &publicIndex));
+                const auto inputs = RigExecRuntimeStageArrayInputs::Enumerate(*reader);
+                CHECK(std::count_if(inputs.begin(), inputs.end(),
+                    [&](const auto &info) {
+                        return info.name == sampledPath &&
+                               info.slot == size_t(slot) &&
+                               info.tag == RrInputTag::Vec3fArray;
+                    }) == 1);
+            }
         }
-        std::vector<std::pair<std::string, std::string>> listed;
         std::vector<RigExecBakeStaticEntry> entries;
         CHECK(RigExecBakeStaticReport(evaluator, &entries, &error));
-        for (const RigExecBakeStaticEntry &entry : entries) {
+        for (const auto &entry : entries) {
             std::printf("  static %s: %s\n", entry.field.c_str(),
                         entry.source.c_str());
-            listed.emplace_back(entry.field, entry.source);
         }
-        return listed;
+        CHECK(entries.empty());
     };
-    using _Listed = std::vector<std::pair<std::string, std::string>>;
-    CHECK(report(_MixOptions()).empty());
+    report(_MixOptions(), "");
     _MixOptions sampler;
     sampler.animatedSampler = true;
-    // Each array is static twice over: the WeightPacket step gathers it,
-    // and the oracle facts the current-phase field resolves with hold it.
-    CHECK(report(sampler) ==
-          _Listed({{"weight object /Asset/Rig/Weights/Plane gather",
-                    "/Asset/Geom/Sampler.points"},
-                   {"weight object /Asset/Rig/Weights/Plane oracle",
-                    "/Asset/Geom/Sampler.points"}}));
+    report(sampler, "/Asset/Geom/Sampler.points");
     _MixOptions curve;
     curve.animatedCurve = true;
-    CHECK(report(curve) ==
-          _Listed({{"weight object /Asset/Rig/Weights/Curve gather",
-                    "/Asset/Geom/CurveSource.points"},
-                   {"weight object /Asset/Rig/Weights/Curve oracle",
-                    "/Asset/Geom/CurveSource.points"}}));
-    std::printf("animated sample source and curve: baked, reported\n");
+    report(curve, "/Asset/Geom/CurveSource.points");
+    std::printf("animated private sample source and curve: transported, not static\n");
 }
 
 // Open refuses an envelope index on a geometry-domain constraint (whose
@@ -2236,6 +2239,231 @@ TestOracleSlotIsCanonical()
     std::printf("%s: %s listed apart from the gathered %s; set %s\n", name,
                 sampler.c_str(), target.c_str(),
                 matched ? "== session edit" : "differs");
+}
+
+// Real stage sampling uses the original private oracle slot, not a
+// crafted public file. Empty arrays and failed reads differ in the oracle's
+// diagnostics and raw target fallback; later valid samples recover. A private
+// curve has no sampleSource fallback and preserves genuine failed-Get coverage.
+static void
+TestStageArrayOracleAndChain()
+{
+    for (const int kind : {0, 1, 2, 3}) {
+        const bool privateOracle = kind != 1;
+        const bool curveOracle = kind == 2;
+        const bool blockedAtBake = kind == 3;
+        const char *name = blockedAtBake ? "stage blocked-at-bake chain raw fallback"
+            : curveOracle ? "stage private curve missing/recovery"
+            : privateOracle ? "stage private oracle samples"
+                            : "stage unweighted chain missing/empty base";
+        _MixOptions options;
+        options.animatedSampler = true;
+        options.samplerPrim = true;
+        options.animatedCurve = curveOracle;
+        if (curveOracle) options.mode = "average";
+        auto stage = _VolumeMixStage(options);
+        const SdfPath rigPath("/Asset/Rig");
+        const SdfPath path(curveOracle ? "/Asset/Geom/CurveSource.points"
+            : privateOracle ? "/Asset/Geom/Sampler.points"
+                            : "/Asset/Geom/M.points");
+        if (!privateOracle) {
+            // Changing weighted-domain cardinality is an epoch refusal.
+            // This clean unweighted chain exercises legal sampled base changes.
+            stage = UsdStage::CreateInMemory();
+            stage->DefinePrim(rigPath, TfToken("RigExecRoot"));
+            const auto mesh = stage->DefinePrim(path.GetPrimPath(), TfToken("Points"));
+            mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+                .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                                 GfVec3f(0, 1, 0)});
+            const auto joint = stage->DefinePrim(
+                SdfPath("/Asset/Rig/Joints/J"), TfToken("RigExecJoint"));
+            joint.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+                .Set(2.0);
+            const auto mover = stage->DefinePrim(
+                SdfPath("/Asset/Rig/Movers/Move"), TfToken("RigExecMatrixMover"));
+            CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+            mover.CreateRelationship(TfToken("rigExec:moves")).SetTargets({path});
+            mover.CreateRelationship(TfToken("rigExec:transform"))
+                .SetTargets({joint.GetPath()});
+        }
+        const auto attribute = stage->GetAttributeAtPath(path);
+        VtVec3fArray initial;
+        CHECK(attribute.Get(&initial, UsdTimeCode(1)) && !initial.empty());
+        if (initial.empty()) continue;
+        VtVec3fArray changed = initial;
+        for (auto &point : changed) {
+            point[0] -= 0.75f;
+            point[1] += 0.25f;
+        }
+        CHECK(attribute.Clear());
+        CHECK(attribute.Set(initial));
+        CHECK(attribute.Set(initial, UsdTimeCode(1)));
+        CHECK(attribute.Set(changed, UsdTimeCode(2)));
+        CHECK(attribute.Set(VtVec3fArray(initial.begin(), initial.end() - 1),
+                            UsdTimeCode(3)));
+        CHECK(attribute.Set(VtVec3fArray(), UsdTimeCode(4)));
+        CHECK(attribute.Set(SdfValueBlock(), UsdTimeCode(5)));
+        CHECK(attribute.Set(changed, UsdTimeCode(6)));
+        const SdfPath fallbackPath("/Asset/Geom/M.points");
+        if (blockedAtBake) {
+            CHECK(attribute.Set(SdfValueBlock(), UsdTimeCode(1)));
+            VtVec3fArray raw;
+            CHECK(stage->GetAttributeAtPath(fallbackPath).Get(&raw) &&
+                  raw == initial);
+            double precedingLift = 0.0;
+            CHECK(stage->GetAttributeAtPath(
+                      SdfPath("/Asset/Rig/Joints/Lift.avars:ty"))
+                      .Get(&precedingLift, UsdTimeCode(1)) &&
+                  precedingLift != 0.0);
+            // The Mix is current-phase through its preceding Sphere. Plane's
+            // canonical fallback is the raw base, apart from First's lift.
+            CHECK(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Weights/Plane"))
+                      .GetRelationship(TfToken("rigExec:weightTarget"))
+                      .SetTargets({fallbackPath.GetPrimPath()}));
+        }
+        std::vector<uint8_t> bytes;
+        std::string error;
+        {
+            RigExecRigEvaluator evaluator(stage, rigPath);
+            evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+            CHECK(RigExecTestBakeAt(evaluator, 1, &bytes, &error));
+        }
+        const auto file = RigExecTestUnpack(bytes);
+        CHECK(file);
+        if (!file) continue;
+        const int64_t slot = RigExecTestSlotOf(*file, path.GetString());
+        CHECK(slot >= 0 && slot < int64_t(file->inputs.size()));
+        if (slot < 0 || slot >= int64_t(file->inputs.size())) continue;
+        auto reader = _ArrayReader(name, bytes);
+        if (!reader) continue;
+        const size_t publicCount = reader->GetInputCount();
+        if (privateOracle) {
+            CHECK(slot >= int64_t(file->listedInputs));
+            size_t publicIndex = 0;
+            CHECK(!reader->FindInput(path.GetString(), &publicIndex));
+            RigExecRuntimeArray view;
+            CHECK(!reader->GetInputArrayAt(size_t(slot), &view));
+            const RigExecRuntimeArray value{
+                RrInputTag::Vec3fArray, changed.cdata(), changed.size()};
+            CHECK(!reader->SetInputArray(path.GetString(), value, &error));
+            CHECK(!reader->SetInputArrayAt(size_t(slot), value, &error));
+            CHECK(!reader->SetSampledInputArrayAt(size_t(slot), value, &error));
+            CHECK(!reader->ResetInput(path.GetString(), &error));
+            int bound = 0;
+            for (const auto &object : file->geometry->weightObjects) {
+                if (RigExecFormatPathText(*file, object.path) ==
+                    (curveOracle ? "/Asset/Rig/Weights/Curve"
+                                 : "/Asset/Rig/Weights/Plane")) {
+                    bound += (curveOracle ? object.oracleCurveSlot
+                                          : object.oracleSamplesSlot) == slot ? 1 : 0;
+                }
+            }
+            CHECK(bound == 1);
+            if (blockedAtBake) {
+                CHECK((file->inputs[size_t(slot)].flags() &
+                       uint8_t(fb::InputSlotFlags::HasValue)) == 0);
+                const int64_t fallbackSlot =
+                    RigExecTestSlotOf(*file, fallbackPath.GetString());
+                CHECK(fallbackSlot >= 0 &&
+                      fallbackSlot < int64_t(file->inputs.size()));
+                if (fallbackSlot >= 0 &&
+                    fallbackSlot < int64_t(file->inputs.size())) {
+                    CHECK(file->inputs[size_t(fallbackSlot)].type() ==
+                          fb::InputTag::Vec3fArray);
+                    size_t publicIndex = 0;
+                    const bool listed = fallbackSlot < int64_t(file->listedInputs);
+                    CHECK(reader->FindInput(fallbackPath.GetString(), &publicIndex)
+                          == listed);
+                    if (listed) CHECK(publicIndex == size_t(fallbackSlot));
+                }
+                CHECK(std::any_of(file->geometry->chains.begin(),
+                                  file->geometry->chains.end(),
+                    [&](const auto &chain) {
+                        return RigExecFormatPathText(*file, chain.target) ==
+                                   fallbackPath.GetString() &&
+                            std::any_of(chain.revisions.begin(), chain.revisions.end(),
+                                [](const auto &revision) {
+                                    return revision.weightCurrentPhase;
+                                });
+                    }));
+                for (const auto &object : file->geometry->weightObjects) {
+                    if (RigExecFormatPathText(*file, object.path) ==
+                        "/Asset/Rig/Weights/Plane") {
+                        CHECK(object.targetPoints.size() == 1 &&
+                              RigExecFormatPathText(*file, object.targetPoints[0]) ==
+                                  fallbackPath.GetString() &&
+                              object.targetValid == std::vector<uint8_t>{0});
+                    }
+                }
+            }
+        }
+        const auto transported = RigExecRuntimeStageArrayInputs::Enumerate(*reader);
+        CHECK(std::count_if(transported.begin(), transported.end(),
+                            [&](const auto &info) {
+                                return info.slot == size_t(slot) &&
+                                       info.name == path.GetString() &&
+                                       info.tag == RrInputTag::Vec3fArray;
+                            }) == 1);
+        RigExecInputSampler sampler;
+        CHECK(sampler.Bind(stage, *reader, &error));
+        CHECK(sampler.GetWarnings().empty());
+        const std::string countFailure =
+            "current-phase weight failed: /Asset/Rig/Weights/Plane: "
+            "sampled point count does not match the target";
+        const std::string missingFailure =
+            "current-phase weight failed: /Asset/Rig/Weights/Plane: "
+            "could not read the points to sample";
+        for (const double time : {1., 2., 3., 4., 5., 6., 2.}) {
+            bool sampled = false;
+            CHECK(sampler.Apply(UsdTimeCode(time), reader.get(), &error, &sampled));
+            CHECK(reader->Execute(&error));
+            CHECK(reader->GetInputCount() == publicCount);
+            for (const auto mode : {RigExecEvaluationMode::Dynamic,
+                                    RigExecEvaluationMode::Baked}) {
+                RigExecRigPose pose;
+                CHECK(RigExecTestArrayReference(stage, rigPath, mode, {}, time,
+                                                &pose, &error));
+                std::vector<std::string> diffs;
+                CHECK(RigExecCompareRuntimeRun(pose, *reader, &diffs));
+                for (const auto &diff : diffs) {
+                    std::printf("  %s at %.0f: %s\n", name, time, diff.c_str());
+                }
+            }
+            if (privateOracle) {
+                const auto &lines = reader->GetDiagnostics();
+                if (curveOracle) {
+                    const std::string curveFailure =
+                        "current-phase weight failed: /Asset/Rig/Weights/Curve: "
+                        "rigExec:curve must name exactly one points source";
+                    CHECK(_HasLine(lines, curveFailure) == (time == 4 || time == 5));
+                } else {
+                    CHECK(_HasLine(lines, countFailure) == (time == 3 || time == 4));
+                    // A blocked primary sampleSource falls back to raw
+                    // weightTarget points. A successful empty primary does not.
+                    CHECK(_HasLine(lines, missingFailure) ==
+                          false);
+                }
+                size_t publicIndex = 0;
+                CHECK(!reader->FindInput(path.GetString(), &publicIndex));
+            }
+            if (time == 2) {
+                RigExecRigPose held;
+                CHECK(RigExecTestArrayReference(
+                    stage, rigPath, RigExecEvaluationMode::Baked,
+                    {{path.GetString(), VtValue(initial), true}}, time,
+                    &held, &error));
+                std::vector<std::string> diffs;
+                CHECK(!RigExecCompareRuntimeOutputs(held, *reader, &diffs));
+            }
+            // A repeated frame performs no new stage sampling, including
+            // after failed reads. The reader still retains that read kind.
+            sampled = true;
+            CHECK(sampler.Apply(UsdTimeCode(time), reader.get(), &error, &sampled));
+            CHECK(!sampled);
+        }
+        std::printf("%s: original slot, 7 frames incl short/empty/missing/recovery\n",
+                    name);
+    }
 }
 
 // docs/examples/skin_mover.usda's two skins, whose layouts hold a mid-row
@@ -3061,6 +3289,7 @@ main(int argc, char **argv)
     TestVolumeMixCurrentPhase();
     TestOraclePointsSet();
     TestOracleSlotIsCanonical();
+    TestStageArrayOracleAndChain();
     TestDynamicSupportFromSlots();
     TestEmptyPlaneAxis();
     TestAnimatedStaticPointsReported();

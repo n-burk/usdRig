@@ -234,6 +234,8 @@ bool RrInputsBuildPathReads(RrProgram *program, std::string *error);
 /// The slot model over the opened file.
 struct RrInputState {
     const RigExecWireFile *file = nullptr;
+    /// Animated arrays with actual AtTime consumers, computed once at Open.
+    std::vector<size_t> stageArraySlots;
     /// File.values inline, entry for entry.
     std::vector<RrWireValue> values;
     /// The first id SetInputToken gives text no Token node holds: the path
@@ -352,6 +354,12 @@ bool RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
 bool RrInputsSetArray(RrProgram *program, size_t index,
                       const RigExecRuntimeArray &value, bool authored,
                       std::string *error);
+
+/// Internal sampled-array transport over actual AtTime consumers.
+std::vector<size_t> RrStageArraySlots(const RrProgram *program);
+bool RrStageArraySet(RrProgram *program, size_t slot,
+                     const RigExecRuntimeArray &value, std::string *error);
+bool RrStageArrayClear(RrProgram *program, size_t slot, std::string *error);
 
 /// Array input \p index's elements as the reads see them: its held set,
 /// else its default; valid until the next set or reset of that input.

@@ -1109,6 +1109,9 @@ table WeightObject {
   plane_axis: uint;
   /// Token.
   plane_bounds: uint;
+  /// Oracle objects retain the full authored weightTarget cardinality.
+  /// Canonical prim targets have valid=0: raw oracle fallback reads them,
+  /// while packet gathering skips them, preserving native gather semantics.
   target_points: [uint];
   target_valid: [ubyte];
   sample_points: [uint];

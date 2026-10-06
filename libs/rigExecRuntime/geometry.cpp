@@ -2924,6 +2924,7 @@ struct RrGeometryScratch {
         // one (baseSlot), else the ones the bake captured, converted at
         // Open (staticBase). haveBase is false when the file holds none.
         int32_t baseSlot = -1;
+        std::vector<RrVec3f> sampleMissingBase;
         std::vector<RrVec3f> staticBase;
         bool haveBase = false;
         std::vector<RrVec3f> lastBase;
@@ -4899,6 +4900,7 @@ RrGeoChainBase(const RrProgram *program,
                 RrInputArray<RrVec3f>(program, uint32_t(chain.baseSlot))) {
             return *held;
         }
+        return chain.sampleMissingBase;
     }
     return chain.staticBase;
 }
@@ -4955,17 +4957,13 @@ RrGeoRunLayoutOp(const RrProgram *program, const RrGeometryScratch &scratch,
         RrInputArray<int32_t>(program, indicesSlot);
     const std::vector<float> *weights =
         RrInputArray<float>(program, weightsSlot);
-    if (!indices || !weights) {
-        rev->layoutHandle = open;
-        return;
-    }
     // The leaf's fallback, 1, when the site reads no element size.
     const int elementSize =
         size && size->value.tag == RrPathValue::Tag::Int ? size->value.i32
                                                          : 1;
     auto built = std::make_shared<RrGeoSkinTopology>();
-    built->indices.assign(indices->begin(), indices->end());
-    built->weights.assign(weights->begin(), weights->end());
+    if (indices) built->indices.assign(indices->begin(), indices->end());
+    if (weights) built->weights.assign(weights->begin(), weights->end());
     built->elementSize = elementSize;
     built->influenceCount = wire.influenceSlots.size();
     if (elementSize >= 1 && built->indices.size() == built->weights.size() &&
@@ -5051,7 +5049,9 @@ RrPrologueGeometry(RrProgram *program,
     for (size_t c = 0; c < geo.chains.size(); ++c) {
         const RigExecWireChain &wireChain = geo.chains[c];
         RrGeometryScratch::Chain &chain = scratch->chains[c];
-        const bool haveBase = chain.haveBase;
+        const bool haveBase = chain.baseSlot >= 0
+            ? RrInputHasValue(program, uint32_t(chain.baseSlot))
+            : chain.haveBase;
         const std::vector<RrVec3f> &basePoints =
             RrGeoChainBase(program, chain);
         if (c < store.chainHaveBase.size()) {

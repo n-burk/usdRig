@@ -6,8 +6,11 @@
 // copies values and the file preserves bits, with no arithmetic between.
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/rigEvaluatorInternal.h"
+#include "rigExec/moverGraph.h"
 #include "rigExecBake/revisionReads.h"
 #include "rigExecBinary/format.h"
+#include "rigExecRuntime/stageArrayInputs.h"
 
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3i.h"
@@ -17,6 +20,7 @@
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/timeCode.h"
 
 #include <cstring>
@@ -1961,7 +1965,7 @@ void
 _BinaryCompareWeightObject(
     const rigExec::RigExecBakedProgramImpl::WeightObject &live,
     const rigExec::fb::RigExecWireWeightObject &wire,
-    const _BinaryFile &file)
+    const _BinaryFile &file, const UsdStageRefPtr &stage)
 {
     CHECK(!wire.envelopeOnly);
     CHECK(live.path.GetString() == _BinaryText(file, wire.path));
@@ -2015,7 +2019,39 @@ _BinaryCompareWeightObject(
     CHECK(live.planeAxis.GetString() == _BinaryText(file, wire.planeAxis));
     CHECK(live.planeBounds.GetString() ==
           _BinaryText(file, wire.planeBounds));
-    attributes(live.targetPoints, wire.targetPoints, wire.targetValid);
+    if (wire.oracleSamplesSlot >= 0) {
+        SdfPathVector targets;
+        const auto prim = stage->GetPrimAtPath(live.path);
+        if (const auto rel = prim.GetRelationship(TfToken("rigExec:weightTarget")))
+            rel.GetTargets(&targets);
+        CHECK(targets.size() == wire.targetPoints.size());
+        CHECK(targets.size() == wire.targetValid.size());
+        std::vector<uint32_t> packetPaths;
+        std::vector<uint8_t> packetValid;
+        for (size_t i = 0; i < targets.size() && i < wire.targetPoints.size() &&
+                           i < wire.targetValid.size(); ++i) {
+            if (targets[i].IsPropertyPath()) {
+                if (stage->GetAttributeAtPath(targets[i])) {
+                    CHECK(wire.targetValid[i] == 1);
+                    CHECK(_BinaryText(file, wire.targetPoints[i]) ==
+                          targets[i].GetString());
+                    packetPaths.push_back(wire.targetPoints[i]);
+                    packetValid.push_back(wire.targetValid[i]);
+                } else {
+                    CHECK(wire.targetPoints[i] == 0 && wire.targetValid[i] == 0);
+                }
+            } else {
+                CHECK(wire.targetValid[i] == 0);
+                CHECK(_BinaryText(file, wire.targetPoints[i]) ==
+                      rigExec::evaluatorDetail::_ResolveGeometryInput(
+                          stage, targets[i]).GetString());
+            }
+        }
+        // Exact packet order, preserving native omission of missing attributes.
+        attributes(live.targetPoints, packetPaths, packetValid);
+    } else {
+        attributes(live.targetPoints, wire.targetPoints, wire.targetValid);
+    }
     attributes(live.samplePoints, wire.samplePoints, wire.sampleValid);
     attributes(live.curvePoints, wire.curvePoints, wire.curveValid);
     _BinaryCheckEqual(live.falloffCurve, wire.falloffCurve);
@@ -2083,14 +2119,26 @@ _BinaryCompareOracleFacts(const rigExec::RigExecRigEvaluator &evaluator,
     // samples points it reads, and its curve wherever it reads a non-empty
     // one; any other entry names neither.
     const bool reached = resolved && facts.phaseError.empty();
-    CHECK((wire.oracleSamplesSlot >= 0) ==
-          (reached && !facts.samplesInFlight && facts.haveSamples));
+    CHECK(wire.oracleSamplesSlot < 0 || (reached && !facts.samplesInFlight));
+    const auto present = [&](int32_t slot) {
+        return slot >= 0 && size_t(slot) < file.inputs.size() &&
+            (file.inputs[size_t(slot)].flags() &
+             uint8_t(rigExec::fb::InputSlotFlags::HasValue)) != 0;
+    };
+    int32_t samplesSlot = wire.oracleSamplesSlot;
+    if (!present(samplesSlot)) {
+        const auto fallback = rigExec::RigExecStageOracleFallbackSlots(file);
+        const size_t object = size_t(&wire - file.geometry->weightObjects.data());
+        if (object < fallback.size()) samplesSlot = fallback[object];
+    }
+    CHECK((reached && !facts.samplesInFlight && facts.haveSamples) ==
+          present(samplesSlot));
     CHECK(wire.oracleCurveSlot < 0 ||
           (reached && _BinaryText(file, wire.type) == "RigExecCurveWeight"));
     CHECK(!(reached && facts.haveCurve) || wire.oracleCurveSlot >= 0);
     std::string bytes;
-    if (wire.oracleSamplesSlot >= 0) {
-        CHECK(_BinarySlotBytes(file, wire.oracleSamplesSlot, &bytes) &&
+    if (present(samplesSlot)) {
+        CHECK(_BinarySlotBytes(file, samplesSlot, &bytes) &&
               bytes == _BinaryBytesOf(facts.samples));
     }
     if (wire.oracleCurveSlot >= 0) {
@@ -2220,7 +2268,7 @@ _BinaryCompareDomainGeometry(const rigExec::RigExecRigEvaluator &evaluator,
         const rigExec::fb::RigExecWireWeightObject &wire =
             geometry.weightObjects[i];
         if (i < program.weightObjects.size()) {
-            _BinaryCompareWeightObject(program.weightObjects[i], wire, file);
+            _BinaryCompareWeightObject(program.weightObjects[i], wire, file, program.stage);
         } else {
             CHECK(wire.envelopeOnly);
             const std::string path = _BinaryText(file, wire.path);
@@ -2391,13 +2439,67 @@ _BinaryComparePathReads(const rigExec::RigExecBakedProgramImpl &program,
     using Key = std::pair<std::string, bool>;
     std::map<Key, const rigExec::RigExecBakeRevisionRead *> first;
     std::set<Key> resolved;
+    std::set<Key> allArraySites;
     for (const rigExec::RigExecBakeRevisionRead &candidate : enumerated) {
         const Key key(candidate.path.GetString(), candidate.rest);
         if (candidate.resolved) {
             resolved.insert(key);
         }
+        // A phase overlay can answer this run while a bound raw array
+        // fallback remains necessary on a later execution. Its provenance
+        // is still an independently enumerated typed array read site.
+        if (candidate.value.IsHolding<PXR_NS::VtIntArray>() ||
+            candidate.value.IsHolding<PXR_NS::VtFloatArray>() ||
+            candidate.value.IsHolding<PXR_NS::VtDoubleArray>() ||
+            candidate.value.IsHolding<PXR_NS::VtVec2fArray>() ||
+            candidate.value.IsHolding<PXR_NS::VtVec3fArray>()) {
+            allArraySites.insert(key);
+        }
         if (!candidate.overlaid) {
             first.emplace(key, &candidate);
+        }
+    }
+    // Fixed resolved skin layouts are deliberately omitted by ordinary
+    // path-read enumeration. Independently declare their typed leaf roles:
+    // the file retains a bound fallback even while its stored layout wins.
+    std::map<Key, rigExec::fb::InputTag> skinArraySites;
+    const auto declareSkin = [&](const auto &revision) {
+        if (revision.op != rigExec::RigExecRevisionOp::Skin) {
+            return;
+        }
+        rigExec::RigExecRevisionLeafDecl decl;
+        rigExec::RigExecDeclareRevisionLeaves(
+            revision.op, revision.moverPath, revision.binding, &decl);
+        const auto role = [&](rigExec::RigExecRevisionLeafRole r,
+                              rigExec::RigExecRevisionLeafType type,
+                              rigExec::fb::InputTag tag) {
+            const int index = decl.Role(r);
+            CHECK(index >= 0 && size_t(index) < decl.keys.size());
+            if (index < 0 || size_t(index) >= decl.keys.size()) {
+                return;
+            }
+            const auto &leaf = decl.keys[size_t(index)];
+            CHECK(leaf.type == type);
+            if (leaf.type == type) {
+                skinArraySites.emplace(
+                    Key(leaf.path.GetString(),
+                        leaf.time == rigExec::RigExecRevisionLeafTime::AtDefault),
+                    tag);
+            }
+        };
+        role(rigExec::RigExecRevisionLeafRole::JointIndices,
+             rigExec::RigExecRevisionLeafType::IntArray,
+             rigExec::fb::InputTag::IntArray);
+        role(rigExec::RigExecRevisionLeafRole::JointWeights,
+             rigExec::RigExecRevisionLeafType::FloatArray,
+             rigExec::fb::InputTag::FloatArray);
+    };
+    for (const auto &chain : program.chains) {
+        for (const auto &revision : chain.revisions) {
+            declareSkin(revision);
+        }
+        for (const auto &derived : chain.derived) {
+            declareSkin(derived.revision);
         }
     }
     CHECK(file.geometry);
@@ -2431,7 +2533,18 @@ _BinaryComparePathReads(const rigExec::RigExecBakedProgramImpl &program,
                       _BinarySamePathValue(found->second->value, *row.value,
                                            file));
             } else {
-                CHECK(found != first.end() || gathers.count(key.first));
+                const auto skin = skinArraySites.find(key);
+                const bool skinProvenance =
+                    skin != skinArraySites.end() && skin->second == read.tag;
+                const bool provenance = allArraySites.count(key) != 0 ||
+                                        gathers.count(key.first) != 0 ||
+                                        skinProvenance;
+                if (!provenance) {
+                    std::printf("  %s: array fallback %s has no independently "
+                                "enumerated array site, typed skin role or gather\n",
+                                fixture.c_str(), key.first.c_str());
+                }
+                CHECK(provenance);
             }
             if (_binaryStats) {
                 ++(row.rest ? _binaryStats->arrayRestRows
@@ -2875,7 +2988,7 @@ _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
     using Tag = rigExec::fb::InputTag;
     using Flags = rigExec::fb::InputSlotFlags;
     const UsdTimeCode time(file.bakeTime);
-    CHECK(file.listedInputs == file.inputs.size());
+    CHECK(file.listedInputs <= file.inputs.size());
     const std::set<uint32_t> live = _BinaryLiveArraySlots(file);
     for (size_t s = 0; s < file.inputs.size(); ++s) {
         const rigExec::fb::InputSlot &slot = file.inputs[s];
@@ -2888,7 +3001,8 @@ _BinaryCheckDefaults(const UsdStageRefPtr &stage, const _BinaryFile &file)
         }
         const rigExec::fb::RigExecWireValue &value = file.values[slot.value()];
         CHECK(value.tag == slot.type());
-        CHECK((slot.flags() & uint8_t(Flags::Listed)) != 0);
+        CHECK(((slot.flags() & uint8_t(Flags::Listed)) != 0) ==
+              (s < file.listedInputs));
         const bool animated =
             a.ValueMightBeTimeVarying() || a.GetNumTimeSamples() > 0;
         CHECK(animated == ((slot.flags() & uint8_t(Flags::Animated)) != 0));

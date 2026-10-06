@@ -9,6 +9,8 @@
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
+#include <set>
+#include "stageArrayInputs.h"
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -455,6 +457,7 @@ RrInputsOpen(RrProgram *program, const RigExecWireFile *file,
     RrInputState &state = program->inputState;
     state = RrInputState();
     state.file = file;
+    state.stageArraySlots = RigExecStageArraySlots(*file);
     state.values.reserve(file->values.size());
     for (const fb::RigExecWireValue &value : file->values) {
         state.values.push_back(RrWireValueOf(value));
@@ -1363,17 +1366,23 @@ RrInputsSet(RrProgram *program, size_t index, const RrInputValue &value,
 }
 
 bool
-RrInputsSetArray(RrProgram *program, size_t index,
+_RrSetArraySlot(RrProgram *program, size_t index,
                  const RigExecRuntimeArray &value, bool authored,
                  std::string *error)
 {
     RrInputState &state = program->inputState;
-    if (index >= state.inputInfo.size()) {
+    if (index >= state.arrayOf.size()) {
         return _RrFail(error, "no input at index " + std::to_string(index) +
                                   "; the file lists " +
-                                  std::to_string(state.inputInfo.size()));
+                                  std::to_string(state.arrayOf.size()));
     }
-    const RigExecRuntimeInputInfo &info = state.inputInfo[index];
+    RigExecRuntimeInputInfo info;
+    info.name = program->TextOrEmpty(state.file->inputs[index].name());
+    info.type = RrInputTag(uint8_t(state.file->inputs[index].type()));
+    if (_RrIsArraySlot(state, index)) {
+        const auto &a = state.arrays[size_t(state.arrayOf[index])];
+        info.defaultCount = _RrVectorElements(a.tag, a.defaultVector).count;
+    }
     if (!RrInputTagIsArray(info.type)) {
         return _RrFail(error, info.name + " is a " + _RrTagName(info.type) +
                                   " input, not an array");
@@ -1412,6 +1421,55 @@ RrInputsSetArray(RrProgram *program, size_t index,
     }
     state.slotHasValue[slot] = 1;
     a.authored = authored;
+    return true;
+}
+
+bool
+RrInputsSetArray(RrProgram *program, size_t index,
+                 const RigExecRuntimeArray &value, bool authored,
+                 std::string *error)
+{
+    if (index >= program->inputState.inputInfo.size()) {
+        return _RrFail(error, "no input at index " + std::to_string(index) +
+                                  "; the file lists " +
+                                  std::to_string(program->inputState.inputInfo.size()));
+    }
+    return _RrSetArraySlot(program, index, value, authored, error);
+}
+
+std::vector<size_t>
+RrStageArraySlots(const RrProgram *program)
+{
+    return program->inputState.stageArraySlots;
+}
+
+bool
+RrStageArraySet(RrProgram *program, size_t slot,
+                const RigExecRuntimeArray &value, std::string *error)
+{
+    const auto &slots = program->inputState.stageArraySlots;
+    if (!std::binary_search(slots.begin(), slots.end(), slot)) {
+        return _RrFail(error, "no sampled array at slot " + std::to_string(slot));
+    }
+    return _RrSetArraySlot(program, slot, value, false, error);
+}
+
+bool
+RrStageArrayClear(RrProgram *program, size_t slot, std::string *error)
+{
+    const auto &slots = program->inputState.stageArraySlots;
+    if (!std::binary_search(slots.begin(), slots.end(), slot)) {
+        return _RrFail(error, "no sampled array at slot " + std::to_string(slot));
+    }
+    auto &state = program->inputState;
+    if (state.slotHasValue[slot]) {
+        auto &array = state.arrays[size_t(state.arrayOf[slot])];
+        _RrTouchArray(state, uint32_t(slot), array);
+        array.holdsSet = false;
+        array.held = RrArrayBuffer();
+        array.authored = false;
+        state.slotHasValue[slot] = 0;
+    }
     return true;
 }
 
@@ -1470,7 +1528,7 @@ RrInputArrayValue(const RrProgram *program, uint32_t slot,
                   RigExecWireInputTag tag)
 {
     const RrInputState &state = program->inputState;
-    if (!_RrIsArraySlot(state, slot)) {
+    if (!_RrIsArraySlot(state, slot) || !state.slotHasValue[slot]) {
         return nullptr;
     }
     const RrArraySlot &a = state.arrays[size_t(state.arrayOf[slot])];
@@ -1553,7 +1611,9 @@ RrArrayReadValue(const RrProgram *program, const RigExecWireInput &read,
     if (slot >= 0) {
         return RrInputArrayValue(program, uint32_t(slot), tag);
     }
-    return _RrPoolVector(state, tag, state.file->values[read.constant].array);
+    return read.walk.empty()
+        ? _RrPoolVector(state, tag, state.file->values[read.constant].array)
+        : nullptr;
 }
 
 const void *

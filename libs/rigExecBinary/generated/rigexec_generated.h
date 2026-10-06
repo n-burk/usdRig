@@ -12307,6 +12307,9 @@ struct WeightObject FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   uint32_t planeBounds() const {
     return GetField<uint32_t>(VT_PLANEBOUNDS, 0);
   }
+  /// Oracle objects retain the full authored weightTarget cardinality.
+  /// Canonical prim targets have valid=0: raw oracle fallback reads them,
+  /// while packet gathering skips them, preserving native gather semantics.
   const ::flatbuffers::Vector<uint32_t> *targetPoints() const {
     return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_TARGETPOINTS);
   }

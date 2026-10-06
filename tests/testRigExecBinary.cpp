@@ -2077,9 +2077,9 @@ TestStaticReportRevisionReads()
 // its binding can never answer, since playback then reads the points the
 // bake held. On tests/fixtures/phased_blend_samples.usda with Shape.points
 // keyed, both samples are phased and bound to a version of Shape's chain,
-// whose base reads at every time, so the report names the chain base and
-// no sample points: an answering binding reads the version, not the held
-// points.
+// whose Animated base is now stage-sampled, so the report names neither
+// chain base nor sample points: an answering binding reads the version.
+// Default-only and structural animation remains covered by the class guard.
 static void
 TestStaticReportAnsweredBlendSamples()
 {
@@ -2144,7 +2144,7 @@ TestStaticReportAnsweredBlendSamples()
         samplePoints += entry.field.rfind("blend sample points ", 0) == 0;
     }
     CHECK(bound == 2);
-    CHECK(chainBase);
+    CHECK(!chainBase);
     CHECK(samplePoints == 0);
     std::printf("static report: %zu phased sample(s) bound to a version, "
                 "the chain base %s, %zu sample point source(s) named\n",

@@ -320,6 +320,7 @@ public:
     const std::vector<RrWeightPacket> &GetWeightPackets() const;
 
 private:
+    friend class RigExecRuntimeStageArrayInputs;
     RigExecRuntimeReader();
 
     std::unique_ptr<RrProgram> _program;

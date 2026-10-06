@@ -40,6 +40,8 @@ enum class RigExecBakeArrayConsumer : uint8_t {
     Painted,
     /// The points the weight oracle samples, and a curve weight's curve.
     OracleSamples,
+    /// Raw weightTarget fallback; its canonical path is already in the object.
+    OracleFallback,
     OracleCurve,
 };
 

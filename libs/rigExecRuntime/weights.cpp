@@ -28,6 +28,7 @@
 // exactly what the baked builders return for them: invalid packets
 // (bare for an unknown type, carrying the object's tokens
 // otherwise), never a defaulted valid field.
+#include "stageArrayInputs.h"
 #include "rigExecRuntime/labels.h"
 #include "rigExecRuntime/store.h"
 
@@ -82,6 +83,8 @@ struct RrWeightScratch {
     // Per weight object, the volume slot whose placement the oracle reads:
     // the no_scale_avars slot whose path is the object's own, else -1.
     std::vector<int32_t> volumeSlot;
+    // Raw weightTarget slots used only after a failed primary Get.
+    std::vector<int32_t> oracleFallbackSlots;
 };
 
 bool
@@ -95,6 +98,8 @@ RrWeightSizeScratch(RrProgram *program, std::string *error)
     }
     RrWeightScratch *scratch = new RrWeightScratch();
     program->weights = std::shared_ptr<void>(scratch);
+    scratch->oracleFallbackSlots =
+        RigExecStageOracleFallbackSlots(*program->inputState.file);
     using Kind = RrWeightOracleKind;
     const std::vector<RigExecWireWeightObject> &objects =
         program->geometry->weightObjects;
@@ -1614,6 +1619,8 @@ _RrOracleVolume(const RrProgram *program, const RrWeightScratch &scratch,
         samples = current;
     } else {
         samples = _RrOraclePoints(program, wire.oracleSamplesSlot);
+        if (!samples && object < scratch.oracleFallbackSlots.size())
+            samples = _RrOraclePoints(program, scratch.oracleFallbackSlots[object]);
         if (!samples) {
             *error = who() + ": could not read the points to sample";
             return false;

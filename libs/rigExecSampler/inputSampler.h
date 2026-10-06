@@ -42,7 +42,10 @@ bool RigExecInputValueFrom(const PXR_NS::VtValue &value, RrInputTag tag,
 /// Sets input \p index of \p reader, named \p name and of type \p tag, to
 /// \p attribute's typed value at \p time, as Apply sets an Animated input:
 /// SetSampledInputAt, which takes a non-finite value too, SetInputToken for
-/// a Token, and ClearInputAt when the read fails. False with the reader's
+/// a Token, and ClearInputAt when the read fails. Animated arrays with actual
+/// AtTime consumers use copied internal stage samples of any count; a failed
+/// Get clears their HasValue, while a successful empty array remains a value.
+/// A Default-only array restores its captured default. False with the reader's
 /// reason when it refuses.
 bool RigExecSampleInputAt(const PXR_NS::UsdAttribute &attribute,
                           size_t index, const std::string &name,
@@ -51,12 +54,15 @@ bool RigExecSampleInputAt(const PXR_NS::UsdAttribute &attribute,
 
 class RigExecInputSampler {
 public:
-    /// Resolves every listed scalar input of \p reader to the attribute of
+    /// Resolves listed scalar inputs and actual Animated AtTime array slots
+    /// (including private storage slots) of \p reader to the attribute of
     /// \p stage at the input's path. An input the stage lacks, or whose
     /// attribute holds another value type, keeps its bake-time default and
     /// gets one warning (GetWarnings). Notes the inputs the file marks
-    /// Animated. Array inputs are not sampled: they keep their value until
-    /// something sets them. The reader's defaults count as sampled at its
+    /// Animated. Default-only arrays are not sampled; Both arrays retain their
+    /// captured Default value while their AtTime side receives copied samples.
+    /// Private sampling does not expose authored setters or public input names.
+    /// The reader's defaults count as sampled at its
     /// bake time. False with the reason when \p stage is null.
     bool Bind(const PXR_NS::UsdStagePtr &stage,
               const RigExecRuntimeReader &reader, std::string *error);

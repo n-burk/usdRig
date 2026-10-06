@@ -1,5 +1,6 @@
 // RigExec baked playback for Hydra (M2b). See playback.h for the contract.
 #include "playback.h"
+#include "rigExecRuntime/stageArrayInputs.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/movers/moverRegistry.h"
 
@@ -232,16 +233,8 @@ RigExecBakedPlayback::_AdmitUpstream(UsdTimeCode time)
             drop(reason);
             continue;
         }
-        // An array value is never admitted here before the format carries
-        // array slots (W.3.11, format 8): FindInput finds no array. From
-        // then on it is set with SetInputArray, authored-level, so it
-        // replaces the attribute for AtDefault and AtTime reads alike; an
-        // AtDefault read takes the value standing at the evaluated time,
-        // as live's leaf does. SetInputArray refuses a count change, and a
-        // refused set lifts the key with ResetInput. An array key lifts
-        // with ResetInput whether its slot is Animated or not, until the
-        // runtime feeds Animated array slots per frame; from then on an
-        // Animated array key follows the scalar Animated recipe below.
+        // Authored array sets reach both time and rest reads. Their lift
+        // restores the stage sample at playback time for Animated slots.
         const RigExecRuntimeInputInfo &info = _reader->GetInputInfo(index);
         _UpstreamKey key;
         key.index = index;
@@ -262,7 +255,9 @@ RigExecBakedPlayback::_LiftUpstream(const _UpstreamKey &key,
     // A non-Animated input's default is the bake-time stage value, which is
     // the stage value at every time. An Animated one takes the stage at
     // this time: Apply already read it when it sampled, else one read here.
-    if (!key.animated) {
+    const bool sampledArray = !RrInputTagIsArray(key.tag) ||
+        RigExecRuntimeStageArrayInputs::CanSample(*_reader, key.index);
+    if (!key.animated || !sampledArray) {
         return _reader->ResetInput(key.name, error);
     }
     return sampled || RigExecSampleInputAt(key.attribute, key.index,

@@ -99,12 +99,32 @@ uses `ResetInput`. Lifting an Animated key restores the sampler's value when it
 just sampled, otherwise it rereads that one stage attribute at the playback time;
 a failed read uses `ClearInputAt`.
 
-Format 7 has no array input slots, so array playback is deferred until AI
-(W.3.11, format 8). That integration must use the authored `SetInputArray` API,
-which refuses count changes; a refused set also lifts the key. Array lifts use
-`ResetInput`, including Animated slots, until per-frame stage-array sampling
-lands. Once that sampling exists, Animated array lifts restore the stage value
-at playback time as the scalar recipe does.
+Playback applies arrays with the authored `SetInputArray` API. Admission checks
+against the stage count at evaluation time; the runtime additionally requires
+the stored default's count. A refused set lifts the key and reports the refusal.
+Animated arrays with actual AtTime consumers restore the current stage sample
+when lifted, including a same-time lift or a first refused value. Default-only
+arrays use `ResetInput` even when numeric samples mark their slots Animated.
+Standing upstream arrays are reapplied after stage sampling.
+
+The stage sampler copies Animated AtTime arrays of any element count. Each
+consumer validates the resulting count as live evaluation does. An oracle's
+failed `sampleSource` Get falls back to the raw canonical `weightTarget`;
+successful empty samples take precedence and undergo the normal count check.
+A failed Get clears HasValue; a successful empty array remains a value. Both leaves retain
+separate captured Default data, so stage samples affect only AtTime reads.
+Eligibility comes from the file's actual chain base, layout, dense sample,
+AtTime path-read and oracle consumers. Structural and Default-only leaves are
+excluded; wire knots (`double[]`) are currently Default-only. Animated skin
+layouts retain the exporter's existing refusal. Static reports omit only arrays
+covered by this same sampler inventory.
+
+Only the evaluator's admitted array paths are public file inputs. Structural
+painted arrays and excluded point/oracle arrays remain captured as private typed
+storage slots and are absent from `GetInputInfo`, `FindInput` and public set
+APIs. An internal stage-only bridge samples eligible private oracle arrays,
+without granting authored overrides or changing public input counts. Static
+private arrays retain their captured defaults.
 
 An authored upstream array replaces both AtDefault and AtTime reads. With a
 varying upstream source, each evaluated frame's upstream value also feeds its

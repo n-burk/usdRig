@@ -275,8 +275,8 @@ struct _Lister {
     }
 
     // _ReadTargetPoints' attribute: the relationship's one target, as
-    // _ResolveGeometryInput resolves it, where a float3[] value stands at
-    // the time.
+    // _ResolveGeometryInput resolves it. A typed missing value still needs
+    // storage so later successful stage samples can recover.
     SdfPath OraclePoints(const UsdPrim &prim, const char *relationship) const
     {
         SdfPathVector targets;
@@ -290,8 +290,7 @@ struct _Lister {
         const SdfPath canonical =
             evaluatorDetail::_ResolveGeometryInput(stage, targets[0]);
         const UsdAttribute a = stage->GetAttributeAtPath(canonical);
-        VtVec3fArray points;
-        return a && a.Get(&points, time) ? canonical : SdfPath();
+        return _HoldsTag(a, fb::InputTag::Vec3fArray) ? canonical : SdfPath();
     }
 
     // One weight object entry: its painted arrays, read at Default, and,
@@ -339,6 +338,8 @@ struct _Lister {
                 samples = OraclePoints(prim, "rigExec:weightTarget");
             }
             add(samples, Consumer::OracleSamples);
+            add(OraclePoints(prim, "rigExec:weightTarget"),
+                Consumer::OracleFallback);
         }
         if (curve) {
             add(OraclePoints(prim, "rigExec:curve"), Consumer::OracleCurve);

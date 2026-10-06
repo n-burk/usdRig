@@ -5,6 +5,7 @@
 // outputs.
 // Failures name the step and keep the previous outputs.
 #include "rigExecRuntime/runtime.h"
+#include "stageArrayInputs.h"
 
 #include "rigExecRuntime/labels.h"
 #include "poseInternal.h"
@@ -27,6 +28,40 @@ _SortByPath(std::vector<T> *out)
 }
 
 }  // namespace
+
+bool
+RigExecRuntimeStageArrayInputs::CanSample(const RigExecRuntimeReader &reader,
+                                         size_t slot)
+{
+    const auto &slots = reader._program->inputState.stageArraySlots;
+    return std::binary_search(slots.begin(), slots.end(), slot);
+}
+
+std::vector<RigExecStageArrayInputInfo>
+RigExecRuntimeStageArrayInputs::Enumerate(const RigExecRuntimeReader &reader)
+{
+    std::vector<RigExecStageArrayInputInfo> result;
+    const auto &file = *reader._program->inputState.file;
+    for (size_t slot : RrStageArraySlots(reader._program.get())) {
+        result.push_back({slot, reader._program->TextOrEmpty(file.inputs[slot].name()),
+                          RrInputTag(uint8_t(file.inputs[slot].type()))});
+    }
+    return result;
+}
+
+bool
+RigExecRuntimeStageArrayInputs::SetSample(RigExecRuntimeReader &reader,
+    size_t slot, const RigExecRuntimeArray &value, std::string *error)
+{
+    return RrStageArraySet(reader._program.get(), slot, value, error);
+}
+
+bool
+RigExecRuntimeStageArrayInputs::ClearSample(RigExecRuntimeReader &reader,
+    size_t slot, std::string *error)
+{
+    return RrStageArrayClear(reader._program.get(), slot, error);
+}
 
 size_t
 RigExecRuntimeReader::GetInputCount() const

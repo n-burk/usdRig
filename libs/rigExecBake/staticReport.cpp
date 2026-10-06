@@ -7,7 +7,9 @@
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/rigEvaluator.h"
 
+#include "rigExecRuntime/stageArrayInputs.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/attributeQuery.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xformable.h"
@@ -84,8 +86,36 @@ _Attribute(const UsdStageRefPtr &stage, const SdfPath &path,
 // than holding its value at the bake time.
 using _SlotDriven = std::function<bool(const SdfPath &)>;
 
-// A revision's stage-routed dense blend-sample points, the shapes of its
-// sparse samples (read per run when the cache refuses one, which a
+// Whether \p binding can answer a run: one of its candidate chains has a
+// base value to read. A chain whose target holds no value at all never
+// reads a base, so a binding of such chains alone always falls through to
+// its tail, which live baked reads off the stage on every run and playback
+// reads as the points the bake held. A base that is missing at some times
+// only is time-varying, and the report names it as a chain base.
+bool
+_CanAnswer(const RigExecBakedProgramImpl &program,
+           const RigExecBakedPointsBinding &binding)
+{
+    if (binding.id < 0) {
+        return false;
+    }
+    for (const RigExecBakedPointVersion &candidate : binding.candidates) {
+        if (candidate.chain < 0 ||
+            size_t(candidate.chain) >= program.chains.size()) {
+            continue;
+        }
+        const UsdAttributeQuery &base =
+            program.chains[size_t(candidate.chain)].baseQuery;
+        if (base.IsValid() && base.HasValue()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A revision's stage-routed dense blend-sample points (a base-phase
+// sample's, and a phased one's whose binding can never answer), the shapes
+// of its sparse samples (read per run when the cache refuses one, which a
 // connection makes it do), the binding arrays its assembly reads as static
 // path reads, and every other path read its assembly makes at the time
 // that no input slot recomputes (structural tokens, lattice divisions, a
@@ -101,11 +131,13 @@ _Revision(const RigExecBakedProgramImpl &program, double time,
          revision.blendChannels) {
         for (const auto &sample : channel.samples) {
             if (sample.blendShape.IsEmpty()) {
-                if (sample.phase.IsBase()) {
-                    _Attribute(sample.points,
-                               "blend sample points " +
-                                   sample.samplePath.GetString(),
-                               entries);
+                if (sample.phase.IsBase() ||
+                    !_CanAnswer(program, sample.pointBinding)) {
+                    if (!slotDriven(sample.points.GetPath())) {
+                        _Attribute(sample.points,
+                                   "blend sample points " + sample.samplePath.GetString(),
+                                   entries);
+                    }
                 }
                 continue;
             }
@@ -130,7 +162,7 @@ _Revision(const RigExecBakedProgramImpl &program, double time,
         binding.driverCurveOrder, binding.driverCurveKnots,
         binding.topologyCounts,   binding.topologyIndices};
     for (const SdfPath &path : bindingPaths) {
-        _Attribute(stage, path, field, entries);
+        if (!slotDriven(path)) _Attribute(stage, path, field, entries);
     }
     const std::string readField = "revision read " +
                                   revision.moverPath.GetString();
@@ -205,6 +237,42 @@ RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
          computed.GetInputs().pathScalarReads) {
         slotPaths.insert(paths.Text(read.path));
     }
+    // Use the same consumer inventory as the stage sampler. This small
+    // wire view needs no constants, geometry payloads or serialization.
+    const auto &capture = computed.GetInputs();
+    fb::RigExecWireFile view;
+    view.inputs = capture.inputs;
+    view.geometry = std::make_unique<fb::RigExecWireDomainGeometry>();
+    view.geometry->weightObjects = capture.weightObjects;
+    for (const auto &row : capture.arrayRows) {
+        fb::RigExecWirePathRead wire;
+        wire.rest = row.rest;
+        wire.read = std::make_unique<fb::RigExecWireInput>(row.read);
+        view.geometry->pathReads.push_back(std::move(wire));
+    }
+    // Dense sample reads use the same walk inventory as path reads.
+    for (const auto &sample : capture.blendPoints) {
+        fb::RigExecWirePathRead wire;
+        wire.rest = false;
+        wire.read = std::make_unique<fb::RigExecWireInput>(sample.read);
+        view.geometry->pathReads.push_back(std::move(wire));
+    }
+    for (int32_t slot : capture.chainBaseSlots) {
+        fb::RigExecWireChain chain;
+        chain.baseSlot = slot;
+        view.geometry->chains.push_back(std::move(chain));
+    }
+    for (const auto &layout : capture.layoutSlots) {
+        fb::RigExecWireRevision revision;
+        revision.jointIndicesSlot = int32_t(layout.indices);
+        revision.jointWeightsSlot = int32_t(layout.weights);
+        fb::RigExecWireChain chain;
+        chain.revisions.push_back(std::move(revision));
+        view.geometry->chains.push_back(std::move(chain));
+    }
+    for (size_t slot : RigExecStageArraySlots(view)) {
+        slotPaths.insert(paths.Text(capture.inputs[slot].name()));
+    }
     const _SlotDriven slotDriven = [&](const SdfPath &path) {
         return slotPaths.count(path.GetString()) != 0;
     };
@@ -257,7 +325,8 @@ RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
 
     // Point chains: authored bases, blend-sample points, binding arrays.
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
-        if (chain.baseQuery.IsValid()) {
+        if (chain.baseQuery.IsValid() &&
+            !slotDriven(chain.baseQuery.GetAttribute().GetPath())) {
             _Attribute(chain.baseQuery.GetAttribute(),
                        "chain base " + chain.target.GetString(), &found);
         }
@@ -285,7 +354,9 @@ RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
              {&object.combineTargetPoints, &object.targetPoints,
               &object.samplePoints, &object.curvePoints}) {
             for (const UsdAttribute &attribute : *attributes) {
-                _Attribute(attribute, field, &found);
+                if (!slotDriven(attribute.GetPath())) {
+                    _Attribute(attribute, field, &found);
+                }
             }
         }
     }
@@ -293,8 +364,10 @@ RigExecBakeStaticReport(RigExecRigEvaluator &evaluator,
     // The oracle facts of the objects the runtime resolves.
     for (const RigExecBakeTimeVaryingFact &fact :
          computed.GetTimeVaryingFacts()) {
-        found.emplace("weight object " + fact.object + " oracle",
-                      fact.attribute);
+        if (!slotDriven(SdfPath(fact.attribute))) {
+            found.emplace("weight object " + fact.object + " oracle",
+                          fact.attribute);
+        }
     }
 
     entries->reserve(found.size());

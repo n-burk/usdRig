@@ -8,6 +8,7 @@
 #include "rigExec/frozenContextInternal.h"
 #include "rigExec/moverGraph.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/rigEvaluatorInternal.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
@@ -19,6 +20,7 @@
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
@@ -1267,6 +1269,31 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
         object.type = objectTypes[i];
         object.oracle = resolved[i] && oracleFacts[i].phaseError.empty();
         object.samplesInFlight = oracleFacts[i].samplesInFlight;
+        if (object.oracle && !object.samplesInFlight &&
+            (object.type == TfToken("RigExecSphereWeight") ||
+             object.type == TfToken("RigExecPlaneWeight") ||
+             object.type == TfToken("RigExecCurveWeight"))) {
+            // Preserve full raw relationship cardinality. Prim targets are
+            // oracle-only: packets ignore them, as their native gather does.
+            SdfPathVector targets;
+            const auto prim = B.stage->GetPrimAtPath(object.path);
+            if (const auto rel = prim.GetRelationship(TfToken("rigExec:weightTarget")))
+                rel.GetTargets(&targets);
+            auto &wire = C.weightObjects[i];
+            wire.targetPoints.clear();
+            wire.targetValid.clear();
+            for (const auto &target : targets) {
+                if (target.IsPropertyPath()) {
+                    const auto attr = B.stage->GetAttributeAtPath(target);
+                    wire.targetPoints.push_back(attr ? interner->Path(target) : 0);
+                    wire.targetValid.push_back(attr ? 1 : 0);
+                } else {
+                    wire.targetPoints.push_back(interner->Path(
+                        evaluatorDetail::_ResolveGeometryInput(B.stage, target)));
+                    wire.targetValid.push_back(0);
+                }
+            }
+        }
     }
     std::vector<RigExecBakeArrayRead> arrayReads;
     if (!RigExecBakeListArrayReads(B, arrayObjects, time, &arrayReads,
@@ -1281,6 +1308,7 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
     std::map<std::pair<uint32_t, bool>, size_t> rowAt;
     std::map<std::pair<uint32_t, uint32_t>, size_t> layoutAt;
     C.chainBaseSlots.assign(B.chains.size(), -1);
+    std::vector<int32_t> oracleFallbackSlots(C.weightObjects.size(), -1);
     for (const RigExecBakeArrayRead &read : arrayReads) {
         fb::RigExecWireInput input;
         input.tag = read.tag;
@@ -1372,6 +1400,9 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
                 object->oracleSamplesSlot = int32_t(head);
             }
             break;
+        case RigExecBakeArrayConsumer::OracleFallback:
+            if (object) oracleFallbackSlots[read.object] = int32_t(head);
+            break;
         case RigExecBakeArrayConsumer::OracleCurve:
             if (object) {
                 object->oracleCurveSlot = int32_t(head);
@@ -1425,16 +1456,25 @@ RigExecBakeComputedCapture::RigExecBakeComputedCapture(
             const RigExecWeightOracleFacts &facts = oracleFacts[i];
             const bool samples = arrayObjects[i].oracle &&
                                  !facts.samplesInFlight && facts.haveSamples;
-            if ((samples || wire.oracleSamplesSlot >= 0) &&
-                !(samples && points(wire.oracleSamplesSlot, facts.samples))) {
+            const auto present = [&](int32_t slot) {
+                VtVec3fArray held;
+                return slot >= 0 && S.slots[size_t(slot)].Get(&held, S.bakeTime);
+            };
+            int32_t sampleSlot = wire.oracleSamplesSlot;
+            if (!present(sampleSlot)) sampleSlot = oracleFallbackSlots[i];
+            if (samples != present(sampleSlot) ||
+                (samples && !points(sampleSlot, facts.samples))) {
                 Fail("the oracle's sample points of " + path +
                      " are not its input's");
                 return;
             }
             const bool curve = arrayObjects[i].oracle && facts.haveCurve;
-            if ((curve || wire.oracleCurveSlot >= 0) &&
-                !points(wire.oracleCurveSlot,
-                        curve ? facts.curve : std::vector<GfVec3f>())) {
+            VtVec3fArray curveValue;
+            const bool haveCurve = wire.oracleCurveSlot >= 0 &&
+                S.slots[size_t(wire.oracleCurveSlot)].Get(&curveValue, S.bakeTime) &&
+                !curveValue.empty();
+            if (curve != haveCurve ||
+                (curve && !points(wire.oracleCurveSlot, facts.curve))) {
                 Fail("the oracle's curve points of " + path +
                      " are not its input's");
                 return;
