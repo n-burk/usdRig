@@ -210,6 +210,14 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::EpochPinned,
          "immutable after Build; safe as the programDigest check names it, "
          "never as a live read of per-frame working state"},
+        {"skin layout handles (bakedGeometry.cpp SkinTopology ops)",
+         RigExecFrozenPurity::Pure,
+         "op-written: each fixed skin layout is built from its layout "
+         "leaves by RigExecBuildSkinTopology, serially, under the body "
+         "purity mark -- in the live prologue from leaves sampled on the "
+         "owning thread, and in a frozen job's prologue from the job's "
+         "layout leaves written over the clone's; an unmoved layout keeps "
+         "its handle, which the prologue adopts"},
         {"ladder tables (restM through rotOrder)",
          RigExecFrozenPurity::Pure,
          "op-written: the RestCompose and LadderCompose head ops compose "
@@ -236,8 +244,8 @@ RigExecFrozenPurityAudit()
          "live state by definition; the program's captured pointers to it "
          "are why workers run a private arena, never the live program"},
         {"RigExecBakedProgramImpl live pointers (evaluator, stage, "
-         "resolvedInputs, chainSnapshots, skinTopologies, "
-         "blendSampleShapes, profiler, guideTaps)",
+         "resolvedInputs, chainSnapshots, blendSampleShapes, profiler, "
+         "guideTaps)",
          RigExecFrozenPurity::LiveOnly,
          "read-what-the-evaluator-holds-now by design; a worker-owned "
          "program copy would still point at the live evaluator, so the "
@@ -254,11 +262,14 @@ RigExecFrozenPurityAudit()
          "whose envelope is sparse with a zero default still reaches it "
          "through RigExecRunRevisionKernel and takes the lock on a worker, "
          "until the program resolves the basis in its prologue"},
-        {"RigExecStaticInputCache / RigExecSkinTopologyCache / "
-         "RigExecBlendSampleCache OBJECTS",
+        {"RigExecStaticInputCache / RigExecBlendSampleCache OBJECTS",
          RigExecFrozenPurity::LiveOnly,
          "single-threaded or notice-invalidated live state (THREAD rule); "
          "workers use sampled values and held bindings, never the caches"},
+        {"RigExecSkinTopologyCache",
+         RigExecFrozenPurity::LiveOnly,
+         "dynamic only; baked and frozen build layouts in the SkinTopology "
+         "op"},
         {"calibration/timing statics (bakedSchedule.cpp framesSeen)",
          RigExecFrozenPurity::LiveOnly,
          "unsynchronized diagnostic counters; frozen runs never enable "

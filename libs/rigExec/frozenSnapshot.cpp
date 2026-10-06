@@ -30,7 +30,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.assetRootPath = src.assetRootPath;
     D.resolvedInputs = nullptr;
     D.chainSnapshots = nullptr;
-    D.skinTopologies = nullptr;
     D.blendSampleShapes = nullptr;
     D.resolveBlendSample = {};
     D.profiler = nullptr;
@@ -402,9 +401,8 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
             // constraint step measures against, the step stashes the delta,
             // and FoldInfluences reads the stash, all shared bodies in
             // program order.
-            // A skin packet is assembled on the UI thread, where no head
-            // tier runs, so none of its reads may be one a chain or record
-            // answers.
+            // A skin whose packet reads a chain or record result does not
+            // freeze.
             if (revision.op == RigExecRevisionOp::Skin &&
                 std::any_of(revision.leaves.walks.begin(),
                             revision.leaves.walks.end(),
@@ -412,8 +410,8 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                 return fail("revision " +
                             revision.moverPath.GetString() +
                             " reads a property chain result into a skin "
-                            "packet, which the frozen executor assembles "
-                            "without the head tier");
+                            "packet, which the frozen executor does not "
+                            "admit");
             }
             if (revision.op == RigExecRevisionOp::Skin &&
                 !revision.skinTopologyFixed) {

@@ -234,8 +234,8 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         // layout arrays are still NAMED, because bakeability judged them --
         // connecting one is a resync, and the judgement was that none is
         // connected. They do not belong in `rebuild` even though the layout
-        // is no longer read per frame: it is held in the evaluator's skin
-        // topology cache, which every notice clears, so a weight-paint edit
+        // is no longer read per frame: the SkinTopology op holds it, and its
+        // layout leaves are filed under these paths, so a weight-paint edit
         // reaches the next generation through the re-read rather than
         // through a rebuild of this program.
         B.prims.insert(r.moverPath);
@@ -944,13 +944,11 @@ PartitionAtBuild(const RigExecBakedProgramImpl &B, const ProviderLevels &levels,
         !revision->skinTopologyFixed || !revision->moverPrim) {
         return;
     }
-    // Read directly rather than through the evaluator's skin topology cache:
-    // resolving there would seed the cache from Build's time code with a
-    // layout the dynamic path has not asked for yet. Fixed means the arrays
-    // do not vary in time, so the default-time read IS the epoch's -- and the
-    // prologue re-cuts against the handle the packet will actually carry the
-    // first time it sees one, so a disagreement costs one extra pass and
-    // never a wrong key.
+    // Read directly, at Default: Build holds no layout handle yet. Fixed
+    // means the arrays do not vary in time, so the default-time read IS the
+    // epoch's -- and the prologue re-cuts against the handle the packet will
+    // actually carry the first time it sees one, so a disagreement costs one
+    // extra pass and never a wrong key.
     VtIntArray indices;
     int elementSize = 1;
     if (const UsdAttribute a =
@@ -1841,10 +1839,10 @@ RevisionValues(RigExecBakedProgramImpl &B,
         values.driverFrames =
             &B.aggregates[size_t(revision->driverFramesSolver)];
     }
-    // Epoch-fixed layouts were resolved in the PROLOGUE, through the same
-    // evaluator cache the dynamic path's assembly resolves through -- so the
-    // two paths cannot hold different arrays, and no step body takes the
-    // cache's lock.
+    // Epoch-fixed layouts were adopted in the PROLOGUE from the SkinTopology
+    // op, which builds them by the dynamic cache's own rules
+    // (RigExecBuildSkinTopology) -- so the two paths cannot hold different
+    // arrays, and no step body reads one off the stage.
     if (revision->topologyResolved) {
         values.skinTopology = &revision->topology;
     }
@@ -2141,20 +2139,22 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
         revision->lastAuxPoints = VtVec3fArray();
         revision->lastStatus = RigExecMoverStatus();
     };
+    // The SkinTopology op's handle, adopted here and only here: topology,
+    // topologyResolved and the partition are exported, so they are set
+    // only for a revision whose base reads, on a generation that reaches
+    // this prologue, however often the op itself runs.
     const auto resolveTopology =
-        [&B, time](RigExecBakedProgramImpl::GeomRevision *revision) {
+        [&B](RigExecBakedProgramImpl::GeomRevision *revision) {
         if (!revision->skinTopologyFixed) {
             return;
         }
-        revision->topology = RigExecResolveSkinTopology(
-            revision->moverPrim, revision->influenceSlots.size(), time,
-            B.resolvedInputs, B.skinTopologies);
+        revision->topology = revision->layoutHandle;
         revision->topologyResolved = true;
         // The partition is Build state, and this is where a frame can tell
-        // in O(1) whether it still describes the vertices: the cache hands
-        // back the SAME layout pointer for a binding that did not move, so a
-        // different one means the arrays did -- a weight-paint edit, or an
-        // override placed on the indices. Re-cutting keeps the chunk COUNT,
+        // in O(1) whether it still describes the vertices: the op hands back
+        // the SAME handle for a layout that did not move, so a different one
+        // means the arrays did -- a weight-paint edit, or an override placed
+        // on the indices. Re-cutting keeps the chunk COUNT,
         // because the number of steps a revision is made of was fixed at
         // Build and a value edit may not change the program. Here rather
         // than in a step because it reads the arrays, and because the first
@@ -3296,6 +3296,265 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
     leaves->stamp = B.programStamp;
     leaves->overrides = overrides;
     leaves->chainSerial = B.pathLeafChainSerial;
+}
+
+// The skin layouts.
+
+RigExecBakedProgramImpl::GeomRevision *
+RigExecBakedLayoutRevision(RigExecBakedProgramImpl *program, size_t r)
+{
+    RigExecBakedProgramImpl &B = *program;
+    if (r < B.revisionIndex.size()) {
+        const auto &[chain, revision] = B.revisionIndex[r];
+        return &B.chains[size_t(chain)].revisions[size_t(revision)];
+    }
+    r -= B.revisionIndex.size();
+    if (r < B.derivedIndex.size()) {
+        const auto &[chain, derived] = B.derivedIndex[r];
+        return &B.chains[size_t(chain)].derived[size_t(derived)].revision;
+    }
+    return nullptr;
+}
+
+const RigExecBakedProgramImpl::GeomRevision *
+RigExecBakedLayoutRevision(const RigExecBakedProgramImpl &program, size_t r)
+{
+    return RigExecBakedLayoutRevision(
+        const_cast<RigExecBakedProgramImpl *>(&program), r);
+}
+
+void
+RigExecBakedBuildLayoutSteps(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const size_t count = B.revisionIndex.size() + B.derivedIndex.size();
+    for (size_t r = 0; r < count; ++r) {
+        RigExecBakedProgramImpl::GeomRevision &revision =
+            *RigExecBakedLayoutRevision(&B, r);
+        if (!revision.skinTopologyFixed) {
+            continue;
+        }
+        revision.layoutLeaves = RigExecBakedPathLeaves();
+        RigExecDeclareSkinLayoutLeaves(revision.moverPath,
+                                       &revision.layoutLeaves.decl);
+        RigExecBakedBindPathLeaves(B.stage, &revision.layoutLeaves);
+        revision.layoutOverlay.assign(revision.layoutLeaves.decl.keys.size(),
+                                      VtValue());
+        revision.layoutFixed = RigExecSkinLayoutIsFixed(revision.moverPrim);
+        revision.layoutFixedChanged = false;
+        revision.layoutRan = false;
+        revision.layoutHandle = nullptr;
+        RigExecBakedHeadStep step;
+        step.kind = RigExecBakedHeadKind::SkinTopology;
+        step.object = int(r);
+        step.label = "SkinTopology " + revision.moverPath.GetString();
+        step.writes.push_back(RigExecBakedHeadOne(
+            RigExecBakedHeadDomain::SkinTopology, uint32_t(r)));
+        B.headSteps.push_back(std::move(step));
+    }
+}
+
+void
+RigExecBakedDeclareLayoutReads(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (RigExecBakedStep &step : B.steps) {
+        size_t r = 0;
+        switch (step.kind) {
+        case RigExecBakedStepKind::RevisionStatic:
+        case RigExecBakedStepKind::RevisionChunk:
+        case RigExecBakedStepKind::RevisionFuse:
+            r = size_t(step.object);
+            break;
+        case RigExecBakedStepKind::Derived:
+            r = B.revisionIndex.size() + size_t(step.object);
+            break;
+        default:
+            continue;
+        }
+        const RigExecBakedProgramImpl::GeomRevision *revision =
+            RigExecBakedLayoutRevision(B, r);
+        if (revision && revision->skinTopologyFixed) {
+            step.headReads.push_back(RigExecBakedHeadOne(
+                RigExecBakedHeadDomain::SkinTopology, uint32_t(r)));
+        }
+    }
+}
+
+void
+RigExecBakedSampleLayoutLeaves(RigExecBakedProgramImpl *program,
+                               RigExecBakedProgramImpl::GeomRevision *revision,
+                               UsdTimeCode time, bool all)
+{
+    RigExecBakedProgramImpl &B = *program;
+    RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
+    const size_t n = leaves.decl.keys.size();
+    revision->layoutFixedChanged = false;
+    std::fill(leaves.changed.begin(), leaves.changed.end(), 0);
+    bool rebind = all || !leaves.sampled || leaves.stamp != B.programStamp;
+    bool overlayMoved = false;
+    for (size_t k = 0; k < n; ++k) {
+        rebind = rebind || leaves.mustSample[k];
+        // What the read consults before the stage, compared by value: an
+        // absent entry is held as an empty value.
+        const VtValue *entry =
+            B.resolvedInputs ? B.resolvedInputs->Find(leaves.decl.keys[k].path)
+                             : nullptr;
+        const bool same = entry ? revision->layoutOverlay[k] == *entry
+                                : revision->layoutOverlay[k].IsEmpty();
+        if (!same) {
+            overlayMoved = true;
+            revision->layoutOverlay[k] = entry ? *entry : VtValue();
+        }
+    }
+    if (!rebind && !overlayMoved) {
+        return;
+    }
+    if (rebind) {
+        // An edit can author time samples or a connection, which the
+        // evaluator's cache would refuse on its next refill.
+        const bool fixed = RigExecSkinLayoutIsFixed(revision->moverPrim);
+        revision->layoutFixedChanged = fixed != revision->layoutFixed;
+        revision->layoutFixed = fixed;
+        std::fill(leaves.mustSample.begin(), leaves.mustSample.end(), 0);
+    }
+    if (revision->layoutFixed) {
+        for (size_t k = 0; k < n; ++k) {
+            ++B.pathLeafSamples;
+            VtValue value = RigExecSampleRevisionLeaf(
+                leaves.decl.keys[k], leaves.attributes[k], B.resolvedInputs,
+                time);
+            leaves.changed[k] = value == leaves.values[k] ? 0 : 1;
+            leaves.values[k] = std::move(value);
+        }
+    }
+    leaves.sampled = true;
+    leaves.time = time;
+    leaves.stamp = B.programStamp;
+}
+
+void
+RigExecBakedRunLayoutOp(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    if (!revision->layoutFixed) {
+        // The cache's refusal: the packet reads the arrays per frame. The
+        // candidate stays, so the layout comes back as the same object.
+        revision->layoutHandle = nullptr;
+        return;
+    }
+    using Role = RigExecRevisionLeafRole;
+    const RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
+    const VtIntArray indices = leaves.Value<VtIntArray>(
+        leaves.decl.Role(Role::JointIndices), VtIntArray());
+    const VtFloatArray weights = leaves.Value<VtFloatArray>(
+        leaves.decl.Role(Role::JointWeights), VtFloatArray());
+    const int elementSize =
+        leaves.Value<int>(leaves.decl.Role(Role::ElementSize), 1);
+    auto built = std::make_shared<RigExecSkinTopology>();
+    RigExecBuildSkinTopology(
+        TfSpan<const int>(indices.cdata(), indices.size()),
+        TfSpan<const float>(weights.cdata(), weights.size()), elementSize,
+        revision->influenceSlots.size(), built.get());
+    // The same layout keeps its object, so the packet that carries it still
+    // compares equal and the kernel does not re-run.
+    if (revision->layoutCandidate && *revision->layoutCandidate == *built) {
+        revision->layoutHandle = revision->layoutCandidate;
+        return;
+    }
+    revision->layoutHandle = std::move(built);
+    revision->layoutCandidate = revision->layoutHandle;
+}
+
+void
+RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
+                          RigExecRigPose *pose, bool force, bool sample,
+                          bool verify)
+{
+    RigExecBakedProgramImpl &B = *program;
+    // After the property revisions and rest ops this run executed, in the
+    // head trace.
+    uint32_t seq = 0;
+    for (const RigExecBakedHeadStep &step : B.headSteps) {
+        if (step.kind != RigExecBakedHeadKind::SkinTopology) {
+            seq = std::max(seq, step.runSeq);
+        }
+    }
+    for (const uint32_t index : B.headOrder) {
+        RigExecBakedHeadStep &step = B.headSteps[index];
+        if (step.kind != RigExecBakedHeadKind::SkinTopology) {
+            continue;
+        }
+        step.runSeq = 0;
+        RigExecBakedProgramImpl::GeomRevision *revision =
+            RigExecBakedLayoutRevision(&B, size_t(step.object));
+        if (!revision) {
+            continue;
+        }
+        if (sample) {
+            RigExecBakedSampleLayoutLeaves(&B, revision, time, force);
+        }
+        bool moved = revision->layoutFixedChanged;
+        for (const char changed : revision->layoutLeaves.changed) {
+            moved = moved || changed;
+        }
+        if (!(force || moved || !revision->layoutRan)) {
+            continue;
+        }
+        {
+            const RigExecOpBodyScope body(
+                B.purityAudit ? &B.purityViolations.count : nullptr);
+            RigExecBakedRunLayoutOp(revision);
+        }
+        revision->layoutRan = true;
+        step.runSeq = ++seq;
+        ++B.headOpsRun;
+    }
+    if (!verify || !sample) {
+        return;
+    }
+    // Every handle against the layout the stage and the overlay describe
+    // now, read afresh: a leaf route that missed an edit shows here.
+    size_t mismatches = 0;
+    for (const uint32_t index : B.headOrder) {
+        const RigExecBakedHeadStep &step = B.headSteps[index];
+        if (step.kind != RigExecBakedHeadKind::SkinTopology) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::GeomRevision *revision =
+            RigExecBakedLayoutRevision(&B, size_t(step.object));
+        if (!revision) {
+            continue;
+        }
+        RigExecBakedProgramImpl::GeomRevision fresh;
+        fresh.moverPrim = revision->moverPrim;
+        fresh.influenceSlots = revision->influenceSlots;
+        fresh.layoutLeaves.decl = revision->layoutLeaves.decl;
+        fresh.layoutLeaves.attributes = revision->layoutLeaves.attributes;
+        fresh.layoutFixed = RigExecSkinLayoutIsFixed(revision->moverPrim);
+        fresh.layoutLeaves.values.clear();
+        for (size_t k = 0; k < fresh.layoutLeaves.decl.keys.size(); ++k) {
+            fresh.layoutLeaves.values.push_back(RigExecSampleRevisionLeaf(
+                fresh.layoutLeaves.decl.keys[k],
+                fresh.layoutLeaves.attributes[k], B.resolvedInputs, time));
+        }
+        RigExecBakedRunLayoutOp(&fresh);
+        const auto &held = revision->layoutHandle;
+        const auto &want = fresh.layoutHandle;
+        if ((!held && !want) || (held && want && *held == *want)) {
+            continue;
+        }
+        ++mismatches;
+        pose->diagnostics.push_back("baked cone mismatch: head skin topology "
+                                    "of " +
+                                    revision->moverPath.GetString() +
+                                    " differs");
+    }
+    if (mismatches > 0) {
+        pose->bakedParityMismatches += mismatches;
+        TF_WARN("rigExec: baked parity mismatch: %zu skin layout(s) the "
+                "SkinTopology ops hold differ from the stage's",
+                mismatches);
+    }
 }
 
 namespace {

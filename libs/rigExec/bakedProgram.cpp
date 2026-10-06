@@ -860,6 +860,13 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
                           RigExecBakedProgramImpl::GeomRevision *source,
                           bool keepRun) {
         destination->created = false;
+        // The layout the outgoing SkinTopology op held, which the new op's
+        // first build of the same layout hands back: the packet the kept
+        // run compares against carries that object, as the evaluator's
+        // cache handed it to both programs.
+        destination->layoutCandidate = source->layoutHandle
+                                           ? source->layoutHandle
+                                           : source->layoutCandidate;
         if (!keepRun) {
             return;
         }
@@ -2173,6 +2180,27 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
         t.count = B.headSteps.size();
     }
     {
+        // Per SkinTopology index: whether the revision's layout is fixed at
+        // compile and at Build, and its layout leaves' paths (the leaves'
+        // hops are in pathLeaves).
+        _DigestTable &t = table("skinLayouts");
+        const size_t count = B.revisionIndex.size() + B.derivedIndex.size();
+        for (size_t r = 0; r < count; ++r) {
+            const RigExecBakedProgramImpl::GeomRevision *revision =
+                RigExecBakedLayoutRevision(B, r);
+            t.Path(revision->moverPath);
+            t.Int(revision->skinTopologyFixed ? 1 : 0);
+            t.Int(revision->layoutFixed ? 1 : 0);
+            for (const RigExecRevisionLeafKey &key :
+                 revision->layoutLeaves.decl.keys) {
+                t.Path(key.path);
+                t.Int(int64_t(key.type));
+                t.Int(int64_t(key.flavour));
+            }
+        }
+        t.count = count;
+    }
+    {
         // The reads after the head tier that resolve walks: each walk's head,
         // hops (slot, candidates, leaf), raw leaf, declared versions and
         // shadows; which path leaves and steps read them; what each step
@@ -2460,7 +2488,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // why each one is a pointer rather than a copy.
     B.resolvedInputs = &E._resolvedInputs;
     B.chainSnapshots = &E._chainSnapshots;
-    B.skinTopologies = &E._skinTopologies;
     B.blendSampleShapes = &E._blendSampleShapes;
     B.profiler = &E._profiler;
     // Where Build spends its time, part by part. The parts run one
@@ -3625,6 +3652,19 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // RigExecBakedBuildSchedule marks its own parts.
     graphPhases.Close();
     RigExecBakedBuildSchedule(&B, &sweep);
+    // The skin layouts as head ops, one per fixed skin revision, now that
+    // the geometry steps number the revisions; ordered after the rest and
+    // ladder ops, and declared by the steps that read the handle.
+    RigExecBakedBuildLayoutSteps(&B);
+    {
+        std::string invalid;
+        if (!RigExecBakedSortHeadTier(&B, &invalid) ||
+            !RigExecBakedValidateHeadTier(B, &invalid)) {
+            refuse("the baked head tier is invalid: " + invalid, E._rigPath);
+            return nullptr;
+        }
+    }
+    RigExecBakedDeclareLayoutReads(&B);
     // The edges cannot show a read whose producer is later or missing, so a
     // program with one would run on a stale value; refuse it instead.
     {
@@ -3865,6 +3905,12 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // and the bake's forced run composes them all at its time.
         RigExecBakedRunRestTier(&B, pose, fullRunRequested,
                                 RigExecBakedVerifyConesRequested());
+        // The skin layouts, from leaves sampled now: an op builds a new
+        // handle only when its leaves moved, on every generation, and the
+        // geometry prologue adopts it where it resolves a topology.
+        RigExecBakedRunLayoutTier(&B, time, pose, fullRunRequested,
+                                  /*sample=*/true,
+                                  RigExecBakedVerifyConesRequested());
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunSolverSources(&B, time);
         stageFramesOk = stageFrames();

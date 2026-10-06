@@ -1109,6 +1109,10 @@ target_compile_definitions(testRigExecSkinTopology PRIVATE
 add_test(NAME testRigExecSkinTopology COMMAND testRigExecSkinTopology)
 set_tests_properties(testRigExecSkinTopology PROPERTIES
     ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
+# The baked program's own layout handles: authored edits, drags, time
+# samples, a bailed generation, and the exported layout fields.
+rigexec_add_baked_parity_test(testRigExecSkinTopology REQUIRE_BAKE CONE_VERIFY
+    --baked "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecStaticInputCache
     tests/testRigExecStaticInputCache.cpp)

@@ -956,7 +956,8 @@ PYBIND11_MODULE(_rigexec, m) {
             "How many skin layouts the epoch's topology cache holds answers\n"
             "for. Dropping and re-reading a layout publishes the same\n"
             "deformation as keeping it, so only the cache's occupancy says\n"
-            "whether an interactive override paid for the re-read.")
+            "whether an interactive override paid for the re-read. The\n"
+            "cache is the dynamic walk's; a baked program never fills it.")
         .def("set_interactive_overrides",
              [](_Rig &r, const std::vector<std::tuple<std::string, std::string,
                                                      py::object>> &entries) {

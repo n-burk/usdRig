@@ -496,7 +496,15 @@ struct RigExecBakedPathLeaves {
 
 /// Which path-leaf owner a path leaf id names (ids from
 /// RigExecBakedProgramImpl::leafRefs.size() on).
-enum class RigExecBakedPathLeafOwner : uint8_t { Revision, Derived, Weight };
+enum class RigExecBakedPathLeafOwner : uint8_t {
+    Revision,
+    Derived,
+    Weight,
+    /// The layout leaves of a chain revision's or a derived target's
+    /// SkinTopology op.
+    RevisionLayout,
+    DerivedLayout,
+};
 
 /// One path leaf: its owner (chain and revision, chain and derived target,
 /// or weight object) and its key there.
@@ -707,7 +715,8 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
 // when something it reads moved: the property revisions
 // (RigExecBakedRunHeadTier), then the rest and ladder composes
 // (RigExecBakedRunRestTier), which read chain-routed ladder channels sampled
-// after the revisions published. The tier keeps its own step list, kinds
+// after the revisions published, then the skin layouts
+// (RigExecBakedRunLayoutTier). The tier keeps its own step list, kinds
 // and domains until the runtime reads them: RigExecBakedStepKind and
 // RigExecBakedSlotDomain end where the exporter's wire asserts pin them, and
 // nothing here is exported.
@@ -723,6 +732,8 @@ enum class RigExecBakedHeadKind : uint8_t {
     /// `selfD`, `parentDinv`, `defaultRoundTrip`, `posedAuthored`,
     /// `posedAuthoredM` and `rotOrder` of its slots.
     LadderCompose,
+    /// The layout handle of fixed skin revision `object`
+    /// (RigExecBakedLayoutRevision), part 0.
     SkinTopology,
 };
 
@@ -737,6 +748,8 @@ enum class RigExecBakedHeadDomain : uint8_t {
     Rest,
     /// Per provider slot: what LadderCompose writes.
     Ladder,
+    /// Per RigExecBakedLayoutRevision index: the layout handle SkinTopology
+    /// writes, which RevisionStatic and the chunks and fuse read.
     SkinTopology,
 };
 
@@ -1728,7 +1741,6 @@ struct RigExecBakedProgramImpl {
     /// records into it nor reads it: its phased reads are bound at Build
     /// (RigExecBakedPointsBinding, `frameRecords`).
     RigExecChainSnapshots *chainSnapshots = nullptr;
-    RigExecSkinTopologyCache *skinTopologies = nullptr;
     /// The evaluator's per-epoch blend sample shapes, resolved in the
     /// geometry prologue through the same cache the dynamic walk resolves
     /// through -- so the two paths hold the same layout pointer, and no step
@@ -2560,7 +2572,7 @@ struct RigExecBakedProgramImpl {
     // it by VALUE. There is no "time changed" and no "overridden" predicate
     // deciding whether a source ran: sources always run and their outputs are
     // compared, which is what makes an override on a routed prim, a released
-    // drag, a cleared topology cache and a moved keyframe all reach the graph
+    // drag, a rebuilt skin layout and a moved keyframe all reach the graph
     // through one test (§7).
     RigExecBakedCones cones;
     /// The steps this run decided to run. Every step outside it keeps its
@@ -2936,9 +2948,9 @@ struct RigExecBakedProgramImpl {
         int chunkBase = 0;
         /// The layout the partition was cut from, so a frame can tell in
         /// O(1) whether the keys still describe the vertices. The handle is
-        /// the identity the skin topology cache preserves across a notice
-        /// that touched no layout, so an unchanged binding never re-cuts and
-        /// a changed one always does.
+        /// the identity the SkinTopology op preserves across a notice that
+        /// touched no layout, so an unchanged binding never re-cuts and a
+        /// changed one always does.
         std::shared_ptr<const RigExecSkinTopology> partitionTopology;
         int partitionElementSize = 0;
         size_t partitionIndexCount = 0;
@@ -3036,13 +3048,35 @@ struct RigExecBakedProgramImpl {
         /// The indirection is what replaces today's `revision.output =
         /// current` copy of a revision that applied nothing.
         int currentSource = -1;
-        /// The epoch-fixed skin layout, resolved in the prologue because
-        /// RigExecSkinTopologyCache::Resolve holds a mutex across the build
-        /// and no step body may take a lock. Null is a remembered refusal,
-        /// which is why `topologyResolved` and not the pointer says whether
-        /// the prologue answered.
+        /// The epoch-fixed skin layout the packet carries: the SkinTopology
+        /// op's `layoutHandle`, adopted where the geometry prologue resolves
+        /// a topology (a chain revision whose chain read a base, a derived
+        /// revision with a base). Null is a refused layout, which is why
+        /// `topologyResolved` and not the pointer says whether the prologue
+        /// answered. Both are exported.
         std::shared_ptr<const RigExecSkinTopology> topology;
         bool topologyResolved = false;
+        /// The SkinTopology head op of a `skinTopologyFixed` revision.
+        /// `layoutLeaves` are the layout's three reads
+        /// (RigExecDeclareSkinLayoutLeaves), sampled on the owning thread
+        /// before the op runs, and `layoutOverlay` the overlay entry each
+        /// last saw at its path. `layoutFixed` is RigExecSkinLayoutIsFixed,
+        /// asked at Build and again when a value edit reaches one of the
+        /// three paths or the program stamp moves; `layoutFixedChanged` says
+        /// the last sample moved it. `layoutHandle` is the op's output: null
+        /// while the layout is not epoch state, else the layout the leaves
+        /// describe, the same object for as long as they describe the same
+        /// layout. `layoutCandidate` is the last non-null handle, handed back
+        /// when a rebuild finds the same layout so that the packet still
+        /// compares equal; AdoptGeometryStateFrom carries it into a rebuilt
+        /// program.
+        RigExecBakedPathLeaves layoutLeaves;
+        std::vector<VtValue> layoutOverlay;
+        bool layoutFixed = false;
+        bool layoutFixedChanged = false;
+        bool layoutRan = false;
+        std::shared_ptr<const RigExecSkinTopology> layoutHandle;
+        std::shared_ptr<const RigExecSkinTopology> layoutCandidate;
         /// Every read RevisionStatic and the packet assembly make, sampled
         /// in the geometry prologue. For an operation the leaves assemble
         /// (`leaves.decl.assembles`), the assembler's reads and the blend
@@ -3478,6 +3512,18 @@ RigExecBakedPathLeavesOf(RigExecBakedProgramImpl *program,
     case RigExecBakedPathLeafOwner::Weight:
         if (ref.a < program->weightObjects.size()) {
             return &program->weightObjects[ref.a].pointLeaves;
+        }
+        return nullptr;
+    case RigExecBakedPathLeafOwner::RevisionLayout:
+        if (ref.a < program->chains.size() &&
+            ref.b < program->chains[ref.a].revisions.size()) {
+            return &program->chains[ref.a].revisions[ref.b].layoutLeaves;
+        }
+        return nullptr;
+    case RigExecBakedPathLeafOwner::DerivedLayout:
+        if (ref.a < program->chains.size() &&
+            ref.b < program->chains[ref.a].derived.size()) {
+            return &program->chains[ref.a].derived[ref.b].revision.layoutLeaves;
         }
         return nullptr;
     }
@@ -4506,13 +4552,64 @@ void RigExecBakedRunSolverSources(RigExecBakedProgramImpl *program,
 
 /// The geometry half of the prologue: every chain's and derived target's
 /// authored base, the point-count-moved reset, the node-creation accounting,
-/// and the skin layouts -- the one lock a frame takes, kept out of the
-/// region.
+/// and the adoption of each fixed skin revision's layout handle (topology,
+/// topologyResolved and the re-cut partition) wherever a base reads.
 /// Also samples the weight objects' and the revisions' path leaves
 /// (RigExecBakedSamplePathLeaves; \p all re-reads every one).
 void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
                                      UsdTimeCode time, RigExecRigPose *pose,
                                      bool all);
+
+/// SkinTopology op \p r's revision: entry r of `revisionIndex`, then of
+/// `derivedIndex` past those; null past both.
+RigExecBakedProgramImpl::GeomRevision *
+RigExecBakedLayoutRevision(RigExecBakedProgramImpl *program, size_t r);
+const RigExecBakedProgramImpl::GeomRevision *
+RigExecBakedLayoutRevision(const RigExecBakedProgramImpl &program, size_t r);
+
+/// Declares and binds the layout leaves of every `skinTopologyFixed`
+/// revision and appends one SkinTopology head op per such revision
+/// (`object` = its RigExecBakedLayoutRevision index), writing SkinTopology
+/// slot `object` and reading only its leaves. Build, owning thread.
+void RigExecBakedBuildLayoutSteps(RigExecBakedProgramImpl *program);
+
+/// Appends SkinTopology[r] to the `headReads` of the RevisionStatic,
+/// RevisionChunk and RevisionFuse steps of every revision a SkinTopology op
+/// serves. Build, once the geometry steps exist.
+void RigExecBakedDeclareLayoutReads(RigExecBakedProgramImpl *program);
+
+/// Re-reads \p revision's layout leaves at \p time through the generation's
+/// resolved inputs, and re-asks RigExecSkinLayoutIsFixed, when one of these
+/// says they can have moved since the last sample:
+///  1. the first sample, \p all (a forced run), or a moved program stamp;
+///  2. a leaf's `mustSample` byte: a value edit or a routed override reached
+///     one of the three paths (`leafByPath`);
+///  3. the overlay entry at one of the three paths differs from the one the
+///     last sample saw (an override placed, moved or lifted there).
+/// The time alone moves nothing: a fixed layout reads the same at every
+/// time, as the evaluator's cache holds it across frames. A layout that is
+/// not fixed is not read. Sets each leaf's `changed` byte and
+/// `layoutFixedChanged`. Owning thread, prologue only.
+void RigExecBakedSampleLayoutLeaves(
+    RigExecBakedProgramImpl *program,
+    RigExecBakedProgramImpl::GeomRevision *revision, UsdTimeCode time,
+    bool all);
+
+/// The SkinTopology op's body over \p revision's leaves: a null handle while
+/// the layout is not fixed, else RigExecBuildSkinTopology of the leaves,
+/// handed back as `layoutCandidate` when that holds the same layout. Writes
+/// `layoutHandle` and `layoutCandidate` and nothing else. Pure.
+void RigExecBakedRunLayoutOp(RigExecBakedProgramImpl::GeomRevision *revision);
+
+/// The SkinTopology ops in `headOrder`, after the rest and ladder ops: with
+/// \p sample, first samples each op's leaves (RigExecBakedSampleLayoutLeaves;
+/// a frozen job writes them from its vector instead), then runs each op whose
+/// leaves or fixedness moved, on its first run, or when \p force. Under
+/// \p verify, then rebuilds every layout from leaves sampled afresh and
+/// reports a handle that differs as a cone mismatch on \p pose.
+void RigExecBakedRunLayoutTier(RigExecBakedProgramImpl *program,
+                               UsdTimeCode time, RigExecRigPose *pose,
+                               bool force, bool sample, bool verify);
 
 /// The pose half of the epilogue: the joint and control publication, the
 /// solver guides and the property-domain results.

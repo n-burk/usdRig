@@ -100,30 +100,29 @@ struct RigExecSampledInput {
 struct RigExecFrameInputs {
     UsdTimeCode time = UsdTimeCode::Default();
     std::vector<RigExecSampledInput> values;
-    /// Per-chain-revision assembled skin packets, parallel to the baked
-    /// program's revisionIndex, assembled on the UI thread at sample time by
-    /// the real RigExecAssembleSkinParameters (which reads the mover prim and
-    /// the live topology cache -- both UI-thread-only). A worker cannot
-    /// assemble them, so they travel with the job instead of being sampled
-    /// as inputs. Transport-only: every number in a packet is a pure
-    /// function of digest-covered values (the revision's sampled
-    /// enabled/defaultWeight/method plus the sampled overrides), so packets
-    /// are deliberately EXCLUDED from the control-state digest. Empty for a
-    /// rig with no chain revisions, and for vectors sampled before the
-    /// frozen executor landed (a job needing packets it was not given
-    /// declines).
-    std::vector<RigExecMoverParameters> revisionPackets;
+    /// Per SkinTopology index (RigExecBakedLayoutRevision: revisionIndex,
+    /// then derivedIndex), the layout leaves of a revision whose layout the
+    /// live program holds as fixed: one value per key
+    /// (GeomRevision::layoutLeaves), read on the UI thread at sample time
+    /// through the refreshed inputs, or live's own sample where nothing that
+    /// can move it differs (no pending edit, the same overlay entries).
+    /// Empty for every other index. The worker runs the SkinTopology op from
+    /// them. Transport-only and EXCLUDED from the control-state digest: a
+    /// fixed layout reads the same at every time, so it moves only with a
+    /// value edit, which the frame cache retires frames for, or a drag,
+    /// whose sampled override the digest folds.
+    std::vector<std::vector<VtValue>> layoutLeaves;
     /// Per-chain-revision path leaves (GeomRevision::leaves), parallel to
     /// the baked program's revisionIndex: one value per key, read on the UI
     /// thread at sample time by the live sampler's own reads
     /// (RigExecSampleRevisionLeaf) through the refreshed inputs, for each
-    /// revision whose packet the leaves assemble on the worker (every such
-    /// operation but a skin, whose packet travels whole above); empty for
+    /// revision whose packet the leaves assemble on the worker; empty for
     /// the rest. A key with a reader walk is empty: the worker resolves it
-    /// after its head tier. Transport-only, like the packets: every value
-    /// is a pure function of digest-covered samples (the same attributes,
-    /// sampled by path in `values`, and the head-leaf samples), so the
-    /// leaves are EXCLUDED from the digest.
+    /// after its head tier. So are a skin's three layout keys while its
+    /// layout is fixed: the packet carries the handle instead.
+    /// Transport-only: every value is a pure function of digest-covered
+    /// samples (the same attributes, sampled by path in `values`, and the
+    /// head-leaf samples), so the leaves are EXCLUDED from the digest.
     std::vector<std::vector<VtValue>> revisionLeaves;
     /// The same for every derived target (normals, extent and a projector's
     /// matrix targets), parallel to the baked program's derivedIndex.

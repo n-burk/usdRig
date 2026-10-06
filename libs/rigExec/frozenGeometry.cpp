@@ -188,29 +188,12 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
     return true;
 }
 
-// The common revision envelope (moverGraph.cpp): the bound weight packet,
-// or the constant packet synthesized from inputs:defaultWeight. Every
-// non-derived op carries exactly this; an invalid envelope fails the
-// revision before any op-specific assembly runs.
-bool
-_FrozenCommonEnvelope(const RigExecBakedProgramImpl &B,
-                      const RigExecBakedProgramImpl::GeomRevision &revision,
-                      float defaultWeight, RigExecMoverParameters *params)
-{
-    if (revision.weightObject >= 0 &&
-        size_t(revision.weightObject) < B.weightPackets.size()) {
-        params->weights = B.weightPackets[size_t(revision.weightObject)];
-    } else {
-        params->weights = RigExecWeightPacket::Constant(defaultWeight);
-    }
-    return params->weights.valid;
-}
-
 // The frozen RevisionStatic: the RevisionStatic arm of
 // RigExecBakedRunGeometryStep (bakedGeometry.cpp), with the mover-prim
-// defaultWeight read replaced by its sample. Every revision but a skin is
-// assembled by the live function itself from the job's leaves
-// (RigExecBakedAssembleFromLeaves); a skin takes its transported packet.
+// defaultWeight read replaced by its sample. Every revision is assembled by
+// the live function itself from the job's leaves
+// (RigExecBakedAssembleFromLeaves), a skin with the layout its SkinTopology
+// op built in the prologue.
 // Everything else -- status, dirty compare, publication sizing, layout and
 // envelope decisions -- is the same code shape over the same fields.
 bool
@@ -253,12 +236,11 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         }
     }
     // An external mover's plugin is never handed to a worker (freeze
-    // refuses the rig); a skin's packet travels whole.
+    // refuses the rig).
     if (revision.op == RigExecRevisionOp::External) {
         return false;
     }
-    const bool fromLeaves = revision.leaves.decl.assembles &&
-                            revision.op != RigExecRevisionOp::Skin;
+    const bool fromLeaves = revision.leaves.decl.assembles;
     // One overlay per revision that declares phases: the worker's resolved
     // inputs plus whatever the phases' bindings resolve to over the
     // worker's own chains -- the overlay AssembleRevision builds, by the
@@ -301,20 +283,6 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         revision.parameters = RigExecBakedAssembleFromLeaves(
             &B, &revision, chain.lastBase.cdata(), chain.lastBase.size(),
             &step->diagnostics);
-    } else if (revision.op == RigExecRevisionOp::Skin) {
-        if (size_t(step->object) >= inputs.revisionPackets.size()) {
-            return false;
-        }
-        revision.parameters = inputs.revisionPackets[size_t(step->object)];
-        // Transported skin packets are assembled envelopeless; a bound
-        // weight object overrides with its packet, as the live assemble
-        // does. Envelopeless skins keep the transported packet untouched.
-        if (revision.weightObject >= 0) {
-            if (!_FrozenCommonEnvelope(B, revision, revision.defaultWeight,
-                                       &revision.parameters)) {
-                revision.parameters.valid = false;
-            }
-        }
     } else {
         return false;
     }

@@ -384,6 +384,11 @@ TestAnInputsMethodEditOnASkinMover(RigExecEvaluationMode mode)
     RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode::Default());
     const VtVec3fArray linear = Deformed(pose, kSkinTarget);
     CHECK(linear.size() == kSkinPoints);
+    // The bake refuses a connected rigExec:skinningMethod, so every mode
+    // evaluates this rig through the dynamic walk, whose layouts the cache
+    // holds. The baked program's own layout handles are
+    // testRigExecSkinTopology --baked's.
+    CHECK(evaluator->GetBakedProgram() == nullptr);
     CHECK(evaluator->GetSkinTopologyCacheSize() > 0);
 
     // The mesh the layout deforms, and the mover's own envelope: neither is

@@ -197,7 +197,7 @@ void RigExecComparePoses(const RigExecRigPose &reference,
 /// SampleStageFrameSeeds and the seeds travel with the job, parallel to
 /// xformSlots, nativeSources, and deltaBasePaths. Fresh stage data, not a
 /// pure function of the sampled attribute values, so the control-state
-/// digest folds it -- unlike the revision packets and the other transports.
+/// digest folds it -- unlike the layout leaves and the other transports.
 struct RigExecStageFrameSeeds {
     /// Per xformSlots entry: the relative transform and the frame, the
     /// pose's two currencies of the same seed. Sampling declines rather

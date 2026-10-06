@@ -3646,8 +3646,11 @@ RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &B,
     }
     // The property revisions run in a pass of their own, before the
     // chain-routed leaves are sampled and the rest and ladder ops run
-    // (RigExecBakedRunRestTier), so no rest or ladder op may precede one.
+    // (RigExecBakedRunRestTier), so no rest or ladder op may precede one;
+    // the skin layouts run last (RigExecBakedRunLayoutTier), so none may
+    // precede either.
     const RigExecBakedHeadStep *restSeen = nullptr;
+    const RigExecBakedHeadStep *layoutSeen = nullptr;
     for (size_t p = 0; p < B.headOrder.size(); ++p) {
         const uint32_t index = B.headOrder[p];
         if (index >= B.headSteps.size()) {
@@ -3656,6 +3659,13 @@ RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &B,
             continue;
         }
         const RigExecBakedHeadStep &step = B.headSteps[index];
+        if (step.kind == RigExecBakedHeadKind::SkinTopology) {
+            layoutSeen = layoutSeen ? layoutSeen : &step;
+        } else if (layoutSeen) {
+            add("head step " + step.label + " is ordered after " +
+                layoutSeen->label + ", which runs after every other head "
+                "step");
+        }
         if (step.kind == RigExecBakedHeadKind::RestCompose ||
             step.kind == RigExecBakedHeadKind::LadderCompose) {
             restSeen = restSeen ? restSeen : &step;

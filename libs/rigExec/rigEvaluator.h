@@ -481,7 +481,8 @@ public:
     std::vector<RigExecOpGraphNode> GetOpGraph() const;
 
     /// How many skin layouts the epoch's topology cache is holding answers
-    /// for.
+    /// for. The cache is the dynamic walk's; a baked program builds its
+    /// layouts in its SkinTopology ops and never fills it.
     ///
     /// The other thing about an interactive generation that a published pose
     /// cannot show: dropping the layouts and re-reading them publishes

@@ -1717,59 +1717,80 @@ RigExecResolveSkinTopology(
             // packet back on the per-frame arrays, which is what Compile
             // would have done had the sample been there. Costs one answer per
             // notice.
-            for (const TfToken &name : {_attrTokens->jointIndices,
-                                        _attrTokens->jointWeights,
-                                        _attrTokens->elementSize}) {
-                const UsdAttribute a = moverPrim.GetAttribute(name);
-                if (a && (a.ValueMightBeTimeVarying() ||
-                          a.HasAuthoredConnections())) {
-                    return false;
-                }
+            if (!RigExecSkinLayoutIsFixed(moverPrim)) {
+                return false;
             }
             // This build fills the epoch cache (a varying layout is
             // refused above), so these reads are epoch state the file's
             // skin topology carries.
-            topology->indices =
+            const std::vector<int> indices =
                 _Array<int>(moverPrim, indicesPath, time, resolved);
-            topology->weights =
+            const std::vector<float> weights =
                 _Array<float>(moverPrim, weightsPath, time, resolved);
-            topology->elementSize = 1;
+            int elementSize = 1;
             if (const UsdAttribute a =
                     moverPrim.GetAttribute(_attrTokens->elementSize)) {
                 if (!resolved ||
-                    !resolved->GetAttribute(a, time, &topology->elementSize)) {
-                    a.Get(&topology->elementSize, time);
+                    !resolved->GetAttribute(a, time, &elementSize)) {
+                    a.Get(&elementSize, time);
                 }
             }
-            topology->influenceCount = influenceCount;
-            if (topology->elementSize < 1 ||
-                topology->weights.size() != topology->indices.size() ||
-                topology->indices.size() %
-                        size_t(topology->elementSize) != 0) {
-                return true;
-            }
-            topology->pointCount =
-                topology->indices.size() / size_t(topology->elementSize);
-            // Exactly RigExecSkinLayout::Validate's shape, range and weight
-            // rules, against a table whose SIZE is epoch state. The matrices
-            // themselves are checked every frame by the caller.
-            if (topology->influenceCount == 0) {
-                return true;
-            }
-            for (size_t i = 0; i < topology->indices.size(); ++i) {
-                const int index = topology->indices[i];
-                if (index < 0 ||
-                    size_t(index) >= topology->influenceCount) {
-                    return true;
-                }
-                const float weight = topology->weights[i];
-                if (!std::isfinite(weight) || weight < 0.0f) {
-                    return true;
-                }
-            }
-            topology->validated = true;
+            RigExecBuildSkinTopology(indices, weights, elementSize,
+                                     influenceCount, topology);
             return true;
         });
+}
+
+bool
+RigExecSkinLayoutIsFixed(const UsdPrim &moverPrim)
+{
+    if (!moverPrim) {
+        return false;
+    }
+    for (const TfToken &name : {_attrTokens->jointIndices,
+                                _attrTokens->jointWeights,
+                                _attrTokens->elementSize}) {
+        const UsdAttribute a = moverPrim.GetAttribute(name);
+        if (a && (a.ValueMightBeTimeVarying() || a.HasAuthoredConnections())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void
+RigExecBuildSkinTopology(TfSpan<const int> indices,
+                         TfSpan<const float> weights, int elementSize,
+                         size_t influenceCount, RigExecSkinTopology *topology)
+{
+    topology->indices.assign(indices.begin(), indices.end());
+    topology->weights.assign(weights.begin(), weights.end());
+    topology->elementSize = elementSize;
+    topology->influenceCount = influenceCount;
+    if (topology->elementSize < 1 ||
+        topology->weights.size() != topology->indices.size() ||
+        topology->indices.size() % size_t(topology->elementSize) != 0) {
+        return;
+    }
+    topology->pointCount =
+        topology->indices.size() / size_t(topology->elementSize);
+    // Exactly RigExecSkinLayout::Validate's shape, range and weight rules,
+    // against a table whose SIZE is epoch state. The matrices themselves are
+    // checked every frame by the caller.
+    if (topology->influenceCount == 0) {
+        return;
+    }
+    for (size_t i = 0; i < topology->indices.size(); ++i) {
+        const int index = topology->indices[i];
+        if (index < 0 || size_t(index) >= topology->influenceCount) {
+            return;
+        }
+        const float weight = topology->weights[i];
+        if (!std::isfinite(weight) || weight < 0.0f) {
+            return;
+        }
+    }
+    topology->validated = true;
 }
 
 RigExecMoverParameters
@@ -2723,6 +2744,26 @@ RigExecDeclareRevisionLeaves(RigExecRevisionOp op, const SdfPath &moverPath,
         }
         break;
     }
+}
+
+void
+RigExecDeclareSkinLayoutLeaves(const SdfPath &moverPath,
+                               RigExecRevisionLeafDecl *decl)
+{
+    using Role = RigExecRevisionLeafRole;
+    using Type = RigExecRevisionLeafType;
+    using Time = RigExecRevisionLeafTime;
+    using Flavour = RigExecRevisionLeafFlavour;
+    decl->roles[size_t(Role::JointIndices)] = decl->Add(
+        {moverPath.AppendProperty(_attrTokens->jointIndices), Type::IntArray,
+         Time::AtTime, Flavour::OverlayThenRaw, VtValue(VtIntArray())});
+    decl->roles[size_t(Role::JointWeights)] = decl->Add(
+        {moverPath.AppendProperty(_attrTokens->jointWeights),
+         Type::FloatArray, Time::AtTime, Flavour::OverlayThenRaw,
+         VtValue(VtFloatArray())});
+    decl->roles[size_t(Role::ElementSize)] = decl->Add(
+        {moverPath.AppendProperty(_attrTokens->elementSize), Type::Int,
+         Time::AtTime, Flavour::Resolved, VtValue(1)});
 }
 
 namespace {

@@ -412,8 +412,7 @@ main(int argc, char **argv)
                     "%zu bytes; unresolved: %zu values %zu bytes\n",
                     staticCount, staticBytes, varyingCount, varyingBytes,
                     unresolvedCount, unresolvedBytes);
-        std::printf("  revisionPackets: %zu\n",
-                    sampled.revisionPackets.size());
+        std::printf("  layoutLeaves: %zu\n", sampled.layoutLeaves.size());
     }
 
     // The mouse-up simulation: an edit plus the release flush's commit, at

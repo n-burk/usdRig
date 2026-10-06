@@ -40,13 +40,12 @@
 //    RevisionStatic/Derived) are pure functions of program slots plus the
 //    shared kernels. RevisionStatic and Derived read the program's own
 //    leaves (and an external mover's plugin, which freeze refuses), so the
-//    frozen run does NOT call them: a skin packet is assembled on the UI
-//    thread by the REAL RigExecAssembleSkinParameters and travels with the
-//    job, every other revision and every derived target is assembled by the
-//    live RigExecBakedAssembleFromLeaves and RigExecBakedRunProjectorTarget
-//    from the job's leaves, and the small pure remainder of each body is
-//    replicated line-for-line (frozenGeometry.cpp: _FrozenRevisionStatic,
-//    _FrozenDerived).
+//    frozen run does NOT call them: every revision and every derived target
+//    is assembled by the live RigExecBakedAssembleFromLeaves and
+//    RigExecBakedRunProjectorTarget from the job's leaves, a skin with the
+//    layout handle its SkinTopology op built from the job's layout leaves,
+//    and the small pure remainder of each body is replicated line-for-line
+//    (frozenGeometry.cpp: _FrozenRevisionStatic, _FrozenDerived).
 //  * RigExecBakedComputeClosure (bakedSchedule.cpp:1223) and
 //    RigExecBakedSkipGeometryStep are pure program-state functions and run
 //    unmodified. The region loop itself is a serial reimplementation of
@@ -73,7 +72,10 @@
 //    are found by (prim, attribute), building no path. The worker passes
 //    no cone verifier and a disabled profiler. The rest and ladder ops
 //    (RigExecBakedRunRestTier) run after the leaf sample, from the ladder
-//    leaves and the Rest and Ladder tables of the clone only.
+//    leaves and the Rest and Ladder tables of the clone only. The
+//    SkinTopology ops (RigExecBakedRunLayoutTier) run from the job's layout
+//    leaves, written over the clone's, so an unmoved layout keeps live's
+//    handle.
 //  * Shared kernels (skin, derived, solvers, constraints) are pure per-point
 //    math over worker-owned buffers, and their five WorkParallelForN launch
 //    sites in moverGraph.cpp (the blend-channel sum among them, which the
@@ -641,11 +643,43 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             derived.lastBase = derivedBase;
         }
     }
-    // The topology resolve, after the bases (it reads the point count):
-    // the transported packet's layout, with the prologue's re-cut rule.
-    if (inputs.revisionPackets.size() != B.revisionIndex.size()) {
+    // The SkinTopology ops, from the job's layout leaves written over the
+    // clone's (rule 2: a job re-reads every leaf, and `changed` says which
+    // differ from live's last sample). The job and the clone must agree on
+    // which layouts are fixed, since the job carries leaves for those alone.
+    const size_t layouts = B.revisionIndex.size() + B.derivedIndex.size();
+    if (inputs.layoutLeaves.size() != layouts) {
         return false;
     }
+    for (size_t r = 0; r < layouts; ++r) {
+        RigExecBakedProgramImpl::GeomRevision &revision =
+            *RigExecBakedLayoutRevision(&B, r);
+        if (!revision.skinTopologyFixed) {
+            continue;
+        }
+        const std::vector<VtValue> &values = inputs.layoutLeaves[r];
+        RigExecBakedPathLeaves &leaves = revision.layoutLeaves;
+        revision.layoutFixedChanged = false;
+        std::fill(leaves.changed.begin(), leaves.changed.end(), 0);
+        if (values.empty() == revision.layoutFixed) {
+            return false;
+        }
+        if (!revision.layoutFixed) {
+            continue;
+        }
+        if (values.size() != leaves.values.size() ||
+            values.size() != leaves.changed.size()) {
+            return false;
+        }
+        for (size_t k = 0; k < values.size(); ++k) {
+            leaves.changed[k] = values[k] == leaves.values[k] ? 0 : 1;
+            leaves.values[k] = values[k];
+        }
+    }
+    RigExecBakedRunLayoutTier(&B, time, pose, /*force=*/false,
+                              /*sample=*/false, /*verify=*/false);
+    // The prologue's adoption, after the bases: every fixed revision takes
+    // its op's handle, with the prologue's re-cut rule.
     for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
         const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
         RigExecBakedProgramImpl::GeomRevision &revision =
@@ -653,7 +687,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         if (!revision.skinTopologyFixed) {
             continue;
         }
-        revision.topology = inputs.revisionPackets[r].skinTopology;
+        revision.topology = revision.layoutHandle;
         revision.topologyResolved = true;
         if (!revision.chunked ||
             revision.topology == revision.partitionTopology) {
@@ -681,8 +715,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
         RigExecBakedProgramImpl::GeomRevision &revision =
             B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
-        if (!revision.leaves.decl.assembles ||
-            revision.op == RigExecRevisionOp::Skin) {
+        if (!revision.leaves.decl.assembles) {
             continue;
         }
         const std::vector<VtValue> &values = inputs.revisionLeaves[r];

@@ -21,6 +21,7 @@
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
 
+#include "pxr/base/tf/span.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/base/gf/vec3f.h"
@@ -704,19 +705,35 @@ private:
 
 /// The epoch-fixed skin layout of \p moverPrim, through \p cache.
 ///
-/// The one call a frame makes that takes a lock (RigExecSkinTopologyCache's,
-/// held across the build). Exposed so a caller that must not take a lock
-/// where it assembles -- the baked program, whose step bodies may not
-/// synchronise at all -- can resolve every layout up front and hand the
-/// answer to the assembler through RigExecProviderValues::skinTopology. A
-/// null return is the cache's remembered REFUSAL: the layout can move within
-/// the epoch, so the packet must read the arrays per frame.
+/// The one call a dynamic frame makes that takes a lock
+/// (RigExecSkinTopologyCache's, held across the build). A null return is the
+/// cache's remembered REFUSAL: the layout can move within the epoch, so the
+/// packet must read the arrays per frame. The baked program and its frozen
+/// jobs never call it: their SkinTopology head op builds the same layout
+/// from sampled leaves through RigExecBuildSkinTopology.
 std::shared_ptr<const RigExecSkinTopology> RigExecResolveSkinTopology(
     const UsdPrim &moverPrim,
     size_t influenceCount,
     UsdTimeCode time,
     const RigExecResolvedInputs *resolved,
     RigExecSkinTopologyCache *cache);
+
+/// Whether \p moverPrim's skin layout is epoch state: none of
+/// rigExec:jointIndices, rigExec:jointWeights and rigExec:elementSize might
+/// vary with time or has an authored connection. The question
+/// RigExecResolveSkinTopology asks wherever the cache is refilled. Reads the
+/// stage: owning thread only.
+bool RigExecSkinLayoutIsFixed(const UsdPrim &moverPrim);
+
+/// Fills \p topology from a skin layout's arrays and element size against an
+/// influence table of \p influenceCount entries: the copies, then the shape,
+/// index range and weight checks of RigExecSkinLayout::Validate, which set
+/// `pointCount` and `validated` only as far as they pass. The influence
+/// matrices are the caller's to check per frame. Pure: no stage, no lock.
+void RigExecBuildSkinTopology(TfSpan<const int> indices,
+                              TfSpan<const float> weights, int elementSize,
+                              size_t influenceCount,
+                              RigExecSkinTopology *topology);
 /// Per-epoch blend sample shapes, keyed by the sample prim that owns them.
 ///
 /// Peer of RigExecSkinTopologyCache, and there for the same reason, but the
@@ -1698,6 +1715,14 @@ void RigExecDeclareRevisionLeaves(RigExecRevisionOp op,
                                   const SdfPath &moverPath,
                                   const RigExecRevisionBinding &binding,
                                   RigExecRevisionLeafDecl *decl);
+
+/// Declares the three reads of the skin mover at \p moverPath's layout, as
+/// RigExecResolveSkinTopology makes them: rigExec:jointIndices and
+/// rigExec:jointWeights through the overlay at their exact paths then raw,
+/// and rigExec:elementSize resolved then raw, over 1 (roles JointIndices,
+/// JointWeights and ElementSize). `assembles` stays false. Stage-free.
+void RigExecDeclareSkinLayoutLeaves(const SdfPath &moverPath,
+                                    RigExecRevisionLeafDecl *decl);
 
 /// The value \p key's read site answers at \p time (Default for an
 /// AtDefault key) through \p resolved, or the key's fallback when it finds

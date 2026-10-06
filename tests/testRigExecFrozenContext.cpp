@@ -358,11 +358,18 @@ TestSamplerMatchesLiveReads()
     CHECK(moverWeight->Get<float>() == stageWeight);
     CHECK(moverEnabled->Get<bool>() == stageEnabled);
     CHECK(moverMethod->Get<TfToken>() == stageMethod);
-    // And the assembled skin packet travels beside the values (one chain
-    // revision), excluded from the digest as derived.
-    CHECK(inputs.revisionPackets.size() == 1);
-    CHECK(inputs.revisionPackets[0].valid);
-    CHECK(inputs.revisionPackets[0].kind == TfToken("skin"));
+    // And the skin's layout leaves travel beside the values (one chain
+    // revision), excluded from the digest; its assembly leaves leave the
+    // three layout reads empty, which the handle answers on the worker.
+    CHECK(inputs.layoutLeaves.size() == 1);
+    CHECK(inputs.layoutLeaves[0].size() == 3);
+    if (inputs.layoutLeaves[0].size() == 3) {
+        CHECK(inputs.layoutLeaves[0][0].IsHolding<VtIntArray>());
+        CHECK(inputs.layoutLeaves[0][1].IsHolding<VtFloatArray>());
+        CHECK(inputs.layoutLeaves[0][2].IsHolding<int>());
+    }
+    CHECK(inputs.revisionLeaves.size() == 1);
+    CHECK(!inputs.revisionLeaves[0].empty());
     CHECK(inputs.overrides.empty());
 }
 
@@ -4663,6 +4670,15 @@ static constexpr size_t k9MeshCount = 9;
 static constexpr size_t k9MeshPointCount =
     RigExecGeometryParallelThreshold + 37;
 
+// The skin layouts a sampled vector carries leaves for.
+static size_t
+SkinLayouts(const RigExecFrameInputs &inputs)
+{
+    return size_t(std::count_if(
+        inputs.layoutLeaves.begin(), inputs.layoutLeaves.end(),
+        [](const std::vector<VtValue> &leaves) { return !leaves.empty(); }));
+}
+
 UsdStageRefPtr
 MakeAnimated9MeshRig()
 {
@@ -4793,9 +4809,9 @@ Test9MeshWarmsBitIdentical()
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
                                    &at3, &error));
     CHECK(!at3.HasChainResolvedInputs());
-    std::printf("9mesh sampled inputs: %zu values, %zu revision packets\n",
-                at3.values.size(), at3.revisionPackets.size());
-    CHECK(at3.revisionPackets.size() == k9MeshCount);
+    std::printf("9mesh sampled inputs: %zu values, %zu skin layouts\n",
+                at3.values.size(), SkinLayouts(at3));
+    CHECK(SkinLayouts(at3) == k9MeshCount);
     const RigExecRigPose warmed3 =
         RunWarmingJob(&evaluator, rig, frozen, at3, &scheduler, nullptr);
     const RigExecRigPose live3 = evaluator.Evaluate(UsdTimeCode(3.0));
@@ -4881,7 +4897,7 @@ Check9MeshWarmsBitIdenticalAt(double frame)
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame), noOverrides,
                                    &probed, &error));
     CHECK(!probed.HasChainResolvedInputs());
-    CHECK(probed.revisionPackets.size() == k9MeshCount);
+    CHECK(SkinLayouts(probed) == k9MeshCount);
     const RigExecRigPose warmed = RunWarmingJob(
         &evaluator, rig, frozen, probed, &scheduler, nullptr);
     const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));

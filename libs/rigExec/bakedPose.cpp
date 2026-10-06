@@ -2674,9 +2674,9 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
         }
     }
     // The path leaves after them, in program order: chain revisions and
-    // derived targets chain by chain, then weight objects. Each is filed
-    // under every path its read can reach, so a value edit there or on its
-    // routed prim marks it (ApplyValueEdits).
+    // derived targets chain by chain, then weight objects, then the skin
+    // layouts. Each is filed under every path its read can reach, so a value
+    // edit there or on its routed prim marks it (ApplyValueEdits).
     B.pathLeafRefs.clear();
     const auto number = [&B](const RigExecBakedPathLeaves &leaves,
                              RigExecBakedPathLeafRef ref) {
@@ -2708,6 +2708,20 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
     for (size_t w = 0; w < B.weightObjects.size(); ++w) {
         number(B.weightObjects[w].pointLeaves,
                {RigExecBakedPathLeafOwner::Weight, uint32_t(w), 0, 0});
+    }
+    // The SkinTopology ops' layout leaves, chain by chain.
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            number(chain.revisions[r].layoutLeaves,
+                   {RigExecBakedPathLeafOwner::RevisionLayout, uint32_t(c),
+                    uint32_t(r), 0});
+        }
+        for (size_t d = 0; d < chain.derived.size(); ++d) {
+            number(chain.derived[d].revision.layoutLeaves,
+                   {RigExecBakedPathLeafOwner::DerivedLayout, uint32_t(c),
+                    uint32_t(d), 0});
+        }
     }
     // The head leaves after those, each under its own path: a head leaf
     // reads one attribute and follows no connection.

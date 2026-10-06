@@ -606,33 +606,43 @@ _SampleRevisionLeaf(const RigExecBakedPathLeaves &leaves, size_t k,
                                      leaves.attributes[k], refreshed, time);
 }
 
-// The path leaves of every chain revision the worker assembles from leaves
-// (every covered operation but a skin, whose packet travels whole), and of
-// every derived target, read by the live prologue's own reads through the
-// refreshed inputs at the job's time: the worker assembles from these as the
-// live RevisionStatic and Derived steps do from their prologue's. Parallel
-// to revisionIndex and derivedIndex; empty for the rest.
+// The path leaves of every chain revision the worker assembles from leaves,
+// and of every derived target, read by the live prologue's own reads through
+// the refreshed inputs at the job's time: the worker assembles from these as
+// the live RevisionStatic and Derived steps do from their prologue's.
+// Parallel to revisionIndex and derivedIndex; empty for the rest. A skin
+// whose layout live holds as fixed leaves its three layout reads empty, as
+// the live prologue skips them: the packet carries the handle instead.
 void
 _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                       const RigExecResolvedInputs *refreshed, UsdTimeCode time,
                       RigExecFrameInputs *sampled)
 {
+    using Role = RigExecRevisionLeafRole;
     sampled->revisionLeaves.assign(B.revisionIndex.size(),
                                    std::vector<VtValue>());
     for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
         const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
-        const RigExecBakedPathLeaves &leaves =
-            B.chains[size_t(chainIndex)]
-                .revisions[size_t(revisionIndex)]
-                .leaves;
-        if (!leaves.decl.assembles ||
-            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)].op ==
-                RigExecRevisionOp::Skin) {
+        const RigExecBakedProgramImpl::GeomRevision &revision =
+            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
+        const RigExecBakedPathLeaves &leaves = revision.leaves;
+        if (!leaves.decl.assembles) {
             continue;
         }
+        const bool heldLayout = revision.op == RigExecRevisionOp::Skin &&
+                                revision.skinTopologyFixed &&
+                                revision.layoutFixed;
         std::vector<VtValue> &values = sampled->revisionLeaves[r];
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
+            const int key = int(k);
+            if (heldLayout &&
+                (key == leaves.decl.Role(Role::JointIndices) ||
+                 key == leaves.decl.Role(Role::JointWeights) ||
+                 key == leaves.decl.Role(Role::ElementSize))) {
+                values.push_back(VtValue());
+                continue;
+            }
             values.push_back(_SampleRevisionLeaf(leaves, k, refreshed, time));
         }
     }
@@ -652,6 +662,49 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
             values.push_back(_SampleRevisionLeaf(leaves, k, refreshed, time));
+        }
+    }
+}
+
+// The layout leaves of every SkinTopology op whose layout live holds as
+// fixed, parallel to RigExecBakedLayoutRevision's index and empty for the
+// rest: read by the live sampler's reads through the refreshed inputs, or
+// live's own sample, shared, where nothing that can move it differs -- no
+// value edit or stamp move pending, and the same overlay entry at each path.
+// A fixed layout reads the same at every time.
+void
+_SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
+                    const RigExecResolvedInputs *refreshed, UsdTimeCode time,
+                    RigExecFrameInputs *sampled)
+{
+    const size_t count = B.revisionIndex.size() + B.derivedIndex.size();
+    sampled->layoutLeaves.assign(count, std::vector<VtValue>());
+    for (size_t r = 0; r < count; ++r) {
+        const RigExecBakedProgramImpl::GeomRevision *revision =
+            RigExecBakedLayoutRevision(B, r);
+        if (!revision->skinTopologyFixed || !revision->layoutFixed) {
+            continue;
+        }
+        const RigExecBakedPathLeaves &leaves = revision->layoutLeaves;
+        const size_t n = leaves.decl.keys.size();
+        bool reuse = leaves.sampled && leaves.stamp == B.programStamp;
+        for (size_t k = 0; reuse && k < n; ++k) {
+            const VtValue *entry =
+                refreshed ? refreshed->Find(leaves.decl.keys[k].path)
+                          : nullptr;
+            reuse = !leaves.mustSample[k] &&
+                    (entry ? revision->layoutOverlay[k] == *entry
+                           : revision->layoutOverlay[k].IsEmpty());
+        }
+        std::vector<VtValue> &values = sampled->layoutLeaves[r];
+        if (reuse) {
+            values = leaves.values;
+            continue;
+        }
+        values.reserve(n);
+        for (size_t k = 0; k < n; ++k) {
+            values.push_back(RigExecSampleRevisionLeaf(
+                leaves.decl.keys[k], leaves.attributes[k], refreshed, time));
         }
     }
 }
@@ -1497,9 +1550,9 @@ _SampleWithPinnedChainBindings(
     // Mover scalars the packet assembly reads per frame (enabled,
     // defaultWeight, skinningMethod), keyed by mover path, plus the derived
     // topology arrays (counts, indices, extent widths), keyed by binding
-    // path. The worker assembles every revision but a skin (whose packet
-    // travels below), and every derived target, from leaves
-    // (revisionLeaves, derivedLeaves); the samples of the same reads are
+    // path. The worker assembles every revision and every derived target
+    // from leaves (revisionLeaves, derivedLeaves, and a skin's layout from
+    // layoutLeaves); the samples of the same reads are
     // what the digest folds for them. RevisionStatic still reads each
     // revision's defaultWeight sample.
     for (const auto &[chainIndex, revisionIndex] : B.revisionIndex) {
@@ -1613,34 +1666,9 @@ _SampleWithPinnedChainBindings(
                                    &sampled);
         }
     }
-    // Skin packets, assembled here by the real assembler: the worker cannot
-    // call it (mover prim and live topology cache), so the packet travels
-    // with the job. Parallel to revisionIndex; non-skin revisions keep a
-    // default packet the worker ignores (it assembles derived packets
-    // itself from the region's points plus the sampled topology above).
-    sampled.revisionPackets.resize(B.revisionIndex.size());
-    for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
-        const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
-        const RigExecBakedProgramImpl::GeomRevision &revision =
-            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
-        if (revision.op != RigExecRevisionOp::Skin) {
-            continue;
-        }
-        // The prologue's resolveTopology, through the refreshed inputs: the
-        // same cache, the same call, the same pointer for an unmoved layout.
-        // No read here is one a chain or record can answer: the freeze
-        // refuses such a skin.
-        std::shared_ptr<const RigExecSkinTopology> topology;
-        if (revision.skinTopologyFixed) {
-            topology = RigExecResolveSkinTopology(
-                revision.moverPrim, revision.influenceSlots.size(), time,
-                &refreshed, B.skinTopologies);
-        }
-        sampled.revisionPackets[r] = RigExecAssembleSkinParameters(
-            revision.moverPrim, &revision.packetInfluences,
-            /*weights=*/nullptr, time, &refreshed, B.skinTopologies,
-            topology ? &topology : nullptr);
-    }
+    // The skin layouts the worker's SkinTopology ops build from, then every
+    // revision's assembly reads.
+    _SampleLayoutLeaves(B, &refreshed, time, &sampled);
     _SampleRevisionLeaves(B, &refreshed, time, &sampled);
     {
         std::string layoutError;
@@ -2095,25 +2123,7 @@ RigExecSampleFrameInputsWithBurstCache(
                                    &sampled);
         }
     }
-    sampled.revisionPackets.resize(B.revisionIndex.size());
-    for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
-        const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
-        const RigExecBakedProgramImpl::GeomRevision &revision =
-            B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
-        if (revision.op != RigExecRevisionOp::Skin) {
-            continue;
-        }
-        std::shared_ptr<const RigExecSkinTopology> topology;
-        if (revision.skinTopologyFixed) {
-            topology = RigExecResolveSkinTopology(
-                revision.moverPrim, revision.influenceSlots.size(), time,
-                &refreshed, B.skinTopologies);
-        }
-        sampled.revisionPackets[r] = RigExecAssembleSkinParameters(
-            revision.moverPrim, &revision.packetInfluences,
-            /*weights=*/nullptr, time, &refreshed, B.skinTopologies,
-            topology ? &topology : nullptr);
-    }
+    _SampleLayoutLeaves(B, &refreshed, time, &sampled);
     _SampleRevisionLeaves(B, &refreshed, time, &sampled);
     {
         std::string layoutError;
