@@ -201,9 +201,9 @@ their step, and `final` readers, like every other reader of the property,
 the chain's result. A clamped `blink` authored at 0.2 and dragged to 1.4
 reads 1.4 at its base and 1.0 at `final`, during the drag and after it is
 released. A drag that is not finite skips the chain, as an authored one
-does, and readers see the dragged value. The `.rigexec` runtime's `SetAvar`
-drags an avar the same way, an avar math movers revise included, and takes
-finite values only. One gap remains for now: a plugin mover applies the
+does, and readers see the dragged value. The `.rigexec` runtime's `SetInput`
+sets an avar the same way, as its authored value, an avar math movers revise
+included, and takes finite values only. One gap remains for now: a plugin mover applies the
 payload its bake assembled for the frame, so a drag that reaches an input
 the plugin reads does not move that mover's output.
 [Example 16](../../examples/16_ConnectionReadPhases.usda) reads one dial

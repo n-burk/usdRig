@@ -39,7 +39,7 @@ playback does not depend on frame history. Wrinkle uses revision opcode 15;
 earlier readers reject files containing that opcode. Existing revision ordinals
 and binary records retain their meaning.
 
-Plugin movers use revision opcode 16 and the ExternalMovers section. The
+Plugin movers use revision opcode 16 and the file's `external_movers` table. The
 runtime stores their bytes and calls the kernel a host installs with
 `SetExternalKernel` (see `rigExecBinary/external.h` and
 [External mover plugins](../../docs/concepts/external-movers.md)). A type with
