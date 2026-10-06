@@ -230,9 +230,9 @@ public:
     /// A null \p runner builds the production runner (see OnEditCommitted).
     /// Empty work when no faithful job exists: unknown or playback rig,
     /// default or non-finite time, stale generation, refusal rig (D7: no
-    /// background job, ever), unsampleable inputs, a chain the sampling
-    /// hook declined (no job is ever built from stale chain values), or an
-    /// undigestible held type. A built job also records its time's
+    /// background job, ever), unsampleable inputs, a vector carrying a stale
+    /// sample (no job is ever built from stale values), or an undigestible
+    /// held type. A built job also records its time's
     /// freshness proof, so a completion is servable without a live visit.
     /// The scheduler triggers build their factories from this; tests drive
     /// it directly for deterministic fence coverage.

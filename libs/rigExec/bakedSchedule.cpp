@@ -2052,6 +2052,21 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             break;
         }
     }
+    // The steps a moved property version or a moved reader walk reaches.
+    cones.headReaders.assign(B.propertyVersionCount, {});
+    cones.walkReaders.assign(B.readerWalks.size(), {});
+    for (const RigExecBakedStep &step : B.steps) {
+        const int index = int(&step - B.steps.data());
+        for (const RigExecBakedHeadRange &range : step.headReads) {
+            for (uint32_t id = range.begin;
+                 id < range.end && id < cones.headReaders.size(); ++id) {
+                cones.headReaders[id].push_back(index);
+            }
+        }
+        for (const int walk : step.readerWalks) {
+            cones.walkReaders[size_t(walk)].push_back(index);
+        }
+    }
     // Which constraint steps a native source's stage transform reaches, and
     // which one each geometry-domain delta base reaches.
     cones.nativeSourceClusters.assign(B.nativeSources.size(), {});
@@ -2182,16 +2197,6 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // that persist across runs like every other slot. The first run of a
     // program is NOT one of them either -- it has its own dirty set below.
     bool full = force || B.programStamp != B.lastProgramStamp;
-    // A chain's result reaches a step through the generation's resolved
-    // inputs, which no slot names, so every step that reads one has to run
-    // when a result moved. That is the steps flagged as reading resolved
-    // inputs, and the providers whose avars a chain writes -- which the
-    // steady state below already catches by comparing every avar by value.
-    // Running the whole program instead made every drag of a chain-driven
-    // control (a lid, a foot roll) cost a full evaluation.
-    const bool chainResultsMoved = !full && B.everRan &&
-                                   B.hasPropertyChains &&
-                                   B.propertyResults != B.lastPropertyResults;
     if (full) {
         // Everything; the closure below is not consulted.
     } else if (!B.everRan) {
@@ -2399,10 +2404,34 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
             for (const int index : cones.varyingSteps) {
                 dirty.Set(index);
             }
-        } else if (chainResultsMoved) {
-            for (const int index : cones.varyingSteps) {
-                if (B.steps[size_t(index)].resolvedInputReads) {
-                    dirty.Set(index);
+        }
+        // A property version that moved this run, by its declared readers;
+        // the providers whose avars a chain writes are caught by the avar
+        // comparison above. And a reader walk whose value moved, by the
+        // steps that read it: a hop's override or stage value can move it
+        // with no version moving.
+        if (B.hasPropertyChains) {
+            const size_t versions =
+                std::min(B.propertyChanged.size(), cones.headReaders.size());
+            for (size_t id = 0; id < versions; ++id) {
+                if (!B.propertyChanged[id]) {
+                    continue;
+                }
+                for (const int index : cones.headReaders[id]) {
+                    if (!RigExecBakedReadIsShadowed(
+                            B, B.steps[size_t(index)].shadowedReads,
+                            uint32_t(id))) {
+                        dirty.Set(index);
+                    }
+                }
+            }
+            const size_t walks = std::min(B.readerWalkChanged.size(),
+                                          cones.walkReaders.size());
+            for (size_t w = 0; w < walks; ++w) {
+                if (B.readerWalkChanged[w]) {
+                    for (const int index : cones.walkReaders[w]) {
+                        dirty.Set(index);
+                    }
                 }
             }
         }
@@ -3314,6 +3343,16 @@ RigExecBakedScheduleReport(const RigExecBakedProgramImpl &B)
         out += "\n";
         AppendRanges(&out, "reads ", step.reads);
         AppendRanges(&out, "writes", step.writes);
+        if (!step.headReads.empty()) {
+            out += "        head  ";
+            for (const RigExecBakedHeadRange &range : step.headReads) {
+                out += std::string(" ") +
+                       RigExecBakedHeadDomainName(range.domain) + "[" +
+                       std::to_string(range.begin) + "," +
+                       std::to_string(range.end) + ")";
+            }
+            out += "\n";
+        }
         out += "        preds ";
         if (step.preds.empty()) {
             out += "-";
@@ -3653,6 +3692,100 @@ RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &B,
     if (B.headOrder.size() != B.headSteps.size()) {
         add("the head order holds " + std::to_string(B.headOrder.size()) +
             " of " + std::to_string(B.headSteps.size()) + " head step(s)");
+    }
+    if (count == 0) {
+        return true;
+    }
+    if (error) {
+        *error = first;
+        if (count > 1) {
+            *error += " (and " + std::to_string(count - 1) + " more)";
+        }
+    }
+    return false;
+}
+
+bool
+RigExecBakedValidateHeadReads(const RigExecBakedProgramImpl &B,
+                              std::string *error)
+{
+    size_t count = 0;
+    std::string first;
+    const auto add = [&](const std::string &violation) {
+        if (count++ == 0) {
+            first = violation;
+        }
+    };
+    const auto writers = HeadWriters(B, nullptr);
+    const std::vector<int> &versionWriters =
+        writers[size_t(RigExecBakedHeadDomain::PropertyVersion)];
+    const auto produced = [&versionWriters](uint32_t id) {
+        return id < versionWriters.size() && versionWriters[id] >= 0;
+    };
+    for (const RigExecBakedStep &step : B.steps) {
+        const auto declares = [&step](uint32_t id) {
+            for (const RigExecBakedHeadRange &range : step.headReads) {
+                if (range.domain == RigExecBakedHeadDomain::PropertyVersion &&
+                    range.begin <= id && id < range.end) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const RigExecBakedHeadRange &range : step.headReads) {
+            if (range.domain != RigExecBakedHeadDomain::PropertyVersion) {
+                add("step " + step.label + " reads the head domain " +
+                    RigExecBakedHeadDomainName(range.domain) +
+                    ", which no head step writes");
+                continue;
+            }
+            for (uint32_t id = range.begin; id < range.end; ++id) {
+                if (!produced(id)) {
+                    add("step " + step.label + " reads PropertyVersion slot " +
+                        std::to_string(id) + ", which no head step writes");
+                }
+            }
+        }
+        // Completeness: every chain target or record consumer a walk the
+        // step reads meets is declared.
+        for (const int walk : step.readerWalks) {
+            if (walk < 0 || size_t(walk) >= B.readerWalks.size()) {
+                add("step " + step.label + " names reader walk " +
+                    std::to_string(walk) + ", which does not exist");
+                continue;
+            }
+            const RigExecBakedReaderWalk &reader = B.readerWalks[size_t(walk)];
+            for (const std::vector<RigExecBakedWalkHop> *hops :
+                 {&reader.walk.hops, &reader.walk.doubleHops}) {
+                for (const RigExecBakedWalkHop &hop : *hops) {
+                    if (hop.chain >= 0 &&
+                        size_t(hop.chain) < B.propertyChains.size()) {
+                        const RigExecBakedPropertyChain &chain =
+                            B.propertyChains[size_t(hop.chain)];
+                        if (!declares(chain.versionBase +
+                                      uint32_t(chain.revisions.size()))) {
+                            add("walk " + hop.path.GetString() +
+                                " meets chain target without declaring it");
+                        }
+                    }
+                    if (hop.record >= 0 &&
+                        size_t(hop.record) < B.propertyRecords.size() &&
+                        !declares(B.propertyRecords[size_t(hop.record)].id)) {
+                        add("walk " + hop.path.GetString() +
+                            " meets record without declaring it");
+                    }
+                }
+            }
+        }
+    }
+    for (size_t slot = 0; slot < B.avarHeadReads.size(); ++slot) {
+        for (const uint32_t id : B.avarHeadReads[slot]) {
+            if (!produced(id)) {
+                add("avar slot " + std::to_string(slot) +
+                    " reads PropertyVersion slot " + std::to_string(id) +
+                    ", which no head step writes");
+            }
+        }
     }
     if (count == 0) {
         return true;

@@ -80,14 +80,12 @@ struct RigExecSampledInput {
     /// False when the source had no value at the sampled time, which the
     /// worker must reproduce exactly rather than fill with a default.
     bool hasValue = false;
-    /// True when the value came from the generation's in-memory resolved
-    /// inputs on a binding with a property chain on its walk -- a chain
-    /// OUTPUT computed for whatever time the evaluator last ran, not a
-    /// fresh read at the sampled time. The chain-sampling hook (see
-    /// RigExecSampleFrameInputs) refreshes such values, so a sample is
-    /// marked only when the hook declined the rig; a vector carrying one
+    /// True when the value came from in-memory state computed for another
+    /// time rather than a fresh read at the sampled time. The samplers mark
+    /// none: a read a property chain or record can answer is resolved by
+    /// the worker from head-leaf samples. A vector carrying a marked sample
     /// must never warm a frame it was not proven for, because the digest
-    /// would name stale values as the frame's.
+    /// would name stale values as the frame's; the runner declines it.
     bool viaChain = false;
     /// Which burst-cache memo map served this sample, when one did: the
     /// digest folds the memoized level-1 from the same route, so a path
@@ -121,9 +119,11 @@ struct RigExecFrameInputs {
     /// (RigExecSampleRevisionLeaf) through the refreshed inputs, for each
     /// revision whose packet the leaves assemble on the worker (every such
     /// operation but a skin, whose packet travels whole above); empty for
-    /// the rest. Transport-only, like the packets: every value is a pure
-    /// function of digest-covered samples (the same attributes, sampled by
-    /// path in `values`), so the leaves are EXCLUDED from the digest.
+    /// the rest. A key with a reader walk is empty: the worker resolves it
+    /// after its head tier. Transport-only, like the packets: every value
+    /// is a pure function of digest-covered samples (the same attributes,
+    /// sampled by path in `values`, and the head-leaf samples), so the
+    /// leaves are EXCLUDED from the digest.
     std::vector<std::vector<VtValue>> revisionLeaves;
     /// The same for every derived target (normals, extent and a projector's
     /// matrix targets), parallel to the baked program's derivedIndex.
@@ -158,15 +158,13 @@ struct RigExecFrameInputs {
     std::vector<RigExecValueOverride> overrides;
 
     /// Appends \p value sampled at \p path. \p hasValue false records an
-    /// explicitly valueless source. \p viaChain marks a chain-resolved
-    /// sample (see RigExecSampledInput::viaChain).
+    /// explicitly valueless source. \p viaChain marks a stale sample (see
+    /// RigExecSampledInput::viaChain).
     void Add(const SdfPath &path, const VtValue &value, bool hasValue = true,
              bool viaChain = false);
 
-    /// Whether any sample came from in-memory chain outputs rather than a
-    /// fresh read. A vector answering true is stale for every time but the
-    /// one the evaluator last ran, so no warming job may be built from it
-    /// (see RigExecSampleFrameInputs).
+    /// Whether any sample is marked stale (RigExecSampledInput::viaChain).
+    /// No warming job may be built from a vector answering true.
     bool HasChainResolvedInputs() const;
 
     /// The first value sampled at \p path, or null when none was. Linear:
@@ -264,12 +262,13 @@ struct RigExecFrozenProgram {
 /// their point arrays sample per frame into the shared packet kernels.
 ///
 /// Property chains are supported: the sampler samples every head leaf the
-/// chains read (RigExecForEachHeadLeaf, under its synthetic key), and the
-/// frozen prologue runs the program's head tier from those samples. The
-/// chain-sampling hook still refreshes the chain outputs the sampler reads
-/// chain-crossing bindings through. Only a chain binding a weight object
-/// refuses, because its envelope resolves through the evaluator's live
-/// oracle, which neither the hook nor the worker can reproduce.
+/// chains and the reader walks read (RigExecForEachHeadLeaf, under its
+/// synthetic key), and the frozen prologue runs the program's head tier
+/// from those samples and resolves every read a chain or record can answer
+/// through its reader walk. A chain binding a weight object refuses,
+/// because its envelope resolves through the evaluator's live oracle, and
+/// so does a skin whose packet reads a chain or record, because the packet
+/// is assembled on the UI thread where no head tier runs.
 ///
 /// A snapshot pins the program OBJECT it was cloned from plus the epoch it
 /// was cloned in. Re-freeze after any change that rebuilds the program; a
@@ -525,8 +524,8 @@ RigExecRigPose RigExecEvaluateFrozen(
 RigExecRigPose RigExecEvaluateFrozen(const RigExecFrozenEvalContext &context,
                                      const RigExecFrameInputs &inputs);
 
-/// One chain input the sampling hook reads by value, pinned the way the
-/// live path pins it on its first run: the attribute and a query over it,
+/// One chain input as the epoch currency check pins it, the way the live
+/// path pins it on its first run: the attribute and a query over it,
 /// whether it carries authored connections (read as a walk then, never as
 /// a value), and, for an input that cannot change until the stage does,
 /// the value read once. UI thread only: it holds live stage handles.
@@ -544,9 +543,9 @@ struct RigExecChainSampleInput {
 struct RigExecChainSampleRevision {
     SdfPath moverPath;
     UsdPrim moverPrim;
-    /// The mover's bound weight objects, if any. The hook declines a chain
+    /// The mover's bound weight objects, if any. The freeze refuses a chain
     /// carrying one: its envelope resolves through the evaluator's live
-    /// oracle, which no caller-owned evaluation can reproduce.
+    /// oracle.
     SdfPathVector weightObjects;
     RigExecChainSampleInput enabled;
     RigExecChainSampleInput defaultWeight;
@@ -593,9 +592,9 @@ struct RigExecChainSampleBindings {
 /// Answers false, having left \p out untouched, when the chains cannot be
 /// named faithfully: a math mover with anything but exactly one exact
 /// property target, or a dependency cycle. A bound chain carrying a weight
-/// object binds fine and declines at evaluation instead, so the caller
-/// can tell "no chains" (empty, success) from "unchainable" (failure).
-/// \p error, when given, says which.
+/// object binds fine (the freeze refuses it), so the caller can tell "no
+/// chains" (empty, success) from "unchainable" (failure). \p error, when
+/// given, says which.
 bool RigExecBindChainSampleInputs(
     const RigExecRigEvaluator &evaluator, RigExecChainSampleBindings *out,
     std::string *error = nullptr);
@@ -609,44 +608,14 @@ bool RigExecChainSampleBindingsStillCurrent(
     const RigExecChainSampleBindings &bindings,
     const RigExecRigEvaluator &evaluator);
 
-/// Evaluates every bound chain at \p time into caller-owned state: the
-/// property-chain prologue for one sampling call, run on the UI thread.
-///
-/// \p resolved carries the job's overrides in -- nothing else, so what it
-/// holds on entry is what the job overrides, which decides each dragged
-/// target's base and the phased readers as on the live path, and is the
-/// only placement the overrides get -- and every chain output out,
-/// published per target as each chain runs so a later chain reads the
-/// revised value; \p results, when given, receives the final value per
-/// target and each published phased reader's value; \p diagnostics, when
-/// given, receives the chains'
-/// lines in chain order (the first lines of the generation, as on the
-/// live path). Values and lines are exactly the live prologue's for the
-/// same time and overrides: the same revision loop over the same pinned
-/// reads through the same property-math kernels, recomputed every call
-/// (the live path's memoization republishes identical values, so skipping
-/// it changes no answer).
-///
-/// Answers false, having left all three out-params undefined, when a
-/// chain binds a weight object: the envelope resolves through the
-/// evaluator's live oracle, which no caller-owned evaluation can
-/// reproduce. The caller then samples through the standing resolved
-/// state, marks viaChain, and declines the job -- stale chain values are
-/// never warmed. \p error, when given, says which mover. UI thread only.
-bool RigExecEvaluateChainsForTime(
-    const RigExecChainSampleBindings &bindings, UsdTimeCode time,
-    RigExecResolvedInputs *resolved,
-    std::map<SdfPath, VtValue> *results,
-    std::vector<std::string> *diagnostics, std::string *error = nullptr);
-
 /// Samples one frame's input vector on the UI thread, at \p time, for the
 /// program \p evaluator currently holds. Every varying binding is read
 /// through the same route the baked frame path reads it -- the retained
-/// query when USD alone answers, the generation's resolved inputs when a
-/// property chain stands on the walk -- plus the prologue reads the bench
-/// measures (blend channels, constraint operator arrays, ribbon drivers,
-/// chain base points) and the standing \p overrides, which never reach the
-/// stage and therefore must be sampled from the list the caller passes.
+/// query when USD alone answers, the job's overrides and the stage when the
+/// walk is read the long way -- plus the prologue reads the bench measures
+/// (blend channels, constraint operator arrays, ribbon drivers, chain base
+/// points) and the standing \p overrides, which never reach the stage and
+/// therefore must be sampled from the list the caller passes.
 ///
 /// Returns false, having left \p out untouched, when no faithful vector can
 /// be sampled: no baked program (a dynamic/refusal rig takes the D7 memo
@@ -655,28 +624,20 @@ bool RigExecEvaluateChainsForTime(
 /// native constraint sources, geometry-delta bases), or a null resolved
 /// inputs pointer. \p error, when given, says which.
 ///
-/// CHAIN-RESOLVED FRESHNESS. A chain-resolved input's value is the property
-/// chain's OUTPUT at the sampled time, which only the chain prologue
-/// computes. The sampler runs that prologue for the job's time on this
-/// thread, into caller-owned resolved inputs seeded with the job's
-/// overrides (RigExecEvaluateChainsForTime), and reads chain-resolved
-/// bindings through the refreshed values -- fresh at the sampled time by
-/// construction, whatever the evaluator last ran. The chains themselves
-/// run on the worker: every head leaf they read is sampled at the job's
-/// time under its synthetic key, and the frozen prologue runs the head
-/// tier from those samples and publishes its results and lines. Only when
-/// the hook declines (a chain binding a weight object) does the sampler
-/// fall back to the standing resolved state and mark the samples viaChain
-/// (see RigExecSampledInput) -- and BuildWarmWork declines a vector
-/// carrying one, so no background job is ever built from stale chain
-/// values.
+/// PROPERTY CHAINS. A read a property chain result or a phased record can
+/// answer is not sampled as a value: every head leaf the property ops and
+/// the reader walks read is sampled at the job's time under its synthetic
+/// key, and the frozen prologue runs the head tier from those samples,
+/// publishes its results and lines, and resolves each such read from its
+/// reader walk, exactly as the live prologue does. A rig whose chain binds
+/// a weight object is refused at freeze.
 bool RigExecSampleFrameInputs(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
     RigExecFrameInputs *out, std::string *error = nullptr);
 
-/// Samples exactly as RigExecSampleFrameInputs, but evaluates the chains
-/// through the caller's epoch-pinned \p bindings instead of binding fresh.
+/// Samples exactly as RigExecSampleFrameInputs, but checks the caller's
+/// epoch-pinned \p bindings instead of binding fresh.
 /// Answers false, having left \p out untouched, when \p bindings no longer
 /// name the evaluator's epoch (see
 /// RigExecChainSampleBindingsStillCurrent) -- the caller rebinds and

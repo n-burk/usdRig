@@ -3279,10 +3279,17 @@ RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
         }
         leaves->mustSample[k] = 0;
         ++B.pathLeafSamples;
-        VtValue value = RigExecSampleRevisionLeaf(
-            key, leaves->attributes[k], B.resolvedInputs, time);
+        // A read a chain or record can answer goes through its walk.
+        const int walk = k < leaves->walks.size() ? leaves->walks[k] : -1;
+        VtValue value =
+            walk >= 0 ? RigExecBakedSampleWalkedPathLeaf(B, key, walk)
+                      : RigExecSampleRevisionLeaf(key, leaves->attributes[k],
+                                                  B.resolvedInputs, time);
         leaves->changed[k] = value == leaves->values[k] ? 0 : 1;
         leaves->values[k] = std::move(value);
+        if (walk >= 0 && leaves->changed[k]) {
+            B.readerWalkChanged[size_t(walk)] = 1;
+        }
     }
     leaves->sampled = true;
     leaves->time = time;

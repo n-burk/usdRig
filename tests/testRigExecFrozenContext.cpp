@@ -415,12 +415,11 @@ TestDigestMovesWithControls()
     CHECK(RigExecFrozenControlDigest(withGap) != digest1);
 }
 
-// Increment B: the chain-sampling hook. The tiny rig plus one float math
-// mover revising the tx avar by a time-varying factor -- the biped's foot
-// chains in miniature (compare examples/09_PropertyMathMovers.usda): the
-// chain's output at the sampled time exists nowhere until the hook runs,
-// so a sampler that read the standing state would warm frame 3 with
-// frame 2's chain values.
+// Chained rigs. The tiny rig plus one float math mover revising the tx avar
+// by a time-varying factor -- the biped's foot chains in miniature (compare
+// examples/09_PropertyMathMovers.usda): the chain's output at the sampled
+// time exists nowhere until the worker's head tier runs, so a job that read
+// the standing state would warm frame 3 with frame 2's chain values.
 
 UsdStageRefPtr
 MakeChainedRig()
@@ -813,10 +812,10 @@ TestProductionRunnerIsBitIdenticalToLive()
     evaluator.SetInteractiveOverrides({});
 }
 
-// The chained rig warms bit-identically: the hook recomputes the chain for
-// the job's time (never the evaluator's last-run outputs), the sampled tx
-// carries the revised value with no stale mark, the per-target results
-// travel with the vector, and the warmed poses match live with zero
+// The chained rig warms bit-identically: the worker recomputes the chain
+// for the job's time from its head-leaf samples (never the evaluator's
+// last-run outputs) and resolves the tx binding through its reader walk,
+// no sample is marked stale, and the warmed poses match live with zero
 // parity mismatches -- including under a drag on the chain's target (the
 // chain's base) and on the mover's own factor input (a pre-chain read).
 void
@@ -839,15 +838,16 @@ TestChainedRigWarmsBitIdentical()
           SdfPath("/Asset/Rig/AlongX.avars:tx"));
     CHECK(RigExecChainSampleBindingsStillCurrent(bound, evaluator));
 
-    // The unlock: a chained rig freezes now that the hook reproduces the
-    // chains for the job's time.
+    // A chained rig freezes: the worker runs the chains for the job's time
+    // and resolves the bindings that read them.
     std::shared_ptr<const RigExecFrozenProgram> frozen;
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
     CHECK(frozen != nullptr);
     RigExecBackgroundScheduler scheduler;
     std::vector<RigExecValueOverride> noOverrides;
 
-    // Frame 3, which live has not run: the hook's values, not frame 2's.
+    // Frame 3, which live has not run: the job's head leaves, not frame 2's
+    // state.
     RigExecFrameInputs at3;
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
                                    &at3, &error));
@@ -856,21 +856,19 @@ TestChainedRigWarmsBitIdentical()
     double authored = 0.0;
     CHECK(stage->GetAttributeAtPath(txPath).Get(&authored,
                                                UsdTimeCode(3.0)));
-    // Sensitivity: the chain's output moves every frame, so a sampler that
-    // read the standing (frame-2) state would be caught below -- and the
-    // tx binding consumed the revised value, not the authored base. The
-    // chain's own inputs travel as head leaves under their own keys: the
-    // target's authored value and the gain's factor at frame 3.
+    // The tx binding reads the chain's result, so it samples nothing: the
+    // worker resolves its reader walk. The chain's own inputs travel as
+    // head leaves under their own keys: the target's authored value, which
+    // moves from frame 2, and the gain's factor at frame 3.
     {
         RigExecFrameInputs at2;
         CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0),
                                        noOverrides, &at2, &error));
-        const VtValue *tx3 = at3.Find(txPath);
-        const VtValue *tx2 = at2.Find(txPath);
-        CHECK(tx3 != nullptr && tx3->IsHolding<double>());
-        CHECK(tx2 != nullptr && tx2->IsHolding<double>());
-        CHECK(tx3 && tx2 && *tx3 != *tx2);
-        CHECK(tx3 && tx3->Get<double>() != authored);
+        CHECK(at3.Find(txPath) == nullptr);
+        const SdfPath ownKey("/Asset/Rig/AlongX.frozenChainOwn:avars:tx");
+        const VtValue *own2 = at2.Find(ownKey);
+        CHECK(own2 != nullptr && own2->IsHolding<double>() &&
+              own2->Get<double>() != authored);
         const VtValue *own = at3.Find(
             SdfPath("/Asset/Rig/AlongX.frozenChainOwn:avars:tx"));
         CHECK(own != nullptr && own->IsHolding<double>() &&
@@ -887,17 +885,16 @@ TestChainedRigWarmsBitIdentical()
     CheckPosesBitIdentical("warmed chained frame 3", live3, warmed3);
     CheckJobAccepted("warmed chained frame 3", at3, warmed3);
     // The worker's head tier published the revised value live published:
-    // the chain's output, which the tx binding sampled, not its base.
+    // the chain's output, not its base.
     {
         const auto published = live3.movedProperties.find(txPath);
         const auto computed = warmed3.movedProperties.find(txPath);
-        const VtValue *tx = at3.Find(txPath);
         CHECK(published != live3.movedProperties.end());
         CHECK(computed != warmed3.movedProperties.end());
         CHECK(published != live3.movedProperties.end() &&
-              computed != warmed3.movedProperties.end() && tx &&
+              computed != warmed3.movedProperties.end() &&
               computed->second == published->second &&
-              computed->second == *tx);
+              computed->second != VtValue(authored));
     }
 
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
@@ -949,7 +946,7 @@ TestChainedRigWarmsBitIdentical()
 // of their own -- undeclared (the base: tx as authored), `final` (no record:
 // tx's published value answers it), `base` on a hop, `final` through that
 // hop (a record of every revision) and a checkpoint at the last revision.
-// The hook publishes each record on its reader as live does, the warmed
+// The worker publishes each record on its reader as live does, the warmed
 // poses match live bit for bit, and so they do under each drag rule: on a
 // reader's own input, on the hop, and on the target, whose drag is the
 // chain's base -- the base readers read it, the checkpoint and the final
@@ -1399,13 +1396,13 @@ TestBlinkDragEdgesWarmBitIdentical()
                       asFloat.live, asDouble.live);
 }
 
-// A chain binding a weight object declines at every layer: the hook names
-// the chain but refuses to evaluate it (the envelope resolves through the
-// evaluator's live oracle), the sampler falls back to the standing state
-// and marks viaChain, the freeze refuses the rig, and the runner declines
-// the marked vector. Live still evaluates -- decline is never failure.
+// A chain binding a weight object refuses the freeze: its envelope is
+// resolved by the oracle off the live stage, which no frozen job has. The
+// sampler still samples the rig and marks nothing stale, live still
+// evaluates, and once the weight object is unbound the rig freezes and a
+// warmed frame is accepted and equals live.
 void
-TestChainHookDeclinesWeightObjects()
+TestAPropertyEnvelopeRefusesTheFreeze()
 {
     UsdStageRefPtr stage = MakeChainedRig();
     const UsdPrim weight = stage->DefinePrim(
@@ -1436,36 +1433,34 @@ TestChainHookDeclinesWeightObjects()
     CHECK(bound.chains[0].revisions.size() == 1);
     CHECK(bound.chains[0].revisions[0].weightObjects.size() == 1);
 
-    RigExecResolvedInputs resolved;
-    CHECK(!RigExecEvaluateChainsForTime(bound, UsdTimeCode(2.0), &resolved,
-                                        nullptr, nullptr, &error));
-    CHECK(!error.empty());
-
     std::vector<RigExecValueOverride> noOverrides;
     RigExecFrameInputs at2;
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), noOverrides,
                                    &at2, &error));
-    CHECK(at2.HasChainResolvedInputs());
+    CHECK(!at2.HasChainResolvedInputs());
 
     std::shared_ptr<const RigExecFrozenProgram> frozen;
     CHECK(!RigExecFreezeProgram(evaluator, &frozen, &error));
     CHECK(frozen == nullptr);
-    CHECK(error.find("weight object") != std::string::npos);
+    CHECK(error.find("a property chain envelope resolves weights from the "
+                     "live stage") != std::string::npos);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
 
-    // The marked vector declines at the runner even against a snapshot
-    // taken before the weight object was bound.
     CHECK(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/TxGain"))
               .GetRelationship(TfToken("rigExec:weightObject"))
               .SetTargets({}));
     CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
     CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
     CHECK(frozen != nullptr);
+    RigExecFrameInputs unbound;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), noOverrides,
+                                   &unbound, &error));
     RigExecBackgroundScheduler scheduler;
-    bool ran = true;
-    const RigExecRigPose pose =
-        RunWarmingJob(&evaluator, rig, frozen, at2, &scheduler, &ran);
-    CHECK(!pose.valid);
-    CHECK(!ran);
+    const RigExecRigPose warmed = RunWarmingJob(&evaluator, rig, frozen,
+                                                unbound, &scheduler, nullptr);
+    CheckJobAccepted("unbound envelope warmed frame 2", unbound, warmed);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(2.0));
+    CheckPosesBitIdentical("unbound envelope frame 2", live, warmed);
 }
 
 // testRigExecArm's phase rig (_PhaseRig there): one dial at 0.45, revised
@@ -1705,13 +1700,13 @@ WithoutHeadLeaves(const RigExecFrameInputs &inputs)
     return out;
 }
 
-// A chain target's own value and a reader whose head is that target sample
-// under different keys: the reader (tx's avar binding) at tx's path, the
-// chain's result; the own value at the synthetic key, as authored. Two jobs
-// whose targets differ only in the authored value, which the clamp folds to
-// one result, have different digests -- the own value moves them -- and
-// each serves a pose equal to live. Without the head leaves the two would
-// share a key (equal poses, so a collision that served nothing wrong).
+// A chain target's own value samples at its synthetic key, as authored,
+// and a reader whose head is that target (tx's avar binding) samples
+// nothing: the worker resolves it to the chain's result. Two jobs whose
+// targets differ only in the authored value, which the clamp folds to one
+// result, have different digests -- the own value moves them -- and each
+// serves a pose equal to live. Without the head leaves the two would share
+// a key (equal poses, so a collision that served nothing wrong).
 void
 TestAChainTargetOwnValueKeyIsDistinct()
 {
@@ -1753,9 +1748,11 @@ TestAChainTargetOwnValueKeyIsDistinct()
     const Job three = warm(3.0);
     const Job four = warm(4.0);
     for (const Job *job : {&three, &four}) {
-        const VtValue *reader = job->inputs.Find(txPath);
-        CHECK(reader != nullptr && reader->IsHolding<double>() &&
-              reader->Get<double>() == 0.5);
+        CHECK(job->inputs.Find(txPath) == nullptr);
+        const auto reader = job->warmed.movedProperties.find(txPath);
+        CHECK(reader != job->warmed.movedProperties.end() &&
+              reader->second.IsHolding<double>() &&
+              reader->second.UncheckedGet<double>() == 0.5);
     }
     const VtValue *own3 = three.inputs.Find(ownKey);
     const VtValue *own4 = four.inputs.Find(ownKey);
@@ -3459,8 +3456,8 @@ TestPurityAuditNamesEveryUnit()
 }  // namespace
 
 // The biped: sixteen float chain-driven inputs over the foot movers, and
-// the rig the hook unlocks. Warmed frames match live with zero parity
-// mismatches -- the same bar as the fixture, on a production rig.
+// the rig the worker's head tier unlocks. Warmed frames match live with zero
+// parity mismatches -- the same bar as the fixture, on a production rig.
 //
 // The counts are the DELIVERED rig's. They are asserted rather than
 // printed because a chain that stops binding is a chain the warming job
@@ -5713,7 +5710,7 @@ main(int argc, char **argv)
     TestPhasedReadsWarmBitIdentical();
     TestBlinkDragWarmsAsReleased();
     TestBlinkDragEdgesWarmBitIdentical();
-    TestChainHookDeclinesWeightObjects();
+    TestAPropertyEnvelopeRefusesTheFreeze();
     TestPhasedReadDragRulesFrozen();
     TestAChainTargetOwnValueKeyIsDistinct();
     TestAChainMoverInputMovesTheDigest();

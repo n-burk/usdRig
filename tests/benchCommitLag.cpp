@@ -347,21 +347,6 @@ main(int argc, char **argv)
             std::printf("  %-28s %10.1f us (median of %zu, x3/frame)\n",
                         "chain currency", Median(current),
                         current.size());
-            std::vector<double> hooks;
-            for (int step = 0; step < 8; ++step) {
-                RigExecResolvedInputs hooked;
-                std::map<SdfPath, VtValue> results;
-                std::vector<std::string> diagnostics;
-                std::string error;
-                const double start = NowUs();
-                volatile bool ok = RigExecEvaluateChainsForTime(
-                    pinned, UsdTimeCode(playheadValue + double(step)),
-                    &hooked, &results, &diagnostics, &error);
-                (void)ok;
-                hooks.push_back(NowUs() - start);
-            }
-            std::printf("  %-28s %10.1f us (median of %zu)\n",
-                        "chain hook", Median(hooks), hooks.size());
             std::vector<double> pinnedSamples;
             for (int step = 0; step < 8; ++step) {
                 RigExecFrameInputs inputs;

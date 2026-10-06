@@ -5,7 +5,8 @@
 // a weight object's gathers make -- are read there too, and the packet is
 // held to the stage assembler's, their keys to the exporter's enumeration.
 // These cases hold the leaf to the read it replaced
-// (RigExecBakedRead evaluated again after the run, bit for bit) under drags,
+// (RigExecBakedRead evaluated again after the run, bit for bit; a reader
+// walk to RigExecResolvedInputs::GetAttribute from its head) under drags,
 // lifted drags, drags scrubbed at a held frame, another chain's drag and
 // stage edits; hold the poses to the exec reference or to a program built
 // fresh after the edit; pin that nothing is re-read when nothing moved; pin
@@ -54,6 +55,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -460,6 +462,268 @@ Frames(const UsdStageRefPtr &stage)
     const double start = stage->GetStartTimeCode();
     return {UsdTimeCode(start), UsdTimeCode(start + 2.0),
             UsdTimeCode(start + 6.0)};
+}
+
+// A double chain on a control's avars:rz read by a float constraint weight
+// at `final`: the reader's walk is a float read of a double hop, which
+// RigExecResolvedInputs::GetAttribute answers as the double read, cast.
+const char *const kFloatAtDouble = R"usda(#usda 1.0
+(
+    endTimeCode = 10
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def Xform "Source"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (10, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "Target"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "RootCtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz.timeSamples = {
+                    1: 0.2,
+                    10: 0.4,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/RootCtl>
+                rel rigExec:joints = </Asset/Rig/Joints/Root>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecFloatMathMover "Gain" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "multiply"
+                float inputs:value = 2
+                rel rigExec:moves = </Asset/Rig/Controls/RootCtl.avars:rz>
+            }
+
+            def RigExecPositionConstraint "Follow" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight (
+                    rigExecReadPhase = "final"
+                )
+                prepend float inputs:defaultWeight.connect = </Asset/Rig/Controls/RootCtl.avars:rz>
+                rel rigExec:moves = </Asset/Target>
+                rel rigExec:sources = </Asset/Source>
+            }
+        }
+    }
+}
+)usda";
+
+template <class T>
+size_t
+ReaderWalkMismatch(const RigExecBakedProgramImpl &B,
+                   const RigExecResolvedInputs &R, const UsdAttribute &head,
+                   int walk, UsdTimeCode time, const std::string &what)
+{
+    T walked{}, read{};
+    const bool a = RigExecBakedResolveReaderWalk(B, walk, &walked);
+    const bool b = R.GetAttribute(head, time, &read);
+    if (a == b && (!a || Same(walked, read))) {
+        return 0;
+    }
+    std::printf("FAIL %s: walk %s answers %s%s, GetAttribute %s%s\n",
+                what.c_str(), head.GetPath().GetText(), a ? "" : "nothing ",
+                a ? Text(walked).c_str() : "", b ? "" : "nothing ",
+                b ? Text(read).c_str() : "");
+    return 1;
+}
+
+// Every reader walk against RigExecResolvedInputs::GetAttribute from its
+// head over the overlay as the prologue left it (see LeafMismatches): the
+// answer and the value, bit for bit.
+size_t
+ReaderWalkMismatches(const RigExecRigEvaluator &evaluator,
+                     const std::vector<RigExecValueOverride> &overrides,
+                     UsdTimeCode time, const std::string &what,
+                     size_t *checked)
+{
+    const RigExecBakedProgramImpl *program = Program(evaluator);
+    if (!program) {
+        return 1;
+    }
+    const RigExecBakedProgramImpl &B = *program;
+    RigExecResolvedInputs R = *B.resolvedInputs;
+    for (const SdfPath &path : B.poseWeightPaths) {
+        R.ClearProperty(path);
+        for (const RigExecValueOverride &o : overrides) {
+            if (!o.attribute.IsEmpty() &&
+                o.prim.AppendProperty(o.attribute) == path) {
+                R.SetProperty(path, o.value);
+            }
+        }
+        const auto found = B.propertyResults.find(path);
+        if (found != B.propertyResults.end()) {
+            R.SetProperty(path, found->second);
+        }
+    }
+    size_t mismatches = 0;
+    for (size_t w = 0; w < B.readerWalks.size(); ++w) {
+        const RigExecBakedReaderWalk &reader = B.readerWalks[w];
+        const UsdAttribute head = B.stage->GetAttributeAtPath(reader.head);
+        const int walk = int(w);
+        using Type = RigExecBakedHeadValueType;
+        switch (reader.walk.type) {
+        case Type::Double:
+            mismatches +=
+                ReaderWalkMismatch<double>(B, R, head, walk, time, what);
+            break;
+        case Type::Float:
+            mismatches +=
+                ReaderWalkMismatch<float>(B, R, head, walk, time, what);
+            break;
+        case Type::Int:
+            mismatches += ReaderWalkMismatch<int>(B, R, head, walk, time, what);
+            break;
+        case Type::Bool:
+            mismatches +=
+                ReaderWalkMismatch<bool>(B, R, head, walk, time, what);
+            break;
+        case Type::Token:
+            mismatches +=
+                ReaderWalkMismatch<TfToken>(B, R, head, walk, time, what);
+            break;
+        case Type::Matrix4d:
+            mismatches +=
+                ReaderWalkMismatch<GfMatrix4d>(B, R, head, walk, time, what);
+            break;
+        case Type::Vec3d:
+            mismatches +=
+                ReaderWalkMismatch<GfVec3d>(B, R, head, walk, time, what);
+            break;
+        case Type::Vec3f:
+            mismatches +=
+                ReaderWalkMismatch<GfVec3f>(B, R, head, walk, time, what);
+            break;
+        case Type::Vec2fArray:
+            ++mismatches;
+            std::printf("FAIL %s: reader walk %s reads an array\n",
+                        what.c_str(), reader.head.GetText());
+            break;
+        }
+        ++*checked;
+    }
+    return mismatches;
+}
+
+// The walk resolver against the read it restates, over every reader walk
+// (chain-routed bindings and path leaves read through the resolved inputs)
+// of every fixture, at three frames: with no override, under a drag on a
+// chain target the walks meet and on a NaN there (which skips the chain,
+// leaving the override standing at its target), and lifted. The in-memory
+// rig adds a float read of a double chain target.
+void
+TestWalkResolverEqualsGetAttribute(const std::string &examples)
+{
+    std::vector<std::pair<std::string, UsdStageRefPtr>> stages;
+    std::vector<SdfPath> rigs;
+    for (const Fixture &f : Fixtures(examples)) {
+        stages.emplace_back(f.name, UsdStage::Open(f.stage));
+        rigs.push_back(f.rig);
+    }
+    {
+        UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        CHECK(stage->GetRootLayer()->ImportFromString(kFloatAtDouble));
+        stages.emplace_back("float at double", stage);
+        rigs.push_back(SdfPath("/Asset/Rig"));
+    }
+    size_t checked = 0, doubleTails = 0, skipped = 0;
+    for (size_t i = 0; i < stages.size(); ++i) {
+        const std::string &name = stages[i].first;
+        const UsdStageRefPtr &stage = stages[i].second;
+        auto evaluator =
+            MakeEvaluator(stage, rigs[i], RigExecEvaluationMode::Baked);
+        const RigExecBakedProgramImpl *program = Program(*evaluator);
+        CHECK(program != nullptr);
+        if (!program) {
+            continue;
+        }
+        // A chain target some walk meets.
+        SdfPath target;
+        for (const RigExecBakedReaderWalk &reader : program->readerWalks) {
+            doubleTails += reader.walk.doubleHops.empty() ? 0 : 1;
+            for (const auto *hops :
+                 {&reader.walk.hops, &reader.walk.doubleHops}) {
+                for (const RigExecBakedWalkHop &hop : *hops) {
+                    if (hop.chain >= 0 && target.IsEmpty()) {
+                        target = program->propertyChains[size_t(hop.chain)]
+                                     .target;
+                    }
+                }
+            }
+        }
+        for (const UsdTimeCode t : Frames(stage)) {
+            std::vector<std::vector<RigExecValueOverride>> cases = {{}};
+            if (!target.IsEmpty()) {
+                cases.push_back(DragBy(stage, target, t, 0.25));
+                const UsdAttribute a = stage->GetAttributeAtPath(target);
+                if (a.GetTypeName() == SdfValueTypeNames->Double) {
+                    cases.push_back({DragOf(target, std::nan(""))});
+                } else if (a.GetTypeName() == SdfValueTypeNames->Float) {
+                    cases.push_back({DragOf(target, std::nanf(""))});
+                }
+                cases.push_back({});
+            }
+            for (size_t c = 0; c < cases.size(); ++c) {
+                evaluator->SetInteractiveOverrides(cases[c]);
+                const RigExecRigPose pose = evaluator->Evaluate(t);
+                CHECK(pose.valid);
+                for (const char valid : program->chainValid) {
+                    skipped += valid ? 0 : 1;
+                }
+                const std::string what = "walk resolver " + name + " at " +
+                                         Text(t.GetValue()) + " case " +
+                                         std::to_string(c);
+                CHECK(ReaderWalkMismatches(*evaluator, cases[c], t, what,
+                                           &checked) == 0);
+            }
+        }
+    }
+    std::printf("walk resolver: %zu walk read(s) checked, %zu float walk(s) "
+                "of a double hop, %zu skipped chain(s) seen\n",
+                checked, doubleTails, skipped);
+    CHECK(checked > 0);
+    CHECK(doubleTails > 0);
+    CHECK(skipped > 0);
 }
 
 // For every visited binding, after every run, the leaf is the read: with no
@@ -2409,6 +2673,7 @@ main(int argc, char **argv)
     TestBodyLeavesEqualTheFunnel(examples);
     TestADragScrubbedAtAHeldFrameReachesTheBody(examples);
     TestAnotherChainsDragReachesAChainRoutedReader(examples);
+    TestWalkResolverEqualsGetAttribute(examples);
     TestRoutedValuesReachTheirLeaves(examples);
     TestAnAvarPatchExportsThePatchedBinding(examples);
     TestAPathLeafIsNotResampledWhenNothingMoved(examples);

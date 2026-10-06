@@ -76,35 +76,30 @@ _SampleResolvedAttribute(const RigExecResolvedInputs &resolved,
 
 // Samples one bound input. Epoch constants are not per-frame inputs and are
 // skipped; everything else is read through the route the frame path reads
-// (RigExecBakedRead): the retained query, else the resolved walk, else --
-// varying with neither handle, which the frame path answers from the typed
-// constant -- that constant. \p head carries the binding's walk-start path,
-// which keys the sample.
+// (RigExecBakedRead): the retained query, else the resolved walk through
+// \p refreshed (the job's overrides, which are all a walk that meets no
+// chain target or record consumer can read), else -- varying with neither
+// handle, which the frame path answers from the typed constant -- that
+// constant. \p head carries the binding's walk-start path, which keys the
+// sample. A binding with a reader walk samples nothing: the worker resolves
+// it from the head-leaf samples and the head tier it runs, as live does.
 template <class T>
 void
 _SampleBinding(const RigExecBakedInput<T> &input,
-               const RigExecResolvedInputs *resolved, UsdTimeCode time,
-               RigExecFrameInputs *out,
-               const RigExecResolvedInputs *chainFresh = nullptr)
+               const RigExecResolvedInputs *refreshed, UsdTimeCode time,
+               RigExecFrameInputs *out)
 {
-    if (!input.varying) {
+    if (!input.varying || input.walk >= 0) {
         return;
     }
-    // A binding with a chain on its walk reads through the hook-refreshed
-    // values when the hook ran: fresh at the sampled time by construction,
-    // whatever the evaluator last ran. Without the hook it reads the
-    // standing state and marks stale below.
-    const bool fresh = chainFresh && input.resolvedAttr.IsValid();
-    const RigExecResolvedInputs *source = fresh ? chainFresh : resolved;
     VtValue value;
     bool hasValue = false;
-    bool fromMemory = false;
     if (input.query.IsValid()) {
         hasValue = input.query.Get(&value, time);
-    } else if (input.resolvedAttr.IsValid() && source) {
+    } else if (input.resolvedAttr.IsValid() && refreshed) {
         hasValue =
-            _SampleResolvedAttribute(*source, input.resolvedAttr, time,
-                                     &value, &fromMemory);
+            _SampleResolvedAttribute(*refreshed, input.resolvedAttr, time,
+                                     &value);
     } else if (input.head.IsValid()) {
         // The frame path answers input.constant here, so the sample is that
         // constant rather than a valueless marker: valueless would tell the
@@ -118,17 +113,7 @@ _SampleBinding(const RigExecBakedInput<T> &input,
     if (!input.head.IsValid()) {
         return;
     }
-    // Chain-resolved only when BOTH hold: a chain on the walk (resolvedAttr
-    // is set exactly then) AND the value came from in-memory state rather
-    // than a fresh stage read -- and never when the hook refreshed the
-    // values the read walked through. A stage fallback on a chained binding
-    // is fresh -- and a lookup that would have read in-memory digests apart
-    // from it, so it can only miss, never serve wrong. In-memory hits on
-    // chainless bindings are standing overrides, which are timeless and
-    // digest-covered, so they stay unmarked and preview-time warming stands.
-    const bool viaChain =
-        input.resolvedAttr.IsValid() && fromMemory && !fresh;
-    out->Add(input.head.GetPath(), value, hasValue, viaChain);
+    out->Add(input.head.GetPath(), value, hasValue);
 }
 
 // Every head leaf the property chains read, at \p time, under its frozen
@@ -269,74 +254,60 @@ _BurstInterpolatorNeedsVisit(
 // overridden arm answers -- through the refreshed inputs (job overrides
 // placed, stage reads at the job's time). The sample then carries the value
 // the frame consumes, and the worker patches it as a constant; no separate
-// override value travels.
-// A chain-resolved binding under an override still depends on chain outputs
-// whenever the override misses mid-walk, so without the hook's refreshed
-// values it is marked stale and the vector declines.
+// override value travels. A binding with a reader walk samples nothing
+// either way (see _SampleBinding).
 template <class T>
 void
 _SampleBindingWithOverrides(const RigExecBakedInput<T> &input,
-                            const RigExecResolvedInputs *standing,
                             const RigExecResolvedInputs *refreshed,
                             bool overridden, UsdTimeCode time,
-                            RigExecFrameInputs *out,
-                            const RigExecResolvedInputs *chainFresh = nullptr)
+                            RigExecFrameInputs *out)
 {
     if (!overridden) {
-        _SampleBinding(input, standing, time, out, chainFresh);
+        _SampleBinding(input, refreshed, time, out);
         return;
     }
-    if (!input.head.IsValid()) {
+    if (!input.head.IsValid() || input.walk >= 0) {
         return;
     }
     T value = input.constant;
     if (refreshed) {
         refreshed->GetAttribute(input.head, time, &value);
     }
-    out->Add(input.head.GetPath(), VtValue(value),
-             /*hasValue=*/true,
-             /*viaChain=*/input.resolvedAttr.IsValid() && !chainFresh);
+    out->Add(input.head.GetPath(), VtValue(value), /*hasValue=*/true);
 }
 
 template <class T>
 void
 _SampleFlaggedBinding(const RigExecBakedInput<T> &input,
-                      const RigExecResolvedInputs *standing,
                       const RigExecResolvedInputs *refreshed,
                       const std::vector<char> &flags, UsdTimeCode time,
-                      RigExecFrameInputs *out,
-                      const RigExecResolvedInputs *chainFresh = nullptr)
+                      RigExecFrameInputs *out)
 {
-    _SampleBindingWithOverrides(input, standing, refreshed,
+    _SampleBindingWithOverrides(input, refreshed,
                                 _IsOverridden(flags, input.overrideIndex),
-                                time, out, chainFresh);
+                                time, out);
 }
 
 void
 _SampleSolverBindings(const RigExecBakedProgramImpl::Solver &solver,
-                      const RigExecResolvedInputs *standing,
                       const RigExecResolvedInputs *refreshed,
                       const std::vector<char> &flags, UsdTimeCode time,
-                      RigExecFrameInputs *out,
-                      const RigExecResolvedInputs *chainFresh = nullptr)
+                      RigExecFrameInputs *out)
 {
     _VisitSolverInputs(solver, [&](const auto &input) {
-        _SampleFlaggedBinding(input, standing, refreshed, flags, time, out,
-                              chainFresh);
+        _SampleFlaggedBinding(input, refreshed, flags, time, out);
     });
 }
 
 void
 _SampleConstraintBindings(
     const RigExecBakedProgramImpl::Constraint &constraint,
-    const RigExecResolvedInputs *standing,
     const RigExecResolvedInputs *refreshed, const std::vector<char> &flags,
-    UsdTimeCode time, RigExecFrameInputs *out,
-    const RigExecResolvedInputs *chainFresh = nullptr)
+    UsdTimeCode time, RigExecFrameInputs *out)
 {
     _VisitConstraintInputs(constraint, [&](const auto &input) {
-        _SampleFlaggedBinding(input, standing, refreshed, flags, time, out,
-                              chainFresh);
+        _SampleFlaggedBinding(input, refreshed, flags, time, out);
     });
 }
 
@@ -358,15 +329,12 @@ _PlaceOverridesIntoResolved(
 
 void
 _SampleWeightBindings(const RigExecBakedProgramImpl::WeightObject &object,
-                      const RigExecResolvedInputs *standing,
                       const RigExecResolvedInputs *refreshed,
                       const std::vector<char> &flags, UsdTimeCode time,
-                      RigExecFrameInputs *out,
-                      const RigExecResolvedInputs *chainFresh)
+                      RigExecFrameInputs *out)
 {
     _VisitWeightInputs(object, [&](const auto &input) {
-        _SampleFlaggedBinding(input, standing, refreshed, flags, time, out,
-                              chainFresh);
+        _SampleFlaggedBinding(input, refreshed, flags, time, out);
     });
 }
 
@@ -584,9 +552,9 @@ _SampleAttribute(const SdfPath &key, const UsdAttribute &attribute,
 }
 
 // Samples one dense blend sample's target points: the refreshed inputs
-// first -- R.GetAttribute follows single authored connections into the
-// program's published properties, so a chain output or override standing
-// on the target is what live reads -- else the stage at the job's time.
+// first -- R.GetAttribute follows single authored connections, so an
+// override standing on the target is what live reads -- else the stage at
+// the job's time.
 // Mirrors the dense arm's R.GetAttribute exactly (miss reads as empty);
 // a dangling handle samples nothing, which the worker answers as empty.
 void
@@ -624,6 +592,20 @@ _SampleStageFrameSeeds(const RigExecBakedProgram &program, UsdTimeCode time,
     return true;
 }
 
+// One path leaf as the live prologue reads it, or empty for a key with a
+// reader walk: the worker resolves that one after its head tier, which the
+// refreshed inputs here do not run.
+VtValue
+_SampleRevisionLeaf(const RigExecBakedPathLeaves &leaves, size_t k,
+                    const RigExecResolvedInputs *refreshed, UsdTimeCode time)
+{
+    if (k < leaves.walks.size() && leaves.walks[k] >= 0) {
+        return VtValue();
+    }
+    return RigExecSampleRevisionLeaf(leaves.decl.keys[k],
+                                     leaves.attributes[k], refreshed, time);
+}
+
 // The path leaves of every chain revision the worker assembles from leaves
 // (every covered operation but a skin, whose packet travels whole), and of
 // every derived target, read by the live prologue's own reads through the
@@ -651,8 +633,7 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
         std::vector<VtValue> &values = sampled->revisionLeaves[r];
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
-            values.push_back(RigExecSampleRevisionLeaf(
-                leaves.decl.keys[k], leaves.attributes[k], refreshed, time));
+            values.push_back(_SampleRevisionLeaf(leaves, k, refreshed, time));
         }
     }
     // Every derived target's, parallel to derivedIndex.
@@ -670,8 +651,7 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
         std::vector<VtValue> &values = sampled->derivedLeaves[d];
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
-            values.push_back(RigExecSampleRevisionLeaf(
-                leaves.decl.keys[k], leaves.attributes[k], refreshed, time));
+            values.push_back(_SampleRevisionLeaf(leaves, k, refreshed, time));
         }
     }
 }
@@ -757,7 +737,7 @@ _SampleQuery(const SdfPath &key, const UsdAttributeQuery &query,
 }
 
 // Samples one mover scalar input the packet assembly reads: the resolved
-// walk first (an override or a chain output standing on it), else the stage
+// walk first (an override standing on it), else the stage
 // at the job's time, else the fallback. Mirrors moverGraph.cpp's _Float /
 // _Enabled / skinningMethod arms exactly (no sample when the attribute does
 // not exist; the worker falls back the same way).
@@ -912,7 +892,7 @@ _ServeBurstStaticSample(RigExecFrameInputs *out,
 // \p route. Called only for attributes _BurstAttributeIsStatic accepts,
 // whose value AND valuelessness are time-invariant -- and, for the
 // resolved route, only with no chains bound, where the refreshed inputs
-// are overrides-only and burst-fixed.
+// are burst-fixed.
 void
 _MemoizeBurstStaticSample(
     RigExecFrameInputs *out,
@@ -984,8 +964,7 @@ _SampleMoverScalarCached(const SdfPath &key, const UsdAttribute &attribute,
     if (!attribute.IsValid() || key.IsEmpty()) {
         return;
     }
-    // With chains bound the refreshed read can carry per-frame chain
-    // outputs: never cached, read plain every frame.
+    // With chains bound, read plain every frame and never memoized.
     if (!cache->bindings.chains.empty()) {
         _SampleMoverScalar(key, attribute, fallback, time, refreshed, out);
         return;
@@ -1013,8 +992,7 @@ _SampleBlendPointsCached(const SdfPath &key, const UsdAttribute &attribute,
     if (!attribute.IsValid() || key.IsEmpty()) {
         return;
     }
-    // With chains bound the refreshed read can carry per-frame chain
-    // outputs: never cached, read plain every frame.
+    // With chains bound, read plain every frame and never memoized.
     if (!cache->bindings.chains.empty()) {
         _SampleBlendPoints(key, attribute, time, refreshed, out);
         return;
@@ -1307,37 +1285,6 @@ _FrozenRibbonInputKey(const SdfPath &moverPath, const char *role)
         TfToken(std::string("frozenRibbon:") + role));
 }
 
-// The chain-sampling hook (Increment B).
-// Replicates the live property-chain prologue through public API only: chain
-// discovery from the evaluator's mover order, _BindInput pinning, and the
-// _EvaluatePropertyChains revision loop over the property-math kernels. The
-// sampler runs it for the job's time on the UI thread, into caller-owned
-// resolved inputs seeded with the job's overrides, and reads chain-resolved
-// bindings through the refreshed values.
-// ORDER SOUNDNESS. The hook evaluates in dependency order computed fresh at
-// bind time. That order equals the live path's compile-time order within an
-// epoch: every order-relevant edge -- a chain input's connection walk, a
-// weight-object relationship -- is covered by the epoch digest
-// (appendAttributeBinding over the value inputs plus the rel targets), so a
-// rewire that could reorder evaluation recompiles first, and the session
-// cache rebinds on the new epoch. What a value edit CAN move within an
-// epoch -- a folded constant, a target's type -- is what
-// RigExecChainSampleBindingsStillCurrent re-verifies at use. A mid-epoch
-// rewire of a non-digested attribute (curve tangents, a custom note) either
-// cannot be read through the resolved inputs at a compatible type, and so
-// cannot move a value, or fails the bind as a cycle; either way the job
-// declines rather than warming a misordered evaluation.
-// What is NOT replicated is the live path's memoization (the watch/upstream
-// dirty skip): it republishes identical values and lines, so recomputing
-// every call changes no answer. Weight-object envelopes are declined, not
-// replicated: they resolve through the evaluator's live oracle.
-
-bool
-_ChainIsFinite(float v)
-{
-    return std::isfinite(v);
-}
-
 } // namespace frozenDetail
 
 namespace {
@@ -1364,7 +1311,7 @@ _SampleWithPinnedChainBindings(
     }
     // The pinned route trusts nothing: stale bindings fail the sample and
     // the caller rebinds. An empty pin on a chained rig fails here too, so
-    // the hook cannot be skipped around -- only the bind, which names the
+    // the check cannot be skipped around -- only the bind, which names the
     // rig's actual chains, feeds this route.
     if (verifyCurrency &&
         !RigExecChainSampleBindingsStillCurrent(bindings, evaluator)) {
@@ -1393,42 +1340,25 @@ _SampleWithPinnedChainBindings(
                     "these overrides, which no frozen job can reproduce");
     }
     // The refreshed inputs: the job's overrides placed over an empty map,
-    // the hook's chain results at the job's time, stage reads at the job's
-    // time. Overridden and chain-resolved bindings and mover scalars sample
-    // through these (fresh at the job's time by construction); the standing
-    // inputs below serve only a declined hook's fallback, which marks stale.
+    // stage reads at the job's time. Bindings read the long way and mover
+    // scalars sample through these. A read a chain result or a record can
+    // answer is resolved by the worker from head-leaf samples instead, so
+    // nothing here holds a chain result.
     RigExecResolvedInputs refreshed;
     _PlaceOverridesIntoResolved(overrides, &refreshed);
 
     RigExecFrameInputs sampled;
     sampled.time = time;
     sampled.overrides = overrides;
-    const RigExecResolvedInputs *resolved = B.resolvedInputs;
 
-    // The chain-sampling hook, in the live prologue's own order: the
-    // chains evaluate into the refreshed inputs over the already-placed
-    // overrides, a drag on a chain target being that chain's base, and the
-    // chain-crossing bindings below read their values through them. The
-    // worker computes the chains' own results and lines itself, from the
-    // head leaves sampled here. On decline (a weight object) the refreshed
-    // inputs stay override-only and chain-resolved bindings mark viaChain
-    // below, declining the vector downstream.
-    const RigExecResolvedInputs *chainFresh = nullptr;
-    if (!bindings.chains.empty()) {
-        RigExecResolvedInputs hooked = refreshed;
-        std::string hookError;
-        if (RigExecEvaluateChainsForTime(bindings, time, &hooked, nullptr,
-                                         nullptr, &hookError)) {
-            refreshed = std::move(hooked);
-            chainFresh = &refreshed;
-        }
-    }
+    // Every head leaf the property ops and the reader walks read: the
+    // worker runs the head tier and resolves the walks from these.
     _SampleHeadLeaves(B, time, &sampled);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
-        _SampleFlaggedBinding(binding.input, resolved, &refreshed,
-                              overrideFlags, time, &sampled, chainFresh);
+        _SampleFlaggedBinding(binding.input, &refreshed,
+                              overrideFlags, time, &sampled);
     }
     for (size_t promoted : B.promotedAvars) {
         if (promoted < B.avarConstantBindings.size()) {
@@ -1442,22 +1372,22 @@ _SampleWithPinnedChainBindings(
     }
     for (const RigExecBakedProgramImpl::Ladder &ladder : B.ladders) {
         _VisitLadderInputs(ladder, [&](const auto &input) {
-            _SampleFlaggedBinding(input, resolved, &refreshed, overrideFlags,
-                                  time, &sampled, chainFresh);
+            _SampleFlaggedBinding(input, &refreshed, overrideFlags,
+                                  time, &sampled);
         });
     }
     for (const RigExecBakedProgramImpl::SpaceSwitch &spaceSwitch :
          B.spaceSwitches) {
         _VisitSpaceSwitchInputs(spaceSwitch, [&](const auto &input) {
-            _SampleFlaggedBinding(input, resolved, &refreshed, overrideFlags,
-                                  time, &sampled, chainFresh);
+            _SampleFlaggedBinding(input, &refreshed, overrideFlags,
+                                  time, &sampled);
         });
     }
     for (const RigExecBakedProgramImpl::PoseInterpolator &interp :
          B.poseInterpolators) {
         _VisitInterpolatorInputs(interp, [&](const auto &input) {
-            _SampleFlaggedBinding(input, resolved, &refreshed, overrideFlags,
-                                  time, &sampled, chainFresh);
+            _SampleFlaggedBinding(input, &refreshed, overrideFlags,
+                                  time, &sampled);
         });
     }
     _VisitComposeInputs(B, [&](const auto &input) {
@@ -1465,18 +1395,18 @@ _SampleWithPinnedChainBindings(
                               time, &sampled, chainFresh);
     });
     for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
-        _SampleSolverBindings(solver, resolved, &refreshed, overrideFlags,
-                              time, &sampled, chainFresh);
+        _SampleSolverBindings(solver, &refreshed, overrideFlags,
+                              time, &sampled);
     }
     for (const RigExecBakedProgramImpl::Constraint &constraint :
          B.constraints) {
-        _SampleConstraintBindings(constraint, resolved, &refreshed,
-                                  overrideFlags, time, &sampled, chainFresh);
+        _SampleConstraintBindings(constraint, &refreshed,
+                                  overrideFlags, time, &sampled);
     }
     for (const RigExecBakedProgramImpl::WeightObject &object :
          B.weightObjects) {
-        _SampleWeightBindings(object, resolved, &refreshed, overrideFlags,
-                              time, &sampled, chainFresh);
+        _SampleWeightBindings(object, &refreshed, overrideFlags,
+                              time, &sampled);
         _SampleWeightArrays(object, &refreshed, time, &sampled);
     }
     // Ribbon driver points: read straight off the stage by the prologue,
@@ -1489,16 +1419,16 @@ _SampleWithPinnedChainBindings(
         }
     }
     // Blend channels outside the binding table, refreshed-first like the
-    // mover scalars: an override or chain output standing on a weight,
-    // activation or target array is what R.GetAttribute answers live. The
+    // mover scalars: an override standing on a weight, activation or
+    // target array is what R.GetAttribute answers live. The
     // fallbacks are the gather's inits (bakedGeometry.cpp AssembleRevision):
     // a weight the read misses is 0, an activation 1, points empty. Dense
     // points ride a synthetic key under the sample prim, never the target
     // path (see _FrozenBlendInputKey).
     // A pose-driven weight samples only when the refreshed inputs hold its
-    // path -- an override or chain result standing on it, which is exactly
-    // when live reads R instead of the pose slot. Otherwise the worker
-    // takes the slot from its own pose run, and no sample shadows it.
+    // path -- an override standing on it. Otherwise the worker takes the
+    // slot from its own pose run, or a chain's result from its own head
+    // tier, and no sample shadows it.
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         for (const RigExecBakedProgramImpl::GeomRevision &revision :
              chain.revisions) {
@@ -1698,8 +1628,8 @@ _SampleWithPinnedChainBindings(
         }
         // The prologue's resolveTopology, through the refreshed inputs: the
         // same cache, the same call, the same pointer for an unmoved layout.
-        // The hook's chain results are in there too, so a chain-driven
-        // mover input resolves at the job's time, as on the live path.
+        // No read here is one a chain or record can answer: the freeze
+        // refuses such a skin.
         std::shared_ptr<const RigExecSkinTopology> topology;
         if (revision.skinTopologyFixed) {
             topology = RigExecResolveSkinTopology(
@@ -1918,27 +1848,15 @@ RigExecSampleFrameInputsWithBurstCache(
     RigExecFrameInputs sampled;
     sampled.time = time;
     sampled.overrides = overrides;
-    const RigExecResolvedInputs *resolved = B.resolvedInputs;
 
-    const RigExecResolvedInputs *chainFresh = nullptr;
-    if (!cache->bindings.chains.empty()) {
-        RigExecResolvedInputs hooked = refreshed;
-        std::string hookError;
-        if (RigExecEvaluateChainsForTime(cache->bindings, time, &hooked,
-                                         nullptr, nullptr, &hookError)) {
-            refreshed = std::move(hooked);
-            chainFresh = &refreshed;
-        }
-    }
     // Fresh every frame, like the plain sampler: the head tier compares
     // them against the snapshot's own last samples.
     _SampleHeadLeaves(B, time, &sampled);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
-        _SampleFlaggedBinding(binding.input, resolved, &refreshed,
-                              cache->overrideFlags, time, &sampled,
-                              chainFresh);
+        _SampleFlaggedBinding(binding.input, &refreshed,
+                              cache->overrideFlags, time, &sampled);
     }
     for (size_t promoted : B.promotedAvars) {
         if (promoted < B.avarConstantBindings.size()) {
@@ -1948,24 +1866,21 @@ RigExecSampleFrameInputsWithBurstCache(
     }
     for (size_t i : cache->ladderSites) {
         _VisitLadderInputs(B.ladders[i], [&](const auto &input) {
-            _SampleFlaggedBinding(input, resolved, &refreshed,
-                                  cache->overrideFlags, time, &sampled,
-                                  chainFresh);
+            _SampleFlaggedBinding(input, &refreshed,
+                                  cache->overrideFlags, time, &sampled);
         });
     }
     for (size_t i : cache->spaceSwitchSites) {
         _VisitSpaceSwitchInputs(B.spaceSwitches[i], [&](const auto &input) {
-            _SampleFlaggedBinding(input, resolved, &refreshed,
-                                  cache->overrideFlags, time, &sampled,
-                                  chainFresh);
+            _SampleFlaggedBinding(input, &refreshed,
+                                  cache->overrideFlags, time, &sampled);
         });
     }
     for (size_t i : cache->interpolatorSites) {
         _VisitInterpolatorInputs(B.poseInterpolators[i],
                                  [&](const auto &input) {
-            _SampleFlaggedBinding(input, resolved, &refreshed,
-                                  cache->overrideFlags, time, &sampled,
-                                  chainFresh);
+            _SampleFlaggedBinding(input, &refreshed,
+                                  cache->overrideFlags, time, &sampled);
         });
     }
     _VisitComposeInputs(B, [&](const auto &input) {
@@ -1974,14 +1889,12 @@ RigExecSampleFrameInputsWithBurstCache(
                               chainFresh);
     });
     for (size_t i : cache->solverSites) {
-        _SampleSolverBindings(B.solvers[i], resolved, &refreshed,
-                              cache->overrideFlags, time, &sampled,
-                              chainFresh);
+        _SampleSolverBindings(B.solvers[i], &refreshed,
+                              cache->overrideFlags, time, &sampled);
     }
     for (size_t i : cache->constraintSites) {
-        _SampleConstraintBindings(B.constraints[i], resolved, &refreshed,
-                                  cache->overrideFlags, time, &sampled,
-                                  chainFresh);
+        _SampleConstraintBindings(B.constraints[i], &refreshed,
+                                  cache->overrideFlags, time, &sampled);
     }
     // Per object, bindings then arrays, exactly as the plain sampler
     // emits them: the sites list is table-ordered, so a merge walk visits
@@ -1994,9 +1907,8 @@ RigExecSampleFrameInputsWithBurstCache(
     for (size_t i = 0; i < B.weightObjects.size(); ++i) {
         if (weightSite < cache->weightSites.size() &&
             cache->weightSites[weightSite] == i) {
-            _SampleWeightBindings(B.weightObjects[i], resolved, &refreshed,
-                                  cache->overrideFlags, time, &sampled,
-                                  chainFresh);
+            _SampleWeightBindings(B.weightObjects[i], &refreshed,
+                                  cache->overrideFlags, time, &sampled);
             ++weightSite;
         }
         // Point arrays ride outside the burst memo (always fresh, like the

@@ -65,7 +65,11 @@
 //    clone's leaves (their attribute handles stay dead and unread): a
 //    body reads leaves, overrides and earlier versions only
 //    (RigExecBakedRunPropertyStep), and the one op that would reach the
-//    oracle, a weight-object envelope, refuses the freeze. Override slots
+//    oracle, a weight-object envelope, refuses the freeze. Every read after
+//    the tier that a chain result or a record can answer -- a chain-routed
+//    binding, a path leaf read through the resolved inputs -- resolves from
+//    the same leaves, the override slots and the tier's versions through
+//    its reader walk (RigExecBakedResolveReaderWalk). Override slots
 //    are found by (prim, attribute), building no path. The worker passes
 //    no cone verifier and a disabled profiler.
 //  * Shared kernels (skin, derived, solvers, constraints) are pure per-point
@@ -91,9 +95,11 @@ namespace {
 // Patches every patchable input's constant from its head-keyed sample and
 // nulls its handles, so the reused step bodies answer the patched constant
 // on every arm of RigExecBakedRead, which the prologue's leaf sample reads.
-// A varying input with no sample, or a sample holding a type the typed read
-// cannot consume, declines the job: the snapshot and the vector describe
-// different programs.
+// An input with a reader walk has no sample: the leaf sample resolves its
+// walk from the head-leaf samples (RigExecBakedReadWalked), so only its
+// handles are nulled. A varying input with no sample, or a sample holding a
+// type the typed read cannot consume, declines the job: the snapshot and
+// the vector describe different programs.
 bool
 _PatchInputs(RigExecBakedProgramImpl &B,
              const RigExecFrozenProgram &snapshot,
@@ -111,6 +117,12 @@ _PatchInputs(RigExecBakedProgramImpl &B,
             return;
         }
         const SdfPath &key = snapshot.inputHeadPaths[walked++];
+        if (input.walk >= 0) {
+            input.head = UsdAttribute();
+            input.query = UsdAttributeQuery();
+            input.resolvedAttr = UsdAttribute();
+            return;
+        }
         if (key.IsEmpty()) {
             // Invalid head: the sampler emits nothing, and live answers the
             // constant on every arm. A varying input the sampler cannot key
@@ -132,12 +144,6 @@ _PatchInputs(RigExecBakedProgramImpl &B,
             return;
         }
         const RigExecSampledInput &sample = inputs.values[found->second];
-        if (sample.viaChain) {
-            // Stale chain output: the hook declined this rig, so the runner
-            // never evaluates one.
-            ok = false;
-            return;
-        }
         if (sample.hasValue && !_SampleHolds(sample.value, &input.constant)) {
             ok = false;
             return;
@@ -192,6 +198,36 @@ _PatchHeadLeaves(RigExecBakedProgramImpl &B,
     return ok;
 }
 
+// One revision's or derived target's path leaves from the job's vector,
+// answered where the live prologue's reads go through the worker's own
+// state: a Present key from the worker's resolved inputs, and a key with a
+// reader walk from the head tier this job ran (the sampler leaves it
+// empty). A walked value that moved from the snapshot's marks its walk.
+void
+_PatchPathLeaves(RigExecBakedProgramImpl *program,
+                 RigExecBakedPathLeaves *leaves,
+                 const std::vector<VtValue> &values)
+{
+    RigExecBakedProgramImpl &B = *program;
+    leaves->values.resize(values.size());
+    for (size_t k = 0; k < values.size(); ++k) {
+        const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
+        const int walk = k < leaves->walks.size() ? leaves->walks[k] : -1;
+        if (walk >= 0) {
+            VtValue value = RigExecBakedSampleWalkedPathLeaf(B, key, walk);
+            if (k < leaves->values.size() && !(value == leaves->values[k])) {
+                B.readerWalkChanged[size_t(walk)] = 1;
+            }
+            leaves->values[k] = std::move(value);
+        } else if (key.flavour == RigExecRevisionLeafFlavour::Present) {
+            leaves->values[k] =
+                VtValue(B.resolvedInputs->Find(key.path) != nullptr);
+        } else {
+            leaves->values[k] = values[k];
+        }
+    }
+}
+
 // The frozen prologue: RigExecBakedProgram::Run's prologue (bakedProgram.cpp)
 // plus RunInputs, RunSolverSources, the constraint-array sweep, and the
 // geometry prologue, with every stage or live-state read replaced by its
@@ -238,12 +274,14 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         RigExecBakedRunHeadTier(&B, time, pose, /*force=*/false,
                                 /*verify=*/false);
         RigExecBakedPublishPropertyChains(&B);
+        RigExecBakedNoteReaderWalks(&B);
     }
 
     // Every leaf, sampled through the real RigExecBakedRead, which answers
-    // the patched constants. All of them on every job: the clone carries
-    // live's time, flags and stamps, so nothing about the job's own inputs
-    // can be told from them.
+    // the patched constants, or through its reader walk over the tier just
+    // run. All of them on every job: the clone carries live's time, flags
+    // and stamps, so nothing about the job's own inputs can be told from
+    // them.
     RigExecBakedSampleLeaves(&B, time, /* all = */ true);
 
     // RunInputs: ladders recompose from stage reads, so a recompute
@@ -664,14 +702,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         if (values.size() != revision.leaves.decl.keys.size()) {
             return false;
         }
-        revision.leaves.values = values;
-        for (size_t k = 0; k < values.size(); ++k) {
-            const RigExecRevisionLeafKey &key = revision.leaves.decl.keys[k];
-            if (key.flavour == RigExecRevisionLeafFlavour::Present) {
-                revision.leaves.values[k] =
-                    VtValue(B.resolvedInputs->Find(key.path) != nullptr);
-            }
-        }
+        _PatchPathLeaves(&B, &revision.leaves, values);
         for (size_t c = 0; c < revision.blendChannels.size(); ++c) {
             auto &channel = revision.blendChannels[c];
             for (size_t s = 0; s < channel.samples.size(); ++s) {
@@ -706,7 +737,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             revision.leaves.decl.keys.size()) {
             return false;
         }
-        revision.leaves.values = inputs.derivedLeaves[d];
+        _PatchPathLeaves(&B, &revision.leaves, inputs.derivedLeaves[d]);
     }
     return true;
 }

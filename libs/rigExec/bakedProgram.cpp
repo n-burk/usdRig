@@ -2169,6 +2169,79 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
         t.count = B.headSteps.size();
     }
     {
+        // The reads after the head tier that resolve walks: each walk's head,
+        // hops (slot, candidates, leaf), raw leaf, declared versions and
+        // shadows; which path leaves and steps read them; what each step
+        // and avar slot declares.
+        _DigestTable &t = table("readerWalks");
+        for (const RigExecBakedReaderWalk &reader : B.readerWalks) {
+            t.Path(reader.head);
+            t.Int(int64_t(reader.walk.flavour));
+            t.Int(int64_t(reader.walk.type));
+            for (const std::vector<RigExecBakedWalkHop> *hops :
+                 {&reader.walk.hops, &reader.walk.doubleHops}) {
+                t.Int(int64_t(hops->size()));
+                for (const RigExecBakedWalkHop &hop : *hops) {
+                    t.Path(hop.path);
+                    t.Int(hop.overrideSlot);
+                    t.Int(hop.chain);
+                    t.Int(hop.record);
+                    t.Int(hop.leaf);
+                }
+            }
+            t.Int(reader.rawLeaf);
+            for (const uint32_t id : reader.versions) {
+                t.Int(int64_t(id));
+            }
+            for (const auto &[version, record] : reader.shadowed) {
+                t.Int(int64_t(version));
+                t.Int(int64_t(record));
+            }
+        }
+        for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+            for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+                for (const int walk : revision.leaves.walks) {
+                    t.Int(walk);
+                }
+            }
+            for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+                for (const int walk : derived.revision.leaves.walks) {
+                    t.Int(walk);
+                }
+            }
+        }
+        frozenDetail::_ForEachPatchableInput(B, [&t](const auto &input) {
+            t.Int(input.walk);
+        });
+        for (size_t i = 0; i < B.steps.size(); ++i) {
+            const RigExecBakedStep &step = B.steps[i];
+            if (step.readerWalks.empty()) {
+                continue;
+            }
+            t.Int(int64_t(i));
+            for (const int walk : step.readerWalks) {
+                t.Int(walk);
+            }
+            for (const RigExecBakedHeadRange &range : step.headReads) {
+                t.Int(int64_t(range.begin));
+                t.Int(int64_t(range.end));
+            }
+            for (const auto &[version, record] : step.shadowedReads) {
+                t.Int(int64_t(version));
+                t.Int(int64_t(record));
+            }
+        }
+        for (size_t slot = 0; slot < B.avarHeadReads.size(); ++slot) {
+            for (const uint32_t id : B.avarHeadReads[slot]) {
+                t.Int(int64_t(slot));
+                t.Int(int64_t(id));
+            }
+        }
+        t.count = B.readerWalks.size();
+    }
+    {
         _DigestTable &t = table("schedule");
         t.Str(RigExecBakedScheduleReport(B));
         t.count = B.steps.size();
@@ -3559,6 +3632,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                    E._rigPath);
             return nullptr;
         }
+        // The readers' declared versions, now that the steps hold them.
+        if (!RigExecBakedValidateHeadReads(B, &invalid)) {
+            refuse("the baked head tier is invalid: " + invalid, E._rigPath);
+            return nullptr;
+        }
     }
     // One leaf per binding, now that every binding exists. The first run
     // samples them all (RigExecBakedSampleLeaves, rule 1).
@@ -3775,6 +3853,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
             RigExecBakedRunHeadTier(&B, time, pose, fullRunRequested,
                                     RigExecBakedVerifyConesRequested());
             RigExecBakedPublishPropertyChains(&B);
+            RigExecBakedNoteReaderWalks(&B);
         }
         RigExecBakedSampleLeaves(&B, time, fullRunRequested,
                                  RigExecBakedLeafPass::ChainRouted);

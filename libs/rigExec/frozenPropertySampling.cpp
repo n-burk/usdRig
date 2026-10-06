@@ -1,10 +1,9 @@
-// Stage-side property-chain discovery, binding, and evaluation.
+// Stage-side property-chain discovery and binding, for the freeze gate and
+// the samplers' epoch currency check.
 
 #include "frozenContextInternal.h"
 #include "movers/moverRegistry.h"
-#include "rigExecMath/propertyMath.h"
 #include <algorithm>
-#include <cmath>
 #include <set>
 
 namespace rigExec {
@@ -13,84 +12,10 @@ using namespace frozenDetail;
 
 namespace {
 
-// NOTE: no double overload, exactly as on the live path: a double base is
-// checked through the float conversion, so a finite double past float range
-// skips the chain on both paths alike.
-
 bool
 _IsChainMathMover(const TfToken &schemaType)
 {
     return RigExecIsPropertyMover(schemaType);
-}
-
-// Mirror of _PinnedRead, arm for arm: no attribute answers the fallback; a
-// connected attribute walks the resolved inputs (the return ignored, so a
-// failed walk keeps the fallback); an in-memory value of the read type
-// wins; a folded constant answers; otherwise the pinned query resolves.
-template <class T>
-T
-_ChainPinnedRead(const RigExecResolvedInputs &resolved,
-                 const RigExecChainSampleInput &input, T fallback,
-                 UsdTimeCode time)
-{
-    T value = fallback;
-    if (!input.attribute) {
-        return value;
-    }
-    if (input.connected) {
-        resolved.GetAttribute(input.attribute, time, &value);
-        return value;
-    }
-    if (const VtValue *const standing = resolved.Find(input.path)) {
-        if (standing->IsHolding<T>()) {
-            return standing->UncheckedGet<T>();
-        }
-    }
-    if (input.constant && input.constantValue.IsHolding<T>()) {
-        return input.constantValue.UncheckedGet<T>();
-    }
-    T resolvedValue;
-    if (input.query.Get(&resolvedValue, time)) {
-        value = resolvedValue;
-    }
-    return value;
-}
-
-// Mirror of _ReadOperation: the operation names the arithmetic, not a
-// value, so it is read at Default with no resolved inputs consulted.
-void
-_ChainReadOperation(const RigExecChainSampleInput &input, TfToken *operation)
-{
-    if (input.constant) {
-        if (input.constantValue.IsHolding<TfToken>()) {
-            *operation = input.constantValue.UncheckedGet<TfToken>();
-        }
-        return;
-    }
-    input.query.Get(operation);
-}
-
-// Mirror of _ReadPinnedPropertyMathParams: the mover's whole authored
-// state, read through the pinned inputs whether or not the operation uses
-// every field.
-template <class T>
-bool
-_ChainReadMathParams(const RigExecResolvedInputs &resolved,
-                     const RigExecChainSampleRevision &mover, UsdTimeCode time,
-                     RigExecPropertyMathParams<T> *params)
-{
-    TfToken operation;
-    if (mover.operation) {
-        _ChainReadOperation(mover.operation, &operation);
-    }
-    if (!RigExecParsePropertyOp(operation, &params->op)) {
-        return false;
-    }
-    params->value =
-        _ChainPinnedRead(resolved, mover.value, params->value, time);
-    params->min = _ChainPinnedRead(resolved, mover.minimum, params->min, time);
-    params->max = _ChainPinnedRead(resolved, mover.maximum, params->max, time);
-    return true;
 }
 
 // The eight inputs a revision pins, by attribute name, for the currency
@@ -118,25 +43,6 @@ _ChainBoundInput(const RigExecChainSampleRevision &revision, size_t i)
 } // namespace
 
 namespace frozenDetail {
-
-bool
-_ChainIsFinite(const GfVec3f &v)
-{
-    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
-}
-
-bool
-_ChainIsFinite(const GfMatrix4d &m)
-{
-    for (size_t r = 0; r < 4; ++r) {
-        for (size_t c = 0; c < 4; ++c) {
-            if (!std::isfinite(m[r][c])) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
 
 // Mirror of the compile pass that fills the evaluator's property chains:
 // every math mover in mover order, each over its one exact property
@@ -464,265 +370,6 @@ RigExecChainSampleBindingsStillCurrent(
 }
 
 bool
-RigExecEvaluateChainsForTime(
-    const RigExecChainSampleBindings &bindings, UsdTimeCode time,
-    RigExecResolvedInputs *resolved, std::map<SdfPath, VtValue> *results,
-    std::vector<std::string> *diagnostics, std::string *error)
-{
-    if (!resolved) {
-        if (error) {
-            *error = "no resolved inputs to evaluate the chains into";
-        }
-        return false;
-    }
-    auto diag = [diagnostics](const std::string &message) {
-        if (diagnostics) {
-            diagnostics->push_back(message);
-        }
-    };
-
-    // The job's overrides, as they stand before any chain publishes: one on
-    // a target is the chain's base, and a phased reader with one on a hop
-    // stands aside for the overlay walk -- the live path's rules
-    // (_EvaluatePropertyChains).
-    std::vector<std::vector<char>> standAside(bindings.chains.size());
-    std::vector<VtValue> targetOverrides(bindings.chains.size());
-    for (size_t c = 0; c < bindings.chains.size(); ++c) {
-        const RigExecChainSampleChain &chain = bindings.chains[c];
-        if (const VtValue *held = resolved->Find(chain.targetPath)) {
-            targetOverrides[c] = *held;
-        }
-        standAside[c].assign(chain.phased.size(), 0);
-        for (size_t k = 0; k < chain.phased.size(); ++k) {
-            for (const SdfPath &hop : chain.phased[k].hops) {
-                if (resolved->Find(hop)) {
-                    standAside[c][k] = 1;
-                    break;
-                }
-            }
-        }
-    }
-
-    for (size_t c = 0; c < bindings.chains.size(); ++c) {
-        const RigExecChainSampleChain &chain = bindings.chains[c];
-        const SdfPath &target = chain.targetPath;
-        if (!chain.target) {
-            diag("property chain " + target.GetString() +
-                 ": target attribute disappeared; chain skipped");
-            continue;
-        }
-        // The target is not cleared: a drag on it stays placed until the
-        // chain publishes, as on the live path.
-        for (size_t k = 0; k < chain.phased.size(); ++k) {
-            if (!standAside[c][k]) {
-                resolved->ClearProperty(chain.phased[k].consumer);
-            }
-        }
-        const SdfValueTypeName &valueType = chain.valueType;
-
-        // One shared revision loop over the three value domains, as on the
-        // live path: each iteration reads the mover's own authored state
-        // and applies it to the preceding revision, from the target's
-        // AUTHORED base value or the drag standing in for it.
-        auto runChain = [&](auto value, auto apply) {
-            using ValueT = decltype(value);
-            bool haveBase = false;
-            if (!targetOverrides[c].IsEmpty()) {
-                const VtValue held =
-                    RigExecPhasedConsumerValue(targetOverrides[c], valueType);
-                if (held.IsHolding<ValueT>()) {
-                    value = held.UncheckedGet<ValueT>();
-                    haveBase = true;
-                }
-            }
-            if (!haveBase && !chain.targetQuery.Get(&value, time)) {
-                diag("property chain " + target.GetString() +
-                     ": target has no authored value; chain skipped");
-                return true;
-            }
-            if (!_ChainIsFinite(value)) {
-                diag("property chain " + target.GetString() +
-                     ": authored base is not finite; chain skipped");
-                return true;
-            }
-            // The value after each revision, base first, for the phased
-            // consumers, as on the live path.
-            std::vector<ValueT> history;
-            if (!chain.phased.empty()) {
-                history.reserve(chain.revisions.size() + 1);
-            }
-            for (const RigExecChainSampleRevision &revision :
-                 chain.revisions) {
-                if (!chain.phased.empty()) {
-                    history.push_back(value);
-                }
-                const UsdPrim &moverPrim = revision.moverPrim;
-                if (!moverPrim) {
-                    continue;
-                }
-                const SdfPath moverPath = moverPrim.GetPath();
-                const bool enabled = _ChainPinnedRead(
-                    *resolved, revision.enabled, true, time);
-                if (!enabled) {
-                    diag("diag " + moverPath.GetString() +
-                         ": disabled; revision passed through");
-                    continue;
-                }
-                float envelope = 1.0f;
-                if (!revision.weightObjects.empty()) {
-                    if (error) {
-                        *error =
-                            "diag " + moverPath.GetString() +
-                            " binds a weight object, whose envelope resolves "
-                            "through the evaluator's live oracle";
-                    }
-                    return false;
-                }
-                envelope = _ChainPinnedRead(
-                    *resolved, revision.defaultWeight, 1.0f, time);
-                if (!std::isfinite(envelope) || envelope < 0.0f ||
-                    envelope > 1.0f) {
-                    diag("diag " + moverPath.GetString() +
-                         ": inputs:defaultWeight must be finite and in "
-                         "[0, 1]; revision passed through");
-                    continue;
-                }
-                ValueT next = value;
-                if (!apply(revision, value, envelope, &next)) {
-                    diag("diag " + moverPath.GetString() +
-                         ": inputs unusable; revision passed through");
-                    continue;
-                }
-                if (!_ChainIsFinite(next)) {
-                    diag("diag " + moverPath.GetString() +
-                         ": produced a non-finite value; revision passed "
-                         "through");
-                    continue;
-                }
-                value = next;
-            }
-            const VtValue finalValue(value);
-            if (results) {
-                (*results)[target] = finalValue;
-            }
-            resolved->SetProperty(target, finalValue);
-            if (!chain.phased.empty()) {
-                history.push_back(value);
-                for (size_t k = 0; k < chain.phased.size(); ++k) {
-                    const RigExecPhasedConnection &phased = chain.phased[k];
-                    if (standAside[c][k]) {
-                        continue;
-                    }
-                    const VtValue read = RigExecPhasedConsumerValue(
-                        VtValue(history[std::min(phased.applied,
-                                                 chain.revisions.size())]),
-                        phased.consumerType);
-                    if (results) {
-                        (*results)[phased.consumer] = read;
-                    }
-                    resolved->SetProperty(phased.consumer, read);
-                }
-            }
-            return true;
-        };
-
-        const auto applyFloat = [&](const RigExecChainSampleRevision &mover,
-                                    float in, float envelope, float *out) {
-            RigExecPropertyMathParams<float> params;
-            if (!_ChainReadMathParams(*resolved, mover, time, &params) ||
-                !_ChainIsFinite(params.value) || !_ChainIsFinite(params.min) ||
-                !_ChainIsFinite(params.max)) {
-                return false;
-            }
-            VtArray<GfVec2f> keys;
-            VtArray<GfVec2f> tangents;
-            if (params.op == RigExecPropertyOp::Curve) {
-                keys = _ChainPinnedRead(*resolved, mover.keys, keys, time);
-                if (keys.empty() || !RigExecValidateLinearKeys(
-                                        keys.cdata(), keys.size())) {
-                    return false;
-                }
-                params.keys = keys.cdata();
-                params.keyCount = keys.size();
-                if (mover.tangents) {
-                    tangents = _ChainPinnedRead(
-                        *resolved, mover.tangents, tangents, time);
-                }
-                if (!tangents.empty()) {
-                    if (tangents.size() != keys.size()) {
-                        return false;
-                    }
-                    params.tangents = tangents.cdata();
-                    params.tangentCount = tangents.size();
-                }
-            }
-            params.weight = envelope;
-            *out = RigExecApplyFloatMath(in, params);
-            return true;
-        };
-        bool chainOk = true;
-        if (valueType == SdfValueTypeNames->Float) {
-            chainOk = runChain(float(0), applyFloat);
-        } else if (valueType == SdfValueTypeNames->Double) {
-            chainOk = runChain(
-                double(0),
-                [&](const RigExecChainSampleRevision &mover, double in,
-                    float envelope, double *out) {
-                    float result = 0.0f;
-                    if (!applyFloat(mover, float(in), envelope, &result)) {
-                        return false;
-                    }
-                    *out = double(result);
-                    return true;
-                });
-        } else if (valueType == SdfValueTypeNames->Matrix4d) {
-            chainOk = runChain(
-                GfMatrix4d(1.0),
-                [&](const RigExecChainSampleRevision &mover,
-                    const GfMatrix4d &in, float envelope, GfMatrix4d *out) {
-                    TfToken operation;
-                    if (mover.operation) {
-                        _ChainReadOperation(mover.operation, &operation);
-                    }
-                    RigExecPropertyOp op;
-                    if (!RigExecParsePropertyOp(operation, &op)) {
-                        return false;
-                    }
-                    const GfMatrix4d opValue = _ChainPinnedRead(
-                        *resolved, mover.value, GfMatrix4d(1.0), time);
-                    if (!_ChainIsFinite(opValue)) {
-                        return false;
-                    }
-                    return RigExecApplyMatrixMath(
-                        in, op, opValue, envelope, out);
-                });
-        } else {
-            // Every remaining type the compiler admits is GfVec3f-backed.
-            chainOk = runChain(
-                GfVec3f(0),
-                [&](const RigExecChainSampleRevision &mover, const GfVec3f &in,
-                    float envelope, GfVec3f *out) {
-                    RigExecPropertyMathParams<GfVec3f> params;
-                    if (!_ChainReadMathParams(
-                            *resolved, mover, time, &params) ||
-                        !_ChainIsFinite(params.value) ||
-                        !_ChainIsFinite(params.min) ||
-                        !_ChainIsFinite(params.max)) {
-                        return false;
-                    }
-                    params.weight = envelope;
-                    *out = RigExecApplyVec3fMath(in, params);
-                    return true;
-                });
-        }
-        if (!chainOk) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool
 RigExecSampleFrameInputs(const RigExecRigEvaluator &evaluator,
                          UsdTimeCode time,
                          const std::vector<RigExecValueOverride> &overrides,
@@ -731,8 +378,7 @@ RigExecSampleFrameInputs(const RigExecRigEvaluator &evaluator,
     // Bind fresh, then sample through the pinned route: the two routes
     // share every line below the bind, and the equivalence test holds them
     // to account sample by sample. A bind failure names no chains at all,
-    // so no vector is built; an evaluation decline (a weight object) still
-    // builds a marked vector that declines downstream.
+    // so no vector is built.
     RigExecChainSampleBindings fresh;
     if (!RigExecBindChainSampleInputs(evaluator, &fresh, error)) {
         return false;

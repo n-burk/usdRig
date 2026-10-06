@@ -14,13 +14,21 @@
 // publishes the chains, that a clean tier still publishes, and that a bake
 // after an evaluation exports what a fresh one does; and hold a chain
 // input connected to a pose interpolator's weight to the authored value.
+// The region's readers declare the versions their walks can meet: only the
+// readers of a moved version re-run, a stand-aside reader re-runs on its
+// hop's drag, every walk's versions are declared and a missing declaration
+// refuses the program, a record of another type than the read shadows
+// nothing, a chain drag on the biped costs less than a forced run, and the
+// exported always-dirty set keeps its recorded digests.
 // Registered plain and under the parity entries; under
 // RIGEXEC_BAKED_VERIFY_CONES the head tier is also checked against a forced
 // run of itself.
 // argv[1] = path to the examples directory.
+#include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedTrace.h"
+#include "rigExec/frozenContext.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/rigEvaluatorPropertyBindings.h"
 #include "rigExecBake/bake.h"
@@ -31,6 +39,7 @@
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/fileUtils.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/type.h"
@@ -42,6 +51,7 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1181,6 +1191,825 @@ TestAChainReadsAnInterpolatorWeightAsAuthored()
     }
 }
 
+// A double chain of three revisions on a control's avars:rz (First adds,
+// Second multiplies, Third adds), read by three position constraints'
+// float inputs:defaultWeight: Follow at `final`, FollowBase through an
+// undeclared connection (the base), and FollowViaHop at `final` through
+// FollowBase's input, a hop of its record.
+const char *const kVersionReaders = R"usda(#usda 1.0
+(
+    endTimeCode = 10
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def Xform "Source"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (10, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "Target"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "TargetBase"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "TargetHop"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            def RigExecControl "RootCtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 0.2
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/RootCtl>
+                rel rigExec:joints = </Asset/Rig/Joints/Root>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Rz"
+            {
+                def RigExecFloatMathMover "Third" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "add"
+                    float inputs:value = 0.125
+                    rel rigExec:moves = </Asset/Rig/Controls/RootCtl.avars:rz>
+                }
+
+                def RigExecFloatMathMover "Second" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "multiply"
+                    float inputs:value = 2
+                    rel rigExec:moves = </Asset/Rig/Controls/RootCtl.avars:rz>
+                }
+
+                def RigExecFloatMathMover "First" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "add"
+                    float inputs:value = 0.05
+                    rel rigExec:moves = </Asset/Rig/Controls/RootCtl.avars:rz>
+                }
+            }
+
+            def RigExecPositionConstraint "Follow" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight (
+                    rigExecReadPhase = "final"
+                )
+                prepend float inputs:defaultWeight.connect = </Asset/Rig/Controls/RootCtl.avars:rz>
+                rel rigExec:moves = </Asset/Target>
+                rel rigExec:sources = </Asset/Source>
+            }
+
+            def RigExecPositionConstraint "FollowBase" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                prepend float inputs:defaultWeight.connect = </Asset/Rig/Controls/RootCtl.avars:rz>
+                rel rigExec:moves = </Asset/TargetBase>
+                rel rigExec:sources = </Asset/Source>
+            }
+
+            def RigExecPositionConstraint "FollowViaHop" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight (
+                    rigExecReadPhase = "final"
+                )
+                prepend float inputs:defaultWeight.connect = </Asset/Rig/Movers/FollowBase.inputs:defaultWeight>
+                rel rigExec:moves = </Asset/TargetHop>
+                rel rigExec:sources = </Asset/Source>
+            }
+        }
+    }
+}
+)usda";
+
+const SdfPath kRz("/Asset/Rig/Controls/RootCtl.avars:rz");
+const SdfPath kFollow("/Asset/Rig/Movers/Follow");
+const SdfPath kFollowBase("/Asset/Rig/Movers/FollowBase");
+const SdfPath kFollowViaHop("/Asset/Rig/Movers/FollowViaHop");
+
+// The region step that commits the constraint at \p path, or -1.
+int
+ConstraintStep(const RigExecBakedProgramImpl &B, const SdfPath &path)
+{
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        const RigExecBakedStep &step = B.steps[i];
+        if (step.kind != RigExecBakedStepKind::Constraint) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::WalkStep &walk =
+            B.walkSteps[size_t(step.object)];
+        if (!walk.solverBatch && walk.index >= 0 &&
+            B.constraints[size_t(walk.index)].path == path) {
+            return int(i);
+        }
+    }
+    return -1;
+}
+
+// The constraint at \p path's inputs:defaultWeight leaf.
+float
+ConstraintWeight(const RigExecBakedProgramImpl &B, const SdfPath &path)
+{
+    for (const RigExecBakedProgramImpl::Constraint &constraint :
+         B.constraints) {
+        if (constraint.path == path) {
+            return RigExecBakedLeafRead(B, constraint.defaultWeight);
+        }
+    }
+    return -1.0f;
+}
+
+// The region steps the last run executed.
+std::set<size_t>
+StepsRan(const RigExecBakedProgramImpl &B)
+{
+    std::set<size_t> ran;
+    for (const RigExecOpTraceEntry &entry : RigExecBakedLastRunTrace(B)) {
+        ran.insert(entry.step);
+    }
+    return ran;
+}
+
+// What two poses publish: moved properties bit for bit, control and joint
+// frames, and the lines (less the mover graph's work line).
+bool
+SameReadings(const RigExecRigPose &a, const RigExecRigPose &b,
+             const std::string &what)
+{
+    std::string why;
+    if (!a.valid || !b.valid) {
+        why = "an invalid pose";
+    } else if (a.movedProperties.size() != b.movedProperties.size()) {
+        why = "moved property count";
+    } else if (a.controlFrames != b.controlFrames) {
+        why = "control frames";
+    } else if (a.jointFramesFinal != b.jointFramesFinal) {
+        why = "joint frames";
+    } else {
+        for (auto i = a.movedProperties.begin(),
+                  j = b.movedProperties.begin();
+             i != a.movedProperties.end(); ++i, ++j) {
+            if (i->first != j->first ||
+                !RigExecBakedHeadValueSame(i->second, j->second)) {
+                why = "moved property " + i->first.GetString();
+                break;
+            }
+        }
+        const auto lines = [](const RigExecRigPose &pose) {
+            std::vector<std::string> out;
+            for (const std::string &line : pose.diagnostics) {
+                if (line.rfind("mover graph: ", 0) != 0) {
+                    out.push_back(line);
+                }
+            }
+            return out;
+        };
+        if (why.empty() && lines(a) != lines(b)) {
+            why = "diagnostics";
+        }
+    }
+    if (!why.empty()) {
+        ++failures;
+        std::printf("FAIL %s: the poses differ in %s\n", what.c_str(),
+                    why.c_str());
+        return false;
+    }
+    return true;
+}
+
+// A program built fresh on \p stage under \p overrides: its first run
+// executes everything.
+RigExecRigPose
+FreshPose(const UsdStageRefPtr &stage, const SdfPath &rig, UsdTimeCode time,
+          const std::vector<RigExecValueOverride> &overrides)
+{
+    auto fresh = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    fresh->SetInteractiveOverrides(overrides);
+    return fresh->Evaluate(time);
+}
+
+// A frozen job at \p time under \p overrides, sampled and warmed against a
+// snapshot of \p evaluator's program: accepted, and equal to live.
+void
+CheckFrozenJob(RigExecRigEvaluator *evaluator, const SdfPath &rig,
+               UsdTimeCode time,
+               const std::vector<RigExecValueOverride> &overrides,
+               const RigExecRigPose &live, const std::string &what)
+{
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(*evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("FAIL %s: freeze refused: %s\n", what.c_str(),
+                    error.c_str());
+        return;
+    }
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(*evaluator, time, overrides, &inputs,
+                                   &error));
+    CHECK(!inputs.HasChainResolvedInputs());
+    RigExecBackgroundScheduler scheduler;
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator->GetBindingEpochDigest();
+    context.generation = scheduler.CurrentGeneration(rig);
+    context.slotCount = evaluator->GetBakedProgram()->GetProviderCount();
+    context.varyingInputCount = inputs.values.size();
+    context.frozen = frozen.get();
+    const RigExecRigPose warmed = RigExecEvaluateFrozen(
+        context, inputs, RigExecMakeProductionStepRunner(), &scheduler, rig);
+    if (!warmed.valid) {
+        ++failures;
+        std::printf("FAIL %s: the frozen job was declined\n", what.c_str());
+        return;
+    }
+    SameReadings(live, warmed, what + " (frozen)");
+}
+
+// A drag on revision 2's input moves the chain's versions 2 and 3, so it
+// re-runs head parts 2-3 and the steps that declare the final version --
+// Follow, and FollowViaHop through its hop -- and not FollowBase, whose
+// walk declares the base record alone; a rule re-running every
+// chain-reading step on any moved chain result fails here. The lift
+// re-runs the same set. Each pose equals a fresh program's, and a
+// frozen job under the same drag is accepted and equals live (the worker
+// reports no trace, so its executed set is not observed).
+void
+TestOnlyReadersOfTheChangedVersionRerun()
+{
+    UsdStageRefPtr stage = StageFrom(kVersionReaders);
+    const SdfPath rig("/Asset/Rig");
+    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    const UsdTimeCode t(1.0);
+    CHECK(evaluator->Evaluate(t).valid);
+    CHECK(evaluator->Evaluate(t).valid);
+    const RigExecBakedProgramImpl *program = Program(*evaluator);
+    CHECK(program && program->propertyChains.size() == 1);
+    if (!program || program->propertyChains.size() != 1) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = *program;
+    const int follow = ConstraintStep(B, kFollow);
+    const int base = ConstraintStep(B, kFollowBase);
+    const int viaHop = ConstraintStep(B, kFollowViaHop);
+    CHECK(follow >= 0 && base >= 0 && viaHop >= 0);
+    if (follow < 0 || base < 0 || viaHop < 0) {
+        return;
+    }
+    // Each reads a walk, and declares its version.
+    for (const int index : {follow, base, viaHop}) {
+        CHECK(!B.steps[size_t(index)].readerWalks.empty());
+        CHECK(!B.steps[size_t(index)].headReads.empty());
+    }
+    const auto check = [&](const std::vector<RigExecValueOverride> &drag,
+                           const std::string &what) {
+        evaluator->SetInteractiveOverrides(drag);
+        const RigExecRigPose pose = evaluator->Evaluate(t);
+        CHECK(pose.valid);
+        const std::set<size_t> ran = StepsRan(B);
+        const bool ok = ran.count(size_t(follow)) &&
+                        ran.count(size_t(viaHop)) && !ran.count(size_t(base));
+        if (!ok) {
+            ++failures;
+        }
+        std::printf("%s %s: Follow %s, FollowViaHop %s, FollowBase %s; "
+                    "head ran%s\n",
+                    ok ? "readers" : "FAIL readers", what.c_str(),
+                    ran.count(size_t(follow)) ? "ran" : "skipped",
+                    ran.count(size_t(viaHop)) ? "ran" : "skipped",
+                    ran.count(size_t(base)) ? "ran" : "skipped",
+                    RanText(Ran(B)).c_str());
+        CHECK((Ran(B) == std::set<std::pair<SdfPath, int>>{{kRz, 2},
+                                                           {kRz, 3}}));
+        SameReadings(FreshPose(stage, rig, t, drag), pose, what);
+        CheckFrozenJob(evaluator.get(), rig, t, drag, pose, what);
+    };
+    check(DragBy(stage,
+                 SdfPath("/Asset/Rig/Movers/Rz/Second.inputs:value"), t,
+                 1.0f),
+          "revision 2 dragged");
+    check({}, "revision 2 lifted");
+}
+
+// A drag on FollowBase's input, a hop of FollowViaHop's record, stands that
+// record aside: FollowViaHop re-runs and reads the hop's override, and so
+// does FollowBase, whose own input it is. Lifting it re-runs both, back on
+// the chain's final version and base. Follow, which reads neither, stays.
+void
+TestAStandAsideReaderDeclaresItsHops()
+{
+    UsdStageRefPtr stage = StageFrom(kVersionReaders);
+    const SdfPath rig("/Asset/Rig");
+    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    const UsdTimeCode t(1.0);
+    CHECK(evaluator->Evaluate(t).valid);
+    CHECK(evaluator->Evaluate(t).valid);
+    const RigExecBakedProgramImpl *program = Program(*evaluator);
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = *program;
+    const int follow = ConstraintStep(B, kFollow);
+    const int base = ConstraintStep(B, kFollowBase);
+    const int viaHop = ConstraintStep(B, kFollowViaHop);
+    CHECK(follow >= 0 && base >= 0 && viaHop >= 0);
+    if (follow < 0 || base < 0 || viaHop < 0) {
+        return;
+    }
+    const float finalWeight = ConstraintWeight(B, kFollowViaHop);
+    const float baseWeight = ConstraintWeight(B, kFollowBase);
+    CHECK(finalWeight == ConstraintWeight(B, kFollow));
+    CHECK(finalWeight != baseWeight);
+
+    const std::vector<RigExecValueOverride> drag = {
+        RigExecValueOverride{kFollowBase, TfToken(),
+                             TfToken("inputs:defaultWeight"), VtValue(0.3f)}};
+    evaluator->SetInteractiveOverrides(drag);
+    RigExecRigPose pose = evaluator->Evaluate(t);
+    CHECK(pose.valid);
+    std::set<size_t> ran = StepsRan(B);
+    CHECK(ran.count(size_t(viaHop)) && ran.count(size_t(base)));
+    CHECK(!ran.count(size_t(follow)));
+    CHECK(ConstraintWeight(B, kFollowViaHop) == 0.3f);
+    CHECK(ConstraintWeight(B, kFollowBase) == 0.3f);
+    CHECK(ConstraintWeight(B, kFollow) == finalWeight);
+    SameReadings(FreshPose(stage, rig, t, drag), pose, "hop dragged");
+    CheckFrozenJob(evaluator.get(), rig, t, drag, pose, "hop dragged");
+
+    evaluator->SetInteractiveOverrides({});
+    pose = evaluator->Evaluate(t);
+    CHECK(pose.valid);
+    ran = StepsRan(B);
+    CHECK(ran.count(size_t(viaHop)) && ran.count(size_t(base)));
+    CHECK(!ran.count(size_t(follow)));
+    CHECK(ConstraintWeight(B, kFollowViaHop) == finalWeight);
+    CHECK(ConstraintWeight(B, kFollowBase) == baseWeight);
+    SameReadings(FreshPose(stage, rig, t, {}), pose, "hop lifted");
+}
+
+// A double avar connected through FollowBase's float input to the double
+// target is a base record of its own, met first. FollowBase's float record
+// further along answers no double read: the overlay answers only its exact
+// type, so with the avar's record stood aside the walk passes it by and
+// reads the target's final version. So the final is shadowed by the avar's
+// own record and never by FollowBase's. A drag on revision 2's input leaves
+// the avar on the base; a drag on FollowBase's input stands both records
+// aside and the avar reads the final, also once revision 2 moves it.
+void
+TestARecordOfAnotherTypeShadowsNothing()
+{
+    UsdStageRefPtr stage = StageFrom(kVersionReaders);
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath probe("/Asset/Rig/Controls/ProbeCtl");
+    const SdfPath probeRz = probe.AppendProperty(TfToken("avars:rz"));
+    {
+        const UsdPrim ctl =
+            stage->DefinePrim(probe, TfToken("RigExecControl"));
+        ctl.AddAppliedSchema(TfToken("RigExecControlAPI"));
+        UsdAttribute rz = ctl.CreateAttribute(TfToken("avars:rz"),
+                                              SdfValueTypeNames->Double);
+        rz.Set(0.0);
+        rz.AddConnection(
+            kFollowBase.AppendProperty(TfToken("inputs:defaultWeight")));
+        ctl.CreateAttribute(TfToken("rest:space"),
+                            SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        const UsdPrim joint = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/Probe"), TfToken("RigExecJoint"));
+        joint.CreateAttribute(TfToken("rest:space"),
+                              SdfValueTypeNames->Matrix4d)
+            .Set(GfMatrix4d(1.0));
+        const UsdPrim chain = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Solvers/ProbeChain"),
+            TfToken("RigExecFkChain"));
+        chain.CreateRelationship(TfToken("rigExec:controls"))
+            .AddTarget(probe);
+        chain.CreateRelationship(TfToken("rigExec:joints"))
+            .AddTarget(joint.GetPath());
+    }
+    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    const UsdTimeCode t(1.0);
+    CHECK(evaluator->Evaluate(t).valid);
+    CHECK(evaluator->Evaluate(t).valid);
+    const RigExecBakedProgramImpl *program = Program(*evaluator);
+    CHECK(program && program->propertyChains.size() == 1);
+    if (!program || program->propertyChains.size() != 1) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = *program;
+    const RigExecBakedInput<double> *input = nullptr;
+    for (const RigExecBakedProgramImpl::AvarBinding &binding :
+         B.avarBindings) {
+        if (binding.input.head && binding.input.head.GetPath() == probeRz) {
+            input = &binding.input;
+        }
+    }
+    CHECK(input && input->walk >= 0);
+    if (!input || input->walk < 0) {
+        return;
+    }
+    // The walk declares the final, and only the avar's own record shadows
+    // it.
+    const RigExecBakedReaderWalk &walk = B.readerWalks[size_t(input->walk)];
+    CHECK(!walk.shadowed.empty());
+    for (const auto &[version, record] : walk.shadowed) {
+        CHECK(B.propertyRecords[record].consumer == probeRz);
+    }
+    const auto finalValue = [&B]() {
+        const VtValue &v = B.chainFinal.front();
+        return v.IsHolding<double>() ? v.UncheckedGet<double>() : -1.0;
+    };
+    const double base = RigExecBakedLeafRead(B, *input);
+    CHECK(base != finalValue());
+    const std::vector<RigExecValueOverride> revision2 = DragBy(
+        stage, SdfPath("/Asset/Rig/Movers/Rz/Second.inputs:value"), t, 1.0f);
+    const std::vector<RigExecValueOverride> hop = {RigExecValueOverride{
+        kFollowBase, TfToken(), TfToken("inputs:defaultWeight"),
+        VtValue(0.3f)}};
+    std::vector<RigExecValueOverride> both = hop;
+    both.insert(both.end(), revision2.begin(), revision2.end());
+    struct Case {
+        const char *what;
+        std::vector<RigExecValueOverride> overrides;
+        bool readsFinal;
+    };
+    for (const Case &c : {Case{"revision 2 dragged", revision2, false},
+                          Case{"FollowBase's input dragged", hop, true},
+                          Case{"both dragged", both, true},
+                          Case{"lifted", {}, false}}) {
+        const std::string what =
+            std::string("a record of another type: ") + c.what;
+        evaluator->SetInteractiveOverrides(c.overrides);
+        const RigExecRigPose pose = evaluator->Evaluate(t);
+        CHECK(pose.valid);
+        const double want = c.readsFinal ? finalValue() : base;
+        const double got = RigExecBakedLeafRead(B, *input);
+        if (got != want) {
+            ++failures;
+            std::printf("FAIL %s: the avar reads %.9g, expected %.9g\n",
+                        what.c_str(), got, want);
+        }
+        SameReadings(FreshPose(stage, rig, t, c.overrides), pose, what);
+        CheckFrozenJob(evaluator.get(), rig, t, c.overrides, pose, what);
+    }
+}
+
+// Every step that reads a reader walk declares each version the walk can
+// meet, on the in-memory readers, computed_chains and the biped; the avar
+// slots likewise. With one declaration taken out, the program's region
+// validation refuses it and names the walk.
+void
+TestReaderWalksDeclareTheirVersions(const std::string &examples)
+{
+    struct Rig {
+        std::string name;
+        UsdStageRefPtr stage;
+        SdfPath rig;
+    };
+    const std::vector<Fixture> fixtures = Fixtures(examples);
+    std::vector<Rig> rigs = {
+        {"version readers", StageFrom(kVersionReaders), SdfPath("/Asset/Rig")},
+    };
+    for (const char *name : {"computed_chains", "biped"}) {
+        const Fixture &f = FixtureNamed(fixtures, name);
+        rigs.push_back({name, UsdStage::Open(f.stage), f.rig});
+    }
+    size_t declaring = 0;
+    for (const Rig &r : rigs) {
+        auto evaluator =
+            MakeEvaluator(r.stage, r.rig, RigExecEvaluationMode::Baked);
+        const RigExecBakedProgramImpl *program = Program(*evaluator);
+        CHECK(program != nullptr);
+        if (!program) {
+            continue;
+        }
+        RigExecBakedProgramImpl &B =
+            const_cast<RigExecBakedProgramImpl &>(*program);
+        std::string error;
+        CHECK(RigExecBakedValidateHeadReads(B, &error));
+        size_t steps = 0, walks = 0;
+        int first = -1;
+        for (size_t i = 0; i < B.steps.size(); ++i) {
+            const RigExecBakedStep &step = B.steps[i];
+            if (step.readerWalks.empty()) {
+                continue;
+            }
+            ++steps;
+            for (const int walk : step.readerWalks) {
+                ++walks;
+                for (const uint32_t id :
+                     B.readerWalks[size_t(walk)].versions) {
+                    bool declared = false;
+                    for (const RigExecBakedHeadRange &range : step.headReads) {
+                        declared = declared ||
+                                   (range.begin <= id && id < range.end);
+                    }
+                    CHECK(declared);
+                }
+            }
+            if (first < 0 &&
+                (step.kind == RigExecBakedStepKind::Solve ||
+                 step.kind == RigExecBakedStepKind::Constraint)) {
+                first = int(i);
+            }
+        }
+        std::printf("reader walks %s: %zu step(s) read %zu walk(s), %zu "
+                    "reader walk(s) in all\n",
+                    r.name.c_str(), steps, walks, B.readerWalks.size());
+        declaring += steps;
+        if (first < 0) {
+            continue;
+        }
+        // One declaration out: refused, naming the walk.
+        RigExecBakedStep &step = B.steps[size_t(first)];
+        const std::vector<RigExecBakedHeadRange> saved = step.headReads;
+        step.headReads.clear();
+        error.clear();
+        CHECK(!RigExecBakedValidateHeadReads(B, &error));
+        CHECK(error.rfind("walk ", 0) == 0 &&
+              error.find(" without declaring it") != std::string::npos);
+        std::printf("reader walks %s: undeclared: %s\n", r.name.c_str(),
+                    error.c_str());
+        step.headReads = saved;
+        CHECK(RigExecBakedValidateHeadReads(B, &error));
+    }
+    CHECK(declaring > 0);
+}
+
+// A drag on a chain target a few steps read, at a held frame on the biped:
+// the cone run executes strictly fewer non-source region steps than a
+// forced run of the same frame and drag, and skips some of the steps that
+// read the generation's resolved inputs (what a rule keyed on any moved
+// chain result would dirty); both publish the same pose.
+void
+TestAChainDragIsNoLongerAWholeRigCost(const std::string &examples)
+{
+    const std::vector<Fixture> fixtures = Fixtures(examples);
+    const Fixture &f = FixtureNamed(fixtures, "biped");
+    UsdStageRefPtr stage = UsdStage::Open(f.stage);
+    auto evaluator = MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+    const UsdTimeCode t(stage->GetStartTimeCode() + 2.0);
+    CHECK(evaluator->Evaluate(t).valid);
+    CHECK(evaluator->Evaluate(t).valid);
+    const RigExecBakedProgramImpl *program = Program(*evaluator);
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = *program;
+    // The chain whose final version the fewest steps read, among those read.
+    SdfPath target;
+    size_t readers = 0;
+    for (const RigExecBakedPropertyChain &chain : B.propertyChains) {
+        const uint32_t last =
+            chain.versionBase + uint32_t(chain.revisions.size());
+        const size_t n = last < B.cones.headReaders.size()
+                             ? B.cones.headReaders[last].size()
+                             : 0;
+        if (n > 0 && chain.targetExists &&
+            (chain.arm == RigExecBakedPropertyChain::Arm::Float ||
+             chain.arm == RigExecBakedPropertyChain::Arm::Double) &&
+            (target.IsEmpty() || n < readers)) {
+            target = chain.target;
+            readers = n;
+        }
+    }
+    CHECK(!target.IsEmpty());
+    if (target.IsEmpty()) {
+        return;
+    }
+    size_t resolvedReaders = 0;
+    for (const RigExecBakedStep &step : B.steps) {
+        resolvedReaders += step.resolvedInputReads ? 1 : 0;
+    }
+    const std::vector<RigExecValueOverride> drag =
+        DragBy(stage, target, t, 0.25f);
+    CHECK(!drag.empty());
+    const auto nonSource = [&B]() {
+        size_t n = 0;
+        for (const size_t step : StepsRan(B)) {
+            n += B.steps[step].isSource ? 0 : 1;
+        }
+        return n;
+    };
+    evaluator->SetInteractiveOverrides(drag);
+    const RigExecRigPose cone = evaluator->Evaluate(t);
+    const size_t coneSteps = nonSource();
+    // The steps the old rule re-ran on any moved chain result.
+    size_t skippedChainReaders = 0;
+    {
+        const std::set<size_t> ran = StepsRan(B);
+        for (const int index : B.cones.varyingSteps) {
+            const RigExecBakedStep &step = B.steps[size_t(index)];
+            if (step.resolvedInputReads && !step.isSource &&
+                !step.externalReads && !ran.count(size_t(index))) {
+                ++skippedChainReaders;
+            }
+        }
+    }
+    evaluator->GetBakedProgram()->RequestFullRun();
+    const RigExecRigPose forced = evaluator->Evaluate(t);
+    const size_t forcedSteps = nonSource();
+    std::printf("chain drag on %s (%zu declared reader(s)): the cone ran "
+                "%zu non-source step(s), a forced run %zu; %zu of %zu "
+                "step(s) reading resolved inputs skipped\n",
+                target.GetText(), readers, coneSteps, forcedSteps,
+                skippedChainReaders, resolvedReaders);
+    CHECK(coneSteps < forcedSteps);
+    CHECK(skippedChainReaders > 0);
+    SameReadings(forced, cone, "chain drag: cone against forced");
+}
+
+// The always-dirty set as the exporter writes it: the labels of the steps
+// with externalReads and of `cones.alwaysSteps`, hashed (FNV-1a), with
+// `cones.always` checked to be exactly the clusters of those steps. Labels,
+// not indices: chunk counts and clusters depend on the schedule settings.
+uint64_t
+AlwaysSetDigest(const RigExecBakedProgramImpl &B, size_t *count)
+{
+    std::vector<std::string> labels;
+    RigExecBakedClusterSet clusters;
+    clusters.Resize(B.clustering.clusters.size());
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        const RigExecBakedStep &step = B.steps[i];
+        const bool always = B.cones.alwaysSteps.Test(int(i));
+        CHECK(always == step.externalReads);
+        if (step.externalReads) {
+            labels.push_back(step.label);
+            clusters.Set(step.cluster);
+        }
+    }
+    CHECK(clusters.words == B.cones.always.words);
+    std::sort(labels.begin(), labels.end());
+    uint64_t hash = 1469598103934665603ull;
+    for (const std::string &label : labels) {
+        for (const char c : label + "\n") {
+            hash = (hash ^ uint64_t(uint8_t(c))) * 1099511628211ull;
+        }
+    }
+    *count = labels.size();
+    return hash;
+}
+
+// The exported `externalReads` and `cones.always` keep the numeric pose
+// interpolators and the Derived steps always-dirty whatever they declare,
+// until the runtime seeds head reads itself. Every rig of the examples, the
+// biped and tests/fixtures against digests recorded before the steps
+// declared head reads.
+void
+TestTheAlwaysSetIsUnchangedUntilT1(const std::string &examples)
+{
+    // Recorded at 9b9fe16: file -> (always-dirty step count, digest).
+    static const std::map<std::string, std::pair<size_t, uint64_t>> kParent =
+        {
+            {"01_FkChainTail.usda", {6, 0xfe4062d5934b8fe3ull}},
+            {"02_TwoBoneIkLeg.usda", {5, 0x662d4e63e658ccaeull}},
+            {"03_IkFkBlendClamp.usda", {5, 0xc6a90d21ca6bdec2ull}},
+            {"04_BlendShapeFace.usda", {3, 0xe3a9a89a0b52e33full}},
+            {"05_TwistRibbonSpine.usda", {8, 0x33413310e1ccd36full}},
+            {"06_LatticeBulge.usda", {5, 0xccc18d2a33cdb131ull}},
+            {"07_SurfaceDrape.usda", {6, 0x70e93e45a305017bull}},
+            {"08_AimEyes.usda", {6, 0x85f9c9b44430ce39ull}},
+            {"09_PropertyMathMovers.usda", {2, 0x1ad397bdc801248full}},
+            {"10_AimXformTurret.usda", {0, 0x14650fb0739d0383ull}},
+            {"11_VolumeWeights.usda", {8, 0x766a76c65735b2b7ull}},
+            {"13_ReadPhases.usda", {4, 0x0368a6f68bc4d5e9ull}},
+            {"14_VolumeConstrainedSweep.usda", {3, 0x38b28c1305471657ull}},
+            {"15_TransformMatrixMover.usda", {0, 0x14650fb0739d0383ull}},
+            {"16_ConnectionReadPhases.usda", {6, 0xc9a3d4a85b17d4faull}},
+            {"ArmRig.usda", {10, 0x0f858b1656d084c7ull}},
+            {"ArmShotAnim.usda", {10, 0x962e672a80772035ull}},
+            {"aimtest.usda", {0, 0x14650fb0739d0383ull}},
+            {"aimtest_points.usda", {2, 0x00872694e9e34627ull}},
+            {"Biped_anim.usda", {1, 0xdffb9a848b5bf349ull}},
+            {"rigexec_flat.usda", {0, 0x14650fb0739d0383ull}},
+            {"rotateConstraint.usda", {0, 0x14650fb0739d0383ull}},
+            {"spider_legs_assembly_ref.usda", {0, 0x14650fb0739d0383ull}},
+            {"computed_chains.usda", {0, 0x14650fb0739d0383ull}},
+            {"computed_ik_space.usda", {0, 0x14650fb0739d0383ull}},
+            {"computed_path_reads.usda", {3, 0xcd9338b497693511ull}},
+            {"computed_weights.usda", {7, 0x96ad9dc08ce7b9afull}},
+            {"frame_record_fallbacks.usda", {5, 0x3fe7408988a0b80cull}},
+            {"oneloop_cross_domain.usda", {3, 0x8ce05dc478d2c0e6ull}},
+            {"oneloop_cycle.usda", {2, 0x5f865f28967f701dull}},
+            {"oneloop_two_limbs.usda", {2, 0xa18efb0f611cb5b2ull}},
+            {"phased_blend_samples.usda", {3, 0xabd1f90bfe97c048ull}},
+            {"preceding_own_chain.usda", {4, 0x3b09c24fca9ec6faull}},
+            {"projector_spaces.usda", {3, 0x176b71ae5cd20c0full}},
+            {"raw_skin_layouts.usda", {6, 0xf78b139674a7d2b1ull}},
+            {"solver_checkpoint.usda", {4, 0xd2653d3e22743355ull}},
+            {"space_switch_carry.usda", {0, 0x14650fb0739d0383ull}},
+            {"space_switch_dial.usda", {0, 0x14650fb0739d0383ull}},
+            {"space_switch_nested.usda", {0, 0x14650fb0739d0383ull}},
+            {"space_switch_same_round.usda", {0, 0x14650fb0739d0383ull}},
+            {"volume_placements.usda", {6, 0x88e3f470ded483ebull}},
+        };
+    std::vector<std::string> files;
+    for (const std::string &dir :
+         {examples, examples + "/../tests/fixtures"}) {
+        for (const std::string &name : TfListDir(dir)) {
+            if (TfStringEndsWith(name, ".usda")) {
+                files.push_back(name);
+            }
+        }
+    }
+    files.push_back(examples + "/biped/Biped_anim.usda");
+    std::sort(files.begin(), files.end());
+    size_t checked = 0;
+    for (const std::string &file : files) {
+        UsdStageRefPtr stage = UsdStage::Open(file);
+        if (!stage) {
+            continue;
+        }
+        SdfPath rig;
+        for (const UsdPrim &prim : stage->Traverse()) {
+            if (prim.GetTypeName() == TfToken("RigExecRoot")) {
+                rig = prim.GetPath();
+                break;
+            }
+        }
+        if (rig.IsEmpty()) {
+            continue;
+        }
+        RigExecRigEvaluator evaluator(stage, rig);
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            continue;
+        }
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        const RigExecBakedProgramImpl *program = Program(evaluator);
+        if (!program) {
+            continue;
+        }
+        const std::string name = TfGetBaseName(file);
+        size_t count = 0;
+        const uint64_t digest = AlwaysSetDigest(*program, &count);
+        std::printf("always set %s: %zu step(s), %016llx\n", name.c_str(),
+                    count, static_cast<unsigned long long>(digest));
+        ++checked;
+        const auto found = kParent.find(name);
+        CHECK(found != kParent.end());
+        if (found != kParent.end() &&
+            (found->second.first != count || found->second.second != digest)) {
+            ++failures;
+            std::printf("FAIL always set %s: %zu step(s) %016llx, the "
+                        "parent's %zu %016llx\n",
+                        name.c_str(), count,
+                        static_cast<unsigned long long>(digest),
+                        found->second.first,
+                        static_cast<unsigned long long>(found->second.second));
+        }
+    }
+    CHECK(checked == kParent.size());
+}
+
 }  // namespace
 
 int
@@ -1201,6 +2030,12 @@ main(int argc, char **argv)
     TestACleanHeadTierStillPublishes(examples);
     TestABakeAfterAnEvaluationExportsTheChains(examples);
     TestAChainReadsAnInterpolatorWeightAsAuthored();
+    TestOnlyReadersOfTheChangedVersionRerun();
+    TestAStandAsideReaderDeclaresItsHops();
+    TestARecordOfAnotherTypeShadowsNothing();
+    TestReaderWalksDeclareTheirVersions(examples);
+    TestAChainDragIsNoLongerAWholeRigCost(examples);
+    TestTheAlwaysSetIsUnchangedUntilT1(examples);
     std::printf("testRigExecPropertyOps: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

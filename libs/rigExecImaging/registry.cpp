@@ -1831,11 +1831,9 @@ RigExecImagingRegistry::BuildWarmWork(
                         "chain-sample");
         }
     }
-    // A declined hook (a chain binding a weight object) samples the
-    // standing resolved state -- the chain outputs at whatever time the
-    // evaluator last ran, not at this job's time -- and marks it viaChain.
-    // No job is built from such a vector; the frame evaluates live when
-    // asked and still memoizes through the live path.
+    // A vector carrying a sample marked stale (viaChain) builds no job; the
+    // frame evaluates live when asked and still memoizes through the live
+    // path. The samplers mark none: chain reads resolve on the worker.
     if (inputs.HasChainResolvedInputs()) {
         return skip(RigExecWarmSkipReason::Unsampleable, "chain-resolved");
     }
@@ -1891,9 +1889,9 @@ RigExecImagingRegistry::BuildWarmWork(
     }
     // Recorded at enqueue, on this thread: a warmed entry with no proof is
     // unreachable (lookups serve only under one), and the worker cannot
-    // record it -- the bridge is UI-thread state. Hook-refreshed by the
-    // checks above (or chainless to begin with), so the digest names fresh
-    // values and proves them.
+    // record it -- the bridge is UI-thread state. Every sample is fresh at
+    // this time (the checks above), so the digest names fresh values and
+    // proves them.
     session->bridge->NoteWarmingEnqueued(time, key.controlDigest,
                                         unfoldedDigest, inputs);
     // Dynamic-override bootstrapping (plan 2.1): an override identity the

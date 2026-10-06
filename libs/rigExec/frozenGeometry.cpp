@@ -231,7 +231,14 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         return false;
     }
     revision.defaultWeight = 1.0f;
-    {
+    const int weightLeaf = revision.defaultWeightLeaf;
+    if (weightLeaf >= 0 && size_t(weightLeaf) < revision.leaves.walks.size() &&
+        revision.leaves.walks[size_t(weightLeaf)] >= 0) {
+        // A chain or record can answer it: the leaf the prologue resolved
+        // from the head tier, which is what live's RevisionStatic reads.
+        revision.defaultWeight =
+            revision.leaves.Value<float>(weightLeaf, 1.0f);
+    } else {
         const SdfPath key = revision.moverPath.AppendProperty(
             _frozenBodyTokens->defaultWeight);
         const auto found = index.find(key);

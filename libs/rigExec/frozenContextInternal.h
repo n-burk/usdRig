@@ -214,15 +214,6 @@ _FrozenLatticeInputKey(const SdfPath &moverPath, const char *role);
 SdfPath
 _FrozenRibbonInputKey(const SdfPath &moverPath, const char *role);
 
-bool
-_ChainIsFinite(float v);
-
-bool
-_ChainIsFinite(const GfVec3f &v);
-
-bool
-_ChainIsFinite(const GfMatrix4d &m);
-
 struct _ChainMoverDesc {
     SdfPath moverPath;
     TfToken schemaType;

@@ -206,6 +206,12 @@ struct RigExecBakedInput {
     /// -1 before RigExecBakedNumberLeaves numbered it. The leaf holds this
     /// input's value at the run's time; the fields above stay the binding.
     int leaf = -1;
+    /// Index into RigExecBakedProgramImpl::readerWalks when the walk from
+    /// `resolvedAttr` meets a chain target or a phased record consumer: the
+    /// leaf is then resolved from head leaves, overrides and versions
+    /// (RigExecBakedReadWalked), never through the resolved inputs. -1
+    /// otherwise. Set at Build only.
+    int walk = -1;
 };
 
 // The attribute GetAttribute would end up reading, plus why it cannot be
@@ -455,6 +461,10 @@ struct RigExecBakedPathLeaves {
     std::vector<UsdAttribute> attributes;
     std::vector<std::vector<SdfPath>> hops;
     std::vector<char> varying;
+    /// Per key, its RigExecBakedProgramImpl::readerWalks index when its
+    /// read goes through the resolved inputs and its hops meet a chain
+    /// target or a record consumer, else -1 (or empty: none). Build state.
+    std::vector<int> walks;
     /// Per key, the value the last sample read, and whether that sample
     /// moved it (bitwise, as the binding leaves compare).
     std::vector<VtValue> values;
@@ -777,7 +787,7 @@ struct RigExecBakedHeadStep {
 
 /// The type a head leaf holds and a walk reads.
 enum class RigExecBakedHeadValueType : uint8_t {
-    Bool, Float, Double, Vec3f, Matrix4d, Vec2fArray
+    Bool, Float, Double, Vec3f, Matrix4d, Vec2fArray, Int, Token, Vec3d
 };
 
 /// One stage value a head op reads: an attribute's own value at the run's
@@ -858,6 +868,33 @@ struct RigExecBakedWalk {
     /// from that hop with its own cycle guard; a float walk whose head is a
     /// double has only `doubleHops`.
     std::vector<RigExecBakedWalkHop> hops, doubleHops;
+};
+
+/// A read after the head tier that RigExecResolvedInputs::GetAttribute
+/// would answer over the published overlay, restated over head leaves,
+/// overrides and versions: a chain-routed binding's walk, or a path leaf's
+/// whose hops meet a chain target or a record consumer. Every chain and
+/// record counts on its hops, since all have run. Bound at Build.
+struct RigExecBakedReaderWalk {
+    /// Always the Connected flavour: GetAttribute's walk from `head`, with
+    /// the float-from-double recursion.
+    RigExecBakedWalk walk;
+    SdfPath head;
+    /// The head's own value as the walk's type, for a path-leaf read that
+    /// falls back to the raw attribute when the walk answers nothing; -1
+    /// for a binding, which keeps its constant.
+    int rawLeaf = -1;
+    /// What the value depends on beside the time: the head leaves of its
+    /// hops (and `rawLeaf`), their override slots, and the PropertyVersion
+    /// ids it declares (each met chain's final version and each met
+    /// record), sorted.
+    std::vector<uint32_t> leaves, slots, versions;
+    /// Declared final versions the walk reaches only past one of that
+    /// chain's records, as (version id, record index): while the record
+    /// does not stand aside it answers the walk (or, with the chain
+    /// skipped, the target holds no version), so a move of the version
+    /// alone moves nothing here (RigExecBakedHeadStep::shadowedReads).
+    std::vector<std::pair<uint32_t, uint32_t>> shadowed;
 };
 
 /// One version's value, in the member the chain's arm computes.
@@ -1154,6 +1191,19 @@ struct RigExecBakedStep {
     /// deduplicated. A step is dirty while an override stands on one of
     /// them, and for the one run after it is lifted.
     std::vector<int> overrideInputs;
+    /// The reader walks (RigExecBakedProgramImpl::readerWalks) of the
+    /// inputs and path leaves this step reads, sorted and deduplicated, and
+    /// the PropertyVersion ids they declare as head reads. Not exported;
+    /// a version that moved dirties the step
+    /// (RigExecBakedCones::headReaders), and so does a walk whose value
+    /// moved (`walkReaders`).
+    std::vector<int> readerWalks;
+    std::vector<RigExecBakedHeadRange> headReads;
+    /// The `headReads` ids every walk of the step that declares them reads
+    /// only past a record (RigExecBakedReaderWalk::shadowed), with those
+    /// records: such an id seeds the step only while one of them stands
+    /// aside.
+    std::vector<std::pair<uint32_t, uint32_t>> shadowedReads;
 
     /// Filled by the clustering pass; the serial executor ignores all four.
     /// `level` is the longest-path level the packing groups by, `sizeUnits`
@@ -1437,6 +1487,10 @@ struct RigExecBakedCones {
     std::vector<std::vector<int>> constraintArrayClusters;
     /// Steps whose dirtiness depends on time or on a standing override.
     std::vector<int> varyingSteps, overrideSteps;
+    /// PropertyVersion id -> the steps that declare it in `headReads`, and
+    /// reader walk -> the steps that read it. What a moved version and a
+    /// moved walk value dirty.
+    std::vector<std::vector<int>> headReaders, walkReaders;
     /// Override index -> what re-reads an input of that number when the
     /// stage value under it moves: a step that lists it in its
     /// `overrideInputs` (kEditRouteStep), the prologue's avar table
@@ -2493,7 +2547,8 @@ struct RigExecBakedProgramImpl {
     RigExecBakedClusterSet closed;
     /// The avar table as the last run left it, for the per-provider compare.
     std::vector<double> lastAvars;
-    /// The property-chain results as the last run left them.
+    /// The property-chain results as the last run left them. No run reads
+    /// them: readers declare the versions they read.
     std::map<SdfPath, VtValue> lastPropertyResults;
     /// The override flags as the last run left them, so that the run AFTER a
     /// drag is released re-runs what the drag was holding.
@@ -3331,6 +3386,16 @@ struct RigExecBakedProgramImpl {
     /// Build.
     uint64_t headLeafSamples = 0;
     uint64_t headOpsRun = 0;
+    /// The reads after the head tier that a chain result or a record can
+    /// answer (RigExecBakedReaderWalk), bound at Build; per walk, whether
+    /// something it depends on moved this run (RigExecBakedNoteReaderWalks)
+    /// and whether the value read through it did (set by the samplers).
+    std::vector<RigExecBakedReaderWalk> readerWalks;
+    std::vector<char> readerWalkMoved, readerWalkChanged;
+    /// Per provider slot, the PropertyVersion ids its chain-routed avar
+    /// binding declares. The avar table is compared by value, so these
+    /// validate and re-sample; they seed nothing.
+    std::vector<std::vector<uint32_t>> avarHeadReads;
 };
 
 /// \p input's sampled leaf, or its constant when it has none.
@@ -3452,6 +3517,8 @@ void RigExecBakedBindPathLeaves(const UsdStageRefPtr &stage,
 ///     (ApplyValueEdits files it under each), and its time variance is
 ///     re-derived with the read;
 ///  5. moved chain results (`pathLeafChainSerial`).
+/// A key with a reader walk is read through it
+/// (RigExecBakedSampleWalkedPathLeaf), not through the resolved inputs.
 /// Keys in \p skip are not read; each is marked to re-read when it next is
 /// not skipped. Every other key keeps its value. Owning thread, prologue
 /// only.
@@ -3475,16 +3542,18 @@ void RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
 ///     RigExecProgramAvarPatch;
 ///  6. a value in `routedOverrides` that differs from `lastRoutedOverrides`
 ///     on one of its paths;
-///  7. a moved chain result (`propertyResults` against
-///     `lastPropertyResults`), for a binding routed through a chain.
-/// Every other leaf keeps its value: none of RigExecBakedRead's inputs can
-/// have moved for it. Owning thread, prologue only.
+///  7. for a binding with a reader walk, a head leaf, override slot or
+///     declared version of that walk that moved (`readerWalkMoved`).
+/// Every other leaf keeps its value: none of its read's inputs can have
+/// moved for it. A binding with a reader walk is read through it
+/// (RigExecBakedReadWalked), any other through RigExecBakedRead. Owning
+/// thread, prologue only.
 ///
 /// \p pass splits the live prologue around the head tier: BeforeHead reads
-/// every leaf but the chain-routed ones (a binding with `resolvedAttr`),
-/// whose walks no chain result can reach, and applies rule 6;
-/// ChainRouted reads the rest once the property chains are published. All
-/// does both, in one pass.
+/// every leaf but the chain-routed ones (a binding with `resolvedAttr` or a
+/// reader walk), whose walks no chain result can reach, and applies rule 6;
+/// ChainRouted reads the rest once the property chains are published and
+/// RigExecBakedNoteReaderWalks has run. All does both, in one pass.
 enum class RigExecBakedLeafPass : uint8_t { All, BeforeHead, ChainRouted };
 void RigExecBakedSampleLeaves(
     RigExecBakedProgramImpl *program, UsdTimeCode time, bool all,
@@ -3566,6 +3635,81 @@ void RigExecBakedFinishPropertyStep(RigExecBakedProgramImpl *program,
 /// Whether two head values are the same bit for bit (a signed zero or a NaN
 /// payload is a difference); empty equals only empty.
 bool RigExecBakedHeadValueSame(const VtValue &a, const VtValue &b);
+
+/// What reader walk \p walk answers after this run's head tier and
+/// publication: RigExecResolvedInputs::GetAttribute over the published
+/// overlay, restated over head leaves, override slots, chain finals and
+/// records. False, leaving \p out alone, where that read answers nothing.
+/// Pure: no stage, no path work, no lock; a frozen worker calls it.
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, double *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, float *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, int *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, bool *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, TfToken *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, GfMatrix4d *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, GfVec3d *out);
+bool RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &program,
+                                   int walk, GfVec3f *out);
+
+/// RigExecBakedRead for a binding with a reader walk: the walk read while
+/// an override stands on its number or the binding varies (the walk is the
+/// one from its head), else its constant.
+template <class T>
+inline T
+RigExecBakedReadWalked(const RigExecBakedProgramImpl &program,
+                       const RigExecBakedInput<T> &input,
+                       const std::vector<char> &overridden)
+{
+    T value = input.constant;
+    const bool flagged = input.overrideIndex >= 0 &&
+                         size_t(input.overrideIndex) < overridden.size() &&
+                         overridden[size_t(input.overrideIndex)];
+    if (flagged || input.varying) {
+        RigExecBakedResolveReaderWalk(program, input.walk, &value);
+    }
+    return value;
+}
+
+/// Whether a move of version \p id is shadowed for a reader by \p shadowed
+/// (a reader walk's or a step's): it is read only past records, and none
+/// of them stands aside this run.
+bool RigExecBakedReadIsShadowed(
+    const RigExecBakedProgramImpl &program,
+    const std::vector<std::pair<uint32_t, uint32_t>> &shadowed, uint32_t id);
+
+/// After the head tier and its publication: marks each reader walk whose
+/// head leaves, override slots or declared versions moved this run
+/// (`readerWalkMoved`), and clears `readerWalkChanged`. Owning thread.
+void RigExecBakedNoteReaderWalks(RigExecBakedProgramImpl *program);
+
+/// RigExecSampleRevisionLeaf for a path-leaf key whose read has reader walk
+/// \p walk, over the head tier's state: Resolved reads the walk, else the
+/// head's own value, else the key's fallback; ResolvedOnly the walk, else
+/// the fallback; Dial the walk as the dial attribute's type, cast to
+/// double. Pure.
+VtValue RigExecBakedSampleWalkedPathLeaf(
+    const RigExecBakedProgramImpl &program, const RigExecRevisionLeafKey &key,
+    int walk);
+
+/// Fills every step's `headReads` from the reader walks in its
+/// `readerWalks`, after RigExecBakedDeclareInputDependencies, and
+/// `avarHeadReads`. Build only.
+void RigExecBakedDeclareHeadReads(RigExecBakedProgramImpl *program);
+
+/// The region half of the head tier's validation, once the steps exist:
+/// every PropertyVersion id a step or an avar slot declares has a head
+/// producer, and every reader walk a step reads declares each chain target
+/// and record consumer it meets ("walk <path> meets chain target without
+/// declaring it"). False with the first violation in \p error.
+bool RigExecBakedValidateHeadReads(const RigExecBakedProgramImpl &program,
+                                   std::string *error);
 
 /// The matrix table \p revision reads at its own phase: FinalMatrix for a
 /// final-phase revision, BaseMatrix otherwise.
@@ -4364,6 +4508,9 @@ RigExecBakedNoteInput(const RigExecBakedInput<T> &input,
         step->resolvedInputReads || bool(input.resolvedAttr);
     if (input.overrideIndex >= 0) {
         step->overrideInputs.push_back(input.overrideIndex);
+    }
+    if (input.walk >= 0) {
+        step->readerWalks.push_back(input.walk);
     }
 }
 

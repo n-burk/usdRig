@@ -259,6 +259,12 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.headStamp = src.headStamp;
     D.headLeafSamples = src.headLeafSamples;
     D.headOpsRun = src.headOpsRun;
+    // The reads after the tier that resolve walks: a frozen job resolves
+    // them from its own head-leaf samples and the tier it runs.
+    D.readerWalks = src.readerWalks;
+    D.readerWalkMoved = src.readerWalkMoved;
+    D.readerWalkChanged = src.readerWalkChanged;
+    D.avarHeadReads = src.avarHeadReads;
 }
 
 } // namespace frozenDetail
@@ -284,10 +290,10 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
     // Property chains are supported: the worker runs the head tier from
-    // sampled head leaves, and the sampling hook refreshes what the
-    // chain-crossing bindings read -- except a chain binding a weight
-    // object, whose envelope resolves through the evaluator's live oracle.
-    // The discovery must also agree with the program: a mismatch means the
+    // sampled head leaves and resolves every read a chain or record can
+    // answer through its reader walk -- except a revision whose envelope is
+    // a weight object, which the oracle resolves off the live stage. The
+    // discovery must also agree with the program: a mismatch means the
     // mover order and the epoch disagree, and no snapshot is taken from a
     // confused epoch.
     {
@@ -301,14 +307,14 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                 "chain discovery disagrees with the program about whether "
                 "chains exist");
         }
-        for (const RigExecChainSampleChain &chain : bound.chains) {
-            for (const RigExecChainSampleRevision &revision :
+        for (const RigExecBakedPropertyChain &chain : B.propertyChains) {
+            for (const RigExecBakedPropertyChain::Revision &revision :
                  chain.revisions) {
-                if (!revision.weightObjects.empty()) {
+                if (!revision.weightObject.IsEmpty()) {
                     return fail(
-                        "diag " + revision.moverPath.GetString() +
-                        " binds a weight object, whose envelope the frozen "
-                        "executor cannot reproduce");
+                        "diag " + revision.mover.GetString() +
+                        " binds a weight object: a property chain envelope "
+                        "resolves weights from the live stage");
                 }
             }
         }
@@ -395,6 +401,19 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
             // constraint step measures against, the step stashes the delta,
             // and FoldInfluences reads the stash, all shared bodies in
             // program order.
+            // A skin packet is assembled on the UI thread, where no head
+            // tier runs, so none of its reads may be one a chain or record
+            // answers.
+            if (revision.op == RigExecRevisionOp::Skin &&
+                std::any_of(revision.leaves.walks.begin(),
+                            revision.leaves.walks.end(),
+                            [](int walk) { return walk >= 0; })) {
+                return fail("revision " +
+                            revision.moverPath.GetString() +
+                            " reads a property chain result into a skin "
+                            "packet, which the frozen executor assembles "
+                            "without the head tier");
+            }
             if (revision.op == RigExecRevisionOp::Skin &&
                 !revision.skinTopologyFixed) {
                 return fail("revision " +

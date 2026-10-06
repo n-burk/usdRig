@@ -8,6 +8,7 @@
 #include "bakedProgram.h"
 #include "bakedProgramImpl.h"
 #include "bodyPurity.h"
+#include "frozenContextInternal.h"
 #include "movers/moverRegistry.h"
 #include "rigEvaluator.h"
 #include "rigEvaluatorPropertyBindings.h"
@@ -15,6 +16,7 @@
 #include "rigExecMath/propertyMath.h"
 
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3d.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/types.h"
@@ -23,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -97,6 +100,9 @@ TypeOf(HeadType type)
     case HeadType::Vec3f: return TfType::Find<GfVec3f>();
     case HeadType::Matrix4d: return TfType::Find<GfMatrix4d>();
     case HeadType::Vec2fArray: return TfType::Find<VtArray<GfVec2f>>();
+    case HeadType::Int: return TfType::Find<int>();
+    case HeadType::Token: return TfType::Find<TfToken>();
+    case HeadType::Vec3d: return TfType::Find<GfVec3d>();
     }
     return TfType();
 }
@@ -129,6 +135,9 @@ SampleHead(const RigExecBakedHeadLeaf &leaf, UsdTimeCode time)
         return TypedGet<GfMatrix4d>(leaf.attribute, time);
     case HeadType::Vec2fArray:
         return TypedGet<VtArray<GfVec2f>>(leaf.attribute, time);
+    case HeadType::Int: return TypedGet<int>(leaf.attribute, time);
+    case HeadType::Token: return TypedGet<TfToken>(leaf.attribute, time);
+    case HeadType::Vec3d: return TypedGet<GfVec3d>(leaf.attribute, time);
     }
     return VtValue();
 }
@@ -235,16 +244,18 @@ struct BindState {
 
     // _PinnedRead's arms as a walk: no attribute, an unconnected one (the
     // overlay at its own path, else its own value), or a connected one
-    // (RigExecResolvedInputs::GetAttribute, hop for hop).
+    // (RigExecResolvedInputs::GetAttribute, hop for hop). \p pinned false
+    // takes GetAttribute's walk for an unconnected attribute too, whose
+    // float read of a double is the double read, cast.
     RigExecBakedWalk Walk(const UsdAttribute &attribute, HeadType type,
-                          int reader)
+                          int reader, bool pinned = true)
     {
         RigExecBakedWalk walk;
         walk.type = type;
         if (!attribute) {
             return walk;
         }
-        if (!attribute.HasAuthoredConnections()) {
+        if (pinned && !attribute.HasAuthoredConnections()) {
             walk.flavour = RigExecBakedWalk::Flavour::Pinned;
             RigExecBakedWalkHop hop = Hop(attribute, reader);
             // A record's consumer is connected by definition.
@@ -287,7 +298,149 @@ struct BindState {
         }
         return walk;
     }
+
+    // A read after the head tier: GetAttribute's walk from \p attribute,
+    // on which every chain and record counts. -1 when no hop is a chain
+    // target or a record consumer, so the published overlay can hold
+    // nothing there but overrides.
+    int ReaderWalk(const UsdAttribute &attribute, HeadType type,
+                   bool rawFallback)
+    {
+        if (!attribute) {
+            return -1;
+        }
+        RigExecBakedProgramImpl &B = *program;
+        // Walk() files leaves and slots as it goes; a walk that meets
+        // nothing takes them back, so only walks a chain can answer add
+        // head leaves (and frozen samples).
+        const size_t leafCount = B.headLeaves.size();
+        const size_t slotCount = B.headOverrideSlots.size();
+        RigExecBakedReaderWalk reader;
+        reader.walk = Walk(attribute, type,
+                           std::numeric_limits<int>::max(),
+                           /*pinned=*/false);
+        bool meets = false;
+        std::set<uint32_t> leaves, slots;
+        for (const std::vector<RigExecBakedWalkHop> *hops :
+             {&reader.walk.hops, &reader.walk.doubleHops}) {
+            for (const RigExecBakedWalkHop &hop : *hops) {
+                meets = meets || hop.chain >= 0 || hop.record >= 0;
+                if (hop.leaf >= 0) {
+                    leaves.insert(uint32_t(hop.leaf));
+                }
+                if (hop.overrideSlot >= 0) {
+                    slots.insert(uint32_t(hop.overrideSlot));
+                }
+            }
+        }
+        if (!meets) {
+            B.headLeaves.resize(leafCount);
+            for (auto it = leafOf.begin(); it != leafOf.end();) {
+                it = it->second >= leafCount ? leafOf.erase(it) : ++it;
+            }
+            for (auto it = B.headOverrideSlots.begin();
+                 it != B.headOverrideSlots.end();) {
+                it = it->second >= slotCount ? B.headOverrideSlots.erase(it)
+                                             : ++it;
+            }
+            return -1;
+        }
+        reader.head = attribute.GetPath();
+        if (rawFallback) {
+            reader.rawLeaf = Leaf(attribute, type);
+            leaves.insert(uint32_t(reader.rawLeaf));
+        }
+        reader.leaves.assign(leaves.begin(), leaves.end());
+        reader.slots.assign(slots.begin(), slots.end());
+        B.readerWalks.push_back(std::move(reader));
+        return int(B.readerWalks.size()) - 1;
+    }
 };
+
+template <class T>
+HeadType
+HeadTypeOf();
+template <>
+HeadType
+HeadTypeOf<double>()
+{
+    return HeadType::Double;
+}
+template <>
+HeadType
+HeadTypeOf<float>()
+{
+    return HeadType::Float;
+}
+template <>
+HeadType
+HeadTypeOf<int>()
+{
+    return HeadType::Int;
+}
+template <>
+HeadType
+HeadTypeOf<bool>()
+{
+    return HeadType::Bool;
+}
+template <>
+HeadType
+HeadTypeOf<TfToken>()
+{
+    return HeadType::Token;
+}
+template <>
+HeadType
+HeadTypeOf<GfMatrix4d>()
+{
+    return HeadType::Matrix4d;
+}
+template <>
+HeadType
+HeadTypeOf<GfVec3d>()
+{
+    return HeadType::Vec3d;
+}
+template <>
+HeadType
+HeadTypeOf<GfVec3f>()
+{
+    return HeadType::Vec3f;
+}
+
+// The head type a path-leaf key reads through the resolved inputs as, or
+// false for a read no chain or record value can answer (arrays) or one at
+// Default (head leaves hold the run's time).
+bool
+PathLeafHeadType(const RigExecRevisionLeafKey &key,
+                 const UsdAttribute &attribute, HeadType *type)
+{
+    using Flavour = RigExecRevisionLeafFlavour;
+    using Type = RigExecRevisionLeafType;
+    if ((key.flavour != Flavour::Resolved &&
+         key.flavour != Flavour::ResolvedOnly) ||
+        key.time != RigExecRevisionLeafTime::AtTime) {
+        return false;
+    }
+    switch (key.type) {
+    case Type::Bool: *type = HeadType::Bool; return true;
+    case Type::Int: *type = HeadType::Int; return true;
+    case Type::Float: *type = HeadType::Float; return true;
+    case Type::Token: *type = HeadType::Token; return true;
+    case Type::Vec3d: *type = HeadType::Vec3d; return true;
+    case Type::Matrix4d: *type = HeadType::Matrix4d; return true;
+    case Type::Dial:
+        // RigExecReadProjectorTarget reads a float dial as a float.
+        *type = attribute &&
+                        attribute.GetTypeName() == SdfValueTypeNames->Float
+                    ? HeadType::Float
+                    : HeadType::Double;
+        return true;
+    default:
+        return false;
+    }
+}
 
 // What stands in the generation's resolved inputs at \p hop while a head op
 // runs: the overlay _EvaluatePropertyChains reads at that point, which holds
@@ -429,6 +582,12 @@ RigExecBakedHeadValueSame(const VtValue &a, const VtValue &b)
     if (a.IsHolding<GfVec3f>()) {
         return BitSame(a.UncheckedGet<GfVec3f>(), b.UncheckedGet<GfVec3f>());
     }
+    if (a.IsHolding<GfVec3d>()) {
+        return BitSame(a.UncheckedGet<GfVec3d>(), b.UncheckedGet<GfVec3d>());
+    }
+    if (a.IsHolding<int>()) {
+        return a.UncheckedGet<int>() == b.UncheckedGet<int>();
+    }
     if (a.IsHolding<GfMatrix4d>()) {
         return BitSame(a.UncheckedGet<GfMatrix4d>(),
                        b.UncheckedGet<GfMatrix4d>());
@@ -441,6 +600,174 @@ RigExecBakedHeadValueSame(const VtValue &a, const VtValue &b)
                                          x.size() * sizeof(GfVec2f)) == 0);
     }
     return a == b;
+}
+
+// Reads after the head tier.
+
+namespace {
+
+template <class T>
+bool
+ResolveReader(const RigExecBakedProgramImpl &B, int walk, T *out)
+{
+    return walk >= 0 && size_t(walk) < B.readerWalks.size() &&
+           RigExecBakedResolveWalk(B, B.readerWalks[size_t(walk)].walk, out);
+}
+
+}  // namespace
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              double *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              float *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              int *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              bool *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              TfToken *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              GfMatrix4d *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              GfVec3d *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedResolveReaderWalk(const RigExecBakedProgramImpl &B, int walk,
+                              GfVec3f *out)
+{
+    return ResolveReader(B, walk, out);
+}
+
+bool
+RigExecBakedReadIsShadowed(
+    const RigExecBakedProgramImpl &B,
+    const std::vector<std::pair<uint32_t, uint32_t>> &shadowed, uint32_t id)
+{
+    bool found = false;
+    for (const auto &[version, record] : shadowed) {
+        if (version != id) {
+            continue;
+        }
+        if (B.recordStoodAside[record]) {
+            return false;
+        }
+        found = true;
+    }
+    return found;
+}
+
+void
+RigExecBakedNoteReaderWalks(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (size_t w = 0; w < B.readerWalks.size(); ++w) {
+        const RigExecBakedReaderWalk &reader = B.readerWalks[w];
+        bool moved = false;
+        for (const uint32_t leaf : reader.leaves) {
+            moved = moved || B.headLeaves[leaf].changed;
+        }
+        for (const uint32_t slot : reader.slots) {
+            moved = moved || B.headOverrideMoved[slot];
+        }
+        for (const uint32_t id : reader.versions) {
+            moved = moved || (B.propertyChanged[id] &&
+                              !RigExecBakedReadIsShadowed(B, reader.shadowed,
+                                                          id));
+        }
+        B.readerWalkMoved[w] = moved ? 1 : 0;
+        B.readerWalkChanged[w] = 0;
+    }
+}
+
+namespace {
+
+// _LeafRead's Resolved (the walk, else the head's own value) and
+// ResolvedOnly (the walk) arms over \p fallback.
+template <class T>
+T
+WalkedPathRead(const RigExecBakedProgramImpl &B, int walk, bool raw,
+               T value)
+{
+    if (RigExecBakedResolveReaderWalk(B, walk, &value) || !raw) {
+        return value;
+    }
+    const int leaf = B.readerWalks[size_t(walk)].rawLeaf;
+    if (leaf >= 0 && B.headLeaves[size_t(leaf)].value.IsHolding<T>()) {
+        value = B.headLeaves[size_t(leaf)].value.UncheckedGet<T>();
+    }
+    return value;
+}
+
+template <class T>
+VtValue
+WalkedPathSample(const RigExecBakedProgramImpl &B,
+                 const RigExecRevisionLeafKey &key, int walk)
+{
+    const T fallback =
+        key.fallback.IsHolding<T>() ? key.fallback.UncheckedGet<T>() : T();
+    return VtValue(WalkedPathRead<T>(
+        B, walk, key.flavour == RigExecRevisionLeafFlavour::Resolved,
+        fallback));
+}
+
+}  // namespace
+
+VtValue
+RigExecBakedSampleWalkedPathLeaf(const RigExecBakedProgramImpl &B,
+                                 const RigExecRevisionLeafKey &key, int walk)
+{
+    using Type = RigExecRevisionLeafType;
+    switch (key.type) {
+    case Type::Bool: return WalkedPathSample<bool>(B, key, walk);
+    case Type::Int: return WalkedPathSample<int>(B, key, walk);
+    case Type::Float: return WalkedPathSample<float>(B, key, walk);
+    case Type::Token: return WalkedPathSample<TfToken>(B, key, walk);
+    case Type::Vec3d: return WalkedPathSample<GfVec3d>(B, key, walk);
+    case Type::Matrix4d: return WalkedPathSample<GfMatrix4d>(B, key, walk);
+    case Type::Dial:
+        // A float dial reads as a float and widens; any other as a double.
+        if (B.readerWalks[size_t(walk)].walk.type == HeadType::Float) {
+            return VtValue(double(WalkedPathRead<float>(B, walk, true, 0.0f)));
+        }
+        return VtValue(WalkedPathRead<double>(B, walk, true, 0.0));
+    default:
+        break;
+    }
+    return key.fallback;
 }
 
 // Build.
@@ -588,6 +915,41 @@ RigExecBakedProgram::_BindPropertyChains(const RigExecRigEvaluator &E,
             chain.revisions.push_back(std::move(r));
         }
     }
+    // The reads after the head tier that a chain or record can answer: the
+    // chain-routed bindings, and the path leaves read through the resolved
+    // inputs. The rest read nothing but overrides through the overlay.
+    B.readerWalks.clear();
+    frozenDetail::_ForEachPatchableInput(B, [&](auto &input) {
+        using T = std::decay_t<decltype(input.constant)>;
+        input.walk = input.resolvedAttr
+                         ? state.ReaderWalk(input.resolvedAttr,
+                                            HeadTypeOf<T>(),
+                                            /*rawFallback=*/false)
+                         : -1;
+    });
+    const auto bindPathLeaves = [&](RigExecBakedPathLeaves *leaves) {
+        const size_t n = leaves->decl.keys.size();
+        leaves->walks.assign(n, -1);
+        for (size_t k = 0; k < n && k < leaves->attributes.size(); ++k) {
+            const RigExecRevisionLeafKey &key = leaves->decl.keys[k];
+            HeadType type;
+            if (PathLeafHeadType(key, leaves->attributes[k], &type)) {
+                leaves->walks[k] = state.ReaderWalk(
+                    leaves->attributes[k], type,
+                    key.flavour == RigExecRevisionLeafFlavour::Resolved);
+            }
+        }
+    };
+    for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (RigExecBakedProgramImpl::GeomRevision &revision :
+             chain.revisions) {
+            bindPathLeaves(&revision.leaves);
+        }
+        for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
+             chain.derived) {
+            bindPathLeaves(&derived.revision.leaves);
+        }
+    }
     // The frozen sample keys. One leaf per attribute can match its type, so
     // the keys are distinct, and none is an attribute's own path.
     std::vector<char> own(B.headLeaves.size(), 0);
@@ -632,6 +994,17 @@ Ranges(const std::set<uint32_t> &ids)
     return out;
 }
 
+// Whether record \p record answers a walk that reads its consumer hop as
+// \p type. The overlay answers a read only in its exact type, so a walk
+// passes a record of another type by and can still reach the target's
+// final version behind it.
+bool
+RecordAnswers(const RigExecBakedProgramImpl &B, int record, HeadType type)
+{
+    return B.propertyRecords[size_t(record)].consumerType.GetType() ==
+           TypeOf(type);
+}
+
 template <class Fn>
 void
 ForEachWalk(const Chain::Revision &r, Fn &&fn)
@@ -644,6 +1017,74 @@ ForEachWalk(const Chain::Revision &r, Fn &&fn)
 }
 
 }  // namespace
+
+void
+RigExecBakedDeclareHeadReads(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const auto pathWalks = [](const RigExecBakedPathLeaves &leaves,
+                              std::vector<int> *out) {
+        for (const int walk : leaves.walks) {
+            if (walk >= 0) {
+                out->push_back(walk);
+            }
+        }
+    };
+    for (RigExecBakedStep &step : B.steps) {
+        if (step.kind == RigExecBakedStepKind::RevisionStatic) {
+            const auto &[c, r] = B.revisionIndex[size_t(step.object)];
+            pathWalks(B.chains[size_t(c)].revisions[size_t(r)].leaves,
+                      &step.readerWalks);
+        } else if (step.kind == RigExecBakedStepKind::Derived) {
+            const auto &[c, d] = B.derivedIndex[size_t(step.object)];
+            pathWalks(B.chains[size_t(c)].derived[size_t(d)].revision.leaves,
+                      &step.readerWalks);
+        }
+        std::sort(step.readerWalks.begin(), step.readerWalks.end());
+        step.readerWalks.erase(
+            std::unique(step.readerWalks.begin(), step.readerWalks.end()),
+            step.readerWalks.end());
+        std::set<uint32_t> versions, unshadowed;
+        std::set<std::pair<uint32_t, uint32_t>> shadowed;
+        for (const int walk : step.readerWalks) {
+            const RigExecBakedReaderWalk &reader =
+                B.readerWalks[size_t(walk)];
+            versions.insert(reader.versions.begin(), reader.versions.end());
+            for (const uint32_t id : reader.versions) {
+                bool byRecord = false;
+                for (const auto &pair : reader.shadowed) {
+                    if (pair.first == id) {
+                        shadowed.insert(pair);
+                        byRecord = true;
+                    }
+                }
+                if (!byRecord) {
+                    unshadowed.insert(id);
+                }
+            }
+        }
+        step.headReads = Ranges(versions);
+        step.shadowedReads.clear();
+        for (const auto &[id, record] : shadowed) {
+            if (!unshadowed.count(id)) {
+                step.shadowedReads.emplace_back(id, record);
+            }
+        }
+    }
+    B.avarHeadReads.assign(B.paths.size(), {});
+    for (const RigExecBakedProgramImpl::AvarBinding &binding :
+         B.avarBindings) {
+        if (binding.input.walk >= 0 && binding.slot / 11 < B.paths.size()) {
+            const RigExecBakedReaderWalk &reader =
+                B.readerWalks[size_t(binding.input.walk)];
+            std::vector<uint32_t> &reads = B.avarHeadReads[binding.slot / 11];
+            reads.insert(reads.end(), reader.versions.begin(),
+                         reader.versions.end());
+            std::sort(reads.begin(), reads.end());
+            reads.erase(std::unique(reads.begin(), reads.end()), reads.end());
+        }
+    }
+}
 
 void
 RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program)
@@ -683,10 +1124,13 @@ RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program)
                 const Chain::Revision &r = chain.revisions[k - 1];
                 reads.insert(chain.versionBase + uint32_t(k) - 1);
                 ForEachWalk(r, [&](const RigExecBakedWalk &walk) {
-                    // The record the walk met last, per chain.
+                    // The record that answered the walk last, per chain.
                     std::map<int, uint32_t> metRecord;
                     for (const std::vector<RigExecBakedWalkHop> *list :
                          {&walk.hops, &walk.doubleHops}) {
+                        const HeadType readAs = list == &walk.doubleHops
+                                                    ? HeadType::Double
+                                                    : walk.type;
                         for (const RigExecBakedWalkHop &hop : *list) {
                             if (hop.overrideSlot >= 0) {
                                 slots.insert(uint32_t(hop.overrideSlot));
@@ -712,8 +1156,10 @@ RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program)
                                 const RigExecBakedPropertyRecord &record =
                                     B.propertyRecords[size_t(hop.record)];
                                 reads.insert(record.id);
-                                metRecord[int(record.chain)] =
-                                    uint32_t(hop.record);
+                                if (RecordAnswers(B, hop.record, readAs)) {
+                                    metRecord[int(record.chain)] =
+                                        uint32_t(hop.record);
+                                }
                             }
                         }
                     }
@@ -755,6 +1201,51 @@ RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program)
     B.headOverrideMoved.assign(B.headOverrideSlots.size(), 0);
     B.headLeavesSampled = false;
     B.headEverRan = false;
+    // What each reader walk declares: the final version of every chain
+    // whose target it meets and every record whose consumer it meets.
+    for (RigExecBakedReaderWalk &reader : B.readerWalks) {
+        std::set<uint32_t> versions, unshadowed;
+        std::set<std::pair<uint32_t, uint32_t>> shadowed;
+        // The record that answered the walk last, per chain.
+        std::map<uint32_t, uint32_t> metRecord;
+        for (const std::vector<RigExecBakedWalkHop> *hops :
+             {&reader.walk.hops, &reader.walk.doubleHops}) {
+            const HeadType readAs = hops == &reader.walk.doubleHops
+                                        ? HeadType::Double
+                                        : reader.walk.type;
+            for (const RigExecBakedWalkHop &hop : *hops) {
+                if (hop.chain >= 0) {
+                    const Chain &chain = B.propertyChains[size_t(hop.chain)];
+                    const uint32_t last =
+                        chain.versionBase + uint32_t(chain.revisions.size());
+                    versions.insert(last);
+                    const auto met = metRecord.find(uint32_t(hop.chain));
+                    if (met != metRecord.end()) {
+                        shadowed.emplace(last, met->second);
+                    } else {
+                        unshadowed.insert(last);
+                    }
+                }
+                if (hop.record >= 0) {
+                    const RigExecBakedPropertyRecord &record =
+                        B.propertyRecords[size_t(hop.record)];
+                    versions.insert(record.id);
+                    if (RecordAnswers(B, hop.record, readAs)) {
+                        metRecord[record.chain] = uint32_t(hop.record);
+                    }
+                }
+            }
+        }
+        reader.versions.assign(versions.begin(), versions.end());
+        reader.shadowed.clear();
+        for (const auto &[id, record] : shadowed) {
+            if (!unshadowed.count(id)) {
+                reader.shadowed.emplace_back(id, record);
+            }
+        }
+    }
+    B.readerWalkMoved.assign(B.readerWalks.size(), 0);
+    B.readerWalkChanged.assign(B.readerWalks.size(), 0);
 }
 
 // The prologue.
@@ -808,6 +1299,9 @@ RigExecBakedHeadLeafHolds(const RigExecBakedHeadLeaf &leaf,
     case HeadType::Vec3f: return value.IsHolding<GfVec3f>();
     case HeadType::Matrix4d: return value.IsHolding<GfMatrix4d>();
     case HeadType::Vec2fArray: return value.IsHolding<VtArray<GfVec2f>>();
+    case HeadType::Int: return value.IsHolding<int>();
+    case HeadType::Token: return value.IsHolding<TfToken>();
+    case HeadType::Vec3d: return value.IsHolding<GfVec3d>();
     }
     return false;
 }

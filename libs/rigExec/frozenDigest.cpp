@@ -185,6 +185,13 @@ RigExecFrozenPurityAudit()
          "handles are dead and unread) and runs the same bodies serially, "
          "with no cone verifier and a disabled profiler; override slots "
          "are found by (prim, attribute), with no path built"},
+        {"reader walks (bakedProperties.cpp RigExecBakedResolveReaderWalk)",
+         RigExecFrozenPurity::Pure,
+         "every read after the head tier that a chain result or a record "
+         "can answer -- a chain-routed binding, a path leaf read through "
+         "the resolved inputs -- resolves from head leaves, override slots, "
+         "chain finals and records: no USD, no path built, no lock; live "
+         "and a frozen job call the same function"},
         {"baked schedule serial executor",
          RigExecFrozenPurity::Pure,
          "program order on one thread; the reference every frozen run uses"},

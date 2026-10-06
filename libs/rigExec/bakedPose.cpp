@@ -2529,6 +2529,8 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
         step.varyingInputs = false;
         step.resolvedInputReads = false;
         step.overrideInputs.clear();
+        step.readerWalks.clear();
+        step.headReads.clear();
         switch (step.kind) {
         case RigExecBakedStepKind::Solve:
             NoteSolverInputs(B.solvers[size_t(step.object)], &step);
@@ -2608,6 +2610,9 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
                         step.overrideInputs.end()),
             step.overrideInputs.end());
     }
+    // The property versions those inputs' walks, and the path leaves'
+    // walks, can read.
+    RigExecBakedDeclareHeadReads(&B);
 }
 
 bool
@@ -2776,8 +2781,6 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // Rules 1 and 2: the caller's `all`, the first run, a moved stamp.
     all = all || !B.everRan || B.programStamp != B.lastProgramStamp;
     const bool timeMoved = time != B.lastTime;
-    const bool chainsMoved = !all && B.hasPropertyChains &&
-                             B.propertyResults != B.lastPropertyResults;
     const bool edited = B.anyEdited;
     const auto flagged = [](const std::vector<char> &flags, int index) {
         return index >= 0 && size_t(index) < flags.size() &&
@@ -2794,10 +2797,9 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
         if (input.leaf < 0) {
             return;
         }
-        // A chain-routed binding reads through the chain results, which the
-        // head tier publishes between the two passes; no other binding's
-        // walk can reach one.
-        const bool routed = bool(input.resolvedAttr);
+        // A chain-routed binding reads after the head tier has published;
+        // no other binding's walk can reach a chain result or a record.
+        const bool routed = input.resolvedAttr || input.walk >= 0;
         if ((pass == RigExecBakedLeafPass::BeforeHead && routed) ||
             (pass == RigExecBakedLeafPass::ChainRouted && !routed)) {
             return;
@@ -2805,22 +2807,26 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
         RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();
         const size_t k = size_t(input.leaf);
         const int o = input.overrideIndex;
-        // `all` first: a frozen job's handles are dead, and the chain rule
-        // is the only one that asks one.
+        const bool walked = input.walk >= 0;
+        // `all` first: a frozen job's handles are dead.
         const bool resample =
             all || pool.mustSample[k] || (timeMoved && input.varying) ||
             flagged(B.overridden, o) || flagged(B.lastOverridden, o) ||
             (edited && flagged(B.edited, o)) ||
-            (chainsMoved && input.resolvedAttr);
+            (walked && B.readerWalkMoved[size_t(input.walk)]);
         if (!resample) {
             return;
         }
         pool.mustSample[k] = 0;
         ++B.leafSamples;
         const Stored value =
-            Stored(RigExecBakedRead(input, R, time, &B.overridden));
+            walked ? Stored(RigExecBakedReadWalked(B, input, B.overridden))
+                   : Stored(RigExecBakedRead(input, R, time, &B.overridden));
         pool.changed[k] = _LeafSame(value, pool.value[k]) ? 0 : 1;
         pool.value[k] = value;
+        if (walked && pool.changed[k]) {
+            B.readerWalkChanged[size_t(input.walk)] = 1;
+        }
     });
 }
 

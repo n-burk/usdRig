@@ -4018,9 +4018,9 @@ TestOverlayMidWarmingServesNoStalePose()
 // contract that replaces the check: a chain mover's constant edited
 // mid-epoch -- which moves no epoch digest -- rebinds them; an edit to a
 // control that no chain reads does not; and the trusted sample always
-// digests exactly as the self-binding sampler's. The negative control proves
-// the rebind is load-bearing: bindings taken BEFORE the edit digest
-// differently once it has landed.
+// digests exactly as the self-binding sampler's. Since the frozen worker runs
+// the chains itself, the bindings carry no value into a sample: bindings
+// taken BEFORE the edit digest the same once it has landed.
 struct _ChainNoticeForward : public TfWeakBase {
     RigExecImagingBridge *bridge = nullptr;
     void OnChanged(const UsdNotice::ObjectsChanged &notice,
@@ -4097,8 +4097,10 @@ TestLiveChainBindingsFollowNotices()
     bound = bridge.AcquireChainBindings(&now);
     CHECK(bound != nullptr && now != first);
     CHECK(bound && digestsAgree(*bound));
-    // ...and the pre-edit bindings would have served a stale constant.
-    CHECK(!digestsAgree(before));
+    // The pre-edit bindings sample the same vector: they are the epoch's
+    // currency check only, and the sampled values (head leaves included)
+    // are read off the stage at the job's time, never through them.
+    CHECK(digestsAgree(before));
 
     TfNotice::Revoke(key);
 }
