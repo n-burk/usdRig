@@ -74,6 +74,7 @@ namespace rigExec {
 
 class RigExecRigEvaluator;
 struct RigExecRigPose;
+struct RigExecHeadLeafConstants;
 
 // Shared helpers.
 
@@ -2868,6 +2869,9 @@ struct RigExecBakedProgramImpl {
         VtVec3fArray lastAuxPoints;
         RigExecMoverStatus lastStatus;
         bool ran = false;
+        /// This revision's own wire-basis memo: only its step runs its
+        /// kernel, so nothing else touches it. A clone shares the entries.
+        RigExecWireBasisCache wireBasis;
         /// A read phase named this revision as the point in the chain it
         /// wants the target's points from (the dynamic walk records them
         /// after it). Decided at bake out of the evaluator's
@@ -3456,6 +3460,20 @@ struct RigExecBakedProgramImpl {
     /// Build.
     uint64_t headLeafSamples = 0;
     uint64_t headOpsRun = 0;
+    /// The frozen samplers' table of the constant head leaves, kept while
+    /// the state it was read under stands (RigExecHeadLeafConstants). UI
+    /// thread only, written through a const program by the samplers; never
+    /// cloned, because a snapshot never samples. A re-read whose every
+    /// entry is bitwise the standing one keeps the standing table, so
+    /// frames sampled on either side of an edit that left the constants
+    /// alone share one.
+    mutable std::shared_ptr<const RigExecHeadLeafConstants>
+        headLeafConstants;
+    /// The state headLeafConstants was last read under: the program stamp,
+    /// the evaluator's stage edit serial and whether the time was Default.
+    mutable uint64_t headLeafConstantsStamp = 0;
+    mutable uint64_t headLeafConstantsSerial = 0;
+    mutable bool headLeafConstantsDefault = false;
     /// The reads after the head tier that a chain result or a record can
     /// answer (RigExecBakedReaderWalk), bound at Build; per walk, whether
     /// something it depends on moved this run (RigExecBakedNoteReaderWalks)
@@ -3698,6 +3716,12 @@ VtValue RigExecBakedReadHeadLeaf(const RigExecBakedHeadLeaf &leaf,
 /// Whether \p value holds exactly \p leaf's type.
 bool RigExecBakedHeadLeafHolds(const RigExecBakedHeadLeaf &leaf,
                                const VtValue &value);
+
+/// Whether \p leaf's attribute might hold a different value at another
+/// time: the predicate RigExecBakedSampleHeadLeaves re-derives `varying`
+/// with. A leaf that answers false reads one value at every numeric time
+/// code. Reads the stage: owning thread.
+bool RigExecBakedHeadLeafVaries(const RigExecBakedHeadLeaf &leaf);
 
 /// The body of one PropertyRevision head step: part 0 sets the base and the
 /// chain's valid byte, part k applies revision k. Each is the loop body of

@@ -54,6 +54,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
 
+struct RigExecWireBasis;
+
 /// The operation a revision performs. One node type per operation and value
 /// type, mirroring the frozen application signatures (spec §4.1): no runtime
 /// operation dispatch inside a node.
@@ -1364,6 +1366,44 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
                                const RigExecMoverParameters &p,
                                std::vector<GfVec3f> *pts);
 
+/// The bases of a sparse-envelope wire revision, memoized by content.
+///
+/// A basis depends on the bind table, the weighted point indices, the knots,
+/// the order, the control and mesh point counts and the dropoff, never on
+/// where the control points are, so a frame whose inputs repeat is a lookup.
+/// The key is a hash of those inputs' contents, not their addresses (an
+/// edited table can reuse a freed buffer); a hit compares the full inputs, so
+/// a collision rebuilds. A rebuild is pure, so a hit, a miss and an eviction
+/// all answer the same basis values.
+///
+/// OWNED, NOT SHARED: one per mover graph (one dynamic chain, run by one task
+/// at a time) and one per baked revision (run by one step at a time), so no
+/// lock guards it. A copy shares the immutable entries, which is how a frozen
+/// clone starts from the program's bases.
+class RigExecWireBasisCache
+{
+public:
+    /// Entries held before the map is cleared; bind tables are fixed in
+    /// practice, so one owner rarely holds more than one.
+    static constexpr size_t kCapacity = 64;
+
+    /// The basis for \p p's bind table over \p indices on a mesh of
+    /// \p meshPoints points, built on a miss; null for an invalid curve
+    /// layout.
+    std::shared_ptr<const RigExecWireBasis> Get(
+        const RigExecMoverParameters &p, const std::vector<int> &indices,
+        size_t meshPoints);
+
+    size_t Size() const { return _entries.size(); }
+    /// Test observable: bases built since construction (copies included).
+    size_t BuildCount() const { return _builds; }
+
+private:
+    struct _Entry;
+    std::unordered_map<uint64_t, std::shared_ptr<const _Entry>> _entries;
+    size_t _builds = 0;
+};
+
 /// Applies \p op to \p pts in place, returning false when the packet fails
 /// atomically.
 ///
@@ -1375,9 +1415,13 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
 /// ONE definition, called by the mover-graph revision node and by the baked
 /// program: a second copy of a deformation agrees on the fixtures that exist
 /// and drifts on the ones that do not.
+///
+/// \p wireBasis is the caller's own memo for a sparse-envelope wire; null
+/// builds the basis for this call only.
 bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
                                 const RigExecMoverParameters &p,
-                                std::vector<GfVec3f> *pts, bool useSimd);
+                                std::vector<GfVec3f> *pts, bool useSimd,
+                                RigExecWireBasisCache *wireBasis);
 
 /// Runs one revision of \p op over \p pts in place, envelope included: the
 /// packet check, the full-strength fast path, RigExecApplyRevisionKernel and
@@ -1388,9 +1432,11 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
 /// which is then only scratch-collect / call / write-back -- and by the baked
 /// geometry loop. Two hand-written wrappers would have to agree about which
 /// operations blend and which fold the envelope into their own arithmetic.
+/// \p wireBasis as for RigExecApplyRevisionKernel.
 bool RigExecRunRevisionKernel(RigExecRevisionOp op,
                               const RigExecMoverParameters &p,
-                              std::vector<GfVec3f> *pts, bool useSimd);
+                              std::vector<GfVec3f> *pts, bool useSimd,
+                              RigExecWireBasisCache *wireBasis);
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the
 /// copy of the preceding revision, the resolved envelope array and the blend

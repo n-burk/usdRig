@@ -37,6 +37,26 @@ RigExecFrameInputs::HasChainResolvedInputs() const
     return false;
 }
 
+namespace {
+
+// The constant head leaf keyed \p path, or -1.
+int
+_HeadConstantAt(const RigExecHeadLeafConstants *constants,
+                const SdfPath &path)
+{
+    if (!constants) {
+        return -1;
+    }
+    for (size_t j = 0; j < constants->keys.size(); ++j) {
+        if (constants->keys[j] == path && !constants->varying[j]) {
+            return int(j);
+        }
+    }
+    return -1;
+}
+
+} // namespace
+
 const VtValue *
 RigExecFrameInputs::Find(const SdfPath &path) const
 {
@@ -45,7 +65,8 @@ RigExecFrameInputs::Find(const SdfPath &path) const
             return &sampled.value;
         }
     }
-    return nullptr;
+    const int j = _HeadConstantAt(headLeafConstants.get(), path);
+    return j < 0 ? nullptr : &headLeafConstants->values[size_t(j)];
 }
 
 bool
@@ -56,7 +77,14 @@ RigExecFrameInputs::Contains(const SdfPath &path) const
             return true;
         }
     }
-    return false;
+    return _HeadConstantAt(headLeafConstants.get(), path) >= 0;
+}
+
+void
+RigExecFrameInputs::SetOverrides(const std::vector<RigExecValueOverride> &list)
+{
+    overrides = list;
+    overridePaths = _FrozenOverridePaths(list);
 }
 
 void
@@ -69,6 +97,8 @@ RigExecFrameInputs::Clear()
     derivedLeaves.clear();
     stageSeeds = RigExecStageFrameSeeds();
     overrides.clear();
+    overridePaths.clear();
+    headLeafConstants.reset();
 }
 
 bool

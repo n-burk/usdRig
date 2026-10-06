@@ -160,7 +160,7 @@ class _RevisionNode final : public VdfNode
 {
 public:
     _RevisionNode(VdfNetwork *network, RigExecRevisionOp op,
-                  size_t *executionCount)
+                  size_t *executionCount, RigExecWireBasisCache *wireBasis)
         : VdfNode(
               network,
               VdfInputSpecs()
@@ -171,6 +171,7 @@ public:
                   .Connector<GfVec3f>(_tokens->out))
         , _op(op)
         , _executionCount(executionCount)
+        , _wireBasis(wireBasis)
     {
     }
 
@@ -181,6 +182,8 @@ private:
     mutable RigExecMoverStatus _resultStatus;
     RigExecRevisionOp _op;
     size_t *const _executionCount;
+    /// The graph's own memo: a graph is evaluated by one task at a time.
+    RigExecWireBasisCache *const _wireBasis;
 };
 
 bool
@@ -253,7 +256,8 @@ _RevisionKindToken(RigExecRevisionOp op)
 // VdfContext appears and neither path holds a copy of the other's dispatch.
 void
 _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
-               RigExecMoverStatus *resultStatus)
+               RigExecMoverStatus *resultStatus,
+               RigExecWireBasisCache *wireBasis)
 {
     const RigExecMoverParameters *params =
         ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
@@ -288,7 +292,7 @@ _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
         }
     }
     if (!RigExecRunRevisionKernel(op, *params, &scratch,
-                                  RigExecSimdEnabled())) {
+                                  RigExecSimdEnabled(), wireBasis)) {
         passThrough();
         return;
     }
@@ -314,7 +318,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
     _resultStatus =
         status ? *status
                : RigExecMoverStatus{_valueTokens->moverFailed, {}};
-    _RunRevisionOp(ctx, _op, &_resultStatus);
+    _RunRevisionOp(ctx, _op, &_resultStatus, _wireBasis);
 }
 
 }  // namespace
@@ -396,26 +400,6 @@ RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
 
 namespace {
 
-// The wire basis cache. A basis depends on the bind table, the weighted
-// point set, the knots, the order, the control point count and the dropoff
-// -- never on where the control points are -- so it is built once and every
-// later frame is a lookup. Keyed by a hash of those inputs' CONTENT, not by
-// their addresses: an edited bind table can reuse a freed buffer's address,
-// and a stale basis would be a silently wrong deformation. The full inputs
-// are kept beside each entry and compared on a hit, so a hash collision
-// rebuilds rather than answers. Shared by the dynamic graph and the baked
-// program, which is what keeps the two paths bit-identical.
-struct _WireBasisEntry {
-    std::vector<GfVec2f> binds;
-    std::vector<int> indices;
-    std::vector<double> knots;
-    int order = 0;
-    size_t controlPoints = 0;
-    size_t meshPoints = 0;
-    double dropoff = 0.0;
-    std::shared_ptr<const RigExecWireBasis> basis;
-};
-
 uint64_t
 _HashBytes(uint64_t h, const void *data, size_t size)
 {
@@ -426,13 +410,25 @@ _HashBytes(uint64_t h, const void *data, size_t size)
     return h;
 }
 
-std::shared_ptr<const RigExecWireBasis>
-_CachedWireBasis(const RigExecMoverParameters &p,
-                 const std::vector<int> &indices, size_t meshPoints)
-{
-    static std::mutex mutex;
-    static std::unordered_map<uint64_t, _WireBasisEntry> cache;
+}  // namespace
 
+// The inputs a basis was built from, kept beside it so a hit compares them
+// in full. Immutable once inserted: copies of a cache share it.
+struct RigExecWireBasisCache::_Entry {
+    std::vector<GfVec2f> binds;
+    std::vector<int> indices;
+    std::vector<double> knots;
+    int order = 0;
+    size_t controlPoints = 0;
+    size_t meshPoints = 0;
+    double dropoff = 0.0;
+    std::shared_ptr<const RigExecWireBasis> basis;
+};
+
+std::shared_ptr<const RigExecWireBasis>
+RigExecWireBasisCache::Get(const RigExecMoverParameters &p,
+                           const std::vector<int> &indices, size_t meshPoints)
+{
     uint64_t h = 1469598103934665603ull;
     h = _HashBytes(h, p.wireBindCoords.cdata(),
                    p.wireBindCoords.size() * sizeof(GfVec2f));
@@ -444,19 +440,16 @@ _CachedWireBasis(const RigExecMoverParameters &p,
     h = _HashBytes(h, &meshPoints, sizeof(meshPoints));
     h = _HashBytes(h, &p.dropoffDistance, sizeof(p.dropoffDistance));
 
-    const auto matches = [&](const _WireBasisEntry &e) {
-        return e.order == p.curveOrder && e.controlPoints == controlPoints &&
-               e.meshPoints == meshPoints && e.dropoff == p.dropoffDistance &&
-               e.knots == p.curveKnots && e.indices == indices &&
-               e.binds.size() == p.wireBindCoords.size() &&
-               std::equal(e.binds.begin(), e.binds.end(),
-                          p.wireBindCoords.cbegin());
-    };
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        const auto it = cache.find(h);
-        if (it != cache.end() && matches(it->second)) {
-            return it->second.basis;
+    const auto found = _entries.find(h);
+    if (found != _entries.end()) {
+        const _Entry &e = *found->second;
+        if (e.order == p.curveOrder && e.controlPoints == controlPoints &&
+            e.meshPoints == meshPoints && e.dropoff == p.dropoffDistance &&
+            e.knots == p.curveKnots && e.indices == indices &&
+            e.binds.size() == p.wireBindCoords.size() &&
+            std::equal(e.binds.begin(), e.binds.end(),
+                       p.wireBindCoords.cbegin())) {
+            return e.basis;
         }
     }
     auto basis = std::make_shared<RigExecWireBasis>();
@@ -466,24 +459,23 @@ _CachedWireBasis(const RigExecMoverParameters &p,
                                p.dropoffDistance, basis.get())) {
         return nullptr;
     }
-    _WireBasisEntry entry;
-    entry.binds.assign(p.wireBindCoords.cbegin(), p.wireBindCoords.cend());
-    entry.indices = indices;
-    entry.knots = p.curveKnots;
-    entry.order = p.curveOrder;
-    entry.controlPoints = controlPoints;
-    entry.meshPoints = meshPoints;
-    entry.dropoff = p.dropoffDistance;
-    entry.basis = basis;
-    std::lock_guard<std::mutex> lock(mutex);
-    if (cache.size() > 512) {
-        cache.clear();  // edits accumulate entries nothing will ask for again
+    ++_builds;
+    auto entry = std::make_shared<_Entry>();
+    entry->binds.assign(p.wireBindCoords.cbegin(), p.wireBindCoords.cend());
+    entry->indices = indices;
+    entry->knots = p.curveKnots;
+    entry->order = p.curveOrder;
+    entry->controlPoints = controlPoints;
+    entry->meshPoints = meshPoints;
+    entry->dropoff = p.dropoffDistance;
+    entry->basis = basis;
+    if (_entries.size() >= kCapacity) {
+        // Edits accumulate entries nothing will ask for again.
+        _entries.clear();
     }
-    cache[h] = std::move(entry);
+    _entries[h] = std::move(entry);
     return basis;
 }
-
-}  // namespace
 
 bool
 RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
@@ -968,7 +960,8 @@ RigExecApplyDerivedKernel(RigExecRevisionOp op,
 bool
 RigExecApplyRevisionKernel(RigExecRevisionOp op,
                            const RigExecMoverParameters &p,
-                           std::vector<GfVec3f> *pts, bool useSimd)
+                           std::vector<GfVec3f> *pts, bool useSimd,
+                           RigExecWireBasisCache *wireBasis)
 {
     switch (op) {
     case RigExecRevisionOp::Matrix:
@@ -1065,8 +1058,19 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
                     return false;
                 }
             }
-            const std::shared_ptr<const RigExecWireBasis> basis =
-                _CachedWireBasis(p, w.indices, pts->size());
+            std::shared_ptr<const RigExecWireBasis> basis;
+            if (wireBasis) {
+                basis = wireBasis->Get(p, w.indices, pts->size());
+            } else {
+                auto built = std::make_shared<RigExecWireBasis>();
+                if (RigExecBuildWireBasis(
+                        p.wireBindCoords.cdata(), p.wireBindCoords.size(),
+                        pts->size(), w.indices, p.curveOrder, p.curveKnots,
+                        p.restPoints.size(), p.dropoffDistance,
+                        built.get())) {
+                    basis = std::move(built);
+                }
+            }
             if (!basis) {
                 return false;
             }
@@ -1136,7 +1140,8 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
 bool
 RigExecRunRevisionKernel(RigExecRevisionOp op,
                          const RigExecMoverParameters &p,
-                         std::vector<GfVec3f> *pts, bool useSimd)
+                         std::vector<GfVec3f> *pts, bool useSimd,
+                         RigExecWireBasisCache *wireBasis)
 {
     if (!p.valid || p.kind != _RevisionKindToken(op)) {
         return false;
@@ -1150,7 +1155,7 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
         op == RigExecRevisionOp::RecomputeExtent ||
         (op == RigExecRevisionOp::Wire &&
          RigExecWireTakesSparseEnvelope(p.weights))) {
-        return RigExecApplyRevisionKernel(op, p, pts, useSimd);
+        return RigExecApplyRevisionKernel(op, p, pts, useSimd, wireBasis);
     }
 
     // A constant envelope at exactly full strength makes the blend below the
@@ -1164,7 +1169,7 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
     if (!fullStrengthEnvelope) {
         preceding = *pts;
     }
-    if (!RigExecApplyRevisionKernel(op, p, pts, useSimd)) {
+    if (!RigExecApplyRevisionKernel(op, p, pts, useSimd, wireBasis)) {
         return false;
     }
     if (pts->size() != precedingSize) {
@@ -3485,6 +3490,8 @@ struct RigExecMoverGraph::_Runtime {
     VdfMaskedOutputVector dirty;
     size_t executionCount = 0;
     size_t scheduleBuildCount = 0;
+    /// Every wire revision of this graph memoizes its bases here.
+    RigExecWireBasisCache wireBasis;
 
     void TopologyChanged() {
         schedule.reset();
@@ -3537,7 +3544,8 @@ RigExecMoverGraph::AddRevision(
     statusSource->SetValue(0, status);
 
     _RevisionNode *const revision =
-        new _RevisionNode(&_network, op, &_runtime->executionCount);
+        new _RevisionNode(&_network, op, &_runtime->executionCount,
+                          &_runtime->wireBasis);
 
     const VdfMask one = VdfMask::AllOnes(1);
     _network.Connect(

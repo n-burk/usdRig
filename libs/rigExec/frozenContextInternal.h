@@ -189,10 +189,21 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((combineTargetCountKey, "frozenWeight:combineTargetCount"))
 );
 
-/// \p name is one of the frozenWeight: keys of _frozenWeightTokens, so the
-/// worker's weight step builds no token from text.
+/// \p name is one of the frozenWeight: keys of _frozenWeightTokens. The
+/// sampler and the freeze call it; the worker reads the freeze's keys
+/// (RigExecFrozenProgram::weightArrayKeys) and builds none.
 SdfPath
 _FrozenWeightArrayKey(const SdfPath &objectPath, const TfToken &name);
+
+/// The position of each frozenWeight: key in a weight object's four
+/// RigExecFrozenProgram::weightArrayKeys.
+enum _FrozenWeightArrayRole : size_t {
+    _FrozenWeightTargetPoints = 0,
+    _FrozenWeightSamplePoints,
+    _FrozenWeightCurvePoints,
+    _FrozenWeightCombineTargetCount,
+    _FrozenWeightArrayRoleCount
+};
 
 SdfPath
 _FrozenWireInputKey(const SdfPath &moverPath, const char *role);
@@ -200,9 +211,17 @@ _FrozenWireInputKey(const SdfPath &moverPath, const char *role);
 SdfPath
 _FrozenBlendInputKey(const SdfPath &samplePath, const char *role);
 
+/// Each override's property path (prim.attribute), empty where it names a
+/// computation. UI thread: it builds paths.
+std::vector<SdfPath>
+_FrozenOverridePaths(const std::vector<RigExecValueOverride> &overrides);
+
+/// \p paths is _FrozenOverridePaths(\p overrides), built on the UI thread,
+/// so placement builds no path; a length mismatch is unplaceable.
 bool
 _FrozenPlaceOverrides(const RigExecBakedProgramImpl &B,
                       const std::vector<RigExecValueOverride> &overrides,
+                      const std::vector<SdfPath> &paths,
                       std::vector<char> *flags);
 
 SdfPath
@@ -310,6 +329,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst);
 // snapshot stores, profiler, guide taps, guides flag). Nothing in here is
 // shared between jobs; nothing in here names the stage or the evaluator.
 struct _FrozenWorker {
+    /// The snapshot `B` was cloned from: its freeze-built keys.
+    const RigExecFrozenProgram *snapshot = nullptr;
     RigExecBakedProgramImpl B;
     RigExecResolvedInputs resolved;
     RigExecChainSnapshots chainSnapshots;

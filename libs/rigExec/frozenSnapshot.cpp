@@ -529,6 +529,22 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
                     moverPrim.GetAttribute(TfToken("rigExec:skinningMethod"))
                 ? 1
                 : 0);
+        // The sampler's key for the mover's defaultWeight sample.
+        snapshot->moverDefaultWeightKeys.push_back(
+            revision.moverPath.AppendProperty(
+                TfToken("inputs:defaultWeight")));
+    }
+    // The sampler's synthetic weight-array keys, by the same function.
+    for (const RigExecBakedProgramImpl::WeightObject &object :
+         B.weightObjects) {
+        for (const TfToken &role :
+             {_frozenWeightTokens->targetPointsKey,
+              _frozenWeightTokens->samplePointsKey,
+              _frozenWeightTokens->curvePointsKey,
+              _frozenWeightTokens->combineTargetCountKey}) {
+            snapshot->weightArrayKeys.push_back(
+                _FrozenWeightArrayKey(object.path, role));
+        }
     }
     *frozen = std::move(snapshot);
     return true;

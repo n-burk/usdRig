@@ -1,6 +1,7 @@
 // Stage-side frame sampling and burst sample caches.
 
 #include "frozenContextInternal.h"
+#include "frameCache.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/geometryKernels.h"
 #include <algorithm>
@@ -116,16 +117,99 @@ _SampleBinding(const RigExecBakedInput<T> &input,
     out->Add(input.head.GetPath(), value, hasValue);
 }
 
-// Every head leaf the property chains read, at \p time, under its frozen
-// key: the raw typed value RigExecBakedSampleHeadLeaves reads on the live
-// path, valueless where the attribute holds none of the leaf's type. All of
-// them on every job, whatever their variance: the worker's head tier
-// compares each against the snapshot's last sample to decide what re-runs.
+// The constant head leaves of \p B, read fresh off the stage: the program's
+// table while the state it was read under stands, else a re-read, which
+// keeps the standing table when every entry is bitwise the same and
+// otherwise becomes the program's. Every stage notice advances the evaluator's serial
+// and a stamp bump reruns live whole, so a standing table holds what a read
+// would answer now, whatever the live leaves were last sampled at -- which
+// is why a snapshot holding an older constant still warms the current one.
+// A constant leaf reads one value at every numeric time; Default-ness is
+// part of the state, as the live sampler re-reads every leaf when the time
+// moves to or from Default.
+std::shared_ptr<const RigExecHeadLeafConstants>
+_HeadLeafConstants(const RigExecRigEvaluator &evaluator,
+                   const RigExecBakedProgramImpl &B, UsdTimeCode time)
+{
+    const uint64_t serial = evaluator.GetStageEditSerial();
+    const std::shared_ptr<const RigExecHeadLeafConstants> memo =
+        B.headLeafConstants;
+    if (memo && B.headLeafConstantsStamp == B.programStamp &&
+        B.headLeafConstantsSerial == serial &&
+        B.headLeafConstantsDefault == time.IsDefault()) {
+        return memo;
+    }
+    B.headLeafConstantsStamp = B.programStamp;
+    B.headLeafConstantsSerial = serial;
+    B.headLeafConstantsDefault = time.IsDefault();
+    auto table = std::make_shared<RigExecHeadLeafConstants>();
+    RigExecFrameInputs asSamples;
+    uint64_t digest = 1469598103934665603ull;
+    RigExecForEachHeadLeaf(B, [&](const RigExecBakedHeadLeaf &leaf) {
+        const bool varies = RigExecBakedHeadLeafVaries(leaf);
+        VtValue value;
+        if (!varies) {
+            value = RigExecBakedReadHeadLeaf(leaf, time);
+        }
+        table->keys.push_back(leaf.frozenKey);
+        table->varying.push_back(varies ? 1 : 0);
+        digest = _MixWord(digest, varies ? 1u : 0u);
+        if (!varies) {
+            asSamples.Add(leaf.frozenKey, value, !value.IsEmpty());
+            digest = _MixWord(digest,
+                              RigExecSampleDigest(asSamples.values.back()));
+        }
+        table->values.push_back(std::move(value));
+    });
+    table->digest = _MixWord(digest, uint64_t(table->keys.size()));
+    table->digestible = RigExecControlStateDigestible(asSamples);
+    if (memo && memo->keys == table->keys &&
+        memo->varying == table->varying &&
+        memo->values.size() == table->values.size()) {
+        bool same = true;
+        for (size_t j = 0; same && j < table->values.size(); ++j) {
+            same = RigExecBakedHeadValueSame(memo->values[j],
+                                             table->values[j]);
+        }
+        if (same) {
+            return memo;
+        }
+    }
+    B.headLeafConstants = table;
+    return table;
+}
+
+// Every head leaf the property chains read, under its frozen key: the raw
+// typed value RigExecBakedSampleHeadLeaves reads on the live path,
+// valueless where the attribute holds none of the leaf's type. A leaf that
+// varies is read at \p time into the vector; the rest ride the shared table
+// (_HeadLeafConstants). The worker's head tier compares each against the
+// snapshot's last sample to decide what re-runs.
 void
-_SampleHeadLeaves(const RigExecBakedProgramImpl &B, UsdTimeCode time,
+_SampleHeadLeaves(const RigExecRigEvaluator &evaluator,
+                  const RigExecBakedProgramImpl &B, UsdTimeCode time,
                   RigExecFrameInputs *out)
 {
+    bool any = false;
+    RigExecForEachHeadLeaf(B, [&any](const RigExecBakedHeadLeaf &) {
+        any = true;
+    });
+    if (!any) {
+        out->headLeafConstants.reset();
+        return;
+    }
+    out->headLeafConstants = _HeadLeafConstants(evaluator, B, time);
+    const RigExecHeadLeafConstants &constants = *out->headLeafConstants;
+    size_t j = 0;
     RigExecForEachHeadLeaf(B, [&](const RigExecBakedHeadLeaf &leaf) {
+        // A leaf past the table's end is sampled; the worker then declines
+        // on the key mismatch.
+        const bool varies =
+            j >= constants.varying.size() || constants.varying[j] != 0;
+        ++j;
+        if (!varies) {
+            return;
+        }
         const VtValue value = RigExecBakedReadHeadLeaf(leaf, time);
         out->Add(leaf.frozenKey, value, !value.IsEmpty());
     });
@@ -1271,6 +1355,19 @@ _FrozenBlendInputKey(const SdfPath &samplePath, const char *role)
         TfToken(std::string("frozenBlend:") + role));
 }
 
+std::vector<SdfPath>
+_FrozenOverridePaths(const std::vector<RigExecValueOverride> &overrides)
+{
+    std::vector<SdfPath> paths;
+    paths.reserve(overrides.size());
+    for (const RigExecValueOverride &o : overrides) {
+        paths.push_back(o.attribute.IsEmpty()
+                            ? SdfPath()
+                            : o.prim.AppendProperty(o.attribute));
+    }
+    return paths;
+}
+
 // Replicates RigExecBakedProgram::SetOverrides (bakedProgram.cpp:1319)
 // against the given epoch tables, writing the job's placement flags. The
 // sampler uses it to read overridden bindings the long way; the worker uses
@@ -1280,16 +1377,21 @@ _FrozenBlendInputKey(const SdfPath &samplePath, const char *role)
 bool
 _FrozenPlaceOverrides(const RigExecBakedProgramImpl &B,
                       const std::vector<RigExecValueOverride> &overrides,
+                      const std::vector<SdfPath> &paths,
                       std::vector<char> *flags)
 {
     flags->assign(B.overridden.size(), 0);
+    if (paths.size() != overrides.size()) {
+        return false;
+    }
     bool placeable = true;
-    for (const RigExecValueOverride &o : overrides) {
+    for (size_t i = 0; i < overrides.size(); ++i) {
+        const RigExecValueOverride &o = overrides[i];
         if (o.attribute.IsEmpty()) {
             placeable = false;
             continue;
         }
-        const SdfPath path = o.prim.AppendProperty(o.attribute);
+        const SdfPath &path = paths[i];
         if (B.folded.count(path)) {
             placeable = false;
             continue;
@@ -1387,8 +1489,12 @@ _SampleWithPinnedChainBindings(
     // Override placement decides which bindings read the long way. When an
     // override is unplaceable live runs dynamically, so no frozen job at
     // these overrides may exist.
+    RigExecFrameInputs sampled;
+    sampled.time = time;
+    sampled.SetOverrides(overrides);
     std::vector<char> overrideFlags;
-    if (!_FrozenPlaceOverrides(B, overrides, &overrideFlags)) {
+    if (!_FrozenPlaceOverrides(B, overrides, sampled.overridePaths,
+                               &overrideFlags)) {
         return fail("an override is unplaceable: live runs dynamically at "
                     "these overrides, which no frozen job can reproduce");
     }
@@ -1400,13 +1506,9 @@ _SampleWithPinnedChainBindings(
     RigExecResolvedInputs refreshed;
     _PlaceOverridesIntoResolved(overrides, &refreshed);
 
-    RigExecFrameInputs sampled;
-    sampled.time = time;
-    sampled.overrides = overrides;
-
     // Every head leaf the property ops and the reader walks read: the
     // worker runs the head tier and resolves the walks from these.
-    _SampleHeadLeaves(B, time, &sampled);
+    _SampleHeadLeaves(evaluator, B, time, &sampled);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
@@ -1783,7 +1885,8 @@ RigExecBuildBurstSampleCache(
     // No shape gate on xform slots, native sources, or delta bases: the
     // seeds sample per frame through the program's hook, as in the plain
     // sampler, so no frame of the burst is unshaped for them.
-    if (!_FrozenPlaceOverrides(B, overrides, &cache->overrideFlags)) {
+    if (!_FrozenPlaceOverrides(B, overrides, _FrozenOverridePaths(overrides),
+                               &cache->overrideFlags)) {
         return fail("an override is unplaceable: live runs dynamically at "
                     "these overrides, which no frozen job can reproduce");
     }
@@ -1875,11 +1978,11 @@ RigExecSampleFrameInputsWithBurstCache(
 
     RigExecFrameInputs sampled;
     sampled.time = time;
-    sampled.overrides = overrides;
+    sampled.SetOverrides(overrides);
 
-    // Fresh every frame, like the plain sampler: the head tier compares
-    // them against the snapshot's own last samples.
-    _SampleHeadLeaves(B, time, &sampled);
+    // As in the plain sampler: the varying leaves every frame, the
+    // constant ones by the shared table.
+    _SampleHeadLeaves(evaluator, B, time, &sampled);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
@@ -2169,6 +2272,23 @@ RigExecFrozenControlDigest(const RigExecFrameInputs &inputs, bool *exact)
             named = _HashVtValue(&hash, sampled.value) && named;
         } else {
             hash = _HashString(hash, sampled.value.GetTypeName().c_str());
+        }
+    }
+    if (const RigExecHeadLeafConstants *constants =
+            inputs.headLeafConstants.get()) {
+        // The constant head leaves, folded as the samples above are.
+        hash = _HashString(hash, "head");
+        for (size_t j = 0; j < constants->keys.size(); ++j) {
+            if (constants->varying[j]) {
+                continue;
+            }
+            const VtValue &value = constants->values[j];
+            const bool hasValue = !value.IsEmpty();
+            hash = _HashString(hash, constants->keys[j].GetString().c_str());
+            hash = _HashBytes(hash, &hasValue, sizeof(hasValue));
+            if (hasValue) {
+                named = _HashVtValue(&hash, value) && named;
+            }
         }
     }
     {

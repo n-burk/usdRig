@@ -60,7 +60,8 @@
 //  * Geometry publication uses the worker's own chain results through
 //    _FrozenPublishGeometry.
 //  * The head tier (property revisions) runs in the frozen prologue from
-//    the job's head-leaf samples, which _PatchHeadLeaves writes into the
+//    the job's head-leaf values (the varying leaves' samples and the shared
+//    constant table), which _PatchHeadLeaves writes into the
 //    clone's leaves (their attribute handles stay dead and unread): a
 //    body reads leaves, overrides and earlier versions only
 //    (RigExecBakedRunPropertyStep), and the one op that would reach the
@@ -82,6 +83,11 @@
 //    frozen blend-shape assembler below calls) take the serial variant
 //    inside a frozen run (the RigExecFrozenSerialActive hook, D4), so the
 //    only thread a frozen frame ever runs on is its own.
+//  * The worker builds none of the paths it places overrides at or looks
+//    samples up by: override placement and the overlay use the vector's
+//    overridePaths, and the RevisionStatic and weight steps use the
+//    snapshot's moverDefaultWeightKeys and weightArrayKeys, all built on
+//    the UI thread, so it never takes the path table's lock to make one.
 //  * TfToken/SdfPath/VtValue copies on the worker touch only their own
 //    atomic refcounts and the process-global immutable-after-load tables
 //    under brief internal locks -- the same operations the live path
@@ -162,12 +168,13 @@ _PatchInputs(RigExecBakedProgramImpl &B,
 }
 
 // Writes every head leaf the sampler keyed (RigExecForEachHeadLeaf) from
-// the job's vector, setting its `changed` byte against the value the
+// the job's vector -- a constant leaf from the shared table, a varying one
+// from its sample -- setting its `changed` byte against the value the
 // snapshot last held, so the head tier re-runs exactly the ops whose inputs
 // differ from the snapshot's. Every other leaf holds no value and is
-// unchanged. A missing sample, or one of another type, declines: the
-// vector was sampled for another program. No stage, no path construction:
-// the keys were built at Build.
+// unchanged. A missing sample or table entry, or one of another type,
+// declines: the vector was sampled for another program. No stage, no path
+// construction: the keys were built at Build.
 bool
 _PatchHeadLeaves(RigExecBakedProgramImpl &B,
                  const std::map<SdfPath, size_t> &index,
@@ -177,24 +184,44 @@ _PatchHeadLeaves(RigExecBakedProgramImpl &B,
         leaf.changed = 0;
         leaf.mustSample = 0;
     }
+    const RigExecHeadLeafConstants *constants =
+        inputs.headLeafConstants.get();
     bool ok = true;
+    size_t j = 0;
     RigExecForEachHeadLeaf(B, [&](RigExecBakedHeadLeaf &leaf) {
         if (!ok) {
             return;
         }
-        const auto found = index.find(leaf.frozenKey);
-        if (found == index.end()) {
+        const size_t at = j++;
+        if (!constants || at >= constants->keys.size() ||
+            constants->keys[at] != leaf.frozenKey) {
             ok = false;
             return;
         }
-        const RigExecSampledInput &sample = inputs.values[found->second];
-        VtValue value;
-        if (sample.hasValue) {
-            if (!RigExecBakedHeadLeafHolds(leaf, sample.value)) {
+        const VtValue *held = nullptr;
+        if (!constants->varying[at]) {
+            held = &constants->values[at];
+            if (held->IsEmpty()) {
+                held = nullptr;
+            }
+        } else {
+            const auto found = index.find(leaf.frozenKey);
+            if (found == index.end()) {
                 ok = false;
                 return;
             }
-            value = sample.value;
+            const RigExecSampledInput &sample = inputs.values[found->second];
+            if (sample.hasValue) {
+                held = &sample.value;
+            }
+        }
+        VtValue value;
+        if (held) {
+            if (!RigExecBakedHeadLeafHolds(leaf, *held)) {
+                ok = false;
+                return;
+            }
+            value = *held;
         }
         leaf.changed = RigExecBakedHeadValueSame(value, leaf.value) ? 0 : 1;
         leaf.value = std::move(value);
@@ -258,13 +285,17 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     // in the resolved inputs, and a chain result at a dragged target takes
     // its place there, the drag being the base it was computed from. The
     // resolved inputs are unread by the patched bindings, but the placement
-    // keeps the private state shape-identical.
-    for (const RigExecValueOverride &o : inputs.overrides) {
+    // keeps the private state shape-identical. The paths were built on the
+    // UI thread (RigExecFrameInputs::overridePaths).
+    if (inputs.overridePaths.size() != inputs.overrides.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < inputs.overrides.size(); ++i) {
+        const RigExecValueOverride &o = inputs.overrides[i];
         if (o.attribute.IsEmpty()) {
             continue;
         }
-        B.resolvedInputs->SetProperty(o.prim.AppendProperty(o.attribute),
-                                      o.value);
+        B.resolvedInputs->SetProperty(inputs.overridePaths[i], o.value);
     }
     // The property chains, after the override placement, as on the live
     // path: the head tier from the job's head-leaf samples, then the
@@ -927,6 +958,7 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
         return false;
     }
     _FrozenWorker worker;
+    worker.snapshot = &snapshot;
     _CloneImpl(snapshot.program, &worker.B);
     RigExecBakedProgramImpl &B = worker.B;
     B.resolvedInputs = &worker.resolved;
@@ -944,7 +976,8 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     // Override flags for the job's overrides, exactly as SetOverrides
     // computes them; unplaceable declines (live runs dynamically).
     std::vector<char> flags;
-    if (!_FrozenPlaceOverrides(B, inputs.overrides, &flags)) {
+    if (!_FrozenPlaceOverrides(B, inputs.overrides, inputs.overridePaths,
+                               &flags)) {
         return false;
     }
     if (flags.size() != B.overridden.size()) {
@@ -1245,6 +1278,7 @@ RigExecRunPartialCone(
         }
     }
     _FrozenWorker worker;
+    worker.snapshot = &snapshot;
     _CloneImpl(snapshot.program, &worker.B);
     RigExecBakedProgramImpl &B = worker.B;
     B.resolvedInputs = &worker.resolved;
@@ -1262,7 +1296,8 @@ RigExecRunPartialCone(
         return result;
     }
     std::vector<char> flags;
-    if (!_FrozenPlaceOverrides(B, freshInputs.overrides, &flags)) {
+    if (!_FrozenPlaceOverrides(B, freshInputs.overrides,
+                               freshInputs.overridePaths, &flags)) {
         return result;
     }
     if (flags.size() != B.overridden.size()) {

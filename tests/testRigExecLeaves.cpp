@@ -64,6 +64,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -2657,6 +2658,134 @@ TestNoBodyReadsTheStage(const std::string &examples)
     CHECK(!volatileRigs.empty());
 }
 
+// A cubic wire over ten points whose envelope is sparse with a zero
+// default, so the kernel evaluates only the named points from a basis.
+RigExecMoverParameters
+SparseWirePacket()
+{
+    RigExecMoverParameters p;
+    p.kind = TfToken("wire");
+    p.valid = true;
+    p.curveOrder = 4;
+    p.curveKnots = {0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0};
+    for (int j = 0; j < 4; ++j) {
+        p.restPoints.emplace_back(float(j), 0.0f, 0.0f);
+        p.auxPoints.emplace_back(float(j), 0.25f * float(j * j), 0.5f);
+    }
+    for (int i = 0; i < 10; ++i) {
+        p.wireBindCoords.push_back(GfVec2f(0.1f * float(i), 0.05f * float(i)));
+    }
+    p.dropoffDistance = 2.0;
+    p.weights.representation = TfToken("sparse");
+    p.weights.rangePolicy = TfToken("strict");
+    p.weights.indices = {1, 3, 5, 7};
+    p.weights.values = {1.0f, 0.5f, 0.25f, 1.0f};
+    p.weights.defaultWeight = 0.0f;
+    p.weights.valid = true;
+    return p;
+}
+
+std::vector<GfVec3f>
+WireMesh()
+{
+    std::vector<GfVec3f> mesh;
+    for (int i = 0; i < 10; ++i) {
+        mesh.emplace_back(0.3f * float(i), 0.1f, -0.2f * float(i));
+    }
+    return mesh;
+}
+
+// The wire-basis memo is owned, not shared (RigExecWireBasisCache): through
+// a cache the kernel answers bit-for-bit what it answers building the basis
+// for one call; a repeat builds nothing; a moved bind table rebuilds and
+// answers the fresh build; a copy, as a frozen clone takes, shares what was
+// built; the map stays under its cap; and caches on separate threads, which
+// share nothing, agree with the reference.
+void
+TestTheWireBasisMemoIsOwned()
+{
+    const RigExecMoverParameters p = SparseWirePacket();
+    CHECK(RigExecWireTakesSparseEnvelope(p.weights));
+    std::vector<GfVec3f> reference = WireMesh();
+    CHECK(RigExecRunRevisionKernel(RigExecRevisionOp::Wire, p, &reference,
+                                   true, nullptr));
+    CHECK(reference != WireMesh());
+
+    RigExecWireBasisCache cache;
+    for (int run = 0; run < 3; ++run) {
+        std::vector<GfVec3f> points = WireMesh();
+        CHECK(RigExecRunRevisionKernel(RigExecRevisionOp::Wire, p, &points,
+                                       true, &cache));
+        CHECK(points == reference);
+    }
+    CHECK(cache.BuildCount() == 1);
+    CHECK(cache.Size() == 1);
+
+    RigExecWireBasisCache copy = cache;
+    {
+        std::vector<GfVec3f> points = WireMesh();
+        CHECK(RigExecRunRevisionKernel(RigExecRevisionOp::Wire, p, &points,
+                                       true, &copy));
+        CHECK(points == reference);
+        CHECK(copy.BuildCount() == 1);
+    }
+
+    RigExecMoverParameters moved = p;
+    moved.wireBindCoords[3] = GfVec2f(0.6f, 0.05f);
+    std::vector<GfVec3f> movedReference = WireMesh();
+    CHECK(RigExecRunRevisionKernel(RigExecRevisionOp::Wire, moved,
+                                   &movedReference, true, nullptr));
+    CHECK(movedReference != reference);
+    {
+        std::vector<GfVec3f> points = WireMesh();
+        CHECK(RigExecRunRevisionKernel(RigExecRevisionOp::Wire, moved,
+                                       &points, true, &cache));
+        CHECK(points == movedReference);
+        CHECK(cache.BuildCount() == 2);
+    }
+    // The copy still holds only what it shared: the original's rebuild did
+    // not reach it.
+    CHECK(copy.Size() == 1);
+
+    for (size_t k = 0; k < RigExecWireBasisCache::kCapacity + 5; ++k) {
+        RigExecMoverParameters edited = p;
+        edited.dropoffDistance = 2.0 + 0.01 * double(k + 1);
+        std::vector<GfVec3f> points = WireMesh();
+        CHECK(RigExecRunRevisionKernel(RigExecRevisionOp::Wire, edited,
+                                       &points, true, &cache));
+        CHECK(cache.Size() <= RigExecWireBasisCache::kCapacity);
+    }
+    {
+        std::vector<GfVec3f> points = WireMesh();
+        CHECK(RigExecRunRevisionKernel(RigExecRevisionOp::Wire, p, &points,
+                                       true, &cache));
+        CHECK(points == reference);
+    }
+
+    std::atomic<int> mismatches(0);
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 4; ++t) {
+        workers.emplace_back([&]() {
+            RigExecWireBasisCache own;
+            for (int run = 0; run < 50; ++run) {
+                std::vector<GfVec3f> points = WireMesh();
+                if (!RigExecRunRevisionKernel(RigExecRevisionOp::Wire, p,
+                                              &points, true, &own) ||
+                    points != reference) {
+                    ++mismatches;
+                }
+            }
+            if (own.BuildCount() != 1) {
+                ++mismatches;
+            }
+        });
+    }
+    for (std::thread &worker : workers) {
+        worker.join();
+    }
+    CHECK(mismatches.load() == 0);
+}
+
 }  // namespace
 
 int
@@ -2684,6 +2813,7 @@ main(int argc, char **argv)
     TestRevisionLeavesCoverTheExporterEnumeration(examples);
     TestTheBodyMarkCountsReadsUnderIt();
     TestAFrozenCloneKeepsTheBuildSettings(examples);
+    TestTheWireBasisMemoIsOwned();
     TestNoBodyReadsTheStage(examples);
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;

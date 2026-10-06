@@ -26,6 +26,7 @@
 #include "rigExec/backgroundScheduler.h"
 #include "rigExec/bakedProgram.h"
 #include "rigExec/frameCache.h"
+#include "rigExec/frameCacheSparsity.h"
 #include "rigExec/generation.h"
 #include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
@@ -1694,12 +1695,14 @@ MakeClampedChainRig(double tx, bool animatedFactor)
     return stage;
 }
 
-// \p inputs less the head-leaf samples: the vector a sampler without them
-// would produce, whose digest is what the frame cache keyed on before.
+// \p inputs less the head-leaf samples and their constant table: the
+// vector a sampler without them would produce, whose digest is what the
+// frame cache keyed on before.
 RigExecFrameInputs
 WithoutHeadLeaves(const RigExecFrameInputs &inputs)
 {
     RigExecFrameInputs out = inputs;
+    out.headLeafConstants.reset();
     out.values.clear();
     for (const RigExecSampledInput &sample : inputs.values) {
         if (sample.path.GetName().rfind("frozenChain", 0) != 0) {
@@ -2895,6 +2898,152 @@ TestStillCurrentDetectsConstantEdit()
                            warmed2);
 }
 
+// The head leaves without time samples ride a table every vector sampled
+// under one program state shares (RigExecHeadLeafConstants): the vector
+// carries only the leaves that vary, two frames share one table, and Find
+// still answers a constant. An edit to a constant leaf reads a new table
+// whose digest moves, and a job sampled after it warms bit-identically
+// even from a snapshot frozen before the edit -- the table carries the
+// value the snapshot never saw, and the worker re-runs what it reaches.
+void
+TestConstantHeadLeavesRideASharedTable()
+{
+    UsdStageRefPtr stage = MakeChainedRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> before;
+    CHECK(RigExecFreezeProgram(evaluator, &before, &error));
+    CHECK(before != nullptr);
+    if (!before) {
+        return;
+    }
+
+    const SdfPath weightKey(
+        "/Asset/Rig/Movers/TxGain.frozenChainHop:inputs:defaultWeight");
+    const SdfPath factorKey(
+        "/Asset/Rig/Movers/TxGain.frozenChainHop:inputs:value");
+    RigExecFrameInputs at2, at3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(2.0), {}, &at2,
+                                   &error));
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &at3,
+                                   &error));
+    CHECK(at3.headLeafConstants != nullptr);
+    if (!at3.headLeafConstants) {
+        return;
+    }
+    CHECK(at2.headLeafConstants == at3.headLeafConstants);
+    const RigExecHeadLeafConstants &table = *at3.headLeafConstants;
+    CHECK(table.keys.size() == table.varying.size() &&
+          table.keys.size() == table.values.size());
+    size_t constants = 0, varyingSamples = 0;
+    for (size_t j = 0; j < table.keys.size(); ++j) {
+        bool sampled = false;
+        for (const RigExecSampledInput &sample : at3.values) {
+            sampled = sampled || sample.path == table.keys[j];
+        }
+        // Exactly the varying leaves travel in the vector.
+        CHECK(sampled == (table.varying[j] != 0));
+        constants += table.varying[j] ? 0 : 1;
+        varyingSamples += table.varying[j] ? 1 : 0;
+    }
+    CHECK(constants > 0);
+    CHECK(varyingSamples > 0);
+    for (const RigExecSampledInput &sample : at3.values) {
+        CHECK(sample.path != weightKey);
+    }
+    const VtValue *weight = at3.Find(weightKey);
+    CHECK(weight != nullptr && weight->IsHolding<float>() &&
+          weight->Get<float>() == 1.0f);
+    const VtValue *factor = at3.Find(factorKey);
+    CHECK(factor != nullptr && factor->IsHolding<float>() &&
+          factor->Get<float>() == 1.5f);
+
+    stage->GetAttributeAtPath(
+             SdfPath("/Asset/Rig/Movers/TxGain.inputs:defaultWeight"))
+        .Set(0.5f);
+    RigExecFrameInputs edited3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &edited3,
+                                   &error));
+    CHECK(edited3.headLeafConstants != nullptr &&
+          edited3.headLeafConstants != at3.headLeafConstants);
+    const VtValue *editedWeight = edited3.Find(weightKey);
+    CHECK(editedWeight != nullptr && editedWeight->IsHolding<float>() &&
+          editedWeight->Get<float>() == 0.5f);
+    CHECK(RigExecControlStateDigest(edited3, {}) !=
+          RigExecControlStateDigest(at3, {}));
+    CHECK(RigExecFrozenControlDigest(edited3) !=
+          RigExecFrozenControlDigest(at3));
+
+    RigExecBackgroundScheduler scheduler;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, before, edited3, &scheduler, nullptr);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live.valid);
+    CheckPosesBitIdentical("constant head leaf edited after the freeze",
+                           live, warmed);
+    CheckJobAccepted("constant head leaf edited after the freeze", edited3,
+                     warmed);
+
+    // An edit that leaves every constant as it was keeps the standing
+    // table: frames sampled on either side of it share one.
+    stage->GetAttributeAtPath(
+             SdfPath("/Asset/Rig/Movers/TxGain.inputs:value"))
+        .Set(2.25f, UsdTimeCode(4.0));
+    RigExecFrameInputs after3;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {}, &after3,
+                                   &error));
+    CHECK(after3.headLeafConstants != nullptr &&
+          after3.headLeafConstants == edited3.headLeafConstants);
+}
+
+// Every path a frozen worker would otherwise build travels with the job or
+// the snapshot: each override's property path rides the vector beside it
+// (RigExecFrameInputs::overridePaths), and the worker places the drag from
+// it. A vector whose two lists disagree declines rather than build one.
+void
+TestOverridePathsTravelWithTheJob()
+{
+    UsdStageRefPtr stage = MakeChainedRig();
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator evaluator(stage, rig);
+    CHECK(evaluator.Compile());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    RigExecValueOverride drag;
+    drag.prim = SdfPath("/Asset/Rig/AlongX");
+    drag.attribute = TfToken("avars:tx");
+    drag.value = VtValue(3.25);
+    evaluator.SetInteractiveOverrides({drag});
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::string error;
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    RigExecFrameInputs dragged;
+    CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), {drag},
+                                   &dragged, &error));
+    CHECK(dragged.overrides.size() == 1);
+    CHECK(dragged.overridePaths.size() == 1 &&
+          dragged.overridePaths[0] ==
+              SdfPath("/Asset/Rig/AlongX.avars:tx"));
+    RigExecBackgroundScheduler scheduler;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, frozen, dragged, &scheduler, nullptr);
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(3.0));
+    CHECK(live.valid);
+    CheckPosesBitIdentical("drag placed from the job's paths", live, warmed);
+
+    RigExecFrameInputs pathless = dragged;
+    pathless.overridePaths.clear();
+    bool ran = true;
+    RunWarmingJob(&evaluator, rig, frozen, pathless, &scheduler, &ran);
+    CHECK(!ran);
+    evaluator.SetInteractiveOverrides({});
+}
+
 // Increment C at the API level: an avar default edit patches the live
 // program in place (same program object, same epoch, moved region digest),
 // and carrying the region onto a copy of the snapshot warms
@@ -3406,9 +3555,9 @@ TestConcurrentFrozenRunsAgree()
 }
 
 // The purity audit is data, so its shape is asserted: every row names a
-// unit and its note, every verdict class is represented, and the rows the
-// plan's Constraints exist for -- the shared memos workers bypass, the live
-// state they never reach -- are present with non-pure verdicts.
+// unit and its note, every verdict class is represented, the live state
+// workers never reach is present with non-pure verdicts, and the wire-basis
+// memo, owned per revision and per chain graph, is pure.
 void
 TestPurityAuditNamesEveryUnit()
 {
@@ -3431,7 +3580,7 @@ TestPurityAuditNamesEveryUnit()
         }
         const bool isLive = finding.verdict == RigExecFrozenPurity::LiveOnly;
         if (std::strstr(finding.unit, "wire-basis memo")) {
-            sawWireMemo = isLive;
+            sawWireMemo = finding.verdict == RigExecFrozenPurity::Pure;
         }
         if (std::strstr(finding.unit, "UsdStage")) {
             sawStage = isLive;
@@ -3528,11 +3677,17 @@ TestBipedWarmsBitIdentical(const std::string &examplesDir,
     CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0), noOverrides,
                                    &at3, &error));
     CHECK(!at3.HasChainResolvedInputs());
-    // The chains' inputs travel as head leaves, under their own keys.
+    // The chains' inputs travel as head leaves, under their own keys: the
+    // varying ones as samples, the rest in the shared constant table.
     size_t headSamples = 0;
     for (const RigExecSampledInput &sample : at3.values) {
         headSamples +=
             sample.path.GetName().rfind("frozenChain", 0) == 0 ? 1 : 0;
+    }
+    if (at3.headLeafConstants) {
+        for (const char varying : at3.headLeafConstants->varying) {
+            headSamples += varying ? 0 : 1;
+        }
     }
     CHECK(headSamples > 0);
     const RigExecRigPose warmed3 =
@@ -4039,11 +4194,72 @@ TestFrozenAssemblesFromLeaves(const std::string &examplesDir)
                         stagePath.c_str(), error.c_str());
             continue;
         }
+        {
+            // The keys the worker reads instead of building them: the
+            // sampler's own, one per revision and four per weight object.
+            const RigExecBakedProgramImpl &B =
+                evaluator.GetBakedProgram()->GetStepGraph();
+            CHECK(frozen->moverDefaultWeightKeys.size() ==
+                  B.revisionIndex.size());
+            for (size_t r = 0; r < B.revisionIndex.size() &&
+                               r < frozen->moverDefaultWeightKeys.size();
+                 ++r) {
+                const auto &[c, i] = B.revisionIndex[r];
+                CHECK(frozen->moverDefaultWeightKeys[r] ==
+                      B.chains[size_t(c)]
+                          .revisions[size_t(i)]
+                          .moverPath.AppendProperty(
+                              TfToken("inputs:defaultWeight")));
+            }
+            CHECK(frozen->weightArrayKeys.size() ==
+                  4 * B.weightObjects.size());
+            for (size_t w = 0; w < B.weightObjects.size() &&
+                               4 * w + 3 < frozen->weightArrayKeys.size();
+                 ++w) {
+                const SdfPath &object = B.weightObjects[w].path;
+                CHECK(frozen->weightArrayKeys[4 * w] ==
+                      object.AppendProperty(
+                          TfToken("frozenWeight:targetPoints")));
+                CHECK(frozen->weightArrayKeys[4 * w + 3] ==
+                      object.AppendProperty(
+                          TfToken("frozenWeight:combineTargetCount")));
+            }
+        }
         RigExecBackgroundScheduler scheduler;
         for (const double frame : {start, start + 4.0}) {
             RigExecFrameInputs inputs;
             CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame), {},
                                            &inputs, &error));
+            if (frame == start) {
+                // What one retained frame carries: the constant head leaves
+                // ride the shared table, not the frame. For comparison, the
+                // same vector with every constant added as a sample.
+                size_t constants = 0, varying = 0;
+                RigExecFrameInputs allSampled = inputs;
+                allSampled.headLeafConstants.reset();
+                if (const RigExecHeadLeafConstants *table =
+                        inputs.headLeafConstants.get()) {
+                    for (size_t j = 0; j < table->keys.size(); ++j) {
+                        if (table->varying[j]) {
+                            ++varying;
+                            continue;
+                        }
+                        ++constants;
+                        allSampled.Add(table->keys[j], table->values[j],
+                                       !table->values[j].IsEmpty());
+                    }
+                }
+                std::printf(
+                    "frozen leaves: %s samples %zu, head leaves %zu "
+                    "constant + %zu varying, retained sources %zu B (%zu B "
+                    "with the constants as samples)\n",
+                    stagePath.c_str(), inputs.values.size(), constants,
+                    varying,
+                    RigExecRetainedSourcesBytes(
+                        RigExecCaptureRetainedState(inputs, {}, 0, 0, 0)),
+                    RigExecRetainedSourcesBytes(
+                        RigExecCaptureRetainedState(allSampled, {}, 0, 0, 0)));
+            }
             const RigExecBakedProgramImpl &B =
                 evaluator.GetBakedProgram()->GetStepGraph();
             const auto carried = [&](const std::vector<VtValue> &values,
@@ -6061,6 +6277,8 @@ main(int argc, char **argv)
     TestBurstDigestOrderFallback();
     TestBurstBuildDeclinesUnplaceable();
     TestStillCurrentDetectsConstantEdit();
+    TestConstantHeadLeavesRideASharedTable();
+    TestOverridePathsTravelWithTheJob();
     TestPatchFrozenAvarConstants();
     if (argc > 1) {
         TestBipedWarmsBitIdentical(argv[1]);

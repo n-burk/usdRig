@@ -180,8 +180,9 @@ RigExecFrozenPurityAudit()
         {"baked head tier in a frozen job (frozenWorker.cpp _FrozenPrologue)",
          RigExecFrozenPurity::Pure,
          "runs from sampled leaves; no USD: the sampler reads every head "
-         "leaf on the UI thread under its Build-time synthetic key, the "
-         "worker writes them into its clone's leaves (whose attribute "
+         "leaf on the UI thread under its Build-time synthetic key (the "
+         "varying ones per frame, the rest into a shared constant table), "
+         "the worker writes them into its clone's leaves (whose attribute "
          "handles are dead and unread) and runs the same bodies serially, "
          "with no cone verifier and a disabled profiler; override slots "
          "are found by (prim, attribute), with no path built"},
@@ -254,14 +255,14 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::LiveOnly,
          "OpenExec against the live stage; cannot run concurrently with "
          "stage edits, which is why refusal rigs take the D7 memo path"},
-        {"wire-basis memo (moverGraph.cpp _CachedWireBasis, process-wide, "
-         "mutex-guarded)",
-         RigExecFrozenPurity::LiveOnly,
-         "thread-safe and answer-preserving (full-input compare on hit), "
-         "but a lock held across map insert; a baked or frozen Wire step "
-         "whose envelope is sparse with a zero default still reaches it "
-         "through RigExecRunRevisionKernel and takes the lock on a worker, "
-         "until the program resolves the basis in its prologue"},
+        {"wire-basis memo (moverGraph.h RigExecWireBasisCache, per owner)",
+         RigExecFrozenPurity::Pure,
+         "one per revision (GeomRevision::wireBasis) and one per dynamic "
+         "chain graph, each touched only by the step or task that runs it, "
+         "so no lock; answer-preserving (full-input compare on hit, a pure "
+         "rebuild on a miss); a frozen clone copies the revision's map, "
+         "whose entries are immutable and shared, and memoizes into its "
+         "own copy"},
         {"RigExecStaticInputCache / RigExecBlendSampleCache OBJECTS",
          RigExecFrozenPurity::LiveOnly,
          "single-threaded or notice-invalidated live state (THREAD rule); "
@@ -434,6 +435,8 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     snapshot->moverHasEnabled = base.moverHasEnabled;
     snapshot->moverHasDefaultWeight = base.moverHasDefaultWeight;
     snapshot->moverHasMethod = base.moverHasMethod;
+    snapshot->moverDefaultWeightKeys = base.moverDefaultWeightKeys;
+    snapshot->weightArrayKeys = base.weightArrayKeys;
     *out = std::move(snapshot);
     return true;
 }

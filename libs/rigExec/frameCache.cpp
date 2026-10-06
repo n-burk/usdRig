@@ -115,6 +115,18 @@ _FoldPointFrame(uint64_t hash, const RigExecPointFrame &frame)
     return _FoldScalar(hash, frame.flags);
 }
 
+// The constant head leaves: their table's own digest, which folds each
+// leaf as a sample (RigExecHeadLeafConstants). Null folds nothing.
+uint64_t
+_FoldHeadLeafConstants(uint64_t hash, const RigExecFrameInputs &inputs)
+{
+    if (!inputs.headLeafConstants) {
+        return hash;
+    }
+    hash = _FoldBytes(hash, "head", 5);
+    return _FoldU64(hash, inputs.headLeafConstants->digest);
+}
+
 // How one frame's stage seeds fold into the control digest: a tag, the six
 // counts, then every entry bitwise, in program order (no sort: the vectors
 // parallel the program tables positionally). The seeds are fresh stage
@@ -477,6 +489,7 @@ RigExecControlStateDigest(const RigExecFrameInputs &inputs,
     for (const auto &kv : ordered) {
         hash = _FoldU64(hash, RigExecSampleDigest(*kv.second));
     }
+    hash = _FoldHeadLeafConstants(hash, inputs);
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
 
     return _FoldOverrides(hash, overrides);
@@ -549,6 +562,7 @@ RigExecControlStateDigestWithBurstCache(
         }
         hash = _FoldU64(hash, level1);
     }
+    hash = _FoldHeadLeafConstants(hash, inputs);
     // The seeds fold fresh every frame, exactly as in the plain digest:
     // they are per-frame stage reads, so no static memo serves them.
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
@@ -598,6 +612,9 @@ RigExecControlStateDigestible(
         if (_ClassifyVtValue(sampled.value) == _ValueFold::Unhashable) {
             return false;
         }
+    }
+    if (inputs.headLeafConstants && !inputs.headLeafConstants->digestible) {
+        return false;
     }
     for (const RigExecValueOverride &o : overrides) {
         if (_ClassifyVtValue(o.value) == _ValueFold::Unhashable) {

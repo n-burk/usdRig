@@ -94,6 +94,28 @@ struct RigExecSampledInput {
     int burstSampleRoute = RigExecBurstRouteFresh;
 };
 
+/// The time-invariant half of a frozen job's head-leaf samples: every keyed
+/// head leaf (RigExecForEachHeadLeaf order) whose attribute holds no time
+/// samples and might not vary (RigExecBakedHeadLeafVaries), read on the UI
+/// thread and shared, immutable, by every vector sampled while the
+/// program's stamp, the evaluator's stage edit serial and the Default-ness
+/// of the time stand, and past a change of those that re-reads every entry
+/// bitwise the same. A leaf that varies is sampled per frame into `values`
+/// instead, and holds an empty value and `varying` here. Retained frames
+/// share it, so the frame cache counts none of it per frame.
+struct RigExecHeadLeafConstants {
+    /// Per keyed head leaf: its frozen key, whether it varies, and (when it
+    /// does not) its value, empty where the attribute holds none.
+    std::vector<SdfPath> keys;
+    std::vector<char> varying;
+    std::vector<VtValue> values;
+    /// The constant leaves folded as samples (RigExecSampleDigest per leaf,
+    /// in key order), and whether each value is hashable; every control
+    /// digest folds `digest` in place of the leaves.
+    uint64_t digest = 0;
+    bool digestible = true;
+};
+
 /// One frame's sampled input vector, built on the UI thread at enqueue time.
 /// Plain values: safe to hand across threads and to hold past the stage edit
 /// that cancels the job it was sampled for.
@@ -155,6 +177,21 @@ struct RigExecFrameInputs {
     /// path), which is what the digest hashes; this list is the worker's
     /// placement input, excluded from the digest as redundant.
     std::vector<RigExecValueOverride> overrides;
+    /// Parallel to `overrides`: each attribute override's property path
+    /// (prim.attribute), empty for a computation override. Built on the
+    /// UI thread by SetOverrides, so the worker places overrides without
+    /// building a path; a vector whose two lists disagree in length
+    /// declines.
+    std::vector<SdfPath> overridePaths;
+    /// The head leaves that hold no time samples, read once per program
+    /// state and shared by every vector sampled under it; `values` carries
+    /// only the head leaves that vary (RigExecHeadLeafConstants). Null for a
+    /// program without property chains. Folded by every control digest
+    /// through its own precomputed digest.
+    std::shared_ptr<const RigExecHeadLeafConstants> headLeafConstants;
+
+    /// Sets `overrides` and builds `overridePaths` from them.
+    void SetOverrides(const std::vector<RigExecValueOverride> &list);
 
     /// Appends \p value sampled at \p path. \p hasValue false records an
     /// explicitly valueless source. \p viaChain marks a stale sample (see
@@ -166,11 +203,13 @@ struct RigExecFrameInputs {
     /// No warming job may be built from a vector answering true.
     bool HasChainResolvedInputs() const;
 
-    /// The first value sampled at \p path, or null when none was. Linear:
-    /// the vector is built once and read by one job.
+    /// The first value sampled at \p path, or null when none was; a
+    /// constant head leaf answers from `headLeafConstants`. Linear: the
+    /// vector is built once and read by one job.
     const VtValue *Find(const SdfPath &path) const;
 
-    /// Whether any value was sampled at \p path, valueless or not.
+    /// Whether any value was sampled at \p path, valueless or not,
+    /// `headLeafConstants` included.
     bool Contains(const SdfPath &path) const;
 
     void Clear();
@@ -242,6 +281,14 @@ struct RigExecFrozenProgram {
     std::vector<char> moverHasEnabled;
     std::vector<char> moverHasDefaultWeight;
     std::vector<char> moverHasMethod;
+    /// Per chain revision (revisionIndex order), the sample key of the
+    /// mover's inputs:defaultWeight, built here so the worker builds no
+    /// path.
+    std::vector<SdfPath> moverDefaultWeightKeys;
+    /// Per weight object, four synthetic sample keys in
+    /// frozenDetail::_FrozenWeightArrayRole order, built here with the
+    /// sampler's own key function.
+    std::vector<SdfPath> weightArrayKeys;
 };
 
 /// Freezes \p evaluator's current baked program into an epoch-pinned
@@ -263,14 +310,15 @@ struct RigExecFrozenProgram {
 /// dragged or chain-written ladder channel): the frozen prologue runs the
 /// rest and ladder ops from the job's sampled ladder leaves.
 ///
-/// Property chains are supported: the sampler samples every head leaf the
+/// Property chains are supported: the sampler carries every head leaf the
 /// chains and the reader walks read (RigExecForEachHeadLeaf, under its
-/// synthetic key), and the frozen prologue runs the program's head tier
-/// from those samples and resolves every read a chain or record can answer
-/// through its reader walk. A chain binding a weight object refuses,
-/// because its envelope resolves through the evaluator's live oracle, and
-/// so does a skin whose packet reads a chain or record, because the packet
-/// is assembled on the UI thread where no head tier runs.
+/// synthetic key; the varying ones as samples, the rest in the shared
+/// RigExecHeadLeafConstants), and the frozen prologue runs the program's
+/// head tier from those values and resolves every read a chain or record
+/// can answer through its reader walk. A chain binding a weight object
+/// refuses, because its envelope resolves through the evaluator's live
+/// oracle, and so does a skin whose packet reads a chain or record, because
+/// the packet is assembled on the UI thread where no head tier runs.
 ///
 /// A snapshot pins the program OBJECT it was cloned from plus the epoch it
 /// was cloned in. Re-freeze after any change that rebuilds the program; a
@@ -628,8 +676,9 @@ bool RigExecChainSampleBindingsStillCurrent(
 ///
 /// PROPERTY CHAINS. A read a property chain result or a phased record can
 /// answer is not sampled as a value: every head leaf the property ops and
-/// the reader walks read is sampled at the job's time under its synthetic
-/// key, and the frozen prologue runs the head tier from those samples,
+/// the reader walks read travels under its synthetic key -- sampled at the
+/// job's time where it varies, from RigExecFrameInputs::headLeafConstants
+/// where it does not -- and the frozen prologue runs the head tier from them,
 /// publishes its results and lines, and resolves each such read from its
 /// reader walk, exactly as the live prologue does. A rig whose chain binds
 /// a weight object is refused at freeze.

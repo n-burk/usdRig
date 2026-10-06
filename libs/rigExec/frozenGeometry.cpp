@@ -15,7 +15,6 @@
 // by Build (RigExecFrozenGeometryTouchTokens) and never on a worker.
 TF_DEFINE_PRIVATE_TOKENS(
     _frozenBodyTokens,
-    ((defaultWeight, "inputs:defaultWeight"))
     ((moverFailed, "moverFailed"))
 );
 
@@ -66,17 +65,25 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
     const auto rd = [&B](const auto &input) {
         return RigExecBakedLeafRead(B, input);
     };
-    const auto findSample = [&](const SdfPath &path) {
-        const auto found = index.find(path);
+    // The freeze built this object's keys; the worker builds none.
+    if (!worker->snapshot) {
+        return false;
+    }
+    const std::vector<SdfPath> &arrayKeys = worker->snapshot->weightArrayKeys;
+    const size_t keyBase = size_t(id) * _FrozenWeightArrayRoleCount;
+    if (keyBase + _FrozenWeightArrayRoleCount > arrayKeys.size()) {
+        return false;
+    }
+    const auto findSample = [&](_FrozenWeightArrayRole role) {
+        const auto found = index.find(arrayKeys[keyBase + role]);
         if (found == index.end()) {
             return static_cast<const RigExecSampledInput *>(nullptr);
         }
         return &inputs.values[found->second];
     };
-    const auto samplePoints = [&](const TfToken &role,
+    const auto samplePoints = [&](_FrozenWeightArrayRole role,
                                   std::vector<GfVec3f> *out) {
-        if (const RigExecSampledInput *sample =
-                findSample(_FrozenWeightArrayKey(object.path, role))) {
+        if (const RigExecSampledInput *sample = findSample(role)) {
             if (sample->hasValue &&
                 sample->value.IsHolding<VtVec3fArray>()) {
                 const VtVec3fArray &held =
@@ -117,9 +124,8 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
             packetInputs.push_back(B.weightPackets[size_t(input)]);
         }
         size_t targetCount = 0;
-        if (const RigExecSampledInput *sample = findSample(
-                _FrozenWeightArrayKey(
-                    object.path, _frozenWeightTokens->combineTargetCountKey))) {
+        if (const RigExecSampledInput *sample =
+                findSample(_FrozenWeightCombineTargetCount)) {
             if (sample->hasValue && sample->value.IsHolding<int>()) {
                 targetCount =
                     size_t(sample->value.UncheckedGet<int>());
@@ -167,12 +173,12 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
             }
         }
         if (RigExecVolumeWeightCanBuild(object.type, packetInputs)) {
-            samplePoints(_frozenWeightTokens->targetPointsKey,
+            samplePoints(_FrozenWeightTargetPoints,
                          &packetInputs.targetPoints);
-            samplePoints(_frozenWeightTokens->samplePointsKey,
+            samplePoints(_FrozenWeightSamplePoints,
                          &packetInputs.samplePoints);
             if (object.type == _frozenWeightTokens->curveWeight) {
-                samplePoints(_frozenWeightTokens->curvePointsKey,
+                samplePoints(_FrozenWeightCurvePoints,
                              &packetInputs.curvePoints);
             }
             B.weightPackets[size_t(id)] =
@@ -222,9 +228,16 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
         revision.defaultWeight =
             revision.leaves.Value<float>(weightLeaf, 1.0f);
     } else {
-        const SdfPath key = revision.moverPath.AppendProperty(
-            _frozenBodyTokens->defaultWeight);
-        const auto found = index.find(key);
+        // The freeze built the key (moverDefaultWeightKeys).
+        if (!worker->snapshot) {
+            return false;
+        }
+        const std::vector<SdfPath> &keys =
+            worker->snapshot->moverDefaultWeightKeys;
+        if (size_t(step->object) >= keys.size()) {
+            return false;
+        }
+        const auto found = index.find(keys[size_t(step->object)]);
         if (found != index.end()) {
             const RigExecSampledInput &sample =
                 inputs.values[found->second];
@@ -395,7 +408,7 @@ _FrozenDerived(_FrozenWorker *worker, RigExecBakedStep *step)
         const bool applied =
             status.AllowsApply() &&
             RigExecRunRevisionKernel(revision.op, parameters, &values,
-                                     B.useSimd);
+                                     B.useSimd, &revision.wireBasis);
         revision.resultStatus = status.state;
         if (!applied) {
             values.assign(derived.lastBase.begin(), derived.lastBase.end());

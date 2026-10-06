@@ -104,6 +104,8 @@ _ArrayBytes(const VtValue &value)
 size_t
 RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state)
 {
+    // The constant head leaves are a table every frame sampled under one
+    // program state shares, so no frame counts them.
     size_t total = sizeof(RigExecRetainedFrameState);
     for (const RigExecSampledInput &sampled : state.inputs.values) {
         total += sampled.path.GetString().size() + sizeof(bool);
@@ -159,6 +161,38 @@ RigExecChangedControls(const RigExecRetainedFrameState &cached,
     for (const auto &kv : after) {
         if (!before.count(kv.first)) {
             changed.push_back(RigExecControlIdForPath(kv.first));
+        }
+    }
+    // The constant head leaves, by key: one shared table is no change.
+    if (cached.inputs.headLeafConstants != requested.headLeafConstants) {
+        const auto constantsOf = [](const RigExecFrameInputs &inputs) {
+            std::map<SdfPath, const VtValue *> out;
+            if (const RigExecHeadLeafConstants *table =
+                    inputs.headLeafConstants.get()) {
+                for (size_t j = 0; j < table->keys.size(); ++j) {
+                    if (!table->varying[j]) {
+                        out.emplace(table->keys[j], &table->values[j]);
+                    }
+                }
+            }
+            return out;
+        };
+        const std::map<SdfPath, const VtValue *> was =
+            constantsOf(cached.inputs);
+        const std::map<SdfPath, const VtValue *> is = constantsOf(requested);
+        for (const auto &kv : was) {
+            const auto found = is.find(kv.first);
+            if (found == is.end() ||
+                !RigExecSameSourceValue(*kv.second, !kv.second->IsEmpty(),
+                                        *found->second,
+                                        !found->second->IsEmpty())) {
+                changed.push_back(RigExecControlIdForPath(kv.first));
+            }
+        }
+        for (const auto &kv : is) {
+            if (!was.count(kv.first)) {
+                changed.push_back(RigExecControlIdForPath(kv.first));
+            }
         }
     }
 

@@ -2447,7 +2447,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             const bool applied =
                 status.AllowsApply() &&
                 RigExecRunRevisionKernel(revision.op, parameters, &values,
-                                         B.useSimd);
+                                         B.useSimd, &revision.wireBasis);
             revision.resultStatus = status.state;
             if (!applied) {
                 values.assign(derived.lastBase.begin(),
@@ -2770,7 +2770,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 // operation cannot mean one thing here and another there.
                 chunk.ok = RigExecRunRevisionKernel(
                     revision.op, revision.parameters, &revision.output,
-                    B.useSimd);
+                    B.useSimd, &revision.wireBasis);
                 return;
             }
             if (!revision.parameters.valid ||

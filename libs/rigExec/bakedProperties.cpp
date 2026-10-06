@@ -1289,6 +1289,12 @@ RigExecBakedReadHeadLeaf(const RigExecBakedHeadLeaf &leaf, UsdTimeCode time)
 }
 
 bool
+RigExecBakedHeadLeafVaries(const RigExecBakedHeadLeaf &leaf)
+{
+    return Varies(leaf.attribute);
+}
+
+bool
 RigExecBakedHeadLeafHolds(const RigExecBakedHeadLeaf &leaf,
                           const VtValue &value)
 {
