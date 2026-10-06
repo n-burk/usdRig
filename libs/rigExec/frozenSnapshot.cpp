@@ -57,8 +57,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.ladders = src.ladders;
     D.ladderVarying = src.ladderVarying;
     D.ladderOverrides = src.ladderOverrides;
-    D.ladderDisturbed = src.ladderDisturbed;
-    D.ladderMovedSlots = src.ladderMovedSlots;
     D.restChainVaries = src.restChainVaries;
     D.posedAuthored = src.posedAuthored;
     D.posedAuthoredM = src.posedAuthoredM;
@@ -153,7 +151,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.closedSteps = src.closedSteps;
     D.closed = src.closed;
     D.lastAvars = src.lastAvars;
-    D.lastPropertyResults = src.lastPropertyResults;
     D.lastOverridden = src.lastOverridden;
     D.lastHaveBase = src.lastHaveBase;
     D.lastTime = src.lastTime;

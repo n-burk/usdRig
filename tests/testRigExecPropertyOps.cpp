@@ -1864,10 +1864,8 @@ TestAChainDragIsNoLongerAWholeRigCost(const std::string &examples)
     if (target.IsEmpty()) {
         return;
     }
-    size_t resolvedReaders = 0;
-    for (const RigExecBakedStep &step : B.steps) {
-        resolvedReaders += step.resolvedInputReads ? 1 : 0;
-    }
+    const auto resolved = RigExecBakedResolvedReaders(B);
+    const size_t resolvedReaders = std::count(resolved.begin(), resolved.end(), char(1));
     const std::vector<RigExecValueOverride> drag =
         DragBy(stage, target, t, 0.25f);
     CHECK(!drag.empty());
@@ -1887,7 +1885,7 @@ TestAChainDragIsNoLongerAWholeRigCost(const std::string &examples)
         const std::set<size_t> ran = StepsRan(B);
         for (const int index : B.cones.varyingSteps) {
             const RigExecBakedStep &step = B.steps[size_t(index)];
-            if (step.resolvedInputReads && !step.isSource &&
+            if (resolved[size_t(index)] && !step.isSource &&
                 !step.externalReads && !ran.count(size_t(index))) {
                 ++skippedChainReaders;
             }
@@ -1906,13 +1904,45 @@ TestAChainDragIsNoLongerAWholeRigCost(const std::string &examples)
     SameReadings(forced, cone, "chain drag: cone against forced");
 }
 
+// Exact build-only binding associations; geometry path walks alone must
+// not broaden the historical time-seed classification.
+void TestResolvedReadersAreBuildOnlyBindings()
+{
+    auto stage = UsdStage::CreateInMemory();
+    const auto prim = stage->DefinePrim(SdfPath("/Inputs"));
+    const auto scalar = prim.CreateAttribute(TfToken("value"),SdfValueTypeNames->Double);
+    const auto points = prim.CreateAttribute(TfToken("points"),SdfValueTypeNames->Point3fArray);
+    RigExecBakedProgramImpl B;
+    B.solvers.resize(2);
+    B.solvers[0].upperOffset.resolvedAttr = scalar;
+    B.solvers[1].upperOffset.varying = true;
+    B.weightObjects.resize(1);
+    B.weightObjects[0].samplePoints.push_back(points);
+    const auto step = [&](RigExecBakedStepKind kind,int object) {
+        RigExecBakedStep s; s.kind=kind; s.object=object; s.cluster=0;
+        B.steps.push_back(std::move(s));
+    };
+    step(RigExecBakedStepKind::Solve,0);
+    step(RigExecBakedStepKind::RevisionStatic,-1);
+    B.steps.back().readerWalks={0};
+    step(RigExecBakedStepKind::WeightPacket,0);
+    step(RigExecBakedStepKind::Solve,1);
+    B.steps.back().varyingInputs=true;
+    CHECK((RigExecBakedResolvedReaders(B)==std::vector<char>{1,0,1,0}));
+    B.steps[0].isHead=true;
+    CHECK((RigExecBakedResolvedReaders(B)==std::vector<char>{0,0,1,0}));
+    // Classification is read-only: it does not mutate declarations.
+    CHECK(!B.steps[0].varyingInputs && B.steps[3].varyingInputs);
+    CHECK((B.steps[1].readerWalks==std::vector<int>{0}));
+}
+
 // Pin semantic identities and region-relative indices across the promotion,
 // including all source/always members. Expected values come from the native
 // graph before promotion, with only numeric interpolator/Derived removals.
 void
 TestTheSourceAndAlwaysSetsSurviveThePromotion(const std::string &examples)
 {
-    size_t checked=0, totalRegion=0, totalSources=0, totalAlways=0;
+    size_t checked=0, totalRegion=0, totalSources=0, totalAlways=0, totalVarying=0;
     constexpr uint64_t initial=14695981039346656037ull;
     for (const auto &expected : rigExecTest::rigExecPromotionCases) {
         auto stage=UsdStage::Open(examples+"/../"+expected.fixture);
@@ -1928,7 +1958,7 @@ TestTheSourceAndAlwaysSetsSurviveThePromotion(const std::string &examples)
         while (H<B.steps.size() && B.steps[H].isHead) ++H;
         size_t sources=0, always=0;
         uint64_t headIdentity=initial, regionIdentity=initial,
-            sourceIdentity=initial, alwaysIdentity=initial;
+            sourceIdentity=initial, alwaysIdentity=initial, varyingIdentity=initial;
         const auto hash=[](uint64_t *value,size_t index,const RigExecBakedStep &step) {
             const std::string text=std::to_string(index)+"|"+
                 RigExecBakedStepKindName(step.kind)+"|"+std::to_string(step.object)+
@@ -1948,6 +1978,17 @@ TestTheSourceAndAlwaysSetsSurviveThePromotion(const std::string &examples)
                 if (step.externalReads) { ++always; hash(&alwaysIdentity,i-H,step); }
             }
         }
+        std::set<int> varyingSeen;
+        for (const int index : B.cones.varyingSteps) {
+            CHECK(index >= 0 && size_t(index) < B.steps.size());
+            if (index < 0 || size_t(index) >= B.steps.size()) continue;
+            CHECK(size_t(index) >= H && !B.steps[size_t(index)].isHead);
+            CHECK(varyingSeen.insert(index).second);
+            if (size_t(index) >= H) hash(&varyingIdentity,size_t(index)-H,B.steps[size_t(index)]);
+        }
+        CHECK(B.cones.varyingSteps.size()==expected.varying);
+        CHECK(varyingIdentity==expected.varyingIdentity);
+        totalVarying+=B.cones.varyingSteps.size();
         const bool same=H==expected.heads && B.steps.size()-H==expected.region &&
             sources==expected.sources && always==expected.always &&
             headIdentity==expected.headIdentity && regionIdentity==expected.regionIdentity &&
@@ -1961,6 +2002,7 @@ TestTheSourceAndAlwaysSetsSurviveThePromotion(const std::string &examples)
     }
     CHECK(checked==47);
     CHECK(totalRegion==7154 && totalSources==345 && totalAlways==375);
+    CHECK(totalVarying==140);
 }
 
 }  // namespace
@@ -1988,6 +2030,7 @@ main(int argc, char **argv)
     TestARecordOfAnotherTypeShadowsNothing();
     TestReaderWalksDeclareTheirVersions(examples);
     TestAChainDragIsNoLongerAWholeRigCost(examples);
+    TestResolvedReadersAreBuildOnlyBindings();
     TestTheSourceAndAlwaysSetsSurviveThePromotion(examples);
     std::printf("testRigExecPropertyOps: %d failure(s)\n", failures);
     return failures ? 1 : 0;

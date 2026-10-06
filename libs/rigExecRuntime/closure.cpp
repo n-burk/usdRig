@@ -431,8 +431,6 @@ RrComputeClosure(RrProgram *program, bool force)
     // What the next run compares against.
     store.lastAvars = store.avars;
     store.lastXformBase = store.xformBase;
-    store.lastPropertyValues = store.propertyValues;
-    store.lastPropertyPublished = store.propertyPublished;
     // Consumed by this closure whichever branch took it: a first or a
     // forced run re-runs every reader the flags could name.
     if (store.anyChangedSinceRun) {

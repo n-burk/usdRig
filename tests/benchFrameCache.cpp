@@ -352,17 +352,9 @@ MeasureArenaBytes(const RigExecBakedProgramImpl &B, const char *rig)
     for (const auto &[path, value] : B.propertyResults) {
         (void)path;
         ++propertyEntries;
-        propertyBytes +=
-            VtValueBytes(value, &unknownTypes, &unknownNames);
+        propertyBytes += VtValueBytes(value, &unknownTypes, &unknownNames);
     }
-    for (const auto &[path, value] : B.lastPropertyResults) {
-        (void)path;
-        ++propertyEntries;
-        propertyBytes +=
-            VtValueBytes(value, &unknownTypes, &unknownNames);
-    }
-    propertyBytes +=
-        propertyEntries * (sizeof(SdfPath) + kMapNodeOverhead);
+    propertyBytes += propertyEntries * (sizeof(SdfPath) + kMapNodeOverhead);
     line("property results", propertyBytes);
 
     size_t aggregateBytes = 0;

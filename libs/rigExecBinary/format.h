@@ -484,10 +484,9 @@ inline constexpr uint8_t RigExecWireConstraintRadialBlend =
     uint8_t(fb::ConstraintFlags::RadialBlend);
 
 /// The format version this code reads and writes; every change to
-/// rigexec.fbs bumps it. Open refuses any other value: the previous
-/// version with a re-export message naming what it lacks, every other one
-/// with a rebake message.
-inline constexpr uint32_t RigExecFormatVersion = 9;
+/// rigexec.fbs bumps it. Open refuses all older versions with an S3
+/// re-export message; unknown future versions receive a rebake message.
+inline constexpr uint32_t RigExecFormatVersion = 10;
 
 /// Whether \p tag is one of the array tags (IntArray and after).
 inline constexpr bool

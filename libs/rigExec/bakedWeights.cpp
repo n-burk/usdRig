@@ -419,31 +419,31 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
 void
 RigExecBakedNoteWeightInputs(
     const RigExecBakedProgramImpl::WeightObject &weight,
-    RigExecBakedStep *step)
+    RigExecBakedDependencySink *sink)
 {
     // This object's OWN inputs only. Every object it composes has a step of
     // its own, and that step declares its own inputs; a packet moves when
     // any of them does, and the cone carries it forward along the
     // WeightPacket edges between them.
-    RigExecBakedNoteInput(weight.defaultWeight, step);
-    RigExecBakedNoteInput(weight.driver, step);
-    RigExecBakedNoteInput(weight.scale, step);
-    RigExecBakedNoteInput(weight.bias, step);
-    RigExecBakedNoteInput(weight.strength, step);
-    RigExecBakedNoteInput(weight.invert, step);
-    RigExecBakedNoteInput(weight.falloffMin, step);
-    RigExecBakedNoteInput(weight.falloffMax, step);
-    RigExecBakedNoteInput(weight.scaleXPos, step);
-    RigExecBakedNoteInput(weight.scaleYPos, step);
-    RigExecBakedNoteInput(weight.scaleZPos, step);
-    RigExecBakedNoteInput(weight.scaleXNeg, step);
-    RigExecBakedNoteInput(weight.scaleYNeg, step);
-    RigExecBakedNoteInput(weight.scaleZNeg, step);
-    RigExecBakedNoteInput(weight.scaleX, step);
-    RigExecBakedNoteInput(weight.scaleY, step);
-    RigExecBakedNoteInput(weight.scaleZ, step);
-    RigExecBakedNoteInput(weight.extentU, step);
-    RigExecBakedNoteInput(weight.extentV, step);
+    RigExecBakedNoteInput(weight.defaultWeight, sink);
+    RigExecBakedNoteInput(weight.driver, sink);
+    RigExecBakedNoteInput(weight.scale, sink);
+    RigExecBakedNoteInput(weight.bias, sink);
+    RigExecBakedNoteInput(weight.strength, sink);
+    RigExecBakedNoteInput(weight.invert, sink);
+    RigExecBakedNoteInput(weight.falloffMin, sink);
+    RigExecBakedNoteInput(weight.falloffMax, sink);
+    RigExecBakedNoteInput(weight.scaleXPos, sink);
+    RigExecBakedNoteInput(weight.scaleYPos, sink);
+    RigExecBakedNoteInput(weight.scaleZPos, sink);
+    RigExecBakedNoteInput(weight.scaleXNeg, sink);
+    RigExecBakedNoteInput(weight.scaleYNeg, sink);
+    RigExecBakedNoteInput(weight.scaleZNeg, sink);
+    RigExecBakedNoteInput(weight.scaleX, sink);
+    RigExecBakedNoteInput(weight.scaleY, sink);
+    RigExecBakedNoteInput(weight.scaleZ, sink);
+    RigExecBakedNoteInput(weight.extentU, sink);
+    RigExecBakedNoteInput(weight.extentV, sink);
     // The point arrays a volume measures, which no RigExecBakedInput covers:
     // they are read through the generation's resolved inputs every frame, so
     // a property chain or a drag on the weighted mesh reaches this step the
@@ -452,10 +452,10 @@ RigExecBakedNoteWeightInputs(
              {&weight.targetPoints, &weight.samplePoints, &weight.curvePoints,
               &weight.combineTargetPoints}) {
         if (!points->empty()) {
-            step->resolvedInputReads = true;
+            sink->resolvedReads = true;
             for (const UsdAttribute &a : *points) {
-                step->varyingInputs =
-                    step->varyingInputs || a.ValueMightBeTimeVarying();
+                sink->step->varyingInputs =
+                    sink->step->varyingInputs || a.ValueMightBeTimeVarying();
             }
         }
     }

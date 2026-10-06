@@ -564,7 +564,6 @@ _FileFill::_Steps(std::vector<fb::RigExecWireStep> *steps)
             out.shadowedReads.emplace_back(int32_t(version), int32_t(record));
         out.externalReads = step.externalReads;
         out.varyingInputs = step.varyingInputs;
-        out.resolvedInputReads = step.resolvedInputReads;
         out.overrideInputs = _ToI32s(step.overrideInputs);
         out.cluster = int32_t(step.cluster);
         out.level = int32_t(step.level);

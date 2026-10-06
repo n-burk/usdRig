@@ -193,7 +193,7 @@ LadderDrag(const RigExecBakedProgramImpl &B, bool rest, double delta,
     return true;
 }
 
-// One rig's tables after every run, against the reference loop.
+// One rig's memo tables against an independently compiled fresh original epoch.
 size_t
 CheckTablesOfRig(const std::string &name, const UsdStageRefPtr &stage,
                  const SdfPath &rig)
@@ -207,20 +207,29 @@ CheckTablesOfRig(const std::string &name, const UsdStageRefPtr &stage,
     const double start = StartOf(stage);
     const double frames[] = {start, start + 2.0, start + 6.0};
     size_t compared = 0;
+    double currentTime = start;
+    std::vector<RigExecValueOverride> currentDrags;
     const auto check = [&](const std::string &when) {
         const RigExecBakedProgram *program = evaluator.GetBakedProgram();
         CHECK(program);
         if (!program) {
             return;
         }
-        const Tables want =
-            RigExecBakedProgramTesting::ComposeLadderReference(*program);
+        RigExecRigEvaluator fresh(stage, rig);
+        CHECK(fresh.Compile());
+        fresh.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        fresh.SetInteractiveOverrides(currentDrags);
+        CHECK(fresh.Evaluate(UsdTimeCode(currentTime)).valid);
+        const auto *freshProgram = fresh.GetBakedProgram();
+        CHECK(freshProgram);
+        if (!freshProgram) return;
+        const Tables want = RigExecBakedProgramTesting::LadderTablesOf(*freshProgram);
         const Tables got = RigExecBakedProgramTesting::LadderTablesOf(*program);
         std::string table;
         const int slot = FirstDifference(want, got, &table);
         if (slot >= 0) {
             ++failures;
-            std::printf("FAIL %s %s: %s differs from the reference loop at "
+            std::printf("FAIL %s %s: %s differs from the fresh epoch at "
                         "%s\n",
                         name.c_str(), when.c_str(), table.c_str(),
                         program->GetStepGraph().paths[size_t(slot)].GetText());
@@ -236,9 +245,11 @@ CheckTablesOfRig(const std::string &name, const UsdStageRefPtr &stage,
                                   &drag)) {
                 continue;
             }
-            evaluator.SetInteractiveOverrides({drag});
+            currentDrags={drag};
+            evaluator.SetInteractiveOverrides(currentDrags);
         }
         for (const double frame : frames) {
+            currentTime=frame;
             CHECK(evaluator.Evaluate(UsdTimeCode(frame)).valid);
             check((state == 0 ? "no override" : state == 1 ? "rest drag"
                                                            : "default drag") +
@@ -246,17 +257,19 @@ CheckTablesOfRig(const std::string &name, const UsdStageRefPtr &stage,
         }
     }
     evaluator.ClearInteractiveOverrides();
+    currentDrags.clear();
+    currentTime=frames[0];
     CHECK(evaluator.Evaluate(UsdTimeCode(frames[0])).valid);
     check("released");
     return compared;
 }
 
-// The ten tables after the head tier equal, bit for bit, what the single
-// loop composes from the same leaves, on every example and fixture rig
+// The ten memoized tables equal the independently compiled fresh epoch
+// bit for bit, on every example and fixture rig
 // that bakes, the biped, and the tail with an animated rest, a connected
 // rest and a property chain on its rest space.
 void
-TestTheRestTablesAreTheLadderLoops(const std::string &examples)
+TestTheRestTablesMatchFreshEpochs(const std::string &examples)
 {
     std::vector<std::string> files;
     for (const std::string &dir :
@@ -1092,7 +1105,7 @@ main(int argc, char **argv)
     TestTheValidatorRefusesAMisorderedRest(examples);
     TestTheValidatorRefusesARestBeforeAProperty(examples);
     TestEveryRestReaderDeclaresIt(examples);
-    TestTheRestTablesAreTheLadderLoops(examples);
+    TestTheRestTablesMatchFreshEpochs(examples);
     std::printf("testRigExecRestOps: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

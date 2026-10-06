@@ -947,7 +947,6 @@ _BinaryCompareSteps(const rigExec::RigExecBakedProgramImpl &program,
         }
         CHECK(live.externalReads == wire.externalReads);
         CHECK(live.varyingInputs == wire.varyingInputs);
-        CHECK(live.resolvedInputReads == wire.resolvedInputReads);
         _BinaryCheckEqual(live.overrideInputs, wire.overrideInputs);
         CHECK(int64_t(live.cluster) == int64_t(wire.cluster));
         CHECK(int64_t(live.level) == int64_t(wire.level));

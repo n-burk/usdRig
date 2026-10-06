@@ -185,9 +185,9 @@ struct RrStore {
     std::map<uint32_t, RrPropertyValue> propertyResults;
     // The same results by publish entry (one per attribute a chain or a
     // phased consumer publishes at), with whether this run published it;
-    // an unpublished entry holds a zero value. The closure compares them
-    // with the last run's.
-    std::vector<RrPropertyValue> propertyValues, lastPropertyValues;
+    // an unpublished entry holds a zero value. These are current
+    // publication values, separate from indexed version change tracking.
+    std::vector<RrPropertyValue> propertyValues;
     std::vector<RrPropertyValue> propertyVersions;
     std::vector<char> propertyVersionValid, propertyVersionChanged;
     std::vector<char> propertyChainValid, propertyRecordStoodAside;
@@ -197,8 +197,7 @@ struct RrStore {
     std::vector<char> restChanged, ladderChanged, topologyChanged;
     std::vector<std::vector<std::string>> headLines;
     std::vector<std::string> headMemoKeys;
-    std::vector<std::vector<uint8_t>> headMemoPresence, headMemoAuthored;
-    std::vector<char> propertyPublished, lastPropertyPublished;
+    std::vector<char> propertyPublished;
     std::vector<char> chainHaveBase, chainBaseDirty, lastHaveBase;
     std::vector<char> derivedHaveBase;
     std::vector<RrPointFrame> nativeFrames;

@@ -413,7 +413,8 @@ table Step {
   shadowed_reads: [IntPair];
   external_reads: bool;
   varying_inputs: bool;
-  resolved_input_reads: bool;
+  // Retired classification field; keep its wire ID reserved.
+  resolved_input_reads: bool (deprecated);
   /// Override numbers.
   override_inputs: [int];
   cluster: int = -1;

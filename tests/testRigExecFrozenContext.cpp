@@ -6238,7 +6238,7 @@ TestARecomposedSpaceRestFreezes(const std::string &examplesDir)
     CheckRecomposingLadderFreezes(c);
 
     // Unkeyed, the ladder recomposes only under the drag, so the Solve
-    // refreshes on the drag and once after its release (ladderDisturbed),
+    // refreshes on the drag and once after its release from changed rest slots,
     // including in a job frozen while the drag stood.
     _RecomposingLadderCase still = c;
     still.label = "a static space rest under a drag";

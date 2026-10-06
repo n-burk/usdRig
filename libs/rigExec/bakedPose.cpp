@@ -2438,79 +2438,79 @@ namespace {
 /// "what can move this" is a step the cone cannot dirty.
 template <class T>
 void
-NoteInput(const RigExecBakedInput<T> &input, RigExecBakedStep *step)
+NoteInput(const RigExecBakedInput<T> &input, RigExecBakedDependencySink *sink)
 {
-    RigExecBakedNoteInput(input, step);
+    RigExecBakedNoteInput(input, sink);
 }
 
 /// Every per-frame input one solver's Solve step reads.
 void
 NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
-                 RigExecBakedStep *step)
+                 RigExecBakedDependencySink *sink)
 {
     // The rest description is one of them. A rest that varies with time
     // moves it whenever the time moves, and a drag on a rest channel of the
     // same chain moves it where no time did -- the two halves the schedule
     // asks about separately.
-    step->varyingInputs = step->varyingInputs || solver.restsVary;
-    step->overrideInputs.insert(step->overrideInputs.end(),
+    sink->step->varyingInputs = sink->step->varyingInputs || solver.restsVary;
+    sink->step->overrideInputs.insert(sink->step->overrideInputs.end(),
                                 solver.restOverrides.begin(),
                                 solver.restOverrides.end());
-    NoteInput(solver.bend, step);
-    NoteInput(solver.upperOffset, step);
-    NoteInput(solver.lowerOffset, step);
-    NoteInput(solver.stretch, step);
-    NoteInput(solver.softness, step);
-    NoteInput(solver.pin, step);
-    NoteInput(solver.upperScale, step);
-    NoteInput(solver.lowerScale, step);
-    NoteInput(solver.softDistance, step);
-    NoteInput(solver.limbTwist, step);
-    NoteInput(solver.blendWeight, step);
-    NoteInput(solver.preserveVolume, step);
-    NoteInput(solver.midFollowWeight, step);
-    NoteInput(solver.roll, step);
-    NoteInput(solver.twist, step);
-    NoteInput(solver.minLengthRatio, step);
-    NoteInput(solver.twistTurns, step);
-    NoteInput(solver.ribbonSampleCount, step);
-    NoteInput(solver.ikSpace, step);
+    NoteInput(solver.bend, sink);
+    NoteInput(solver.upperOffset, sink);
+    NoteInput(solver.lowerOffset, sink);
+    NoteInput(solver.stretch, sink);
+    NoteInput(solver.softness, sink);
+    NoteInput(solver.pin, sink);
+    NoteInput(solver.upperScale, sink);
+    NoteInput(solver.lowerScale, sink);
+    NoteInput(solver.softDistance, sink);
+    NoteInput(solver.limbTwist, sink);
+    NoteInput(solver.blendWeight, sink);
+    NoteInput(solver.preserveVolume, sink);
+    NoteInput(solver.midFollowWeight, sink);
+    NoteInput(solver.roll, sink);
+    NoteInput(solver.twist, sink);
+    NoteInput(solver.minLengthRatio, sink);
+    NoteInput(solver.twistTurns, sink);
+    NoteInput(solver.ribbonSampleCount, sink);
+    NoteInput(solver.ikSpace, sink);
     // The spline parameters the bake could not fold, which the solve re-reads
     // as a group rather than one input at a time.
-    step->varyingInputs = step->varyingInputs || solver.splineParamsVary;
+    sink->step->varyingInputs = sink->step->varyingInputs || solver.splineParamsVary;
 }
 
 /// Every per-frame input one constraint's step reads.
 void
 NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
-                     RigExecBakedStep *step)
+                     RigExecBakedDependencySink *sink)
 {
-    NoteInput(constraint.enabled, step);
-    NoteInput(constraint.defaultWeight, step);
-    NoteInput(constraint.offset, step);
-    NoteInput(constraint.affectX, step);
-    NoteInput(constraint.affectY, step);
-    NoteInput(constraint.affectZ, step);
-    NoteInput(constraint.tX, step);
-    NoteInput(constraint.tY, step);
-    NoteInput(constraint.tZ, step);
-    NoteInput(constraint.rX, step);
-    NoteInput(constraint.rY, step);
-    NoteInput(constraint.rZ, step);
-    NoteInput(constraint.sX, step);
-    NoteInput(constraint.sY, step);
-    NoteInput(constraint.sZ, step);
-    NoteInput(constraint.aimVector, step);
-    NoteInput(constraint.upVector, step);
-    NoteInput(constraint.rotationOffset, step);
-    NoteInput(constraint.worldUpVector, step);
+    NoteInput(constraint.enabled, sink);
+    NoteInput(constraint.defaultWeight, sink);
+    NoteInput(constraint.offset, sink);
+    NoteInput(constraint.affectX, sink);
+    NoteInput(constraint.affectY, sink);
+    NoteInput(constraint.affectZ, sink);
+    NoteInput(constraint.tX, sink);
+    NoteInput(constraint.tY, sink);
+    NoteInput(constraint.tZ, sink);
+    NoteInput(constraint.rX, sink);
+    NoteInput(constraint.rY, sink);
+    NoteInput(constraint.rZ, sink);
+    NoteInput(constraint.sX, sink);
+    NoteInput(constraint.sY, sink);
+    NoteInput(constraint.sZ, sink);
+    NoteInput(constraint.aimVector, sink);
+    NoteInput(constraint.upVector, sink);
+    NoteInput(constraint.rotationOffset, sink);
+    NoteInput(constraint.worldUpVector, sink);
     // The two SingleChainIK-only inputs. Bound only in RotatePlane mode, so
     // in every other mode these are the default-constructed inputs and note
     // nothing -- which is the same answer as not listing them, and a good
     // deal harder to forget.
-    NoteInput(constraint.poleVector, step);
-    NoteInput(constraint.twistDegrees, step);
-    NoteInput(constraint.ikStretch, step);
+    NoteInput(constraint.poleVector, sink);
+    NoteInput(constraint.twistDegrees, sink);
+    NoteInput(constraint.ikStretch, sink);
     // The authored source-weight, offset and pole-weight tables are NOT
     // noted here: they are not inputs the step reads at all. The prologue
     // re-reads them off the stage each run and compares them by value, and
@@ -2519,7 +2519,105 @@ NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
     // varying-input one.
 }
 
+// One binding-to-step association shared by declarations and cone classification.
+void NoteStepInputs(const RigExecBakedProgramImpl &B, RigExecBakedDependencySink *sink)
+{
+    RigExecBakedStep &step = *sink->step;
+    switch (step.kind) {
+    case RigExecBakedStepKind::Solve:
+        if (step.object < 0 || size_t(step.object) >= B.solvers.size()) break;
+        NoteSolverInputs(B.solvers[size_t(step.object)], sink);
+        break;
+    case RigExecBakedStepKind::Constraint: {
+        if (step.object < 0 || size_t(step.object) >= B.walkSteps.size()) break;
+        // A commit step and its walk entry are the same index, and a
+        // constraint entry names the constraint it commits.
+        const RigExecBakedProgramImpl::WalkStep &walk =
+            B.walkSteps[size_t(step.object)];
+        if (!walk.solverBatch && walk.index >= 0 && size_t(walk.index) < B.constraints.size()) {
+            NoteConstraintInputs(B.constraints[size_t(walk.index)], sink);
+        }
+        break;
+    }
+    case RigExecBakedStepKind::WeightPacket:
+        if (step.object < 0 || size_t(step.object) >= B.weightObjects.size()) break;
+        RigExecBakedNoteWeightInputs(
+            B.weightObjects[size_t(step.object)], sink);
+        break;
+    case RigExecBakedStepKind::ComposeSubtree: {
+        if (step.object < 0 || size_t(step.object) >= B.composeGroups.size()) break;
+        // A switched slot's active index, so that keying a space dirties
+        // the compose group that reads it and only that one.
+        const RigExecBakedComposeGroup &group =
+            B.composeGroups[size_t(step.object)];
+        for (int slot = group.begin; slot < group.end; ++slot) {
+            const int switchIndex =
+                slot < 0 || size_t(slot) >= B.spaceSwitchBySlot.size()
+                    ? -1 : B.spaceSwitchBySlot[size_t(slot)];
+            if (switchIndex >= 0 && size_t(switchIndex) < B.spaceSwitches.size()) {
+                NoteInput(B.spaceSwitches[size_t(switchIndex)].activeInput,
+                          sink);
+            }
+            const int clavicleIndex =
+                B.autoClavicleBySlot.empty()
+                    ? -1 : B.autoClavicleBySlot[size_t(slot)];
+            if (clavicleIndex >= 0) {
+                const RigExecBakedProgramImpl::AutoClavicle &ac =
+                    B.autoClavicles[size_t(clavicleIndex)];
+                NoteInput(ac.ikBlendInput, sink);
+                NoteInput(ac.ikBlendFloat, sink);
+                NoteInput(ac.amountInput, sink);
+                NoteInput(ac.amountFloat, sink);
+                if (ac.limbSolver >= 0) {
+                    // The limb's IK inputs shape the clavicle's estimate.
+                    const RigExecBakedProgramImpl::Solver &s =
+                        B.solvers[size_t(ac.limbSolver)];
+                    NoteInput(s.stretch, sink);
+                    NoteInput(s.pin, sink);
+                    NoteInput(s.upperScale, sink);
+                    NoteInput(s.lowerScale, sink);
+                    NoteInput(s.softDistance, sink);
+                    NoteInput(s.limbTwist, sink);
+                }
+            }
+        }
+        break;
+    }
+    case RigExecBakedStepKind::PoseInterpolator: {
+        if (step.object < 0 || size_t(step.object) >= B.poseInterpolators.size()) break;
+        // Read by the prologue into enabledValue and values, which the
+        // step consumes; the step owns the dependency.
+        const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
+            B.poseInterpolators[size_t(step.object)];
+        NoteInput(interpolator.enabled, sink);
+        for (const RigExecBakedInput<double> &value :
+                 interpolator.valueInputs) {
+            NoteInput(value, sink);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 }  // namespace
+
+std::vector<char>
+RigExecBakedResolvedReaders(const RigExecBakedProgramImpl &B)
+{
+    std::vector<char> resolved(B.steps.size(), 0);
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        if (B.steps[i].isHead) continue;
+        RigExecBakedStep scratch;
+        scratch.kind = B.steps[i].kind;
+        scratch.object = B.steps[i].object;
+        RigExecBakedDependencySink sink{&scratch};
+        NoteStepInputs(B, &sink);
+        resolved[i] = sink.resolvedReads;
+    }
+    return resolved;
+}
 
 void
 RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
@@ -2528,84 +2626,12 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
     for (RigExecBakedStep &step : B.steps) {
         if (step.isHead) continue;
         step.varyingInputs = false;
-        step.resolvedInputReads = false;
         step.overrideInputs.clear();
         step.readerWalks.clear();
         step.reads.erase(std::remove_if(step.reads.begin(),step.reads.end(),
             [](const auto &r) { return RigExecBakedIsHeadDomain(r.domain); }),step.reads.end());
-        switch (step.kind) {
-        case RigExecBakedStepKind::Solve:
-            NoteSolverInputs(B.solvers[size_t(step.object)], &step);
-            break;
-        case RigExecBakedStepKind::Constraint: {
-            // A commit step and its walk entry are the same index, and a
-            // constraint entry names the constraint it commits.
-            const RigExecBakedProgramImpl::WalkStep &walk =
-                B.walkSteps[size_t(step.object)];
-            if (!walk.solverBatch && walk.index >= 0) {
-                NoteConstraintInputs(B.constraints[size_t(walk.index)], &step);
-            }
-            break;
-        }
-        case RigExecBakedStepKind::WeightPacket:
-            RigExecBakedNoteWeightInputs(
-                B.weightObjects[size_t(step.object)], &step);
-            break;
-        case RigExecBakedStepKind::ComposeSubtree: {
-            // A switched slot's space index, which the step reads per frame:
-            // re-declared here because this pass starts every step from
-            // nothing, and an index left off makes an override on it -- a
-            // space match's trial switch, a preview -- reach no step at all.
-            const RigExecBakedComposeGroup &group =
-                B.composeGroups[size_t(step.object)];
-            for (int slot = group.begin; slot < group.end; ++slot) {
-                const int switchIndex =
-                    B.spaceSwitchBySlot.empty()
-                        ? -1 : B.spaceSwitchBySlot[size_t(slot)];
-                if (switchIndex >= 0) {
-                    NoteInput(B.spaceSwitches[size_t(switchIndex)].activeInput,
-                              &step);
-                }
-                const int clavicleIndex =
-                    B.autoClavicleBySlot.empty()
-                        ? -1 : B.autoClavicleBySlot[size_t(slot)];
-                if (clavicleIndex >= 0) {
-                    const RigExecBakedProgramImpl::AutoClavicle &ac =
-                        B.autoClavicles[size_t(clavicleIndex)];
-                    NoteInput(ac.ikBlendInput, &step);
-                    NoteInput(ac.ikBlendFloat, &step);
-                    NoteInput(ac.amountInput, &step);
-                    NoteInput(ac.amountFloat, &step);
-                    if (ac.limbSolver >= 0) {
-                        // The limb's IK inputs shape the clavicle's estimate.
-                        const RigExecBakedProgramImpl::Solver &s =
-                            B.solvers[size_t(ac.limbSolver)];
-                        NoteInput(s.stretch, &step);
-                        NoteInput(s.pin, &step);
-                        NoteInput(s.upperScale, &step);
-                        NoteInput(s.lowerScale, &step);
-                        NoteInput(s.softDistance, &step);
-                        NoteInput(s.limbTwist, &step);
-                    }
-                }
-            }
-            break;
-        }
-        case RigExecBakedStepKind::PoseInterpolator: {
-            // Read by the prologue into enabledValue and values, which the
-            // step consumes; the step owns the dependency.
-            const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
-                B.poseInterpolators[size_t(step.object)];
-            NoteInput(interpolator.enabled, &step);
-            for (const RigExecBakedInput<double> &value :
-                     interpolator.valueInputs) {
-                NoteInput(value, &step);
-            }
-            break;
-        }
-        default:
-            break;
-        }
+        RigExecBakedDependencySink sink{&step};
+        NoteStepInputs(B, &sink);
         std::sort(step.overrideInputs.begin(), step.overrideInputs.end());
         step.overrideInputs.erase(
             std::unique(step.overrideInputs.begin(),
@@ -3245,66 +3271,6 @@ RigExecBakedProgramTesting::LadderTablesOf(const RigExecBakedProgram &program)
     return T;
 }
 
-RigExecBakedProgramTesting::LadderTables
-RigExecBakedProgramTesting::ComposeLadderReference(
-    const RigExecBakedProgram &program)
-{
-    const RigExecBakedProgramImpl &B = *program._impl;
-    LadderTables T = LadderTablesOf(program);
-    const int N = int(B.paths.size());
-    const GfMatrix4d identity(1.0);
-    const auto rd = [&B](const auto &input) {
-        return RigExecBakedLeafRead(B, input);
-    };
-    // The single slot-order loop the two ops were split from, statement for
-    // statement, into the copies.
-    for (int i = 0; i < N; ++i) {
-        const size_t slot = size_t(i);
-        if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
-            continue;
-        }
-        const RigExecBakedProgramImpl::Ladder &L = B.ladders[slot];
-        const GfMatrix4d posed = rd(L.posedSpace);
-        T.posedAuthored[slot] = posed != identity ? 1 : 0;
-        T.posedAuthoredM[slot] = posed;
-
-        GfMatrix4d rest =
-            RigExecBakedComposeAvars(rd(L.restAvars[0]), rd(L.restAvars[1]),
-                                     rd(L.restAvars[2]), 1, 1, 1,
-                                     rd(L.restAvars[3]), rd(L.restAvars[4]),
-                                     rd(L.restAvars[5]), 0, TfToken("XYZ")) *
-            rd(L.restSpace);
-        rest.Orthonormalize(/* issueWarning = */ false);
-        const int parent = B.parent[slot];
-        const GfMatrix4d parentRest =
-            parent >= 0 ? T.restRoundTrip[size_t(parent)] : identity;
-        T.restM[slot] = rest * parentRest;
-        T.restFrames[slot] = RigExecFrameFromMatrix(T.restM[slot]);
-        T.restPts[slot] = T.restFrames[slot].points;
-        T.restRoundTrip[slot] = RigExecBakedRoundTrip(T.restM[slot]);
-
-        const GfMatrix4d authoredDefault = rd(L.defaultSpace);
-        const GfMatrix4d parentDefault =
-            parent >= 0 ? T.defaultRoundTrip[size_t(parent)] : identity;
-        if (authoredDefault != identity) {
-            T.selfD[slot] = authoredDefault;
-        } else {
-            const GfMatrix4d offset = RigExecBakedComposeAvars(
-                rd(L.defaultAvars[0]), rd(L.defaultAvars[1]),
-                rd(L.defaultAvars[2]), 1, 1, 1, rd(L.defaultAvars[3]),
-                rd(L.defaultAvars[4]), rd(L.defaultAvars[5]), 0,
-                TfToken("XYZ"));
-            T.selfD[slot] = offset * T.restRoundTrip[slot] *
-                            parentRest.GetInverse() * parentDefault;
-        }
-        T.defaultRoundTrip[slot] = RigExecBakedRoundTrip(T.selfD[slot]);
-        T.parentDinv[slot] = parentDefault.GetInverse();
-        const TfToken order = rd(L.rotationOrder);
-        T.rotOrder[slot] = order.IsEmpty() ? TfToken("XYZ") : order;
-    }
-    return T;
-}
-
 void
 RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {
@@ -3312,17 +3278,7 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
     // The rest and ladder ops composed the provider ladder before this
     // (RigExecBakedRunRestTier), and each Solve step refreshes from the
-    // rests that moved there. `ladderDisturbed` is only recorded.
-    bool ladderDragged = false;
-    if (B.anyOverridden) {
-        for (const int index : B.ladderOverrides) {
-            if (B.overridden[size_t(index)]) {
-                ladderDragged = true;
-                break;
-            }
-        }
-    }
-    B.ladderDisturbed = ladderDragged;
+    // rests that moved there.
     // Every read below is a leaf RigExecBakedSampleLeaves left this run.
     for (const auto &binding : B.avarBindings) {
         B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);

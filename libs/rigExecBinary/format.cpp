@@ -4359,13 +4359,12 @@ RigExecFormatValidate(const fb::RigExecWireFile &file, std::string *error)
 
 namespace {
 
-/// Why a file of format \p version does not open. The previous version
-/// holds no array inputs, which only an export from the rig's stage can
-/// supply; any other version is a rebake.
+/// Older files require re-export from the stage after the S3 wire cleanup.
+/// Future formats require a matching exporter/reader.
 std::string
 _VersionRefusal(uint32_t version)
 {
-    static_assert(RigExecFormatVersion == 9,
+    static_assert(RigExecFormatVersion == 10,
                   "name what the previous format version lacks");
     return "unsupported .rigexec format version " + _N(version) +
            " (this reader reads " + _N(RigExecFormatVersion) + "); " +

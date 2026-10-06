@@ -1133,9 +1133,6 @@ struct RigExecBakedStep {
     /// The step reads a baked input whose value is a function of TIME, so a
     /// frame at a different time may hand it different numbers.
     bool varyingInputs = false;
-    /// The step reads a baked input that resolves through the generation's
-    /// resolved inputs every frame -- a property chain's output.
-    bool resolvedInputReads = false;
     /// The override indices of the baked inputs this step reads, sorted and
     /// deduplicated. A step is dirty while an override stands on one of
     /// them, and for the one run after it is lifted.
@@ -1801,14 +1798,6 @@ struct RigExecBakedProgramImpl {
     /// Consulted only while a drag stands, to decide whether that drag is
     /// one of THESE inputs.
     std::vector<int> ladderOverrides;
-    /// True while a drag stands on a ladder channel. Written by
-    /// RigExecBakedRunInputs and read by nothing: the rest tier answers a
-    /// release by value, and each solver refreshes on its own rests.
-    bool ladderDisturbed = false;
-    /// The slots whose Rest or Ladder output moved this run, in slot order.
-    /// Written by the rest tier and read by nothing: the closure seeds from
-    /// `restMoved` and `ladderMoved`.
-    std::vector<int> ladderMovedSlots;
     /// Per slot, whether the REST CHAIN reaching it can move within the
     /// epoch: its own rest channels, or any ancestor's. A solver measures
     /// its description from these, so it is the question a solver asks.
@@ -2504,9 +2493,6 @@ struct RigExecBakedProgramImpl {
     RigExecBakedClusterSet closed;
     /// The avar table as the last run left it, for the per-provider compare.
     std::vector<double> lastAvars;
-    /// The property-chain results as the last run left them. No run reads
-    /// them: readers declare the versions they read.
-    std::map<SdfPath, VtValue> lastPropertyResults;
     /// The override flags as the last run left them, so that the run AFTER a
     /// drag is released re-runs what the drag was holding.
     std::vector<char> lastOverridden;
@@ -4485,10 +4471,17 @@ void RigExecBakedPublishVolumePlacements(
     const RigExecBakedProgramImpl &program,
     std::map<SdfPath, GfMatrix4d> *frames);
 
+// Build-only declaration sink; resolved reads are never persistent step state.
+struct RigExecBakedDependencySink {
+    RigExecBakedStep *step;
+    bool resolvedReads = false;
+};
+std::vector<char> RigExecBakedResolvedReaders(const RigExecBakedProgramImpl &program);
+
 /// Every per-frame input one weight object's step reads.
 void RigExecBakedNoteWeightInputs(
     const RigExecBakedProgramImpl::WeightObject &weight,
-    RigExecBakedStep *step);
+    RigExecBakedDependencySink *sink);
 
 /// Resets the per-run DELTAS a geometry step would have written, for a run
 /// that skipped it (§7).
@@ -4692,11 +4685,11 @@ std::string RigExecBakedGeometryReport(const RigExecBakedProgramImpl &program);
 template <class T>
 inline void
 RigExecBakedNoteInput(const RigExecBakedInput<T> &input,
-                      RigExecBakedStep *step)
+                      RigExecBakedDependencySink *sink)
 {
+    RigExecBakedStep *step = sink->step;
     step->varyingInputs = step->varyingInputs || input.varying;
-    step->resolvedInputReads =
-        step->resolvedInputReads || bool(input.resolvedAttr);
+    sink->resolvedReads = sink->resolvedReads || bool(input.resolvedAttr);
     if (input.overrideIndex >= 0) {
         step->overrideInputs.push_back(input.overrideIndex);
     }
@@ -4926,7 +4919,7 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///  * the cone bookkeeping itself -- `closedSteps`, `closed`, `lastAvars`,
 ///    `lastOverridden`, `edited`/`anyEdited` (the first pass consumes them
 ///    and the forced second pass needs none),
-///    `lastPropertyResults`, `lastHaveBase`, `lastTime`, `everRan`,
+///    `lastHaveBase`, `lastTime`, `everRan`,
 ///    `lastProgramStamp`. The second pass is FORCED, so its closure differs
 ///    from the first's on purpose; comparing them would report the mode
 ///    rather than the program. The run statistics that observers read are
@@ -4990,7 +4983,7 @@ struct RigExecBakedRunShadow {
     std::vector<char> lastPosedAuthored;
     std::vector<TfToken> lastRotOrder;
     std::vector<char> restChanged, ladderChanged;
-    std::vector<int> restMoved, ladderMoved, ladderMovedSlots;
+    std::vector<int> restMoved, ladderMoved;
     uint64_t opsRun = 0;
 
     uint32_t sequence = 0;
@@ -5166,12 +5159,6 @@ struct RigExecBakedProgramTesting {
     using LadderTables = RigExecBakedLadderTables;
     /// \p program's ten tables as they stand.
     static LadderTables LadderTablesOf(const RigExecBakedProgram &program);
-    /// The ten tables as the single slot-order loop the rest and ladder ops
-    /// were split from composes them from the leaves \p program holds now,
-    /// starting from its current tables (xform-derived slots keep theirs).
-    /// The program is not modified.
-    static LadderTables ComposeLadderReference(
-        const RigExecBakedProgram &program);
     /// Assembles every revision of \p program whose packet its path leaves
     /// assemble (chain revisions whose chain read a base this run, and
     /// non-matrix derived targets) twice, from the leaves the last run

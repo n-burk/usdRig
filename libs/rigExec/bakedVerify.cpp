@@ -571,7 +571,6 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     ladderChanged = B.ladderChanged;
     restMoved = B.restMoved;
     ladderMoved = B.ladderMoved;
-    ladderMovedSlots = B.ladderMovedSlots;
 
     opsRun = B.headOpsRun;
 
@@ -682,7 +681,6 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.ladderChanged = ladderChanged;
     B.restMoved = restMoved;
     B.ladderMoved = ladderMoved;
-    B.ladderMovedSlots = ladderMovedSlots;
 
     B.headOpsRun = opsRun;
 
@@ -881,7 +879,6 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     CompareVector(differences, &count, "last rotation order", lastRotOrder, program.lastRotOrder);
     CompareVector(differences, &count, "rest moved", restMoved, program.restMoved);
     CompareVector(differences, &count, "ladder moved", ladderMoved, program.ladderMoved);
-    CompareVector(differences, &count, "ladder moved slots", ladderMovedSlots, program.ladderMovedSlots);
     // The avar table is the prologue's, and the prologue ran once: a
     // difference here is a STEP that wrote it, which is the one thing
     // nothing else in the program is positioned to notice.

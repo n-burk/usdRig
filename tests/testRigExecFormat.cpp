@@ -1387,15 +1387,17 @@ TestOpenRefusals()
     wildRoot[3] = 0x0f;
     CHECK(!_Open(wildRoot, &why) && _Contains(why, "malformed"));
 
-    // Every prior version lacks the promoted shared head tier and must be
-    // re-exported. Future versions still require a supported exporter.
+    static_assert(RigExecFormatVersion == 10, "X1 wire cleanup format pin");
+    // Every prior format is disposable after the S3 wire cleanup and must
+    // be re-exported. Future versions require a supported exporter.
     RigExecWireFile versioned = _RichFile();
     for (uint32_t version = 0; version <= RigExecFormatVersion + 1; ++version) {
         if (version == RigExecFormatVersion) continue;
         _context = "open refusals: version " + std::to_string(version);
         versioned.formatVersion = version;
         const std::string expected = "unsupported .rigexec format version " +
-            std::to_string(version) + " (this reader reads 9); " +
+            std::to_string(version) + " (this reader reads " +
+            std::to_string(RigExecFormatVersion) + "); " +
             (version < RigExecFormatVersion ? "re-export: S3 head tier" : "rebake");
         CHECK(!_Open(_PackUnchecked(versioned), &why) && why == expected);
     }
@@ -1403,7 +1405,7 @@ TestOpenRefusals()
     versioned.formatVersion = RigExecFormatVersion;
     std::vector<uint8_t> current;
     CHECK(_Write(versioned, &current) && _Open(current, &why) != nullptr);
-    std::printf("format versions: 0 through 8 refused with a re-export, "
+    std::printf("format versions: 0 through 9 refused with a re-export, "
                 "%u with a rebake; %u writes and opens\n",
                 RigExecFormatVersion + 1, RigExecFormatVersion);
 

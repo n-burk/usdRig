@@ -272,9 +272,6 @@ struct RrPoseScratch {
     std::vector<RrMat4d> lastPosedAuthoredM;
     std::vector<char> lastPosedAuthored;
     std::vector<uint32_t> lastRotOrder;
-    bool ladderRecomputed = false;
-    // A drag stood on the ladder last run, so this run recomposes it.
-    bool ladderDisturbed = false;
     // A drag stood last run, so this run writes the constant avars back.
     bool avarsDisturbed = false;
     // Interpolator enables, read by the prologue so the step reads no

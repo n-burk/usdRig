@@ -1174,7 +1174,6 @@ PYBIND11_MODULE(_rigexec, m) {
                 d["is_source"] = s.isSource;
                 d["external_reads"] = s.externalReads;
                 d["varying_inputs"] = s.varyingInputs;
-                d["resolved_input_reads"] = s.resolvedInputReads;
                 d["override_inputs"] = s.overrideInputs;
                 d["diagnostics"] = s.diagnostics;
                 d["revisions_executed"] = s.counters.revisionsExecuted;

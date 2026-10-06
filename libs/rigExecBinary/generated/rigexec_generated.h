@@ -4143,7 +4143,6 @@ struct RigExecWireStep : public ::flatbuffers::NativeTable {
   std::vector<::rigExec::RigExecWireIntPair> shadowedReads{};
   bool externalReads = false;
   bool varyingInputs = false;
-  bool resolvedInputReads = false;
   std::vector<int32_t> overrideInputs{};
   int32_t cluster = -1;
   int32_t level = 0;
@@ -4178,7 +4177,6 @@ struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_SHADOWEDREADS = 30,
     VT_EXTERNALREADS = 32,
     VT_VARYINGINPUTS = 34,
-    VT_RESOLVEDINPUTREADS = 36,
     VT_OVERRIDEINPUTS = 38,
     VT_CLUSTER = 40,
     VT_LEVEL = 42,
@@ -4243,9 +4241,6 @@ struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool varyingInputs() const {
     return GetField<uint8_t>(VT_VARYINGINPUTS, 0) != 0;
   }
-  bool resolvedInputReads() const {
-    return GetField<uint8_t>(VT_RESOLVEDINPUTREADS, 0) != 0;
-  }
   /// Override numbers.
   const ::flatbuffers::Vector<int32_t> *overrideInputs() const {
     return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_OVERRIDEINPUTS);
@@ -4292,7 +4287,6 @@ struct Step FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(shadowedReads()) &&
            VerifyField<uint8_t>(verifier, VT_EXTERNALREADS, 1) &&
            VerifyField<uint8_t>(verifier, VT_VARYINGINPUTS, 1) &&
-           VerifyField<uint8_t>(verifier, VT_RESOLVEDINPUTREADS, 1) &&
            VerifyOffset(verifier, VT_OVERRIDEINPUTS) &&
            verifier.VerifyVector(overrideInputs()) &&
            VerifyField<int32_t>(verifier, VT_CLUSTER, 4) &&
@@ -4359,9 +4353,6 @@ struct StepBuilder {
   void add_varyingInputs(bool varyingInputs) {
     fbb_.AddElement<uint8_t>(Step::VT_VARYINGINPUTS, static_cast<uint8_t>(varyingInputs), 0);
   }
-  void add_resolvedInputReads(bool resolvedInputReads) {
-    fbb_.AddElement<uint8_t>(Step::VT_RESOLVEDINPUTREADS, static_cast<uint8_t>(resolvedInputReads), 0);
-  }
   void add_overrideInputs(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> overrideInputs) {
     fbb_.AddOffset(Step::VT_OVERRIDEINPUTS, overrideInputs);
   }
@@ -4409,7 +4400,6 @@ inline ::flatbuffers::Offset<Step> CreateStep(
     ::flatbuffers::Offset<::flatbuffers::Vector<const rigExec::fb::IntPair *>> shadowedReads = 0,
     bool externalReads = false,
     bool varyingInputs = false,
-    bool resolvedInputReads = false,
     ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> overrideInputs = 0,
     int32_t cluster = -1,
     int32_t level = 0,
@@ -4432,7 +4422,6 @@ inline ::flatbuffers::Offset<Step> CreateStep(
   builder_.add_reads(reads);
   builder_.add_part(part);
   builder_.add_object(object);
-  builder_.add_resolvedInputReads(resolvedInputReads);
   builder_.add_varyingInputs(varyingInputs);
   builder_.add_externalReads(externalReads);
   builder_.add_headAlwaysRuns(headAlwaysRuns);
@@ -4466,7 +4455,6 @@ inline ::flatbuffers::Offset<Step> CreateStepDirect(
     const std::vector<rigExec::fb::IntPair> *shadowedReads = nullptr,
     bool externalReads = false,
     bool varyingInputs = false,
-    bool resolvedInputReads = false,
     const std::vector<int32_t> *overrideInputs = nullptr,
     int32_t cluster = -1,
     int32_t level = 0,
@@ -4499,7 +4487,6 @@ inline ::flatbuffers::Offset<Step> CreateStepDirect(
       shadowedReads__,
       externalReads,
       varyingInputs,
-      resolvedInputReads,
       overrideInputs__,
       cluster,
       level,
@@ -15131,7 +15118,6 @@ inline void Step::UnPackTo(RigExecWireStep *_o, const ::flatbuffers::resolver_fu
   { auto _e = shadowedReads(); if (_e) { _o->shadowedReads.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->shadowedReads[_i] = ::flatbuffers::UnPackIntPair(*_e->Get(_i)); } } else { _o->shadowedReads.resize(0); } }
   { auto _e = externalReads(); _o->externalReads = _e; }
   { auto _e = varyingInputs(); _o->varyingInputs = _e; }
-  { auto _e = resolvedInputReads(); _o->resolvedInputReads = _e; }
   { auto _e = overrideInputs(); if (_e) { _o->overrideInputs.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->overrideInputs[_i] = _e->Get(_i); } } else { _o->overrideInputs.resize(0); } }
   { auto _e = cluster(); _o->cluster = _e; }
   { auto _e = level(); _o->level = _e; }
@@ -15164,7 +15150,6 @@ inline ::flatbuffers::Offset<Step> Step::Pack(::flatbuffers::FlatBufferBuilder &
   auto _shadowedReads = _o->shadowedReads.size() ? _fbb.CreateVectorOfNativeStructs<rigExec::fb::IntPair, ::rigExec::RigExecWireIntPair>(_o->shadowedReads, ::flatbuffers::PackIntPair) : 0;
   auto _externalReads = _o->externalReads;
   auto _varyingInputs = _o->varyingInputs;
-  auto _resolvedInputReads = _o->resolvedInputReads;
   auto _overrideInputs = _o->overrideInputs.size() ? _fbb.CreateVector(_o->overrideInputs) : 0;
   auto _cluster = _o->cluster;
   auto _level = _o->level;
@@ -15189,7 +15174,6 @@ inline ::flatbuffers::Offset<Step> Step::Pack(::flatbuffers::FlatBufferBuilder &
       _shadowedReads,
       _externalReads,
       _varyingInputs,
-      _resolvedInputReads,
       _overrideInputs,
       _cluster,
       _level,

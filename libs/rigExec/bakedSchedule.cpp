@@ -1828,6 +1828,7 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     RigExecBakedCones &cones = B.cones;
+    const auto resolvedReaders = RigExecBakedResolvedReaders(B);
     const size_t count = B.clustering.clusters.size();
     const size_t stepCount = B.steps.size();
     cones = RigExecBakedCones();
@@ -1922,7 +1923,7 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             cones.poseClusters.Set(step.cluster);
             cones.poseSteps.Set(index);
         }
-        if (step.varyingInputs || step.resolvedInputReads) {
+        if (step.varyingInputs || resolvedReaders[size_t(&step - B.steps.data())]) {
             cones.varyingSteps.push_back(int(&step - B.steps.data()));
         }
         if (!step.overrideInputs.empty()) {
@@ -2407,28 +2408,26 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // comparison above. And a reader walk whose value moved, by the
         // steps that read it: a hop's override or stage value can move it
         // with no version moving.
-        if (B.hasPropertyChains) {
-            const size_t versions =
-                std::min(B.propertyChanged.size(), cones.headReaders.size());
-            for (size_t id = 0; id < versions; ++id) {
-                if (!B.propertyChanged[id]) {
-                    continue;
-                }
-                for (const int index : cones.headReaders[id]) {
-                    if (!RigExecBakedReadIsShadowed(
-                            B, B.steps[size_t(index)].shadowedReads,
-                            uint32_t(id))) {
-                        dirty.Set(index);
-                    }
+        const size_t versions =
+            std::min(B.propertyChanged.size(), cones.headReaders.size());
+        for (size_t id = 0; id < versions; ++id) {
+            if (!B.propertyChanged[id]) {
+                continue;
+            }
+            for (const int index : cones.headReaders[id]) {
+                if (!RigExecBakedReadIsShadowed(
+                        B, B.steps[size_t(index)].shadowedReads,
+                        uint32_t(id))) {
+                    dirty.Set(index);
                 }
             }
-            const size_t walks = std::min(B.readerWalkChanged.size(),
-                                          cones.walkReaders.size());
-            for (size_t w = 0; w < walks; ++w) {
-                if (B.readerWalkChanged[w]) {
-                    for (const int index : cones.walkReaders[w]) {
-                        dirty.Set(index);
-                    }
+        }
+        const size_t walks = std::min(B.readerWalkChanged.size(),
+                                      cones.walkReaders.size());
+        for (size_t w = 0; w < walks; ++w) {
+            if (B.readerWalkChanged[w]) {
+                for (const int index : cones.walkReaders[w]) {
+                    dirty.Set(index);
                 }
             }
         }
@@ -2521,7 +2520,6 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         std::fill(B.edited.begin(), B.edited.end(), 0);
         B.anyEdited = false;
     }
-    B.lastPropertyResults = B.propertyResults;
     B.lastHaveBase.resize(B.chains.size());
     for (size_t c = 0; c < B.chains.size(); ++c) {
         B.lastHaveBase[c] = B.chains[c].haveBase ? 1 : 0;
@@ -4193,14 +4191,6 @@ ExecuteRestTier(RigExecBakedProgramImpl *program, bool force, bool first)
     }
     B.restMoved.clear();
     B.ladderMoved.clear();
-    // After the property revisions this run executed, in the head trace.
-    uint32_t seq = 0;
-    for (const RigExecBakedStep &step : B.steps) {
-        if (step.kind == RigExecBakedStepKind::PropertyRevision) {
-            seq = std::max(seq, step.runSeq);
-        }
-    }
-    bool ran = false;
     for (size_t index = 0; index < B.steps.size() && B.steps[index].isHead; ++index) {
         RigExecBakedStep &step = B.steps[index];
         if (!IsRestKind(step.kind)) {
@@ -4213,16 +4203,6 @@ ExecuteRestTier(RigExecBakedProgramImpl *program, bool force, bool first)
         }
         RigExecBakedRunStepBodyAndStamp(&B,&step,UsdTimeCode::Default());
         ++B.headOpsRun;
-        ran = true;
-    }
-    if (ran || !B.ladderMovedSlots.empty()) {
-        B.ladderMovedSlots.assign(B.restMoved.begin(), B.restMoved.end());
-        B.ladderMovedSlots.insert(B.ladderMovedSlots.end(),
-                                  B.ladderMoved.begin(), B.ladderMoved.end());
-        std::sort(B.ladderMovedSlots.begin(), B.ladderMovedSlots.end());
-        B.ladderMovedSlots.erase(std::unique(B.ladderMovedSlots.begin(),
-                                             B.ladderMovedSlots.end()),
-                                 B.ladderMovedSlots.end());
     }
 }
 

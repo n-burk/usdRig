@@ -447,9 +447,7 @@ RrPropertySizeScratch(RrProgram *program, std::string *error)
     const size_t entries = scratch->publishNames.size();
     store.propertyResults.clear();
     store.propertyValues.assign(entries, _RrPropertyZero());
-    store.lastPropertyValues.assign(entries, _RrPropertyZero());
     store.propertyPublished.assign(entries, 0);
-    store.lastPropertyPublished.assign(entries, 0);
     size_t versions = 0;
     for (const auto &chain : file->propertyChains)
         versions = std::max(versions, size_t(chain.versionBase) + chain.revisions.size() + 1);
