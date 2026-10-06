@@ -12,6 +12,7 @@
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
 #include "rigExecImaging/upstreamTable.h"
+#include "rigExecBake/bake.h"
 #include "rigExecMath/avarScale.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedTrace.h"
@@ -6369,8 +6370,7 @@ _UpstreamGeometry(_UpstreamPose pose)
     return pose;
 }
 
-// Step 6, interim form until W.3.6: the binary is baked with no upstream
-// value standing (the interim guard refuses a bake while one stands).
+// Step 6 playback integration: a file of the authored stage receives upstream values.
 //  - Both keys are listed inputs whose defaults are the authored values.
 //  - Execute with no input set equals the authored pose.
 //  - SetSampledInputAt of both values, then Execute, equals live with both
@@ -6381,7 +6381,7 @@ _UpstreamGeometry(_UpstreamPose pose)
 static void
 _UpstreamPlaybackSteps(const std::string &fixture)
 {
-    std::printf("  upstream step 6 (.rigexec, interim form)\n");
+    std::printf("  upstream step 6 (.rigexec)\n");
     const double t = 1.0;
     const GfMatrix4d space = _UpTranslate(1, 0, 10);
     const UsdStageRefPtr stage = UsdStage::Open(fixture);
@@ -6530,18 +6530,61 @@ _UpstreamPlaybackSteps(const std::string &fixture)
     std::filesystem::remove(binary, removed);
 }
 
-// Deferred to the runtime session: TestABakeExposesUpstreamAsInputs, step
-// 6's full form, after W.3.6 (which exposes standing upstream values as
-// inputs, deletes the interim IsBakeable reason and holds
-// RigExecScopedUpstreamSuspension across the bake): baked while both
-// values stand, the bytes equal a bake with them lifted, both keys are
-// listed with authored defaults and named in upstreamInputs, and the
-// evaluator's next generation still holds them.
+// Step 6's full bake form: standing inputs remain integration values.
 static void
-TestABakeExposesUpstreamAsInputs()
+TestABakeExposesUpstreamAsInputs(const std::string &fixture)
 {
-    std::printf("  TestABakeExposesUpstreamAsInputs: SKIPPED (after W.3.6; "
-                "runtime session)\n");
+    const auto stage = UsdStage::Open(fixture);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, kUpLimbsRig);
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(evaluator.Compile());
+    const UsdTimeCode time(1.0);
+    const auto authored = evaluator.Evaluate(time);
+    RigExecBakeOpts opts;
+    opts.time = 1.0;
+    RigExecBakeResult baseline, result;
+    std::string error;
+    CHECK(RigExecBakeToBinary(evaluator, opts, &baseline, &error));
+    const GfMatrix4d space = _UpTranslate(1, 0, 10);
+    const std::vector<RigExecValueOverride> inputs = {
+        {kUpA0Rz.GetPrimPath(), TfToken(), kUpA0Rz.GetNameToken(), VtValue(30.0)},
+        {kUpSpace.GetPrimPath(), TfToken(), kUpSpace.GetNameToken(), VtValue(space)}};
+    evaluator.SetUpstreamInputs(inputs);
+    const auto standing = evaluator.Evaluate(time);
+    CHECK(RigExecBakeToBinary(evaluator, opts, &result, &error));
+    CHECK(result.bytes == baseline.bytes);
+    std::vector<std::string> names = {kUpA0Rz.GetString(), kUpSpace.GetString()};
+    std::sort(names.begin(), names.end());
+    CHECK(result.upstreamInputs == names);
+    CHECK(evaluator.GetUpstreamInputs() == inputs);
+    const auto restored = evaluator.Evaluate(time);
+    auto reader = RigExecRuntimeReader::Open(result.bytes.data(),
+                                             result.bytes.size(), &error);
+    CHECK(reader);
+    if (!reader) {
+        return;
+    }
+    size_t rz = 0, spaceInput = 0;
+    CHECK(reader->FindInput(kUpA0Rz.GetString(), &rz));
+    CHECK(reader->FindInput(kUpSpace.GetString(), &spaceInput));
+    CHECK(reader->GetInputInfo(rz).defaultValue.f64 == 0.0);
+    const auto &m = reader->GetInputInfo(spaceInput).defaultValue.matrix;
+    CHECK(m[3][0] == 0.0 && m[3][2] == 10.0);
+    CHECK(reader->Execute(&error));
+    std::vector<std::string> diffs;
+    CHECK(RigExecCompareRuntimeOutputs(authored, *reader, &diffs));
+    RrInputValue value;
+    CHECK(RigExecInputValueFrom(VtValue(30.0), RrInputTag::Double, &value));
+    CHECK(reader->SetSampledInputAt(rz, value, &error));
+    CHECK(RigExecInputValueFrom(VtValue(space), RrInputTag::Matrix4d, &value));
+    CHECK(reader->SetSampledInputAt(spaceInput, value, &error));
+    CHECK(reader->Execute(&error));
+    CHECK(RigExecCompareRuntimeOutputs(standing, *reader, &diffs));
+    CHECK(RigExecCompareRuntimeOutputs(restored, *reader, &diffs));
 }
 
 // Deferred to the runtime session (W.5, on the W.3.9 already in the tree):
@@ -7150,7 +7193,7 @@ TestUpstreamSceneIndexDrivesRigInputs(const std::string &examplesDir)
                             VtValue(_UpTranslate(1, 0, 10)), kUpLimbB,
                             kUpLimbA, "", "BRoot", "Upstream inputs:space");
         _UpstreamPlaybackSteps(fixture);
-        TestABakeExposesUpstreamAsInputs();
+        TestABakeExposesUpstreamAsInputs(fixture);
         TestTheRuntimeUpstreamCone();
         _UpstreamAdmissionNegatives(fixture);
         _UpstreamAddsAndChains(fixture);

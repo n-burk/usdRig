@@ -20,6 +20,7 @@
 #include "rigExec/frameCache.h"
 #include "rigExec/frozenContext.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExecBake/bake.h"
 #include "rigExecBake/computedCapture.h"
 #include "rigExecBake/pathTable.h"
 #include "rigExecImaging/playback.h"
@@ -2003,9 +2004,7 @@ TestThePosedVariant()
     }
 }
 
-// The interim bake guard: a bake is refused while values stand, not while
-// they are suspended, and the program itself is never refused for them.
-// A freeze is not: frozen jobs carry upstream values.
+// Suspension restores upstream values without changing bakeability or freezing.
 void
 TestTheBakeGuard()
 {
@@ -2029,9 +2028,8 @@ TestTheBakeGuard()
     const RigExecRigPose standing = evaluator->Evaluate(UsdTimeCode(1));
     CHECK(evaluator->GetBakedProgram() != nullptr);
     reasons.clear();
-    CHECK(!evaluator->IsBakeable(&reasons));
-    CHECK(HasReason(reasons, reason));
-    CHECK(reasons.size() == 1);
+    CHECK(evaluator->IsBakeable(&reasons));
+    CHECK(!HasReason(reasons, reason));
     {
         RigExecScopedUpstreamSuspension suspension(*evaluator);
         CHECK(!evaluator->HasUpstreamInputs());
@@ -2048,8 +2046,8 @@ TestTheBakeGuard()
     }
     CHECK(evaluator->GetUpstreamInputs() == inputs);
     reasons.clear();
-    CHECK(!evaluator->IsBakeable(&reasons));
-    CHECK(HasReason(reasons, reason));
+    CHECK(evaluator->IsBakeable(&reasons));
+    CHECK(!HasReason(reasons, reason));
     CHECK(RigExecCanFreezeProgram(*evaluator, &error));
     CheckSamePose("restored", standing, evaluator->Evaluate(UsdTimeCode(1)));
 }
@@ -2084,8 +2082,7 @@ DropLines(const RigExecRigPose &pose)
     return lines;
 }
 
-// \p evaluator's epoch baked at \p t (no upstream value may stand: the
-// interim guard refuses), written as \p name in the scratch directory.
+// \p evaluator's authored epoch baked at \p t and written as \p name.
 std::string
 WriteBake(RigExecRigEvaluator &evaluator, double t, const std::string &name)
 {
@@ -2421,16 +2418,142 @@ TestTheArrayPlaybackLegs()
                 "(W.3.11, format 8) merges; runtime session, W.5)\n");
 }
 
-// Deferred to the runtime session: after W.3.6, which exposes standing
-// upstream values as inputs, deletes the interim IsBakeable reason and
-// holds RigExecScopedUpstreamSuspension across the bake. The oracle case's
-// leg: a bake with inputs:scale standing lists the attribute, and the
-// runtime with SetSampledInputAt equals live.
+// A standing upstream list is reported, never printed into file defaults.
+void
+CheckStandingBake(const std::string &what, const std::string &stagePath,
+                  const SdfPath &rig, double time,
+                  const std::vector<RigExecValueOverride> &requested)
+{
+    const auto stage = UsdStage::Open(stagePath);
+    auto evaluator = Make(stage, rig, BakedMode());
+    const RigExecRigPose authored = evaluator->Evaluate(UsdTimeCode(time));
+    RigExecBakeOpts opts;
+    opts.time = time;
+    RigExecBakeResult baseline;
+    std::string error;
+    CHECK(RigExecBakeToBinary(*evaluator, opts, &baseline, &error));
+    CHECK(baseline.upstreamInputs.empty());
+    evaluator->SetUpstreamInputs(requested);
+    const RigExecRigPose standing = evaluator->Evaluate(UsdTimeCode(time));
+    const auto admitted = evaluator->GetUpstreamInputPaths();
+    CHECK(!admitted.empty());
+    CHECK(Differences(authored, standing) != 0);
+    for (const auto &entry : requested) {
+        const auto path = entry.prim.AppendProperty(entry.attribute);
+        if (stage->GetAttributeAtPath(path)) {
+            CHECK(std::binary_search(admitted.begin(), admitted.end(), path));
+        }
+    }
+    std::vector<std::string> names;
+    for (const auto &path : admitted) {
+        names.push_back(path.GetString());
+    }
+    std::sort(names.begin(), names.end());
+    RigExecBakeResult result;
+    const bool baked = RigExecBakeToBinary(*evaluator, opts, &result, &error);
+    if (!baked) {
+        std::printf("FAIL %s bake: %s\n", what.c_str(), error.c_str());
+    }
+    CHECK(baked);
+    CHECK(result.bytes == baseline.bytes);
+    CHECK(result.upstreamInputs == names);
+    CHECK(std::is_sorted(result.upstreamInputs.begin(),
+                         result.upstreamInputs.end()));
+    CHECK(evaluator->GetUpstreamInputs() == requested);
+    CheckSamePose(what + " restored", standing,
+                  evaluator->Evaluate(UsdTimeCode(time)));
+    if (!baked) {
+        return;
+    }
+    auto reader = RigExecRuntimeReader::Open(result.bytes.data(),
+                                             result.bytes.size(), &error);
+    CHECK(reader);
+    if (!reader) {
+        return;
+    }
+    CHECK(reader->Execute(&error));
+    CheckSameRun(what + " authored defaults", authored, reader.get());
+    for (const auto &entry : requested) {
+        const auto path = entry.prim.AppendProperty(entry.attribute);
+        if (!std::binary_search(admitted.begin(), admitted.end(), path)) {
+            continue;
+        }
+        size_t index = 0;
+        CHECK(reader->FindInput(path.GetString(), &index));
+        const auto tag = reader->GetInputInfo(index).type;
+        if (RrInputTagIsArray(tag)) {
+            RigExecRuntimeArray array;
+            CHECK(RigExecInputArrayFrom(entry.value, tag, &array));
+            CHECK(reader->GetInputInfo(index).defaultCount == array.count);
+            CHECK(reader->SetInputArrayAt(index, array, &error));
+        } else if (tag == RrInputTag::Token) {
+            CHECK(reader->SetInputToken(path.GetString(),
+                  entry.value.UncheckedGet<TfToken>().GetString(), &error));
+        } else {
+            RrInputValue value;
+            CHECK(RigExecInputValueFrom(entry.value, tag, &value));
+            CHECK(reader->SetSampledInputAt(index, value, &error));
+        }
+    }
+    CHECK(reader->Execute(&error));
+    CheckSameRun(what + " reapplied", standing, reader.get());
+    reader->ResetInputs();
+    CHECK(reader->Execute(&error));
+    CheckSameRun(what + " runtime lifted", authored, reader.get());
+
+    // A failure after suspension must restore even ignored requested keys,
+    // without publishing any partial result.
+    RigExecBakeResult untouched;
+    untouched.bytes = {42};
+    untouched.upstreamInputs = {"sentinel"};
+    untouched.pathReadsWritten = 17;
+    untouched.pathReadsEnumerated = 19;
+    opts.presentation = {0, 1, 2};
+    CHECK(!RigExecBakeToBinary(*evaluator, opts, &untouched, &error));
+    CHECK(untouched.bytes == std::vector<uint8_t>{42});
+    CHECK(untouched.upstreamInputs == std::vector<std::string>{"sentinel"});
+    CHECK(untouched.pathReadsWritten == 17 &&
+          untouched.pathReadsEnumerated == 19);
+    CHECK(evaluator->GetUpstreamInputs() == requested);
+    CheckSamePose(what + " failed bake restored", standing,
+                  evaluator->Evaluate(UsdTimeCode(time)));
+}
+
+void
+TestStandingBakes()
+{
+    const std::string limbs = Fixture("upstream_inputs.usda");
+    VtVec3fArray points = AuthoredArray<VtVec3fArray>(limbs, kMeshAPoints);
+    points[0] += GfVec3f(0, 1, 0);
+    VtFloatArray weights = AuthoredArray<VtFloatArray>(limbs, kJointWeights);
+    weights[0] = 0.25f;
+    weights[1] = 0.75f;
+    CheckStandingBake("mixed upstream bake", limbs, kLimbsRig, 5,
+        {Up(kA0Rz, VtValue(30.0)),
+         Up(kUpstreamSpace, VtValue(Translate(1, 0, 10))),
+         Up(kMeshAPoints, VtValue(points)),
+         Up(kJointWeights, VtValue(weights)),
+         Up(SdfPath("/LimbsAsset/Rig.noSuchInput"), VtValue(1.0))});
+    CheckStandingBake("rest constants bake", Example("01_FkChainTail.usda"),
+        kTailRig, 1012,
+        {Up(SdfPath("/TailAsset/Rig/Joints/Seg1.rest:space"),
+            VtValue(Translate(0, 0.5, 0)))});
+    const std::string lattice = Example("06_LatticeBulge.usda");
+    const SdfPath cage("/LatticeAsset/Geom/Cage.points");
+    const auto stage = UsdStage::Open(lattice);
+    VtVec3fArray bulged;
+    CHECK(stage->GetAttributeAtPath(cage).Get(&bulged, UsdTimeCode(1024)));
+    CheckStandingBake("Both cage bake", lattice,
+        SdfPath("/LatticeAsset/Rig"), 1024, {Up(cage, VtValue(bulged))});
+}
+
 void
 TestAnOracleBakeListsTheAttribute()
 {
-    std::printf("case: oracle bake lists the attribute: SKIPPED (after "
-                "W.3.6; runtime session)\n");
+    CheckStandingBake("oracle standing bake", Fixture("computed_weights.usda"),
+        SdfPath("/Asset/Rig"), 5,
+        {Up(SdfPath("/Asset/Rig/Weights/Driven.inputs:scale"),
+            VtValue(0.25f))});
 }
 
 // --- The admission sets against the exporter -------------------------------
@@ -2681,8 +2804,8 @@ main(int argc, char **argv)
         TestPlaybackParity();
         TestAPlaybackTokenKey();
         TestAnOracleBakeListsTheAttribute();
-        // Arrays, behind the admission hook: the painted case first (it
-        // gated the array list), then the admitted arrays.
+        TestStandingBakes();
+        // Structural painted arrays, followed by admitted array paths.
         TestAPaintedWeightIsDropped();
         TestTheArrayRows();
         TestUpstreamChainBasePoints();

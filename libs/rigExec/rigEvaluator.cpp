@@ -778,18 +778,7 @@ RigExecRigEvaluator::_RebuildBakedProgram(
 bool
 RigExecRigEvaluator::IsBakeable(std::vector<std::string> *reasons) const
 {
-    bool bakeable = RigExecBakedProgram::IsBakeable(*this, reasons);
-    // Here and not in the program's own check, which Build asks: a standing
-    // upstream value must not refuse the program, only a bake, until the
-    // exporter lists such values as inputs.
-    if (HasUpstreamInputs()) {
-        if (reasons) {
-            reasons->push_back("upstream inputs standing (the exporter does "
-                               "not expose them yet)");
-        }
-        bakeable = false;
-    }
-    return bakeable;
+    return RigExecBakedProgram::IsBakeable(*this, reasons);
 }
 
 size_t

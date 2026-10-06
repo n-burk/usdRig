@@ -40,6 +40,9 @@ struct RigExecBakeResult {
     /// written through RigExecFormatWrite and opened again with
     /// RigExecFormatOpen before the bake returns.
     std::vector<uint8_t> bytes;
+    /// Sorted names of admitted upstream inputs standing on entry. Their
+    /// file defaults remain stage-authored; callers retain the values.
+    std::vector<std::string> upstreamInputs;
     /// The file's path-read rows (a read row per connection-following
     /// scalar read, a value row per other key), and the distinct (path,
     /// rest) keys of the assembly's enumeration they come from
@@ -60,7 +63,8 @@ struct RigExecBakeResult {
 /// The caller sets the evaluation mode BEFORE calling -- Baked, the way
 /// rigExecPose honors --mode -- and this compiles, checks bakeability,
 /// evaluates once at the bake time with every step forced to run, and
-/// serializes. The evaluator is left compiled in the caller's mode.
+/// serializes with upstream inputs suspended. The complete requested list
+/// is restored on every return. The evaluator stays in the caller's mode.
 bool RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
                          const RigExecBakeOpts &opts,
                          RigExecBakeResult *result, std::string *error);

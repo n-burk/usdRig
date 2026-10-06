@@ -1,4 +1,4 @@
-﻿# Upstream rig inputs
+# Upstream rig inputs
 
 An upstream Hydra scene index can supply authored-level rig inputs without
 editing the USD stage. On the prim that owns an attribute, publish a
@@ -115,10 +115,12 @@ this distinction when applying upstream arrays.
 
 ## Baking
 
-The current evaluator refuses a bake while upstream values stand with
-`upstream inputs standing (the exporter does not expose them yet)`.
-`RigExecScopedUpstreamSuspension` temporarily lifts and restores the values.
-The W.3.6 integration, after AI, will remove that refusal, suspend upstream values
-during the bake's authored-stage evaluation, and verify that every standing path
-is a listed file input. The file's defaults then remain authored-stage values,
-and playback receives upstream values through the input API.
+A bake accepts admitted upstream scalars and arrays. It suspends the complete
+requested list while evaluating and capturing the authored stage, then restores
+that list on success or failure. Every standing admitted path must be a listed
+file input; a missing slot reports an exporter invariant defect. File defaults
+and static data remain authored-stage values, so the bytes equal a bake with
+upstream values lifted. `RigExecBakeResult::upstreamInputs` reports the sorted
+admitted names on success; callers retain and reapply their values through the
+scalar or authored array input API. Authored array sets still require the file's
+default element count. Interactive overrides still refuse a bake.

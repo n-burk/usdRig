@@ -230,6 +230,8 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     if (evaluator.HasInteractiveOverrides()) {
         return Fail("cannot bake with interactive overrides standing");
     }
+    const std::vector<SdfPath> upstream = evaluator.GetUpstreamInputPaths();
+    RigExecScopedUpstreamSuspension suspension(evaluator);
     const RigExecBakedProgram *standing = evaluator.GetBakedProgram();
     if (!standing) {
         return Fail("no baked program standing to capture from");
@@ -240,23 +242,7 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
                   .GetValue()
             : opts.time;
     char number[32];
-    // The input list, from the standing program: the slots every read
-    // takes, with their values at the bake time as the defaults, every read
-    // in its table field, and the facts the oracle needs. Facts of an
-    // animated attribute hold their value at the bake time, which
-    // RigExecBakeStaticReport names. Paths and tokens intern in the order
-    // this visits them, then the tables', so two bakes write the same ids.
-    RigExecBakePathTable paths;
     std::string why;
-    RigExecBakeComputedCapture inputs(evaluator, bakeTime, &paths, &why);
-    if (!inputs.Valid()) {
-        return Fail(why);
-    }
-    if (!opts.presentation.empty() &&
-        !_VerifyPresentation(opts.presentation, inputs.GetListedInputNames(),
-                             &why)) {
-        return Fail(why);
-    }
     const size_t bakedBefore = evaluator.GetBakedGenerationCount();
     // The one run reads every step's inputs, so the static data it leaves
     // behind is complete whatever the closure would have skipped.
@@ -284,6 +270,35 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
         return Fail("the bake run did not come from the baked program");
     }
     const RigExecBakedProgramImpl &program = standing->GetStepGraph();
+
+    // The input list, from the standing program: the slots every read
+    // takes, with their values at the bake time as the defaults, every read
+    // in its table field, and the facts the oracle needs. Facts of an
+    // animated attribute hold their value at the bake time, which
+    // RigExecBakeStaticReport names. Paths and tokens intern in the order
+    // this visits them, then the tables', so two bakes write the same ids.
+    RigExecBakePathTable paths;
+    RigExecBakeComputedCapture inputs(evaluator, bakeTime, &paths, &why);
+    if (!inputs.Valid()) {
+        return Fail(why);
+    }
+    const auto &listed = inputs.GetListedInputNames();
+    std::vector<std::string> upstreamNames;
+    upstreamNames.reserve(upstream.size());
+    for (const SdfPath &path : upstream) {
+        const std::string name = path.GetString();
+        if (!std::binary_search(listed.begin(), listed.end(), name)) {
+            return Fail("upstream input " + name +
+                        " is admitted but has no input slot");
+        }
+        upstreamNames.push_back(name);
+    }
+    std::sort(upstreamNames.begin(), upstreamNames.end());
+    if (!opts.presentation.empty() &&
+        !_VerifyPresentation(opts.presentation, inputs.GetListedInputNames(),
+                             &why)) {
+        return Fail(why);
+    }
 
     // The file of the program and its run: the tables, the static data the
     // run left, the plugin movers, then the root's fields. The path reads
@@ -323,6 +338,7 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
         keys.emplace(read.path, read.rest);
     }
     result->bytes = std::move(bytes);
+    result->upstreamInputs = std::move(upstreamNames);
     result->pathReadsWritten = file.geometry->pathReads.size();
     result->pathReadsEnumerated = keys.size();
     return true;
