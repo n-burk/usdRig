@@ -4,9 +4,8 @@
     Docs example: the rolling-ball tutorial rig (docs/concepts/
     tutorial-rolling-ball.md).
 
-    A Luxo-style ball: a textured UV sphere of radius 1 sitting on the
-    ground, carried by one matrix mover from the last joint of a
-    four-joint FK chain.
+    A flat yellow ball of radius 1 sitting on the ground, carried by
+    one matrix mover from the last joint of a four-joint FK chain.
 
     Four nested controls drive that chain. Move translates along the
     ground, Squash scales, and Roll spins. The animator keys Move alone:
@@ -232,42 +231,12 @@ def Xform "BallAsset" (
             def Shader "Surface"
             {
                 uniform token info:id = "UsdPreviewSurface"
-                color3f inputs:diffuseColor.connect = </BallAsset/Looks/BallMaterial/Texture.outputs:rgb>
-                color3f inputs:emissiveColor.connect = </BallAsset/Looks/BallMaterial/Flat.outputs:rgb>
+                color3f inputs:diffuseColor = (0.992, 0.867, 0.02)
                 float inputs:metallic = 0
                 float inputs:roughness = 0.5
                 float inputs:specular = 0.35
                 int inputs:useSpecularWorkflow = 0
                 token outputs:surface
-            }
-
-            def Shader "Texture"
-            {
-                uniform token info:id = "UsdUVTexture"
-                asset inputs:file = @./textures/pixar_ball.png@
-                float4 inputs:scale = (0.75, 0.75, 0.75, 1)
-                float2 inputs:st.connect = </BallAsset/Looks/BallMaterial/Reader.outputs:result>
-                token inputs:wrapS = "repeat"
-                token inputs:wrapT = "clamp"
-                float3 outputs:rgb
-            }
-
-            def Shader "Flat"
-            {
-                uniform token info:id = "UsdUVTexture"
-                asset inputs:file = @./textures/pixar_ball.png@
-                float4 inputs:scale = (0.5, 0.5, 0.5, 1)
-                float2 inputs:st.connect = </BallAsset/Looks/BallMaterial/Reader.outputs:result>
-                token inputs:wrapS = "repeat"
-                token inputs:wrapT = "clamp"
-                float3 outputs:rgb
-            }
-
-            def Shader "Reader"
-            {
-                uniform token info:id = "UsdPrimvarReader_float2"
-                token inputs:varname = "st"
-                float2 outputs:result
             }
         }
     }
