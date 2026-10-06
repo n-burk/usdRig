@@ -1,5 +1,6 @@
 // RigExec baked playback for Hydra (M2b). See playback.h for the contract.
 #include "playback.h"
+#include "rigExec/bakedProgram.h"
 #include "rigExec/movers/moverRegistry.h"
 
 #include "pxr/base/tf/staticTokens.h"
@@ -155,6 +156,173 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
     _epochDigest = _PlaybackDigestBytes(bytes);
     _reader = std::move(reader);
     _assetPath = resolvedPath;
+    // Admission condition 3 in playback: a listed input, holding its tag's
+    // type. A file lists scalar inputs only until it carries array slots.
+    _listedInputs.clear();
+    for (size_t i = 0; i < _reader->GetInputCount(); ++i) {
+        const RigExecRuntimeInputInfo &info = _reader->GetInputInfo(i);
+        if (SdfPath::IsValidPathString(info.name)) {
+            _listedInputs.emplace(SdfPath(info.name),
+                                  RigExecInputTagType(info.type));
+        }
+    }
+    _upstreamApplied.clear();
+    _AdmitUpstream(UsdTimeCode(_reader->GetBakeTime()));
+    return true;
+}
+
+void
+RigExecBakedPlayback::SetUpstreamInputs(
+    std::vector<RigExecUpstreamValue> values)
+{
+    _upstreamRequested = std::move(values);
+    _AdmitUpstream(_upstreamTime);
+}
+
+std::vector<SdfPath>
+RigExecBakedPlayback::GetUpstreamInputPaths() const
+{
+    std::vector<SdfPath> paths;
+    paths.reserve(_upstreamAdmitted.size());
+    for (const auto &[path, key] : _upstreamAdmitted) {
+        paths.push_back(path);
+    }
+    return paths;
+}
+
+void
+RigExecBakedPlayback::_AdmitUpstream(UsdTimeCode time)
+{
+    _upstreamTime = time;
+    _upstreamAdmitted.clear();
+    _upstreamDropLines.clear();
+    if (!_reader) {
+        return;
+    }
+    // Live's rule over what a playback session has: the file's listed
+    // inputs stand for the program's admissible set, which equals them over
+    // unconnected attributes with a stage value. Each entry is judged
+    // before the last-wins rule, and the reason text is live's.
+    for (const RigExecUpstreamValue &entry : _upstreamRequested) {
+        const auto drop = [&](const std::string &reason) {
+            _upstreamDropLines.push_back("upstream input " +
+                                         entry.path.GetString() + ": " +
+                                         reason + "; ignored");
+        };
+        if (!entry.path.IsPrimPropertyPath()) {
+            drop("names no attribute");
+            continue;
+        }
+        std::string reason = RigExecUpstreamDropReason(
+            _stage, &_listedInputs, entry.path, entry.value, time);
+        size_t index = 0;
+        if (reason.empty() &&
+            !_reader->FindInput(entry.path.GetString(), &index)) {
+            reason = "no listed read reaches it";
+        }
+        // Only a file baked from another stage types an input apart from
+        // its attribute.
+        if (reason.empty() &&
+            entry.value.GetType() !=
+                RigExecInputTagType(_reader->GetInputInfo(index).type)) {
+            reason = std::string("the file's input holds a ") +
+                     RigExecInputTagName(_reader->GetInputInfo(index).type);
+        }
+        if (!reason.empty()) {
+            drop(reason);
+            continue;
+        }
+        // An array value is never admitted here before the format carries
+        // array slots (W.3.11, format 8): FindInput finds no array. From
+        // then on it is set with SetInputArray, authored-level, so it
+        // replaces the attribute for AtDefault and AtTime reads alike; an
+        // AtDefault read takes the value standing at the evaluated time,
+        // as live's leaf does. SetInputArray refuses a count change, and a
+        // refused set lifts the key with ResetInput. An array key lifts
+        // with ResetInput whether its slot is Animated or not, until the
+        // runtime feeds Animated array slots per frame; from then on an
+        // Animated array key follows the scalar Animated recipe below.
+        const RigExecRuntimeInputInfo &info = _reader->GetInputInfo(index);
+        _UpstreamKey key;
+        key.index = index;
+        key.name = info.name;
+        key.tag = info.type;
+        key.animated = info.animated;
+        key.attribute = _stage->GetAttributeAtPath(entry.path);
+        key.value = entry.value;
+        _upstreamAdmitted[entry.path] = std::move(key);
+    }
+}
+
+bool
+RigExecBakedPlayback::_LiftUpstream(const _UpstreamKey &key,
+                                    UsdTimeCode time, bool sampled,
+                                    std::string *error)
+{
+    // A non-Animated input's default is the bake-time stage value, which is
+    // the stage value at every time. An Animated one takes the stage at
+    // this time: Apply already read it when it sampled, else one read here.
+    if (!key.animated) {
+        return _reader->ResetInput(key.name, error);
+    }
+    return sampled || RigExecSampleInputAt(key.attribute, key.index,
+                                           key.name, key.tag, time,
+                                           _reader.get(), error);
+}
+
+bool
+RigExecBakedPlayback::_ApplyUpstream(UsdTimeCode time, bool sampled,
+                                     std::string *error)
+{
+    for (const auto &[path, key] : _upstreamApplied) {
+        if (!_upstreamAdmitted.count(path) &&
+            !_LiftUpstream(key, time, sampled, error)) {
+            return false;
+        }
+    }
+    std::map<SdfPath, _UpstreamKey> applied;
+    std::vector<SdfPath> refused;
+    for (const auto &[path, key] : _upstreamAdmitted) {
+        const auto was = _upstreamApplied.find(path);
+        const bool moved =
+            was == _upstreamApplied.end() || was->second.value != key.value;
+        // Apply overwrote an Animated input with the stage at the new time.
+        if (moved || (key.animated && sampled)) {
+            // SetSampledInputAt: the value stands where the stage value
+            // stood, and a stage value may be non-finite. A Token is set by
+            // its text, which the reader interns when the file lacks it.
+            RrInputValue value;
+            std::string why;
+            const bool set =
+                key.tag == RrInputTag::Token
+                    ? _reader->SetInputToken(
+                          key.name,
+                          key.value.UncheckedGet<TfToken>().GetString(),
+                          &why)
+                    : RigExecInputValueFrom(key.value, key.tag, &value) &&
+                          _reader->SetSampledInputAt(key.index, value, &why);
+            if (!set) {
+                // A refused set lifts the key, reported as live reports a
+                // dropped one.
+                _upstreamDropLines.push_back(
+                    "upstream input " + path.GetString() + ": " +
+                    (why.empty() ? std::string("the input refused it")
+                                 : why) +
+                    "; ignored");
+                refused.push_back(path);
+                if (was != _upstreamApplied.end() &&
+                    !_LiftUpstream(key, time, sampled, error)) {
+                    return false;
+                }
+                continue;
+            }
+        }
+        applied.emplace(path, key);
+    }
+    for (const SdfPath &path : refused) {
+        _upstreamAdmitted.erase(path);
+    }
+    _upstreamApplied = std::move(applied);
     return true;
 }
 
@@ -172,8 +340,17 @@ RigExecBakedPlayback::EvaluateAndPublishResult(UsdTimeCode time)
         return result;
     }
     std::string why;
-    if (!_sampler.Apply(time, _reader.get(), &why) ||
-        !_reader->Execute(&why)) {
+    bool sampled = false;
+    // Upstream values go in after Apply, never through
+    // _sampler.Invalidate(): an invalidated Apply touches every Animated
+    // input, so every varying step would re-run for a change that reaches
+    // only its own readers.
+    bool ran = _sampler.Apply(time, _reader.get(), &why, &sampled);
+    if (ran) {
+        _AdmitUpstream(time);
+        ran = _ApplyUpstream(time, sampled, &why) && _reader->Execute(&why);
+    }
+    if (!ran) {
         // The bridge's rule: a rig that cannot evaluate stops driving the
         // scene, and the next good generation re-announces its epoch.
         result.dirtied = _store->Publish(nullptr);

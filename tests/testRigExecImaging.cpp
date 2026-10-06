@@ -8,6 +8,7 @@
 // failure without evaluation, derivative blocking, terminal-enumeration
 // audit, and the real evaluator publishing the ArmShotAnim rig.
 #include "rigExecImaging/bridge.h"
+#include "rigExecImaging/playback.h"
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
 #include "rigExecImaging/upstreamTable.h"
@@ -15,7 +16,9 @@
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedTrace.h"
 #include "rigExec/frozenContext.h"
+#include "rigExecRuntimeDrive.h"
 
+#include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/editContext.h"
@@ -72,8 +75,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -5930,7 +5936,8 @@ struct _UpstreamImaging {
 std::unique_ptr<_UpstreamImaging>
 _OpenUpstreamImaging(
     const std::string &stagePath, const SdfPath &rig, double t,
-    const std::function<void(_UpstreamInputsSceneIndex &)> &seed = nullptr)
+    const std::function<void(_UpstreamInputsSceneIndex &)> &seed = nullptr,
+    const std::function<void(const UsdStageRefPtr &)> &prepare = nullptr)
 {
     auto imaging = std::make_unique<_UpstreamImaging>();
     imaging->stage = UsdStage::Open(stagePath);
@@ -5938,6 +5945,10 @@ _OpenUpstreamImaging(
     CHECK(imaging->stage);
     if (!imaging->stage) {
         return nullptr;
+    }
+    // Edits the stage needs before the chain activates the rig.
+    if (prepare) {
+        prepare(imaging->stage);
     }
     _UpstreamImaging *raw = imaging.get();
     UsdImagingCreateSceneIndicesInfo info;
@@ -6347,6 +6358,202 @@ _UpstreamValueSteps(const std::string &fixture, const SdfPath &attribute,
     CHECK(!imaging->context->GetUpstreamTable(kUpLimbsRig));
     _CheckUpstreamCone(*imaging, own, other, regionSeed, headSeed,
                        what + ": lifted");
+}
+
+// The geometry a playback generation owns: points and driven transforms
+// (playback draws no guides).
+static _UpstreamPose
+_UpstreamGeometry(_UpstreamPose pose)
+{
+    pose.guides.clear();
+    return pose;
+}
+
+// Step 6, interim form until W.3.6: the binary is baked with no upstream
+// value standing (the interim guard refuses a bake while one stands).
+//  - Both keys are listed inputs whose defaults are the authored values.
+//  - Execute with no input set equals the authored pose.
+//  - SetSampledInputAt of both values, then Execute, equals live with both
+//    standing.
+//  - Through imaging, a playback session over a rigExec:asset rig follows
+//    the same upstream->Set: equal to a stage authoring the value, lifted
+//    by Clear, a dropped key reported with live's line.
+static void
+_UpstreamPlaybackSteps(const std::string &fixture)
+{
+    std::printf("  upstream step 6 (.rigexec, interim form)\n");
+    const double t = 1.0;
+    const GfMatrix4d space = _UpTranslate(1, 0, 10);
+    const UsdStageRefPtr stage = UsdStage::Open(fixture);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, kUpLimbsRig);
+    CHECK(evaluator.Compile());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    const RigExecRigPose authored = evaluator.Evaluate(UsdTimeCode(t));
+    std::vector<uint8_t> bytes;
+    std::string error;
+    const bool baked = RigExecTestBakeAt(evaluator, t, &bytes, &error);
+    if (!baked) {
+        std::printf("    bake refused: %s\n", error.c_str());
+    }
+    CHECK(baked);
+    if (!baked) {
+        return;
+    }
+    std::unique_ptr<RigExecRuntimeReader> reader =
+        RigExecRuntimeReader::Open(bytes.data(), bytes.size(), &error);
+    CHECK(reader);
+    if (!reader) {
+        return;
+    }
+    size_t rz = 0;
+    size_t spaceInput = 0;
+    CHECK(reader->FindInput(kUpA0Rz.GetString(), &rz));
+    CHECK(reader->FindInput(kUpSpace.GetString(), &spaceInput));
+    const RigExecRuntimeInputInfo &rzInfo = reader->GetInputInfo(rz);
+    const RigExecRuntimeInputInfo &spaceInfo =
+        reader->GetInputInfo(spaceInput);
+    CHECK(rzInfo.type == RrInputTag::Double && !rzInfo.animated);
+    CHECK(rzInfo.defaultValue.f64 == 0.0);
+    CHECK(spaceInfo.type == RrInputTag::Matrix4d && !spaceInfo.animated);
+    CHECK(spaceInfo.defaultValue.matrix[3][2] == 10.0 &&
+          spaceInfo.defaultValue.matrix[3][0] == 0.0);
+    std::vector<std::string> diffs;
+    CHECK(reader->Execute(&error));
+    CHECK(RigExecCompareRuntimeOutputs(authored, *reader, &diffs));
+    // Live with both values standing.
+    evaluator.SetUpstreamInputs(
+        {RigExecValueOverride{kUpA0Rz.GetPrimPath(), TfToken(),
+                              kUpA0Rz.GetNameToken(), VtValue(30.0)},
+         RigExecValueOverride{kUpSpace.GetPrimPath(), TfToken(),
+                              kUpSpace.GetNameToken(), VtValue(space)}});
+    const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(t));
+    CHECK(evaluator.GetUpstreamInputPaths().size() == 2);
+    RrInputValue value;
+    CHECK(RigExecInputValueFrom(VtValue(30.0), RrInputTag::Double, &value));
+    CHECK(reader->SetSampledInputAt(rz, value, &error));
+    CHECK(RigExecInputValueFrom(VtValue(space), RrInputTag::Matrix4d,
+                                &value));
+    CHECK(reader->SetSampledInputAt(spaceInput, value, &error));
+    CHECK(reader->Execute(&error));
+    const bool same = RigExecCompareRuntimeOutputs(live, *reader, &diffs);
+    for (const std::string &line : diffs) {
+        std::printf("    %s\n", line.c_str());
+    }
+    CHECK(same);
+
+    // Through imaging: the same fixture with rigExec:asset naming the bake.
+    const std::filesystem::path binary =
+        std::filesystem::temp_directory_path() /
+        ("rigexec-upstream-step6-" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()) +
+         ".rigexec");
+    {
+        std::ofstream stream(binary, std::ios::binary);
+        stream.write(reinterpret_cast<const char *>(bytes.data()),
+                     std::streamsize(bytes.size()));
+    }
+    {
+        std::unique_ptr<_UpstreamImaging> imaging = _OpenUpstreamImaging(
+            fixture, kUpLimbsRig, t, nullptr,
+            [&binary](const UsdStageRefPtr &opened) {
+                UsdEditContext context(opened, opened->GetSessionLayer());
+                const UsdAttribute asset =
+                    opened->GetPrimAtPath(kUpLimbsRig)
+                        .CreateAttribute(TfToken("rigExec:asset"),
+                                         SdfValueTypeNames->Asset);
+                CHECK(asset.Set(SdfAssetPath(binary.generic_string())));
+            });
+        if (imaging) {
+            RigExecBakedPlayback *playback =
+                imaging->context->GetPlayback(kUpLimbsRig);
+            CHECK(playback);
+            CHECK(!imaging->context->GetBridge(kUpLimbsRig));
+            const _UpstreamPose playAuthored = imaging->Pose();
+            CHECK(!playAuthored.points.empty());
+            CHECK(_SameUpstreamPose(
+                _UpstreamGeometry(
+                    _UpstreamReference(fixture, kUpLimbsRig, {}, t)),
+                playAuthored, "playback: authored"));
+            for (const auto &[attribute, value] :
+                 std::vector<std::pair<SdfPath, VtValue>>{
+                     {kUpA0Rz, VtValue(30.0)}, {kUpSpace, VtValue(space)}}) {
+                const std::string what =
+                    "playback " + attribute.GetString();
+                const size_t before = imaging->Evaluations();
+                imaging->upstream->Set(attribute, value);
+                CHECK(imaging->Evaluations() == before + 1);
+                CHECK(playback &&
+                      playback->GetUpstreamInputPaths() ==
+                          std::vector<SdfPath>{attribute});
+                CHECK(_SameUpstreamPose(
+                    _UpstreamGeometry(_UpstreamReference(
+                        fixture, kUpLimbsRig, {{attribute, value, {}}}, t)),
+                    imaging->Pose(), what + ": standing"));
+                // A second identical Set hands nothing over.
+                imaging->upstream->Set(attribute, value);
+                CHECK(imaging->Evaluations() == before + 1);
+                imaging->upstream->Clear(attribute);
+                CHECK(playback && playback->GetUpstreamInputPaths().empty());
+                CHECK(_SameUpstreamPose(playAuthored, imaging->Pose(),
+                                        what + ": lifted"));
+            }
+            // Both at once, as the binary leg above.
+            imaging->upstream->Set(kUpA0Rz, VtValue(30.0));
+            imaging->upstream->Set(kUpSpace, VtValue(space));
+            CHECK(_SameUpstreamPose(
+                _UpstreamGeometry(_UpstreamReference(
+                    fixture, kUpLimbsRig,
+                    {{kUpA0Rz, VtValue(30.0), {}},
+                     {kUpSpace, VtValue(space), {}}},
+                    t)),
+                imaging->Pose(), "playback: both standing"));
+            imaging->upstream->Clear(kUpA0Rz);
+            imaging->upstream->Clear(kUpSpace);
+            // A dropped key: live's line, the authored pose.
+            imaging->upstream->Set(kUpBRootRestSpace, VtValue(space));
+            CHECK(playback && playback->GetUpstreamInputPaths().empty());
+            CHECK(playback &&
+                  playback->GetUpstreamDropLines() ==
+                      std::vector<std::string>{
+                          "upstream input " + kUpBRootRestSpace.GetString() +
+                          ": the attribute is connected; ignored"});
+            CHECK(_SameUpstreamPose(playAuthored, imaging->Pose(),
+                                    "playback: dropped"));
+        }
+    }
+    std::error_code removed;
+    std::filesystem::remove(binary, removed);
+}
+
+// Deferred to the runtime session: TestABakeExposesUpstreamAsInputs, step
+// 6's full form, after W.3.6 (which exposes standing upstream values as
+// inputs, deletes the interim IsBakeable reason and holds
+// RigExecScopedUpstreamSuspension across the bake): baked while both
+// values stand, the bytes equal a bake with them lifted, both keys are
+// listed with authored defaults and named in upstreamInputs, and the
+// evaluator's next generation still holds them.
+static void
+TestABakeExposesUpstreamAsInputs()
+{
+    std::printf("  TestABakeExposesUpstreamAsInputs: SKIPPED (after W.3.6; "
+                "runtime session)\n");
+}
+
+// Deferred to the runtime session (W.5, on the W.3.9 already in the tree):
+// the .rigexec legs of steps 3 and 4. Through a playback session, a Set
+// runs only the forward cone of the value's slot
+// (GetLastRunTraceForTesting), and a second identical Set runs no step
+// beyond the sources.
+static void
+TestTheRuntimeUpstreamCone()
+{
+    std::printf("  runtime upstream cone and no-change-no-work: SKIPPED "
+                "(runtime session, W.5)\n");
 }
 
 // Admission through imaging: each key is ignored, the pose stays authored.
@@ -6846,8 +7053,9 @@ _UpstreamLiftSteps(const std::string &stagePath, const SdfPath &rig,
 }
 
 // TestUpstreamSceneIndexDrivesRigInputs: steps 1-5 and 7 (frame cache off),
-// the posed variant, admission negatives, step 8 and its D7 variant, steps
-// 9, 9b and 9c. Step 6 (.rigexec playback) is U1e's.
+// step 6 in its interim form (.rigexec playback; the full form and the
+// runtime cone are the runtime session's), the posed variant, admission
+// negatives, step 8 and its D7 variant, steps 9, 9b and 9c.
 static void
 TestUpstreamSceneIndexDrivesRigInputs(const std::string &examplesDir)
 {
@@ -6870,6 +7078,9 @@ TestUpstreamSceneIndexDrivesRigInputs(const std::string &examplesDir)
         _UpstreamValueSteps(fixture, kUpSpace,
                             VtValue(_UpTranslate(1, 0, 10)), kUpLimbB,
                             kUpLimbA, "", "BRoot", "Upstream inputs:space");
+        _UpstreamPlaybackSteps(fixture);
+        TestABakeExposesUpstreamAsInputs();
+        TestTheRuntimeUpstreamCone();
         _UpstreamAdmissionNegatives(fixture);
         _UpstreamAddsAndChains(fixture);
         _UpstreamAddedOutsideRoots(fixture);

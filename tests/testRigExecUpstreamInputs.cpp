@@ -11,6 +11,8 @@
 // Registered plain and under the parity entries, where every baked
 // generation is also compared with the dynamic walk and, with
 // RIGEXEC_BAKED_VERIFY_CONES, the cone run with a forced run of everything.
+// A .rigexec playback session of a bake made with no upstream value admits
+// the same keys, reports the same drops and publishes live's outputs.
 // argv[1] = path to the examples directory.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
@@ -20,6 +22,8 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/computedCapture.h"
 #include "rigExecBake/pathTable.h"
+#include "rigExecImaging/playback.h"
+#include "rigExecRuntimeDrive.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
@@ -41,7 +45,10 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -1163,7 +1170,8 @@ TestDroppedKeys()
 // Registration note: array admission defaults on when AI (W.3.11, format 8)
 // merges; that merge flips the default and extends
 // TestEveryAdmissiblePathIsAnInput to array slots. The .rigexec legs of
-// these cases are the runtime session's (W.5), skipped here until then.
+// these cases are the runtime session's (W.5), skipped until then
+// (TestTheArrayPlaybackLegs).
 struct ArrayAdmission {
     ArrayAdmission() { RigExecSetUpstreamArrayAdmissionForTesting(true); }
     ~ArrayAdmission() { RigExecSetUpstreamArrayAdmissionForTesting(false); }
@@ -1277,10 +1285,6 @@ void
 TestTheArrayRows()
 {
     std::printf("case: array rows\n");
-    // Registered by the runtime session when AI lands (W.5): the .rigexec
-    // leg of every array case here.
-    std::printf("  skipped: .rigexec array legs (enable when AI, W.3.11 "
-                "format 8, merges; runtime session, W.5)\n");
     const auto rowsOf = [](const std::string &stagePath, const SdfPath &rig) {
         const UsdStageRefPtr stage = UsdStage::Open(stagePath);
         auto evaluator = Make(stage, rig, RigExecEvaluationMode::Dynamic);
@@ -2050,6 +2054,385 @@ TestTheBakeGuard()
     CheckSamePose("restored", standing, evaluator->Evaluate(UsdTimeCode(1)));
 }
 
+// --- .rigexec playback ----------------------------------------------------
+
+// Where the playback cases write the binaries they open.
+std::string g_scratch;
+
+// The upstream list a host hands live and playback alike, in the order
+// given (each backend judges each entry before the last-wins rule).
+std::vector<RigExecUpstreamValue>
+UpstreamList(const std::vector<RigExecValueOverride> &inputs)
+{
+    std::vector<RigExecUpstreamValue> values;
+    for (const RigExecValueOverride &o : inputs) {
+        values.push_back(RigExecUpstreamValue{
+            o.prim.AppendProperty(o.attribute), o.value, 0});
+    }
+    return values;
+}
+
+std::vector<std::string>
+DropLines(const RigExecRigPose &pose)
+{
+    std::vector<std::string> lines;
+    for (const std::string &line : pose.diagnostics) {
+        if (line.rfind("upstream input ", 0) == 0) {
+            lines.push_back(line);
+        }
+    }
+    return lines;
+}
+
+// \p evaluator's epoch baked at \p t (no upstream value may stand: the
+// interim guard refuses), written as \p name in the scratch directory.
+std::string
+WriteBake(RigExecRigEvaluator &evaluator, double t, const std::string &name)
+{
+    std::vector<uint8_t> bytes;
+    std::string error;
+    const bool baked = RigExecTestBakeAt(evaluator, t, &bytes, &error);
+    if (!baked) {
+        std::printf("FAIL bake %s: %s\n", name.c_str(), error.c_str());
+    }
+    CHECK(baked);
+    const std::string path = g_scratch + "/" + name + ".rigexec";
+    std::ofstream stream(path, std::ios::binary);
+    stream.write(reinterpret_cast<const char *>(bytes.data()),
+                 std::streamsize(bytes.size()));
+    return path;
+}
+
+// Whether \p admitted holds a key a playback session cannot follow before
+// AI, naming it in \p why: rigExec:elementSize on a skinTopologyFixed
+// revision. The runtime adopts the layout it opened for such a revision
+// and ignores the slot until AI's layout rebuild (W.3.11), while live's
+// SkinTopology op rebuilds from the leaf. Remove when AI merges.
+bool
+SkipsPoseUntilAI(const RigExecRigEvaluator &evaluator,
+                 const std::vector<SdfPath> &admitted, std::string *why)
+{
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (!program) {
+        return false;
+    }
+    for (const SdfPath &path : admitted) {
+        if (path.GetName() != "rigExec:elementSize") {
+            continue;
+        }
+        for (const auto &chain : program->GetStepGraph().chains) {
+            for (const auto &revision : chain.revisions) {
+                if (revision.moverPath == path.GetPrimPath() &&
+                    revision.skinTopologyFixed) {
+                    *why = path.GetString() +
+                           " on a skinTopologyFixed revision (until AI, "
+                           "W.3.11)";
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// \p reader's last run against \p pose, output domain by output domain and
+// the property chains' values, bit for bit.
+void
+CheckSameRun(const std::string &what, const RigExecRigPose &pose,
+             const RigExecRuntimeReader *reader)
+{
+    CHECK(reader);
+    if (!reader) {
+        return;
+    }
+    std::vector<std::string> diffs;
+    const bool outputs = RigExecCompareRuntimeOutputs(pose, *reader, &diffs);
+    const bool properties =
+        RigExecCompareRuntimeProperties(pose, *reader, &diffs);
+    if (!outputs || !properties) {
+        std::printf("FAIL %s: playback differs from live:\n", what.c_str());
+        for (const std::string &line : diffs) {
+            std::printf("    %s\n", line.c_str());
+        }
+    }
+    CHECK(outputs);
+    CHECK(properties);
+}
+
+// Playback parity (R3-M5): \p inputs on a playback session of a bake of the
+// rig at \p t made with no upstream values, over the stage with \p edits
+// authored. The session admits the keys live admits, reports the keys live
+// drops with live's lines, in live's order, and publishes live's outputs
+// while they stand, at \p t and then at each of \p later (Apply samples the
+// Animated inputs there, and the keys on them are set again), and after the
+// lift at the last of those times (an Animated key re-reads the stage
+// there). The admitted values move live's pose at \p t. Returns the admitted
+// keys that sit on Animated inputs of the file.
+std::set<SdfPath>
+CheckPlaybackParity(const std::string &what, const std::string &stagePath,
+                    const SdfPath &rig, double t,
+                    const std::vector<RigExecValueOverride> &inputs,
+                    const std::vector<Authored> &edits = {},
+                    const std::vector<double> &later = {})
+{
+    std::printf("case: playback parity: %s\n", what.c_str());
+    const UsdTimeCode time(t);
+    std::set<SdfPath> animated;
+    const UsdStageRefPtr stage = OpenAuthored(stagePath, edits);
+    if (!stage) {
+        return animated;
+    }
+    auto evaluator = Make(stage, rig, BakedMode());
+    const RigExecRigPose authored = evaluator->Evaluate(time);
+    std::string name = what;
+    for (char &c : name) {
+        c = std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+    }
+    const std::string file = WriteBake(*evaluator, t, name);
+
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    RigExecBakedPlayback play(stage, rig, store);
+    std::string error;
+    const bool opened = play.Open(file, &error);
+    if (!opened) {
+        std::printf("FAIL %s: open: %s\n", what.c_str(), error.c_str());
+    }
+    CHECK(opened);
+    if (!opened) {
+        return animated;
+    }
+    CHECK(play.EvaluateAndPublishResult(time).ok);
+    CheckSameRun(what + ": authored", authored, play.GetReaderForTesting());
+
+    evaluator->SetUpstreamInputs(inputs);
+    const RigExecRigPose live = evaluator->Evaluate(time);
+    const std::vector<SdfPath> admitted = evaluator->GetUpstreamInputPaths();
+    const std::vector<std::string> drops = DropLines(live);
+    play.SetUpstreamInputs(UpstreamList(inputs));
+    CHECK(play.GetUpstreamInputPaths() == admitted);
+    CHECK(play.EvaluateAndPublishResult(time).ok);
+    if (play.GetUpstreamInputPaths() != admitted ||
+        play.GetUpstreamDropLines() != drops) {
+        std::printf("FAIL %s: admission differs\n", what.c_str());
+        for (const SdfPath &path : admitted) {
+            std::printf("    live admits %s\n", path.GetText());
+        }
+        for (const SdfPath &path : play.GetUpstreamInputPaths()) {
+            std::printf("    playback admits %s\n", path.GetText());
+        }
+        for (const std::string &line : drops) {
+            std::printf("    live: %s\n", line.c_str());
+        }
+        for (const std::string &line : play.GetUpstreamDropLines()) {
+            std::printf("    playback: %s\n", line.c_str());
+        }
+    }
+    CHECK(play.GetUpstreamInputPaths() == admitted);
+    CHECK(play.GetUpstreamDropLines() == drops);
+    for (const SdfPath &path : admitted) {
+        const RigExecRuntimeReader *reader = play.GetReaderForTesting();
+        size_t index = 0;
+        if (reader->FindInput(path.GetString(), &index) &&
+            reader->GetInputInfo(index).animated) {
+            animated.insert(path);
+        }
+    }
+    std::string why;
+    const bool skip = SkipsPoseUntilAI(*evaluator, admitted, &why);
+    if (skip) {
+        std::printf("  skip pose compare: %s\n", why.c_str());
+    } else {
+        CheckSameRun(what + ": standing", live, play.GetReaderForTesting());
+        if (!admitted.empty()) {
+            CHECK(Differences(authored, live) != 0);
+        }
+    }
+    UsdTimeCode last = time;
+    for (const double at : later) {
+        last = UsdTimeCode(at);
+        const RigExecRigPose moved = evaluator->Evaluate(last);
+        CHECK(play.EvaluateAndPublishResult(last).ok);
+        CHECK(play.GetUpstreamInputPaths() == admitted);
+        CHECK(play.GetUpstreamDropLines() == DropLines(moved));
+        if (!skip) {
+            CheckSameRun(what + ": standing at " + TfStringify(at), moved,
+                         play.GetReaderForTesting());
+        }
+    }
+
+    evaluator->SetUpstreamInputs({});
+    const RigExecRigPose lifted = evaluator->Evaluate(last);
+    play.SetUpstreamInputs({});
+    CHECK(play.EvaluateAndPublishResult(last).ok);
+    CHECK(play.GetUpstreamInputPaths().empty());
+    CHECK(play.GetUpstreamDropLines().empty());
+    CheckSameRun(what + ": lifted", lifted, play.GetReaderForTesting());
+    return animated;
+}
+
+// The scalar cases, the dropped keys and a hook-off array, each on a
+// playback session against live.
+void
+TestPlaybackParity()
+{
+    const std::string limbs = Fixture("upstream_inputs.usda");
+    const SdfPath offset(
+        "/LimbsAsset/Rig/Solvers/LimbBIK.rigExec:upperLengthOffset");
+    const SdfPath scheme("/LimbsAsset/Geom/MeshA.subdivisionScheme");
+    VtFloatArray weights = AuthoredArray<VtFloatArray>(limbs, kJointWeights);
+    weights[0] = 0.5f;
+    weights[1] = 0.5f;
+    // Admitted, dropped (connected, another type after an admitted entry
+    // for the same path, no listed read, no attribute, an array with the
+    // admission hook off), in one list. The D2 keys sit on non-Animated
+    // inputs.
+    const std::set<SdfPath> limbsAnimated = CheckPlaybackParity(
+        "limbs", limbs, kLimbsRig, 1,
+        {Up(kA0Rz, VtValue(30.0)),
+         Up(kUpstreamSpace, VtValue(Translate(1, 0, 10))),
+         Up(kBRootRestSpace, VtValue(Translate(1, 0, 10))),
+         Up(kA0Rz, VtValue(30.0f)), Up(offset, VtValue(0.5)),
+         Up(scheme, VtValue(TfToken("catmullClark"))),
+         Up(SdfPath("/LimbsAsset/Rig.noSuchInput"), VtValue(1.0)),
+         Up(kJointWeights, VtValue(weights))},
+        {}, {4, 7.5});
+    CHECK(limbsAnimated.empty());
+    // A key on an Animated input (A1's keyed avar): set again after each
+    // Apply that sampled, and on the lift read from the stage at the time
+    // without a sample.
+    CHECK(CheckPlaybackParity("animated input", limbs, kLimbsRig, 3,
+                              {Up(kA1Rz, VtValue(20.0))}, {}, {5, 8}) ==
+          std::set<SdfPath>{kA1Rz});
+    // The solver input where it moves the pose.
+    CheckPlaybackParity("solver input", limbs, kLimbsRig, 5,
+                        {Up(offset, VtValue(0.5))});
+    // A layout scalar of a fixed skin layout: admitted by both, the pose
+    // compare skipped until AI (SkipsPoseUntilAI).
+    CheckPlaybackParity(
+        "skin elementSize", limbs, kLimbsRig, 1,
+        {Up(SdfPath("/LimbsAsset/Rig/Movers/MeshASkin.rigExec:elementSize"),
+            VtValue(1))});
+    CheckPlaybackParity(
+        "chain target and chain mover input",
+        Example("09_PropertyMathMovers.usda"), kPropRig, 1012,
+        {Up(SdfPath("/PropMathAsset/Rig/Channels/Dials.rigExec:gain"),
+            VtValue(0.5f)),
+         Up(SdfPath("/PropMathAsset/Rig/Movers/OffsetLift.inputs:value"),
+            VtValue(GfVec3f(0, 7, 0)))});
+    CheckPlaybackParity(
+        "rest:tx", Example("01_FkChainTail.usda"), kTailRig, 1012,
+        {Up(SdfPath("/TailAsset/Rig/Joints/Seg1/Seg2.rest:tx"),
+            VtValue(0.5))});
+    CheckPlaybackParity(
+        "skin mover inputs:defaultWeight", Example("biped/Biped.usda"),
+        SdfPath("/Biped/Rig"), 1,
+        {Up(SdfPath("/Biped/Rig/Movers/skin_body_geo/body_geo_skin."
+                    "inputs:defaultWeight"),
+            VtValue(0.5f))});
+    // The oracle-read scalar (the runtime's oracle reads it as an input on
+    // every call) and a connected listed hop.
+    CheckPlaybackParity(
+        "oracle input", Fixture("computed_weights.usda"),
+        SdfPath("/Asset/Rig"), 5,
+        {Up(SdfPath("/Asset/Rig/Weights/Driven.inputs:scale"),
+            VtValue(0.25f)),
+         Up(SdfPath("/Asset/Rig/Weights/Driven.inputs:driver"),
+            VtValue(0.5f))});
+}
+
+// A Token key goes through SetInputToken, once with text the file holds
+// (another skin mover authors it, so the bake interned it) and once with
+// text it does not (the reader interns it): live and playback agree.
+void
+TestAPlaybackTokenKey()
+{
+    const std::string limbs = Fixture("upstream_inputs.usda");
+    const SdfPath method(
+        "/LimbsAsset/Rig/Movers/MeshASkin.rigExec:skinningMethod");
+    const SdfPath other(
+        "/LimbsAsset/Rig/Movers/MeshBSkin.rigExec:skinningMethod");
+    const TfToken dq("dualQuaternion");
+    // Whether a token input of the file defaults to \p text.
+    const auto holds = [](const RigExecRuntimeReader &reader,
+                          const std::string &text) {
+        for (size_t i = 0; i < reader.GetInputCount(); ++i) {
+            const RigExecRuntimeInputInfo &info = reader.GetInputInfo(i);
+            if (info.type == RrInputTag::Token &&
+                reader.GetTokenText(info.defaultValue.token) == text) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const bool held : {false, true}) {
+        const std::string what =
+            held ? "token the file holds" : "token the file does not hold";
+        const std::vector<Authored> edits =
+            held ? std::vector<Authored>{{other, VtValue(dq), {}}}
+                 : std::vector<Authored>{};
+        // At frame 6, where A1 bends LimbA1 against LimbA0, so dual
+        // quaternions and linear blending part.
+        CheckPlaybackParity(what, limbs, kLimbsRig, 6,
+                            {Up(method, VtValue(dq))}, edits, {9});
+        // The reader side: the input holds the text, by the file's id when
+        // the file holds it.
+        const UsdStageRefPtr stage = OpenAuthored(limbs, edits);
+        auto evaluator = Make(stage, kLimbsRig, BakedMode());
+        evaluator->Evaluate(UsdTimeCode(6));
+        const std::string file =
+            WriteBake(*evaluator, 6, held ? "token_held" : "token_new");
+        RigExecBakedPlayback play(stage, kLimbsRig,
+                                  std::make_shared<RigExecSnapshotStore>());
+        std::string error;
+        CHECK(play.Open(file, &error));
+        const RigExecRuntimeReader *reader = play.GetReaderForTesting();
+        if (!reader) {
+            continue;
+        }
+        CHECK(holds(*reader, dq.GetString()) == held);
+        size_t index = 0;
+        CHECK(reader->FindInput(method.GetString(), &index));
+        CHECK(reader->GetInputInfo(index).type == RrInputTag::Token);
+        play.SetUpstreamInputs(UpstreamList({Up(method, VtValue(dq))}));
+        CHECK(play.EvaluateAndPublishResult(UsdTimeCode(6)).ok);
+        CHECK(reader->GetTokenText(reader->GetInputValue(index).token) ==
+              dq.GetString());
+        size_t otherIndex = 0;
+        CHECK(reader->FindInput(other.GetString(), &otherIndex));
+        CHECK((reader->GetInputValue(index).token ==
+               reader->GetInputInfo(otherIndex).defaultValue.token) == held);
+    }
+}
+
+// Deferred to the runtime session (W.5): enable when AI (W.3.11, format 8)
+// merges. The .rigexec legs of the array cases above, each on a playback
+// session of a bake made with no upstream value, against live with the
+// array standing and after the lift: chain base points, jointWeights,
+// chunked jointIndices (partition stale while standing), the invalid
+// layout (per-set validation fails the mover), time-varying jointWeights
+// (one SetInputArray per frame), the lattice cage (AtDefault and AtTime
+// reads both see the value); and the array keys of the playback-parity
+// case with the admission hook on (live admits them; playback finds no
+// array input until AI).
+void
+TestTheArrayPlaybackLegs()
+{
+    std::printf("case: array playback legs: SKIPPED (enable when AI "
+                "(W.3.11, format 8) merges; runtime session, W.5)\n");
+}
+
+// Deferred to the runtime session: after W.3.6, which exposes standing
+// upstream values as inputs, deletes the interim IsBakeable reason and
+// holds RigExecScopedUpstreamSuspension across the bake. The oracle case's
+// leg: a bake with inputs:scale standing lists the attribute, and the
+// runtime with SetSampledInputAt equals live.
+void
+TestAnOracleBakeListsTheAttribute()
+{
+    std::printf("case: oracle bake lists the attribute: SKIPPED (after "
+                "W.3.6; runtime session)\n");
+}
+
 // --- The admission sets against the exporter -------------------------------
 
 TfType
@@ -2270,6 +2653,13 @@ main(int argc, char **argv)
         return 2;
     }
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    const std::filesystem::path scratch =
+        std::filesystem::temp_directory_path() /
+        ("rigexec-upstream-" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(scratch);
+    g_scratch = scratch.generic_string();
     try {
         TestAChainTarget();
         TestAChainMoverInput();
@@ -2288,6 +2678,9 @@ main(int argc, char **argv)
         TestDroppedKeys();
         TestThePosedVariant();
         TestTheBakeGuard();
+        TestPlaybackParity();
+        TestAPlaybackTokenKey();
+        TestAnOracleBakeListsTheAttribute();
         // Arrays, behind the admission hook: the painted case first (it
         // gated the array list), then the admitted arrays.
         TestAPaintedWeightIsDropped();
@@ -2303,6 +2696,7 @@ main(int argc, char **argv)
         TestTheCountMemoReadsEachOpinion();
         TestTheCountMemoFollowsEdits();
         TestDroppedArrayKeys();
+        TestTheArrayPlaybackLegs();
         // Structural: the same answer in every mode, so once, unverified.
         if (TfGetenv("RIGEXEC_EVALUATION_MODE").empty() && !ConeVerify()) {
             TestEveryAdmissiblePathIsAnInput();
@@ -2311,6 +2705,8 @@ main(int argc, char **argv)
         std::printf("FAIL: threw: %s\n", error.what());
         return 1;
     }
+    std::error_code removed;
+    std::filesystem::remove_all(scratch, removed);
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

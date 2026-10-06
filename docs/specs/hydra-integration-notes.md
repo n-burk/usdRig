@@ -543,6 +543,10 @@ usdExecImaging itself uses (§1.3) and is the *only* pre-instancing hook.
 - Therefore (b) is unusable for stock usdview without patching OpenUSD or
   replacing the engine.
 
+RigExec sources installed through this callback can publish a `rigExecInputs`
+container. See the [upstream input contract](upstream-inputs.md) for admission,
+sampling, warming and binary playback.
+
 ### 6.3 (c) Other public mechanisms
 
 - The callback flavor of `RegisterSceneIndexForRenderer` (see 6.1) — usable

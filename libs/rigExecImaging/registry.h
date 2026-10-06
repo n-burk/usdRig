@@ -379,6 +379,10 @@ public:
     /// under the caller's own serialization with triggers.
     RigExecImagingBridge *GetBridge(const SdfPath &rig);
 
+    /// One rig's playback session, or null when the rig is unknown or
+    /// evaluates live. For tests, under the same terms as GetBridge.
+    RigExecBakedPlayback *GetPlayback(const SdfPath &rig);
+
     /// Every (time, key) completion the warm index holds for the rig, in
     /// index order. For tests pinning the 2.2 re-resolve lanes (which key
     /// each frame completed under, before and after a carry). Empty when
@@ -543,8 +547,8 @@ public:
     // always postdates the last source change (the fast path serves rows
     // with no digest compare). Before a live evaluation the bridge receives
     // the table's values at the evaluated time; warming reads the job
-    // time's values from the table alone. Playback sessions do not take
-    // upstream values yet.
+    // time's values from the table alone. A playback session takes the same
+    // hand-off and applies the values to its binary's inputs.
 
     /// The window a pull reconstructs: the union of the sessions' warm
     /// ranges, or the stage's start and end time codes when no session set

@@ -1493,7 +1493,7 @@ RigExecImagingRegistry::_Activate(
     if (!_upstreamTables.empty()) {
         const auto found = _upstreamTables.find(_upstreamChain);
         for (RigSession &session : candidate) {
-            if (!session.bridge) {
+            if (!session.bridge && !session.playback) {
                 continue;
             }
             session.upstream = _UpstreamShare(
@@ -1828,8 +1828,7 @@ RigExecImagingRegistry::GetUpstreamSerial(const SdfPath &rig)
 void
 RigExecImagingRegistry::_UpdateSessionUpstreamLocked(RigSession *session)
 {
-    // Playback sessions take no upstream values yet.
-    if (!session || !session->bridge) {
+    if (!session || (!session->bridge && !session->playback)) {
         return;
     }
     const auto found = _upstreamTables.find(_upstreamChain);
@@ -1846,9 +1845,12 @@ RigExecImagingRegistry::_UpdateSessionUpstreamLocked(RigSession *session)
     session->upstream = std::move(share);
     if (!same) {
         // The sources, the window or a frame value moved: rows warmed under
-        // the old ones must not serve (FindCachedKey compares no digest).
+        // the old ones must not serve (FindCachedKey compares no digest). A
+        // playback rig never warms.
         ++session->upstreamSerial;
-        _CancelGenerationLocked(session->rigPath);
+        if (session->bridge) {
+            _CancelGenerationLocked(session->rigPath);
+        }
     }
 }
 
@@ -1856,7 +1858,7 @@ void
 RigExecImagingRegistry::_HandOffUpstreamLocked(RigSession *session,
                                                UsdTimeCode time)
 {
-    if (!session || !session->bridge) {
+    if (!session || (!session->bridge && !session->playback)) {
         return;
     }
     std::vector<RigExecUpstreamValue> values;
@@ -1874,7 +1876,14 @@ RigExecImagingRegistry::_HandOffUpstreamLocked(RigSession *session,
             }
         }
     }
-    if (values != session->bridge->GetUpstreamInputs()) {
+    // A playback session applies them to the binary's inputs at its next
+    // generation (RigExecBakedPlayback::SetUpstreamInputs).
+    if (session->playback) {
+        if (values != session->playback->GetUpstreamInputs()) {
+            session->playback->SetUpstreamInputs(std::move(values));
+            session->dirty = true;
+        }
+    } else if (values != session->bridge->GetUpstreamInputs()) {
         session->bridge->SetUpstreamInputs(std::move(values));
         session->dirty = true;
     }
@@ -3191,6 +3200,21 @@ RigExecImagingRegistry::GetBridge(const SdfPath &rig)
     for (RigSession &session : _sessions) {
         if (session.rigPath == rig && !session.playback && session.bridge) {
             return session.bridge.get();
+        }
+    }
+    return nullptr;
+}
+
+RigExecBakedPlayback *
+RigExecImagingRegistry::GetPlayback(const SdfPath &rig)
+{
+    if (const Ptr routed = _Routed()) {
+        return routed->GetPlayback(rig);
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (RigSession &session : _sessions) {
+        if (session.rigPath == rig && session.playback) {
+            return session.playback.get();
         }
     }
     return nullptr;

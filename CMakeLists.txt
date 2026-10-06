@@ -1026,7 +1026,8 @@ rigexec_add_baked_parity_test(testRigExecArm REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecImaging tests/testRigExecImaging.cpp)
-target_link_libraries(testRigExecImaging PRIVATE rigExecImaging)
+target_link_libraries(testRigExecImaging PRIVATE
+    rigExecImaging rigExecBake rigExecRuntime rigExecSampler)
 target_compile_definitions(testRigExecImaging PRIVATE
     ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
@@ -1319,10 +1320,12 @@ rigexec_add_baked_parity_test(testRigExecRestOps REQUIRE_BAKE CONE_VERIFY
 # Upstream inputs through the evaluator API: authored-level values in the
 # dynamic walk and the baked program, each equal to a stage authoring the
 # value and back to the authored pose once lifted; the dropped keys; the
-# interim bake guard; and the admission sets equal to the exporter's
-# listed inputs and oracle-read objects.
+# interim bake guard; the admission sets equal to the exporter's listed
+# inputs and oracle-read objects; and a .rigexec playback session admitting,
+# dropping and publishing as live does.
 add_executable(testRigExecUpstreamInputs tests/testRigExecUpstreamInputs.cpp)
-target_link_libraries(testRigExecUpstreamInputs PRIVATE rigExecBake)
+target_link_libraries(testRigExecUpstreamInputs PRIVATE
+    rigExecBake rigExecImaging rigExecRuntime rigExecSampler)
 target_compile_definitions(testRigExecUpstreamInputs PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecUpstreamInputs COMMAND testRigExecUpstreamInputs

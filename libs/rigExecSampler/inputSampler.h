@@ -14,6 +14,8 @@
 
 #include "rigExecRuntime/runtime.h"
 
+#include "pxr/base/tf/type.h"
+#include "pxr/base/vt/value.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -23,6 +25,29 @@
 #include <vector>
 
 namespace rigExec {
+
+/// The value type an input of \p tag holds, the way the bake typed its
+/// slot: the attribute's own scalar type, any role.
+PXR_NS::TfType RigExecInputTagType(RrInputTag tag);
+
+/// The name of \p tag's type as a stage spells it ("double", "matrix4d").
+const char *RigExecInputTagName(RrInputTag tag);
+
+/// \p value as an input value of \p tag, for SetSampledInputAt. False when
+/// \p value does not hold exactly RigExecInputTagType(tag), and for a Token
+/// input, which is set by its text (SetInputToken).
+bool RigExecInputValueFrom(const PXR_NS::VtValue &value, RrInputTag tag,
+                           RrInputValue *out);
+
+/// Sets input \p index of \p reader, named \p name and of type \p tag, to
+/// \p attribute's typed value at \p time, as Apply sets an Animated input:
+/// SetSampledInputAt, which takes a non-finite value too, SetInputToken for
+/// a Token, and ClearInputAt when the read fails. False with the reader's
+/// reason when it refuses.
+bool RigExecSampleInputAt(const PXR_NS::UsdAttribute &attribute,
+                          size_t index, const std::string &name,
+                          RrInputTag tag, PXR_NS::UsdTimeCode time,
+                          RigExecRuntimeReader *reader, std::string *error);
 
 class RigExecInputSampler {
 public:
@@ -43,9 +68,10 @@ public:
     /// so the binary reads it as the evaluators read the stage. No call at
     /// all when \p time is the time of the last Apply, or the bake time
     /// right after Bind. False with the reader's reason when it refuses a
-    /// value; the next Apply samples again.
+    /// value; the next Apply samples again. \p sampled, when given, says
+    /// whether this call sampled (false for the no-call case).
     bool Apply(PXR_NS::UsdTimeCode time, RigExecRuntimeReader *reader,
-               std::string *error);
+               std::string *error, bool *sampled = nullptr);
 
     /// The next Apply samples whatever its time.
     void Invalidate() { _sampled = false; }

@@ -31,6 +31,11 @@
 // and only on an Animated input; changing the asset, or the file it names,
 // needs a re-activation, the same rule as a rig authored into an
 // already-active stage.
+// Upstream scene-index values (docs/specs/upstream-inputs.md, "Playback")
+// reach the binary through its inputs, as authored values: after each
+// Apply, every admitted key is set where the stage value stood, and a
+// lifted key returns to what the stage says. The sampler is never
+// invalidated for them, so an upstream change dirties only what reads it.
 #ifndef RIGEXEC_IMAGING_PLAYBACK_H
 #define RIGEXEC_IMAGING_PLAYBACK_H
 
@@ -39,13 +44,18 @@
 #include "rigExecRuntime/runtime.h"
 #include "rigExecSampler/inputSampler.h"
 
+#include "pxr/base/tf/type.h"
+#include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace rigExec {
 
@@ -96,7 +106,51 @@ public:
 
     const SdfPath &GetWeightOverlay() const { return _weightOverlay; }
 
+    /// Upstream values for this rig: authored-level, each replacing the
+    /// stage value of its attribute at every time. The list replaces the
+    /// last one; an empty list lifts every value. Admitted now and again at
+    /// each EvaluateAndPublishResult, which applies them. A key is admitted
+    /// when FindInput finds it as a listed input, the value holds exactly
+    /// that input's type, and on the stage the attribute is unconnected and
+    /// has a value; every other key is ignored with live's line, "upstream
+    /// input <path>: <reason>; ignored" (GetUpstreamDropLines). Array values
+    /// are never listed inputs until the format carries array slots.
+    void SetUpstreamInputs(std::vector<RigExecUpstreamValue> values);
+
+    /// The list SetUpstreamInputs last received.
+    const std::vector<RigExecUpstreamValue> &GetUpstreamInputs() const {
+        return _upstreamRequested;
+    }
+
+    /// The admitted keys, sorted.
+    std::vector<SdfPath> GetUpstreamInputPaths() const;
+
+    /// One line per key the last admission ignored, in the order given.
+    const std::vector<std::string> &GetUpstreamDropLines() const {
+        return _upstreamDropLines;
+    }
+
+    /// The reader, for tests that compare its outputs; null before Open.
+    const RigExecRuntimeReader *GetReaderForTesting() const {
+        return _reader.get();
+    }
+
 private:
+    // An admitted upstream key: the input it sets and the value.
+    struct _UpstreamKey {
+        size_t index = 0;
+        std::string name;
+        RrInputTag tag = RrInputTag::Double;
+        bool animated = false;
+        UsdAttribute attribute;
+        VtValue value;
+    };
+
+    void _AdmitUpstream(UsdTimeCode time);
+    bool _ApplyUpstream(UsdTimeCode time, bool sampled, std::string *error);
+    bool _LiftUpstream(const _UpstreamKey &key, UsdTimeCode time,
+                       bool sampled, std::string *error);
+
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
     SdfPath _assetRoot;
@@ -108,6 +162,15 @@ private:
     SdfPath _weightOverlay;
     uint64_t _generation = 0;
     uint64_t _publishedEpochDigest = 0;
+    // The listed inputs by path, with the type each holds (condition 3).
+    std::map<SdfPath, TfType> _listedInputs;
+    std::vector<RigExecUpstreamValue> _upstreamRequested;
+    // Admitted by the last admission, and set on the reader by the last
+    // application; a key in the second and not the first is lifted next.
+    std::map<SdfPath, _UpstreamKey> _upstreamAdmitted;
+    std::map<SdfPath, _UpstreamKey> _upstreamApplied;
+    std::vector<std::string> _upstreamDropLines;
+    UsdTimeCode _upstreamTime = UsdTimeCode::Default();
 };
 
 /// Resolves the playback file a rig names, if any. True with the playable
