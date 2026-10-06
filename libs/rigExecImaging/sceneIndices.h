@@ -12,6 +12,7 @@
 #define RIGEXEC_IMAGING_SCENE_INDICES_H
 
 #include "snapshotStore.h"
+#include "upstreamTable.h"
 
 #include "pxr/base/tf/token.h"
 
@@ -67,6 +68,11 @@ const TfToken &RigExecTriggerLeafToken();
 /// per-stage context to bind to -- see registry.h, "Chain -> context
 /// binding" -- and the TouchPose highlight index binds through it too.
 const TfToken &RigExecStageKeyLeafToken();
+
+/// The container an upstream scene index publishes on the prim that owns an
+/// attribute, `rigExecInputs`: one HdSampledDataSource child per attribute,
+/// named by attribute name (upstreamTable.h).
+const TfToken &RigExecUpstreamInputsToken();
 
 /// The stage key carried by the first top-level prim of \p entries that
 /// has one, read from \p input; 0 when no top-level prim in the batch
@@ -375,6 +381,20 @@ public:
     uint64_t GetContextKey() const { return _contextKey.load(); }
     void SetContextKey(uint64_t key) { _contextKey.store(key); }
 
+    /// Pulls this chain's upstream inputs again over the context's current
+    /// window (RigExecImagingRegistry::SetWarmRange calls it after a window
+    /// change) and hands the table to the context. Call with no context
+    /// lock held, since the pull calls into upstream data sources, and on
+    /// the thread that delivers this index's notices, which owns the noted
+    /// prims.
+    void PullUpstreamInputs();
+
+    /// The table this chain last handed to its context (null before any
+    /// pull, or while no prim carries `rigExecInputs`). For tests.
+    std::shared_ptr<const RigExecUpstreamTable> GetUpstreamTable() const {
+        return std::atomic_load(&_upstreamTable);
+    }
+
     HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override;
     SdfPathVector GetChildPrimPaths(const SdfPath &primPath) const override;
 
@@ -412,6 +432,38 @@ private:
         const HdSceneIndexObserver::DirtiedPrimEntries::value_type &entry)
         const;
 
+    /// Why an upstream pull runs: a trigger at a new T0 (the caller
+    /// evaluates next), a source added, removed or dirtied (the context
+    /// re-evaluates at its time), or a new window (nothing to re-evaluate:
+    /// the values at T0 stand).
+    enum class _UpstreamPull { Trigger, Sources, Window };
+
+    /// Notes the added prims whose data carries `rigExecInputs`; true when
+    /// a noted prim was added.
+    bool _NoteUpstreamAdded(
+        const HdSceneIndexObserver::AddedPrimEntries &entries);
+
+    /// Notes the prims whose dirty intersects `rigExecInputs` (a universal
+    /// dirty only on a prim already noted); true when any.
+    bool _NoteUpstreamDirtied(
+        const HdSceneIndexObserver::DirtiedPrimEntries &entries);
+
+    /// Forgets the noted prims at or under the removed paths; true when
+    /// any went.
+    bool _NoteUpstreamRemoved(
+        const HdSceneIndexObserver::RemovedPrimEntries &entries);
+
+    /// One pull, plus at most one more for a notice that arrived while it
+    /// ran (a source may send one from GetValue); a further notice during
+    /// that second pull is dropped with a diagnostic.
+    void _RequestUpstreamPull(_UpstreamPull why);
+
+    /// Reads every noted prim's sources with no lock held, builds the
+    /// table and hands it to the context (upstreamTable.h). A trigger whose
+    /// T0 lies inside the stored window, with no source change since,
+    /// re-derives only the values at T0 and calls no data source.
+    void _PullUpstreamOnce(_UpstreamPull why);
+
     /// Reconciles the announced synthesized guide children of one
     /// published prim against the current snapshot, emitting exact
     /// PrimsAdded/PrimsRemoved entries (joints and aggregate solvers
@@ -439,6 +491,19 @@ private:
     /// through GetStore().
     std::shared_ptr<RigExecSnapshotStore> _store;
     std::atomic<uint64_t> _contextKey{0};
+
+    /// Upstream inputs (upstreamTable.h), on the notice thread: the prims
+    /// known to carry `rigExecInputs`, whether a source changed since the
+    /// last pull, the last trigger time (T0), and the last table, swapped
+    /// atomically for GetUpstreamTable.
+    std::set<SdfPath> _upstreamPrims;
+    bool _upstreamSourcesDirty = false;
+    bool _haveUpstreamT0 = false;
+    double _upstreamT0 = 0.0;
+    std::shared_ptr<const RigExecUpstreamTable> _upstreamTable;
+    std::atomic<bool> _upstreamPulling{false};
+    std::atomic<bool> _upstreamRepull{false};
+    std::atomic<bool> _upstreamInRepull{false};
     /// Guide topology already announced per published prim: one sphere/cone
     /// bit mask per payload element (mutated only on the serialized
     /// publication path).

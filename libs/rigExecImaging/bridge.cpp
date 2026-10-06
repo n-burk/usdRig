@@ -2186,17 +2186,35 @@ bool
 RigExecImagingBridge::_SampleLive(
     UsdTimeCode time, RigExecFrameInputs *out) const
 {
+    // The upstream values ride the vector (RigExecFrameInputs::upstream),
+    // admitted as live admits them, so every digest of it folds them.
     if (_EnsureChainBindings() &&
         RigExecSampleFrameInputsWithTrustedChainBindings(
-            *_evaluator, time, _interactiveOverrides, _liveChainBindings,
-            out)) {
+            *_evaluator, time, _interactiveOverrides, _upstreamInputs,
+            _liveChainBindings, out)) {
         return true;
     }
     // The pinned route declined (a bind that failed, an override it cannot
     // place, a hook that refused): the self-binding sampler answers exactly
     // as it always has, at its own cost.
     return RigExecSampleFrameInputs(*_evaluator, time, _interactiveOverrides,
-                                    out);
+                                    _upstreamInputs, out);
+}
+
+void
+RigExecImagingBridge::SetUpstreamInputs(
+    std::vector<RigExecUpstreamValue> values)
+{
+    std::vector<RigExecValueOverride> inputs;
+    inputs.reserve(values.size());
+    for (const RigExecUpstreamValue &value : values) {
+        inputs.push_back(RigExecValueOverride{value.path.GetPrimPath(),
+                                              TfToken(),
+                                              value.path.GetNameToken(),
+                                              value.value});
+    }
+    _upstreamInputs = std::move(values);
+    _evaluator->SetUpstreamInputs(std::move(inputs));
 }
 
 bool
@@ -2224,7 +2242,8 @@ RigExecImagingBridge::_ComputePoseOnlyCacheKey(
     UsdTimeCode time, RigExecFrameCacheKey *key) const
 {
     if (!key || !_frameCache ||
-        !RigExecRefusalControlDigestible(_interactiveOverrides)) {
+        !RigExecRefusalControlDigestible(_interactiveOverrides,
+                                         _upstreamInputs)) {
         return false;
     }
     // Complete live results remain cacheable when an operation has no
@@ -2232,7 +2251,8 @@ RigExecImagingBridge::_ComputePoseOnlyCacheKey(
     // per-operation input list or partial retained-state proof is needed.
     key->epochDigest = RigExecFrameCacheEpochDigest(*_evaluator);
     key->controlDigest = RigExecRefusalControlDigest(
-        time, _evaluator->GetStageEditSerial(), _interactiveOverrides);
+        time, _evaluator->GetStageEditSerial(), _interactiveOverrides,
+        _upstreamInputs);
     return true;
 }
 

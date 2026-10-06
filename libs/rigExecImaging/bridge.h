@@ -390,6 +390,17 @@ public:
         _evaluator->ClearInteractiveOverrides();
     }
 
+    /// This frame's upstream values (authored-level; RigExecRigEvaluator::
+    /// SetUpstreamInputs admits them), sorted by path. Records only, like
+    /// SetInteractiveOverrides. Unlike a drag they keep the frame cache on:
+    /// the live sampler carries them (RigExecFrameInputs::upstream), so
+    /// every sampled key folds them, and the pose-only key folds them too.
+    void SetUpstreamInputs(std::vector<RigExecUpstreamValue> values);
+
+    const std::vector<RigExecUpstreamValue> &GetUpstreamInputs() const {
+        return _upstreamInputs;
+    }
+
     /// The stage the rig evaluates against, for a caller that has to read the
     /// authored value an override is standing in for.
     const UsdStageRefPtr &GetEvaluationStage() const {
@@ -411,7 +422,8 @@ private:
     /// its posed frame (spec §10.3 extension).
     /// Records the stage identity and sample time on a generation.
     /// A complete conservative key for operations without a sampled input
-    /// contract: time, stage-edit serial, epoch and standing overrides.
+    /// contract: time, stage-edit serial, epoch, standing overrides and
+    /// upstream values.
     bool _ComputePoseOnlyCacheKey(
         UsdTimeCode time, RigExecFrameCacheKey *key) const;
 
@@ -629,6 +641,9 @@ private:
     /// digest folds them explicitly (a drag must never hit a pre-drag pose)
     /// and warming jobs sample them at enqueue time.
     std::vector<RigExecValueOverride> _interactiveOverrides;
+    /// The upstream values as handed to SetUpstreamInputs: the live sampler
+    /// carries them and the pose-only key folds them.
+    std::vector<RigExecUpstreamValue> _upstreamInputs;
     /// Freshness proofs: (isDefault, timeValue) -> the proof recorded for
     /// a sample taken right after a live evaluation AT that time, when
     /// every chain-resolved input was fresh. A lookup serves a cached pose

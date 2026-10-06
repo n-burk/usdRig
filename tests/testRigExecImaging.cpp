@@ -10,10 +10,15 @@
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
+#include "rigExecImaging/upstreamTable.h"
 #include "rigExecMath/avarScale.h"
+#include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedTrace.h"
+#include "rigExec/frozenContext.h"
 
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/references.h"
@@ -21,7 +26,10 @@
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/matrix4f.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/diagnosticMgr.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/coneSchema.h"
@@ -32,6 +40,7 @@
 #include "pxr/imaging/hd/legacyDisplayStyleSchema.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
+#include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/sphereSchema.h"
 #include "pxr/imaging/hd/flattenedDataSourceProviders.h"
 #include "pxr/imaging/hd/flatteningSceneIndex.h"
@@ -62,10 +71,16 @@
 #include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <limits>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace rigExec;
@@ -5448,6 +5463,1462 @@ TestPolicyRigActivationSurvivesItsOwnDerivation(
     }
 }
 
+// --- Upstream scene-index inputs ------------------------------------------
+//
+// An upstream scene index publishes `rigExecInputs` containers; the results
+// index pulls them (with no registry lock held) into a table its context
+// stores, hands each live evaluation the values at its time, and warms other
+// frames from the table alone. The frame cache keys every frame on its own
+// values.
+
+namespace {
+
+// Calls into the test sources: how many, how many off a sample time, and
+// how many from a thread other than the one that built the scene index.
+struct _UpstreamCalls {
+    std::atomic<size_t> getValue{0};
+    std::atomic<size_t> offSample{0};
+    std::atomic<size_t> offThread{0};
+    std::thread::id owner = std::this_thread::get_id();
+};
+
+// One `rigExecInputs` child. Uniform: GetContributingSampleTimesForInterval
+// says false. Sampled: true with the window's integer frames, answering
+// f(T + dt) only there. Sparse: true with the given frames only, answering
+// only there. T is the scene index's time at the call.
+class _UpstreamSource : public HdSampledDataSource {
+public:
+    HD_DECLARE_DATASOURCE(_UpstreamSource);
+
+    enum class Kind { Uniform, Sampled, Sparse };
+
+    VtValue GetValue(Time offset) override
+    {
+        _Count();
+        if (_kind == Kind::Uniform) {
+            return _uniform;
+        }
+        const double at = _time->load() + double(offset);
+        if (_kind == Kind::Sampled) {
+            if (std::floor(at) == at) {
+                return _f(at);
+            }
+        } else {
+            const auto found = _samples.find(at);
+            if (found != _samples.end()) {
+                return found->second;
+            }
+        }
+        _calls->offSample.fetch_add(1);
+        return VtValue();
+    }
+
+    bool GetContributingSampleTimesForInterval(
+        Time startTime, Time endTime, std::vector<Time> *out) override
+    {
+        if (_kind == Kind::Uniform) {
+            return false;
+        }
+        const double t = _time->load();
+        out->clear();
+        if (_kind == Kind::Sampled) {
+            for (double f = std::ceil(t + startTime);
+                 f <= std::floor(t + endTime); f += 1.0) {
+                out->push_back(Time(f - t));
+            }
+        } else {
+            for (const auto &[at, value] : _samples) {
+                out->push_back(Time(at - t));
+            }
+        }
+        return true;
+    }
+
+private:
+    _UpstreamSource(Kind kind, VtValue uniform,
+                    std::function<VtValue(double)> f,
+                    std::map<double, VtValue> samples,
+                    std::shared_ptr<std::atomic<double>> time,
+                    std::shared_ptr<_UpstreamCalls> calls)
+        : _kind(kind), _uniform(std::move(uniform)), _f(std::move(f)),
+          _samples(std::move(samples)), _time(std::move(time)),
+          _calls(std::move(calls))
+    {
+    }
+
+    void _Count()
+    {
+        _calls->getValue.fetch_add(1);
+        if (std::this_thread::get_id() != _calls->owner) {
+            _calls->offThread.fetch_add(1);
+        }
+    }
+
+    Kind _kind;
+    VtValue _uniform;
+    std::function<VtValue(double)> _f;
+    std::map<double, VtValue> _samples;
+    std::shared_ptr<std::atomic<double>> _time;
+    std::shared_ptr<_UpstreamCalls> _calls;
+};
+
+HD_DECLARE_DATASOURCE_HANDLES(_UpstreamSource);
+
+// The sources by prim, then attribute name.
+using _UpstreamSourceMap =
+    std::map<SdfPath, std::map<TfToken, HdDataSourceBaseHandle>>;
+
+// A prim's data source with `rigExecInputs` read from the live source map
+// at each Get. The handle a downstream index caches (the flattening index
+// keeps the prim's input data source until a resync) therefore stays
+// valid while sources come and go, and a dirty is all a change needs.
+class _UpstreamPrimSource : public HdContainerDataSource {
+public:
+    HD_DECLARE_DATASOURCE(_UpstreamPrimSource);
+
+    TfTokenVector GetNames() override
+    {
+        TfTokenVector names =
+            _input ? _input->GetNames() : TfTokenVector();
+        if (_Inputs()) {
+            names.push_back(RigExecUpstreamInputsToken());
+        }
+        return names;
+    }
+
+    HdDataSourceBaseHandle Get(const TfToken &name) override
+    {
+        if (name == RigExecUpstreamInputsToken()) {
+            return _Inputs();
+        }
+        return _input ? _input->Get(name) : nullptr;
+    }
+
+private:
+    _UpstreamPrimSource(HdContainerDataSourceHandle input,
+                        std::shared_ptr<const _UpstreamSourceMap> sources,
+                        SdfPath prim)
+        : _input(std::move(input)), _sources(std::move(sources)),
+          _prim(std::move(prim))
+    {
+    }
+
+    HdContainerDataSourceHandle _Inputs() const
+    {
+        const auto found = _sources->find(_prim);
+        if (found == _sources->end() || found->second.empty()) {
+            return nullptr;
+        }
+        std::vector<TfToken> names;
+        std::vector<HdDataSourceBaseHandle> values;
+        for (const auto &[name, source] : found->second) {
+            names.push_back(name);
+            values.push_back(source);
+        }
+        return HdRetainedContainerDataSource::New(names.size(), names.data(),
+                                                  values.data());
+    }
+
+    HdContainerDataSourceHandle _input;
+    std::shared_ptr<const _UpstreamSourceMap> _sources;
+    SdfPath _prim;
+};
+
+// Publishes `rigExecInputs` on the prims it was given values for, and sends
+// the dirty a value change owes.
+class _UpstreamInputsSceneIndex : public HdSingleInputFilteringSceneIndexBase {
+public:
+    static TfRefPtr<_UpstreamInputsSceneIndex> New(
+        const HdSceneIndexBaseRefPtr &input)
+    {
+        return TfCreateRefPtr(new _UpstreamInputsSceneIndex(input));
+    }
+
+    void Set(const SdfPath &attribute, const VtValue &value)
+    {
+        _Put(attribute, _UpstreamSource::New(
+                            _UpstreamSource::Kind::Uniform, value, nullptr,
+                            std::map<double, VtValue>(), _time, calls));
+    }
+
+    void SetSampled(const SdfPath &attribute,
+                    std::function<VtValue(double)> f)
+    {
+        _Put(attribute, _UpstreamSource::New(
+                            _UpstreamSource::Kind::Sampled, VtValue(),
+                            std::move(f), std::map<double, VtValue>(), _time,
+                            calls));
+    }
+
+    void SetSparse(const SdfPath &attribute,
+                   std::map<double, VtValue> samples)
+    {
+        _Put(attribute, _UpstreamSource::New(
+                            _UpstreamSource::Kind::Sparse, VtValue(), nullptr,
+                            std::move(samples), _time, calls));
+    }
+
+    void Clear(const SdfPath &attribute)
+    {
+        _Put(attribute, nullptr);
+    }
+
+    void SetTime(double t) { _time->store(t); }
+
+    HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override
+    {
+        HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
+        if (prim.dataSource) {
+            prim.dataSource = _UpstreamPrimSource::New(prim.dataSource,
+                                                       _sources, primPath);
+        }
+        return prim;
+    }
+
+    SdfPathVector GetChildPrimPaths(const SdfPath &primPath) const override
+    {
+        return _GetInputSceneIndex()->GetChildPrimPaths(primPath);
+    }
+
+    std::shared_ptr<_UpstreamCalls> calls =
+        std::make_shared<_UpstreamCalls>();
+
+protected:
+    void _PrimsAdded(const HdSceneIndexBase &,
+                     const HdSceneIndexObserver::AddedPrimEntries &entries)
+        override
+    {
+        _SendPrimsAdded(entries);
+    }
+    void _PrimsRemoved(
+        const HdSceneIndexBase &,
+        const HdSceneIndexObserver::RemovedPrimEntries &entries) override
+    {
+        _SendPrimsRemoved(entries);
+    }
+    void _PrimsDirtied(
+        const HdSceneIndexBase &,
+        const HdSceneIndexObserver::DirtiedPrimEntries &entries) override
+    {
+        _SendPrimsDirtied(entries);
+    }
+
+private:
+    explicit _UpstreamInputsSceneIndex(const HdSceneIndexBaseRefPtr &input)
+        : HdSingleInputFilteringSceneIndexBase(input)
+    {
+    }
+
+    void _Put(const SdfPath &attribute, const HdDataSourceBaseHandle &source)
+    {
+        const SdfPath prim = attribute.GetPrimPath();
+        if (source) {
+            (*_sources)[prim][attribute.GetNameToken()] = source;
+        } else {
+            (*_sources)[prim].erase(attribute.GetNameToken());
+        }
+        // A value change at any time is announced by dirtying the child.
+        HdSceneIndexObserver::DirtiedPrimEntries dirtied;
+        dirtied.emplace_back(
+            prim, HdDataSourceLocatorSet{HdDataSourceLocator(
+                      RigExecUpstreamInputsToken(),
+                      attribute.GetNameToken())});
+        _SendPrimsDirtied(dirtied);
+    }
+
+    std::shared_ptr<_UpstreamSourceMap> _sources =
+        std::make_shared<_UpstreamSourceMap>();
+    std::shared_ptr<std::atomic<double>> _time =
+        std::make_shared<std::atomic<double>>(0.0);
+};
+
+// What a generation publishes: points, driven transforms and guide frames
+// (joint matrices), by prim.
+struct _UpstreamPose {
+    std::map<SdfPath, VtVec3fArray> points;
+    std::map<SdfPath, GfMatrix4d> xforms;
+    std::map<SdfPath, std::vector<GfMatrix4d>> guides;
+
+    bool Empty() const { return points.empty() && guides.empty(); }
+};
+
+_UpstreamPose
+_CaptureUpstreamPose(const RigExecImagingSnapshotConstPtr &snapshot)
+{
+    _UpstreamPose pose;
+    if (!snapshot) {
+        return pose;
+    }
+    for (const auto &[path, prim] : snapshot->prims) {
+        if (prim.hasPoints) {
+            pose.points[path] = prim.points;
+        }
+        if (prim.hasXform) {
+            pose.xforms[path] = prim.xform;
+        }
+        if (prim.hasGuides) {
+            pose.guides[path] = prim.guideFrames;
+        }
+    }
+    return pose;
+}
+
+// The entries whose path names any of \p names.
+_UpstreamPose
+_UpstreamPart(const _UpstreamPose &pose,
+              const std::vector<std::string> &names)
+{
+    const auto named = [&](const SdfPath &path) {
+        for (const std::string &name : names) {
+            if (path.GetString().find(name) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    _UpstreamPose part;
+    for (const auto &[path, points] : pose.points) {
+        if (named(path)) {
+            part.points[path] = points;
+        }
+    }
+    for (const auto &[path, xform] : pose.xforms) {
+        if (named(path)) {
+            part.xforms[path] = xform;
+        }
+    }
+    for (const auto &[path, guides] : pose.guides) {
+        if (named(path)) {
+            part.guides[path] = guides;
+        }
+    }
+    return part;
+}
+
+// Bit-identical, printing the first difference under \p what.
+bool
+_SameUpstreamPose(const _UpstreamPose &a, const _UpstreamPose &b,
+                  const std::string &what, bool report = true)
+{
+    std::string why;
+    if (a.points.size() != b.points.size() ||
+        a.xforms.size() != b.xforms.size() ||
+        a.guides.size() != b.guides.size()) {
+        why = "different prim sets";
+    }
+    for (const auto &[path, points] : a.points) {
+        const auto found = b.points.find(path);
+        if (why.empty() &&
+            (found == b.points.end() || found->second != points)) {
+            why = "points differ at " + path.GetString();
+        }
+    }
+    for (const auto &[path, xform] : a.xforms) {
+        const auto found = b.xforms.find(path);
+        if (why.empty() &&
+            (found == b.xforms.end() || found->second != xform)) {
+            why = "xform differs at " + path.GetString();
+        }
+    }
+    for (const auto &[path, guides] : a.guides) {
+        const auto found = b.guides.find(path);
+        if (why.empty() &&
+            (found == b.guides.end() || found->second != guides)) {
+            why = "guides differ at " + path.GetString();
+        }
+    }
+    if (!why.empty() && report) {
+        std::printf("    %s: %s\n", what.c_str(), why.c_str());
+    }
+    return why.empty();
+}
+
+// A value a reference stage authors in its session layer: a default, or
+// time samples.
+struct _UpstreamAuthored {
+    SdfPath path;
+    VtValue value;
+    std::map<double, VtValue> samples;
+};
+
+// What a bridge publishes at \p t over \p stagePath with \p edits authored.
+_UpstreamPose
+_UpstreamReference(const std::string &stagePath, const SdfPath &rig,
+                   const std::vector<_UpstreamAuthored> &edits, double t)
+{
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return _UpstreamPose();
+    }
+    {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        for (const _UpstreamAuthored &edit : edits) {
+            const UsdAttribute attribute =
+                stage->GetAttributeAtPath(edit.path);
+            CHECK(attribute);
+            if (!attribute) {
+                continue;
+            }
+            if (edit.samples.empty()) {
+                CHECK(attribute.Set(edit.value));
+            }
+            for (const auto &[at, value] : edit.samples) {
+                CHECK(attribute.Set(value, UsdTimeCode(at)));
+            }
+        }
+    }
+    RigExecImagingBridge bridge(stage, rig);
+    std::vector<std::string> errors;
+    const bool compiled = bridge.Compile(&errors);
+    CHECK(compiled);
+    if (!compiled) {
+        return _UpstreamPose();
+    }
+    CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(t)).ok);
+    return _CaptureUpstreamPose(bridge.GetStore()->Get());
+}
+
+// One stage imaged through the real UsdImaging chain with the upstream
+// scene index installed after the stage scene index; the rig adapter
+// activates it.
+struct _UpstreamImaging {
+    UsdStageRefPtr stage;
+    TfRefPtr<_UpstreamInputsSceneIndex> upstream;
+    UsdImagingSceneIndices indices;
+    RigExecImagingRegistry::Ptr context;
+    SdfPath rig;
+
+    ~_UpstreamImaging()
+    {
+        if (context) {
+            context->Deactivate();
+        }
+    }
+
+    // The input scene index's time and the stage scene index's, together:
+    // the trigger the stage scene index sends carries T0.
+    void SetTime(double t)
+    {
+        upstream->SetTime(t);
+        indices.stageSceneIndex->SetTime(UsdTimeCode(t));
+    }
+
+    _UpstreamPose Pose() const
+    {
+        return _CaptureUpstreamPose(context->GetStore()->Get());
+    }
+
+    size_t Evaluations() const
+    {
+        return context->GetSessionEvaluationCount(rig);
+    }
+
+    const RigExecRigEvaluator *Evaluator() const
+    {
+        RigExecImagingBridge *bridge = context->GetBridge(rig);
+        return bridge ? &bridge->GetEvaluator() : nullptr;
+    }
+
+    const RigExecBakedProgram *Program() const
+    {
+        const RigExecRigEvaluator *evaluator = Evaluator();
+        return evaluator ? evaluator->GetBakedProgram() : nullptr;
+    }
+};
+
+std::unique_ptr<_UpstreamImaging>
+_OpenUpstreamImaging(
+    const std::string &stagePath, const SdfPath &rig, double t,
+    const std::function<void(_UpstreamInputsSceneIndex &)> &seed = nullptr)
+{
+    auto imaging = std::make_unique<_UpstreamImaging>();
+    imaging->stage = UsdStage::Open(stagePath);
+    imaging->rig = rig;
+    CHECK(imaging->stage);
+    if (!imaging->stage) {
+        return nullptr;
+    }
+    _UpstreamImaging *raw = imaging.get();
+    UsdImagingCreateSceneIndicesInfo info;
+    info.stage = imaging->stage;
+    info.overridesSceneIndexCallback =
+        [raw, &seed, t](const HdSceneIndexBaseRefPtr &input)
+        -> HdSceneIndexBaseRefPtr {
+        raw->upstream = _UpstreamInputsSceneIndex::New(input);
+        // Sources standing before population reach RigExec as adds.
+        if (seed) {
+            raw->upstream->SetTime(t);
+            seed(*raw->upstream);
+        }
+        return raw->upstream;
+    };
+    imaging->indices = UsdImagingCreateSceneIndices(info);
+    CHECK(imaging->upstream);
+    imaging->context =
+        RigExecImagingRegistry::ForStage(imaging->stage, false);
+    CHECK(imaging->context && imaging->context->IsActive());
+    if (!imaging->upstream || !imaging->context ||
+        !imaging->context->IsActive()) {
+        return nullptr;
+    }
+    imaging->SetTime(t);
+    return imaging;
+}
+
+// The frame cache mode for a span of the test, restored after.
+class _UpstreamCacheMode {
+public:
+    explicit _UpstreamCacheMode(const char *mode)
+        : _saved(TfGetenv("RIGEXEC_FRAME_CACHE", ""))
+    {
+        TfSetenv("RIGEXEC_FRAME_CACHE", mode);
+    }
+    ~_UpstreamCacheMode()
+    {
+        if (_saved.empty()) {
+            TfUnsetenv("RIGEXEC_FRAME_CACHE");
+        } else {
+            TfSetenv("RIGEXEC_FRAME_CACHE", _saved);
+        }
+    }
+
+private:
+    std::string _saved;
+};
+
+const SdfPath kUpLimbsRig("/LimbsAsset/Rig");
+const SdfPath kUpA0Rz("/LimbsAsset/Rig/Controls/A0.avars:rz");
+const SdfPath kUpSpace("/LimbsAsset/Upstream.inputs:space");
+const SdfPath kUpBRootRestSpace("/LimbsAsset/Rig/Controls/BRoot.rest:space");
+const SdfPath kUpJointWeights(
+    "/LimbsAsset/Rig/Movers/MeshASkin.rigExec:jointWeights");
+const std::vector<std::string> kUpLimbA{"LimbA", "MeshA", "/A0", "/A1"};
+const std::vector<std::string> kUpLimbB{"LimbB", "MeshB", "BRoot",
+                                        "BEffector", "BPole"};
+
+GfMatrix4d
+_UpTranslate(double x, double y, double z)
+{
+    GfMatrix4d m(1.0);
+    m.SetTranslateOnly(GfVec3d(x, y, z));
+    return m;
+}
+
+bool
+_Names(const std::string &label, const std::vector<std::string> &names)
+{
+    for (const std::string &name : names) {
+        if (label.find(name) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Steps forward of the steps whose label names \p seed, over \p graph.
+std::set<size_t>
+_ForwardClosure(const std::vector<RigExecOpGraphNode> &graph,
+                const std::string &seed)
+{
+    std::set<size_t> closure;
+    std::vector<size_t> pending;
+    for (const RigExecOpGraphNode &node : graph) {
+        if (node.label.find(seed) != std::string::npos) {
+            pending.push_back(node.step);
+        }
+    }
+    while (!pending.empty()) {
+        const size_t step = pending.back();
+        pending.pop_back();
+        if (!closure.insert(step).second) {
+            continue;
+        }
+        for (const RigExecOpGraphNode &node : graph) {
+            if (node.step == step) {
+                pending.insert(pending.end(), node.succs.begin(),
+                               node.succs.end());
+                break;
+            }
+        }
+    }
+    return closure;
+}
+
+// Step 3: only the forward cone of the moved value re-ran. The fixture has
+// no always-dirty step. Region steps (sources aside) lie in the forward
+// closure of \p regionSeed's steps when given, head steps in that of
+// \p headSeed's when given, and no executed step, head or region, names
+// only the limb the value does not reach (the slot grain the compose-group
+// budget leaves machine-independent).
+void
+_CheckUpstreamCone(const _UpstreamImaging &imaging,
+                   const std::vector<std::string> &own,
+                   const std::vector<std::string> &other,
+                   const std::string &regionSeed,
+                   const std::string &headSeed, const std::string &what)
+{
+    const RigExecRigEvaluator *evaluator = imaging.Evaluator();
+    const RigExecBakedProgram *program = imaging.Program();
+    if (!evaluator || !program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    for (size_t i = 0; i < B.steps.size(); ++i) {
+        CHECK(!B.cones.alwaysSteps.Test(int(i)));
+    }
+    const std::vector<RigExecOpTraceEntry> region =
+        evaluator->GetLastOpTrace();
+    const std::vector<RigExecOpTraceEntry> head =
+        RigExecBakedLastHeadTrace(B);
+    const std::set<size_t> regionClosure =
+        regionSeed.empty() ? std::set<size_t>()
+                           : _ForwardClosure(evaluator->GetOpGraph(),
+                                             regionSeed);
+    const std::set<size_t> headClosure =
+        headSeed.empty() ? std::set<size_t>()
+                         : _ForwardClosure(RigExecBakedHeadGraph(B),
+                                           headSeed);
+    size_t outside = 0;
+    size_t ran = 0;
+    for (const RigExecOpTraceEntry &entry : region) {
+        if (entry.step < B.steps.size() && B.steps[entry.step].isSource) {
+            continue;
+        }
+        ++ran;
+        const bool foreign =
+            _Names(entry.label, other) && !_Names(entry.label, own);
+        const bool unreached =
+            !regionSeed.empty() && !regionClosure.count(entry.step);
+        if (foreign || unreached) {
+            std::printf("    %s: region step %zu (%s) %s\n", what.c_str(),
+                        entry.step, entry.label.c_str(),
+                        foreign ? "names only the other limb"
+                                : "is outside the forward closure");
+            ++outside;
+        }
+    }
+    for (const RigExecOpTraceEntry &entry : head) {
+        ++ran;
+        const bool foreign =
+            _Names(entry.label, other) && !_Names(entry.label, own);
+        const bool unreached =
+            !headSeed.empty() && !headClosure.count(entry.step);
+        if (foreign || unreached) {
+            std::printf("    %s: head step %zu (%s) %s\n", what.c_str(),
+                        entry.step, entry.label.c_str(),
+                        foreign ? "names only the other limb"
+                                : "is outside the forward closure");
+            ++outside;
+        }
+    }
+    CHECK(ran > 0);
+    CHECK(outside == 0);
+}
+
+// The region steps (sources aside) and head steps the last generation ran.
+size_t
+_UpstreamWork(const _UpstreamImaging &imaging)
+{
+    const RigExecRigEvaluator *evaluator = imaging.Evaluator();
+    const RigExecBakedProgram *program = imaging.Program();
+    if (!evaluator || !program) {
+        return 0;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    size_t work = RigExecBakedLastHeadTrace(B).size();
+    for (const RigExecOpTraceEntry &entry : evaluator->GetLastOpTrace()) {
+        if (entry.step >= B.steps.size() || !B.steps[entry.step].isSource) {
+            ++work;
+        }
+    }
+    return work;
+}
+
+// A pose minus what a generation BUILT and minus its diagnostics, for
+// comparing a frozen job with an evaluator.
+size_t
+_UpstreamPoseMismatches(const RigExecRigPose &reference,
+                        const RigExecRigPose &pose)
+{
+    RigExecRigPose a = reference, b = pose;
+    for (RigExecRigPose *p : {&a, &b}) {
+        p->moverGraphRevisionsCreated = 0;
+        p->moverGraphRevisionsExecuted = 0;
+        p->moverGraphSchedulesBuilt = 0;
+        p->diagnostics.clear();
+    }
+    RigExecRigPose diff;
+    RigExecComparePoses(a, b, &diff);
+    for (size_t i = 0; i < diff.diagnostics.size() && i < 6; ++i) {
+        std::printf("    %s\n", diff.diagnostics[i].c_str());
+    }
+    return diff.bakedParityMismatches;
+}
+
+// Step 5: a job from a snapshot frozen now, sampled with the bridge's
+// upstream values, equals a baked evaluator over a stage authoring them,
+// and runs nothing outside live's cone of the last generation.
+void
+_CheckUpstreamFrozen(const _UpstreamImaging &imaging,
+                     const std::string &stagePath,
+                     const std::vector<_UpstreamAuthored> &edits, double t,
+                     const std::string &what)
+{
+    const RigExecRigEvaluator *evaluator = imaging.Evaluator();
+    const RigExecBakedProgram *program = imaging.Program();
+    if (!evaluator || !program) {
+        return;
+    }
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(*evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("    %s: freeze refused: %s\n", what.c_str(),
+                    error.c_str());
+        return;
+    }
+    const std::vector<RigExecUpstreamValue> &upstream =
+        imaging.context->GetBridge(imaging.rig)->GetUpstreamInputs();
+    RigExecFrameInputs inputs;
+    CHECK(RigExecSampleFrameInputs(*evaluator, UsdTimeCode(t), {}, upstream,
+                                   &inputs, &error));
+    CHECK(!inputs.HasChainResolvedInputs());
+    CHECK(inputs.upstream.size() == upstream.size());
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator->GetBindingEpochDigest();
+    context.slotCount = program->GetProviderCount();
+    context.varyingInputCount = inputs.values.size();
+    if (evaluator->GetPublishWeightFields()) {
+        context.flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator->GetSolverGuidesEnabled()) {
+        context.flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.frozen = frozen.get();
+    RigExecFrozenRunReport report;
+    const RigExecRigPose job = RigExecEvaluateFrozen(
+        context, inputs, RigExecMakeProductionStepRunner(), nullptr,
+        SdfPath(), &report);
+    CHECK(job.valid);
+    CHECK(report.ran);
+    // The reference: a baked evaluator over a stage authoring the values.
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    {
+        UsdEditContext editContext(stage, stage->GetSessionLayer());
+        for (const _UpstreamAuthored &edit : edits) {
+            CHECK(stage->GetAttributeAtPath(edit.path).Set(edit.value));
+        }
+    }
+    RigExecRigEvaluator reference(stage, imaging.rig);
+    CHECK(reference.Compile());
+    reference.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    reference.SetSolverGuidesEnabled(evaluator->GetSolverGuidesEnabled());
+    reference.SetPublishWeightFields(evaluator->GetPublishWeightFields());
+    const size_t mismatches =
+        _UpstreamPoseMismatches(reference.Evaluate(UsdTimeCode(t)), job);
+    if (mismatches != 0) {
+        std::printf("    %s: frozen job differs from the authored stage\n",
+                    what.c_str());
+    }
+    CHECK(mismatches == 0);
+    // The job's cone: no region step outside the clusters live ran (a
+    // snapshot frozen after live's run holds the values, so it runs what
+    // the job's own history moved, which is nothing beyond live's).
+    std::set<int> clusters;
+    for (const RigExecOpTraceEntry &entry : evaluator->GetLastOpTrace()) {
+        clusters.insert(entry.cluster);
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    size_t outside = 0;
+    for (const RigExecOpTraceEntry &entry : report.region) {
+        if (entry.step < B.steps.size() && B.steps[entry.step].isSource) {
+            continue;
+        }
+        if (!clusters.count(entry.cluster)) {
+            ++outside;
+        }
+    }
+    CHECK(outside == 0);
+}
+
+bool
+_WarmRange(_UpstreamImaging &imaging, const std::vector<double> &frames)
+{
+    for (size_t tick = 0; tick < frames.size() + 6; ++tick) {
+        bool allCached = true;
+        for (const RigExecWarmFrameState state :
+             imaging.context->GetFrameStates(imaging.rig, frames)) {
+            allCached = allCached && state == RigExecWarmFrameState::Cached;
+        }
+        if (allCached) {
+            return true;
+        }
+        imaging.context->OnIdle();
+        imaging.context->WaitUntilBackgroundIdle();
+    }
+    bool allCached = true;
+    for (const RigExecWarmFrameState state :
+         imaging.context->GetFrameStates(imaging.rig, frames)) {
+        allCached = allCached && state == RigExecWarmFrameState::Cached;
+    }
+    return allCached;
+}
+
+size_t
+_ScopeCount(RigExecProfiler *profiler, const char *name)
+{
+    if (!profiler) {
+        return 0;
+    }
+    for (const RigExecProfileSummaryRow &row : profiler->Summarize()) {
+        if (row.name == name) {
+            return row.count;
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
+// Steps 1-5 and 7 for one value, at time 1, with the frame cache off.
+static void
+_UpstreamValueSteps(const std::string &fixture, const SdfPath &attribute,
+                    const VtValue &value,
+                    const std::vector<std::string> &own,
+                    const std::vector<std::string> &other,
+                    const std::string &regionSeed,
+                    const std::string &headSeed, const std::string &what)
+{
+    std::printf("  upstream steps: %s\n", what.c_str());
+    std::unique_ptr<_UpstreamImaging> imaging =
+        _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0);
+    if (!imaging) {
+        return;
+    }
+    const _UpstreamPose authored = imaging->Pose();
+    CHECK(!authored.Empty());
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig, {}, 1.0), authored,
+        what + ": authored"));
+    const size_t before = imaging->Evaluations();
+
+    // 1. The Set evaluates once.
+    imaging->upstream->Set(attribute, value);
+    CHECK(imaging->Evaluations() == before + 1);
+    CHECK(imaging->context->GetUpstreamTable(kUpLimbsRig));
+
+    // 2. Live follows: equal to a stage authoring the value; the other limb
+    // is unchanged.
+    const _UpstreamPose standing = imaging->Pose();
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig, {{attribute, value, {}}},
+                           1.0),
+        standing, what + ": standing"));
+    CHECK(!_SameUpstreamPose(authored, standing, what, false));
+    CHECK(_SameUpstreamPose(_UpstreamPart(authored, other),
+                            _UpstreamPart(standing, other),
+                            what + ": other limb"));
+    CHECK(imaging->Evaluator()->GetUpstreamInputPaths() ==
+          std::vector<SdfPath>{attribute});
+
+    // 3. Only the forward cone re-ran.
+    _CheckUpstreamCone(*imaging, own, other, regionSeed, headSeed,
+                       what + ": placed");
+
+    // 4. No change, no work: a second identical Set evaluates nothing, and
+    // a generation forced with the value standing runs no step.
+    imaging->upstream->Set(attribute, value);
+    CHECK(imaging->Evaluations() == before + 1);
+    if (imaging->Program()) {
+        RigExecImagingBridge *bridge = imaging->context->GetBridge(kUpLimbsRig);
+        CHECK(bridge->EvaluateAndPublish(UsdTimeCode(1.0)));
+        CHECK(_UpstreamWork(*imaging) == 0);
+    }
+
+    // 5. Frozen follows.
+    _CheckUpstreamFrozen(*imaging, fixture, {{attribute, value, {}}}, 1.0,
+                         what);
+
+    // 7. Remove: back to the authored pose, through the same cone.
+    imaging->upstream->Clear(attribute);
+    CHECK(_SameUpstreamPose(authored, imaging->Pose(), what + ": lifted"));
+    CHECK(imaging->Evaluator()->GetUpstreamInputPaths().empty());
+    CHECK(!imaging->context->GetUpstreamTable(kUpLimbsRig));
+    _CheckUpstreamCone(*imaging, own, other, regionSeed, headSeed,
+                       what + ": lifted");
+}
+
+// Admission through imaging: each key is ignored, the pose stays authored.
+static void
+_UpstreamAdmissionNegatives(const std::string &fixture)
+{
+    std::printf("  upstream admission negatives\n");
+    std::unique_ptr<_UpstreamImaging> imaging =
+        _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0);
+    if (!imaging) {
+        return;
+    }
+    const _UpstreamPose authored = imaging->Pose();
+    // A value on BRoot's connected rest:space itself, and a float on a
+    // double avar.
+    imaging->upstream->Set(kUpBRootRestSpace,
+                           VtValue(_UpTranslate(1, 0, 10)));
+    imaging->upstream->Set(kUpA0Rz, VtValue(30.0f));
+    CHECK(imaging->Evaluator()->HasUpstreamInputs());
+    CHECK(imaging->Evaluator()->GetUpstreamInputPaths().empty());
+    CHECK(_SameUpstreamPose(authored, imaging->Pose(),
+                            "admission negatives"));
+}
+
+// Sources present at population are noted from the add, and a second
+// chain bound to the same context supplies the values when it delivers the
+// trigger, with a diagnostic for a key the chains publish differently (Q4).
+namespace {
+class _UpstreamConflictCounter : public TfDiagnosticMgr::Delegate {
+public:
+    void IssueStatus(TfStatus const &) override {}
+    void IssueWarning(TfWarning const &warning) override
+    {
+        if (warning.GetCommentary().find("two scene-index chains") !=
+            std::string::npos) {
+            count.fetch_add(1);
+        }
+    }
+    void IssueError(TfError const &) override {}
+    void IssueFatalError(TfCallContext const &, std::string const &) override
+    {
+    }
+    std::atomic<size_t> count{0};
+};
+}  // namespace
+
+static void
+_UpstreamAddsAndChains(const std::string &fixture)
+{
+    std::printf("  upstream adds and chains\n");
+    std::unique_ptr<_UpstreamImaging> first = _OpenUpstreamImaging(
+        fixture, kUpLimbsRig, 1.0, [](_UpstreamInputsSceneIndex &upstream) {
+            upstream.Set(kUpA0Rz, VtValue(30.0));
+        });
+    if (!first) {
+        return;
+    }
+    const _UpstreamPose at30 = _UpstreamReference(
+        fixture, kUpLimbsRig, {{kUpA0Rz, VtValue(30.0), {}}}, 1.0);
+    CHECK(_SameUpstreamPose(at30, first->Pose(), "seeded before population"));
+
+    // A second chain over the same stage binds to the same context.
+    TfRefPtr<_UpstreamInputsSceneIndex> secondUpstream;
+    UsdImagingCreateSceneIndicesInfo info;
+    info.stage = first->stage;
+    info.overridesSceneIndexCallback =
+        [&secondUpstream](const HdSceneIndexBaseRefPtr &input)
+        -> HdSceneIndexBaseRefPtr {
+        secondUpstream = _UpstreamInputsSceneIndex::New(input);
+        return secondUpstream;
+    };
+    const UsdImagingSceneIndices second = UsdImagingCreateSceneIndices(info);
+    CHECK(RigExecImagingRegistry::ForStage(first->stage, false) ==
+          first->context);
+    _UpstreamConflictCounter conflicts;
+    TfDiagnosticMgr::GetInstance().AddDelegate(&conflicts);
+    secondUpstream->SetTime(1.0);
+    secondUpstream->Set(kUpA0Rz, VtValue(10.0));
+    CHECK(conflicts.count.load() >= 1);
+    TfDiagnosticMgr::GetInstance().RemoveDelegate(&conflicts);
+    const _UpstreamPose at10 = _UpstreamReference(
+        fixture, kUpLimbsRig, {{kUpA0Rz, VtValue(10.0), {}}}, 1.0);
+    CHECK(_SameUpstreamPose(at10, first->Pose(), "second chain supplies"));
+    // The chain that delivers the trigger supplies the values.
+    first->SetTime(2.0);
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig,
+                           {{kUpA0Rz, VtValue(30.0), {}}}, 2.0),
+        first->Pose(), "first chain's trigger"));
+    secondUpstream->SetTime(3.0);
+    second.stageSceneIndex->SetTime(UsdTimeCode(3.0));
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig,
+                           {{kUpA0Rz, VtValue(10.0), {}}}, 3.0),
+        first->Pose(), "second chain's trigger"));
+}
+
+// A source on a prim added after activation, outside every root the rig
+// reads, reaches the rig once a later connection brings that prim into its
+// read roots: an add is noted wherever it lands.
+static void
+_UpstreamAddedOutsideRoots(const std::string &fixture)
+{
+    std::printf("  upstream source added outside the read roots\n");
+    std::unique_ptr<_UpstreamImaging> imaging =
+        _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0);
+    if (!imaging) {
+        return;
+    }
+    const SdfPath driver("/Driver");
+    const SdfPath driverSpace = driver.AppendProperty(TfToken("inputs:space"));
+    const GfMatrix4d pulled = _UpTranslate(1, 0, 10);
+    // The prim, authoring the value BRoot's rest already has, and then the
+    // connection, each in the session layer.
+    const auto define = [&](const UsdStageRefPtr &stage,
+                            const GfMatrix4d &value) {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        const UsdPrim prim = stage->DefinePrim(driver, TfToken("Scope"));
+        CHECK(prim.CreateAttribute(TfToken("inputs:space"),
+                                   SdfValueTypeNames->Matrix4d, true)
+                  .Set(value));
+    };
+    const auto connect = [&](const UsdStageRefPtr &stage) {
+        UsdEditContext context(stage, stage->GetSessionLayer());
+        CHECK(stage->GetAttributeAtPath(kUpBRootRestSpace)
+                  .SetConnections({driverSpace}));
+    };
+    const auto reference = [&](const GfMatrix4d &value) {
+        const UsdStageRefPtr stage = UsdStage::Open(fixture);
+        define(stage, value);
+        connect(stage);
+        RigExecImagingBridge bridge(stage, kUpLimbsRig);
+        std::vector<std::string> errors;
+        CHECK(bridge.Compile(&errors));
+        CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(2.0)).ok);
+        return _CaptureUpstreamPose(bridge.GetStore()->Get());
+    };
+    imaging->upstream->Set(driverSpace, VtValue(pulled));
+    define(imaging->stage, _UpTranslate(0, 0, 10));
+    imaging->indices.stageSceneIndex->ApplyPendingUpdates();
+    connect(imaging->stage);
+    imaging->indices.stageSceneIndex->ApplyPendingUpdates();
+    imaging->SetTime(2.0);
+    const _UpstreamPose pose = imaging->Pose();
+    CHECK(!_SameUpstreamPose(reference(_UpTranslate(0, 0, 10)), pose,
+                             "outside roots: authored", false));
+    CHECK(_SameUpstreamPose(reference(pulled), pose,
+                            "outside roots: pulled"));
+}
+
+// Step 8: the frame cache on, at time 1. Never serves the other value's
+// pose: the sparse path misses on an upstream difference, and the D7
+// pose-only key folds the values.
+static void
+_UpstreamCacheSteps(const std::string &fixture, const SdfPath &attribute,
+                    const VtValue &value, bool sparse, const std::string &what)
+{
+    std::printf("  upstream cache: %s\n", what.c_str());
+    std::unique_ptr<_UpstreamImaging> imaging =
+        _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0);
+    if (!imaging) {
+        return;
+    }
+    // A retained base at time 1 (the warm index's row), so the proof
+    // mismatch a Set causes falls into the sparse plan.
+    imaging->SetTime(2.0);
+    imaging->SetTime(1.0);
+    const _UpstreamPose p0 = imaging->Pose();
+    if (sparse) {
+        CHECK(imaging->Program() != nullptr);
+        bool based = false;
+        for (const auto &[time, key] :
+             imaging->context->GetCompletedKeys(kUpLimbsRig)) {
+            based = based || time == UsdTimeCode(1.0);
+        }
+        CHECK(based);
+    } else {
+        CHECK(imaging->Program() == nullptr);
+    }
+    const size_t evaluations0 = imaging->Evaluations();
+    imaging->upstream->Set(attribute, value);
+    const _UpstreamPose p1 = imaging->Pose();
+    CHECK(!_SameUpstreamPose(p0, p1, what, false));
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig, {{attribute, value, {}}},
+                           1.0),
+        p1, what + ": set"));
+    // A miss: evaluated, not served (the plan's base lookup may count as
+    // a store hit; the evaluation is what a miss is).
+    CHECK(imaging->Evaluations() == evaluations0 + 1);
+    imaging->upstream->Clear(attribute);
+    CHECK(_SameUpstreamPose(p0, imaging->Pose(), what + ": cleared"));
+    imaging->upstream->Set(attribute, value);
+    CHECK(_SameUpstreamPose(p1, imaging->Pose(), what + ": set again"));
+    // Revisits of time 1 under each value serve that value's pose.
+    imaging->SetTime(2.0);
+    imaging->SetTime(1.0);
+    CHECK(_SameUpstreamPose(p1, imaging->Pose(), what + ": revisited"));
+}
+
+// Steps 9 and 9c: other frames warm from a time-varying source, with no
+// data source call off the notice thread or off a sample time.
+static void
+_UpstreamWarmSteps(const std::string &fixture)
+{
+    std::printf("  upstream warming\n");
+    std::unique_ptr<_UpstreamImaging> imaging =
+        _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0);
+    if (!imaging) {
+        return;
+    }
+    if (!imaging->Program() || !RigExecBackgroundWarmingEnabled()) {
+        std::printf("  (no baked program or no warming: skipping)\n");
+        return;
+    }
+    RigExecImagingRegistry &context = *imaging->context;
+    const SdfPath rig = kUpLimbsRig;
+    const std::vector<double> range{1, 2, 3, 4, 5, 6};
+    const std::vector<double> later{2, 3, 4, 5, 6};
+    CHECK(context.SetWarmRange(rig, range));
+    imaging->upstream->SetSampled(
+        kUpA0Rz, [](double t) { return VtValue(5.0 * t); });
+    const std::shared_ptr<_UpstreamCalls> calls = imaging->upstream->calls;
+    const auto samples = [](double k, double lo, double hi) {
+        _UpstreamAuthored authored{kUpA0Rz, VtValue(), {}};
+        for (double f = lo; f <= hi; f += 1.0) {
+            authored.samples[f] = VtValue(k * f);
+        }
+        return authored;
+    };
+    CHECK(_WarmRange(*imaging, later));
+    CHECK(context.GetLastWarmSkipReason(rig) == RigExecWarmSkipReason::None);
+    CHECK(!context.GetWarmBurstUsable(rig));
+
+    // A warm pass with nothing changed calls no data source.
+    const size_t callsBefore = calls->getValue.load();
+    context.OnIdle();
+    context.WaitUntilBackgroundIdle();
+    CHECK(calls->getValue.load() == callsBefore);
+
+    // Hits through the warm rows: no lookup sample, no evaluation, no
+    // cancelled generation; each equals the authored samples.
+    RigExecProfiler *profiler = context.MutableBridgeProfiler(rig);
+    if (profiler) {
+        profiler->SetEnabled(true);
+    }
+    const size_t lookups = _ScopeCount(profiler, "Imaging.LookupSampleDigest");
+    const RigExecFrameGeneration generation =
+        context.CurrentFrameGeneration(rig);
+    const size_t evaluations = imaging->Evaluations();
+    const size_t hits = context.GetFrameCacheStats(rig).hits;
+    const size_t triggerCalls = calls->getValue.load();
+    for (const double t : later) {
+        imaging->SetTime(t);
+        CHECK(_SameUpstreamPose(
+            _UpstreamReference(fixture, rig, {samples(5.0, 1, 6)}, t),
+            imaging->Pose(), "5t at " + std::to_string(int(t))));
+    }
+    // A trigger inside the window with no source change re-derives the
+    // value at T0 from the table: no data source call.
+    CHECK(calls->getValue.load() == triggerCalls);
+    CHECK(imaging->Evaluations() == evaluations);
+    CHECK(context.GetFrameCacheStats(rig).hits == hits + later.size());
+    CHECK(_ScopeCount(profiler, "Imaging.LookupSampleDigest") == lookups);
+    CHECK(context.CurrentFrameGeneration(rig) == generation);
+    imaging->SetTime(1.0);
+
+    // f = 7t: a dirty cancels the generation; the old rows no longer serve.
+    const uint64_t serial = context.GetUpstreamSerial(rig);
+    imaging->upstream->SetSampled(
+        kUpA0Rz, [](double t) { return VtValue(7.0 * t); });
+    CHECK(context.GetUpstreamSerial(rig) != serial);
+    CHECK(context.CurrentFrameGeneration(rig) != generation);
+    for (const RigExecWarmFrameState state :
+         context.GetFrameStates(rig, later)) {
+        CHECK(state != RigExecWarmFrameState::Cached);
+    }
+    const size_t missed = imaging->Evaluations();
+    imaging->SetTime(3.0);
+    CHECK(imaging->Evaluations() == missed + 1);
+    // Not vacuous: a lookup past the warm rows does record the scope.
+    CHECK(!profiler ||
+          _ScopeCount(profiler, "Imaging.LookupSampleDigest") > lookups);
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, rig, {samples(7.0, 1, 6)}, 3.0),
+        imaging->Pose(), "7t at 3 (live)"));
+    imaging->SetTime(1.0);
+    CHECK(_WarmRange(*imaging, later));
+    for (const double t : later) {
+        imaging->SetTime(t);
+        CHECK(_SameUpstreamPose(
+            _UpstreamReference(fixture, rig, {samples(7.0, 1, 6)}, t),
+            imaging->Pose(), "7t at " + std::to_string(int(t))));
+    }
+    imaging->SetTime(1.0);
+
+    // Sparse samples {1: 5, 3: 15, 5: 25}: frames 2, 4 and 6 reconstruct
+    // (linear between samples, the last held), queried only at samples.
+    const _UpstreamAuthored sparseAuthored{
+        kUpA0Rz,
+        VtValue(),
+        {{1.0, VtValue(5.0)}, {3.0, VtValue(15.0)}, {5.0, VtValue(25.0)}}};
+    imaging->upstream->SetSparse(kUpA0Rz, sparseAuthored.samples);
+    CHECK(_WarmRange(*imaging, later));
+    for (const double t : {2.0, 4.0, 6.0}) {
+        imaging->SetTime(t);
+        CHECK(_SameUpstreamPose(
+            _UpstreamReference(fixture, rig, {sparseAuthored}, t),
+            imaging->Pose(), "sparse at " + std::to_string(int(t))));
+    }
+    imaging->SetTime(1.0);
+
+    // A wider range re-pulls: frames 7-10 warm with the source's values
+    // there (the last sample held), not the value at 1.
+    CHECK(context.SetWarmRange(rig, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}));
+    const std::shared_ptr<const RigExecUpstreamTable> wide =
+        context.GetUpstreamTable(rig);
+    CHECK(wide && wide->windowHi == 10.0);
+    const std::vector<double> wider{7, 8, 9, 10};
+    CHECK(_WarmRange(*imaging, wider));
+    const _UpstreamPose atOne =
+        _UpstreamReference(fixture, rig, {{kUpA0Rz, VtValue(5.0), {}}}, 8.0);
+    for (const double t : wider) {
+        imaging->SetTime(t);
+        const _UpstreamPose pose = imaging->Pose();
+        CHECK(_SameUpstreamPose(
+            _UpstreamReference(fixture, rig, {sparseAuthored}, t), pose,
+            "sparse at " + std::to_string(int(t))));
+        if (t == 8.0) {
+            CHECK(!_SameUpstreamPose(atOne, pose, "held", false));
+        }
+    }
+    imaging->SetTime(1.0);
+
+    // A frame outside the window has no value for a varying source: the
+    // factory skips it rather than warm it with another frame's value.
+    const RigExecWarmFactoryResult outside = context.BuildWarmWork(
+        rig, UsdTimeCode(14.0), context.CurrentFrameGeneration(rig),
+        RigExecFrozenStepRunner());
+    CHECK(!outside.work);
+    CHECK(outside.skip == RigExecWarmSkipReason::Unsampleable);
+    CHECK(outside.detail == "upstream not pulled for this time");
+
+    // A uniform source keeps the burst route.
+    imaging->upstream->Set(kUpA0Rz, VtValue(30.0));
+    context.OnIdle();
+    context.WaitUntilBackgroundIdle();
+    CHECK(context.GetWarmBurstUsable(rig));
+    CHECK(calls->offSample.load() == 0);
+    CHECK(calls->offThread.load() == 0);
+}
+
+// Step 9c: arrays through the cache and warming (U1c's admission hook on).
+static void
+_UpstreamArraySteps(const std::string &fixture)
+{
+    std::printf("  upstream arrays\n");
+    RigExecSetUpstreamArrayAdmissionForTesting(true);
+    {
+        _UpstreamCacheMode cache("on");
+        std::unique_ptr<_UpstreamImaging> imaging =
+            _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0);
+        if (imaging && imaging->Program()) {
+            const UsdAttribute attribute =
+                imaging->stage->GetAttributeAtPath(kUpJointWeights);
+            VtFloatArray authored;
+            CHECK(attribute.Get(&authored));
+            const auto weights = [&](float a) {
+                VtFloatArray w(authored.size());
+                for (size_t i = 0; i < w.size(); i += 2) {
+                    w[i] = a;
+                    w[i + 1] = 1.0f - a;
+                }
+                return w;
+            };
+            // Step 8's shape: authored, set (a miss), cleared, set again,
+            // at a posed frame (at frame 1 every joint rests, and the skin
+            // returns its rest points whatever the weights).
+            imaging->SetTime(7.0);
+            imaging->SetTime(6.0);
+            const _UpstreamPose p0 = imaging->Pose();
+            const VtValue value(weights(0.25f));
+            imaging->upstream->Set(kUpJointWeights, value);
+            const _UpstreamPose p1 = imaging->Pose();
+            CHECK(!_SameUpstreamPose(p0, p1, "array", false));
+            CHECK(_SameUpstreamPose(
+                _UpstreamReference(fixture, kUpLimbsRig,
+                                   {{kUpJointWeights, value, {}}}, 6.0),
+                p1, "array: set"));
+            imaging->upstream->Clear(kUpJointWeights);
+            CHECK(_SameUpstreamPose(p0, imaging->Pose(), "array: cleared"));
+            imaging->upstream->Set(kUpJointWeights, value);
+            CHECK(_SameUpstreamPose(p1, imaging->Pose(), "array: again"));
+            imaging->upstream->Clear(kUpJointWeights);
+            imaging->SetTime(1.0);
+
+            // Step 9's shape: three array samples; frames between them
+            // reconstruct, the table holds the three samples only.
+            if (RigExecBackgroundWarmingEnabled()) {
+                RigExecImagingRegistry &context = *imaging->context;
+                const std::vector<double> later{2, 3, 4, 5, 6};
+                CHECK(context.SetWarmRange(kUpLimbsRig, {1, 2, 3, 4, 5, 6}));
+                const std::map<double, VtValue> arraySamples{
+                    {1.0, VtValue(weights(1.0f))},
+                    {3.0, VtValue(weights(0.5f))},
+                    {5.0, VtValue(weights(0.0f))}};
+                imaging->upstream->SetSparse(kUpJointWeights, arraySamples);
+                const std::shared_ptr<const RigExecUpstreamTable> table =
+                    context.GetUpstreamTable(kUpLimbsRig);
+                CHECK(table &&
+                      RigExecUpstreamTableBufferCount(*table) == 3);
+                CHECK(_WarmRange(*imaging, later));
+                const size_t evaluations = imaging->Evaluations();
+                for (const double t : {2.0, 4.0, 6.0}) {
+                    imaging->SetTime(t);
+                    // Linear between equal-length samples, the last held,
+                    // authored per frame (time-sampled layouts do not bake).
+                    std::vector<RigExecUpstreamTableSample> samples;
+                    for (const auto &[at, v] : arraySamples) {
+                        samples.push_back({at, v});
+                    }
+                    const VtValue expected =
+                        RigExecReconstructUpstream(samples, t, false);
+                    CHECK(_SameUpstreamPose(
+                        _UpstreamReference(fixture, kUpLimbsRig,
+                                           {{kUpJointWeights, expected, {}}},
+                                           t),
+                        imaging->Pose(),
+                        "array sparse at " + std::to_string(int(t))));
+                }
+                CHECK(imaging->Evaluations() == evaluations);
+                CHECK(imaging->upstream->calls->offSample.load() == 0);
+                CHECK(imaging->upstream->calls->offThread.load() == 0);
+            }
+        }
+    }
+    RigExecSetUpstreamArrayAdmissionForTesting(false);
+}
+
+// Step 9b: a lift reaches a job from a snapshot frozen while the value
+// stood. One session warms the authored frame; another places the value
+// before its first freeze (so its snapshot inherits it), warms, lifts and
+// warms again: that job's key and pose are the authored ones.
+static void
+_UpstreamLiftSteps(const std::string &stagePath, const SdfPath &rig,
+                   const SdfPath &attribute, const VtValue &value,
+                   double t, double later, const std::string &what)
+{
+    std::printf("  upstream lift: %s\n", what.c_str());
+    if (!RigExecBackgroundWarmingEnabled()) {
+        return;
+    }
+    const auto keyAt = [&](RigExecImagingRegistry &context) {
+        RigExecFrameCacheKey key{0, 0};
+        for (const auto &[time, k] : context.GetCompletedKeys(rig)) {
+            if (time == UsdTimeCode(later)) {
+                key = k;
+            }
+        }
+        return key;
+    };
+    RigExecFrameCacheKey authoredKey{0, 0};
+    _UpstreamPose authored;
+    {
+        std::unique_ptr<_UpstreamImaging> imaging =
+            _OpenUpstreamImaging(stagePath, rig, t);
+        if (!imaging || !imaging->Program()) {
+            std::printf("  (no baked program: skipping)\n");
+            return;
+        }
+        CHECK(imaging->context->SetWarmRange(rig, {t, later}));
+        CHECK(_WarmRange(*imaging, {later}));
+        authoredKey = keyAt(*imaging->context);
+        imaging->SetTime(later);
+        authored = imaging->Pose();
+    }
+    std::unique_ptr<_UpstreamImaging> imaging =
+        _OpenUpstreamImaging(stagePath, rig, t);
+    if (!imaging) {
+        return;
+    }
+    RigExecImagingRegistry &context = *imaging->context;
+    imaging->upstream->Set(attribute, value);
+    CHECK(context.SetWarmRange(rig, {t, later}));
+    CHECK(_WarmRange(*imaging, {later}));
+    const RigExecFrameCacheKey placedKey = keyAt(context);
+    CHECK(placedKey.controlDigest != authoredKey.controlDigest);
+
+    imaging->upstream->Clear(attribute);
+    CHECK(_WarmRange(*imaging, {later}));
+    const RigExecFrameCacheKey liftedKey = keyAt(context);
+    CHECK(liftedKey.controlDigest == authoredKey.controlDigest);
+    const size_t evaluations = imaging->Evaluations();
+    imaging->SetTime(later);
+    CHECK(imaging->Evaluations() == evaluations);
+    CHECK(_SameUpstreamPose(authored, imaging->Pose(), what + ": lifted"));
+}
+
+// TestUpstreamSceneIndexDrivesRigInputs: steps 1-5 and 7 (frame cache off),
+// the posed variant, admission negatives, step 8 and its D7 variant, steps
+// 9, 9b and 9c. Step 6 (.rigexec playback) is U1e's.
+static void
+TestUpstreamSceneIndexDrivesRigInputs(const std::string &examplesDir)
+{
+    if (_ImagingResourceDir().empty()) {
+        std::printf("  (no imaging plugInfo; skipping upstream inputs)\n");
+        return;
+    }
+    std::printf("progress: TestUpstreamSceneIndexDrivesRigInputs\n");
+    std::fflush(stdout);
+    const std::string fixture =
+        examplesDir + "/../tests/fixtures/upstream_inputs.usda";
+    const std::string posed =
+        examplesDir + "/../tests/fixtures/upstream_inputs_posed.usda";
+    {
+        _UpstreamCacheMode cache("off");
+        // A0's ComposeSubtree seeds the control case; BRoot's rest group
+        // seeds the space case in the head tier.
+        _UpstreamValueSteps(fixture, kUpA0Rz, VtValue(30.0), kUpLimbA,
+                            kUpLimbB, "A0", "", "A0 avars:rz");
+        _UpstreamValueSteps(fixture, kUpSpace,
+                            VtValue(_UpTranslate(1, 0, 10)), kUpLimbB,
+                            kUpLimbA, "", "BRoot", "Upstream inputs:space");
+        _UpstreamAdmissionNegatives(fixture);
+        _UpstreamAddsAndChains(fixture);
+        _UpstreamAddedOutsideRoots(fixture);
+        // The posed variant: the program refuses, the walk follows.
+        std::unique_ptr<_UpstreamImaging> imaging =
+            _OpenUpstreamImaging(posed, kUpLimbsRig, 1.0);
+        if (imaging) {
+            CHECK(imaging->Program() == nullptr);
+            imaging->upstream->Set(kUpSpace, VtValue(_UpTranslate(1, 0, 10)));
+            CHECK(_SameUpstreamPose(
+                _UpstreamReference(
+                    posed, kUpLimbsRig,
+                    {{kUpSpace, VtValue(_UpTranslate(1, 0, 10)), {}}}, 1.0),
+                imaging->Pose(), "posed: standing"));
+        }
+    }
+    {
+        _UpstreamCacheMode cache("on");
+        const bool baked = [&]() {
+            std::unique_ptr<_UpstreamImaging> probe =
+                _OpenUpstreamImaging(fixture, kUpLimbsRig, 1.0);
+            return probe && probe->Program() != nullptr;
+        }();
+        if (baked) {
+            _UpstreamCacheSteps(fixture, kUpA0Rz, VtValue(30.0), true,
+                                "sparse path");
+        }
+        _UpstreamCacheSteps(posed, kUpSpace, VtValue(_UpTranslate(1, 0, 10)),
+                            false, "pose-only key (D7)");
+        _UpstreamWarmSteps(fixture);
+        // A constant avar: the clone's inherited avar slot is undone only by
+        // the worker's upstream arm (rule 2).
+        _UpstreamLiftSteps(fixture, kUpLimbsRig, kUpA0Rz, VtValue(30.0), 1, 4,
+                           "A0 avars:rz");
+        _UpstreamLiftSteps(
+            examplesDir + "/09_PropertyMathMovers.usda",
+            SdfPath("/PropMathAsset/Rig"),
+            SdfPath("/PropMathAsset/Rig/Movers/OffsetLift.inputs:value"),
+            VtValue(GfVec3f(0, 7, 0)), 1012, 1015,
+            "09 chain mover inputs:value");
+        _UpstreamLiftSteps(
+            examplesDir + "/biped/Biped.usda", SdfPath("/Biped/Rig"),
+            SdfPath("/Biped/Rig/Movers/skin_body_geo/body_geo_skin."
+                    "inputs:defaultWeight"),
+            VtValue(0.5f), 1, 4, "biped skin inputs:defaultWeight");
+    }
+    _UpstreamArraySteps(fixture);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5521,6 +6992,9 @@ main(int argc, char **argv)
     // Last: it drives the real UsdImaging chain and deactivates on the way
     // out, leaving the process-global registry cleared.
     TestSetTimeDrivenEvaluation(examplesDir);
+    // The real chain with an upstream scene index installed; every session
+    // it opens is deactivated on the way out.
+    TestUpstreamSceneIndexDrivesRigInputs(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

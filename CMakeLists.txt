@@ -175,6 +175,8 @@ add_library(rigExecImaging SHARED
     # The 1.4 warm-frame index: shared-owned per-frame completions.
     libs/rigExecImaging/warmIndex.cpp
     libs/rigExecImaging/profilerApi.cpp
+    # Pulled upstream scene-index inputs (rigExecInputs).
+    libs/rigExecImaging/upstreamTable.cpp
 )
 target_include_directories(rigExecImaging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>

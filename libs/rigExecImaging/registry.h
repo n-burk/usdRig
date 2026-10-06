@@ -101,6 +101,19 @@ namespace rigExec {
 
 class RigExecImagingDirectory;
 
+/// The span an upstream pull reconstructs (RigExecImagingRegistry::
+/// GetUpstreamPullWindow).
+struct RigExecUpstreamPullWindow {
+    double lo = 0.0;
+    double hi = 0.0;
+    /// The stage reconstructs held, not linear (UsdInterpolationTypeHeld).
+    bool held = false;
+    /// The context's current time, when numeric: a pull's T0 before its
+    /// chain has read any trigger.
+    bool haveTime = false;
+    double time = 0.0;
+};
+
 class RigExecImagingRegistry : public TfWeakBase {
 public:
     using Ptr = std::shared_ptr<RigExecImagingRegistry>;
@@ -517,6 +530,46 @@ public:
     /// Whether \p path was noted by NoteRigRoot and is still pending.
     bool IsNotedRigRoot(const SdfPath &path);
 
+    // -- upstream inputs (upstreamTable.h) ------------------------------------
+    //
+    // A chain's results index pulls its `rigExecInputs` sources with no lock
+    // held and hands the table here. The chain that delivered the last
+    // table (a trigger's, or a source change's) supplies every session's
+    // values; a key two chains publish differently is reported. Each live
+    // session keeps its share of that table (keys at or under its asset or
+    // read roots) and an upstream serial that moves when the sources, the
+    // window or a frame value change -- not when only T0 moves. A serial
+    // move cancels the rig's warming generation, so a completed warm row
+    // always postdates the last source change (the fast path serves rows
+    // with no digest compare). Before a live evaluation the bridge receives
+    // the table's values at the evaluated time; warming reads the job
+    // time's values from the table alone. Playback sessions do not take
+    // upstream values yet.
+
+    /// The window a pull reconstructs: the union of the sessions' warm
+    /// ranges, or the stage's start and end time codes when no session set
+    /// one. Takes the lock briefly; the caller pulls after it returns.
+    RigExecUpstreamPullWindow GetUpstreamPullWindow();
+
+    /// Stores \p table as \p chain's pulled sources (an empty table lifts
+    /// them), makes \p chain the one that supplies the values, and updates
+    /// every session's share. Call with no lock held.
+    void SetUpstreamTable(const RigExecResultsSceneIndex *chain,
+                          std::shared_ptr<const RigExecUpstreamTable> table);
+
+    /// Forgets \p chain's table (the chain is going away or rebinding).
+    void DropUpstreamTable(const RigExecResultsSceneIndex *chain);
+
+    /// Re-evaluates and republishes at the current time with the values the
+    /// tables now give (after a source change). False when inactive.
+    bool RefreshUpstreamInputs();
+
+    /// The rig's share of the supplying chain's table (null when none) and
+    /// its upstream serial. For tests.
+    std::shared_ptr<const RigExecUpstreamTable> GetUpstreamTable(
+        const SdfPath &rig);
+    uint64_t GetUpstreamSerial(const SdfPath &rig);
+
     ~RigExecImagingRegistry();
 
 private:
@@ -697,9 +750,32 @@ private:
         /// frames stay visitable). Times only: the trigger skips the
         /// playhead.
         std::vector<double> pendingRewarm;
+        /// The session's share of the supplying chain's upstream table
+        /// (null when no key is its), and the serial that moves with its
+        /// sources, window or frame values (see "upstream inputs" above).
+        std::shared_ptr<const RigExecUpstreamTable> upstream;
+        uint64_t upstreamSerial = 0;
+        /// The burst's upstream pins: the uniform values it was built
+        /// under and the serial they came from. While a source varies no
+        /// burst is built (burstUpstreamVaries): those frames take the
+        /// plain per-frame route, which reads each job time's values.
+        std::vector<RigExecUpstreamValue> burstUpstream;
+        uint64_t burstUpstreamSerial = ~uint64_t(0);
+        bool burstUpstreamVaries = false;
     };
 
     using RigSessions = std::vector<RigSession>;
+
+    /// Recomputes \p session's share of the supplying chain's table; moves
+    /// its serial, and cancels its warming generation, when the sources
+    /// differ from the share it held. _mutex held.
+    void _UpdateSessionUpstreamLocked(RigSession *session);
+
+    /// Hands \p session's bridge the values at \p time when they differ
+    /// from the ones it holds, and marks the session dirty. A varying key
+    /// with no value at \p time (outside the window) is left out. _mutex
+    /// held.
+    void _HandOffUpstreamLocked(RigSession *session, UsdTimeCode time);
 
     bool _EvaluateSessions(
         RigSessions *sessions,
@@ -942,6 +1018,13 @@ private:
     size_t _warmSamplingMaxInvocations = 16;
     double _warmSamplingMaxMs = 8.0;
     TfNotice::Key _changeKey;
+    /// Each bound chain's last pulled table, and the chain whose table
+    /// supplies the sessions (the last to hand one over). Keys are
+    /// identities only: a chain drops its entry before it goes. _mutex held.
+    std::map<const RigExecResultsSceneIndex *,
+             std::shared_ptr<const RigExecUpstreamTable>>
+        _upstreamTables;
+    const RigExecResultsSceneIndex *_upstreamChain = nullptr;
 };
 
 }  // namespace rigExec
