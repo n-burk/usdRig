@@ -7,6 +7,7 @@
 #include "parallel.h"
 #include "pathText.h"
 #include "profiler.h"
+#include "rigEvaluator.h"
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
@@ -28,8 +29,10 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -94,6 +97,30 @@ RigExecBakedStepKindName(RigExecBakedStepKind kind)
     case RigExecBakedStepKind::ChainStatus: return "ChainStatus";
     case RigExecBakedStepKind::Derived: return "Derived";
     case RigExecBakedStepKind::FrameMatrix: return "FrameMatrix";
+    }
+    return "unknown";
+}
+
+const char *
+RigExecBakedHeadKindName(RigExecBakedHeadKind kind)
+{
+    switch (kind) {
+    case RigExecBakedHeadKind::PropertyRevision: return "PropertyRevision";
+    case RigExecBakedHeadKind::RestCompose: return "RestCompose";
+    case RigExecBakedHeadKind::LadderCompose: return "LadderCompose";
+    case RigExecBakedHeadKind::SkinTopology: return "SkinTopology";
+    }
+    return "unknown";
+}
+
+const char *
+RigExecBakedHeadDomainName(RigExecBakedHeadDomain domain)
+{
+    switch (domain) {
+    case RigExecBakedHeadDomain::PropertyVersion: return "PropertyVersion";
+    case RigExecBakedHeadDomain::Rest: return "Rest";
+    case RigExecBakedHeadDomain::Ladder: return "Ladder";
+    case RigExecBakedHeadDomain::SkinTopology: return "SkinTopology";
     }
     return "unknown";
 }
@@ -3414,6 +3441,498 @@ RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
             {{"level", std::to_string(cluster.level)},
              {"steps", std::to_string(cluster.members.size())},
              {"waitUs", std::to_string(cluster.startUs - cluster.readyUs)}});
+    }
+}
+
+// The head tier.
+
+namespace {
+
+constexpr size_t kHeadDomainCount =
+    size_t(RigExecBakedHeadDomain::SkinTopology) + 1;
+
+// Per head domain, the head step writing each slot (-1 for none); a slot
+// with two writers keeps the first, and `*duplicate` names the slot.
+std::array<std::vector<int>, kHeadDomainCount>
+HeadWriters(const RigExecBakedProgramImpl &B, std::string *duplicate)
+{
+    std::array<std::vector<int>, kHeadDomainCount> writers;
+    for (size_t i = 0; i < B.headSteps.size(); ++i) {
+        for (const RigExecBakedHeadRange &range : B.headSteps[i].writes) {
+            std::vector<int> &table = writers[size_t(range.domain)];
+            if (table.size() < range.end) {
+                table.resize(range.end, -1);
+            }
+            for (uint32_t slot = range.begin; slot < range.end; ++slot) {
+                if (table[slot] >= 0) {
+                    if (duplicate && duplicate->empty()) {
+                        *duplicate =
+                            std::string("head ") +
+                            RigExecBakedHeadDomainName(range.domain) +
+                            " slot " + std::to_string(slot) +
+                            " has more than one head producer";
+                    }
+                    continue;
+                }
+                table[slot] = int(i);
+            }
+        }
+    }
+    return writers;
+}
+
+}  // namespace
+
+bool
+RigExecBakedSortHeadTier(RigExecBakedProgramImpl *program, std::string *error)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const size_t n = B.headSteps.size();
+    const auto writers = HeadWriters(B, nullptr);
+    for (RigExecBakedHeadStep &step : B.headSteps) {
+        step.preds.clear();
+        step.succs.clear();
+    }
+    for (size_t i = 0; i < n; ++i) {
+        RigExecBakedHeadStep &step = B.headSteps[i];
+        std::set<uint32_t> preds;
+        for (const RigExecBakedHeadRange &range : step.reads) {
+            const std::vector<int> &table = writers[size_t(range.domain)];
+            for (uint32_t slot = range.begin; slot < range.end; ++slot) {
+                if (slot < table.size() && table[slot] >= 0 &&
+                    size_t(table[slot]) != i) {
+                    preds.insert(uint32_t(table[slot]));
+                }
+            }
+        }
+        step.preds.assign(preds.begin(), preds.end());
+        for (const uint32_t pred : preds) {
+            B.headSteps[pred].succs.push_back(uint32_t(i));
+        }
+    }
+    // Min-key Kahn: the lowest (object, part, first written slot) of the
+    // ready steps first. Over edges for which the identity order is already
+    // topological this returns the identity order.
+    const auto key = [&B](uint32_t i) {
+        const RigExecBakedHeadStep &step = B.headSteps[i];
+        const uint32_t first =
+            step.writes.empty() ? 0 : step.writes.front().begin;
+        return std::make_tuple(step.object, step.part, first, i);
+    };
+    const auto later = [&key](uint32_t a, uint32_t b) {
+        return key(a) > key(b);
+    };
+    std::vector<size_t> remaining(n, 0);
+    std::vector<uint32_t> ready;
+    for (size_t i = 0; i < n; ++i) {
+        remaining[i] = B.headSteps[i].preds.size();
+        if (remaining[i] == 0) {
+            ready.push_back(uint32_t(i));
+        }
+    }
+    std::make_heap(ready.begin(), ready.end(), later);
+    B.headOrder.clear();
+    while (!ready.empty()) {
+        std::pop_heap(ready.begin(), ready.end(), later);
+        const uint32_t i = ready.back();
+        ready.pop_back();
+        B.headOrder.push_back(i);
+        for (const uint32_t succ : B.headSteps[i].succs) {
+            if (--remaining[succ] == 0) {
+                ready.push_back(succ);
+                std::push_heap(ready.begin(), ready.end(), later);
+            }
+        }
+    }
+    if (B.headOrder.size() != n) {
+        if (error) {
+            *error = "the head tier's reads form a cycle";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool
+RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &B,
+                             std::string *error)
+{
+    size_t count = 0;
+    std::string first;
+    const auto add = [&](const std::string &violation) {
+        if (count++ == 0) {
+            first = violation;
+        }
+    };
+    std::string duplicate;
+    const auto writers = HeadWriters(B, &duplicate);
+    if (!duplicate.empty()) {
+        add(duplicate);
+    }
+    std::vector<size_t> position(B.headSteps.size(), B.headSteps.size());
+    for (size_t p = 0; p < B.headOrder.size(); ++p) {
+        if (B.headOrder[p] < position.size()) {
+            position[B.headOrder[p]] = p;
+        }
+    }
+    for (size_t p = 0; p < B.headOrder.size(); ++p) {
+        const uint32_t index = B.headOrder[p];
+        if (index >= B.headSteps.size()) {
+            add("head order names step " + std::to_string(index) +
+                ", which does not exist");
+            continue;
+        }
+        const RigExecBakedHeadStep &step = B.headSteps[index];
+        for (const RigExecBakedSlotRange &range : step.regionReads) {
+            add("head step " + step.label + " reads the region domain " +
+                RigExecBakedSlotDomainName(range.domain));
+        }
+        for (const RigExecBakedHeadRange &range : step.reads) {
+            const std::vector<int> &table = writers[size_t(range.domain)];
+            for (uint32_t slot = range.begin; slot < range.end; ++slot) {
+                const int writer =
+                    slot < table.size() ? table[slot] : -1;
+                if (writer < 0 || position[size_t(writer)] >= p) {
+                    add("head step " + step.label + " reads " +
+                        RigExecBakedHeadDomainName(range.domain) + " slot " +
+                        std::to_string(slot) +
+                        ", which no earlier head step writes");
+                }
+            }
+        }
+        // Completeness: every chain target or record consumer a walk of a
+        // property revision meets is declared.
+        if (step.kind != RigExecBakedHeadKind::PropertyRevision ||
+            step.part == 0 || step.object < 0 ||
+            size_t(step.object) >= B.propertyChains.size()) {
+            continue;
+        }
+        const RigExecBakedPropertyChain &chain =
+            B.propertyChains[size_t(step.object)];
+        if (size_t(step.part) > chain.revisions.size()) {
+            continue;
+        }
+        const auto declares = [&step](uint32_t id) {
+            for (const RigExecBakedHeadRange &range : step.reads) {
+                if (range.domain == RigExecBakedHeadDomain::PropertyVersion &&
+                    range.begin <= id && id < range.end) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const RigExecBakedPropertyChain::Revision &r =
+            chain.revisions[size_t(step.part) - 1];
+        for (const RigExecBakedWalk *walk :
+             {&r.enabled, &r.defaultWeight, &r.value, &r.minimum,
+              &r.maximum, &r.keys, &r.tangents}) {
+            for (const std::vector<RigExecBakedWalkHop> *hops :
+                 {&walk->hops, &walk->doubleHops}) {
+                for (const RigExecBakedWalkHop &hop : *hops) {
+                    if (hop.chain >= 0 &&
+                        size_t(hop.chain) < B.propertyChains.size()) {
+                        const RigExecBakedPropertyChain &other =
+                            B.propertyChains[size_t(hop.chain)];
+                        if (!declares(other.versionBase +
+                                      uint32_t(other.revisions.size()))) {
+                            add("walk " + hop.path.GetString() +
+                                " meets chain target without declaring it");
+                        }
+                    }
+                    if (hop.record >= 0 &&
+                        size_t(hop.record) < B.propertyRecords.size() &&
+                        !declares(
+                            B.propertyRecords[size_t(hop.record)].id)) {
+                        add("walk " + hop.path.GetString() +
+                            " meets record without declaring it");
+                    }
+                }
+            }
+        }
+    }
+    if (B.headOrder.size() != B.headSteps.size()) {
+        add("the head order holds " + std::to_string(B.headOrder.size()) +
+            " of " + std::to_string(B.headSteps.size()) + " head step(s)");
+    }
+    if (count == 0) {
+        return true;
+    }
+    if (error) {
+        *error = first;
+        if (count > 1) {
+            *error += " (and " + std::to_string(count - 1) + " more)";
+        }
+    }
+    return false;
+}
+
+namespace {
+
+// Whether anything \p step declares moved this run.
+bool
+HeadStepDirty(const RigExecBakedProgramImpl &B,
+              const RigExecBakedHeadStep &step)
+{
+    for (const uint32_t leaf : step.leaves) {
+        if (B.headLeaves[leaf].changed) {
+            return true;
+        }
+    }
+    for (const uint32_t slot : step.overrideSlots) {
+        if (B.headOverrideMoved[slot]) {
+            return true;
+        }
+    }
+    const auto shadowed = [&B, &step](uint32_t id) {
+        for (const auto &[version, record] : step.shadowedReads) {
+            if (version == id && !B.recordStoodAside[record]) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const RigExecBakedHeadRange &range : step.reads) {
+        if (range.domain != RigExecBakedHeadDomain::PropertyVersion) {
+            continue;
+        }
+        for (uint32_t id = range.begin; id < range.end; ++id) {
+            if (B.propertyChanged[id] && !shadowed(id)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// One pass over the head order. A weight-object envelope is resolved by
+// the oracle through the generation's resolved inputs, which hold every
+// earlier chain's publication when _EvaluatePropertyChains reaches it, so
+// the chains finished so far are published there first.
+void
+ExecuteHeadTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
+                bool force, bool profile)
+{
+    RigExecBakedProgramImpl &B = *program;
+    std::vector<char> finished(B.propertyChains.size(), 0);
+    std::vector<char> published(B.propertyChains.size(), 0);
+    uint32_t seq = 0;
+    // One "PropertyChain <target>" span per chain that runs any part, which
+    // is the span _EvaluatePropertyChains records for a chain it runs.
+    std::optional<RigExecProfileScope> chainSpan;
+    int spanChain = -1;
+    for (const uint32_t index : B.headOrder) {
+        RigExecBakedHeadStep &step = B.headSteps[index];
+        step.runSeq = 0;
+        if (step.kind != RigExecBakedHeadKind::PropertyRevision) {
+            TF_CODING_ERROR("head step %s has no body", step.label.c_str());
+            continue;
+        }
+        if (force || step.alwaysRuns || HeadStepDirty(B, step)) {
+            if (step.alwaysRuns) {
+                for (size_t c = 0; c < finished.size(); ++c) {
+                    if (finished[c] && !published[c]) {
+                        RigExecBakedPublishPropertyChains(&B, c, c + 1,
+                                                          false);
+                        published[c] = 1;
+                    }
+                }
+            }
+            if (profile && B.profiler && B.profiler->IsEnabled() &&
+                spanChain != step.object) {
+                chainSpan.reset();
+                chainSpan.emplace(
+                    B.profiler,
+                    "PropertyChain " +
+                        B.propertyChains[size_t(step.object)]
+                            .target.GetString(),
+                    "property");
+                spanChain = step.object;
+            }
+            step.lines.clear();
+            {
+                const RigExecOpBodyScope body(
+                    B.purityAudit ? &B.purityViolations.count : nullptr);
+                RigExecBakedRunPropertyStep(&B, &step, time);
+            }
+            step.runSeq = ++seq;
+            ++B.headOpsRun;
+        }
+        RigExecBakedFinishPropertyStep(&B, step);
+        const RigExecBakedPropertyChain &chain =
+            B.propertyChains[size_t(step.object)];
+        if (size_t(step.part) == chain.revisions.size()) {
+            finished[size_t(step.object)] = 1;
+            if (spanChain == step.object) {
+                chainSpan.reset();
+                spanChain = -1;
+            }
+        }
+    }
+}
+
+// What a head pass leaves, for the cone verifier.
+struct HeadState {
+    std::vector<RigExecBakedPropertyValue> values;
+    std::vector<char> versionValid, changed, chainValid;
+    std::vector<VtValue> chainFinal, recordValues;
+    std::vector<std::vector<std::string>> lines;
+    std::vector<uint32_t> runSeq;
+    uint64_t opsRun = 0;
+
+    void Capture(const RigExecBakedProgramImpl &B)
+    {
+        values = B.propertyValues;
+        versionValid = B.propertyVersionValid;
+        changed = B.propertyChanged;
+        chainValid = B.chainValid;
+        chainFinal = B.chainFinal;
+        recordValues = B.recordValues;
+        lines.resize(B.headSteps.size());
+        runSeq.resize(B.headSteps.size());
+        for (size_t i = 0; i < B.headSteps.size(); ++i) {
+            lines[i] = B.headSteps[i].lines;
+            runSeq[i] = B.headSteps[i].runSeq;
+        }
+        opsRun = B.headOpsRun;
+    }
+
+    void Restore(RigExecBakedProgramImpl *program) const
+    {
+        RigExecBakedProgramImpl &B = *program;
+        B.propertyValues = values;
+        B.propertyVersionValid = versionValid;
+        B.propertyChanged = changed;
+        B.chainValid = chainValid;
+        B.chainFinal = chainFinal;
+        B.recordValues = recordValues;
+        for (size_t i = 0; i < B.headSteps.size(); ++i) {
+            B.headSteps[i].lines = lines[i];
+            B.headSteps[i].runSeq = runSeq[i];
+        }
+        B.headOpsRun = opsRun;
+    }
+};
+
+// The differences between \p memo (the cone pass) and what the forced pass
+// left in \p B: every valid version, valid byte, published record and line.
+size_t
+CompareHeadPasses(const RigExecBakedProgramImpl &B, const HeadState &memo,
+                  std::vector<std::string> *differences)
+{
+    size_t mismatches = 0;
+    const auto differ = [&](const std::string &what) {
+        ++mismatches;
+        differences->push_back("baked cone mismatch: " + what);
+    };
+    for (size_t c = 0; c < B.propertyChains.size(); ++c) {
+        const RigExecBakedPropertyChain &chain = B.propertyChains[c];
+        for (size_t k = 0; k <= chain.revisions.size(); ++k) {
+            const uint32_t id = chain.versionBase + uint32_t(k);
+            if (memo.versionValid[id] != B.propertyVersionValid[id]) {
+                differ("head version " + std::to_string(k) + " of " +
+                       chain.target.GetString() + " differs in validity");
+                continue;
+            }
+            if (!B.propertyVersionValid[id]) {
+                continue;
+            }
+            const RigExecBakedPropertyValue &a = memo.values[id];
+            const RigExecBakedPropertyValue &b = B.propertyValues[id];
+            bool same = true;
+            switch (chain.arm) {
+            case RigExecBakedPropertyChain::Arm::Float:
+                same = std::memcmp(&a.f, &b.f, sizeof(a.f)) == 0;
+                break;
+            case RigExecBakedPropertyChain::Arm::Double:
+                same = std::memcmp(&a.d, &b.d, sizeof(a.d)) == 0;
+                break;
+            case RigExecBakedPropertyChain::Arm::Matrix4d:
+                same = std::memcmp(&a.m, &b.m, sizeof(a.m)) == 0;
+                break;
+            case RigExecBakedPropertyChain::Arm::Vec3f:
+                same = std::memcmp(&a.v, &b.v, sizeof(a.v)) == 0;
+                break;
+            }
+            if (!same) {
+                differ("head version " + std::to_string(k) + " of " +
+                       chain.target.GetString() + " differs");
+            }
+        }
+        if (B.chainValid[c] &&
+            !RigExecBakedHeadValueSame(memo.chainFinal[c], B.chainFinal[c])) {
+            differ("head final value of " + chain.target.GetString() +
+                   " differs");
+        }
+        for (const uint32_t r : chain.records) {
+            if (B.chainValid[c] && !B.recordStoodAside[r] &&
+                !RigExecBakedHeadValueSame(memo.recordValues[r],
+                                           B.recordValues[r])) {
+                differ("head record " +
+                       B.propertyRecords[r].consumer.GetString() +
+                       " differs");
+            }
+        }
+    }
+    for (size_t i = 0; i < B.headSteps.size(); ++i) {
+        if (memo.lines[i] != B.headSteps[i].lines) {
+            differ("head step " + B.headSteps[i].label +
+                   " reports different lines");
+        }
+    }
+    return mismatches;
+}
+
+}  // namespace
+
+void
+RigExecBakedRunHeadTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
+                        RigExecRigPose *pose, bool force)
+{
+    RigExecBakedProgramImpl &B = *program;
+    RigExecBakedPlaceHeadOverrides(&B);
+    // The program's first tier run, and one after a moved stamp, run every
+    // op: Build computes no chain result to keep.
+    force = force || !B.headEverRan || B.headStamp != B.programStamp;
+    if (RigExecBakedVerifyConesRequested()) {
+        HeadState before, memo;
+        before.Capture(B);
+        // The overlay too: a pass publishes finished chains into it
+        // ahead of a volatile op, and the oracle reads it.
+        const RigExecResolvedInputs overlay = *B.resolvedInputs;
+        ExecuteHeadTier(&B, time, force, true);
+        memo.Capture(B);
+        before.Restore(&B);
+        *B.resolvedInputs = overlay;
+        ExecuteHeadTier(&B, time, true, false);
+        std::vector<std::string> differences;
+        const size_t mismatches = CompareHeadPasses(B, memo, &differences);
+        // The trace and the counter say what the cone pass did.
+        for (size_t i = 0; i < B.headSteps.size(); ++i) {
+            B.headSteps[i].runSeq = memo.runSeq[i];
+        }
+        B.headOpsRun = memo.opsRun;
+        if (mismatches > 0) {
+            pose->bakedParityMismatches += mismatches;
+            for (std::string &difference : differences) {
+                pose->diagnostics.push_back(std::move(difference));
+            }
+            TF_WARN("rigExec: baked parity mismatch: %zu difference(s) "
+                    "between the head tier's cone run and a forced run",
+                    mismatches);
+        }
+    } else {
+        ExecuteHeadTier(&B, time, force, true);
+    }
+    B.headEverRan = true;
+    B.headStamp = B.programStamp;
+    B.lastHeadOverrides = B.headOverrides;
+    // Straight into the published diagnostics, in head order: the chains
+    // run before anything else on both paths, so their lines are the first
+    // of the generation.
+    for (const uint32_t index : B.headOrder) {
+        const RigExecBakedHeadStep &step = B.headSteps[index];
+        pose->diagnostics.insert(pose->diagnostics.end(), step.lines.begin(),
+                                 step.lines.end());
     }
 }
 

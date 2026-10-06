@@ -170,6 +170,13 @@ RigExecFrozenPurityAudit()
          "bodyPurity.h), except the volatile oracle callers and the stage "
          "assembly of a plugin revision bound to region values; settings "
          "and token tables are read and touched at Build"},
+        {"baked head tier (bakedProperties.cpp property revisions)",
+         RigExecFrozenPurity::LiveOnly,
+         "runs in the live prologue, serially on the owning thread, from "
+         "head leaves sampled there; a body reads leaves, overrides and "
+         "earlier versions and no USD (enforced by RIGEXEC_PURITY_CHECK), "
+         "except a weight-object envelope's volatile oracle; a frozen job "
+         "takes its chain results from the chain hook and runs no head op"},
         {"baked schedule serial executor",
          RigExecFrozenPurity::Pure,
          "program order on one thread; the reference every frozen run uses"},

@@ -123,6 +123,47 @@ void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
 bool RigExecBakedValidateStepGraph(const RigExecBakedProgramImpl &program,
                                    std::string *error);
 
+/// Orders \p program's head steps into `headOrder` and fills their `preds`
+/// and `succs` from what they declare.
+///
+/// One Kahn sort over the declared reads: an edge from the head step that
+/// writes a slot to every head step that reads it. Among the steps ready
+/// at once the lowest (`object`, `part`, first written slot) goes first --
+/// for property revisions the chain's place in _propertyChainOrder, then
+/// the revision -- so where the declarations allow the evaluator's order,
+/// that order is the result, and it comes from the declarations rather than
+/// from statement order. False with the step left unordered when the reads
+/// form a cycle.
+bool RigExecBakedSortHeadTier(RigExecBakedProgramImpl *program,
+                              std::string *error);
+
+/// Whether \p program's head tier is one RigExecBakedRunHeadTier may trust,
+/// which Build asks before it hands the program out: in `headOrder`, every
+/// slot a head step reads was written by an earlier head step, no head
+/// step reads a region domain, no slot has two head producers, and every
+/// walk that meets a chain target or a phased record's consumer declares
+/// that chain's final version or that record. On failure \p error receives
+/// the first violation and how many more there were.
+bool RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &program,
+                                  std::string *error);
+
+/// Runs \p program's head tier at \p time: serially, on the owning thread,
+/// in `headOrder`, before the region.
+///
+/// An op runs when \p force, on the program's first tier run or after a
+/// moved program stamp, when it always runs, or when a head leaf, an
+/// override slot or a head output it declares moved; otherwise it keeps
+/// its outputs and replays its lines. Each executed body runs under the
+/// purity mark. The lines of every op go to \p pose in head order. Under
+/// RIGEXEC_BAKED_VERIFY_CONES the tier runs a second, forced time from the
+/// same state and counts every version, valid byte, record or line that
+/// differs as a parity mismatch on \p pose; the head trace keeps what the
+/// first pass ran. The caller publishes the chains after it
+/// (RigExecBakedPublishPropertyChains).
+void RigExecBakedRunHeadTier(RigExecBakedProgramImpl *program,
+                             UsdTimeCode time, RigExecRigPose *pose,
+                             bool force);
+
 /// Assigns every step from \p firstStep on its size, its cost and its
 /// longest-path level.
 ///

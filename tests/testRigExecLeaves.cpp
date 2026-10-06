@@ -34,6 +34,7 @@
 
 #include "pxr/base/arch/env.h"
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
@@ -42,7 +43,9 @@
 #include "pxr/base/tf/type.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
+#include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/attributeSpec.h"
+#include "pxr/usd/sdf/changeBlock.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -683,6 +686,98 @@ void RoutedPathLeafCases(const std::string &examples);
 void RoutedSmoothScrubCase(const std::string &examples);
 void RoutedDeformerCases(const std::string &examples);
 
+// The property revisions' own inputs, which the head ops read as head
+// leaves: a curve's keys edited and then dragged, a chain target
+// given time samples where it had a default, and a mover input given time
+// samples. Each edit is held to a program built fresh on the edited stage,
+// and the drag to the reference.
+void
+RoutedChainCases(const std::string &examples)
+{
+    const std::vector<Fixture> fixtures = Fixtures(examples);
+    {
+        const Fixture &f = FixtureNamed(fixtures, "computed_chains");
+        UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        const SdfPath keys("/Asset/Rig/Movers/Dial/Shape.inputs:keys");
+        UsdAttribute attribute = stage->GetAttributeAtPath(keys);
+        CHECK(attribute);
+        const UsdTimeCode t(stage->GetStartTimeCode() + 2.0);
+        auto evaluator =
+            MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+        RunChecked(evaluator.get(), {}, t, "curve keys, before");
+        const size_t builds = evaluator->GetBakedProgramBuildCount();
+        CHECK(attribute.Set(VtArray<GfVec2f>{GfVec2f(0.0f, 0.0f),
+                                             GfVec2f(0.5f, 0.4f),
+                                             GfVec2f(2.0f, 1.6f)}));
+        RigExecRigPose pose =
+            RunChecked(evaluator.get(), {}, t, "curve keys, edited");
+        CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+        CHECK(PoseMismatches(FreshPose(stage, f.rig, t), pose,
+                             "curve keys, edited") == 0);
+        const std::vector<RigExecValueOverride> drag = {RigExecValueOverride{
+            keys.GetPrimPath(), TfToken(), keys.GetNameToken(),
+            VtValue(VtArray<GfVec2f>{GfVec2f(0.0f, 0.0f),
+                                     GfVec2f(0.5f, 1.0f),
+                                     GfVec2f(2.0f, 1.1f)})}};
+        pose = RunChecked(evaluator.get(), drag, t, "curve keys, dragged");
+        CHECK(PoseMismatches(Reference(stage, f.rig, t, drag), pose,
+                             "curve keys, dragged") == 0);
+        pose = RunChecked(evaluator.get(), {}, t, "curve keys, released");
+        CHECK(PoseMismatches(Reference(stage, f.rig, t, {}), pose,
+                             "curve keys, released") == 0);
+    }
+    const Fixture &f = FixtureNamed(fixtures, "09");
+    const auto animate = [&](const SdfPath &property, const VtValue &first,
+                             const VtValue &third, const char *what) {
+        UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        UsdAttribute attribute = stage->GetAttributeAtPath(property);
+        CHECK(attribute);
+        const UsdTimeCode t1(stage->GetStartTimeCode());
+        const UsdTimeCode t3(stage->GetStartTimeCode() + 2.0);
+        auto evaluator =
+            MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+        const std::string name = std::string("animated ") + what;
+        RunChecked(evaluator.get(), {}, t1, name + ", before");
+        const size_t builds = evaluator->GetBakedProgramBuildCount();
+        {
+            // One notice: the property goes from a default to two samples.
+            SdfChangeBlock block;
+            CHECK(attribute.Set(first, t1));
+            CHECK(attribute.Set(third, t3));
+        }
+        const RigExecRigPose one =
+            RunChecked(evaluator.get(), {}, t1, name + " at 1");
+        CHECK(PoseMismatches(FreshPose(stage, f.rig, t1), one,
+                             name + " at 1") == 0);
+        const RigExecRigPose three =
+            RunChecked(evaluator.get(), {}, t3, name + " at 3");
+        CHECK(PoseMismatches(FreshPose(stage, f.rig, t3), three,
+                             name + " at 3") == 0);
+        CHECK(PoseMismatches(Reference(stage, f.rig, t3, {}), three,
+                             name + " at 3, reference") == 0);
+        // The time now moves the chain.
+        CHECK(PoseMismatches(one, three, name + " 1 against 3",
+                             /*quiet=*/true) != 0);
+        std::printf("routed %s: %zu rebuild(s)\n", name.c_str(),
+                    evaluator->GetBakedProgramBuildCount() - builds);
+    };
+    // The target's own value is no epoch input, so this one re-binds its
+    // head leaf as varying in the standing program.
+    animate(SdfPath("/PropMathAsset/Rig/Channels/Dials.rigExec:gain"),
+            VtValue(0.25f), VtValue(0.75f), "chain target");
+    animate(SdfPath("/PropMathAsset/Rig/Movers/OffsetLift.inputs:value"),
+            VtValue(GfVec3f(0.0f, 4.0f, 0.0f)),
+            VtValue(GfVec3f(0.0f, 8.0f, 0.0f)), "chain mover input");
+}
+
 void
 TestRoutedValuesReachTheirLeaves(const std::string &examples)
 {
@@ -694,6 +789,11 @@ TestRoutedValuesReachTheirLeaves(const std::string &examples)
     RoutedCase(f,
                SdfPath("/PropMathAsset/Rig/Channels/Dials.rigExec:gain"),
                VtValue(0.5f), "chain target default");
+    // A chain mover's envelope, edited at the held frame.
+    RoutedCase(
+        f, SdfPath("/PropMathAsset/Rig/Movers/OffsetSpace.inputs:defaultWeight"),
+        VtValue(0.5f), "chain mover defaultWeight");
+    RoutedChainCases(examples);
 
     // An avar edited through RigExecProgramAvarPatch, the Animation-mode
     // route: the binding is patched in place and its leaf re-read.

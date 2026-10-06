@@ -2733,17 +2733,24 @@ RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program)
         number(B.weightObjects[w].pointLeaves,
                {RigExecBakedPathLeafOwner::Weight, uint32_t(w), 0, 0});
     }
+    // The head leaves after those, each under its own path: a head leaf
+    // reads one attribute and follows no connection.
+    const size_t headBase = B.leafRefs.size() + B.pathLeafRefs.size();
+    for (size_t h = 0; h < B.headLeaves.size(); ++h) {
+        B.leafByPath[B.headLeaves[h].path].push_back(uint32_t(headBase + h));
+    }
 }
 
 void
 RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
-                         bool all)
+                         bool all, RigExecBakedLeafPass pass)
 {
     RigExecBakedProgramImpl &B = *program;
     const RigExecResolvedInputs &R = *B.resolvedInputs;
+    const bool first = pass != RigExecBakedLeafPass::ChainRouted;
     // Rule 6, carried into `mustSample`: the leaves under a routed override
     // whose value moved (placed, changed or lifted).
-    if (B.routedOverrides != B.lastRoutedOverrides) {
+    if (first && B.routedOverrides != B.lastRoutedOverrides) {
         const auto markPath = [&B](const SdfPath &path) {
             const auto found = B.leafByPath.find(path);
             if (found != B.leafByPath.end()) {
@@ -2776,13 +2783,23 @@ RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program, UsdTimeCode time,
         return index >= 0 && size_t(index) < flags.size() &&
                flags[size_t(index)];
     };
-    B.leaves.ForEach([](auto &pool) {
-        std::fill(pool.changed.begin(), pool.changed.end(), char(0));
-    });
+    if (first) {
+        B.leaves.ForEach([](auto &pool) {
+            std::fill(pool.changed.begin(), pool.changed.end(), char(0));
+        });
+    }
     frozenDetail::_ForEachPatchableInput(B, [&](auto &input) {
         using T = std::decay_t<decltype(input.constant)>;
         using Stored = typename RigExecBakedLeafTraits<T>::Stored;
         if (input.leaf < 0) {
+            return;
+        }
+        // A chain-routed binding reads through the chain results, which the
+        // head tier publishes between the two passes; no other binding's
+        // walk can reach one.
+        const bool routed = bool(input.resolvedAttr);
+        if ((pass == RigExecBakedLeafPass::BeforeHead && routed) ||
+            (pass == RigExecBakedLeafPass::ChainRouted && !routed)) {
             return;
         }
         RigExecBakedLeafPool<T> &pool = B.leaves.Of<T>();

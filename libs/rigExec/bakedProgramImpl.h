@@ -691,6 +691,214 @@ RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
     return RigExecBakedRange(domain, index, index + 1);
 }
 
+// The head tier.
+// Ops the prologue runs serially before the region, in an order derived from
+// what they declare they read (RigExecBakedSortHeadTier), each re-run only
+// when something it reads moved (RigExecBakedRunHeadTier): today the
+// property revisions. The tier keeps its own step list, kinds and domains
+// until the runtime reads them: RigExecBakedStepKind and
+// RigExecBakedSlotDomain end where the exporter's wire asserts pin them, and
+// nothing here is exported.
+
+/// What one head step computes.
+enum class RigExecBakedHeadKind : uint8_t {
+    /// Revision `part` of property chain `object`; part 0 is the base.
+    PropertyRevision,
+    RestCompose,
+    LadderCompose,
+    SkinTopology,
+};
+
+/// The tables head steps read and write.
+enum class RigExecBakedHeadDomain : uint8_t {
+    /// Per chain, RigExecBakedPropertyChain::versionBase + k: the value
+    /// after k revisions, with the chain's valid byte. After every chain's
+    /// versions, one id per phased record (RigExecBakedPropertyRecord::id),
+    /// written by the part that writes the version the record reads.
+    PropertyVersion,
+    Rest,
+    Ladder,
+    SkinTopology,
+};
+
+const char *RigExecBakedHeadKindName(RigExecBakedHeadKind kind);
+const char *RigExecBakedHeadDomainName(RigExecBakedHeadDomain domain);
+
+/// A half-open run of one head domain's slots.
+struct RigExecBakedHeadRange {
+    RigExecBakedHeadDomain domain = RigExecBakedHeadDomain::PropertyVersion;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+
+    bool IsEmpty() const { return end <= begin; }
+};
+
+inline RigExecBakedHeadRange
+RigExecBakedHeadOne(RigExecBakedHeadDomain domain, uint32_t index)
+{
+    RigExecBakedHeadRange range;
+    range.domain = domain;
+    range.begin = index;
+    range.end = index + 1;
+    return range;
+}
+
+/// One head step: what it declares, and what its last execution left.
+struct RigExecBakedHeadStep {
+    RigExecBakedHeadKind kind = RigExecBakedHeadKind::PropertyRevision;
+    int object = -1;
+    int part = 0;
+    std::vector<RigExecBakedHeadRange> reads, writes;
+    /// Region slots it reads. Empty for every op built today: no head op reads
+    /// a pose, weight or geometry value, and the validator refuses one that
+    /// declares any.
+    std::vector<RigExecBakedSlotRange> regionReads;
+    /// The head leaves and the override slots its body reads.
+    std::vector<uint32_t> leaves, overrideSlots;
+    /// Reads of a chain's final version through a walk that meets one of
+    /// that chain's records first, as (version id, record index). While the
+    /// record does not stand aside it answers the walk (or, with the chain
+    /// skipped, the target holds no version), so a move of that version
+    /// alone does not re-run the op. Also in `reads`, which orders the op.
+    std::vector<std::pair<uint32_t, uint32_t>> shadowedReads;
+    /// Runs on every run: a property revision whose envelope is a weight
+    /// object, which the oracle resolves off the stage (volatile until S4).
+    bool alwaysRuns = false;
+    std::string label;
+    /// The head steps whose writes it reads, and those that read its
+    /// writes, as indices into `headSteps`.
+    std::vector<uint32_t> preds, succs;
+    /// The lines its last execution produced, replayed while it is clean.
+    std::vector<std::string> lines;
+    /// 1-based place among the ops the last run executed; 0 when it did not
+    /// run.
+    uint32_t runSeq = 0;
+};
+
+/// The type a head leaf holds and a walk reads.
+enum class RigExecBakedHeadValueType : uint8_t {
+    Bool, Float, Double, Vec3f, Matrix4d, Vec2fArray
+};
+
+/// One stage value a head op reads: an attribute's own value at the run's
+/// time as one type, with no connection followed and no overlay consulted;
+/// empty when the attribute has no value of that type then. Sampled on the
+/// owning thread (RigExecBakedSampleHeadLeaves); leaf id
+/// `leafRefs.size() + pathLeafRefs.size() + i` in `leafByPath`.
+struct RigExecBakedHeadLeaf {
+    SdfPath path;
+    /// Invalid when no attribute stands at `path`. Owning thread only.
+    UsdAttribute attribute;
+    RigExecBakedHeadValueType type = RigExecBakedHeadValueType::Float;
+    /// The attribute's value type is `type`. A typed read of another type
+    /// has no value, so such a leaf stays empty and is never read.
+    bool typeMatches = false;
+    bool varying = false;
+    VtValue value;
+    /// This run's sample differs bitwise from the one before it.
+    char changed = 0;
+    /// The next sample re-reads it whatever else holds (a value edit
+    /// reached `path`), and re-derives `varying`.
+    char mustSample = 0;
+};
+
+/// One attribute of a walk, and what can stand in the overlay there when a
+/// head op reads it.
+struct RigExecBakedWalkHop {
+    SdfPath path;
+    /// `headOverrideSlots`' slot of `path`.
+    int overrideSlot = -1;
+    /// An earlier chain whose target `path` is: its final version stands
+    /// here while the chain is valid, in place of any override.
+    int chain = -1;
+    /// An earlier chain's phased record whose consumer `path` is.
+    int record = -1;
+    /// The head leaf holding `path`'s own value as the walk reads it; -1
+    /// where the walk never falls back to it.
+    int leaf = -1;
+};
+
+/// One input of a property revision as _EvaluatePropertyChains reads it
+/// (_PinnedRead, rigEvaluatorProperties.cpp), restated over head leaves,
+/// overrides and versions by RigExecBakedResolveWalk (bakedProperties.cpp).
+/// The hops are fixed at Build: a connection, a type or an attribute
+/// appearing on them moves the epoch digest, which recompiles.
+struct RigExecBakedWalk {
+    enum class Flavour : uint8_t {
+        Absent,     ///< no attribute: the read's fallback
+        Pinned,     ///< unconnected: the overlay at its path, else its value
+        Connected,  ///< RigExecResolvedInputs::GetAttribute's walk
+    };
+    Flavour flavour = Flavour::Absent;
+    RigExecBakedHeadValueType type = RigExecBakedHeadValueType::Float;
+    /// The hops read as `type`, in walk order. A float walk that meets a
+    /// double hop ends `hops` there (that hop still answers a float overlay
+    /// first) and goes on in `doubleHops`, GetAttribute's double recursion
+    /// from that hop with its own cycle guard; a float walk whose head is a
+    /// double has only `doubleHops`.
+    std::vector<RigExecBakedWalkHop> hops, doubleHops;
+};
+
+/// One version's value, in the member the chain's arm computes.
+struct RigExecBakedPropertyValue {
+    float f = 0.0f;
+    double d = 0.0;
+    GfVec3f v{0.0f};
+    GfMatrix4d m{1.0};
+};
+
+/// A property chain as the head tier runs it, bound at Build from the
+/// evaluator's compiled chain the way _EvaluatePropertyChains binds it
+/// (rigEvaluatorProperties.cpp).
+struct RigExecBakedPropertyChain {
+    /// The runChain arm the target's type name selects.
+    enum class Arm : uint8_t { Float, Double, Matrix4d, Vec3f };
+    SdfPath target;
+    bool targetExists = false;
+    SdfValueTypeName valueType;
+    Arm arm = Arm::Float;
+    /// The target's own value (no connection, no overlay) as the arm's type.
+    int ownLeaf = -1;
+    int targetSlot = -1;
+    /// The PropertyVersion id of part 0; part k writes versionBase + k.
+    uint32_t versionBase = 0;
+    struct Revision {
+        SdfPath mover;
+        bool moverExists = false;
+        /// rigExec:operation as _ReadOperation reads it (its own value at
+        /// Default), parsed at Build. Structural: an edit rebuilds.
+        bool opValid = false;
+        RigExecPropertyOp op = RigExecPropertyOp::Add;
+        /// rigExec:weightObject's first target; empty when none.
+        SdfPath weightObject;
+        RigExecBakedWalk enabled, defaultWeight, value, minimum, maximum,
+            keys, tangents;
+        /// inputs:tangents exists, which is what decides it is read.
+        bool hasTangents = false;
+        /// "diag <mover>", the head of every line the revision emits.
+        std::string linePrefix;
+    };
+    std::vector<Revision> revisions;
+    /// Its phased records, as indices into `propertyRecords`.
+    std::vector<uint32_t> records;
+    /// "property chain <target>", the head of every line the base emits.
+    std::string linePrefix;
+};
+
+/// A phased record (RigExecPhasedConnection): its consumer reads the chain
+/// after `applied` revisions, converted to `consumerType`, unless an
+/// override stands on one of its hops.
+struct RigExecBakedPropertyRecord {
+    uint32_t chain = 0;
+    SdfPath consumer;
+    SdfValueTypeName consumerType;
+    size_t applied = 0;
+    /// The override slots of the consumer and every hop before the target.
+    std::vector<int> hopSlots;
+    /// Its PropertyVersion id.
+    uint32_t id = 0;
+};
+
 /// One version of a chain's running points: 0 is the authored base, v > 0
 /// what the fuse of the chain's revision v - 1 left.
 struct RigExecBakedPointVersion {
@@ -3055,6 +3263,49 @@ struct RigExecBakedProgramImpl {
     bool anyOverridden = false;
     /// RigExecBakedProgram::SetPublishWeightFields.
     bool publishWeightFields = true;
+
+    /// The head tier (RigExecBakedRunHeadTier). Build state: the chains,
+    /// records, leaves, override slots and steps. Everything after
+    /// `headOrder` is prologue state, written on the owning thread before
+    /// the region.
+    std::vector<RigExecBakedPropertyChain> propertyChains;
+    std::vector<RigExecBakedPropertyRecord> propertyRecords;
+    /// The PropertyVersion domain's size: every chain's versions, then the
+    /// records.
+    uint32_t propertyVersionCount = 0;
+    std::vector<RigExecBakedHeadLeaf> headLeaves;
+    /// Every path a head op reads an override at, and its slot.
+    std::map<SdfPath, uint32_t> headOverrideSlots;
+    std::vector<RigExecBakedHeadStep> headSteps;
+    /// `headSteps` in execution order (RigExecBakedSortHeadTier).
+    std::vector<uint32_t> headOrder;
+    /// Per version id: its value, and whether its chain was valid when it
+    /// was written.
+    std::vector<RigExecBakedPropertyValue> propertyValues;
+    std::vector<char> propertyVersionValid;
+    /// Per PropertyVersion id, records included: moved this run.
+    std::vector<char> propertyChanged;
+    /// Per chain: valid this run, and its final version as published.
+    std::vector<char> chainValid;
+    std::vector<VtValue> chainFinal;
+    /// Per record: its value, and whether an override on one of its hops
+    /// stands it aside this run.
+    std::vector<VtValue> recordValues;
+    std::vector<char> recordStoodAside;
+    /// Per override slot: the interactive override standing there this run
+    /// (empty when none), last run's, and whether it moved.
+    std::vector<VtValue> headOverrides, lastHeadOverrides;
+    std::vector<char> headOverrideMoved;
+    /// What the head leaves were last sampled at, and the last tier run.
+    bool headLeavesSampled = false;
+    UsdTimeCode headLeafTime = UsdTimeCode::Default();
+    uint64_t headLeafStamp = 0;
+    bool headEverRan = false;
+    uint64_t headStamp = 0;
+    /// Test observables: head leaves re-read and head ops executed since
+    /// Build.
+    uint64_t headLeafSamples = 0;
+    uint64_t headOpsRun = 0;
 };
 
 /// \p input's sampled leaf, or its constant when it has none.
@@ -3126,6 +3377,10 @@ RigExecBakedMarkLeaf(RigExecBakedProgramImpl *program, uint32_t id)
     if (id >= program->leafRefs.size()) {
         const size_t i = id - program->leafRefs.size();
         if (i >= program->pathLeafRefs.size()) {
+            const size_t h = i - program->pathLeafRefs.size();
+            if (h < program->headLeaves.size()) {
+                program->headLeaves[h].mustSample = 1;
+            }
             return;
         }
         const RigExecBakedPathLeafRef &ref = program->pathLeafRefs[i];
@@ -3149,8 +3404,8 @@ RigExecBakedMarkLeaf(RigExecBakedProgramImpl *program, uint32_t id)
 /// seeded with the binding's constant, and files each under every path
 /// `overridableInputs` gives its override number. Then numbers every path
 /// leaf after them (`pathLeafRefs`), filed under every path its read can
-/// reach. Renumbers from scratch, so Build calls it again once every binding
-/// exists.
+/// reach, and every head leaf after those, filed under its path. Renumbers
+/// from scratch, so Build calls it again once every binding exists.
 void RigExecBakedNumberLeaves(RigExecBakedProgramImpl *program);
 
 /// Resolves \p leaves' keys on \p stage at Build: each key's attribute, the
@@ -3199,8 +3454,82 @@ void RigExecBakedSamplePathLeaves(RigExecBakedProgramImpl *program,
 ///     `lastPropertyResults`), for a binding routed through a chain.
 /// Every other leaf keeps its value: none of RigExecBakedRead's inputs can
 /// have moved for it. Owning thread, prologue only.
-void RigExecBakedSampleLeaves(RigExecBakedProgramImpl *program,
-                              UsdTimeCode time, bool all);
+///
+/// \p pass splits the live prologue around the head tier: BeforeHead reads
+/// every leaf but the chain-routed ones (a binding with `resolvedAttr`),
+/// whose walks no chain result can reach, and applies rule 6;
+/// ChainRouted reads the rest once the property chains are published. All
+/// does both, in one pass.
+enum class RigExecBakedLeafPass : uint8_t { All, BeforeHead, ChainRouted };
+void RigExecBakedSampleLeaves(
+    RigExecBakedProgramImpl *program, UsdTimeCode time, bool all,
+    RigExecBakedLeafPass pass = RigExecBakedLeafPass::All);
+
+/// Emits one PropertyRevision head step per part of every property chain
+/// (part 0 the base, part k revision k), numbers the PropertyVersion domain
+/// (`versionBase`, record ids) and sizes the head tier's run state. Each
+/// step declares the head leaves and override slots its body reads and,
+/// as head reads, the version before it and every chain version or record
+/// one of its walks meets. Build only.
+void RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program);
+
+/// Re-reads every head leaf that can have moved since its last sample and
+/// sets its `changed` byte by bitwise comparison:
+///  1. the first sample, a moved program stamp, or \p all (a forced run);
+///  2. its `mustSample` byte (a value edit reached its path), which also
+///     re-derives whether it varies;
+///  3. a moved time, for a leaf that varies (or a time moving to or from
+///     Default).
+/// A head leaf is a raw stage value, so overrides and chain results never
+/// move it: the walk resolver reads those beside it. Owning thread,
+/// prologue only.
+void RigExecBakedSampleHeadLeaves(RigExecBakedProgramImpl *program,
+                                  UsdTimeCode time, bool all);
+
+/// The body of one PropertyRevision head step: part 0 sets the base and the
+/// chain's valid byte, part k applies revision k. Each is the loop body of
+/// _EvaluatePropertyChains it replaces (rigEvaluatorProperties.cpp), over
+/// head leaves, overrides and earlier versions; its lines go to
+/// `step->lines`, and it sets the `propertyChanged` byte of the version it
+/// writes. A weight-object envelope is resolved through `resolveWeights`
+/// inside RigExecVolatileRead. Owning thread.
+void RigExecBakedRunPropertyStep(RigExecBakedProgramImpl *program,
+                                 RigExecBakedHeadStep *step,
+                                 UsdTimeCode time);
+
+/// Publishes chains [\p begin, \p end) as _EvaluatePropertyChains leaves
+/// them: each valid chain's final version at its target and each record
+/// not standing aside at its consumer, into the generation's resolved
+/// inputs and, when \p results, into `propertyResults`. A skipped chain
+/// publishes nothing, so an override on its target stays. Runs after the
+/// head tier on every run, whether its ops ran or replayed.
+void RigExecBakedPublishPropertyChains(RigExecBakedProgramImpl *program,
+                                       size_t begin, size_t end,
+                                       bool results);
+inline void
+RigExecBakedPublishPropertyChains(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedPublishPropertyChains(program, 0,
+                                      program->propertyChains.size(), true);
+}
+
+/// Places this run's interactive overrides into the head tier's override
+/// slots (the last at a path wins, as the overlay takes them), marks each
+/// slot whose value moved since the last run and each record an override
+/// stands aside, and clears every PropertyVersion `changed` byte except a
+/// record's whose hops' overrides moved. The head tier's first act on every
+/// run.
+void RigExecBakedPlaceHeadOverrides(RigExecBakedProgramImpl *program);
+
+/// After head step \p step ran or replayed: when the version it writes
+/// moved, the records that read that version (value and `changed` byte)
+/// and, for a chain's last part, the chain's final value.
+void RigExecBakedFinishPropertyStep(RigExecBakedProgramImpl *program,
+                                    const RigExecBakedHeadStep &step);
+
+/// Whether two head values are the same bit for bit (a signed zero or a NaN
+/// payload is a difference); empty equals only empty.
+bool RigExecBakedHeadValueSame(const VtValue &a, const VtValue &b);
 
 /// The matrix table \p revision reads at its own phase: FinalMatrix for a
 /// final-phase revision, BaseMatrix otherwise.
@@ -4215,7 +4544,10 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
 ///    `scheduleDirty`/`topology`/the partition and the path leaves (each
 ///    revision's and weight object's, `pathLeafChainResults`/
-///    `pathLeafChainSerial`, `pathLeafSamples`). The prologue runs ONCE per
+///    `pathLeafChainSerial`, `pathLeafSamples`), and the head tier's state
+///    (the head leaves, overrides, versions, records and lines, which
+///    RigExecBakedRunHeadTier verifies against a forced run of its own).
+///    The prologue runs ONCE per
 ///    generation, before either pass, so both passes see one value of each
 ///    by construction. Several are captured and restored anyway, because
 ///    they are cheap and putting the second pass back on exactly the first
@@ -4447,7 +4779,32 @@ struct RigExecBakedProgramTesting {
         const std::function<void(const SdfPath &, RigExecRevisionLeafDecl *)>
             &edit,
         size_t *compared);
+    /// Runs \p evaluator's own _EvaluatePropertyChains at \p time, as a
+    /// generation with a fresh chain memo would, and leaves the evaluator as
+    /// it found it: the resolved inputs are swapped by value for a fresh
+    /// object holding the evaluator's interactive overrides (so the
+    /// program's pointer to them stays valid) and the chain memo is moved
+    /// aside, and both are restored after. Owning thread, between
+    /// evaluations. False when the restore did not hand back the same memo.
+    static bool EvaluateChainsDetached(RigExecRigEvaluator *evaluator,
+                                       UsdTimeCode time,
+                                       std::map<SdfPath, VtValue> *results,
+                                       std::vector<std::string> *lines);
+    /// The evaluator's chain memo (null before a dynamic generation binds
+    /// one), for an identity check.
+    static const void *ChainMemo(const RigExecRigEvaluator &evaluator);
 };
+
+/// RigExecBakedProgramTesting::EvaluateChainsDetached.
+inline bool
+RigExecTestEvaluateChainsDetached(RigExecRigEvaluator *evaluator,
+                                  UsdTimeCode time,
+                                  std::map<SdfPath, VtValue> *results,
+                                  std::vector<std::string> *lines)
+{
+    return RigExecBakedProgramTesting::EvaluateChainsDetached(
+        evaluator, time, results, lines);
+}
 
 }  // namespace rigExec
 

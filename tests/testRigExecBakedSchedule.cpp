@@ -2474,6 +2474,126 @@ ExpectRejected(const RigExecBakedProgramImpl &B, const char *what,
     std::printf("  %s: %s\n", what, error.c_str());
 }
 
+// A hand-built head tier: two chains of two revisions, the second revision
+// of chain 1 reading chain 0's target through its inputs:value.
+void
+HandBuiltHeadTier(RigExecBakedProgramImpl *B)
+{
+    for (int c = 0; c < 2; ++c) {
+        RigExecBakedPropertyChain chain;
+        chain.target = SdfPath("/Rig/C" + std::to_string(c) + ".rigExec:x");
+        chain.targetExists = true;
+        for (int r = 0; r < 2; ++r) {
+            RigExecBakedPropertyChain::Revision revision;
+            revision.mover = SdfPath("/Rig/M" + std::to_string(c) + "_" +
+                                     std::to_string(r));
+            revision.moverExists = true;
+            chain.revisions.push_back(revision);
+        }
+        B->propertyChains.push_back(chain);
+    }
+    RigExecBakedWalkHop hop;
+    hop.path = B->propertyChains[0].target;
+    hop.chain = 0;
+    RigExecBakedWalk &walk = B->propertyChains[1].revisions[1].value;
+    walk.flavour = RigExecBakedWalk::Flavour::Pinned;
+    walk.hops.push_back(hop);
+    RigExecBakedBuildPropertySteps(B);
+    std::string error;
+    CHECK(RigExecBakedSortHeadTier(B, &error));
+}
+
+// The head step of chain \p chain, part \p part.
+uint32_t
+HeadStepOf(const RigExecBakedProgramImpl &B, int chain, int part)
+{
+    for (uint32_t i = 0; i < B.headSteps.size(); ++i) {
+        if (B.headSteps[i].object == chain && B.headSteps[i].part == part) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+void
+ExpectHeadRejected(const RigExecBakedProgramImpl &B, const char *what,
+                   const std::string &expected)
+{
+    std::string error;
+    if (RigExecBakedValidateHeadTier(B, &error)) {
+        ++failures;
+        std::printf("FAIL %s: the head validator accepted it\n", what);
+        return;
+    }
+    if (error.find(expected) == std::string::npos) {
+        ++failures;
+        std::printf("FAIL %s: \"%s\" is not in \"%s\"\n", what,
+                    expected.c_str(), error.c_str());
+    }
+    std::printf("  %s: %s\n", what, error.c_str());
+}
+
+/// The head tier's validator: it accepts a built program's and a
+/// hand-built tier, and refuses a part ordered before the part it reads, a
+/// property step that reads a region domain, and a walk through another
+/// chain's target that does not declare that chain's final version.
+void
+TestTheHeadValidatorRejectsAMalformedTier(const BuiltProgram &built)
+{
+    std::string error;
+    CHECK(built.program &&
+          RigExecBakedValidateHeadTier(built.program->GetStepGraph(),
+                                       &error));
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        CHECK(RigExecBakedValidateHeadTier(B, &error));
+        // The sort keeps the chain order where the reads allow it.
+        std::vector<uint32_t> identity(B.headSteps.size());
+        for (uint32_t i = 0; i < identity.size(); ++i) {
+            identity[i] = i;
+        }
+        CHECK(B.headOrder == identity);
+    }
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        const uint32_t one = HeadStepOf(B, 0, 1);
+        const uint32_t two = HeadStepOf(B, 0, 2);
+        std::swap(*std::find(B.headOrder.begin(), B.headOrder.end(), one),
+                  *std::find(B.headOrder.begin(), B.headOrder.end(), two));
+        ExpectHeadRejected(B, "part 2 before part 1",
+                           "head step PropertyRevision /Rig/M0_1 reads "
+                           "PropertyVersion slot 1, which no earlier head "
+                           "step writes");
+    }
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        B.headSteps[HeadStepOf(B, 0, 1)].regionReads.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, 0));
+        ExpectHeadRejected(B, "a property step reading PoseFin",
+                           "head step PropertyRevision /Rig/M0_0 reads the "
+                           "region domain PoseFin");
+    }
+    {
+        RigExecBakedProgramImpl B;
+        HandBuiltHeadTier(&B);
+        RigExecBakedHeadStep &step = B.headSteps[HeadStepOf(B, 1, 2)];
+        const uint32_t final0 = B.propertyChains[0].versionBase + 2;
+        step.reads.erase(
+            std::remove_if(step.reads.begin(), step.reads.end(),
+                           [final0](const RigExecBakedHeadRange &range) {
+                               return range.begin <= final0 &&
+                                      final0 < range.end;
+                           }),
+            step.reads.end());
+        ExpectHeadRejected(B, "an undeclared walk through a target",
+                           "walk /Rig/C0.rigExec:x meets chain target "
+                           "without declaring it");
+    }
+}
+
 /// The shapes the edge sweep cannot see, each of which the validator must
 /// refuse by name: a read whose producer is later, missing or the reader
 /// itself; a phased-read prefix that reaches past its reader; edges that
@@ -3553,6 +3673,7 @@ main(int argc, char **argv)
         }
     }
     TestTheValidatorRejectsAMalformedGraph();
+    TestTheHeadValidatorRejectsAMalformedTier(biped);
     TestAPlacementReadNeedsItsVolumesStep();
     TestTheValidatorRejectsALaterPoseVersion();
     TestTheValidatorRejectsAnUnboundPointVersion();

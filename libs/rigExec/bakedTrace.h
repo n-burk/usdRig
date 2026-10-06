@@ -66,6 +66,20 @@ RigExecBakedLastRunTrace(const RigExecBakedProgramImpl &program);
 std::vector<RigExecOpGraphNode>
 RigExecBakedOpGraph(const RigExecBakedProgramImpl &program);
 
+/// The head-tier ops \p program's last run executed, in execution order,
+/// as the same records: `step` is the head step's index, `kind`
+/// RigExecBakedHeadKindName, `domain` "head", `cluster` -1. Empty before
+/// the first run. Separate while the head tier is outside the step
+/// graph.
+std::vector<RigExecOpTraceEntry>
+RigExecBakedLastHeadTrace(const RigExecBakedProgramImpl &program);
+
+/// Every head step of \p program, in head order, with its declared reads
+/// and writes by RigExecBakedHeadDomainName; `level` is the longest path
+/// over its predecessors.
+std::vector<RigExecOpGraphNode>
+RigExecBakedHeadGraph(const RigExecBakedProgramImpl &program);
+
 }  // namespace rigExec
 
 #endif  // RIGEXEC_BAKED_TRACE_H

@@ -231,6 +231,32 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.folded = src.folded;
     D.anyOverridden = src.anyOverridden;
     D.publishWeightFields = src.publishWeightFields;
+    // The head tier, as live left it. A frozen job does not run it: the
+    // chain hook transports the chain results.
+    D.propertyChains = src.propertyChains;
+    D.propertyRecords = src.propertyRecords;
+    D.propertyVersionCount = src.propertyVersionCount;
+    D.headLeaves = src.headLeaves;
+    D.headOverrideSlots = src.headOverrideSlots;
+    D.headSteps = src.headSteps;
+    D.headOrder = src.headOrder;
+    D.propertyValues = src.propertyValues;
+    D.propertyVersionValid = src.propertyVersionValid;
+    D.propertyChanged = src.propertyChanged;
+    D.chainValid = src.chainValid;
+    D.chainFinal = src.chainFinal;
+    D.recordValues = src.recordValues;
+    D.recordStoodAside = src.recordStoodAside;
+    D.headOverrides = src.headOverrides;
+    D.lastHeadOverrides = src.lastHeadOverrides;
+    D.headOverrideMoved = src.headOverrideMoved;
+    D.headLeavesSampled = src.headLeavesSampled;
+    D.headLeafTime = src.headLeafTime;
+    D.headLeafStamp = src.headLeafStamp;
+    D.headEverRan = src.headEverRan;
+    D.headStamp = src.headStamp;
+    D.headLeafSamples = src.headLeafSamples;
+    D.headOpsRun = src.headOpsRun;
 }
 
 } // namespace frozenDetail

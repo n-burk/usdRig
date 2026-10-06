@@ -258,6 +258,10 @@ TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
     evaluator->SetProfilingEnabled(true);
     RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 21.0f);
+    // A parity generation runs the chain on both paths: the dynamic walk's
+    // function and the program's head tier each record one span.
+    const size_t oneRun =
+        mode == RigExecEvaluationMode::BakedWithParityCheck ? 2 : 1;
 
     // A value nothing the chain reads: the chain keeps its answer and does
     // not run.
@@ -277,7 +281,7 @@ TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
     evaluator->ClearProfile();
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 41.0f);
-    CHECK(ChainRuns(*evaluator, dial) == 1);
+    CHECK(ChainRuns(*evaluator, dial) == oneRun);
     CheckAgreesWithFresh(std::string("chain input default, ") +
                              ModeName(mode),
                          stage, mode, pose);
@@ -288,7 +292,7 @@ TestAChainInputDefaultEditReachesTheChain(RigExecEvaluationMode mode)
     evaluator->ClearProfile();
     pose = evaluator->Evaluate(UsdTimeCode::Default());
     CHECK(FloatAt(pose, dial) == 45.0f);
-    CHECK(ChainRuns(*evaluator, dial) == 1);
+    CHECK(ChainRuns(*evaluator, dial) == oneRun);
     CheckAgreesWithFresh(std::string("connection source default, ") +
                              ModeName(mode),
                          stage, mode, pose);

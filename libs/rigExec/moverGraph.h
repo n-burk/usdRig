@@ -471,6 +471,10 @@ public:
 
     bool IsEmpty() const { return _values.empty(); }
     size_t GetSize() const { return _values.size(); }
+    /// Whether \p other holds the same values at the same paths.
+    bool HasSameValues(const RigExecResolvedInputs &other) const {
+        return _values == other._values;
+    }
     void Clear() { _values.clear(); }
 
     /// Attaches the owner's static-input cache. Not owned, and not cleared

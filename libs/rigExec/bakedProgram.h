@@ -22,6 +22,7 @@
 #include "rigExecMath/pointFrame.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -515,6 +516,16 @@ private:
     friend struct RigExecBakedProgramTesting;
     static void _SetWalkVolumePlacements(RigExecRigEvaluator *evaluator,
                                          const GfMatrix4d &matrix);
+    static bool _EvaluateChainsDetached(RigExecRigEvaluator *evaluator,
+                                        UsdTimeCode time,
+                                        std::map<SdfPath, VtValue> *results,
+                                        std::vector<std::string> *lines);
+    static const void *_ChainMemo(const RigExecRigEvaluator &evaluator);
+    /// Binds \p evaluator's property chains into \p program's head tier
+    /// (bakedProperties.cpp): chains, records, walks, head leaves and
+    /// override slots. Build only.
+    static void _BindPropertyChains(const RigExecRigEvaluator &evaluator,
+                                    RigExecBakedProgramImpl *program);
 
     explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);
     std::unique_ptr<RigExecBakedProgramImpl> _impl;

@@ -2066,6 +2066,108 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
         t.count = B.pathLeafRefs.size();
     }
     {
+        // Per property chain: its target, arm and version base, each
+        // revision's operation, weight object and walks (every hop with its
+        // override slot, candidates and leaf), and its records.
+        _DigestTable &t = table("propertyChains");
+        const auto walk = [&t](const RigExecBakedWalk &w) {
+            t.Int(int64_t(w.flavour));
+            t.Int(int64_t(w.type));
+            for (const std::vector<RigExecBakedWalkHop> *hops :
+                 {&w.hops, &w.doubleHops}) {
+                t.Int(int64_t(hops->size()));
+                for (const RigExecBakedWalkHop &hop : *hops) {
+                    t.Path(hop.path);
+                    t.Int(hop.overrideSlot);
+                    t.Int(hop.chain);
+                    t.Int(hop.record);
+                    t.Int(hop.leaf);
+                }
+            }
+        };
+        for (const RigExecBakedPropertyChain &chain : B.propertyChains) {
+            t.Path(chain.target);
+            t.Int(chain.targetExists ? 1 : 0);
+            t.Int(int64_t(chain.arm));
+            t.Int(chain.ownLeaf);
+            t.Int(chain.targetSlot);
+            t.Int(int64_t(chain.versionBase));
+            for (const RigExecBakedPropertyChain::Revision &r :
+                 chain.revisions) {
+                t.Path(r.mover);
+                t.Int(r.moverExists ? 1 : 0);
+                t.Int(r.opValid ? int64_t(r.op) : -1);
+                t.Path(r.weightObject);
+                t.Int(r.hasTangents ? 1 : 0);
+                for (const RigExecBakedWalk *w :
+                     {&r.enabled, &r.defaultWeight, &r.value, &r.minimum,
+                      &r.maximum, &r.keys, &r.tangents}) {
+                    walk(*w);
+                }
+            }
+            for (const uint32_t index : chain.records) {
+                const RigExecBakedPropertyRecord &record =
+                    B.propertyRecords[index];
+                t.Path(record.consumer);
+                t.Str(record.consumerType.GetAsToken().GetString());
+                t.Int(int64_t(record.applied));
+                t.Int(int64_t(record.id));
+                for (const int slot : record.hopSlots) {
+                    t.Int(slot);
+                }
+            }
+        }
+        for (const RigExecBakedHeadLeaf &leaf : B.headLeaves) {
+            t.Path(leaf.path);
+            t.Int(int64_t(leaf.type));
+            t.Int(leaf.typeMatches ? 1 : 0);
+        }
+        for (const auto &[path, slot] : B.headOverrideSlots) {
+            t.Path(path);
+            t.Int(int64_t(slot));
+        }
+        t.count = B.propertyChains.size();
+    }
+    {
+        // The head steps in head order: kind, object, part, reads, writes,
+        // what they always run on, and their predecessors.
+        _DigestTable &t = table("headSteps");
+        const auto ranges =
+            [&t](const std::vector<RigExecBakedHeadRange> &list) {
+                t.Int(int64_t(list.size()));
+                for (const RigExecBakedHeadRange &range : list) {
+                    t.Int(int64_t(range.domain));
+                    t.Int(int64_t(range.begin));
+                    t.Int(int64_t(range.end));
+                }
+            };
+        for (const uint32_t index : B.headOrder) {
+            const RigExecBakedHeadStep &step = B.headSteps[index];
+            t.Int(int64_t(index));
+            t.Int(int64_t(step.kind));
+            t.Int(step.object);
+            t.Int(step.part);
+            ranges(step.reads);
+            ranges(step.writes);
+            t.Int(step.alwaysRuns ? 1 : 0);
+            for (const uint32_t leaf : step.leaves) {
+                t.Int(int64_t(leaf));
+            }
+            for (const uint32_t slot : step.overrideSlots) {
+                t.Int(int64_t(slot));
+            }
+            for (const auto &[version, record] : step.shadowedReads) {
+                t.Int(int64_t(version));
+                t.Int(int64_t(record));
+            }
+            for (const uint32_t pred : step.preds) {
+                t.Int(int64_t(pred));
+            }
+            t.Str(step.label);
+        }
+        t.count = B.headSteps.size();
+    }
+    {
         _DigestTable &t = table("schedule");
         t.Str(RigExecBakedScheduleReport(B));
         t.count = B.steps.size();
@@ -3318,10 +3420,26 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     for (const auto &[target, revisions] : E._propertyChains) {
         B.prims.insert(target.GetPrimPath());
         B.resolvedRoutedPrims.insert(target.GetPrimPath());
+        // Named: the head tier binds the target's existence and type, which
+        // the epoch digest does not hash, so a resync or a type edit of it
+        // rebuilds. Its value edits still route through the routed prim.
+        B.named.insert(target);
         for (const RigExecRigEvaluator::_PropertyRevision &revision :
                  revisions) {
             B.prims.insert(revision.moverPath);
             B.resolvedRoutedPrims.insert(revision.moverPath);
+        }
+    }
+    // The property revisions as head-tier ops, ordered by what they read and
+    // refused when that order cannot be trusted.
+    _BindPropertyChains(E, &B);
+    RigExecBakedBuildPropertySteps(&B);
+    {
+        std::string invalid;
+        if (!RigExecBakedSortHeadTier(&B, &invalid) ||
+            !RigExecBakedValidateHeadTier(B, &invalid)) {
+            refuse("the baked head tier is invalid: " + invalid, E._rigPath);
+            return nullptr;
         }
     }
     // Bakeability accepted every intervening-Xform candidate BECAUSE the
@@ -3622,8 +3740,8 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedPrologue", "baked");
         // A math mover's inputs are all authored on itself, so its chain owes
-        // exec nothing and resolves first -- which is why this op can be the
-        // same routine the dynamic path runs rather than a second copy of it.
+        // exec nothing and resolves first: the head tier runs the chains
+        // before anything else reads a result.
         B.propertyResults.clear();
         // The geometry-domain constraint deltas are NOT emptied here. They
         // are slots: what a skipped constraint step left is what it would
@@ -3639,24 +3757,25 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         if (!B.interactiveOverrides->empty()) {
             E._ApplyInteractiveOverridesToResolved(B.resolvedInputs);
         }
+        // Every bound input's value at this time, read here, on this
+        // thread: nothing after this point reads a binding any other way.
+        // A forced run trusts no leaf it holds. The bindings whose walks
+        // reach a chain result are read once the chains are published.
+        RigExecBakedSampleLeaves(&B, time, fullRunRequested,
+                                 RigExecBakedLeafPass::BeforeHead);
         if (B.hasPropertyChains) {
             RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "PropertyChains",
                                       "property");
-            std::vector<RigExecValueOverride> overrides;
-            // Straight into the published diagnostics: the chains run before
-            // anything else on both paths, so their lines are the first of
-            // the generation and nothing has to replay them.
-            E._EvaluatePropertyChains(time, &B.propertyResults, &overrides,
-                                      &pose->diagnostics);
-            for (const auto &[path, value] : B.propertyResults) {
-                B.resolvedInputs->SetProperty(path, value);
-            }
+            // The property revisions, from leaves sampled now. The bake's
+            // forced run executes every op, so what it exports is computed
+            // at its time; every other run re-runs only what moved, and the
+            // publication refills the results and the overlay either way.
+            RigExecBakedSampleHeadLeaves(&B, time, fullRunRequested);
+            RigExecBakedRunHeadTier(&B, time, pose, fullRunRequested);
+            RigExecBakedPublishPropertyChains(&B);
         }
-        // Every bound input's value at this time, read here, on this
-        // thread, once the overrides and the chain results stand in the
-        // resolved inputs: nothing after this point reads a binding any
-        // other way. A forced run trusts no leaf it holds.
-        RigExecBakedSampleLeaves(&B, time, fullRunRequested);
+        RigExecBakedSampleLeaves(&B, time, fullRunRequested,
+                                 RigExecBakedLeafPass::ChainRouted);
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunSolverSources(&B, time);
         stageFramesOk = stageFrames();

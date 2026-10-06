@@ -106,6 +106,7 @@ add_library(rigExec SHARED
     libs/rigExec/rigEvaluatorValidation.cpp
     libs/rigExec/bakedProgram.cpp
     libs/rigExec/bakedPose.cpp
+    libs/rigExec/bakedProperties.cpp
     libs/rigExec/bakedSchedule.cpp
     libs/rigExec/bakedTrace.cpp
     libs/rigExec/bakedGeometry.cpp
@@ -1281,6 +1282,18 @@ add_test(NAME testRigExecLeaves_parallel COMMAND testRigExecLeaves
 set_tests_properties(testRigExecLeaves_parallel PROPERTIES
     ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=parallel")
 rigexec_add_baked_parity_test(testRigExecLeaves REQUIRE_BAKE CONE_VERIFY
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# Property revisions as head-tier ops: the ops equal the evaluator's
+# chains bit for bit and line for line, run only when what they read moved,
+# and still publish every run.
+add_executable(testRigExecPropertyOps tests/testRigExecPropertyOps.cpp)
+target_link_libraries(testRigExecPropertyOps PRIVATE rigExecBake)
+target_compile_definitions(testRigExecPropertyOps PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecPropertyOps COMMAND testRigExecPropertyOps
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+rigexec_add_baked_parity_test(testRigExecPropertyOps REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecScopedClears tests/testRigExecScopedClears.cpp)
