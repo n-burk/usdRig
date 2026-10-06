@@ -6651,6 +6651,77 @@ _UpstreamAddsAndChains(const std::string &fixture)
         first->Pose(), "second chain's trigger"));
 }
 
+// A chain's last anchor does not change the signal it publishes. Compare
+// both signals at the incoming trigger, not their independently saved T0.
+static void
+_UpstreamChainConflictTimes(const std::string &fixture)
+{
+    std::printf("  upstream chain conflict times\n");
+    const std::map<double, VtValue> curve = {
+        {1.0, VtValue(1.0)}, {3.0, VtValue(3.0)}};
+    std::unique_ptr<_UpstreamImaging> first = _OpenUpstreamImaging(
+        fixture, kUpLimbsRig, 1.0, [&](auto &upstream) {
+            upstream.SetSparse(kUpA0Rz, curve);
+        });
+    if (!first) {
+        return;
+    }
+    TfRefPtr<_UpstreamInputsSceneIndex> secondUpstream;
+    UsdImagingCreateSceneIndicesInfo info;
+    info.stage = first->stage;
+    info.overridesSceneIndexCallback =
+        [&secondUpstream](const HdSceneIndexBaseRefPtr &input)
+        -> HdSceneIndexBaseRefPtr {
+        secondUpstream = _UpstreamInputsSceneIndex::New(input);
+        return secondUpstream;
+    };
+    const UsdImagingSceneIndices second = UsdImagingCreateSceneIndices(info);
+    secondUpstream->SetTime(1.0);
+    second.stageSceneIndex->SetTime(UsdTimeCode(1.0));
+    secondUpstream->SetSparse(kUpA0Rz, curve);
+    const size_t firstCalls = first->upstream->calls->getValue.load();
+    const size_t secondCalls = secondUpstream->calls->getValue.load();
+    _UpstreamConflictCounter conflicts;
+    TfDiagnosticMgr::GetInstance().AddDelegate(&conflicts);
+    secondUpstream->SetTime(2.0);
+    second.stageSceneIndex->SetTime(UsdTimeCode(2.0));
+    CHECK(conflicts.count.load() == 0);
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig,
+                           {{kUpA0Rz, VtValue(2.0), {}}}, 2.0),
+        first->Pose(), "equal curves at second trigger"));
+    first->SetTime(3.0);
+    CHECK(conflicts.count.load() == 0);
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig,
+                           {{kUpA0Rz, VtValue(3.0), {}}}, 3.0),
+        first->Pose(), "equal curves at first trigger"));
+    TfDiagnosticMgr::GetInstance().RemoveDelegate(&conflicts);
+    CHECK(first->upstream->calls->getValue.load() == firstCalls);
+    CHECK(secondUpstream->calls->getValue.load() == secondCalls);
+
+    // A is anchored at 1 with A(1)=1. B's new value at 2 is also 1,
+    // but A(2)=2: comparing stored atT0 values would miss the conflict.
+    secondUpstream->SetSparse(kUpA0Rz, {
+        {1.0, VtValue(0.0)}, {3.0, VtValue(2.0)}});
+    secondUpstream->SetTime(1.0);
+    second.stageSceneIndex->SetTime(UsdTimeCode(1.0));
+    first->SetTime(1.0);
+    const size_t changedCalls = secondUpstream->calls->getValue.load();
+    conflicts.count.store(0);
+    TfDiagnosticMgr::GetInstance().AddDelegate(&conflicts);
+    secondUpstream->SetTime(2.0);
+    second.stageSceneIndex->SetTime(UsdTimeCode(2.0));
+    CHECK(conflicts.count.load() >= 1);
+    TfDiagnosticMgr::GetInstance().RemoveDelegate(&conflicts);
+    CHECK(_SameUpstreamPose(
+        _UpstreamReference(fixture, kUpLimbsRig,
+                           {{kUpA0Rz, VtValue(1.0), {}}}, 2.0),
+        first->Pose(), "different incoming curve wins"));
+    CHECK(first->upstream->calls->getValue.load() == firstCalls);
+    CHECK(secondUpstream->calls->getValue.load() == changedCalls);
+}
+
 // A source on a prim added after activation, outside every root the rig
 // reads, reaches the rig once a later connection brings that prim into its
 // read roots: an add is noted wherever it lands.
@@ -7083,6 +7154,7 @@ TestUpstreamSceneIndexDrivesRigInputs(const std::string &examplesDir)
         TestTheRuntimeUpstreamCone();
         _UpstreamAdmissionNegatives(fixture);
         _UpstreamAddsAndChains(fixture);
+        _UpstreamChainConflictTimes(fixture);
         _UpstreamAddedOutsideRoots(fixture);
         // The posed variant: the program refuses, the walk follows.
         std::unique_ptr<_UpstreamImaging> imaging =

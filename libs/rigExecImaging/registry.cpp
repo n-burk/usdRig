@@ -1736,9 +1736,16 @@ RigExecImagingRegistry::SetUpstreamTable(
             }
             for (const auto &[path, entry] : table->entries) {
                 const auto found = otherTable->entries.find(path);
+                // Tables can have different anchors. Compare the values at
+                // this trigger, using stored samples only; an older table
+                // outside its window cannot establish a conflict.
+                RigExecUpstreamValue incoming, previous;
                 if (found != otherTable->entries.end() &&
-                    (found->second.varies != entry.varies ||
-                     found->second.atT0 != entry.atT0)) {
+                    table->ValueAt(path, entry, table->t0, &incoming) &&
+                    otherTable->ValueAt(path, found->second, table->t0,
+                                        &previous) &&
+                    !RigExecSameSourceValue(incoming.value, true,
+                                           previous.value, true)) {
                     TF_WARN("upstream input %s: two scene-index chains "
                             "publish different values; the triggering "
                             "chain's are used",
