@@ -2618,6 +2618,13 @@ TestStackFullRangeCursorWarmsEveryFrame(const std::string &examplesDir)
     }
     std::vector<std::string> errors;
     CHECK(registry.Activate(stage, rig, UsdTimeCode(start), &errors));
+    // The cursor is under test, not the cap: every warmed frame must stay.
+    // The stack's retained frames (about 5.9 MB each, the property chains'
+    // head-leaf samples among them) do not all fit the default cap.
+    if (RigExecImagingBridge *bridge = registry.GetBridge(rig)) {
+        bridge->GetFrameCache()->SetByteCap(2 *
+                                            kRigExecFrameCacheDefaultByteCap);
+    }
     if (!registry.SetWarmRange(rig, frames)) {
         CHECK(false);
         registry.Deactivate();

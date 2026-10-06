@@ -60,6 +60,14 @@
 //    replays the guide publication itself from the aggregates.
 //  * Geometry publication uses the worker's own chain results through
 //    _FrozenPublishGeometry.
+//  * The head tier (property revisions) runs in the frozen prologue from
+//    the job's head-leaf samples, which _PatchHeadLeaves writes into the
+//    clone's leaves (their attribute handles stay dead and unread): a
+//    body reads leaves, overrides and earlier versions only
+//    (RigExecBakedRunPropertyStep), and the one op that would reach the
+//    oracle, a weight-object envelope, refuses the freeze. Override slots
+//    are found by (prim, attribute), building no path. The worker passes
+//    no cone verifier and a disabled profiler.
 //  * Shared kernels (skin, derived, solvers, constraints) are pure per-point
 //    math over worker-owned buffers, and their five WorkParallelForN launch
 //    sites in moverGraph.cpp (the blend-channel sum among them, which the
@@ -143,6 +151,47 @@ _PatchInputs(RigExecBakedProgramImpl &B,
     return ok && walked == snapshot.inputHeadPaths.size();
 }
 
+// Writes every head leaf the sampler keyed (RigExecForEachHeadLeaf) from
+// the job's vector, setting its `changed` byte against the value the
+// snapshot last held, so the head tier re-runs exactly the ops whose inputs
+// differ from the snapshot's. Every other leaf holds no value and is
+// unchanged. A missing sample, or one of another type, declines: the
+// vector was sampled for another program. No stage, no path construction:
+// the keys were built at Build.
+bool
+_PatchHeadLeaves(RigExecBakedProgramImpl &B,
+                 const std::map<SdfPath, size_t> &index,
+                 const RigExecFrameInputs &inputs)
+{
+    for (RigExecBakedHeadLeaf &leaf : B.headLeaves) {
+        leaf.changed = 0;
+        leaf.mustSample = 0;
+    }
+    bool ok = true;
+    RigExecForEachHeadLeaf(B, [&](RigExecBakedHeadLeaf &leaf) {
+        if (!ok) {
+            return;
+        }
+        const auto found = index.find(leaf.frozenKey);
+        if (found == index.end()) {
+            ok = false;
+            return;
+        }
+        const RigExecSampledInput &sample = inputs.values[found->second];
+        VtValue value;
+        if (sample.hasValue) {
+            if (!RigExecBakedHeadLeafHolds(leaf, sample.value)) {
+                ok = false;
+                return;
+            }
+            value = sample.value;
+        }
+        leaf.changed = RigExecBakedHeadValueSame(value, leaf.value) ? 0 : 1;
+        leaf.value = std::move(value);
+    });
+    return ok;
+}
+
 // The frozen prologue: RigExecBakedProgram::Run's prologue (bakedProgram.cpp)
 // plus RunInputs, RunSolverSources, the constraint-array sweep, and the
 // geometry prologue, with every stage or live-state read replaced by its
@@ -161,15 +210,6 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         return found == index.end() ? nullptr : &inputs.values[found->second];
     };
 
-    // Chains, after the override placement, as on the live path: the
-    // sampler evaluated the hook for the job's time on the UI thread, and
-    // the per-target results travel with the vector. The worker publishes
-    // them where the live prologue publishes the chains it ran.
-    // A chainless snapshot with transported results is a stale vector from
-    // another epoch and declines.
-    if (!B.hasPropertyChains && !inputs.chainResults.empty()) {
-        return false;
-    }
     B.propertyResults.clear();
     B.resolvedInputs->Clear();
     B.chainSnapshots->Clear();
@@ -177,8 +217,8 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     // _ApplyInteractiveOverridesToResolved: every attribute override stands
     // in the resolved inputs, and a chain result at a dragged target takes
     // its place there, the drag being the base it was computed from. The
-    // resolved inputs are unread on the worker (patched constants), but the
-    // placement keeps the private state shape-identical.
+    // resolved inputs are unread by the patched bindings, but the placement
+    // keeps the private state shape-identical.
     for (const RigExecValueOverride &o : inputs.overrides) {
         if (o.attribute.IsEmpty()) {
             continue;
@@ -186,9 +226,18 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         B.resolvedInputs->SetProperty(o.prim.AppendProperty(o.attribute),
                                       o.value);
     }
-    for (const auto &[target, value] : inputs.chainResults) {
-        B.propertyResults[target] = value;
-        B.resolvedInputs->SetProperty(target, value);
+    // The property chains, after the override placement, as on the live
+    // path: the head tier from the job's head-leaf samples, then the
+    // publication into the results and the overlay. The tier's lines are
+    // the first of the generation. No cone verifier: the worker shares its
+    // statics with nothing.
+    if (B.hasPropertyChains) {
+        if (!_PatchHeadLeaves(B, index, inputs)) {
+            return false;
+        }
+        RigExecBakedRunHeadTier(&B, time, pose, /*force=*/false,
+                                /*verify=*/false);
+        RigExecBakedPublishPropertyChains(&B);
     }
 
     // Every leaf, sampled through the real RigExecBakedRead, which answers
@@ -887,14 +936,11 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
         return false;
     }
 
-    // Epilogue (bakedProgram.cpp:2644): chain lines first (live runs the
-    // chains before everything), then the pose and geometry publication, the
-    // work counters and the summary line, in live's
-    // order. No timing replay, calibration, or cone verification: the worker
-    // shares those statics with nothing and reports no trace.
-    for (const std::string &line : inputs.chainDiagnostics) {
-        working.diagnostics.push_back(line);
-    }
+    // Epilogue (bakedProgram.cpp:2644): the pose and geometry publication,
+    // the work counters and the summary line, in live's order, after the
+    // chain lines the prologue's head tier put first. No timing replay,
+    // calibration, or cone verification: the worker shares those statics
+    // with nothing and reports no trace.
     if (!RigExecBakedPublishPose(&B, &working)) {
         return false;
     }
@@ -1228,9 +1274,6 @@ RigExecRunPartialCone(
         return result;
     }
     result.executedClusters = execution.executedClusters;
-    for (const std::string &line : freshInputs.chainDiagnostics) {
-        working.diagnostics.push_back(line);
-    }
     if (!RigExecBakedPublishPose(&B, &working)) {
         return result;
     }

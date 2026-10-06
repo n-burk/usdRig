@@ -131,6 +131,21 @@ _SampleBinding(const RigExecBakedInput<T> &input,
     out->Add(input.head.GetPath(), value, hasValue, viaChain);
 }
 
+// Every head leaf the property chains read, at \p time, under its frozen
+// key: the raw typed value RigExecBakedSampleHeadLeaves reads on the live
+// path, valueless where the attribute holds none of the leaf's type. All of
+// them on every job, whatever their variance: the worker's head tier
+// compares each against the snapshot's last sample to decide what re-runs.
+void
+_SampleHeadLeaves(const RigExecBakedProgramImpl &B, UsdTimeCode time,
+                  RigExecFrameInputs *out)
+{
+    RigExecForEachHeadLeaf(B, [&](const RigExecBakedHeadLeaf &leaf) {
+        const VtValue value = RigExecBakedReadHeadLeaf(leaf, time);
+        out->Add(leaf.frozenKey, value, !value.IsEmpty());
+    });
+}
+
 template <class T>
 void
 _SamplePromotedAvar(const RigExecBakedInput<T> &input,
@@ -1393,24 +1408,22 @@ _SampleWithPinnedChainBindings(
     // The chain-sampling hook, in the live prologue's own order: the
     // chains evaluate into the refreshed inputs over the already-placed
     // overrides, a drag on a chain target being that chain's base, and the
-    // per-target results travel with the vector for the frozen prologue to
-    // publish as its property results. On decline (a weight object) the
-    // refreshed inputs stay override-only and chain-resolved bindings mark
-    // viaChain below, declining the vector downstream.
+    // chain-crossing bindings below read their values through them. The
+    // worker computes the chains' own results and lines itself, from the
+    // head leaves sampled here. On decline (a weight object) the refreshed
+    // inputs stay override-only and chain-resolved bindings mark viaChain
+    // below, declining the vector downstream.
     const RigExecResolvedInputs *chainFresh = nullptr;
     if (!bindings.chains.empty()) {
         RigExecResolvedInputs hooked = refreshed;
-        std::map<SdfPath, VtValue> results;
-        std::vector<std::string> hookDiagnostics;
         std::string hookError;
-        if (RigExecEvaluateChainsForTime(bindings, time, &hooked, &results,
-                                         &hookDiagnostics, &hookError)) {
+        if (RigExecEvaluateChainsForTime(bindings, time, &hooked, nullptr,
+                                         nullptr, &hookError)) {
             refreshed = std::move(hooked);
-            sampled.chainResults = std::move(results);
-            sampled.chainDiagnostics = std::move(hookDiagnostics);
             chainFresh = &refreshed;
         }
     }
+    _SampleHeadLeaves(B, time, &sampled);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
@@ -1910,18 +1923,16 @@ RigExecSampleFrameInputsWithBurstCache(
     const RigExecResolvedInputs *chainFresh = nullptr;
     if (!cache->bindings.chains.empty()) {
         RigExecResolvedInputs hooked = refreshed;
-        std::map<SdfPath, VtValue> results;
-        std::vector<std::string> hookDiagnostics;
         std::string hookError;
         if (RigExecEvaluateChainsForTime(cache->bindings, time, &hooked,
-                                         &results, &hookDiagnostics,
-                                         &hookError)) {
+                                         nullptr, nullptr, &hookError)) {
             refreshed = std::move(hooked);
-            sampled.chainResults = std::move(results);
-            sampled.chainDiagnostics = std::move(hookDiagnostics);
             chainFresh = &refreshed;
         }
     }
+    // Fresh every frame, like the plain sampler: the head tier compares
+    // them against the snapshot's own last samples.
+    _SampleHeadLeaves(B, time, &sampled);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {

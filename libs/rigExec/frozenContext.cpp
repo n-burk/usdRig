@@ -68,8 +68,6 @@ RigExecFrameInputs::Clear()
     revisionLeaves.clear();
     derivedLeaves.clear();
     stageSeeds = RigExecStageFrameSeeds();
-    chainDiagnostics.clear();
-    chainResults.clear();
     overrides.clear();
 }
 

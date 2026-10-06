@@ -2121,6 +2121,7 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
             t.Path(leaf.path);
             t.Int(int64_t(leaf.type));
             t.Int(leaf.typeMatches ? 1 : 0);
+            t.Path(leaf.frozenKey);
         }
         for (const auto &[path, slot] : B.headOverrideSlots) {
             t.Path(path);
@@ -3771,7 +3772,8 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
             // at its time; every other run re-runs only what moved, and the
             // publication refills the results and the overlay either way.
             RigExecBakedSampleHeadLeaves(&B, time, fullRunRequested);
-            RigExecBakedRunHeadTier(&B, time, pose, fullRunRequested);
+            RigExecBakedRunHeadTier(&B, time, pose, fullRunRequested,
+                                    RigExecBakedVerifyConesRequested());
             RigExecBakedPublishPropertyChains(&B);
         }
         RigExecBakedSampleLeaves(&B, time, fullRunRequested,

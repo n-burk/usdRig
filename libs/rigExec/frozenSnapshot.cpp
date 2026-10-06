@@ -231,13 +231,15 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.folded = src.folded;
     D.anyOverridden = src.anyOverridden;
     D.publishWeightFields = src.publishWeightFields;
-    // The head tier, as live left it. A frozen job does not run it: the
-    // chain hook transports the chain results.
+    // The head tier, as live left it: a frozen job runs it from its own
+    // head-leaf samples (the leaves' attribute handles are dead there), and
+    // re-runs what differs from this state.
     D.propertyChains = src.propertyChains;
     D.propertyRecords = src.propertyRecords;
     D.propertyVersionCount = src.propertyVersionCount;
     D.headLeaves = src.headLeaves;
     D.headOverrideSlots = src.headOverrideSlots;
+    D.headOverrideSlotsByName = src.headOverrideSlotsByName;
     D.headSteps = src.headSteps;
     D.headOrder = src.headOrder;
     D.propertyValues = src.propertyValues;
@@ -281,11 +283,13 @@ RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                     "UI-thread memo path, never a background job");
     }
     const RigExecBakedProgramImpl &B = program->GetStepGraph();
-    // Property chains are supported through the sampling hook -- except a
-    // chain binding a weight object, whose envelope resolves through the
-    // evaluator's live oracle. The discovery must also agree with the
-    // program: a mismatch means the mover order and the epoch disagree, and
-    // no snapshot is taken from a confused epoch.
+    // Property chains are supported: the worker runs the head tier from
+    // sampled head leaves, and the sampling hook refreshes what the
+    // chain-crossing bindings read -- except a chain binding a weight
+    // object, whose envelope resolves through the evaluator's live oracle.
+    // The discovery must also agree with the program: a mismatch means the
+    // mover order and the epoch disagree, and no snapshot is taken from a
+    // confused epoch.
     {
         RigExecChainSampleBindings bound;
         std::string bindError;

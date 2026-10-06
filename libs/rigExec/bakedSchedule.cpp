@@ -3886,14 +3886,14 @@ CompareHeadPasses(const RigExecBakedProgramImpl &B, const HeadState &memo,
 
 void
 RigExecBakedRunHeadTier(RigExecBakedProgramImpl *program, UsdTimeCode time,
-                        RigExecRigPose *pose, bool force)
+                        RigExecRigPose *pose, bool force, bool verify)
 {
     RigExecBakedProgramImpl &B = *program;
     RigExecBakedPlaceHeadOverrides(&B);
     // The program's first tier run, and one after a moved stamp, run every
     // op: Build computes no chain result to keep.
     force = force || !B.headEverRan || B.headStamp != B.programStamp;
-    if (RigExecBakedVerifyConesRequested()) {
+    if (verify) {
         HeadState before, memo;
         before.Capture(B);
         // The overlay too: a pass publishes finished chains into it

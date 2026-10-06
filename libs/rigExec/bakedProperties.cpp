@@ -454,6 +454,7 @@ RigExecBakedProgram::_BindPropertyChains(const RigExecRigEvaluator &E,
     B.propertyRecords.clear();
     B.headLeaves.clear();
     B.headOverrideSlots.clear();
+    B.headOverrideSlotsByName.clear();
     BindState state;
     state.program = &B;
 
@@ -585,6 +586,30 @@ RigExecBakedProgram::_BindPropertyChains(const RigExecRigEvaluator &E,
                 r.hasTangents = bool(tangents);
             }
             chain.revisions.push_back(std::move(r));
+        }
+    }
+    // The frozen sample keys. One leaf per attribute can match its type, so
+    // the keys are distinct, and none is an attribute's own path.
+    std::vector<char> own(B.headLeaves.size(), 0);
+    for (const Chain &chain : B.propertyChains) {
+        if (chain.ownLeaf >= 0) {
+            own[size_t(chain.ownLeaf)] = 1;
+        }
+    }
+    for (size_t i = 0; i < B.headLeaves.size(); ++i) {
+        RigExecBakedHeadLeaf &leaf = B.headLeaves[i];
+        if (!leaf.typeMatches || !leaf.path.IsPropertyPath()) {
+            continue;
+        }
+        leaf.frozenKey = leaf.path.GetPrimPath().AppendProperty(
+            TfToken((own[i] ? "frozenChainOwn:" : "frozenChainHop:") +
+                    leaf.path.GetName()));
+    }
+    for (const auto &[path, slot] : B.headOverrideSlots) {
+        if (path.IsPrimPropertyPath()) {
+            B.headOverrideSlotsByName.emplace(
+                std::make_pair(path.GetParentPath(), path.GetNameToken()),
+                slot);
         }
     }
 }
@@ -766,6 +791,27 @@ RigExecBakedSampleHeadLeaves(RigExecBakedProgramImpl *program,
     B.headLeafStamp = B.programStamp;
 }
 
+VtValue
+RigExecBakedReadHeadLeaf(const RigExecBakedHeadLeaf &leaf, UsdTimeCode time)
+{
+    return SampleHead(leaf, time);
+}
+
+bool
+RigExecBakedHeadLeafHolds(const RigExecBakedHeadLeaf &leaf,
+                          const VtValue &value)
+{
+    switch (leaf.type) {
+    case HeadType::Bool: return value.IsHolding<bool>();
+    case HeadType::Float: return value.IsHolding<float>();
+    case HeadType::Double: return value.IsHolding<double>();
+    case HeadType::Vec3f: return value.IsHolding<GfVec3f>();
+    case HeadType::Matrix4d: return value.IsHolding<GfMatrix4d>();
+    case HeadType::Vec2fArray: return value.IsHolding<VtArray<GfVec2f>>();
+    }
+    return false;
+}
+
 void
 RigExecBakedPlaceHeadOverrides(RigExecBakedProgramImpl *program)
 {
@@ -779,9 +825,9 @@ RigExecBakedPlaceHeadOverrides(RigExecBakedProgramImpl *program)
             if (o.attribute.IsEmpty()) {
                 continue;
             }
-            const auto found =
-                B.headOverrideSlots.find(o.prim.AppendProperty(o.attribute));
-            if (found != B.headOverrideSlots.end()) {
+            const auto found = B.headOverrideSlotsByName.find(
+                std::make_pair(o.prim, o.attribute));
+            if (found != B.headOverrideSlotsByName.end()) {
                 B.headOverrides[found->second] = o.value;
             }
         }

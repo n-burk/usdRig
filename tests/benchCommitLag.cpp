@@ -427,8 +427,7 @@ main(int argc, char **argv)
                     "%zu bytes; unresolved: %zu values %zu bytes\n",
                     staticCount, staticBytes, varyingCount, varyingBytes,
                     unresolvedCount, unresolvedBytes);
-        std::printf("  chainResults: %zu revisionPackets: %zu\n",
-                    sampled.chainResults.size(),
+        std::printf("  revisionPackets: %zu\n",
                     sampled.revisionPackets.size());
     }
 

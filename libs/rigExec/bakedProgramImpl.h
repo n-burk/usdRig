@@ -800,7 +800,28 @@ struct RigExecBakedHeadLeaf {
     /// The next sample re-reads it whatever else holds (a value edit
     /// reached `path`), and re-derives `varying`.
     char mustSample = 0;
+    /// The key a frozen job samples it under, set at Build for a leaf whose
+    /// type matches (`<prim>.frozenChainOwn:<name>` for a chain target's own
+    /// value, `<prim>.frozenChainHop:<name>` otherwise); empty for a leaf
+    /// that never holds a value. Never `path`: a reader binding whose head
+    /// is a chain target samples the chain's result at that path, and
+    /// first-wins lookup would serve one to the other.
+    SdfPath frozenKey;
 };
+
+/// Calls \p fn on every head leaf a frozen job samples (those with a
+/// `frozenKey`), in leaf order: the sampler's emission order and the
+/// worker's patch order.
+template <class Program, class Fn>
+inline void
+RigExecForEachHeadLeaf(Program &program, Fn &&fn)
+{
+    for (auto &leaf : program.headLeaves) {
+        if (!leaf.frozenKey.IsEmpty()) {
+            fn(leaf);
+        }
+    }
+}
 
 /// One attribute of a walk, and what can stand in the overlay there when a
 /// head op reads it.
@@ -3276,6 +3297,10 @@ struct RigExecBakedProgramImpl {
     std::vector<RigExecBakedHeadLeaf> headLeaves;
     /// Every path a head op reads an override at, and its slot.
     std::map<SdfPath, uint32_t> headOverrideSlots;
+    /// The same slots keyed as an override names its property, (prim,
+    /// attribute), so placement builds no path: the frozen worker runs it
+    /// and must not take the path table's lock.
+    std::map<std::pair<SdfPath, TfToken>, uint32_t> headOverrideSlotsByName;
     std::vector<RigExecBakedHeadStep> headSteps;
     /// `headSteps` in execution order (RigExecBakedSortHeadTier).
     std::vector<uint32_t> headOrder;
@@ -3485,6 +3510,17 @@ void RigExecBakedBuildPropertySteps(RigExecBakedProgramImpl *program);
 /// prologue only.
 void RigExecBakedSampleHeadLeaves(RigExecBakedProgramImpl *program,
                                   UsdTimeCode time, bool all);
+
+/// \p leaf's value at \p time as RigExecBakedSampleHeadLeaves reads it: the
+/// attribute's own typed value, empty when it has none of the leaf's type.
+/// Reads the stage: owning thread (the live prologue, or the frozen sampler
+/// on the UI thread).
+VtValue RigExecBakedReadHeadLeaf(const RigExecBakedHeadLeaf &leaf,
+                                 UsdTimeCode time);
+
+/// Whether \p value holds exactly \p leaf's type.
+bool RigExecBakedHeadLeafHolds(const RigExecBakedHeadLeaf &leaf,
+                               const VtValue &value);
 
 /// The body of one PropertyRevision head step: part 0 sets the base and the
 /// chain's valid byte, part k applies revision k. Each is the loop body of

@@ -154,15 +154,16 @@ bool RigExecBakedValidateHeadTier(const RigExecBakedProgramImpl &program,
 /// moved program stamp, when it always runs, or when a head leaf, an
 /// override slot or a head output it declares moved; otherwise it keeps
 /// its outputs and replays its lines. Each executed body runs under the
-/// purity mark. The lines of every op go to \p pose in head order. Under
-/// RIGEXEC_BAKED_VERIFY_CONES the tier runs a second, forced time from the
+/// purity mark. The lines of every op go to \p pose in head order. With
+/// \p verify (the live prologue passes RigExecBakedVerifyConesRequested;
+/// a frozen job passes false) the tier runs a second, forced time from the
 /// same state and counts every version, valid byte, record or line that
 /// differs as a parity mismatch on \p pose; the head trace keeps what the
 /// first pass ran. The caller publishes the chains after it
 /// (RigExecBakedPublishPropertyChains).
 void RigExecBakedRunHeadTier(RigExecBakedProgramImpl *program,
                              UsdTimeCode time, RigExecRigPose *pose,
-                             bool force);
+                             bool force, bool verify);
 
 /// Assigns every step from \p firstStep on its size, its cost and its
 /// longest-path level.

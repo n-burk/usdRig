@@ -175,8 +175,16 @@ RigExecFrozenPurityAudit()
          "runs in the live prologue, serially on the owning thread, from "
          "head leaves sampled there; a body reads leaves, overrides and "
          "earlier versions and no USD (enforced by RIGEXEC_PURITY_CHECK), "
-         "except a weight-object envelope's volatile oracle; a frozen job "
-         "takes its chain results from the chain hook and runs no head op"},
+         "except a weight-object envelope's volatile oracle, which refuses "
+         "the freeze"},
+        {"baked head tier in a frozen job (frozenWorker.cpp _FrozenPrologue)",
+         RigExecFrozenPurity::Pure,
+         "runs from sampled leaves; no USD: the sampler reads every head "
+         "leaf on the UI thread under its Build-time synthetic key, the "
+         "worker writes them into its clone's leaves (whose attribute "
+         "handles are dead and unread) and runs the same bodies serially, "
+         "with no cone verifier and a disabled profiler; override slots "
+         "are found by (prim, attribute), with no path built"},
         {"baked schedule serial executor",
          RigExecFrozenPurity::Pure,
          "program order on one thread; the reference every frozen run uses"},

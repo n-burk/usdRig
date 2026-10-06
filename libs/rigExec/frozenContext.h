@@ -149,24 +149,6 @@ struct RigExecFrameInputs {
     /// folded by the control-state digest; a moved constraint target must
     /// miss the cache.
     RigExecStageFrameSeeds stageSeeds;
-    /// Property-chain diagnostics for the sampled time, in chain order,
-    /// produced by the chain-sampling hook on the UI thread. The chains run
-    /// first on the live path and their lines are the first of the
-    /// generation, so the frozen epilogue prepends these verbatim. Outputs,
-    /// not inputs: excluded from the digest like every other pose content.
-    std::vector<std::string> chainDiagnostics;
-    /// Property-chain outputs for the sampled time, per target, produced by
-    /// the chain-sampling hook on the UI thread. The frozen prologue
-    /// publishes these into its program-owned property results exactly where
-    /// the live prologue publishes the chains it ran, so a chain-driven
-    /// binding -- whose patched constant was sampled through the same values
-    /// -- and a chain target read as pose content agree. Outputs, not
-    /// inputs: excluded from the digest (a pure function of digest-covered
-    /// values, like the revision packets). Empty for a rig with no chains,
-    /// and empty for a chain that skipped (no base: nothing authored and no
-    /// drag on the target, or a non-finite one), exactly as on the live
-    /// path.
-    std::map<SdfPath, VtValue> chainResults;
     /// The standing overrides the vector was sampled under, verbatim from
     /// the caller's list. The worker replicates override placement from
     /// these (SetOverrides' flags drive cone dirtiness exactly as live).
@@ -281,11 +263,13 @@ struct RigExecFrozenProgram {
 /// objects and their steps DO freeze: their scalars patch from samples and
 /// their point arrays sample per frame into the shared packet kernels.
 ///
-/// Property chains are supported: the sampler refreshes their outputs for
-/// the job's time through the chain-sampling hook, and the frozen prologue
-/// publishes the transported results. Only a chain binding a weight object
+/// Property chains are supported: the sampler samples every head leaf the
+/// chains read (RigExecForEachHeadLeaf, under its synthetic key), and the
+/// frozen prologue runs the program's head tier from those samples. The
+/// chain-sampling hook still refreshes the chain outputs the sampler reads
+/// chain-crossing bindings through. Only a chain binding a weight object
 /// refuses, because its envelope resolves through the evaluator's live
-/// oracle, which no hook can reproduce.
+/// oracle, which neither the hook nor the worker can reproduce.
 ///
 /// A snapshot pins the program OBJECT it was cloned from plus the epoch it
 /// was cloned in. Re-freeze after any change that rebuilds the program; a
@@ -677,13 +661,15 @@ bool RigExecEvaluateChainsForTime(
 /// thread, into caller-owned resolved inputs seeded with the job's
 /// overrides (RigExecEvaluateChainsForTime), and reads chain-resolved
 /// bindings through the refreshed values -- fresh at the sampled time by
-/// construction, whatever the evaluator last ran. The chain outputs and
-/// their diagnostics travel with the vector (chainResults,
-/// chainDiagnostics) for the frozen prologue and epilogue. Only when the
-/// hook declines (a chain binding a weight object) does the sampler fall
-/// back to the standing resolved state and mark the samples viaChain (see
-/// RigExecSampledInput) -- and BuildWarmWork declines a vector carrying
-/// one, so no background job is ever built from stale chain values.
+/// construction, whatever the evaluator last ran. The chains themselves
+/// run on the worker: every head leaf they read is sampled at the job's
+/// time under its synthetic key, and the frozen prologue runs the head
+/// tier from those samples and publishes its results and lines. Only when
+/// the hook declines (a chain binding a weight object) does the sampler
+/// fall back to the standing resolved state and mark the samples viaChain
+/// (see RigExecSampledInput) -- and BuildWarmWork declines a vector
+/// carrying one, so no background job is ever built from stale chain
+/// values.
 bool RigExecSampleFrameInputs(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
