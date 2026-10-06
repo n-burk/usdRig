@@ -31,10 +31,14 @@ namespace {
 // type parameter; the float-from-double coercion it also performs is a
 // CONSUMPTION rule (a typed read of a double source) and stays at the typed
 // reads, which is where the frame path applies it too.
+//
+// \p layer, when given, is the job's upstream layer: in the fallback each
+// hop answers from it before the stage, as GetAttributeOverStageLayer does.
 bool
 _SampleResolvedAttribute(const RigExecResolvedInputs &resolved,
                          const UsdAttribute &attribute, UsdTimeCode time,
-                         VtValue *out, bool *fromMemory = nullptr)
+                         VtValue *out, bool *fromMemory = nullptr,
+                         const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     std::set<SdfPath> visiting;
     std::vector<UsdAttribute> fallback;
@@ -61,7 +65,14 @@ _SampleResolvedAttribute(const RigExecResolvedInputs &resolved,
         a = a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
     }
     for (auto it = fallback.rbegin(); it != fallback.rend(); ++it) {
-        if (it->Get(out, time)) {
+        const auto upstream =
+            layer ? layer->find(it->GetPath())
+                  : std::map<SdfPath, VtValue>::const_iterator();
+        const bool fromLayer = layer && upstream != layer->end();
+        if (fromLayer) {
+            *out = upstream->second;
+        }
+        if (fromLayer || it->Get(out, time)) {
             // A stage read at the sampled time: fresh whatever the binding.
             if (fromMemory) {
                 *fromMemory = false;
@@ -88,7 +99,8 @@ template <class T>
 void
 _SampleBinding(const RigExecBakedInput<T> &input,
                const RigExecResolvedInputs *refreshed, UsdTimeCode time,
-               RigExecFrameInputs *out)
+               RigExecFrameInputs *out,
+               const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     if (!input.varying || input.walk >= 0) {
         return;
@@ -100,7 +112,7 @@ _SampleBinding(const RigExecBakedInput<T> &input,
     } else if (input.resolvedAttr.IsValid() && refreshed) {
         hasValue =
             _SampleResolvedAttribute(*refreshed, input.resolvedAttr, time,
-                                     &value);
+                                     &value, nullptr, layer);
     } else if (input.head.IsValid()) {
         // The frame path answers input.constant here, so the sample is that
         // constant rather than a valueless marker: valueless would tell the
@@ -185,10 +197,16 @@ _HeadLeafConstants(const RigExecRigEvaluator &evaluator,
 // varies is read at \p time into the vector; the rest ride the shared table
 // (_HeadLeafConstants). The worker's head tier compares each against the
 // snapshot's last sample to decide what re-runs.
+//
+// A leaf at a path the job's upstream \p layer holds a value of its type at
+// is sampled as that value whether it varies or not, as the live sampler
+// reads the layer in front of the stage; the worker takes that sample over
+// the table.
 void
 _SampleHeadLeaves(const RigExecRigEvaluator &evaluator,
                   const RigExecBakedProgramImpl &B, UsdTimeCode time,
-                  RigExecFrameInputs *out)
+                  RigExecFrameInputs *out,
+                  const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     bool any = false;
     RigExecForEachHeadLeaf(B, [&any](const RigExecBakedHeadLeaf &) {
@@ -207,6 +225,14 @@ _SampleHeadLeaves(const RigExecRigEvaluator &evaluator,
         const bool varies =
             j >= constants.varying.size() || constants.varying[j] != 0;
         ++j;
+        if (layer && !layer->empty()) {
+            const auto upstream = layer->find(leaf.path);
+            if (upstream != layer->end() && leaf.typeMatches &&
+                RigExecBakedHeadLeafHolds(leaf, upstream->second)) {
+                out->Add(leaf.frozenKey, upstream->second, true);
+                return;
+            }
+        }
         if (!varies) {
             return;
         }
@@ -219,7 +245,8 @@ template <class T>
 void
 _SamplePromotedAvar(const RigExecBakedInput<T> &input,
                     const RigExecResolvedInputs *resolved, UsdTimeCode time,
-                    RigExecFrameInputs *out)
+                    RigExecFrameInputs *out,
+                    const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     // A constant binding an edit has animated since: read per frame the long
     // way, like a varying binding, until an edit makes it constant again.
@@ -232,8 +259,8 @@ _SamplePromotedAvar(const RigExecBakedInput<T> &input,
         // Never viaChain: a promoted avar classified constant at Build, so
         // no chain stands on its walk and an in-memory hit is a standing
         // override -- timeless and digest-covered, like any other.
-        hasValue =
-            _SampleResolvedAttribute(*resolved, input.head, time, &value);
+        hasValue = _SampleResolvedAttribute(*resolved, input.head, time,
+                                            &value, nullptr, layer);
     }
     if (!hasValue) {
         value = VtValue(input.constant);
@@ -340,15 +367,21 @@ _BurstInterpolatorNeedsVisit(
 // the frame consumes, and the worker patches it as a constant; no separate
 // override value travels. A binding with a reader walk samples nothing
 // either way (see _SampleBinding).
+//
+// \p flags (and so `overridden`) also carry the override numbers an
+// upstream value stands on a hop of, and the long way reads through the
+// job's upstream \p layer, as RigExecBakedRead's first arm does live: the
+// sample at the head is then the upstream-valued answer, constant or not.
 template <class T>
 void
 _SampleBindingWithOverrides(const RigExecBakedInput<T> &input,
                             const RigExecResolvedInputs *refreshed,
                             bool overridden, UsdTimeCode time,
-                            RigExecFrameInputs *out)
+                            RigExecFrameInputs *out,
+                            const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     if (!overridden) {
-        _SampleBinding(input, refreshed, time, out);
+        _SampleBinding(input, refreshed, time, out, layer);
         return;
     }
     if (!input.head.IsValid() || input.walk >= 0) {
@@ -356,7 +389,8 @@ _SampleBindingWithOverrides(const RigExecBakedInput<T> &input,
     }
     T value = input.constant;
     if (refreshed) {
-        refreshed->GetAttribute(input.head, time, &value);
+        refreshed->GetAttributeOverStageLayer(input.head, time, layer,
+                                              &value);
     }
     out->Add(input.head.GetPath(), VtValue(value), /*hasValue=*/true);
 }
@@ -366,21 +400,23 @@ void
 _SampleFlaggedBinding(const RigExecBakedInput<T> &input,
                       const RigExecResolvedInputs *refreshed,
                       const std::vector<char> &flags, UsdTimeCode time,
-                      RigExecFrameInputs *out)
+                      RigExecFrameInputs *out,
+                      const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     _SampleBindingWithOverrides(input, refreshed,
                                 _IsOverridden(flags, input.overrideIndex),
-                                time, out);
+                                time, out, layer);
 }
 
 void
 _SampleSolverBindings(const RigExecBakedProgramImpl::Solver &solver,
                       const RigExecResolvedInputs *refreshed,
                       const std::vector<char> &flags, UsdTimeCode time,
-                      RigExecFrameInputs *out)
+                      RigExecFrameInputs *out,
+                      const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     _VisitSolverInputs(solver, [&](const auto &input) {
-        _SampleFlaggedBinding(input, refreshed, flags, time, out);
+        _SampleFlaggedBinding(input, refreshed, flags, time, out, layer);
     });
 }
 
@@ -388,10 +424,11 @@ void
 _SampleConstraintBindings(
     const RigExecBakedProgramImpl::Constraint &constraint,
     const RigExecResolvedInputs *refreshed, const std::vector<char> &flags,
-    UsdTimeCode time, RigExecFrameInputs *out)
+    UsdTimeCode time, RigExecFrameInputs *out,
+    const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     _VisitConstraintInputs(constraint, [&](const auto &input) {
-        _SampleFlaggedBinding(input, refreshed, flags, time, out);
+        _SampleFlaggedBinding(input, refreshed, flags, time, out, layer);
     });
 }
 
@@ -415,10 +452,11 @@ void
 _SampleWeightBindings(const RigExecBakedProgramImpl::WeightObject &object,
                       const RigExecResolvedInputs *refreshed,
                       const std::vector<char> &flags, UsdTimeCode time,
-                      RigExecFrameInputs *out)
+                      RigExecFrameInputs *out,
+                      const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     _VisitWeightInputs(object, [&](const auto &input) {
-        _SampleFlaggedBinding(input, refreshed, flags, time, out);
+        _SampleFlaggedBinding(input, refreshed, flags, time, out, layer);
     });
 }
 
@@ -676,18 +714,21 @@ _SampleStageFrameSeeds(const RigExecBakedProgram &program, UsdTimeCode time,
     return true;
 }
 
-// One path leaf as the live prologue reads it, or empty for a key with a
-// reader walk: the worker resolves that one after its head tier, which the
-// refreshed inputs here do not run.
+// One path leaf as the live prologue reads it, through the job's upstream
+// \p layer where live reads its own, or empty for a key with a reader walk:
+// the worker resolves that one after its head tier, which the refreshed
+// inputs here do not run.
 VtValue
 _SampleRevisionLeaf(const RigExecBakedPathLeaves &leaves, size_t k,
-                    const RigExecResolvedInputs *refreshed, UsdTimeCode time)
+                    const RigExecResolvedInputs *refreshed, UsdTimeCode time,
+                    const std::map<SdfPath, VtValue> *layer)
 {
     if (k < leaves.walks.size() && leaves.walks[k] >= 0) {
         return VtValue();
     }
     return RigExecSampleRevisionLeaf(leaves.decl.keys[k],
-                                     leaves.attributes[k], refreshed, time);
+                                     leaves.attributes[k], refreshed, time,
+                                     layer);
 }
 
 // The path leaves of every chain revision the worker assembles from leaves,
@@ -700,7 +741,8 @@ _SampleRevisionLeaf(const RigExecBakedPathLeaves &leaves, size_t k,
 void
 _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                       const RigExecResolvedInputs *refreshed, UsdTimeCode time,
-                      RigExecFrameInputs *sampled)
+                      RigExecFrameInputs *sampled,
+                      const std::map<SdfPath, VtValue> *layer)
 {
     using Role = RigExecRevisionLeafRole;
     sampled->revisionLeaves.assign(B.revisionIndex.size(),
@@ -727,7 +769,8 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                 values.push_back(VtValue());
                 continue;
             }
-            values.push_back(_SampleRevisionLeaf(leaves, k, refreshed, time));
+            values.push_back(
+                _SampleRevisionLeaf(leaves, k, refreshed, time, layer));
         }
     }
     // Every derived target's, parallel to derivedIndex.
@@ -745,7 +788,8 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
         std::vector<VtValue> &values = sampled->derivedLeaves[d];
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
-            values.push_back(_SampleRevisionLeaf(leaves, k, refreshed, time));
+            values.push_back(
+                _SampleRevisionLeaf(leaves, k, refreshed, time, layer));
         }
     }
 }
@@ -754,13 +798,24 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
 // fixed, parallel to RigExecBakedLayoutRevision's index and empty for the
 // rest: read by the live sampler's reads through the refreshed inputs, or
 // live's own sample, shared, where nothing that can move it differs -- no
-// value edit or stamp move pending, and the same overlay entry at each path.
-// A fixed layout reads the same at every time.
+// value edit or stamp move pending, and the same overlay entry and the same
+// upstream value (live's last placed table against the job's \p layer) at
+// each path. A fixed layout reads the same at every time.
 void
 _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
                     const RigExecResolvedInputs *refreshed, UsdTimeCode time,
-                    RigExecFrameInputs *sampled)
+                    RigExecFrameInputs *sampled,
+                    const std::map<SdfPath, VtValue> *layer)
 {
+    const auto sameUpstream = [&B, layer](const SdfPath &path) {
+        const auto live = B.lastUpstream.find(path);
+        const bool liveHas = live != B.lastUpstream.end();
+        const auto job =
+            layer ? layer->find(path)
+                  : std::map<SdfPath, VtValue>::const_iterator();
+        const bool jobHas = layer && job != layer->end();
+        return liveHas == jobHas && (!liveHas || live->second == job->second);
+    };
     const size_t count = B.revisionIndex.size() + B.derivedIndex.size();
     sampled->layoutLeaves.assign(count, std::vector<VtValue>());
     for (size_t r = 0; r < count; ++r) {
@@ -778,7 +833,8 @@ _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
                           : nullptr;
             reuse = !leaves.mustSample[k] &&
                     (entry ? revision->layoutOverlay[k] == *entry
-                           : revision->layoutOverlay[k].IsEmpty());
+                           : revision->layoutOverlay[k].IsEmpty()) &&
+                    sameUpstream(leaves.decl.keys[k].path);
         }
         std::vector<VtValue> &values = sampled->layoutLeaves[r];
         if (reuse) {
@@ -788,7 +844,8 @@ _SampleLayoutLeaves(const RigExecBakedProgramImpl &B,
         values.reserve(n);
         for (size_t k = 0; k < n; ++k) {
             values.push_back(RigExecSampleRevisionLeaf(
-                leaves.decl.keys[k], leaves.attributes[k], refreshed, time));
+                leaves.decl.keys[k], leaves.attributes[k], refreshed, time,
+                layer));
         }
     }
 }
@@ -883,13 +940,17 @@ void
 _SampleMoverScalar(const SdfPath &key, const UsdAttribute &attribute,
                    T fallback, UsdTimeCode time,
                    const RigExecResolvedInputs *refreshed,
-                   RigExecFrameInputs *out)
+                   RigExecFrameInputs *out,
+                   const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     if (!attribute.IsValid() || key.IsEmpty()) {
         return;
     }
     T value = fallback;
-    if (!(refreshed && refreshed->GetAttribute(attribute, time, &value))) {
+    // The job's upstream layer stands in front of the stage, as for the
+    // live leaf read of the same attribute (RigExecSampleRevisionLeaf).
+    if (!(refreshed && refreshed->GetAttributeOverStageLayer(
+                           attribute, time, layer, &value))) {
         attribute.Get(&value, time);
     }
     out->Add(key, VtValue(value), /*hasValue=*/true);
@@ -903,7 +964,8 @@ void
 _SampleProjectorInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
                        const RigExecResolvedInputs *refreshed,
                        const UsdStageRefPtr &stage, UsdTimeCode time,
-                       RigExecFrameInputs *out)
+                       RigExecFrameInputs *out,
+                       const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     const UsdPrim &prim = revision.moverPrim;
     if (!prim || !stage) {
@@ -915,12 +977,14 @@ _SampleProjectorInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
             double value = 0.0;
             if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
                 float asFloat = 0.0f;
-                if (!(refreshed && refreshed->GetAttribute(a, time, &asFloat))) {
+                if (!(refreshed && refreshed->GetAttributeOverStageLayer(
+                                       a, time, layer, &asFloat))) {
                     a.Get(&asFloat, time);
                 }
                 value = double(asFloat);
             } else if (a) {
-                if (!(refreshed && refreshed->GetAttribute(a, time, &value))) {
+                if (!(refreshed && refreshed->GetAttributeOverStageLayer(
+                                       a, time, layer, &value))) {
                     a.Get(&value, time);
                 }
             }
@@ -931,16 +995,16 @@ _SampleProjectorInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
     const SdfPath &path = revision.moverPath;
     _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:rayOrigin")),
                        prim.GetAttribute(TfToken("rigExec:rayOrigin")),
-                       GfVec3d(0.0, 0.0, 0.0), time, refreshed, out);
+                       GfVec3d(0.0, 0.0, 0.0), time, refreshed, out, layer);
     _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:rayDirection")),
                        prim.GetAttribute(TfToken("rigExec:rayDirection")),
-                       GfVec3d(0.0, 0.0, 1.0), time, refreshed, out);
+                       GfVec3d(0.0, 0.0, 1.0), time, refreshed, out, layer);
     _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:rayUp")),
                        prim.GetAttribute(TfToken("rigExec:rayUp")),
-                       GfVec3d(0.0, 1.0, 0.0), time, refreshed, out);
+                       GfVec3d(0.0, 1.0, 0.0), time, refreshed, out, layer);
     _SampleMoverScalar(path.AppendProperty(TfToken("rigExec:shaderOffset")),
                        prim.GetAttribute(TfToken("rigExec:shaderOffset")),
-                       GfMatrix4d(1.0), time, refreshed, out);
+                       GfMatrix4d(1.0), time, refreshed, out, layer);
     _SampleMoverToken(prim, path, "rigExec:projectionMode", time, out);
 }
 
@@ -971,7 +1035,8 @@ void
 _SampleIterativeMoverInputs(
     const RigExecBakedProgramImpl::GeomRevision &revision,
     const RigExecResolvedInputs *refreshed, const UsdStageRefPtr &stage,
-    UsdTimeCode time, RigExecFrameInputs *out)
+    UsdTimeCode time, RigExecFrameInputs *out,
+    const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     if (revision.op != RigExecRevisionOp::DeltaMush &&
         revision.op != RigExecRevisionOp::Wrinkle) {
@@ -990,7 +1055,7 @@ _SampleIterativeMoverInputs(
             const TfToken token(name);
             _SampleMoverScalar(revision.moverPath.AppendProperty(token),
                 revision.moverPrim.GetAttribute(token), fallback,
-                time, refreshed, out);
+                time, refreshed, out, layer);
         });
     if (revision.op == RigExecRevisionOp::Wrinkle) {
         const TfToken topology("inputs:topology");
@@ -1101,9 +1166,14 @@ _SampleMoverScalarCached(const SdfPath &key, const UsdAttribute &attribute,
     if (!attribute.IsValid() || key.IsEmpty()) {
         return;
     }
+    // The burst's upstream layer is pinned with it, so a memoized read
+    // through it stays the burst's answer.
+    const std::map<SdfPath, VtValue> *layer =
+        cache->upstreamLayer.empty() ? nullptr : &cache->upstreamLayer;
     // With chains bound, read plain every frame and never memoized.
     if (!cache->bindings.chains.empty()) {
-        _SampleMoverScalar(key, attribute, fallback, time, refreshed, out);
+        _SampleMoverScalar(key, attribute, fallback, time, refreshed, out,
+                           layer);
         return;
     }
     const auto found = cache->staticResolved.find(key);
@@ -1112,7 +1182,8 @@ _SampleMoverScalarCached(const SdfPath &key, const UsdAttribute &attribute,
                                 RigExecBurstRouteResolved);
         return;
     }
-    _SampleMoverScalar(key, attribute, fallback, time, refreshed, out);
+    _SampleMoverScalar(key, attribute, fallback, time, refreshed, out,
+                       layer);
     if (_BurstAttributeIsStatic(attribute)) {
         _MemoizeBurstStaticSample(out, &cache->staticResolved,
                                   RigExecBurstRouteResolved);
@@ -1444,6 +1515,96 @@ _FrozenRibbonInputKey(const SdfPath &moverPath, const char *role)
 
 namespace {
 
+// The part of \p upstream live admits against \p program (the drop rule of
+// RigExecRigEvaluator::SetUpstreamInputs), one per path, the last admitted
+// entry winning, sorted by path; and the same values as the layer by path.
+// As live, each entry is judged before the last-wins rule, so a dropped
+// entry never displaces an admitted one given earlier for its path.
+void
+_AdmitFrameUpstream(const RigExecBakedProgram &program,
+                    const std::vector<RigExecUpstreamValue> &upstream,
+                    std::vector<RigExecUpstreamValue> *admitted,
+                    std::map<SdfPath, VtValue> *layer)
+{
+    admitted->clear();
+    layer->clear();
+    if (upstream.empty()) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program.GetStepGraph();
+    const std::map<SdfPath, TfType> &listed = program.GetUpstreamAdmissible();
+    std::map<SdfPath, const RigExecUpstreamValue *> byPath;
+    for (const RigExecUpstreamValue &value : upstream) {
+        if (value.path.IsPrimPropertyPath() &&
+            RigExecUpstreamDropReason(B.stage, &listed, value.path,
+                                      value.value)
+                .empty()) {
+            byPath[value.path] = &value;
+        }
+    }
+    for (const auto &[path, value] : byPath) {
+        admitted->push_back(*value);
+        layer->emplace_hint(layer->end(), path, value->value);
+    }
+}
+
+// Per override number, whether a value of \p layer stands on a hop of its
+// walk (`overridableInputs` files every hop): live's `upstreamOn`.
+std::vector<char>
+_UpstreamFlags(const RigExecBakedProgramImpl &B,
+               const std::map<SdfPath, VtValue> &layer)
+{
+    std::vector<char> flags(B.overridden.size(), 0);
+    for (const auto &[path, value] : layer) {
+        const auto found = B.overridableInputs.find(path);
+        if (found == B.overridableInputs.end()) {
+            continue;
+        }
+        for (const int index : found->second) {
+            if (index >= 0 && size_t(index) < flags.size()) {
+                flags[size_t(index)] = 1;
+            }
+        }
+    }
+    return flags;
+}
+
+// \p a or \p b, elementwise, sized as \p a.
+std::vector<char>
+_EitherFlag(const std::vector<char> &a, const std::vector<char> &b)
+{
+    std::vector<char> flags = a;
+    for (size_t i = 0; i < flags.size() && i < b.size(); ++i) {
+        flags[i] = flags[i] || b[i];
+    }
+    return flags;
+}
+
+// The constant avar bindings an upstream value stands on and no override
+// does (\p readFlags without \p overrideFlags), sampled at their heads: the
+// worker patches their constants from these, as it does a dragged one's
+// from the override sample keyed by the same path.
+void
+_SampleUpstreamConstantAvars(const RigExecBakedProgramImpl &B,
+                             const RigExecResolvedInputs *refreshed,
+                             const std::vector<char> &overrideFlags,
+                             const std::vector<char> &readFlags,
+                             UsdTimeCode time, RigExecFrameInputs *out,
+                             const std::map<SdfPath, VtValue> *layer)
+{
+    if (!layer) {
+        return;
+    }
+    for (const RigExecBakedProgramImpl::AvarBinding &binding :
+         B.avarConstantBindings) {
+        const int o = binding.input.overrideIndex;
+        if (_IsOverridden(readFlags, o) && !_IsOverridden(overrideFlags, o)) {
+            _SampleFlaggedBinding(binding.input, refreshed, readFlags, time,
+                                  out, layer);
+        }
+    }
+}
+
 // The pinned sampler's body. `verifyCurrency` is the per-call
 // RigExecChainSampleBindingsStillCurrent check: on for every caller that
 // cannot otherwise prove its bindings fresh, off for one that tracks their
@@ -1452,6 +1613,7 @@ bool
 _SampleWithPinnedChainBindings(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
     const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
     std::string *error, bool verifyCurrency)
 {
@@ -1505,15 +1667,27 @@ _SampleWithPinnedChainBindings(
     // nothing here holds a chain result.
     RigExecResolvedInputs refreshed;
     _PlaceOverridesIntoResolved(overrides, &refreshed);
+    // The job's upstream layer: the admitted values, read in front of the
+    // stage wherever live reads its own (RigExecBakedPlaceUpstream). A
+    // binding with a value on a hop of its walk is read the long way, as an
+    // overridden one is, so `readFlags` stands for both.
+    std::map<SdfPath, VtValue> upstreamLayer;
+    _AdmitFrameUpstream(*program, upstream, &sampled.upstream,
+                        &upstreamLayer);
+    const std::map<SdfPath, VtValue> *layer =
+        upstreamLayer.empty() ? nullptr : &upstreamLayer;
+    const std::vector<char> readFlags =
+        layer ? _EitherFlag(overrideFlags, _UpstreamFlags(B, upstreamLayer))
+              : overrideFlags;
 
     // Every head leaf the property ops and the reader walks read: the
     // worker runs the head tier and resolves the walks from these.
-    _SampleHeadLeaves(evaluator, B, time, &sampled);
+    _SampleHeadLeaves(evaluator, B, time, &sampled, layer);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
-        _SampleFlaggedBinding(binding.input, &refreshed,
-                              overrideFlags, time, &sampled);
+        _SampleFlaggedBinding(binding.input, &refreshed, readFlags, time,
+                              &sampled, layer);
     }
     for (size_t promoted : B.promotedAvars) {
         if (promoted < B.avarConstantBindings.size()) {
@@ -1522,27 +1696,29 @@ _SampleWithPinnedChainBindings(
             // time) is exactly what live reads, while the standing inputs
             // may hold another frame's overrides.
             _SamplePromotedAvar(B.avarConstantBindings[promoted].input,
-                                &refreshed, time, &sampled);
+                                &refreshed, time, &sampled, layer);
         }
     }
+    _SampleUpstreamConstantAvars(B, &refreshed, overrideFlags, readFlags,
+                                 time, &sampled, layer);
     for (const RigExecBakedProgramImpl::Ladder &ladder : B.ladders) {
         _VisitLadderInputs(ladder, [&](const auto &input) {
-            _SampleFlaggedBinding(input, &refreshed, overrideFlags,
-                                  time, &sampled);
+            _SampleFlaggedBinding(input, &refreshed, readFlags, time,
+                                  &sampled, layer);
         });
     }
     for (const RigExecBakedProgramImpl::SpaceSwitch &spaceSwitch :
          B.spaceSwitches) {
         _VisitSpaceSwitchInputs(spaceSwitch, [&](const auto &input) {
-            _SampleFlaggedBinding(input, &refreshed, overrideFlags,
-                                  time, &sampled);
+            _SampleFlaggedBinding(input, &refreshed, readFlags, time,
+                                  &sampled, layer);
         });
     }
     for (const RigExecBakedProgramImpl::PoseInterpolator &interp :
          B.poseInterpolators) {
         _VisitInterpolatorInputs(interp, [&](const auto &input) {
-            _SampleFlaggedBinding(input, &refreshed, overrideFlags,
-                                  time, &sampled);
+            _SampleFlaggedBinding(input, &refreshed, readFlags, time,
+                                  &sampled, layer);
         });
     }
     _VisitComposeInputs(B, [&](const auto &input) {
@@ -1550,18 +1726,18 @@ _SampleWithPinnedChainBindings(
                               time, &sampled, chainFresh);
     });
     for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
-        _SampleSolverBindings(solver, &refreshed, overrideFlags,
-                              time, &sampled);
+        _SampleSolverBindings(solver, &refreshed, readFlags, time, &sampled,
+                              layer);
     }
     for (const RigExecBakedProgramImpl::Constraint &constraint :
          B.constraints) {
-        _SampleConstraintBindings(constraint, &refreshed,
-                                  overrideFlags, time, &sampled);
+        _SampleConstraintBindings(constraint, &refreshed, readFlags, time,
+                                  &sampled, layer);
     }
     for (const RigExecBakedProgramImpl::WeightObject &object :
          B.weightObjects) {
-        _SampleWeightBindings(object, &refreshed, overrideFlags,
-                              time, &sampled);
+        _SampleWeightBindings(object, &refreshed, readFlags, time, &sampled,
+                              layer);
         _SampleWeightArrays(object, &refreshed, time, &sampled);
     }
     // Ribbon driver points: read straight off the stage by the prologue,
@@ -1594,13 +1770,13 @@ _SampleWithPinnedChainBindings(
                      refreshed.Find(channel.weightPath))) {
                     _SampleMoverScalar(channel.weight.GetPath(),
                                        channel.weight, 0.0f, time, &refreshed,
-                                       &sampled);
+                                       &sampled, layer);
                 }
                 for (const RigExecBakedProgramImpl::GeomBlendChannel::Sample
                          &sample : channel.samples) {
                     _SampleMoverScalar(sample.activation.GetPath(),
                                        sample.activation, 1.0f, time,
-                                       &refreshed, &sampled);
+                                       &refreshed, &sampled, layer);
                     _SampleBlendPoints(
                         _FrozenBlendInputKey(sample.samplePath, "points"),
                         sample.points, time, &refreshed, &sampled);
@@ -1664,15 +1840,15 @@ _SampleWithPinnedChainBindings(
         _SampleMoverScalar(
             revision.moverPath.AppendProperty(TfToken("inputs:enabled")),
             moverPrim.GetAttribute(TfToken("inputs:enabled")), true, time,
-            &refreshed, &sampled);
+            &refreshed, &sampled, layer);
         _SampleMoverScalar(
             revision.moverPath.AppendProperty(TfToken("inputs:defaultWeight")),
             moverPrim.GetAttribute(TfToken("inputs:defaultWeight")), 1.0f,
-            time, &refreshed, &sampled);
+            time, &refreshed, &sampled, layer);
         _SampleMoverScalar(
             revision.moverPath.AppendProperty(TfToken("rigExec:skinningMethod")),
             moverPrim.GetAttribute(TfToken("rigExec:skinningMethod")),
-            TfToken("classicLinear"), time, &refreshed, &sampled);
+            TfToken("classicLinear"), time, &refreshed, &sampled, layer);
         if (revision.op == RigExecRevisionOp::Wire) {
             _SampleWireInputs(revision, &refreshed, B.stage, time, &sampled);
         }
@@ -1681,7 +1857,7 @@ _SampleWithPinnedChainBindings(
                               "rigExec:weightBlend", time, &sampled);
         }
         _SampleIterativeMoverInputs(revision, &refreshed, B.stage, time,
-                                    &sampled);
+                                    &sampled, layer);
         if (revision.op == RigExecRevisionOp::BlendShape && moverPrim) {
             // rigExec:deltaSpace, exactly as the arm's _Token reads it: a
             // raw Default read with no resolved arm, "target" when absent.
@@ -1765,13 +1941,13 @@ _SampleWithPinnedChainBindings(
         }
         if (RigExecIsDerivedMatrixOp(revision.op)) {
             _SampleProjectorInputs(revision, &refreshed, B.stage, time,
-                                   &sampled);
+                                   &sampled, layer);
         }
     }
     // The skin layouts the worker's SkinTopology ops build from, then every
     // revision's assembly reads.
-    _SampleLayoutLeaves(B, &refreshed, time, &sampled);
-    _SampleRevisionLeaves(B, &refreshed, time, &sampled);
+    _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer);
+    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer);
     {
         std::string layoutError;
         if (!_SampleBlendLayouts(B, time, &sampled, &layoutError)) {
@@ -1817,8 +1993,21 @@ RigExecSampleFrameInputsWithChainBindings(
     const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
     std::string *error)
 {
-    return _SampleWithPinnedChainBindings(evaluator, time, overrides,
+    return _SampleWithPinnedChainBindings(evaluator, time, overrides, {},
                                           bindings, out, error,
+                                          /* verifyCurrency = */ true);
+}
+
+bool
+RigExecSampleFrameInputsWithChainBindings(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
+    std::string *error)
+{
+    return _SampleWithPinnedChainBindings(evaluator, time, overrides,
+                                          upstream, bindings, out, error,
                                           /* verifyCurrency = */ true);
 }
 
@@ -1829,8 +2018,21 @@ RigExecSampleFrameInputsWithTrustedChainBindings(
     const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
     std::string *error)
 {
-    return _SampleWithPinnedChainBindings(evaluator, time, overrides,
+    return _SampleWithPinnedChainBindings(evaluator, time, overrides, {},
                                           bindings, out, error,
+                                          /* verifyCurrency = */ false);
+}
+
+bool
+RigExecSampleFrameInputsWithTrustedChainBindings(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
+    std::string *error)
+{
+    return _SampleWithPinnedChainBindings(evaluator, time, overrides,
+                                          upstream, bindings, out, error,
                                           /* verifyCurrency = */ false);
 }
 
@@ -1842,6 +2044,11 @@ RigExecBurstSampleCache::Clear()
     bindings = RigExecChainSampleBindings();
     overrides.clear();
     overrideFlags.clear();
+    upstream.clear();
+    upstreamAdmitted.clear();
+    upstreamLayer.clear();
+    upstreamFlags.clear();
+    readFlags.clear();
     placeable = false;
     usable = false;
     ladderSites.clear();
@@ -1863,6 +2070,18 @@ RigExecBuildBurstSampleCache(
     const RigExecBakedProgram &program,
     const RigExecChainSampleBindings &bindings,
     const std::vector<RigExecValueOverride> &overrides, uint64_t epochDigest,
+    RigExecBurstSampleCache *cache, std::string *error)
+{
+    return RigExecBuildBurstSampleCache(program, bindings, overrides, {},
+                                        epochDigest, cache, error);
+}
+
+bool
+RigExecBuildBurstSampleCache(
+    const RigExecBakedProgram &program,
+    const RigExecChainSampleBindings &bindings,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream, uint64_t epochDigest,
     RigExecBurstSampleCache *cache, std::string *error)
 {
     const auto fail = [&error, cache](const std::string &why) {
@@ -1894,39 +2113,42 @@ RigExecBuildBurstSampleCache(
     cache->epochDigest = epochDigest;
     cache->bindings = bindings;
     cache->overrides = overrides;
+    cache->upstream = upstream;
+    _AdmitFrameUpstream(program, upstream, &cache->upstreamAdmitted,
+                        &cache->upstreamLayer);
+    cache->upstreamFlags = _UpstreamFlags(B, cache->upstreamLayer);
+    cache->readFlags =
+        _EitherFlag(cache->overrideFlags, cache->upstreamFlags);
     cache->placeable = true;
     // In table order, so the cached sampler visits in emission order.
+    const std::vector<char> &flags = cache->readFlags;
     for (size_t i = 0; i < B.ladders.size(); ++i) {
-        if (_BurstLadderNeedsVisit(B.ladders[i], cache->overrideFlags)) {
+        if (_BurstLadderNeedsVisit(B.ladders[i], flags)) {
             cache->ladderSites.push_back(i);
         }
     }
     for (size_t i = 0; i < B.spaceSwitches.size(); ++i) {
-        if (_BurstSpaceSwitchNeedsVisit(B.spaceSwitches[i],
-                                        cache->overrideFlags)) {
+        if (_BurstSpaceSwitchNeedsVisit(B.spaceSwitches[i], flags)) {
             cache->spaceSwitchSites.push_back(i);
         }
     }
     for (size_t i = 0; i < B.solvers.size(); ++i) {
-        if (_BurstSolverNeedsVisit(B.solvers[i], cache->overrideFlags)) {
+        if (_BurstSolverNeedsVisit(B.solvers[i], flags)) {
             cache->solverSites.push_back(i);
         }
     }
     for (size_t i = 0; i < B.constraints.size(); ++i) {
-        if (_BurstConstraintNeedsVisit(B.constraints[i],
-                                       cache->overrideFlags)) {
+        if (_BurstConstraintNeedsVisit(B.constraints[i], flags)) {
             cache->constraintSites.push_back(i);
         }
     }
     for (size_t i = 0; i < B.weightObjects.size(); ++i) {
-        if (_BurstWeightNeedsVisit(B.weightObjects[i],
-                                   cache->overrideFlags)) {
+        if (_BurstWeightNeedsVisit(B.weightObjects[i], flags)) {
             cache->weightSites.push_back(i);
         }
     }
     for (size_t i = 0; i < B.poseInterpolators.size(); ++i) {
-        if (_BurstInterpolatorNeedsVisit(B.poseInterpolators[i],
-                                         cache->overrideFlags)) {
+        if (_BurstInterpolatorNeedsVisit(B.poseInterpolators[i], flags)) {
             cache->interpolatorSites.push_back(i);
         }
     }
@@ -1938,6 +2160,18 @@ bool
 RigExecSampleFrameInputsWithBurstCache(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
+    RigExecBurstSampleCache *cache, RigExecFrameInputs *out,
+    std::string *error)
+{
+    return RigExecSampleFrameInputsWithBurstCache(evaluator, time, overrides,
+                                                  {}, cache, out, error);
+}
+
+bool
+RigExecSampleFrameInputsWithBurstCache(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
     RigExecBurstSampleCache *cache, RigExecFrameInputs *out,
     std::string *error)
 {
@@ -1965,6 +2199,10 @@ RigExecSampleFrameInputsWithBurstCache(
         return fail("burst cache was prepared for other overrides; "
                     "re-prepare");
     }
+    if (upstream != cache->upstream) {
+        return fail("burst cache was prepared for other upstream values; "
+                    "re-prepare");
+    }
     const RigExecBakedProgramImpl &B = cache->program->GetStepGraph();
     // No currency re-verification (verified at prepare), no decline checks
     // (the build failed on them), no override placement (cached flags).
@@ -1979,39 +2217,45 @@ RigExecSampleFrameInputsWithBurstCache(
     RigExecFrameInputs sampled;
     sampled.time = time;
     sampled.SetOverrides(overrides);
+    sampled.upstream = cache->upstreamAdmitted;
+    const std::map<SdfPath, VtValue> *layer =
+        cache->upstreamLayer.empty() ? nullptr : &cache->upstreamLayer;
+    const std::vector<char> &readFlags = cache->readFlags;
 
     // As in the plain sampler: the varying leaves every frame, the
     // constant ones by the shared table.
-    _SampleHeadLeaves(evaluator, B, time, &sampled);
+    _SampleHeadLeaves(evaluator, B, time, &sampled, layer);
 
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          B.avarBindings) {
-        _SampleFlaggedBinding(binding.input, &refreshed,
-                              cache->overrideFlags, time, &sampled);
+        _SampleFlaggedBinding(binding.input, &refreshed, readFlags, time,
+                              &sampled, layer);
     }
     for (size_t promoted : B.promotedAvars) {
         if (promoted < B.avarConstantBindings.size()) {
             _SamplePromotedAvar(B.avarConstantBindings[promoted].input,
-                                &refreshed, time, &sampled);
+                                &refreshed, time, &sampled, layer);
         }
     }
+    _SampleUpstreamConstantAvars(B, &refreshed, cache->overrideFlags,
+                                 readFlags, time, &sampled, layer);
     for (size_t i : cache->ladderSites) {
         _VisitLadderInputs(B.ladders[i], [&](const auto &input) {
-            _SampleFlaggedBinding(input, &refreshed,
-                                  cache->overrideFlags, time, &sampled);
+            _SampleFlaggedBinding(input, &refreshed, readFlags, time,
+                                  &sampled, layer);
         });
     }
     for (size_t i : cache->spaceSwitchSites) {
         _VisitSpaceSwitchInputs(B.spaceSwitches[i], [&](const auto &input) {
-            _SampleFlaggedBinding(input, &refreshed,
-                                  cache->overrideFlags, time, &sampled);
+            _SampleFlaggedBinding(input, &refreshed, readFlags, time,
+                                  &sampled, layer);
         });
     }
     for (size_t i : cache->interpolatorSites) {
         _VisitInterpolatorInputs(B.poseInterpolators[i],
                                  [&](const auto &input) {
-            _SampleFlaggedBinding(input, &refreshed,
-                                  cache->overrideFlags, time, &sampled);
+            _SampleFlaggedBinding(input, &refreshed, readFlags, time,
+                                  &sampled, layer);
         });
     }
     _VisitComposeInputs(B, [&](const auto &input) {
@@ -2020,12 +2264,12 @@ RigExecSampleFrameInputsWithBurstCache(
                               chainFresh);
     });
     for (size_t i : cache->solverSites) {
-        _SampleSolverBindings(B.solvers[i], &refreshed,
-                              cache->overrideFlags, time, &sampled);
+        _SampleSolverBindings(B.solvers[i], &refreshed, readFlags, time,
+                              &sampled, layer);
     }
     for (size_t i : cache->constraintSites) {
-        _SampleConstraintBindings(B.constraints[i], &refreshed,
-                                  cache->overrideFlags, time, &sampled);
+        _SampleConstraintBindings(B.constraints[i], &refreshed, readFlags,
+                                  time, &sampled, layer);
     }
     // Per object, bindings then arrays, exactly as the plain sampler
     // emits them: the sites list is table-ordered, so a merge walk visits
@@ -2038,8 +2282,8 @@ RigExecSampleFrameInputsWithBurstCache(
     for (size_t i = 0; i < B.weightObjects.size(); ++i) {
         if (weightSite < cache->weightSites.size() &&
             cache->weightSites[weightSite] == i) {
-            _SampleWeightBindings(B.weightObjects[i], &refreshed,
-                                  cache->overrideFlags, time, &sampled);
+            _SampleWeightBindings(B.weightObjects[i], &refreshed, readFlags,
+                                  time, &sampled, layer);
             ++weightSite;
         }
         // Point arrays ride outside the burst memo (always fresh, like the
@@ -2144,7 +2388,7 @@ RigExecSampleFrameInputsWithBurstCache(
                               "rigExec:weightBlend", time, &sampled);
         }
         _SampleIterativeMoverInputs(revision, &refreshed, B.stage, time,
-                                    &sampled);
+                                    &sampled, layer);
         if (revision.op == RigExecRevisionOp::BlendShape && moverPrim) {
             // rigExec:deltaSpace, as the slow sampler reads it: raw Default,
             // no resolved arm. Unmemoized -- one token read per frame is
@@ -2223,11 +2467,11 @@ RigExecSampleFrameInputsWithBurstCache(
         }
         if (RigExecIsDerivedMatrixOp(revision.op)) {
             _SampleProjectorInputs(revision, &refreshed, B.stage, time,
-                                   &sampled);
+                                   &sampled, layer);
         }
     }
-    _SampleLayoutLeaves(B, &refreshed, time, &sampled);
-    _SampleRevisionLeaves(B, &refreshed, time, &sampled);
+    _SampleLayoutLeaves(B, &refreshed, time, &sampled, layer);
+    _SampleRevisionLeaves(B, &refreshed, time, &sampled, layer);
     {
         std::string layoutError;
         if (!_SampleBlendLayouts(B, time, &sampled, &layoutError)) {
@@ -2334,6 +2578,16 @@ RigExecFrozenControlDigest(const RigExecFrameInputs &inputs, bool *exact)
         foldMatrices(seeds.deltaBase);
         foldOk(seeds.nativeOk);
         foldFrames(seeds.nativeFrames);
+    }
+    if (!inputs.upstream.empty()) {
+        // The upstream values, by path: a job under another table hashes
+        // apart even where no sample shows the difference.
+        hash = _HashString(hash, "ups");
+        for (const RigExecUpstreamValue &value : inputs.upstream) {
+            hash = _HashString(hash, value.path.GetString().c_str());
+            hash = _HashBytes(hash, &value.foldHash, sizeof(value.foldHash));
+            named = _HashVtValue(&hash, value.value) && named;
+        }
     }
     if (exact) {
         *exact = named;

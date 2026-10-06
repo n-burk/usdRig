@@ -124,6 +124,12 @@ size_t RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state);
 bool RigExecSameSourceValue(const VtValue &a, bool aHas, const VtValue &b,
                             bool bHas);
 
+/// Whether two upstream tables (RigExecFrameInputs::upstream, sorted by
+/// path) hold the same values: path by path, the fold hash, then
+/// RigExecSameSourceValue.
+bool RigExecSameUpstream(const std::vector<RigExecUpstreamValue> &a,
+                         const std::vector<RigExecUpstreamValue> &b);
+
 /// The controls whose value moved between the retained frame and the
 /// request: sampled sources by first-wins-per-path (matching what the
 /// worker reads), overrides by (prim, computation, attribute) last-wins
@@ -175,7 +181,8 @@ struct RigExecSparsePlan {
 /// The checks, in order: the index must be built for \p requestEpoch and
 /// the retained frame must belong to it, with the index's cluster count --
 /// anything else is Miss (a count mismatch under a standing epoch also sets
-/// topologyChanged). The changed controls are diffed by value; none changed
+/// topologyChanged). Upstream tables that differ (RigExecSameUpstream) are
+/// a Miss too: no control id names them. The changed controls are diffed by value; none changed
 /// at a standing time is a Hit, none changed at a moved time still re-runs
 /// the always-dirty set plus the varying closure (§7: external reads are
 /// functions of time the source vector does not name, and the executor

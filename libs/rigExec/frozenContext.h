@@ -32,6 +32,7 @@
 #define RIGEXEC_FROZEN_CONTEXT_H
 
 #include "bakedProgramImpl.h"
+#include "bakedTrace.h"
 #include "moverGraph.h"
 #include "rigEvaluator.h"
 
@@ -93,6 +94,31 @@ struct RigExecSampledInput {
     /// alias across the two. The plain sampler leaves every sample fresh.
     int burstSampleRoute = RigExecBurstRouteFresh;
 };
+
+/// One admitted upstream value at a frame's time: authored-level, so it
+/// stands where the stage value of \p path stood (RigExecRigEvaluator::
+/// SetUpstreamInputs). \p foldHash is the pulled table's fold of an array
+/// value and 0 for a scalar, which the frame-cache key folds by value.
+struct RigExecUpstreamValue {
+    SdfPath path;
+    VtValue value;
+    uint64_t foldHash = 0;
+
+    bool operator==(const RigExecUpstreamValue &other) const
+    {
+        return path == other.path && foldHash == other.foldHash &&
+               value == other.value;
+    }
+    bool operator!=(const RigExecUpstreamValue &other) const
+    {
+        return !(*this == other);
+    }
+};
+
+/// \p inputs (attribute entries only) as upstream values: one per path, the
+/// last given winning, sorted by path, each with a zero fold hash.
+std::vector<RigExecUpstreamValue> RigExecUpstreamValuesOf(
+    const std::vector<RigExecValueOverride> &inputs);
 
 /// The time-invariant half of a frozen job's head-leaf samples: every keyed
 /// head leaf (RigExecForEachHeadLeaf order) whose attribute holds no time
@@ -189,6 +215,12 @@ struct RigExecFrameInputs {
     /// program without property chains. Folded by every control digest
     /// through its own precomputed digest.
     std::shared_ptr<const RigExecHeadLeafConstants> headLeafConstants;
+    /// The admitted upstream values the vector was sampled under, sorted by
+    /// path: the worker's upstream layer, which it diffs against the
+    /// snapshot's (rule 8). Every read they reach rides `values` and the
+    /// leaves as sampled through that layer; the control-state digest folds
+    /// the list itself (`ups` block), and the retained state counts it.
+    std::vector<RigExecUpstreamValue> upstream;
 
     /// Sets `overrides` and builds `overridePaths` from them.
     void SetOverrides(const std::vector<RigExecValueOverride> &list);
@@ -328,6 +360,11 @@ struct RigExecFrozenProgram {
 /// copy without re-cloning the epoch. The registry's session cache owns
 /// that discipline in production (see RigExecImagingRegistry); direct
 /// callers re-freeze around their own edits.
+///
+/// Upstream inputs freeze too: the snapshot keeps the table live's last run
+/// placed, and each job carries its own (RigExecFrameInputs::upstream),
+/// which the worker diffs against it, so a value placed, moved or lifted
+/// since the freeze re-reads what it reaches.
 bool RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
                           std::shared_ptr<const RigExecFrozenProgram> *frozen,
                           std::string *error = nullptr);
@@ -335,7 +372,6 @@ bool RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
 /// Checks the same sampling/worker support contract as FreezeProgram without
 /// cloning its slot state. UI thread only. Unsupported rigs must use a cache
 /// key fenced by stage edits and frame time, not an incomplete sampled digest.
-/// Refuses while the evaluator's upstream inputs stand, which no job carries.
 bool RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
                              std::string *error = nullptr);
 
@@ -402,8 +438,10 @@ bool RigExecFrozenSnapshotOwesLiveEdits(const RigExecFrozenProgram &base,
 /// since \p base (RigExecFrozenSnapshotOwesLiveEdits): its first run
 /// re-runs the steps those edits reached, or everything after a bump.
 /// Answers false, having left \p out untouched, when the two programs are
-/// not the same shape (different binding counts -- a rebuild, not a patch).
-/// UI thread only: it reads the live program.
+/// not the same shape (different binding counts -- a rebuild, not a patch),
+/// or when live's last run placed another upstream table than the
+/// snapshot's (live's avar slots hold that table's values, which the
+/// copy's history does not). UI thread only: it reads the live program.
 bool RigExecPatchFrozenAvarConstants(
     const RigExecFrozenProgram &base, const RigExecBakedProgram &live,
     std::shared_ptr<const RigExecFrozenProgram> *out,
@@ -523,6 +561,23 @@ private:
     bool _active = false;
 };
 
+/// What one frozen job executed, for a caller that asks RigExecEvaluateFrozen
+/// for it: the head steps (RigExecBakedLastHeadTrace over the job's clone)
+/// and the region steps, sources included, each in execution order, with
+/// steps indexed as in the snapshot's program. Empty when the job declined.
+struct RigExecFrozenRunReport {
+    std::vector<RigExecOpTraceEntry> head;
+    std::vector<RigExecOpTraceEntry> region;
+    bool ran = false;
+
+    void Clear()
+    {
+        head.clear();
+        region.clear();
+        ran = false;
+    }
+};
+
 /// The serial step runner a frozen job executes: the baked program's serial
 /// executor over the private arena, reading nothing but \p context and \p
 /// inputs. Returns false to hand the generation back, exactly as
@@ -556,11 +611,14 @@ using RigExecFrozenStepRunner = std::function<bool(
 ///
 /// \p rig names the rig the generation belongs to. It is a plain value, not
 /// a handle: naming the fence is not touching the stage.
+///
+/// \p report, when given, is cleared and then filled by a production runner
+/// that ran the job (RigExecFrozenRunReport).
 RigExecRigPose RigExecEvaluateFrozen(
     const RigExecFrozenEvalContext &context,
     const RigExecFrameInputs &inputs, RigExecFrozenStepRunner runner,
     const RigExecBackgroundScheduler *scheduler = nullptr,
-    const SdfPath &rig = SdfPath());
+    const SdfPath &rig = SdfPath(), RigExecFrozenRunReport *report = nullptr);
 
 /// Evaluates \p inputs under \p context, reading nothing else. The returned
 /// pose is bit-identical to a live evaluation of the same inputs; when it
@@ -688,6 +746,23 @@ bool RigExecSampleFrameInputs(
     const std::vector<RigExecValueOverride> &overrides,
     RigExecFrameInputs *out, std::string *error = nullptr);
 
+/// UPSTREAM INPUTS. Each sampler also takes the frame's upstream values
+/// (none in the overloads without them). A value is kept only where live
+/// admits it (RigExecUpstreamDropReason against the program standing) and
+/// travels as RigExecFrameInputs::upstream. Every read live takes through
+/// the upstream layer is sampled through the same layer: a binding with a
+/// value on a hop of its walk is read the long way and sampled at its head,
+/// constant or not; a head leaf at a valued path is sampled under its key,
+/// constant or not; revision, layout and mover-scalar reads see the value
+/// where they would see the stage's. A path no value stands on reads the
+/// stage, so a job whose snapshot held a value since lifted needs nothing
+/// more: the worker diffs the job's table against the snapshot's.
+bool RigExecSampleFrameInputs(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    RigExecFrameInputs *out, std::string *error = nullptr);
+
 /// Samples exactly as RigExecSampleFrameInputs, but checks the caller's
 /// epoch-pinned \p bindings instead of binding fresh.
 /// Answers false, having left \p out untouched, when \p bindings no longer
@@ -698,6 +773,12 @@ bool RigExecSampleFrameInputs(
 bool RigExecSampleFrameInputsWithChainBindings(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
+    const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
+    std::string *error = nullptr);
+bool RigExecSampleFrameInputsWithChainBindings(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
     const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
     std::string *error = nullptr);
 
@@ -715,6 +796,12 @@ bool RigExecSampleFrameInputsWithChainBindings(
 bool RigExecSampleFrameInputsWithTrustedChainBindings(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
+    const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
+    std::string *error = nullptr);
+bool RigExecSampleFrameInputsWithTrustedChainBindings(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
     const RigExecChainSampleBindings &bindings, RigExecFrameInputs *out,
     std::string *error = nullptr);
 
@@ -750,6 +837,16 @@ struct RigExecBurstSampleCache {
     RigExecChainSampleBindings bindings;
     std::vector<RigExecValueOverride> overrides;
     std::vector<char> overrideFlags;
+    /// The upstream values the burst was prepared under, as given (a pin
+    /// like `overrides`), the admitted ones by path (the layer every frame
+    /// reads through), and per override number whether one stands on a hop
+    /// of its walk. `readFlags` is `overrideFlags` or `upstreamFlags`: the
+    /// bindings read the long way, which the site lists cover.
+    std::vector<RigExecUpstreamValue> upstream;
+    std::vector<RigExecUpstreamValue> upstreamAdmitted;
+    std::map<SdfPath, VtValue> upstreamLayer;
+    std::vector<char> upstreamFlags;
+    std::vector<char> readFlags;
     bool placeable = false;
     bool usable = false;
     /// Per-table indices of structs with any varying-or-overridden field,
@@ -792,6 +889,14 @@ bool RigExecBuildBurstSampleCache(
     const RigExecChainSampleBindings &bindings,
     const std::vector<RigExecValueOverride> &overrides, uint64_t epochDigest,
     RigExecBurstSampleCache *cache, std::string *error = nullptr);
+/// The same, pinned to the burst's \p upstream values as well, which every
+/// frame of the burst is then sampled under (RigExecSampleFrameInputs).
+bool RigExecBuildBurstSampleCache(
+    const RigExecBakedProgram &program,
+    const RigExecChainSampleBindings &bindings,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream, uint64_t epochDigest,
+    RigExecBurstSampleCache *cache, std::string *error = nullptr);
 
 /// Samples exactly as RigExecSampleFrameInputsWithChainBindings, but
 /// through \p cache: no currency re-verification, binding tables visited
@@ -807,6 +912,14 @@ bool RigExecBuildBurstSampleCache(
 bool RigExecSampleFrameInputsWithBurstCache(
     const RigExecRigEvaluator &evaluator, UsdTimeCode time,
     const std::vector<RigExecValueOverride> &overrides,
+    RigExecBurstSampleCache *cache, RigExecFrameInputs *out,
+    std::string *error = nullptr);
+/// The same under \p upstream, which must equal the values \p cache was
+/// prepared under (a differing list fails loud, like differing overrides).
+bool RigExecSampleFrameInputsWithBurstCache(
+    const RigExecRigEvaluator &evaluator, UsdTimeCode time,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
     RigExecBurstSampleCache *cache, RigExecFrameInputs *out,
     std::string *error = nullptr);
 
@@ -847,7 +960,8 @@ RigExecFrozenStepRunner RigExecMakeProductionStepRunner();
 /// deliberately NOT hashed: a scrub between identical control states hits
 /// across times, and a control edit changes the digest at every affected
 /// frame by construction. Overrides are hashed with the authored values,
-/// because a drag must never be served a pre-drag pose.
+/// because a drag must never be served a pre-drag pose, and so are the
+/// vector's upstream values (`upstream`), when it carries any.
 ///
 /// \p exact, when given, reports whether every sampled value was hashed at
 /// full precision. A value of a type the hasher does not name contributes

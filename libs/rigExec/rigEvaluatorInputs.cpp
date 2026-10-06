@@ -665,36 +665,10 @@ RigExecRigEvaluator::_AdmitUpstreamInputs()
             drop("names no attribute");
             continue;
         }
-        const UsdAttribute attribute =
-            _stage ? _stage->GetAttributeAtPath(path) : UsdAttribute();
-        if (!attribute) {
-            drop("no attribute stands there");
-            continue;
-        }
-        if (!_AuthoredConnections(attribute).empty()) {
-            drop("the attribute is connected");
-            continue;
-        }
-        if (!attribute.HasValue()) {
-            drop("the attribute has no stage value");
-            continue;
-        }
-        const SdfValueTypeName typeName = attribute.GetTypeName();
-        const TfType type = typeName.GetType();
-        if (!RigExecUpstreamSlotType(typeName)) {
-            drop(typeName.IsArray()
-                     ? std::string("array values are not admitted")
-                     : "no input slot holds a " +
-                           typeName.GetAsToken().GetString());
-            continue;
-        }
-        if (o.value.GetType() != type) {
-            drop("a " + o.value.GetTypeName() + " value on a " +
-                 typeName.GetAsToken().GetString() + " attribute");
-            continue;
-        }
-        if (listed && !listed->count(path)) {
-            drop("no listed read reaches it");
+        const std::string reason =
+            RigExecUpstreamDropReason(_stage, listed, path, o.value);
+        if (!reason.empty()) {
+            drop(reason);
             continue;
         }
         byPath[path] = &o;

@@ -44,6 +44,7 @@ namespace rigExec {
 struct RigExecFrameInputs;
 struct RigExecSampledInput;
 struct RigExecBurstSampleCache;
+struct RigExecUpstreamValue;
 
 /// Default per-rig byte cap: holds the 200-frame stack full range
 /// (slot-backed retained state, measured at 5.4 MB/frame, 1.08 GB in all)
@@ -133,11 +134,21 @@ struct RigExecFrameCacheStats {
 /// the values, in program order: they are fresh stage reads, so a moved
 /// constraint target moves the digest.
 ///
+/// Upstream values fold after the seeds, as a tagged block ("ups"), sorted
+/// by path: each entry's path and type, then the value
+/// (RigExecUpstreamValue). An empty list folds nothing. The forms without
+/// \p upstream fold `inputs.upstream`, the values the vector was sampled
+/// under.
+///
 /// Within-process only, like the key hash: never persisted.
 uint64_t RigExecControlStateDigest(const RigExecFrameInputs &inputs);
 uint64_t RigExecControlStateDigest(
     const RigExecFrameInputs &inputs,
     const std::vector<RigExecValueOverride> &overrides);
+uint64_t RigExecControlStateDigest(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream);
 
 /// Level-1 digest of one sampled input: its path, its valuelessness, and
 /// its value folded exactly as the control digest folds one sample. The
@@ -164,6 +175,11 @@ uint64_t RigExecControlStateDigestWithConstants(
     const RigExecFrameInputs &inputs,
     const std::vector<RigExecValueOverride> &overrides,
     uint64_t constantDigest);
+uint64_t RigExecControlStateDigestWithConstants(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    uint64_t constantDigest);
 
 /// The control-state digest of a burst-cached vector: identical to
 /// RigExecControlStateDigest for the same inputs, but level-1s served
@@ -177,8 +193,14 @@ uint64_t RigExecControlStateDigestWithBurstCache(
     const RigExecFrameInputs &inputs,
     const std::vector<RigExecValueOverride> &overrides,
     RigExecBurstSampleCache *cache);
+uint64_t RigExecControlStateDigestWithBurstCache(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    RigExecBurstSampleCache *cache);
 
-/// Whether every value in \p inputs and \p overrides can be digested exactly.
+/// Whether every value in \p inputs (its upstream values included) and
+/// \p overrides can be digested exactly.
 /// An unhashable held type (one VtValue cannot hash and the digest has no
 /// bitwise fold for) answers false, and the frame must bypass the cache --
 /// the digest still folds the type name so it stays defined, but two
@@ -203,18 +225,26 @@ bool RigExecControlStateDigestible(
 /// digest from ever equaling a sampled digest under the same epoch (a mode
 /// toggle crosses the two without moving the epoch). Overrides fold exactly
 /// as in RigExecControlStateDigest, so a drag always digests apart from the
-/// authored frame it started from.
+/// authored frame it started from, and so do \p upstream values, which the
+/// dynamic walk reads authored-level.
 ///
 /// Within-process only, like the key hash: never persisted.
 uint64_t RigExecRefusalControlDigest(
     UsdTimeCode time, uint64_t stageEditSerial,
     const std::vector<RigExecValueOverride> &overrides);
+uint64_t RigExecRefusalControlDigest(
+    UsdTimeCode time, uint64_t stageEditSerial,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream);
 
-/// Whether every override in \p overrides can be digested exactly (time
-/// always folds). False bypasses the cache, as in
-/// RigExecControlStateDigestible.
+/// Whether every override in \p overrides (and upstream value in
+/// \p upstream) can be digested exactly (time always folds). False bypasses
+/// the cache, as in RigExecControlStateDigestible.
 bool RigExecRefusalControlDigestible(
     const std::vector<RigExecValueOverride> &overrides);
+bool RigExecRefusalControlDigestible(
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream);
 
 /// One entry the cache dropped: its key and the time it was published for.
 /// Reported so the per-frame index retires the time without scanning the

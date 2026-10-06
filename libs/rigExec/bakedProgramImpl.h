@@ -3722,8 +3722,12 @@ enum class RigExecBakedLeafPass : uint8_t { All, BeforeHead, ChainRouted };
 /// `upstreamChanged` for the override numbers filed there, and it rebuilds
 /// `upstreamOn`. Then places every value on an `upstreamOracle` path into
 /// the resolved inputs. `upstreamChanged` holds this run's moves only.
-/// Owning thread.
-void RigExecBakedPlaceUpstream(RigExecBakedProgramImpl *program);
+/// Runs on the thread that owns \p program: live's owning thread, or a
+/// frozen worker over its private clone, which passes \p placeOracle false:
+/// it builds no admission set (that reads the stage), and the freeze
+/// refuses every rig with an object the oracle resolves.
+void RigExecBakedPlaceUpstream(RigExecBakedProgramImpl *program,
+                               bool placeOracle = true);
 
 void RigExecBakedSampleLeaves(
     RigExecBakedProgramImpl *program, UsdTimeCode time, bool all,

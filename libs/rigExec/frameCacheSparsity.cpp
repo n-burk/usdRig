@@ -117,6 +117,11 @@ RigExecRetainedSourcesBytes(const RigExecRetainedFrameState &state)
         total += o.prim.GetString().size() + o.computation.GetString().size() +
                  o.attribute.GetString().size() + _ArrayBytes(o.value);
     }
+    // Upstream values as the samples: path bytes plus the payload, shared
+    // buffers counted per frame (an over-count, on the cap's safe side).
+    for (const RigExecUpstreamValue &value : state.inputs.upstream) {
+        total += value.path.GetString().size() + _ArrayBytes(value.value);
+    }
     return total;
 }
 
@@ -131,6 +136,22 @@ RigExecSameSourceValue(const VtValue &a, bool aHas, const VtValue &b,
         return true;
     }
     return a == b;
+}
+
+bool
+RigExecSameUpstream(const std::vector<RigExecUpstreamValue> &a,
+                    const std::vector<RigExecUpstreamValue> &b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].path != b[i].path || a[i].foldHash != b[i].foldHash ||
+            !RigExecSameSourceValue(a[i].value, true, b[i].value, true)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::vector<RigExecControlId>
@@ -248,6 +269,11 @@ RigExecPlanSparseReuse(const RigExecOutputAffectedIndex &index,
         if (memo) {
             memo->InvalidateEpoch(requestEpoch);
         }
+        return plan;
+    }
+    // Upstream values seed no control the index maps, so a frame retained
+    // under another table is never reused, whole or in part.
+    if (!RigExecSameUpstream(cached.inputs.upstream, requested.upstream)) {
         return plan;
     }
     plan.changedControls = RigExecChangedControls(cached, requested,

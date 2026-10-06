@@ -24,7 +24,27 @@ thread_local std::shared_ptr<const void> _lastFrozenSlots;
 
 thread_local size_t _lastFrozenSlotBytes = 0;
 
+thread_local RigExecFrozenRunReport *_frozenRunReport = nullptr;
+
 } // namespace frozenDetail
+
+std::vector<RigExecUpstreamValue>
+RigExecUpstreamValuesOf(const std::vector<RigExecValueOverride> &inputs)
+{
+    std::map<SdfPath, const VtValue *> byPath;
+    for (const RigExecValueOverride &o : inputs) {
+        if (!o.attribute.IsEmpty() && o.computation.IsEmpty() &&
+            !o.prim.IsEmpty()) {
+            byPath[o.prim.AppendProperty(o.attribute)] = &o.value;
+        }
+    }
+    std::vector<RigExecUpstreamValue> values;
+    values.reserve(byPath.size());
+    for (const auto &[path, value] : byPath) {
+        values.push_back(RigExecUpstreamValue{path, *value, 0});
+    }
+    return values;
+}
 
 bool
 RigExecFrameInputs::HasChainResolvedInputs() const
@@ -99,6 +119,7 @@ RigExecFrameInputs::Clear()
     overrides.clear();
     overridePaths.clear();
     headLeafConstants.reset();
+    upstream.clear();
 }
 
 bool
@@ -147,10 +168,13 @@ RigExecEvaluateFrozen(const RigExecFrozenEvalContext &context,
                       const RigExecFrameInputs &inputs,
                       RigExecFrozenStepRunner runner,
                       const RigExecBackgroundScheduler *scheduler,
-                      const SdfPath &rig)
+                      const SdfPath &rig, RigExecFrozenRunReport *report)
 {
     _lastFrozenSlots.reset();
     _lastFrozenSlotBytes = 0;
+    if (report) {
+        report->Clear();
+    }
     RigExecRigPose declined;
     declined.time = inputs.time;
     declined.valid = false;
@@ -191,9 +215,21 @@ RigExecEvaluateFrozen(const RigExecFrozenEvalContext &context,
     bool ran = false;
     {
         RigExecFrozenSerialScope serial;
+        // The production runner fills the caller's report on this thread;
+        // the pointer is withdrawn however the runner leaves.
+        struct ReportScope {
+            explicit ReportScope(RigExecFrozenRunReport *r)
+            {
+                _frozenRunReport = r;
+            }
+            ~ReportScope() { _frozenRunReport = nullptr; }
+        } reportScope(report);
         ran = runner(context, inputs, arena, &pose);
     }
     if (!ran || !pose.valid) {
+        if (report) {
+            report->Clear();
+        }
         return declined;
     }
     pose.time = inputs.time;

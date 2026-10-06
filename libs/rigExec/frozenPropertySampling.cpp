@@ -379,12 +379,23 @@ RigExecSampleFrameInputs(const RigExecRigEvaluator &evaluator,
     // share every line below the bind, and the equivalence test holds them
     // to account sample by sample. A bind failure names no chains at all,
     // so no vector is built.
+    return RigExecSampleFrameInputs(evaluator, time, overrides, {}, out,
+                                    error);
+}
+
+bool
+RigExecSampleFrameInputs(const RigExecRigEvaluator &evaluator,
+                         UsdTimeCode time,
+                         const std::vector<RigExecValueOverride> &overrides,
+                         const std::vector<RigExecUpstreamValue> &upstream,
+                         RigExecFrameInputs *out, std::string *error)
+{
     RigExecChainSampleBindings fresh;
     if (!RigExecBindChainSampleInputs(evaluator, &fresh, error)) {
         return false;
     }
     return RigExecSampleFrameInputsWithChainBindings(
-        evaluator, time, overrides, fresh, out, error);
+        evaluator, time, overrides, upstream, fresh, out, error);
 }
 
 } // namespace rigExec

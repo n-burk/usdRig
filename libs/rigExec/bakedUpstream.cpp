@@ -37,6 +37,42 @@ RigExecUpstreamSlotType(const SdfValueTypeName &typeName)
            type == TfType::Find<GfVec3d>() || type == TfType::Find<GfVec3f>();
 }
 
+std::string
+RigExecUpstreamDropReason(const UsdStageRefPtr &stage,
+                          const std::map<SdfPath, TfType> *listed,
+                          const SdfPath &path, const VtValue &value)
+{
+    const UsdAttribute attribute =
+        stage ? stage->GetAttributeAtPath(path) : UsdAttribute();
+    if (!attribute) {
+        return "no attribute stands there";
+    }
+    SdfPathVector connections;
+    if (attribute.HasAuthoredConnections()) {
+        attribute.GetConnections(&connections);
+    }
+    if (!connections.empty()) {
+        return "the attribute is connected";
+    }
+    if (!attribute.HasValue()) {
+        return "the attribute has no stage value";
+    }
+    const SdfValueTypeName typeName = attribute.GetTypeName();
+    if (!RigExecUpstreamSlotType(typeName)) {
+        return typeName.IsArray() ? std::string("array values are not admitted")
+                                  : "no input slot holds a " +
+                                        typeName.GetAsToken().GetString();
+    }
+    if (value.GetType() != typeName.GetType()) {
+        return "a " + value.GetTypeName() + " value on a " +
+               typeName.GetAsToken().GetString() + " attribute";
+    }
+    if (listed && !listed->count(path)) {
+        return "no listed read reaches it";
+    }
+    return std::string();
+}
+
 void
 RigExecBakedProgram::SetUpstreamInputs(
     const std::vector<RigExecValueOverride> &inputs)
@@ -319,7 +355,7 @@ RigExecBakedProgram::GetUpstreamOracle() const
 }
 
 void
-RigExecBakedPlaceUpstream(RigExecBakedProgramImpl *program)
+RigExecBakedPlaceUpstream(RigExecBakedProgramImpl *program, bool placeOracle)
 {
     RigExecBakedProgramImpl &B = *program;
     if (B.upstreamMovedThisRun) {
@@ -381,7 +417,7 @@ RigExecBakedPlaceUpstream(RigExecBakedProgramImpl *program)
     // a value on one of its paths is placed there too, beneath any
     // interactive override placed after it and any chain result published
     // over it, as the dynamic walk places it.
-    if (!B.upstream.empty()) {
+    if (placeOracle && !B.upstream.empty()) {
         if (!B.upstreamSetsBuilt) {
             _BuildUpstreamSets(&B);
         }

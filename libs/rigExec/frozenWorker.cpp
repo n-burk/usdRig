@@ -83,6 +83,10 @@
 //    frozen blend-shape assembler below calls) take the serial variant
 //    inside a frozen run (the RigExecFrozenSerialActive hook, D4), so the
 //    only thread a frozen frame ever runs on is its own.
+//  * The upstream layer is the job's table (RigExecFrameInputs::upstream),
+//    diffed against the clone's by RigExecBakedPlaceUpstream with the
+//    oracle placement off, so no admission set is built (that reads the
+//    stage); every value it reaches was sampled through it on the UI thread.
 //  * The worker builds none of the paths it places overrides at or looks
 //    samples up by: override placement and the overlay use the vector's
 //    overridePaths, and the RevisionStatic and weight steps use the
@@ -199,13 +203,15 @@ _PatchHeadLeaves(RigExecBakedProgramImpl &B,
             return;
         }
         const VtValue *held = nullptr;
-        if (!constants->varying[at]) {
+        // A constant leaf at a path the job's upstream layer holds rides a
+        // sample too (rule 2's upstream arm), which wins over the table.
+        const auto found = index.find(leaf.frozenKey);
+        if (!constants->varying[at] && found == index.end()) {
             held = &constants->values[at];
             if (held->IsEmpty()) {
                 held = nullptr;
             }
         } else {
-            const auto found = index.find(leaf.frozenKey);
             if (found == index.end()) {
                 ok = false;
                 return;
@@ -339,13 +345,12 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         const auto &binding = B.avarConstantBindings[promoted];
         B.avars[binding.slot] = RigExecBakedLeafRead(B, binding.input);
     }
-    if (B.anyOverridden || B.avarsDisturbed) {
+    // As RigExecBakedRunInputs: an upstream value placed, moved or lifted
+    // against the snapshot's table (_FrozenPlaceUpstream) runs the pass
+    // too, and each slot takes its leaf.
+    if (B.anyOverridden || B.avarsDisturbed || B.upstreamMovedThisRun) {
         for (const auto &binding : B.avarConstantBindings) {
-            B.avars[binding.slot] =
-                (B.overridden[size_t(binding.input.overrideIndex)] ||
-                 binding.input.varying)
-                    ? RigExecBakedLeafRead(B, binding.input)
-                    : binding.input.constant;
+            B.avars[binding.slot] = RigExecBakedLeaf(B, binding.input);
         }
         B.avarsDisturbed = B.anyOverridden;
     }
@@ -831,6 +836,19 @@ _FrozenRunSteps(_FrozenWorker *worker,
             return false;
         }
     }
+    // Execution order for RigExecFrozenRunReport (RigExecBakedLastRunTrace):
+    // the sources, then the closed steps, as they ran above.
+    uint32_t seq = 0;
+    for (RigExecBakedStep &step : B.steps) {
+        if (step.isSource) {
+            step.runSeq = ++seq;
+        }
+    }
+    for (RigExecBakedStep &step : B.steps) {
+        if (!step.isSource && B.closed.Test(step.cluster)) {
+            step.runSeq = ++seq;
+        }
+    }
     return true;
 }
 
@@ -939,6 +957,18 @@ _FrozenPublishGeometry(RigExecBakedProgramImpl &B, RigExecRigPose *pose)
 
 namespace frozenDetail {
 
+void
+_FrozenPlaceUpstream(RigExecBakedProgramImpl *program,
+                     const RigExecFrameInputs &inputs)
+{
+    RigExecBakedProgramImpl &B = *program;
+    B.upstream.clear();
+    for (const RigExecUpstreamValue &value : inputs.upstream) {
+        B.upstream[value.path] = value.value;
+    }
+    RigExecBakedPlaceUpstream(&B, /*placeOracle=*/false);
+}
+
 // Defined below, beside the executor.
 bool _RunFrozen(const RigExecFrozenEvalContext &context,
                 const RigExecFrameInputs &inputs, RigExecRigPose *pose);
@@ -991,6 +1021,9 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
             break;
         }
     }
+    // The job's upstream table against the snapshot's (rule 2's upstream
+    // arm): the clone's slots and outputs hold the snapshot's values.
+    _FrozenPlaceUpstream(&B, inputs);
 
     std::map<SdfPath, size_t> index;
     for (size_t i = 0; i < inputs.values.size(); ++i) {
@@ -1051,6 +1084,11 @@ _RunFrozen(const RigExecFrozenEvalContext &context,
     working.time = time;
     *pose = working;
     RigExecCapturePartialSlots(B, &_lastFrozenSlots, &_lastFrozenSlotBytes);
+    if (RigExecFrozenRunReport *report = _frozenRunReport) {
+        report->head = RigExecBakedLastHeadTrace(B);
+        report->region = RigExecBakedLastRunTrace(B);
+        report->ran = true;
+    }
     return true;
 }
 
@@ -1311,6 +1349,7 @@ RigExecRunPartialCone(
             break;
         }
     }
+    _FrozenPlaceUpstream(&B, freshInputs);
     std::map<SdfPath, size_t> index;
     for (size_t i = 0; i < freshInputs.values.size(); ++i) {
         index.emplace(freshInputs.values[i].path, i);

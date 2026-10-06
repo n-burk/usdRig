@@ -505,6 +505,76 @@ TestPlanSparseReuse()
     CHECK(index.Walks() == walks + 1);
 }
 
+// A frame retained under other upstream values is never reused: no control
+// id names them, so the plan misses before it compares controls, even
+// where every sampled source agrees. The retained bytes count the values.
+void
+TestUpstreamMissesSparseReuse()
+{
+    const RigExecBakedProgramImpl program = MakeDiamond(false);
+    RigExecOutputAffectedIndex index;
+    index.Build(program, 7);
+    index.MapControl("/Ctl/A", {1});
+    const std::vector<RigExecValueOverride> noOverrides;
+    const auto up = [](double value) {
+        return RigExecUpstreamValue{SdfPath("/Ctl/U.avars:rz"),
+                                    VtValue(value), 0};
+    };
+
+    RigExecRetainedFrameState cached =
+        MakeRetained(7, 6, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}});
+    cached.inputs.upstream = {up(30.0)};
+
+    // The same table: as before, a hit.
+    RigExecFrameInputs same = cached.inputs;
+    CHECK(RigExecPlanSparseReuse(index, nullptr, cached, 7, same,
+                                 noOverrides).verdict ==
+          RigExecSparseVerdict::Hit);
+    // Another value, or none, with every sampled source equal: a miss.
+    RigExecFrameInputs moved = cached.inputs;
+    moved.upstream = {up(31.0)};
+    CHECK(RigExecChangedControls(cached, moved, noOverrides).empty());
+    CHECK(RigExecPlanSparseReuse(index, nullptr, cached, 7, moved,
+                                 noOverrides).verdict ==
+          RigExecSparseVerdict::Miss);
+    RigExecFrameInputs lifted = cached.inputs;
+    lifted.upstream.clear();
+    CHECK(RigExecPlanSparseReuse(index, nullptr, cached, 7, lifted,
+                                 noOverrides).verdict ==
+          RigExecSparseVerdict::Miss);
+    RigExecRetainedFrameState authored = cached;
+    authored.inputs.upstream.clear();
+    CHECK(RigExecPlanSparseReuse(index, nullptr, authored, 7, same,
+                                 noOverrides).verdict ==
+          RigExecSparseVerdict::Miss);
+    // A moved control under the same table still plans its cone.
+    RigExecFrameInputs movedA = cached.inputs;
+    movedA.values.clear();
+    movedA.Add(SdfPath("/Ctl/A"), VtValue(1.5));
+    const RigExecSparsePlan partial = RigExecPlanSparseReuse(
+        index, nullptr, cached, 7, movedA, noOverrides);
+    CHECK(partial.verdict == RigExecSparseVerdict::Partial);
+    CHECK(SetIs(partial.clusters, {1, 3, 4}));
+
+    CHECK(RigExecSameUpstream(cached.inputs.upstream, same.upstream));
+    CHECK(!RigExecSameUpstream(cached.inputs.upstream, moved.upstream));
+    CHECK(!RigExecSameUpstream(cached.inputs.upstream, lifted.upstream));
+    std::vector<RigExecUpstreamValue> hashed = cached.inputs.upstream;
+    hashed[0].foldHash = 5;
+    CHECK(!RigExecSameUpstream(cached.inputs.upstream, hashed));
+
+    // Retained bytes: path bytes plus the payload per value.
+    RigExecRetainedFrameState arrays = authored;
+    const size_t without = RigExecRetainedSourcesBytes(arrays);
+    VtFloatArray weights(10, 0.5f);
+    arrays.inputs.upstream = {RigExecUpstreamValue{
+        SdfPath("/Ctl/U.rigExec:values"), VtValue(weights), 0}};
+    CHECK(RigExecRetainedSourcesBytes(arrays) ==
+          without + std::string("/Ctl/U.rigExec:values").size() +
+              10 * sizeof(float));
+    CHECK(arrays.RetainedBytes() > authored.RetainedBytes());
+}
+
 // At a moved time the always-dirty steps re-run even when every compared
 // source agrees (§7's time rule, cross-frame); at a standing time the same
 // request is a hit.
@@ -1528,6 +1598,7 @@ main()
     TestChangedControls();
     TestPlanSparseReuse();
     TestPlanTimeRule();
+    TestUpstreamMissesSparseReuse();
     TestRunSparsePlan();
     TestRunSparsePlanRunsPredecessorsFirst();
     TestRetainedPublishAndEpochEviction();

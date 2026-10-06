@@ -226,6 +226,15 @@ RigExecFrozenPurityAudit()
          "mark -- in the live prologue on the owning thread, and in a "
          "frozen job's prologue over the clone's tables from the job's "
          "patched ladder leaves"},
+        {"upstream layer (upstream, lastUpstream, upstreamOn, "
+         "upstreamChanged)",
+         RigExecFrozenPurity::Pure,
+         "per program: a frozen job sets its clone's from the vector's "
+         "admitted values and diffs them against the snapshot's by "
+         "RigExecBakedPlaceUpstream with the oracle placement off -- map "
+         "compares and leaf marks, no stage, no admission-set build; every "
+         "read they reach was sampled through the same values on the UI "
+         "thread"},
         {"skin/blend bindings (shared_ptr<const> topologies and layouts)",
          RigExecFrozenPurity::EpochPinned,
          "immutable snapshots resolved at Build/prologue; the worker runs "
@@ -363,10 +372,12 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     }
     const RigExecBakedProgramImpl &L = live.GetStepGraph();
     const RigExecBakedProgramImpl &S = base.program;
-    // Live's avar slots hold its upstream values, which a job never
-    // samples; RigExecCanFreezeProgram refuses the re-freeze as well.
-    if (!L.upstream.empty() || !L.lastUpstream.empty()) {
-        return fail("upstream inputs standing: re-freeze, do not patch");
+    // Live's avar slots, carried below, hold the upstream values its last
+    // run placed; the copy keeps the snapshot's table as its history, so
+    // the two must name the same table.
+    if (L.lastUpstream != S.lastUpstream) {
+        return fail("upstream inputs moved since the snapshot: re-freeze, "
+                    "do not patch");
     }
     // The same program object, or at least the same shape: a rebuild is
     // re-frozen, never patched.

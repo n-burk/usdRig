@@ -284,6 +284,18 @@ _VisitComposeInputs(Impl &B, Fn &&fn)
     }
 }
 
+// The report RigExecEvaluateFrozen's caller asked for, set for the span of
+// its runner call on the calling thread, else null. _RunFrozen fills it.
+extern thread_local RigExecFrozenRunReport *_frozenRunReport;
+
+// Sets \p program's upstream layer to \p inputs' table and diffs it against
+// the table its last run placed (RigExecBakedPlaceUpstream, rule 8): leaves
+// under a value placed, moved or lifted re-read, their override numbers
+// seed the closure, and the constant-avar pass runs. No stage access.
+void
+_FrozenPlaceUpstream(RigExecBakedProgramImpl *program,
+                     const RigExecFrameInputs &inputs);
+
 // Visits every patchable input in one fixed order. The freeze uses it to
 // capture head paths (UI thread, handles valid there) and the worker uses
 // it to patch constants (side-table keys, no handle dereference); sharing

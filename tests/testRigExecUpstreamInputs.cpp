@@ -5,12 +5,17 @@
 // Admission keeps a value only on an unconnected attribute with a stage
 // value, of its own input-slot type, that a read a bake lists as an input
 // reaches; every other key is reported and ignored by both paths.
+// In baked mode each value case also runs frozen jobs, which carry the
+// values in their sampled vector: a job equals live under the same values,
+// whichever values the snapshot it clones held, and runs only what moved.
 // Registered plain and under the parity entries, where every baked
 // generation is also compared with the dynamic walk and, with
 // RIGEXEC_BAKED_VERIFY_CONES, the cone run with a forced run of everything.
 // argv[1] = path to the examples directory.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bakedTrace.h"
+#include "rigExec/frameCache.h"
 #include "rigExec/frozenContext.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/computedCapture.h"
@@ -287,15 +292,223 @@ PathsOf(const std::vector<RigExecValueOverride> &inputs)
     return std::vector<SdfPath>(paths.begin(), paths.end());
 }
 
+// --- Frozen jobs ------------------------------------------------------------
+
+std::shared_ptr<const RigExecFrozenProgram>
+Freeze(const RigExecRigEvaluator &evaluator, const std::string &what)
+{
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    if (!RigExecFreezeProgram(evaluator, &frozen, &error)) {
+        std::printf("FAIL %s: freeze refused: %s\n", what.c_str(),
+                    error.c_str());
+        ++failures;
+    }
+    return frozen;
+}
+
+struct FrozenJob {
+    RigExecFrameInputs inputs;
+    RigExecFrozenRunReport report;
+    RigExecRigPose pose;
+};
+
+FrozenJob RunSampled(const RigExecRigEvaluator &evaluator,
+                     const std::shared_ptr<const RigExecFrozenProgram> &snapshot,
+                     RigExecFrameInputs inputs, const std::string &what);
+
+// One warming job at \p time from \p snapshot, sampled from \p evaluator's
+// program with \p upstream as the frame's upstream values, through the
+// production runner.
+FrozenJob
+RunJob(const RigExecRigEvaluator &evaluator,
+       const std::shared_ptr<const RigExecFrozenProgram> &snapshot,
+       UsdTimeCode time, const std::vector<RigExecValueOverride> &upstream,
+       const std::string &what)
+{
+    RigExecFrameInputs inputs;
+    std::string error;
+    if (!snapshot ||
+        !RigExecSampleFrameInputs(evaluator, time, {},
+                                  RigExecUpstreamValuesOf(upstream),
+                                  &inputs, &error)) {
+        std::printf("FAIL %s: no job sampled: %s\n", what.c_str(),
+                    error.c_str());
+        ++failures;
+        return FrozenJob();
+    }
+    return RunSampled(evaluator, snapshot, std::move(inputs), what);
+}
+
+// One job over an already sampled vector, through the production runner.
+FrozenJob
+RunSampled(const RigExecRigEvaluator &evaluator,
+           const std::shared_ptr<const RigExecFrozenProgram> &snapshot,
+           RigExecFrameInputs inputs, const std::string &what)
+{
+    FrozenJob job;
+    job.inputs = std::move(inputs);
+    if (!snapshot) {
+        std::printf("FAIL %s: no snapshot\n", what.c_str());
+        ++failures;
+        return job;
+    }
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator.GetBindingEpochDigest();
+    context.slotCount = evaluator.GetBakedProgram()->GetProviderCount();
+    context.varyingInputCount = job.inputs.values.size();
+    if (evaluator.GetPublishWeightFields()) {
+        context.flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator.GetSolverGuidesEnabled()) {
+        context.flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.frozen = snapshot.get();
+    job.pose = RigExecEvaluateFrozen(context, job.inputs,
+                                     RigExecMakeProductionStepRunner(),
+                                     nullptr, SdfPath(), &job.report);
+    // Accepted: the worker ran it from samples alone.
+    CHECK(!job.inputs.HasChainResolvedInputs());
+    CHECK(job.pose.valid);
+    CHECK(job.report.ran);
+    if (!job.pose.valid) {
+        std::printf("FAIL %s: the job declined\n", what.c_str());
+    }
+    return job;
+}
+
+// The steps of \p job outside what live ran over the same history: region
+// steps (sources aside) by cluster, as the worker runs whole clusters,
+// against the clusters of \p liveRegion and the always-dirty steps; head
+// steps against \p liveHead.
+size_t
+StepsOutsideLive(const RigExecBakedProgramImpl &B, const FrozenJob &job,
+                 const std::vector<RigExecOpTraceEntry> &liveRegion,
+                 const std::vector<RigExecOpTraceEntry> &liveHead)
+{
+    std::set<int> clusters;
+    for (const RigExecOpTraceEntry &entry : liveRegion) {
+        clusters.insert(entry.cluster);
+    }
+    std::set<size_t> head;
+    for (const RigExecOpTraceEntry &entry : liveHead) {
+        head.insert(entry.step);
+    }
+    size_t outside = 0;
+    for (const RigExecOpTraceEntry &entry : job.report.region) {
+        if (entry.step < B.steps.size() && B.steps[entry.step].isSource) {
+            continue;
+        }
+        if (!clusters.count(entry.cluster) &&
+            !B.cones.alwaysSteps.Test(int(entry.step))) {
+            ++outside;
+        }
+    }
+    for (const RigExecOpTraceEntry &entry : job.report.head) {
+        if (!head.count(entry.step)) {
+            ++outside;
+        }
+    }
+    return outside;
+}
+
+// The region steps a job ran beyond its sources and the always-dirty steps.
+std::set<size_t>
+WorkSteps(const RigExecBakedProgramImpl &B, const FrozenJob &job)
+{
+    std::set<size_t> work;
+    for (const RigExecOpTraceEntry &entry : job.report.region) {
+        if (entry.step < B.steps.size() && !B.steps[entry.step].isSource &&
+            !B.cones.alwaysSteps.Test(int(entry.step))) {
+            work.insert(entry.step);
+        }
+    }
+    return work;
+}
+
+size_t
+NonSourceWork(const RigExecBakedProgramImpl &B, const FrozenJob &job)
+{
+    return WorkSteps(B, job).size();
+}
+
+// The frozen legs of a value case, on \p evaluator with \p inputs standing
+// and its last generation at \p time: \p authoredSnapshot was frozen before
+// the values were placed, and the live traces are those of the generation
+// that placed them.
+//  - A job carrying the values from the authored snapshot equals live with
+//    them standing, and runs no step outside live's cone of that change.
+//  - A job carrying them from a snapshot frozen while they stand runs only
+//    what the authored job runs against the authored snapshot: nothing
+//    moved against its history.
+//  - A job with none from that snapshot lifts them: it equals the authored
+//    pose and its key is the authored job's.
+void
+RunFrozenLegs(const std::string &what, const RigExecRigEvaluator &evaluator,
+              const std::shared_ptr<const RigExecFrozenProgram>
+                  &authoredSnapshot,
+              const FrozenJob &authoredJob,
+              const std::vector<RigExecValueOverride> &inputs,
+              UsdTimeCode time, const RigExecRigPose &authored,
+              const RigExecRigPose &standing,
+              const std::vector<RigExecOpTraceEntry> &liveRegion,
+              const std::vector<RigExecOpTraceEntry> &liveHead)
+{
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program);
+    if (!program || !authoredSnapshot) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const FrozenJob placed =
+        RunJob(evaluator, authoredSnapshot, time, inputs, what + ": placed");
+    CheckSamePose(what + ": frozen, placed", standing, placed.pose);
+    CHECK(placed.inputs.upstream == RigExecUpstreamValuesOf(inputs));
+    CHECK(!placed.report.region.empty());
+    const size_t outside = StepsOutsideLive(B, placed, liveRegion, liveHead);
+    if (outside != 0) {
+        std::printf("FAIL %s: frozen job ran %zu step(s) outside live's "
+                    "cone\n", what.c_str(), outside);
+    }
+    CHECK(outside == 0);
+    CHECK(RigExecControlStateDigest(placed.inputs) !=
+          RigExecControlStateDigest(authoredJob.inputs));
+
+    const std::shared_ptr<const RigExecFrozenProgram> standingSnapshot =
+        Freeze(evaluator, what + ": standing snapshot");
+    if (!standingSnapshot) {
+        return;
+    }
+    CHECK(!standingSnapshot->program.lastUpstream.empty());
+    const FrozenJob again = RunJob(evaluator, standingSnapshot, time, inputs,
+                                   what + ": standing");
+    CheckSamePose(what + ": frozen, standing", standing, again.pose);
+    // The work a job does with nothing moved against its history: what the
+    // authored job did against the authored snapshot (its time-varying
+    // reads), and no more.
+    CHECK(NonSourceWork(B, again) == NonSourceWork(B, authoredJob));
+    CHECK(WorkSteps(B, again) == WorkSteps(B, authoredJob));
+    CHECK(again.report.head.size() == authoredJob.report.head.size());
+
+    const FrozenJob lifted =
+        RunJob(evaluator, standingSnapshot, time, {}, what + ": lifted");
+    CheckSamePose(what + ": frozen, lifted", authored, lifted.pose);
+    CHECK(lifted.inputs.upstream.empty());
+    CHECK(RigExecControlStateDigest(lifted.inputs) ==
+          RigExecControlStateDigest(authoredJob.inputs));
+}
+
 // One value case: in each mode, the authored pose, then the pose with
 // \p inputs standing against a stage authoring \p edits, then the pose
 // after the lift against the authored stage again. In baked mode the
-// program answers every generation.
+// program answers every generation, and frozen jobs follow
+// (RunFrozenLegs), unless \p freezes is false: then the rig must refuse the
+// freeze.
 void
 RunCase(const std::string &name, const std::string &stagePath,
         const SdfPath &rig, double t,
         const std::vector<RigExecValueOverride> &inputs,
-        const std::vector<Authored> &edits)
+        const std::vector<Authored> &edits, bool freezes = true)
 {
     std::printf("case: %s\n", name.c_str());
     const UsdTimeCode time(t);
@@ -313,6 +526,19 @@ RunCase(const std::string &name, const std::string &stagePath,
         const RigExecRigPose before = evaluator->Evaluate(time);
         CheckSamePose(what + ": before", authored, before);
         const size_t generations = evaluator->GetBakedGenerationCount();
+        const bool frozen = mode != RigExecEvaluationMode::Dynamic && freezes;
+        if (mode != RigExecEvaluationMode::Dynamic && !freezes) {
+            CHECK(!RigExecCanFreezeProgram(*evaluator));
+        }
+        std::shared_ptr<const RigExecFrozenProgram> authoredSnapshot;
+        FrozenJob authoredJob;
+        if (frozen) {
+            authoredSnapshot = Freeze(*evaluator, what + ": authored");
+            authoredJob = RunJob(*evaluator, authoredSnapshot, time, {},
+                                 what + ": authored");
+            CheckSamePose(what + ": frozen, authored", before,
+                          authoredJob.pose);
+        }
 
         evaluator->SetUpstreamInputs(inputs);
         CHECK(evaluator->HasUpstreamInputs());
@@ -325,6 +551,13 @@ RunCase(const std::string &name, const std::string &stagePath,
         CheckSamePose(what + ": standing", expected, standing);
         // The value moved something, so the case tests a move.
         CHECK(Differences(authored, standing) != 0);
+        if (frozen && evaluator->GetBakedProgram()) {
+            RunFrozenLegs(what, *evaluator, authoredSnapshot, authoredJob,
+                          inputs, time, authored, standing,
+                          evaluator->GetLastOpTrace(),
+                          RigExecBakedLastHeadTrace(
+                              evaluator->GetBakedProgram()->GetStepGraph()));
+        }
         // A second generation with the same value standing.
         CheckSamePose(what + ": standing again", expected,
                       evaluator->Evaluate(time));
@@ -484,13 +717,279 @@ TestATimeVaryingValue()
         const UsdStageRefPtr authoredStage =
             OpenAuthored(stagePath, {samples});
         auto reference = Make(authoredStage, kLimbsRig, mode);
+        std::shared_ptr<const RigExecFrozenProgram> snapshot;
+        std::set<uint64_t> digests;
         for (int f = 1; f <= 5; ++f) {
-            evaluator->SetUpstreamInputs({Up(kA0Rz, VtValue(5.0 * f))});
-            CheckSamePose(std::string("A0 per frame (") + ModeName(mode) +
-                              ") at " + std::to_string(f),
-                          reference->Evaluate(UsdTimeCode(f)),
-                          evaluator->Evaluate(UsdTimeCode(f)));
+            const std::string what = std::string("A0 per frame (") +
+                                     ModeName(mode) + ") at " +
+                                     std::to_string(f);
+            const std::vector<RigExecValueOverride> inputs = {
+                Up(kA0Rz, VtValue(5.0 * f))};
+            evaluator->SetUpstreamInputs(inputs);
+            const RigExecRigPose expected = reference->Evaluate(UsdTimeCode(f));
+            const RigExecRigPose live = evaluator->Evaluate(UsdTimeCode(f));
+            CheckSamePose(what, expected, live);
+            if (mode == RigExecEvaluationMode::Dynamic) {
+                continue;
+            }
+            // Each frame's job from the snapshot taken at frame 1: its own
+            // frame's value, whatever the snapshot's.
+            if (!snapshot) {
+                snapshot = Freeze(*evaluator, what);
+            }
+            const FrozenJob job =
+                RunJob(*evaluator, snapshot, UsdTimeCode(f), inputs, what);
+            CheckSamePose(what + " (frozen)", expected, job.pose);
+            digests.insert(RigExecControlStateDigest(job.inputs));
+            // The upstream block alone separates the frame's key from the
+            // same vector under another value.
+            FrozenJob other = job;
+            other.inputs.upstream =
+                RigExecUpstreamValuesOf({Up(kA0Rz, VtValue(5.0 * f + 1.0))});
+            CHECK(RigExecControlStateDigest(other.inputs) !=
+                  RigExecControlStateDigest(job.inputs));
         }
+        if (mode != RigExecEvaluationMode::Dynamic) {
+            CHECK(digests.size() == 5);
+        }
+    }
+}
+
+// A lift reaches a job whose snapshot was frozen while the value stood: the
+// clone's slots, leaves and outputs hold the value, and the job, carrying
+// none, diffs its empty table against the clone's. Its pose and its key are
+// the authored ones at another frame. A constant avar (a slot only the
+// constant-avar pass rewrites), a chain mover's constant inputs:value (a
+// head leaf) and a skin mover's inputs:defaultWeight (a revision leaf).
+void
+TestALiftReachesAnOlderSnapshot()
+{
+    std::printf("case: a lift reaches an older snapshot\n");
+    struct Lift {
+        std::string name;
+        std::string stagePath;
+        SdfPath rig;
+        RigExecValueOverride input;
+        double placedAt, warmedAt;
+    };
+    const std::vector<Lift> lifts = {
+        {"A0 avars:rz", Fixture("upstream_inputs.usda"), kLimbsRig,
+         Up(kA0Rz, VtValue(30.0)), 1, 4},
+        {"chain mover inputs:value", Example("09_PropertyMathMovers.usda"),
+         kPropRig,
+         Up(SdfPath("/PropMathAsset/Rig/Movers/OffsetLift.inputs:value"),
+            VtValue(GfVec3f(0, 7, 0))),
+         1012, 1013},
+        {"skin mover inputs:defaultWeight", Example("biped/Biped.usda"),
+         SdfPath("/Biped/Rig"),
+         Up(SdfPath("/Biped/Rig/Movers/skin_body_geo/body_geo_skin."
+                    "inputs:defaultWeight"),
+            VtValue(0.5f)),
+         1, 4},
+    };
+    for (const Lift &lift : lifts) {
+        const std::string what = "lift " + lift.name;
+        const UsdStageRefPtr stage = UsdStage::Open(lift.stagePath);
+        auto evaluator = Make(stage, lift.rig, BakedMode());
+        const UsdTimeCode placedAt(lift.placedAt), warmedAt(lift.warmedAt);
+        evaluator->Evaluate(placedAt);
+        const std::shared_ptr<const RigExecFrozenProgram> before =
+            Freeze(*evaluator, what + ": before");
+        // The authored key at the warmed frame.
+        const FrozenJob authoredJob =
+            RunJob(*evaluator, before, warmedAt, {}, what + ": authored");
+        evaluator->SetUpstreamInputs({lift.input});
+        evaluator->Evaluate(placedAt);
+        const std::shared_ptr<const RigExecFrozenProgram> standing =
+            Freeze(*evaluator, what + ": standing");
+        if (!standing) {
+            continue;
+        }
+        CHECK(!standing->program.lastUpstream.empty());
+        // The value stands at the warmed frame too.
+        const FrozenJob held =
+            RunJob(*evaluator, standing, warmedAt, {lift.input},
+                   what + ": held");
+        CheckSamePose(what + ": held",
+                      Reference(lift.stagePath, lift.rig, BakedMode(),
+                                {{lift.input.prim.AppendProperty(
+                                      lift.input.attribute),
+                                  lift.input.value,
+                                  {}}},
+                                warmedAt),
+                      held.pose);
+        // Lifted live; the snapshot taken while it stood is kept.
+        evaluator->SetUpstreamInputs({});
+        evaluator->Evaluate(placedAt);
+        const FrozenJob job =
+            RunJob(*evaluator, standing, warmedAt, {}, what + ": lifted");
+        CheckSamePose(what + ": lifted",
+                      Reference(lift.stagePath, lift.rig, BakedMode(), {},
+                                warmedAt),
+                      job.pose);
+        CheckSamePose(what + ": lifted against the authored job",
+                      authoredJob.pose, job.pose);
+        CHECK(RigExecControlStateDigest(job.inputs) ==
+              RigExecControlStateDigest(authoredJob.inputs));
+    }
+}
+
+// A warming burst prepared under upstream values samples every frame as the
+// plain sampler does under them, sample for sample and digest for digest,
+// and its jobs equal a stage authoring the value. A burst refuses frames
+// under another list. Cases: a constant avar, the source hop of a pinned
+// ladder binding, a chain mover's inputs:value (a head leaf, chains bound)
+// and a skin mover's inputs:defaultWeight (a memoized mover scalar).
+void
+TestABurstCarriesUpstream()
+{
+    std::printf("case: a burst carries upstream values\n");
+    struct Burst {
+        std::string name;
+        std::string stagePath;
+        SdfPath rig;
+        RigExecValueOverride input;
+        double first;
+    };
+    const SdfPath space("/LimbsAsset/Upstream.inputs:space");
+    const std::vector<Burst> bursts = {
+        {"A0 avars:rz", Fixture("upstream_inputs.usda"), kLimbsRig,
+         Up(kA0Rz, VtValue(30.0)), 1},
+        {"Upstream inputs:space", Fixture("upstream_inputs.usda"), kLimbsRig,
+         Up(space, VtValue(Translate(1, 0, 10))), 1},
+        {"chain mover inputs:value", Example("09_PropertyMathMovers.usda"),
+         kPropRig,
+         Up(SdfPath("/PropMathAsset/Rig/Movers/OffsetLift.inputs:value"),
+            VtValue(GfVec3f(0, 7, 0))),
+         1012},
+        {"skin mover inputs:defaultWeight", Example("biped/Biped.usda"),
+         SdfPath("/Biped/Rig"),
+         Up(SdfPath("/Biped/Rig/Movers/skin_body_geo/body_geo_skin."
+                    "inputs:defaultWeight"),
+            VtValue(0.5f)),
+         1},
+    };
+    for (const Burst &burst : bursts) {
+        const std::string what = "burst " + burst.name;
+        const UsdStageRefPtr stage = UsdStage::Open(burst.stagePath);
+        auto evaluator = Make(stage, burst.rig, BakedMode());
+        const UsdTimeCode first(burst.first);
+        evaluator->Evaluate(first);
+        evaluator->SetUpstreamInputs({burst.input});
+        evaluator->Evaluate(first);
+        const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+        CHECK(program);
+        const std::shared_ptr<const RigExecFrozenProgram> snapshot =
+            Freeze(*evaluator, what);
+        if (!program || !snapshot) {
+            continue;
+        }
+        RigExecChainSampleBindings pinned;
+        std::string error;
+        CHECK(RigExecBindChainSampleInputs(*evaluator, &pinned, &error));
+        const std::vector<RigExecUpstreamValue> upstream =
+            RigExecUpstreamValuesOf({burst.input});
+        const std::vector<RigExecValueOverride> none;
+        RigExecBurstSampleCache cache;
+        CHECK(RigExecBuildBurstSampleCache(
+            *program, pinned, none, upstream,
+            RigExecFrameCacheEpochDigest(*evaluator), &cache, &error));
+        CHECK(cache.usable);
+        CHECK(cache.upstreamAdmitted == upstream);
+        if (!cache.usable) {
+            std::printf("FAIL %s: burst unusable: %s\n", what.c_str(),
+                        error.c_str());
+            continue;
+        }
+        for (int k = 0; k < 3; ++k) {
+            const UsdTimeCode time(burst.first + k);
+            const std::string at = what + " at " +
+                                   std::to_string(int(time.GetValue()));
+            RigExecFrameInputs plain, burstInputs;
+            CHECK(RigExecSampleFrameInputsWithChainBindings(
+                *evaluator, time, none, upstream, pinned, &plain, &error));
+            CHECK(RigExecSampleFrameInputsWithBurstCache(
+                *evaluator, time, none, upstream, &cache, &burstInputs,
+                &error));
+            CHECK(plain.upstream == upstream);
+            CHECK(burstInputs.upstream == plain.upstream);
+            CHECK(plain.values.size() == burstInputs.values.size());
+            for (size_t i = 0; i < plain.values.size() &&
+                               i < burstInputs.values.size();
+                 ++i) {
+                CHECK(plain.values[i].path == burstInputs.values[i].path);
+                CHECK(plain.values[i].hasValue ==
+                      burstInputs.values[i].hasValue);
+                CHECK(plain.values[i].value == burstInputs.values[i].value);
+            }
+            CHECK(RigExecFrozenControlDigest(plain) ==
+                  RigExecFrozenControlDigest(burstInputs));
+            CHECK(RigExecControlStateDigest(plain, none) ==
+                  RigExecControlStateDigestWithBurstCache(burstInputs, none,
+                                                          &cache));
+            const FrozenJob job = RunSampled(*evaluator, snapshot,
+                                             std::move(burstInputs), at);
+            CheckSamePose(at + " (frozen)",
+                          Reference(burst.stagePath, burst.rig, BakedMode(),
+                                    {{burst.input.prim.AppendProperty(
+                                          burst.input.attribute),
+                                      burst.input.value,
+                                      {}}},
+                                    time),
+                          job.pose);
+        }
+        // A burst is pinned to its values, as to its overrides.
+        RigExecFrameInputs other;
+        error.clear();
+        CHECK(!RigExecSampleFrameInputsWithBurstCache(
+            *evaluator, first, none, {}, &cache, &other, &error));
+        CHECK(error.find("upstream") != std::string::npos);
+    }
+}
+
+// Admission judges each entry before the last-wins rule, in live and in the
+// sampler alike: a dropped entry given last for a path leaves the earlier
+// admitted one standing.
+void
+TestTheSamplerAdmitsAsLiveDoes()
+{
+    std::printf("case: the sampler admits as live does\n");
+    const std::string stagePath = Fixture("upstream_inputs.usda");
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    auto evaluator = Make(stage, kLimbsRig, BakedMode());
+    const UsdTimeCode time(1);
+    evaluator->Evaluate(time);
+    const std::shared_ptr<const RigExecFrozenProgram> snapshot =
+        Freeze(*evaluator, "admission");
+    const RigExecRigPose expected = Reference(
+        stagePath, kLimbsRig, BakedMode(), {{kA0Rz, VtValue(30.0), {}}}, time);
+    const RigExecValueOverride good = Up(kA0Rz, VtValue(30.0));
+    const RigExecValueOverride wrongType = Up(kA0Rz, VtValue(1.0f));
+    for (int order = 0; order < 2; ++order) {
+        const std::vector<RigExecValueOverride> given =
+            order == 0 ? std::vector<RigExecValueOverride>{good, wrongType}
+                       : std::vector<RigExecValueOverride>{wrongType, good};
+        const std::string what =
+            std::string("admission, ") + (order == 0 ? "bad last" : "bad first");
+        evaluator->SetUpstreamInputs(given);
+        CHECK(evaluator->GetUpstreamInputPaths() ==
+              std::vector<SdfPath>{kA0Rz});
+        CheckSamePose(what + " (live)", expected, evaluator->Evaluate(time));
+        std::vector<RigExecUpstreamValue> raw;
+        for (const RigExecValueOverride &o : given) {
+            raw.push_back(RigExecUpstreamValue{
+                o.prim.AppendProperty(o.attribute), o.value, 0});
+        }
+        RigExecFrameInputs inputs;
+        std::string error;
+        CHECK(RigExecSampleFrameInputs(*evaluator, time, {}, raw, &inputs,
+                                       &error));
+        CHECK(inputs.upstream == RigExecUpstreamValuesOf({good}));
+        const FrozenJob job =
+            RunSampled(*evaluator, snapshot, std::move(inputs), what);
+        CheckSamePose(what + " (frozen)", expected, job.pose);
+        evaluator->SetUpstreamInputs({});
+        evaluator->Evaluate(time);
     }
 }
 
@@ -544,7 +1043,40 @@ TestAnOracleReadInput()
     }
     // At frame 5, where the driver has left 0 and the scale matters.
     RunCase("oracle input inputs:scale", stagePath, SdfPath("/Asset/Rig"), 5,
-            {Up(scale, VtValue(0.25f))}, {{scale, VtValue(0.25f), {}}});
+            {Up(scale, VtValue(0.25f))}, {{scale, VtValue(0.25f), {}}},
+            /*freezes=*/false);
+    // No frozen job computes an oracle-resolved object: the freeze refuses
+    // the rig, or a job declines, as with no value standing.
+    {
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        auto evaluator = Make(stage, SdfPath("/Asset/Rig"), BakedMode());
+        evaluator->SetUpstreamInputs({Up(scale, VtValue(0.25f))});
+        const RigExecRigPose standing = evaluator->Evaluate(UsdTimeCode(5));
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        if (RigExecFreezeProgram(*evaluator, &frozen, &error)) {
+            FrozenJob job;
+            CHECK(RigExecSampleFrameInputs(
+                *evaluator, UsdTimeCode(5), {},
+                RigExecUpstreamValuesOf({Up(scale, VtValue(0.25f))}),
+                &job.inputs, &error));
+            RigExecFrozenEvalContext context;
+            context.slotCount = evaluator->GetBakedProgram()->GetProviderCount();
+            context.varyingInputCount = job.inputs.values.size();
+            context.frozen = frozen.get();
+            job.pose = RigExecEvaluateFrozen(context, job.inputs,
+                                             RigExecMakeProductionStepRunner(),
+                                             nullptr, SdfPath(), &job.report);
+            std::printf("  oracle: froze; the job %s\n",
+                        job.pose.valid ? "ran" : "declined");
+            if (job.pose.valid) {
+                CheckSamePose("oracle input (frozen)", standing, job.pose);
+            }
+        } else {
+            std::printf("  oracle: freeze refused: %s\n", error.c_str());
+            CHECK(error.find("upstream") == std::string::npos);
+        }
+    }
 }
 
 // Keys admission drops, in both paths: the pose is the authored one and
@@ -665,7 +1197,7 @@ TestThePosedVariant()
 
 // The interim bake guard: a bake is refused while values stand, not while
 // they are suspended, and the program itself is never refused for them.
-// A freeze is refused until a generation has lifted them from the program.
+// A freeze is not: frozen jobs carry upstream values.
 void
 TestTheBakeGuard()
 {
@@ -678,9 +1210,6 @@ TestTheBakeGuard()
     std::vector<std::string> reasons;
     CHECK(evaluator->IsBakeable(&reasons));
     CHECK(!HasReason(reasons, reason));
-    // No frozen job carries upstream values, and live's avar slots hold
-    // them, so no snapshot is taken while one stands.
-    const std::string freezeReason = "upstream inputs standing";
     evaluator->Evaluate(UsdTimeCode(1));
     std::string error;
     CHECK(RigExecCanFreezeProgram(*evaluator, &error));
@@ -688,8 +1217,7 @@ TestTheBakeGuard()
         Up(kA0Rz, VtValue(30.0))};
     evaluator->SetUpstreamInputs(inputs);
     error.clear();
-    CHECK(!RigExecCanFreezeProgram(*evaluator, &error));
-    CHECK(error.find(freezeReason) != std::string::npos);
+    CHECK(RigExecCanFreezeProgram(*evaluator, &error));
     const RigExecRigPose standing = evaluator->Evaluate(UsdTimeCode(1));
     CHECK(evaluator->GetBakedProgram() != nullptr);
     reasons.clear();
@@ -702,11 +1230,8 @@ TestTheBakeGuard()
         reasons.clear();
         CHECK(evaluator->IsBakeable(&reasons));
         CHECK(!HasReason(reasons, reason));
-        // Lifted, but the program holds the values until a generation
-        // lifts them there.
         error.clear();
-        CHECK(!RigExecCanFreezeProgram(*evaluator, &error));
-        CHECK(error.find(freezeReason) != std::string::npos);
+        CHECK(RigExecCanFreezeProgram(*evaluator, &error));
         CheckSamePose("suspended",
                       Reference(Fixture("upstream_inputs.usda"), kLimbsRig,
                                 BakedMode(), {}, UsdTimeCode(1)),
@@ -717,7 +1242,7 @@ TestTheBakeGuard()
     reasons.clear();
     CHECK(!evaluator->IsBakeable(&reasons));
     CHECK(HasReason(reasons, reason));
-    CHECK(!RigExecCanFreezeProgram(*evaluator, &error));
+    CHECK(RigExecCanFreezeProgram(*evaluator, &error));
     CheckSamePose("restored", standing, evaluator->Evaluate(UsdTimeCode(1)));
 }
 
@@ -951,6 +1476,9 @@ main(int argc, char **argv)
         TestASolverInput();
         TestUpstreamThroughADrag();
         TestATimeVaryingValue();
+        TestALiftReachesAnOlderSnapshot();
+        TestABurstCarriesUpstream();
+        TestTheSamplerAdmitsAsLiveDoes();
         TestAStandingValueCostsNothing();
         TestAnOracleReadInput();
         TestDroppedKeys();

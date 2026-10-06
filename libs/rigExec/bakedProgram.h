@@ -24,6 +24,7 @@
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/common.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/timeCode.h"
 
@@ -45,6 +46,18 @@ namespace rigExec {
 /// token, 4x4 double matrix or 3-vector of either precision, any role. No
 /// array does. Upstream admission condition 2.
 bool RigExecUpstreamSlotType(const SdfValueTypeName &typeName);
+
+/// Why an upstream value \p value at attribute \p path is not admitted on
+/// \p stage, or empty when it is: the attribute stands there, is
+/// unconnected, has a stage value, has a slot type (condition 2) the value
+/// holds exactly, and (condition 3) \p listed, the standing program's
+/// GetUpstreamAdmissible() or null when none stands, holds it. The text is
+/// the "<reason>" of the "upstream input <path>: <reason>; ignored" line.
+/// Owning thread: it reads the stage.
+std::string RigExecUpstreamDropReason(const UsdStageRefPtr &stage,
+                                      const std::map<SdfPath, TfType> *listed,
+                                      const SdfPath &path,
+                                      const VtValue &value);
 
 class RigExecRigEvaluator;
 struct RigExecRigPose;

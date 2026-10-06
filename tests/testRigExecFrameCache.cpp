@@ -12,7 +12,8 @@
 //     RigExecRefusalControlDigest is the D7 time-plus-serial fallback for
 //     rigs with no baked program: the frame moves it, an edit moves it at
 //     every frame, a drag moves it, and it never equals a sampled digest
-//     under the same epoch.
+//     under the same epoch. Both fold the frame's upstream values as a
+//     block of their own, which folds nothing when there are none.
 //   * LRU. A per-rig byte cap with least-recently-used eviction, accounted
 //     in RigExecFrameCachePoseBytes; oversized entries are dropped, never
 //     partially stored.
@@ -584,6 +585,85 @@ TestRefusalDigestKeysTimeAndOverrides()
     CHECK(!RigExecRefusalControlDigestible({o}));
 }
 
+RigExecUpstreamValue
+MakeUpstream(const char *path, const VtValue &value)
+{
+    return RigExecUpstreamValue{SdfPath(path), value, 0};
+}
+
+// Upstream values are key material in every digest: an entry, a moved
+// value, another path or another type digests apart, an empty list folds
+// nothing, the order given never matters, and the forms without an explicit
+// list fold the vector's own. An unhashable value bypasses the cache.
+void
+TestDigestSeesUpstream()
+{
+    const RigExecFrameInputs plain = MakeInputs({{"/Rig/A", 1.0}});
+    const std::vector<RigExecValueOverride> none;
+    const std::vector<RigExecUpstreamValue> noUpstream;
+    CHECK(RigExecControlStateDigest(plain, none, noUpstream) ==
+          RigExecControlStateDigest(plain, none));
+
+    RigExecFrameInputs placed = plain;
+    placed.upstream = {MakeUpstream("/Rig/U.avars:rz", VtValue(30.0))};
+    CHECK(RigExecControlStateDigest(placed) !=
+          RigExecControlStateDigest(plain));
+    CHECK(RigExecControlStateDigest(placed) ==
+          RigExecControlStateDigest(plain, none, placed.upstream));
+
+    RigExecFrameInputs moved = plain;
+    moved.upstream = {MakeUpstream("/Rig/U.avars:rz", VtValue(31.0))};
+    CHECK(RigExecControlStateDigest(moved) !=
+          RigExecControlStateDigest(placed));
+    RigExecFrameInputs elsewhere = plain;
+    elsewhere.upstream = {MakeUpstream("/Rig/U.avars:ry", VtValue(30.0))};
+    CHECK(RigExecControlStateDigest(elsewhere) !=
+          RigExecControlStateDigest(placed));
+    RigExecFrameInputs retyped = plain;
+    retyped.upstream = {MakeUpstream("/Rig/U.avars:rz", VtValue(30.0f))};
+    CHECK(RigExecControlStateDigest(retyped) !=
+          RigExecControlStateDigest(placed));
+
+    const std::vector<RigExecUpstreamValue> fwd{
+        MakeUpstream("/Rig/U.a", VtValue(1.0)),
+        MakeUpstream("/Rig/U.b", VtValue(2.0))};
+    const std::vector<RigExecUpstreamValue> rev{fwd[1], fwd[0]};
+    CHECK(RigExecControlStateDigest(plain, none, fwd) ==
+          RigExecControlStateDigest(plain, none, rev));
+
+    // The constant fold and the burst form carry the block as well.
+    CHECK(RigExecControlStateDigestWithConstants(plain, none, fwd, 9) ==
+          RigExecFoldConstantDigest(
+              RigExecControlStateDigest(plain, none, fwd), 9));
+    CHECK(RigExecControlStateDigestWithConstants(plain, none, fwd, 9) !=
+          RigExecControlStateDigestWithConstants(plain, none, 9));
+    CHECK(RigExecControlStateDigestWithBurstCache(placed, none, nullptr) ==
+          RigExecControlStateDigest(placed));
+
+    // The refusal digest: the dynamic walk reads upstream values too.
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none, noUpstream) ==
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none));
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream) !=
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none));
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream) !=
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      moved.upstream));
+    CHECK(RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream) ==
+          RigExecRefusalControlDigest(UsdTimeCode(2.0), 7, none,
+                                      placed.upstream));
+
+    // Digestibility: an unhashable upstream value is a bypass.
+    CHECK(RigExecControlStateDigestible(placed));
+    RigExecFrameInputs unhashable = plain;
+    unhashable.upstream = {MakeUpstream("/Rig/U.x", VtValue(Unhashable{6}))};
+    CHECK(!RigExecControlStateDigestible(unhashable));
+    CHECK(RigExecRefusalControlDigestible(none, placed.upstream));
+    CHECK(!RigExecRefusalControlDigestible(none, unhashable.upstream));
+}
+
 // The cap fits two entries: the third publish evicts the
 // least-recently-used one, and the held bytes never exceed the cap.
 void
@@ -856,6 +936,7 @@ main()
     TestDigestIgnoresTime();
     TestDigestibleFlagsUnhashableValues();
     TestRefusalDigestKeysTimeAndOverrides();
+    TestDigestSeesUpstream();
     TestLRUEvictsLeastRecentlyUsed();
     TestLookupRefreshesRecency();
     TestOverwriteRefreshesRecency();

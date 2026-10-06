@@ -407,6 +407,31 @@ RigExecControlStateDigest(const RigExecFrameInputs &inputs)
     return RigExecControlStateDigest(inputs, noOverrides);
 }
 
+// The upstream block: a tag, the count, then per path (sorted, the last
+// entry of a path winning) its path and value type, then the value. Empty
+// folds nothing, so a frame with no upstream value keys as before.
+uint64_t
+_FoldUpstream(uint64_t hash, const std::vector<RigExecUpstreamValue> &upstream)
+{
+    if (upstream.empty()) {
+        return hash;
+    }
+    std::map<SdfPath, const RigExecUpstreamValue *> byPath;
+    for (const RigExecUpstreamValue &value : upstream) {
+        byPath[value.path] = &value;
+    }
+    hash = _FoldBytes(hash, "ups\x1f", 4);
+    hash = _FoldU64(hash, static_cast<uint64_t>(byPath.size()));
+    for (const auto &[path, value] : byPath) {
+        hash = _FoldString(hash, path.GetString());
+        hash = _FoldBytes(hash, "\x1f", 1);
+        hash = _FoldString(hash, value->value.GetTypeName());
+        hash = _FoldBytes(hash, "\x1f", 1);
+        hash = _FoldVtValue(hash, value->value);
+    }
+    return hash;
+}
+
 uint64_t
 _FoldOverrides(uint64_t hash,
                const std::vector<RigExecValueOverride> &overrides)
@@ -471,8 +496,28 @@ RigExecControlStateDigestWithConstants(
 }
 
 uint64_t
+RigExecControlStateDigestWithConstants(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    uint64_t constantDigest)
+{
+    return RigExecFoldConstantDigest(
+        RigExecControlStateDigest(inputs, overrides, upstream),
+        constantDigest);
+}
+
+uint64_t
 RigExecControlStateDigest(const RigExecFrameInputs &inputs,
                          const std::vector<RigExecValueOverride> &overrides)
+{
+    return RigExecControlStateDigest(inputs, overrides, inputs.upstream);
+}
+
+uint64_t
+RigExecControlStateDigest(const RigExecFrameInputs &inputs,
+                         const std::vector<RigExecValueOverride> &overrides,
+                         const std::vector<RigExecUpstreamValue> &upstream)
 {
     // First sample per path wins, matching FrameInputs::Find; the survivors
     // sort by path so enqueue order cannot move the digest. Two levels --
@@ -491,6 +536,7 @@ RigExecControlStateDigest(const RigExecFrameInputs &inputs,
     }
     hash = _FoldHeadLeafConstants(hash, inputs);
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
+    hash = _FoldUpstream(hash, upstream);
 
     return _FoldOverrides(hash, overrides);
 }
@@ -501,12 +547,23 @@ RigExecControlStateDigestWithBurstCache(
     const std::vector<RigExecValueOverride> &overrides,
     RigExecBurstSampleCache *cache)
 {
+    return RigExecControlStateDigestWithBurstCache(inputs, overrides,
+                                                   inputs.upstream, cache);
+}
+
+uint64_t
+RigExecControlStateDigestWithBurstCache(
+    const RigExecFrameInputs &inputs,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream,
+    RigExecBurstSampleCache *cache)
+{
     // Anything the cache cannot serve falls back to the plain digest:
     // same answer, full cost. Overrides first: a differing list means a
     // differing vector shape and differing placement, which the recorded
     // order and the static maps do not describe.
     if (!cache || !cache->usable || overrides != cache->overrides) {
-        return RigExecControlStateDigest(inputs, overrides);
+        return RigExecControlStateDigest(inputs, overrides, upstream);
     }
     if (cache->sortedOrder.empty()) {
         // First frame of the burst: record the emission indices in
@@ -534,7 +591,7 @@ RigExecControlStateDigestWithBurstCache(
         // emits the same path sequence every frame (every Add guard is
         // validity-only), so this is a foreign vector, not a later frame.
         // The size check short-circuits first, so front/back are safe.
-        return RigExecControlStateDigest(inputs, overrides);
+        return RigExecControlStateDigest(inputs, overrides, upstream);
     }
     uint64_t hash = 1469598103934665603ull;
     hash = _FoldU64(hash, static_cast<uint64_t>(cache->sortedOrder.size()));
@@ -566,6 +623,7 @@ RigExecControlStateDigestWithBurstCache(
     // The seeds fold fresh every frame, exactly as in the plain digest:
     // they are per-frame stage reads, so no static memo serves them.
     hash = _FoldStageSeeds(hash, inputs.stageSeeds);
+    hash = _FoldUpstream(hash, upstream);
     return _FoldOverrides(hash, overrides);
 }
 
@@ -573,6 +631,15 @@ uint64_t
 RigExecRefusalControlDigest(
     UsdTimeCode time, uint64_t stageEditSerial,
     const std::vector<RigExecValueOverride> &overrides)
+{
+    return RigExecRefusalControlDigest(time, stageEditSerial, overrides, {});
+}
+
+uint64_t
+RigExecRefusalControlDigest(
+    UsdTimeCode time, uint64_t stageEditSerial,
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream)
 {
     uint64_t hash = 1469598103934665603ull;
     // The domain tag: a refusal digest must never equal a sampled digest
@@ -590,6 +657,7 @@ RigExecRefusalControlDigest(
         const double value = time.GetValue();
         hash = _FoldScalar(hash, value);
     }
+    hash = _FoldUpstream(hash, upstream);
     return _FoldOverrides(hash, overrides);
 }
 
@@ -616,6 +684,11 @@ RigExecControlStateDigestible(
     if (inputs.headLeafConstants && !inputs.headLeafConstants->digestible) {
         return false;
     }
+    for (const RigExecUpstreamValue &value : inputs.upstream) {
+        if (_ClassifyVtValue(value.value) == _ValueFold::Unhashable) {
+            return false;
+        }
+    }
     for (const RigExecValueOverride &o : overrides) {
         if (_ClassifyVtValue(o.value) == _ValueFold::Unhashable) {
             return false;
@@ -628,9 +701,23 @@ bool
 RigExecRefusalControlDigestible(
     const std::vector<RigExecValueOverride> &overrides)
 {
-    // Time always folds; only the overrides can carry an unhashable type.
+    return RigExecRefusalControlDigestible(overrides, {});
+}
+
+bool
+RigExecRefusalControlDigestible(
+    const std::vector<RigExecValueOverride> &overrides,
+    const std::vector<RigExecUpstreamValue> &upstream)
+{
+    // Time always folds; only the overrides and the upstream values can
+    // carry an unhashable type.
     for (const RigExecValueOverride &o : overrides) {
         if (_ClassifyVtValue(o.value) == _ValueFold::Unhashable) {
+            return false;
+        }
+    }
+    for (const RigExecUpstreamValue &value : upstream) {
+        if (_ClassifyVtValue(value.value) == _ValueFold::Unhashable) {
             return false;
         }
     }
