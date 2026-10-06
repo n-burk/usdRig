@@ -141,8 +141,9 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.clustering = src.clustering;
     D.clusterCounters.reset();
     D.runSeqCounter.next.store(0, std::memory_order_relaxed);
-    // Build's settings: the worker's re-cut and kernels must make the live
-    // program's choices, and its bodies count into their own audit counter.
+    // Build's settings: the clone's partition settings and the worker's
+    // kernels are the live program's choices, and its bodies count into
+    // their own audit counter.
     D.chunkVertexTarget = src.chunkVertexTarget;
     D.chunkCap = src.chunkCap;
     D.useSimd = src.useSimd;

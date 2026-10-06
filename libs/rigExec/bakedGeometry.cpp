@@ -672,9 +672,10 @@ void
 RigExecBakedPartitionRevision(
     const RigExecBakedProgramImpl &program,
     RigExecBakedProgramImpl::GeomRevision *revision,
-    const int *indices, size_t indexCount, int elementSize, int chunkCount)
+    const VtIntArray &indices, int elementSize)
 {
     using GeomChunk = RigExecBakedProgramImpl::GeomChunk;
+    const size_t indexCount = indices.size();
     const size_t slots = elementSize < 1 ? 0 : size_t(elementSize);
     const size_t points = slots ? indexCount / slots : 0;
     const size_t influences = revision->influenceSlots.size();
@@ -682,9 +683,7 @@ RigExecBakedPartitionRevision(
     revision->partitionIndexCount = indexCount;
     revision->partitionPointCount = points;
 
-    // How many ranges, and how long. The same answer every time for the same
-    // layout, which is what makes a re-cut against arrays that did not
-    // actually move reproduce the cut it replaces.
+    // How many ranges, and how long.
     size_t target = program.chunkVertexTarget;
     size_t count = std::max<size_t>(1, (points + target - 1) / target);
     if (count > program.chunkCap) {
@@ -707,7 +706,7 @@ RigExecBakedPartitionRevision(
         for (size_t point = size_t(chunk.begin); point < size_t(chunk.end);
              ++point) {
             for (size_t slot = 0; slot < slots; ++slot) {
-                const int index = indices[point * slots + slot];
+                const int index = indices.cdata()[point * slots + slot];
                 // An index outside the table is a layout the packet will
                 // reject; leaving it out of the key costs nothing, because
                 // the revision never applies.
@@ -745,41 +744,6 @@ RigExecBakedPartitionRevision(
         }
     }
 
-    // A re-cut is told how many ranges it must end up with, because the
-    // number of STEPS a revision is made of was fixed at Build and a layout
-    // that moved may not change the program. A layout that did NOT move
-    // reaches this with the count it had and nothing happens, which is what
-    // makes the first frame of an epoch re-derive the cut Build made rather
-    // than replace it.
-    if (chunkCount > 0) {
-        while (chunks.size() > size_t(chunkCount)) {
-            // The adjacent pair that costs the least to join.
-            size_t best = 0;
-            for (size_t i = 1; i + 1 < chunks.size(); ++i) {
-                if (chunks[i + 1].end - chunks[i].begin <
-                    chunks[best + 1].end - chunks[best].begin) {
-                    best = i;
-                }
-            }
-            std::vector<int> key;
-            std::set_union(chunks[best].key.begin(), chunks[best].key.end(),
-                           chunks[best + 1].key.begin(),
-                           chunks[best + 1].key.end(),
-                           std::back_inserter(key));
-            chunks[best].key = std::move(key);
-            chunks[best].end = chunks[best + 1].end;
-            chunks.erase(chunks.begin() + long(best) + 1);
-        }
-        // An empty range is a step that does nothing, which is the honest
-        // shape of "this layout wants fewer chunks than the program has".
-        while (chunks.size() < size_t(chunkCount)) {
-            GeomChunk chunk;
-            chunk.begin = int(points);
-            chunk.end = int(points);
-            chunks.push_back(std::move(chunk));
-        }
-    }
-
     // The table every chunk skins against: identity everywhere, with its own
     // influences copied in per run. Filled here so that a run writes only the
     // |key| entries that moved, and so that the rows a SIMD kernel loads are
@@ -806,6 +770,32 @@ RigExecBakedPartitionRevision(
     }
     revision->chunks = std::move(chunks);
     revision->chunked = keyed;
+    revision->partitionIndices = keyed ? indices : VtIntArray();
+}
+
+void
+RigExecBakedAdoptPartition(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    // A null handle is a refusal: the packet reads the arrays per frame and
+    // RevisionStatic runs the revision whole. Recording it here would make
+    // the handles agree by both being null.
+    if (!revision->chunked || !revision->topology ||
+        revision->topology == revision->partitionTopology) {
+        return;
+    }
+    // The keys stay Build's whatever the layout says, because each chunk
+    // step's reads were declared from its key: a re-cut would let a chunk
+    // read a joint it never declared, and a cone that skips it would leave
+    // its range stale. So a handle is adopted only when it has the arrays
+    // the keys were cut from; a weight-only edit keeps the chunks running.
+    const RigExecSkinTopology &topology = *revision->topology;
+    const VtIntArray &indices = revision->partitionIndices;
+    if (topology.elementSize == revision->partitionElementSize &&
+        topology.indices.size() == indices.size() &&
+        std::equal(topology.indices.begin(), topology.indices.end(),
+                   indices.cdata())) {
+        revision->partitionTopology = revision->topology;
+    }
 }
 
 // Build: the geometry half of the program, in program order.
@@ -946,9 +936,9 @@ PartitionAtBuild(const RigExecBakedProgramImpl &B, const ProviderLevels &levels,
     }
     // Read directly, at Default: Build holds no layout handle yet. Fixed
     // means the arrays do not vary in time, so the default-time read IS the
-    // epoch's -- and the prologue re-cuts against the handle the packet will
-    // actually carry the first time it sees one, so a disagreement costs one
-    // extra pass and never a wrong key.
+    // epoch's. A handle whose arrays disagree with it (an override standing
+    // on the indices at Build) is never adopted, and the revision runs whole
+    // (RigExecBakedAdoptPartition).
     VtIntArray indices;
     int elementSize = 1;
     if (const UsdAttribute a =
@@ -963,9 +953,7 @@ PartitionAtBuild(const RigExecBakedProgramImpl &B, const ProviderLevels &levels,
         indices.size() % size_t(elementSize) != 0) {
         return;
     }
-    RigExecBakedPartitionRevision(B, revision, indices.cdata(),
-                                  indices.size(), elementSize,
-                                  /*chunkCount=*/0);
+    RigExecBakedPartitionRevision(B, revision, indices, elementSize);
     revision->partitionCandidates = revision->chunks.size();
 
     // Whether the cut pays, which is a question about LEVELS and not about
@@ -1000,9 +988,11 @@ PartitionAtBuild(const RigExecBakedProgramImpl &B, const ProviderLevels &levels,
         // no per-chunk tables, so the fuse's whole-array path runs the
         // revision through the self-parallelising kernel. The partition
         // FIELDS stay where the cut left them -- the point and index counts
-        // are the layout's, not the cut's, and the report reads them.
+        // are the layout's, not the cut's, and the report reads them -- but
+        // the indices, which only an adoption reads, are let go.
         revision->chunks.assign(1, RigExecBakedProgramImpl::GeomChunk());
         revision->chunked = false;
+        revision->partitionIndices = VtIntArray();
     }
 }
 
@@ -2144,41 +2134,16 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
     // only for a revision whose base reads, on a generation that reaches
     // this prologue, however often the op itself runs.
     const auto resolveTopology =
-        [&B](RigExecBakedProgramImpl::GeomRevision *revision) {
+        [](RigExecBakedProgramImpl::GeomRevision *revision) {
         if (!revision->skinTopologyFixed) {
             return;
         }
         revision->topology = revision->layoutHandle;
         revision->topologyResolved = true;
-        // The partition is Build state, and this is where a frame can tell
-        // in O(1) whether it still describes the vertices: the op hands back
-        // the SAME handle for a layout that did not move, so a different one
-        // means the arrays did -- a weight-paint edit, or an override placed
-        // on the indices. Re-cutting keeps the chunk COUNT,
-        // because the number of steps a revision is made of was fixed at
-        // Build and a value edit may not change the program. Here rather
-        // than in a step because it reads the arrays, and because the first
-        // frame of an epoch is the one that pays for it.
-        if (!revision->chunked ||
-            revision->topology == revision->partitionTopology) {
-            return;
-        }
-        if (!revision->topology) {
-            // A refusal leaves the partition AND the handle it was cut from
-            // where they are: the packet then reads the arrays per frame,
-            // and RevisionStatic, which has no resolved layout to compare
-            // the handle of, routes the revision through the fuse's
-            // whole-array path. Recording the refusal here instead would
-            // make the handles agree by both being null, which is the one
-            // answer this comparison must never give.
-            return;
-        }
-        RigExecBakedPartitionRevision(
-            B, revision, revision->topology->indices.data(),
-            revision->topology->indices.size(),
-            revision->topology->elementSize,
-            int(revision->chunks.size()));
-        revision->partitionTopology = revision->topology;
+        // The op hands back the SAME handle for a layout that did not move,
+        // so only a different one costs the comparison with Build's arrays.
+        // Here rather than in a step because it reads the arrays.
+        RigExecBakedAdoptPartition(revision);
     };
     // A sparse blend sample's shape, resolved HERE and never in a step: the
     // cache takes a lock, and a refusal means the shape is read off the stage
@@ -2744,10 +2709,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         }
         if (revision.chunked) {
             // Whether the keys still describe the vertices. The handle is
-            // the identity the layout cache preserves for a binding that did
-            // not move, and the prologue re-cut against it; anything else
-            // here means the packet is reading arrays the partition never
-            // saw, and the fuse runs the revision whole instead.
+            // the identity the SkinTopology op preserves for a binding that
+            // did not move, and the prologue adopted it only if it has the
+            // partition's arrays; anything else here means the packet is
+            // reading arrays the keys were not cut from, and the fuse runs
+            // the revision whole instead.
             const RigExecSkinTopology *const topology =
                 revision.parameters.skinTopology.get();
             const size_t indexCount =

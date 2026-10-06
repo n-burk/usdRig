@@ -520,8 +520,8 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
 
     // Geometry prologue (bakedGeometry.cpp:1759): base reads replay from the
     // sampled queries, with the same reset/count/swap/compare sequence; the
-    // topology resolve replays the transported packet's layout with the same
-    // re-cut rule; blend layouts travel with the sampled inputs.
+    // topology adoption takes the layout op's handle with the same partition
+    // rule; blend layouts travel with the sampled inputs.
     const auto resetRevision =
         [](RigExecBakedProgramImpl::GeomRevision *revision) {
         revision->created = true;
@@ -679,7 +679,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
     RigExecBakedRunLayoutTier(&B, time, pose, /*force=*/false,
                               /*sample=*/false, /*verify=*/false);
     // The prologue's adoption, after the bases: every fixed revision takes
-    // its op's handle, with the prologue's re-cut rule.
+    // its op's handle, with the prologue's partition rule.
     for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
         const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
         RigExecBakedProgramImpl::GeomRevision &revision =
@@ -689,18 +689,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
         }
         revision.topology = revision.layoutHandle;
         revision.topologyResolved = true;
-        if (!revision.chunked ||
-            revision.topology == revision.partitionTopology) {
-            continue;
-        }
-        if (!revision.topology) {
-            continue;
-        }
-        RigExecBakedPartitionRevision(
-            B, &revision, revision.topology->indices.data(),
-            revision.topology->indices.size(), revision.topology->elementSize,
-            int(revision.chunks.size()));
-        revision.partitionTopology = revision.topology;
+        RigExecBakedAdoptPartition(&revision);
     }
     // The revisions the worker assembles from leaves: the job's leaves, read
     // on the UI thread by the live prologue's reads, and the blend layouts

@@ -2346,9 +2346,10 @@ TestAPathLeafIsNotResampledWhenNothingMoved(const std::string &examples)
 }
 
 // Build's settings reach a frozen clone (frozenDetail::_CloneImpl): the
-// worker's re-cut and kernels make the live program's choices, and its
-// bodies count into their own audit counter. The clone starts from other
-// values, so a field the clone skips fails here.
+// clone's partition settings and the worker's kernels are the live
+// program's choices, and its bodies count into their own audit counter.
+// The clone starts from other values, so a field the clone skips fails
+// here.
 void
 TestAFrozenCloneKeepsTheBuildSettings(const std::string &examples)
 {

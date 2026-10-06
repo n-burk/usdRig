@@ -32,6 +32,7 @@
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
+#include "rigExec/frozenContext.h"
 #include "rigExec/parallel.h"
 #include "rigExec/moverGraph.h"
 #include "rigExecMath/dualQuat.h"
@@ -1563,12 +1564,11 @@ TestADualQuaternionSkinChunksLikeTheDynamicPath(const std::string &stagePath)
 /// and lands where the chunks would have landed.
 ///
 /// The fallback is the safety net under the whole design -- the keys are
-/// trusted only while they are provably current -- and no stage can drive it
-/// today: the layout cache preserves its handle for a binding that did not
-/// move, and one that did move re-cuts in the prologue. So the fixture makes
-/// the partition disagree with the packet by hand, which is the one thing a
-/// frame cannot do to itself, and then asks the question the fallback exists
-/// to answer: are the points the same ones?
+/// trusted only while they are provably current. A repainted layout drives
+/// it from a stage (TestARecutLayoutCannotReadAnUndeclaredJoint); here the
+/// biped's partition is made to disagree with the packet by hand, and the
+/// question is the one the fallback exists to answer: are the points the
+/// same ones?
 void
 TestAStalePartitionRunsTheRevisionWhole(const std::string &stagePath)
 {
@@ -1633,6 +1633,266 @@ TestAStalePartitionRunsTheRevisionWhole(const std::string &stagePath)
     }
     std::printf("  stale partition: %s ran whole and published the chunked "
                 "points\n", stale->moverPath.GetString().c_str());
+}
+
+/// A skin with two Build keys, {j0} and {j1}: four points of one influence
+/// each, cut two to a chunk under RIGEXEC_BAKED_CHUNK_VERTS=2. J0 moves its
+/// points along x and J1 along y.
+UsdStageRefPtr
+MakeTwoKeySkinStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim j0 = stage->DefinePrim(SdfPath("/Asset/Rig/J0"),
+                                         TfToken("RigExecControl"));
+    j0.GetAttribute(TfToken("avars:tx")).Set(10.0);
+    const UsdPrim j1 = stage->DefinePrim(SdfPath("/Asset/Rig/J1"),
+                                         TfToken("RigExecControl"));
+    j1.GetAttribute(TfToken("avars:ty")).Set(20.0);
+    const SdfPath target("/Asset/Geom/Mesh.points");
+    const UsdPrim mesh =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Mesh"));
+    VtVec3fArray points(4);
+    for (size_t i = 0; i < points.size(); ++i) {
+        points[i] = GfVec3f(float(i), float(i) * 2.0f, float(i) * 3.0f);
+    }
+    mesh.GetAttribute(TfToken("points")).Set(points);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim skin = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin"), TfToken("RigExecSkinMover"));
+    skin.ApplyAPI(TfToken("RigExecMoverAPI"));
+    skin.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    skin.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    skin.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({j0.GetPath(), j1.GetPath()});
+    skin.CreateAttribute(TfToken("rigExec:elementSize"),
+                         SdfValueTypeNames->Int).Set(1);
+    skin.CreateAttribute(TfToken("rigExec:jointIndices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 0, 1, 1});
+    skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{1.0f, 1.0f, 1.0f, 1.0f});
+    return stage;
+}
+
+/// A repainted layout on a chunked revision runs the revision whole, so no
+/// chunk reads a joint its Build key never declared (B21).
+///
+/// The chunk steps declare their reads from the Build keys, and a frame may
+/// not change the program. Repainting chunk 0's points onto j1 and then
+/// moving only j1 is the frame the cone answers with chunk 1 and the fuse;
+/// a chunk 0 that had been re-cut onto j1 would keep its range from the frame
+/// before. Instead the keys stay Build's, the partition is stale and the fuse
+/// skins every point, equal to the exec reference to the bit. Painting the
+/// Build indices back adopts the new handle, and the chunks run again. A
+/// frozen job at each stage agrees with the reference too.
+void
+TestARecutLayoutCannotReadAnUndeclaredJoint()
+{
+    const int failuresBefore = failures;
+    const std::string always = TfGetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+    const std::string verts = TfGetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", "2");
+    const auto restore = [&]() {
+        if (always.empty()) {
+            TfUnsetenv("RIGEXEC_BAKED_CHUNK_ALWAYS");
+        } else {
+            TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", always);
+        }
+        if (verts.empty()) {
+            TfUnsetenv("RIGEXEC_BAKED_CHUNK_VERTS");
+        } else {
+            TfSetenv("RIGEXEC_BAKED_CHUNK_VERTS", verts);
+        }
+    };
+
+    const UsdStageRefPtr stage = MakeTwoKeySkinStage();
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath skinPath("/Asset/Rig/Movers/Skin");
+    const SdfPath target("/Asset/Geom/Mesh.points");
+    const UsdAttribute indices = stage->GetPrimAtPath(skinPath)
+        .GetAttribute(TfToken("rigExec:jointIndices"));
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    const UsdTimeCode time(1.0);
+
+    const auto skin = [&]() -> const RigExecBakedProgramImpl::GeomRevision * {
+        const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+        if (!program) {
+            return nullptr;
+        }
+        for (const auto &chain : program->GetStepGraph().chains) {
+            for (const auto &revision : chain.revisions) {
+                if (revision.moverPath == skinPath) {
+                    return &revision;
+                }
+            }
+        }
+        return nullptr;
+    };
+    // The exec reference on the stage as it stands, under the same
+    // overrides, point for point; a differing point names its chunk.
+    const auto agrees =
+        [&](const char *what, const RigExecRigPose &pose,
+            const std::vector<RigExecValueOverride> &overrides) {
+        RigExecRigEvaluator reference(stage, rigPath);
+        std::vector<std::string> referenceErrors;
+        CHECK(reference.Compile(&referenceErrors));
+        reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+        reference.SetInteractiveOverrides(overrides);
+        const RigExecRigPose expected = reference.Evaluate(time);
+        CHECK(pose.valid && expected.valid);
+        rigExecTest::CompareEveryMap(&failures,
+                                     std::string("recut layout, ") + what,
+                                     expected, pose);
+        const auto found = pose.movedProperties.find(target);
+        const auto want = expected.movedProperties.find(target);
+        if (found == pose.movedProperties.end() ||
+            want == expected.movedProperties.end() ||
+            !found->second.IsHolding<VtVec3fArray>() ||
+            !want->second.IsHolding<VtVec3fArray>()) {
+            return;
+        }
+        const VtVec3fArray &got = found->second.UncheckedGet<VtVec3fArray>();
+        const VtVec3fArray &ref = want->second.UncheckedGet<VtVec3fArray>();
+        for (size_t i = 0; i < got.size() && i < ref.size(); ++i) {
+            if (got[i] != ref[i]) {
+                std::printf("    %s: point %zu (chunk %zu) is (%g %g %g), "
+                            "the reference (%g %g %g)\n", what, i, i / 2,
+                            got[i][0], got[i][1], got[i][2], ref[i][0],
+                            ref[i][1], ref[i][2]);
+            }
+        }
+    };
+    const std::vector<RigExecValueOverride> none;
+    const auto dragJ1 = [](double value) {
+        return std::vector<RigExecValueOverride>{RigExecValueOverride{
+            SdfPath("/Asset/Rig/J1"), TfToken(), TfToken("avars:ty"),
+            VtValue(value)}};
+    };
+    // A frozen job at the held frame under its own drag: the worker adopts
+    // with the live rule from the clone's partition, so its chunks stand
+    // down and rejoin where live's do.
+    const auto frozenAgrees =
+        [&](const char *what,
+            const std::vector<RigExecValueOverride> &overrides) {
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, time, overrides, &inputs,
+                                       &error));
+        if (!frozen) {
+            std::printf("FAIL %s: the freeze refused: %s\n", what,
+                        error.c_str());
+            return;
+        }
+        RigExecFrozenEvalContext context;
+        context.epochDigest = evaluator.GetBindingEpochDigest();
+        context.slotCount = evaluator.GetBakedProgram()->GetProviderCount();
+        context.varyingInputCount = inputs.values.size();
+        context.flags = 0;
+        if (evaluator.GetPublishWeightFields()) {
+            context.flags |= kRigExecFrozenPublishWeightFields;
+        }
+        if (evaluator.GetSolverGuidesEnabled()) {
+            context.flags |= kRigExecFrozenSolverGuidesEnabled;
+        }
+        context.frozen = frozen.get();
+        const RigExecRigPose warmed = RigExecEvaluateFrozen(
+            context, inputs, RigExecMakeProductionStepRunner());
+        if (!warmed.valid) {
+            std::printf("FAIL %s: the job was declined\n", what);
+        }
+        agrees(what, warmed, overrides);
+    };
+
+    // Build: keys {j0} and {j1}, adopted on the first run.
+    RigExecRigPose pose = evaluator.Evaluate(time);
+    agrees("authored layout", pose, none);
+    const RigExecBakedProgramImpl::GeomRevision *revision = skin();
+    CHECK(revision != nullptr);
+    if (!revision) {
+        restore();
+        return;
+    }
+    const std::vector<int> key0{0}, key1{1};
+    CHECK(revision->chunked && revision->chunks.size() == 2);
+    if (!revision->chunked || revision->chunks.size() != 2) {
+        restore();
+        return;
+    }
+    CHECK(revision->chunks[0].key == key0 && revision->chunks[1].key == key1);
+    CHECK(!revision->partitionStale);
+    CHECK(revision->topology &&
+          revision->partitionTopology == revision->topology);
+    const size_t builds = evaluator.GetBakedProgramBuildCount();
+
+    // Chunk 0's points repainted onto j1: a value edit, no rebuild.
+    indices.Set(VtIntArray{1, 1, 1, 1});
+    pose = evaluator.Evaluate(time);
+    agrees("repainted", pose, none);
+    revision = skin();
+    CHECK(revision != nullptr);
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds);
+
+    // Only j1 moves.
+    const std::vector<RigExecValueOverride> drag = dragJ1(25.0);
+    evaluator.SetInteractiveOverrides(drag);
+    pose = evaluator.Evaluate(time);
+    agrees("repainted, j1 moved", pose, drag);
+    revision = skin();
+    CHECK(revision != nullptr);
+    if (!revision) {
+        restore();
+        return;
+    }
+    // The keys are still Build's, the partition does not describe the new
+    // layout, and the fuse did the work.
+    CHECK(revision->chunks[0].key == key0 && revision->chunks[1].key == key1);
+    CHECK(revision->partitionStale);
+    CHECK(revision->topology &&
+          revision->partitionTopology != revision->topology);
+    for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision->chunks) {
+        CHECK(!chunk.ok);
+    }
+    CHECK(evaluator.GetBakedGenerationCount() == 3);
+    frozenAgrees("frozen, repainted, j1 moved again", dragJ1(30.0));
+
+    // The Build indices painted back: the new handle has the partition's
+    // arrays, so it is adopted and the chunks run again.
+    indices.Set(VtIntArray{0, 0, 1, 1});
+    pose = evaluator.Evaluate(time);
+    agrees("painted back", pose, drag);
+    revision = skin();
+    CHECK(revision != nullptr);
+    if (!revision) {
+        restore();
+        return;
+    }
+    CHECK(!revision->partitionStale);
+    CHECK(revision->topology &&
+          revision->partitionTopology == revision->topology);
+    for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision->chunks) {
+        CHECK(chunk.ok);
+    }
+    frozenAgrees("frozen, painted back, j1 moved again", dragJ1(30.0));
+    evaluator.ClearInteractiveOverrides();
+    pose = evaluator.Evaluate(time);
+    agrees("painted back, drag lifted", pose, none);
+    CHECK(evaluator.GetBakedProgramBuildCount() == builds);
+    CHECK(evaluator.GetBakedGenerationCount() == 5);
+    if (failures == failuresBefore) {
+        std::printf("  recut layout: %s ran whole while repainted, and its "
+                    "chunks resumed\n", skinPath.GetText());
+    }
+    restore();
 }
 
 /// The predicate the fold hands the fuse, on the one input the pose walk
@@ -3753,6 +4013,7 @@ main(int argc, char **argv)
         examplesDir + "/biped/Biped.usda");
     TestAStalePartitionRunsTheRevisionWhole(
         examplesDir + "/biped/Biped.usda");
+    TestARecutLayoutCannotReadAnUndeclaredJoint();
     {
         // Chunked revisions: a fuse reads several chunks of its own, and in
         // oneloop_cross_domain the smooth reads the version a chunked skin's

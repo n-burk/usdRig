@@ -2201,6 +2201,27 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
         t.count = count;
     }
     {
+        // Per chunked revision: the arrays Build cut its keys from, which
+        // decide whether a frame adopts a layout handle.
+        _DigestTable &t = table("partitions");
+        size_t count = 0;
+        for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+            for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+                if (!revision.chunked) {
+                    continue;
+                }
+                t.Path(revision.moverPath);
+                t.Int(revision.partitionElementSize);
+                t.Int(int64_t(revision.partitionIndices.size()));
+                t.Bytes(revision.partitionIndices.cdata(),
+                        sizeof(int) * revision.partitionIndices.size());
+                ++count;
+            }
+        }
+        t.count = count;
+    }
+    {
         // The reads after the head tier that resolve walks: each walk's head,
         // hops (slot, candidates, leaf), raw leaf, declared versions and
         // shadows; which path leaves and steps read them; what each step

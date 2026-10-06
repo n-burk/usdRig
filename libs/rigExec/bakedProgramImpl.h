@@ -2946,12 +2946,15 @@ struct RigExecBakedProgramImpl {
         std::vector<GeomChunk> chunks;
         /// Where this revision's chunks start in the RevisionOut domain.
         int chunkBase = 0;
-        /// The layout the partition was cut from, so a frame can tell in
-        /// O(1) whether the keys still describe the vertices. The handle is
-        /// the identity the SkinTopology op preserves across a notice that
-        /// touched no layout, so an unchanged binding never re-cuts and a
-        /// changed one always does.
+        /// The handle the chunk keys describe, so a frame can tell in O(1)
+        /// whether they still describe the vertices: null until the first
+        /// adoption, then the last handle whose arrays were Build's
+        /// (RigExecBakedAdoptPartition). The keys themselves never move
+        /// after Build.
         std::shared_ptr<const RigExecSkinTopology> partitionTopology;
+        /// The `jointIndices` and element size Build cut the keys from.
+        /// The indices are held only while the revision is chunked.
+        VtIntArray partitionIndices;
         int partitionElementSize = 0;
         size_t partitionIndexCount = 0;
         size_t partitionPointCount = 0;
@@ -4553,7 +4556,7 @@ void RigExecBakedRunSolverSources(RigExecBakedProgramImpl *program,
 /// The geometry half of the prologue: every chain's and derived target's
 /// authored base, the point-count-moved reset, the node-creation accounting,
 /// and the adoption of each fixed skin revision's layout handle (topology,
-/// topologyResolved and the re-cut partition) wherever a base reads.
+/// topologyResolved and the partition's adoption) wherever a base reads.
 /// Also samples the weight objects' and the revisions' path leaves
 /// (RigExecBakedSamplePathLeaves; \p all re-reads every one).
 void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
@@ -4638,7 +4641,9 @@ size_t RigExecBakedChunkVertexTargetFromEnvironment();
 size_t RigExecBakedChunkCapFromEnvironment();
 
 /// Cuts \p revision's vertices into chunks, from \p indices and
-/// \p elementSize.
+/// \p elementSize, and records both as the partition's arrays (the indices
+/// only when the cut has more than one chunk). Build only: each chunk step
+/// declares its reads from its key.
 ///
 /// Contiguous ranges of \p program's chunkVertexTarget vertices, capped at
 /// its chunkCap (the range grows to meet the cap); each range's
@@ -4646,15 +4651,20 @@ size_t RigExecBakedChunkCapFromEnvironment();
 /// merge while they stay under the vertex cap and one key contains the
 /// other, because a range that waits for a superset of another's joints is
 /// not waiting any longer for holding both. Vertex order is never permuted.
-///
-/// \p chunkCount, when positive, is the number of chunks the caller must
-/// end up with -- the number of STEPS a revision is made of is fixed at
-/// Build, so a re-cut against a layout that moved redistributes the same
-/// number of ranges rather than changing the program.
 void RigExecBakedPartitionRevision(
     const RigExecBakedProgramImpl &program,
     RigExecBakedProgramImpl::GeomRevision *revision,
-    const int *indices, size_t indexCount, int elementSize, int chunkCount);
+    const VtIntArray &indices, int elementSize);
+
+/// Makes \p revision's adopted `topology` the handle its chunk keys
+/// describe when it carries the partition's arrays (the same `jointIndices`
+/// and element size; the weights may differ). Otherwise the partition is
+/// left as it is, and `partitionStale` runs the revision whole until a
+/// handle with those arrays is adopted again or the program is rebuilt.
+/// Nothing for an unchunked revision or a null handle. Called where the
+/// handle is adopted: the live geometry prologue and the frozen worker.
+void RigExecBakedAdoptPartition(
+    RigExecBakedProgramImpl::GeomRevision *revision);
 
 /// The partition statistics of every skin revision, for the schedule report.
 ///
