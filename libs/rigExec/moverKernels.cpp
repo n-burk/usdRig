@@ -486,9 +486,8 @@ _EvaluateMatrixPointArrayExpression(const VdfContext &ctx)
     // CPU SIMD over the contiguous elements (spec 6.5): parity-gated
     // against the scalar reference; RIGEXEC_ENABLE_SIMD=false forces the
     // scalar path for debugging.
-    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
     auto out = VdfReadWriteIterator<GfVec3f>::Allocate(ctx, count);
-    if (useSimd) {
+    if (rigExec::RigExecSimdEnabled()) {
         std::vector<GfVec3f> scratch;
         scratch.reserve(count);
         for (; !previous.IsAtEnd(); ++previous) {

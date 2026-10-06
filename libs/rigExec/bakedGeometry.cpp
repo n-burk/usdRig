@@ -55,6 +55,12 @@ TF_DEFINE_PRIVATE_TOKENS(
 
 namespace rigExec {
 
+void
+RigExecBakedGeometryTouchTokens()
+{
+    (void)_tokens.Get();
+}
+
 // Bake.
 
 namespace {
@@ -602,37 +608,6 @@ ChunkReadyLevel(const RigExecBakedProgramImpl::GeomRevision &revision,
     return ready;
 }
 
-/// How many vertices one chunk covers before the cap takes over.
-///
-/// The default is the point count at which the geometry kernels start
-/// splitting work themselves, because a range smaller than that is a range
-/// the deformation was never worth spreading over.
-size_t
-ChunkVertexTarget()
-{
-    static const size_t target = [] {
-        const int authored = TfGetenvInt(
-            "RIGEXEC_BAKED_CHUNK_VERTS", int(RigExecGeometryParallelThreshold));
-        return authored < 1 ? size_t(1) : size_t(authored);
-    }();
-    return target;
-}
-
-/// The most chunks one revision is cut into; the range grows to meet it.
-///
-/// A cap rather than a target: chunk count decides STEP count, and a mesh
-/// with a million vertices must not add two hundred steps to the program for
-/// a machine that can run twenty of them at once.
-size_t
-ChunkCap()
-{
-    static const size_t cap = [] {
-        const int authored = TfGetenvInt("RIGEXEC_BAKED_MAX_CHUNKS", 32);
-        return authored < 1 ? size_t(1) : size_t(authored);
-    }();
-    return cap;
-}
-
 /// Whether a skin revision is cut whatever its chunks' ready levels say.
 ///
 /// RIGEXEC_BAKED_CHUNK_ALWAYS=1. The escape hatch for the rules' own
@@ -666,8 +641,36 @@ IsSubset(const std::vector<int> &a, const std::vector<int> &b)
 
 }  // namespace
 
+/// How many vertices one chunk covers before the cap takes over.
+///
+/// The default is the point count at which the geometry kernels start
+/// splitting work themselves, because a range smaller than that is a range
+/// the deformation was never worth spreading over. Read at Build into
+/// chunkVertexTarget.
+size_t
+RigExecBakedChunkVertexTargetFromEnvironment()
+{
+    const int authored = TfGetenvInt("RIGEXEC_BAKED_CHUNK_VERTS",
+                                     int(RigExecGeometryParallelThreshold));
+    return authored < 1 ? size_t(1) : size_t(authored);
+}
+
+/// The most chunks one revision is cut into; the range grows to meet it.
+///
+/// A cap rather than a target: chunk count decides STEP count, and a mesh
+/// with a million vertices must not add two hundred steps to the program for
+/// a machine that can run twenty of them at once. Read at Build into
+/// chunkCap.
+size_t
+RigExecBakedChunkCapFromEnvironment()
+{
+    const int authored = TfGetenvInt("RIGEXEC_BAKED_MAX_CHUNKS", 32);
+    return authored < 1 ? size_t(1) : size_t(authored);
+}
+
 void
 RigExecBakedPartitionRevision(
+    const RigExecBakedProgramImpl &program,
     RigExecBakedProgramImpl::GeomRevision *revision,
     const int *indices, size_t indexCount, int elementSize, int chunkCount)
 {
@@ -682,10 +685,10 @@ RigExecBakedPartitionRevision(
     // How many ranges, and how long. The same answer every time for the same
     // layout, which is what makes a re-cut against arrays that did not
     // actually move reproduce the cut it replaces.
-    size_t target = ChunkVertexTarget();
+    size_t target = program.chunkVertexTarget;
     size_t count = std::max<size_t>(1, (points + target - 1) / target);
-    if (count > ChunkCap()) {
-        count = ChunkCap();
+    if (count > program.chunkCap) {
+        count = program.chunkCap;
         target = std::max<size_t>(1, (points + count - 1) / count);
         count = std::max<size_t>(1, (points + target - 1) / target);
     }
@@ -929,7 +932,7 @@ namespace {
 /// -- is one chunk over the whole array, which is the degenerate case of the
 /// same step.
 void
-PartitionAtBuild(const ProviderLevels &levels,
+PartitionAtBuild(const RigExecBakedProgramImpl &B, const ProviderLevels &levels,
                  RigExecBakedProgramImpl::GeomRevision *revision)
 {
     revision->chunks.assign(1, RigExecBakedProgramImpl::GeomChunk());
@@ -962,8 +965,9 @@ PartitionAtBuild(const ProviderLevels &levels,
         indices.size() % size_t(elementSize) != 0) {
         return;
     }
-    RigExecBakedPartitionRevision(revision, indices.cdata(), indices.size(),
-                                  elementSize, /*chunkCount=*/0);
+    RigExecBakedPartitionRevision(B, revision, indices.cdata(),
+                                  indices.size(), elementSize,
+                                  /*chunkCount=*/0);
     revision->partitionCandidates = revision->chunks.size();
 
     // Whether the cut pays, which is a question about LEVELS and not about
@@ -1113,7 +1117,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             // in exactly where the assembler's would have landed.
             revision.packetInfluences.assign(revision.influenceSlots.size(),
                                              GfMatrix4d(1.0));
-            PartitionAtBuild(levels, &revision);
+            PartitionAtBuild(B, levels, &revision);
             revision.chunkBase = nextChunk;
             nextChunk += int(revision.chunks.size());
             B.revisionChunkBase.push_back(revision.chunkBase);
@@ -1533,9 +1537,9 @@ WholeTransformsView(RigExecBakedProgramImpl::GeomRevision *revision)
 /// an unchunked one: the whole-array fallback the fuse falls back to reads
 /// these, and a step may not write a slot it declared as a read.
 void
-FoldTransformForms(RigExecBakedProgramImpl::GeomRevision *revision)
+FoldTransformForms(RigExecBakedProgramImpl::GeomRevision *revision,
+                   bool useSimd)
 {
-    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
     const size_t count = revision->influences.size();
     if (revision->parameters.skinningMethod == _tokens->dualQuaternion) {
         revision->rows.clear();
@@ -1613,12 +1617,12 @@ GatherChunkTransforms(const RigExecBakedProgramImpl &B,
 
 /// The view onto \p chunk's own tables.
 RigExecSkinTransformsView
-ChunkTransformsView(const RigExecBakedProgramImpl::GeomChunk &chunk)
+ChunkTransformsView(const RigExecBakedProgramImpl::GeomChunk &chunk,
+                    bool useSimd)
 {
     RigExecSkinTransformsView view;
     view.transforms = chunk.transforms.data();
     view.transformCount = chunk.transforms.size();
-    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
     if (useSimd && !chunk.rows.empty()) {
         view.rows = chunk.rows.data();
     }
@@ -1643,17 +1647,17 @@ ChunkTransformsView(const RigExecBakedProgramImpl::GeomChunk &chunk)
 bool
 SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
           const GfVec3f *preceding, const RigExecSkinTransformsView &view,
-          size_t begin, size_t end, bool whole)
+          size_t begin, size_t end, bool whole, bool useSimd)
 {
     std::vector<GfVec3f> &out = revision->output;
     std::copy(preceding + begin, preceding + end, out.begin() + long(begin));
     if (whole) {
         if (!RigExecApplySkinKernelWithTransforms(revision->parameters, view,
-                                                  &out)) {
+                                                  &out, useSimd)) {
             return false;
         }
     } else if (!RigExecApplySkinKernelRange(revision->parameters, view, begin,
-                                            end, &out)) {
+                                            end, &out, useSimd)) {
         return false;
     }
     // "Apply once", over the same range: the envelope was resolved at the
@@ -2063,6 +2067,9 @@ AssembleRevision(RigExecBakedProgramImpl &B,
                                               basePointCount,
                                               &step->diagnostics);
     }
+    // Volatile until plugin API v3 (bodyPurity.h): the plugin is handed
+    // values the region computes, so it cannot run in the prologue.
+    const RigExecVolatileRead volatileRead;
     return AssembleRevisionFromStage(B, *B.resolvedInputs, revision,
                                      basePoints, basePointCount, time,
                                      &step->diagnostics, /*record=*/true);
@@ -2080,7 +2087,7 @@ AssembleRevision(RigExecBakedProgramImpl &B,
 bool
 FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
                   RigExecBakedProgramImpl::GeomRevision *revision,
-                  size_t revisionIndex)
+                  size_t revisionIndex, bool useSimd)
 {
     const GfVec3f *points = nullptr;
     size_t count = 0;
@@ -2094,7 +2101,7 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
     // and writes none of it, so the table it skins against is the one that
     // slot already holds.
     return SkinRange(revision, points, WholeTransformsView(revision), 0, count,
-                     /*whole=*/true);
+                     /*whole=*/true, useSimd);
 }
 
 }  // namespace
@@ -2167,7 +2174,7 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             return;
         }
         RigExecBakedPartitionRevision(
-            revision, revision->topology->indices.data(),
+            B, revision, revision->topology->indices.data(),
             revision->topology->indices.size(),
             revision->topology->elementSize,
             int(revision->chunks.size()));
@@ -2474,7 +2481,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             // about and the status is what the graph decided.
             const bool applied =
                 status.AllowsApply() &&
-                RigExecRunRevisionKernel(revision.op, parameters, &values);
+                RigExecRunRevisionKernel(revision.op, parameters, &values,
+                                         B.useSimd);
             revision.resultStatus = status.state;
             if (!applied) {
                 values.assign(derived.lastBase.begin(),
@@ -2581,7 +2589,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // fallback reads these and cannot write them. O(influences) of pure
         // per-matrix arithmetic, which is the size of this step anyway.
         if (skin && revision.influencesValid) {
-            FoldTransformForms(&revision);
+            FoldTransformForms(&revision, B.useSimd);
         }
         return;
     }
@@ -2613,9 +2621,15 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                                entering + enteringCount);
             std::vector<float> field;
             std::string error;
-            if (B.resolveWeights(
+            bool resolved = false;
+            {
+                // The weight oracle: volatile until S4 (bodyPurity.h).
+                const RigExecVolatileRead volatileRead;
+                resolved = B.resolveWeights(
                     B.weightObjects[size_t(revision.weightObject)].path,
-                    current.size(), time, &field, &error, &current)) {
+                    current.size(), time, &field, &error, &current);
+            }
+            if (resolved) {
                 revision.currentPhasePacket.representation =
                     _tokens->denseRepresentation;
                 revision.currentPhasePacket.values = std::move(field);
@@ -2789,7 +2803,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 // blend all live in RigExecRunRevisionKernel, so an
                 // operation cannot mean one thing here and another there.
                 chunk.ok = RigExecRunRevisionKernel(
-                    revision.op, revision.parameters, &revision.output);
+                    revision.op, revision.parameters, &revision.output,
+                    B.useSimd);
                 return;
             }
             if (!revision.parameters.valid ||
@@ -2800,7 +2815,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             }
             chunk.ok = SkinRange(&revision, points,
                                  WholeTransformsView(&revision), 0, count,
-                                 /*whole=*/true);
+                                 /*whole=*/true, B.useSimd);
             return;
         }
 
@@ -2831,9 +2846,10 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             // local to this step.
             return;
         }
-        chunk.ok = SkinRange(&revision, points, ChunkTransformsView(chunk),
+        chunk.ok = SkinRange(&revision, points,
+                             ChunkTransformsView(chunk, B.useSimd),
                              size_t(chunk.begin), size_t(chunk.end),
-                             /*whole=*/false);
+                             /*whole=*/false, B.useSimd);
         return;
     }
 
@@ -2879,7 +2895,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             bool applied = packetValid && revision.status.AllowsApply();
             if (applied && skin && revision.partitionStale) {
                 applied = FuseWholeRevision(chain, &revision,
-                                            size_t(revisionIndex));
+                                            size_t(revisionIndex), B.useSimd);
             } else if (applied) {
                 for (const RigExecBakedProgramImpl::GeomChunk &chunk :
                          revision.chunks) {

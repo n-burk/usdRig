@@ -1112,6 +1112,9 @@ private:
 
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
+    /// The seven rest input names (evaluatorDetail::_MakeRestInputNames),
+    /// built in the constructor.
+    std::vector<TfToken> _restInputNames;
     /// Whether the requests only the DYNAMIC path pulls were left
     /// unprepared by Compile, to be prepared at first use instead.
     ///
@@ -1396,7 +1399,7 @@ private:
     std::map<SdfPath, RigExecTapId> _restTapIds;
     std::map<SdfPath, RigExecPointFrame> _epochRestFrames;
     /// The rest gate (_NoteRestEdits). The epoch's rest paths are every
-    /// _RestInputNames() property of every key of _restTapIds, which is
+    /// _restInputNames property of every key of _restTapIds, which is
     /// every provider and every provider ancestor the rests read, so the
     /// set is kept as that map and the name list rather than spelled out.
     /// A notice that resyncs or changes one of those paths, or resyncs a

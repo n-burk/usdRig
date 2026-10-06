@@ -833,7 +833,7 @@ TestTheRangeFormDeformsLikeTheWholeArray(const char *method)
     }
 
     std::vector<GfVec3f> whole = rest;
-    CHECK(RigExecApplySkinKernel(packet, &whole));
+    CHECK(RigExecApplySkinKernel(packet, &whole, RigExecSimdEnabled()));
 
     // The same influence table, narrowed and split once by the caller -- the
     // forms a chunk keeps beside its own matrices.
@@ -863,7 +863,8 @@ TestTheRangeFormDeformsLikeTheWholeArray(const char *method)
             for (size_t begin = 0; begin < points; begin += chunk) {
                 ok = ok && RigExecApplySkinKernelRange(
                                packet, view, begin,
-                               std::min(points, begin + chunk), &ranged);
+                               std::min(points, begin + chunk), &ranged,
+                               RigExecSimdEnabled());
             }
             CHECK(ok);
             if (ranged != whole) {
@@ -913,7 +914,7 @@ TestAChunkSeesOnlyItsOwnInfluences(const char *method)
                           float(i % 5) * -2.0f);
     }
     std::vector<GfVec3f> whole = rest;
-    CHECK(RigExecApplySkinKernel(packet, &whole));
+    CHECK(RigExecApplySkinKernel(packet, &whole, RigExecSimdEnabled()));
 
     const size_t chunk = 512;
     size_t padded = 0;
@@ -953,7 +954,7 @@ TestAChunkSeesOnlyItsOwnInfluences(const char *method)
         view.palette = palette.data();
         view.paletteSize = palette.size();
         ok = ok && RigExecApplySkinKernelRange(packet, view, begin, end,
-                                               &ranged);
+                                               &ranged, RigExecSimdEnabled());
     }
     CHECK(ok);
     // Otherwise every table above held every matrix and the assertion below

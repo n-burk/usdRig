@@ -3,6 +3,7 @@
 #include "bakedSchedule.h"
 
 #include "bakedTrace.h"
+#include "bodyPurity.h"
 #include "parallel.h"
 #include "pathText.h"
 #include "profiler.h"
@@ -2471,6 +2472,59 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     B.lastClosedSteps = B.closedSteps.Count();
 }
 
+// Step-body purity (bodyPurity.h). Namespace-scope and constant-initialised,
+// so reading them takes no guard and no lock on any thread.
+
+namespace {
+
+thread_local bool tRigExecInOpBody = false;
+thread_local std::atomic<uint64_t> *tRigExecPurityViolations = nullptr;
+
+}  // namespace
+
+bool
+RigExecInOpBody()
+{
+    return tRigExecInOpBody;
+}
+
+void
+RigExecReportBodyRead()
+{
+    if (std::atomic<uint64_t> *violations = tRigExecPurityViolations) {
+        violations->fetch_add(1, std::memory_order_relaxed);
+    }
+#ifndef NDEBUG
+    TF_VERIFY(false, "rigExec: a step body read the stage or the resolved "
+                     "inputs outside a listed volatile read");
+#endif
+}
+
+RigExecOpBodyScope::RigExecOpBodyScope(std::atomic<uint64_t> *violations)
+    : _wasInBody(tRigExecInOpBody)
+    , _wasViolations(tRigExecPurityViolations)
+{
+    tRigExecInOpBody = true;
+    tRigExecPurityViolations = violations;
+}
+
+RigExecOpBodyScope::~RigExecOpBodyScope()
+{
+    tRigExecInOpBody = _wasInBody;
+    tRigExecPurityViolations = _wasViolations;
+}
+
+RigExecVolatileRead::RigExecVolatileRead()
+    : _wasInBody(tRigExecInOpBody)
+{
+    tRigExecInOpBody = false;
+}
+
+RigExecVolatileRead::~RigExecVolatileRead()
+{
+    tRigExecInOpBody = _wasInBody;
+}
+
 // The executors.
 
 namespace {
@@ -2480,6 +2534,9 @@ void
 RunStepBody(RigExecBakedProgramImpl *B, RigExecBakedStep *step,
             UsdTimeCode time)
 {
+    // The one body dispatch: the source pass and both executors come here.
+    const RigExecOpBodyScope body(
+        B->purityAudit ? &B->purityViolations.count : nullptr);
     // A run's output is cleared HERE rather than in the body, so that the
     // clearing is the executor's promise and not something fifteen bodies
     // each have to remember.

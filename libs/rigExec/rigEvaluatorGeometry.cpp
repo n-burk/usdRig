@@ -140,6 +140,9 @@ const TfToken _kGeoPoints("points");
 // The mover envelope default, in the inputs: namespace -- distinct from a
 // weight object's rigExec:defaultWeight above.
 const TfToken _kGeoInputsDefaultWeight("inputs:defaultWeight");
+// The falloff profile's fallback. Namespace scope like the rest: the oracle
+// runs inside step bodies on workers and builds no token from text.
+const TfToken _kGeoSmoothProfile("smooth");
 
 } // namespace
 
@@ -155,7 +158,7 @@ namespace evaluatorDetail {
 std::vector<float>
 _BakeFalloffLut(const UsdPrim &prim)
 {
-    TfToken profile("smooth");
+    TfToken profile = _kGeoSmoothProfile;
     if (UsdAttribute a = prim.GetAttribute(_falloffProfileAttr)) {
         a.Get(&profile);
     }

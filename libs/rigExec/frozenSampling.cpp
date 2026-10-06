@@ -386,7 +386,8 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
                     RigExecFrameInputs *out)
 {
     const auto gatherPoints =
-        [&](const std::vector<UsdAttribute> &attributes, const char *role) {
+        [&](const std::vector<UsdAttribute> &attributes,
+            const TfToken &role) {
             if (attributes.empty()) {
                 return;
             }
@@ -402,9 +403,9 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
             out->Add(_FrozenWeightArrayKey(object.path, role),
                      VtValue(gathered), /*hasValue=*/true);
         };
-    gatherPoints(object.targetPoints, "targetPoints");
-    gatherPoints(object.samplePoints, "samplePoints");
-    gatherPoints(object.curvePoints, "curvePoints");
+    gatherPoints(object.targetPoints, _frozenWeightTokens->targetPointsKey);
+    gatherPoints(object.samplePoints, _frozenWeightTokens->samplePointsKey);
+    gatherPoints(object.curvePoints, _frozenWeightTokens->curvePointsKey);
     if (!object.combineTargetPoints.empty()) {
         size_t count = 0;
         for (const UsdAttribute &a : object.combineTargetPoints) {
@@ -416,7 +417,8 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
         // The worker casts back to size_t; mesh point counts never approach
         // int range, and int folds exactly in every digest (uint64_t would
         // not -- _HashVtValue has no uint64 arm).
-        out->Add(_FrozenWeightArrayKey(object.path, "combineTargetCount"),
+        out->Add(_FrozenWeightArrayKey(
+                     object.path, _frozenWeightTokens->combineTargetCountKey),
                  VtValue(static_cast<int>(count)), /*hasValue=*/true);
     }
 }
@@ -1198,10 +1200,9 @@ namespace frozenDetail {
 // reader's value to the other. The digest folds these keys like any other
 // sample, which is what keeps distinct array states on distinct keys.
 SdfPath
-_FrozenWeightArrayKey(const SdfPath &objectPath, const char *role)
+_FrozenWeightArrayKey(const SdfPath &objectPath, const TfToken &name)
 {
-    return objectPath.AppendProperty(
-        TfToken(std::string("frozenWeight:") + role));
+    return objectPath.AppendProperty(name);
 }
 
 SdfPath

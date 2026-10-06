@@ -8,6 +8,7 @@
 #include "rigExecMath/rbf.h"
 #include "solverKernels.h"
 #include "weightPackets.h"
+#include "bodyPurity.h"
 #include "rigExecMath/singleChainIk.h"
 #include "rigExecMath/solvers.h"
 
@@ -904,7 +905,8 @@ RigExecRigEvaluator::_EpochRestsMightVary(
         chainTargets.insert(target);
     }
     for (const SdfPath &provider : providers) {
-        if (_ProviderRestMightVary(_stage, provider, chainTargets)) {
+        if (_ProviderRestMightVary(_stage, _restInputNames, provider,
+                                   chainTargets)) {
             return true;
         }
     }
@@ -943,7 +945,7 @@ RigExecRigEvaluator::_NoteRestEdits(const UsdNotice::ObjectsChanged &notice)
     bool reached = false;
     const auto noteProperty = [&](const SdfPath &path) {
         if (!path.IsPrimPropertyPath() ||
-            !_IsRestInputName(path.GetNameToken())) {
+            !_IsRestInputName(_restInputNames, path.GetNameToken())) {
             return;
         }
         const SdfPath prim = path.GetPrimPath();
@@ -1322,6 +1324,7 @@ RigExecRigEvaluator::_FrameFromXformRelativeToAsset(
     RigExecPointFrame *outFrame,
     GfMatrix4d *outMatrix) const
 {
+    RIGEXEC_PURITY_CHECK();
     const UsdPrim prim = _stage->GetPrimAtPath(path);
     if (!prim || !assetRoot || !UsdGeomXformable(prim)) {
         return false;

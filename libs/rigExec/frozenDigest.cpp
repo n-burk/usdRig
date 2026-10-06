@@ -149,22 +149,27 @@ RigExecFrozenPurityAudit()
          "locks, no USD"},
         {"libs/rigExec/moverKernels.cpp exec callbacks and helpers",
          RigExecFrozenPurity::Pure,
-         "only static const tokens and the SIMD env flag; per-evaluation "
-         "state lives in the VdfContext, never in the kernel"},
+         "only static const tokens and the SIMD switch, read once at "
+         "library load (RigExecSimdEnabled); per-evaluation state lives in "
+         "the VdfContext, never in the kernel"},
         {"libs/rigExec/computations.cpp frame helpers",
          RigExecFrozenPurity::Pure,
          "static free functions over frames and params; guards and packing "
          "only, no retained state"},
         {"libs/rigExec/weightPackets.cpp packet math",
          RigExecFrozenPurity::Pure,
-         "only static const tokens; assembly over caller buffers"},
+         "one token table, touched at Build; assembly over caller "
+         "buffers"},
         {"baked step bodies (bakedPose/bakedGeometry/bakedWeights/"
          "bakedVerify.cpp)",
          RigExecFrozenPurity::Pure,
          "a step reads declared slots and writes declared slots; per-step "
          "diagnostics and counters merge in step order, and BeginRun resets "
-         "them, so no result survives into the next run; steps never touch "
-         "USD (bakedProgram.cpp Run prologue comment)"},
+         "them, so no result survives into the next run; no body reads USD "
+         "or the resolved-input overlay (enforced by RIGEXEC_PURITY_CHECK, "
+         "bodyPurity.h), except the volatile oracle callers and the stage "
+         "assembly of a plugin revision bound to region values; settings "
+         "and token tables are read and touched at Build"},
         {"baked schedule serial executor",
          RigExecFrozenPurity::Pure,
          "program order on one thread; the reference every frozen run uses"},
@@ -216,10 +221,10 @@ RigExecFrozenPurityAudit()
          "mutex-guarded)",
          RigExecFrozenPurity::LiveOnly,
          "thread-safe and answer-preserving (full-input compare on hit), "
-         "but a lock held across map insert; no baked step calls it, so "
-         "frozen runs bypass it; a wire deformer that ever reaches a step "
-         "makes its rig cache-ineligible until the program resolves bases "
-         "in its UI-thread prologue"},
+         "but a lock held across map insert; a baked or frozen Wire step "
+         "whose envelope is sparse with a zero default still reaches it "
+         "through RigExecRunRevisionKernel and takes the lock on a worker, "
+         "until the program resolves the basis in its prologue"},
         {"RigExecStaticInputCache / RigExecSkinTopologyCache / "
          "RigExecBlendSampleCache OBJECTS",
          RigExecFrozenPurity::LiveOnly,

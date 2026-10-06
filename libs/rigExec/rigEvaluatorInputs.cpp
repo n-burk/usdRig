@@ -19,25 +19,6 @@ namespace {
 
 const TfToken _restPointsAttr("rigExec:restPoints");
 
-// Every authored input computeRestFrame reads.
-// Exactly the seven AttributeValue inputs of the computation
-// (computations.cpp, RIGEXEC_REGISTER_XFORMABLE) -- rest:space and the six
-// rest avars. Its eighth input is the NamespaceAncestor's own
-// computeRestFrame, which reads these same seven on the ancestor, so the
-// closure over a provider and its RigExec ancestors is the closure over this
-// list. Nothing else can move a rest frame, which is what makes both the
-// epoch-constancy test and the override test below exact rather than
-// approximate.
-const std::vector<TfToken> &
-_RestInputNames()
-{
-    static const std::vector<TfToken> names = {
-        TfToken("rest:space"), TfToken("rest:tx"), TfToken("rest:ty"),
-        TfToken("rest:tz"),    TfToken("rest:rx"), TfToken("rest:ry"),
-        TfToken("rest:rz")};
-    return names;
-}
-
 // Whether any override in \p overrides could reach a cached blend sample
 // shape.
 // A shape is a function of exactly `offsets` and `pointIndices` on the
@@ -246,10 +227,17 @@ _IsWeightObjectType(const TfToken &typeName)
            typeName == _kCombineWeightType || _IsVolumeWeightType(typeName);
 }
 
-bool
-_IsRestInputName(const TfToken &name)
+std::vector<TfToken>
+_MakeRestInputNames()
 {
-    const std::vector<TfToken> &names = _RestInputNames();
+    return {TfToken("rest:space"), TfToken("rest:tx"), TfToken("rest:ty"),
+            TfToken("rest:tz"),    TfToken("rest:rx"), TfToken("rest:ry"),
+            TfToken("rest:rz")};
+}
+
+bool
+_IsRestInputName(const std::vector<TfToken> &names, const TfToken &name)
+{
     return std::find(names.begin(), names.end(), name) != names.end();
 }
 
@@ -263,14 +251,16 @@ _IsRestInputName(const TfToken &name)
 // attribute, which recomputes it every generation (the same guard the skin
 // layout already applies to its own three attributes).
 bool
-_ProviderRestMightVary(const UsdStageRefPtr &stage, const SdfPath &provider,
+_ProviderRestMightVary(const UsdStageRefPtr &stage,
+                       const std::vector<TfToken> &restInputNames,
+                       const SdfPath &provider,
                        const std::set<SdfPath> &chainTargets)
 {
     const UsdPrim prim = stage ? stage->GetPrimAtPath(provider) : UsdPrim();
     if (!prim) {
         return true;
     }
-    for (const TfToken &name : _RestInputNames()) {
+    for (const TfToken &name : restInputNames) {
         if (chainTargets.count(provider.AppendProperty(name))) {
             return true;
         }

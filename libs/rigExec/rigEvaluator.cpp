@@ -199,6 +199,7 @@ RigExecRigEvaluator::RigExecRigEvaluator(
     const UsdStageRefPtr &stage, const SdfPath &rigPath, bool preferProgram)
     : _stage(stage)
     , _rigPath(rigPath)
+    , _restInputNames(evaluatorDetail::_MakeRestInputNames())
     , _preferProgram(preferProgram)
     , _evaluationMode(_EnvironmentEvaluationMode().mode)
     , _evaluationModeSource(_EnvironmentEvaluationMode().authored

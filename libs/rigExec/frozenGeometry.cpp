@@ -4,11 +4,29 @@
 #include "weightPackets.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/geometryKernels.h"
+
+#include "pxr/base/tf/staticTokens.h"
+
 #include <algorithm>
 #include <cmath>
 #include <set>
 
+// Names the frozen bodies need as tokens, constructed on the owning thread
+// by Build (RigExecFrozenGeometryTouchTokens) and never on a worker.
+TF_DEFINE_PRIVATE_TOKENS(
+    _frozenBodyTokens,
+    ((defaultWeight, "inputs:defaultWeight"))
+    ((moverFailed, "moverFailed"))
+);
+
 namespace rigExec {
+
+void
+RigExecFrozenGeometryTouchTokens()
+{
+    (void)_frozenBodyTokens.Get();
+    (void)frozenDetail::_frozenWeightTokens.Get();
+}
 
 using namespace frozenDetail;
 
@@ -55,7 +73,7 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
         }
         return &inputs.values[found->second];
     };
-    const auto samplePoints = [&](const char *role,
+    const auto samplePoints = [&](const TfToken &role,
                                   std::vector<GfVec3f> *out) {
         if (const RigExecSampledInput *sample =
                 findSample(_FrozenWeightArrayKey(object.path, role))) {
@@ -100,7 +118,8 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
         }
         size_t targetCount = 0;
         if (const RigExecSampledInput *sample = findSample(
-                _FrozenWeightArrayKey(object.path, "combineTargetCount"))) {
+                _FrozenWeightArrayKey(
+                    object.path, _frozenWeightTokens->combineTargetCountKey))) {
             if (sample->hasValue && sample->value.IsHolding<int>()) {
                 targetCount =
                     size_t(sample->value.UncheckedGet<int>());
@@ -148,10 +167,13 @@ _FrozenWeightStep(_FrozenWorker *worker, RigExecBakedStep *step,
             }
         }
         if (RigExecVolumeWeightCanBuild(object.type, packetInputs)) {
-            samplePoints("targetPoints", &packetInputs.targetPoints);
-            samplePoints("samplePoints", &packetInputs.samplePoints);
+            samplePoints(_frozenWeightTokens->targetPointsKey,
+                         &packetInputs.targetPoints);
+            samplePoints(_frozenWeightTokens->samplePointsKey,
+                         &packetInputs.samplePoints);
             if (object.type == _frozenWeightTokens->curveWeight) {
-                samplePoints("curvePoints", &packetInputs.curvePoints);
+                samplePoints(_frozenWeightTokens->curvePointsKey,
+                             &packetInputs.curvePoints);
             }
             B.weightPackets[size_t(id)] =
                 RigExecBuildVolumeWeightPacket(object.type, packetInputs);
@@ -211,7 +233,7 @@ _FrozenRevisionStatic(_FrozenWorker *worker, RigExecBakedStep *step,
     revision.defaultWeight = 1.0f;
     {
         const SdfPath key = revision.moverPath.AppendProperty(
-            TfToken("inputs:defaultWeight"));
+            _frozenBodyTokens->defaultWeight);
         const auto found = index.find(key);
         if (found != index.end()) {
             const RigExecSampledInput &sample =
@@ -397,13 +419,13 @@ _FrozenDerived(_FrozenWorker *worker, RigExecBakedStep *step)
                                     derived.lastBase.end());
         const bool applied =
             status.AllowsApply() &&
-            RigExecRunRevisionKernel(revision.op, parameters, &values);
+            RigExecRunRevisionKernel(revision.op, parameters, &values,
+                                     B.useSimd);
         revision.resultStatus = status.state;
         if (!applied) {
             values.assign(derived.lastBase.begin(), derived.lastBase.end());
             if (status.AllowsApply()) {
-                static const TfToken moverFailed("moverFailed");
-                revision.resultStatus = moverFailed;
+                revision.resultStatus = _frozenBodyTokens->moverFailed;
             }
         }
         revision.output = std::move(values);
@@ -441,6 +463,8 @@ _FrozenStepBody(_FrozenWorker *worker, RigExecBakedStep *step,
                const RigExecFrameInputs &inputs, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = worker->B;
+    const RigExecOpBodyScope body(
+        B.purityAudit ? &B.purityViolations.count : nullptr);
     step->BeginRun();
     if (step->kind == RigExecBakedStepKind::WeightPacket ||
         step->kind == RigExecBakedStepKind::VolumePlacements) {

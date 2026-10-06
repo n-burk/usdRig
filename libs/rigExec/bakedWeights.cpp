@@ -67,6 +67,12 @@ TF_DEFINE_PRIVATE_TOKENS(
 
 namespace rigExec {
 
+void
+RigExecBakedWeightsTouchTokens()
+{
+    (void)_tokens.Get();
+}
+
 int
 RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
                              const SdfPath &path)

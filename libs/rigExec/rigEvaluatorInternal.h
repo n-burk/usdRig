@@ -300,11 +300,27 @@ _ValidateWeightObjectDomain(
     const SdfPath &moverTarget, bool pointDomain, bool operationDomain,
     size_t logicalCount, std::set<SdfPath> *visiting, std::string *error);
 
-bool
-_IsRestInputName(const TfToken &name);
+// Every authored input computeRestFrame reads: exactly the seven
+// AttributeValue inputs of the computation (computations.cpp,
+// RIGEXEC_REGISTER_XFORMABLE) -- rest:space and the six rest avars. Its
+// eighth input is the NamespaceAncestor's own computeRestFrame, which reads
+// these same seven on the ancestor, so the closure over a provider and its
+// RigExec ancestors is the closure over this list. Nothing else can move a
+// rest frame, which is what makes the epoch-constancy test and the override
+// test exact rather than approximate. Built once per evaluator, in its
+// constructor (RigExecRigEvaluator::_restInputNames), because the
+// constancy test runs on a parallel compile and a function-local static or
+// a token built from text there takes a lock.
+std::vector<TfToken>
+_MakeRestInputNames();
 
 bool
-_ProviderRestMightVary(const UsdStageRefPtr &stage, const SdfPath &provider,
+_IsRestInputName(const std::vector<TfToken> &names, const TfToken &name);
+
+bool
+_ProviderRestMightVary(const UsdStageRefPtr &stage,
+                       const std::vector<TfToken> &restInputNames,
+                       const SdfPath &provider,
                        const std::set<SdfPath> &chainTargets);
 
 // Counters used by RIGEXEC_VERIFY_CERTAIN_STRUCTURAL.

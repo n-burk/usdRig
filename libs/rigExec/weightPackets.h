@@ -163,6 +163,10 @@ bool RigExecVolumeWeightCanBuild(
 RigExecWeightPacket RigExecBuildVolumeWeightPacket(
     const TfToken &typeName, const RigExecVolumeWeightInputs &inputs);
 
+/// Constructs the packet builders' token table on the calling thread; Build
+/// calls it so the table's lazy construction never runs first on a worker.
+void RigExecWeightPacketsTouchTokens();
+
 /// Folds \p inputs together in AUTHORED ORDER (subtract and overlay are
 /// order dependent by design) and applies invert, strength, and the range
 /// policy.

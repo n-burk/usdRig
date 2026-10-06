@@ -16,6 +16,7 @@
 #include "bakedProgram.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
+#include "parallel.h"
 #include "profiler.h"
 #include "solverKernels.h"
 #include "tapSet.h"
@@ -311,6 +312,7 @@ RigExecBakedRead(const RigExecBakedInput<T> &input,
                  const RigExecResolvedInputs &resolved, UsdTimeCode time,
                  const std::vector<char> *overridden = nullptr)
 {
+    RIGEXEC_PURITY_CHECK();
     T value = input.constant;
     // A held drag is placed by reading THE LONG WAY. GetAttribute is the same
     // walk exec's accessor performs and _resolvedInputs already carries the
@@ -2216,6 +2218,33 @@ struct RigExecBakedProgramImpl {
     };
     RunSeqCounter runSeqCounter;
 
+    // Settings a body path needs, read from the environment once at Build so
+    // that no body reads the environment or a function-local static.
+    /// RIGEXEC_BAKED_CHUNK_VERTS: vertices one chunk covers before the cap.
+    size_t chunkVertexTarget = RigExecGeometryParallelThreshold;
+    /// RIGEXEC_BAKED_MAX_CHUNKS: the most chunks one revision is cut into.
+    size_t chunkCap = 32;
+    /// RIGEXEC_ENABLE_SIMD, as RigExecSimdEnabled() answers it.
+    bool useSimd = true;
+    /// RIGEXEC_PURITY_AUDIT: whether RunStepBody hands its bodies
+    /// purityViolations to count reads under RIGEXEC_PURITY_CHECK.
+    bool purityAudit = false;
+    /// Body reads counted under purityAudit. Relaxed, because nothing is
+    /// published through it; the test thread reads it after the run joins.
+    /// A copy or move starts at zero, so it does not make the program
+    /// immovable; _CloneImpl copies purityAudit and zeroes this, so a frozen
+    /// clone counts its own.
+    struct PurityCounter {
+        std::atomic<uint64_t> count{0};
+        PurityCounter() = default;
+        PurityCounter(const PurityCounter &) {}
+        PurityCounter &operator=(const PurityCounter &) {
+            count.store(0, std::memory_order_relaxed);
+            return *this;
+        }
+    };
+    PurityCounter purityViolations;
+
     // What a run may SKIP. The sets are Build's; everything below them is the
     // last run's answer, kept so that this run's sources can be compared with
     // it by VALUE. There is no "time changed" and no "overridden" predicate
@@ -3908,11 +3937,24 @@ bool RigExecBakedPublishPose(RigExecBakedProgramImpl *program,
 void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                                  RigExecRigPose *pose);
 
+/// Construct the token tables the step bodies of each translation unit use,
+/// on the calling thread. Build calls them, with RigExecMoverGraphTouchTokens
+/// and RigExecWeightPacketsTouchTokens, so a table's lazy construction --
+/// which builds tokens from text -- never runs first on a worker.
+void RigExecBakedGeometryTouchTokens();
+void RigExecBakedWeightsTouchTokens();
+void RigExecFrozenGeometryTouchTokens();
+
+/// RIGEXEC_BAKED_CHUNK_VERTS and RIGEXEC_BAKED_MAX_CHUNKS, read by Build
+/// into chunkVertexTarget and chunkCap.
+size_t RigExecBakedChunkVertexTargetFromEnvironment();
+size_t RigExecBakedChunkCapFromEnvironment();
+
 /// Cuts \p revision's vertices into chunks, from \p indices and
 /// \p elementSize.
 ///
-/// Contiguous ranges of RIGEXEC_BAKED_CHUNK_VERTS vertices, capped at
-/// RIGEXEC_BAKED_MAX_CHUNKS (the range grows to meet the cap); each range's
+/// Contiguous ranges of \p program's chunkVertexTarget vertices, capped at
+/// its chunkCap (the range grows to meet the cap); each range's
 /// key is the union of its vertices' influence positions; adjacent ranges
 /// merge while they stay under the vertex cap and one key contains the
 /// other, because a range that waits for a superset of another's joints is
@@ -3923,6 +3965,7 @@ void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
 /// Build, so a re-cut against a layout that moved redistributes the same
 /// number of ranges rather than changing the program.
 void RigExecBakedPartitionRevision(
+    const RigExecBakedProgramImpl &program,
     RigExecBakedProgramImpl::GeomRevision *revision,
     const int *indices, size_t indexCount, int elementSize, int chunkCount);
 

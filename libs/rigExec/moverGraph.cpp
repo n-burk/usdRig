@@ -143,6 +143,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((rest, "rest"))
     ((local, "local"))
     ((material, "material"))
+    ((radial, "radial"))
 );
 
 namespace rigExec {
@@ -190,6 +191,9 @@ _StatusAllowsApply(const VdfContext &ctx)
     return status && status->AllowsApply();
 }
 
+// The kind of an operation outside the table below: never reached.
+const TfToken _noKindToken;
+
 // The kind token an assembled packet must carry to be the packet for \p op.
 // One table, read by the revision node's guard and by the shared kernel
 // entry point, so the two cannot disagree about which packet belongs to
@@ -235,8 +239,7 @@ _RevisionKindToken(RigExecRevisionOp op)
     }
     // No runtime dispatch beyond the frozen operation set: an unhandled op is
     // a build error, not a silently mismatched packet.
-    static const TfToken unknown;
-    return unknown;
+    return _noKindToken;
 }
 
 // Shared scratch-collect / kernel / write-back body for every revision
@@ -284,7 +287,8 @@ _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
             scratch.push_back(*previous);
         }
     }
-    if (!RigExecRunRevisionKernel(op, *params, &scratch)) {
+    if (!RigExecRunRevisionKernel(op, *params, &scratch,
+                                  RigExecSimdEnabled())) {
         passThrough();
         return;
     }
@@ -315,6 +319,29 @@ _RevisionNode::Compute(const VdfContext &ctx) const
 
 }  // namespace
 
+namespace {
+
+// RIGEXEC_ENABLE_SIMD, read once while the library loads: a namespace-scope
+// constant, so a kernel on a worker reads it with no guard and no lock.
+const bool _simdEnabled = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
+
+}  // namespace
+
+bool
+RigExecSimdEnabled()
+{
+    return _simdEnabled;
+}
+
+void
+RigExecMoverGraphTouchTokens()
+{
+    (void)_tokens.Get();
+    (void)_kindTokens.Get();
+    (void)_attrTokens.Get();
+    (void)_valueTokens.Get();
+}
+
 // Public alias of the table above: the frozen assembler stamps the same
 // kind tokens onto worker-assembled packets.
 const TfToken &
@@ -333,9 +360,9 @@ RigExecRevisionKindToken(RigExecRevisionOp op)
 void
 RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
                               const float *envelope,
-                              size_t begin, size_t end, GfVec3f *pts)
+                              size_t begin, size_t end, GfVec3f *pts,
+                              bool useSimd)
 {
-    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
     if (p.radialWeight) {
         // A fraction of the ROTATION, not of the position: the linear form
         // below follows the chord of the arc, and a chord falls inside its
@@ -460,7 +487,7 @@ _CachedWireBasis(const RigExecMoverParameters &p,
 
 bool
 RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
-                         std::vector<GfVec3f> *pts)
+                         std::vector<GfVec3f> *pts, bool useSimd)
 {
     const size_t count = pts->size();
     // A sparse field with a zero default touches only its named points: a
@@ -521,7 +548,8 @@ RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
     if (!p.weights.ResolveAll(count, &weights)) {
         return false;  // cardinality mismatch fails atomically
     }
-    RigExecApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data());
+    RigExecApplyMatrixKernelRange(p, weights.data(), 0, count, pts->data(),
+                                  useSimd);
     return true;
 }
 
@@ -678,7 +706,7 @@ bool
 RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
                             const RigExecSkinTransformsView &transforms,
                             size_t begin, size_t end,
-                            std::vector<GfVec3f> *pts)
+                            std::vector<GfVec3f> *pts, bool useSimd)
 {
     const RigExecSkinLayout layout =
         RigExecSkinLayoutForPacket(p, transforms, pts->size());
@@ -694,7 +722,6 @@ RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
     part.indexCount = (end - begin) * layout.elementSize;
     part.pointCount = end - begin;
     GfVec3f *const points = pts->data();
-    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
 
     // The one point where the skinning methods part. Everything above is
     // the shared per-point gather (indices, weights, influence matrices,
@@ -742,7 +769,7 @@ bool
 RigExecApplySkinKernelWithTransforms(
     const RigExecMoverParameters &p,
     const RigExecSkinTransformsView &transforms,
-    std::vector<GfVec3f> *pts)
+    std::vector<GfVec3f> *pts, bool useSimd)
 {
     const size_t count = pts->size();
     if (!RigExecSkinLayoutIsUsable(p, count)) {
@@ -768,7 +795,8 @@ RigExecApplySkinKernelWithTransforms(
         (p.skinningMethod == "classicLinear" ||
          p.skinningMethod == "dualQuaternion");
     if (!splittable) {
-        return RigExecApplySkinKernelRange(p, transforms, 0, count, pts);
+        return RigExecApplySkinKernelRange(p, transforms, 0, count, pts,
+                                           useSimd);
     }
 
     // THE PER-MATRIX TABLES ARE DERIVED ONCE HERE AND HANDED TO EVERY CHUNK.
@@ -805,8 +833,9 @@ RigExecApplySkinKernelWithTransforms(
     std::atomic<bool> ok(true);
     WorkParallelForN(
         count,
-        [&p, &shared, pts, &ok](size_t begin, size_t end) {
-            if (!RigExecApplySkinKernelRange(p, shared, begin, end, pts)) {
+        [&p, &shared, pts, &ok, useSimd](size_t begin, size_t end) {
+            if (!RigExecApplySkinKernelRange(p, shared, begin, end, pts,
+                                             useSimd)) {
                 ok.store(false, std::memory_order_relaxed);
             }
         },
@@ -816,10 +845,10 @@ RigExecApplySkinKernelWithTransforms(
 
 bool
 RigExecApplySkinKernel(const RigExecMoverParameters &p,
-                       std::vector<GfVec3f> *pts)
+                       std::vector<GfVec3f> *pts, bool useSimd)
 {
     return RigExecApplySkinKernelWithTransforms(
-        p, RigExecSkinTransformsOf(p), pts);
+        p, RigExecSkinTransformsOf(p), pts, useSimd);
 }
 
 // The blend-shape kernel, shared by the mover-graph revision node and by the
@@ -939,13 +968,13 @@ RigExecApplyDerivedKernel(RigExecRevisionOp op,
 bool
 RigExecApplyRevisionKernel(RigExecRevisionOp op,
                            const RigExecMoverParameters &p,
-                           std::vector<GfVec3f> *pts)
+                           std::vector<GfVec3f> *pts, bool useSimd)
 {
     switch (op) {
     case RigExecRevisionOp::Matrix:
-        return RigExecApplyMatrixKernel(p, pts);
+        return RigExecApplyMatrixKernel(p, pts, useSimd);
     case RigExecRevisionOp::Skin:
-        return RigExecApplySkinKernel(p, pts);
+        return RigExecApplySkinKernel(p, pts, useSimd);
     case RigExecRevisionOp::BlendShape:
         return RigExecApplyBlendShapeKernel(p, pts);
     case RigExecRevisionOp::VolumeCorrect:
@@ -1107,7 +1136,7 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
 bool
 RigExecRunRevisionKernel(RigExecRevisionOp op,
                          const RigExecMoverParameters &p,
-                         std::vector<GfVec3f> *pts)
+                         std::vector<GfVec3f> *pts, bool useSimd)
 {
     if (!p.valid || p.kind != _RevisionKindToken(op)) {
         return false;
@@ -1121,7 +1150,7 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
         op == RigExecRevisionOp::RecomputeExtent ||
         (op == RigExecRevisionOp::Wire &&
          RigExecWireTakesSparseEnvelope(p.weights))) {
-        return RigExecApplyRevisionKernel(op, p, pts);
+        return RigExecApplyRevisionKernel(op, p, pts, useSimd);
     }
 
     // A constant envelope at exactly full strength makes the blend below the
@@ -1135,7 +1164,7 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
     if (!fullStrengthEnvelope) {
         preceding = *pts;
     }
-    if (!RigExecApplyRevisionKernel(op, p, pts)) {
+    if (!RigExecApplyRevisionKernel(op, p, pts, useSimd)) {
         return false;
     }
     if (pts->size() != precedingSize) {
@@ -1544,15 +1573,13 @@ RigExecAssembleMatrixParameters(
 
     // Read in the assembly every path shares, not only in the exec builder:
     // the baked program fills these parameters through this function.
-    static const TfToken radial("radial");
-    static const TfToken weightBlend("rigExec:weightBlend");
-    static const TfToken pointFrame("rigExec:pointFrame");
     params.radialWeight =
-        _RecordedToken(moverPrim, weightBlend, TfToken(), time) == radial;
+        _RecordedToken(moverPrim, _attrTokens->weightBlend, TfToken(), time) ==
+        _valueTokens->radial;
     // The USD paths take rigExec:pointFrame from compile (it selects
     // RigExecClusterInPointFrame in the fold); it is read here too, and the
     // runtime's fold replays that read to make the same choice.
-    _RecordedToken(moverPrim, pointFrame, TfToken(), time);
+    _RecordedToken(moverPrim, _attrTokens->pointFrame, TfToken(), time);
 
     params.enabled = _Enabled(moverPrim, time, resolved);
     if (!params.enabled) {
@@ -1664,6 +1691,7 @@ RigExecResolveSkinTopology(
     const RigExecResolvedInputs *resolved,
     RigExecSkinTopologyCache *cache)
 {
+    RIGEXEC_PURITY_CHECK();
     if (!cache || !moverPrim) {
         return nullptr;
     }
@@ -2026,6 +2054,7 @@ RigExecAssembleParameters(
     const RigExecProviderValues &values,
     UsdTimeCode time)
 {
+    RIGEXEC_PURITY_CHECK();
     if (op == RigExecRevisionOp::Matrix) {
         return RigExecAssembleMatrixParameters(
             moverPrim, values.transform, values.weights, time,
@@ -2153,15 +2182,15 @@ RigExecAssembleParameters(
         break;
 
     case RigExecRevisionOp::DeltaMush:
-        params.restPoints = _Array<GfVec3f>(moverPrim, moverPrim.GetPath().AppendProperty(TfToken("inputs:restPoints")), UsdTimeCode::Default(), values.resolved);
+        params.restPoints = _Array<GfVec3f>(moverPrim, moverPrim.GetPath().AppendProperty(_attrTokens->restPoints), UsdTimeCode::Default(), values.resolved);
         if (params.restPoints.empty()) params.restPoints = values.basePoints;
         params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
         params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
-        params.mushIterations = _RecordedInput<int>(moverPrim, TfToken("inputs:iterations"), 10, time, values.resolved);
-        params.mushStep = _RecordedInput<float>(moverPrim, TfToken("inputs:step"), 0.5f, time, values.resolved);
-        params.mushPinBorders = _RecordedInput<bool>(moverPrim, TfToken("inputs:pinBorders"), true, time, values.resolved);
-        params.mushDistanceWeight = _RecordedInput<float>(moverPrim, TfToken("inputs:distanceWeight"), 0.0f, time, values.resolved);
-        params.mushDisplacement = _RecordedInput<float>(moverPrim, TfToken("inputs:displacement"), 1.0f, time, values.resolved);
+        params.mushIterations = _RecordedInput<int>(moverPrim, _attrTokens->iterations, 10, time, values.resolved);
+        params.mushStep = _RecordedInput<float>(moverPrim, _attrTokens->step, 0.5f, time, values.resolved);
+        params.mushPinBorders = _RecordedInput<bool>(moverPrim, _attrTokens->pinBorders, true, time, values.resolved);
+        params.mushDistanceWeight = _RecordedInput<float>(moverPrim, _attrTokens->distanceWeight, 0.0f, time, values.resolved);
+        params.mushDisplacement = _RecordedInput<float>(moverPrim, _attrTokens->displacement, 1.0f, time, values.resolved);
         params.valid = !params.restPoints.empty() && !params.topologyCounts.empty();
         break;
     case RigExecRevisionOp::Wrinkle: {
@@ -2307,10 +2336,9 @@ RigExecAssembleParameters(
             if (!table || table->size() < t + s + bt) {
                 break;  // MoverFailed
             }
-            const auto floats = [&](const char *name) {
+            const auto floats = [&](const TfToken &name) {
                 VtFloatArray out;
-                if (const UsdAttribute a =
-                        moverPrim.GetAttribute(TfToken(name))) {
+                if (const UsdAttribute a = moverPrim.GetAttribute(name)) {
                     if (!values.resolved ||
                         !values.resolved->GetAttribute(a, time, &out)) {
                         a.Get(&out, time);
@@ -2318,20 +2346,19 @@ RigExecAssembleParameters(
                 }
                 return out;
             };
-            const VtFloatArray weights = floats("inputs:driverWeights");
-            const VtFloatArray baseWeights = floats("inputs:driverBaseWeights");
+            const VtFloatArray weights = floats(_attrTokens->driverWeights);
+            const VtFloatArray baseWeights =
+                floats(_attrTokens->driverBaseWeights);
             // Which frame the wire's points are already in, and which frame
             // the driver's offset is applied in. The runtime and the frozen
             // replay read the same tokens, so they make the same choice.
-            static const TfToken pointFrameName("rigExec:pointFrame");
-            static const TfToken deltaFrameName("rigExec:driverDeltaFrame");
             RigExecWireDriverFrame frame;
             frame.posedPoints =
-                _RecordedToken(moverPrim, pointFrameName, TfToken("rest"),
-                               time) == "posed";
+                _RecordedToken(moverPrim, _attrTokens->pointFrame,
+                               _valueTokens->rest, time) == "posed";
             frame.posedDelta =
-                _RecordedToken(moverPrim, deltaFrameName, TfToken("local"),
-                               time) == "posed";
+                _RecordedToken(moverPrim, _attrTokens->driverDeltaFrame,
+                               _valueTokens->local, time) == "posed";
             frame.carry = values.carry;
             RigExecPoseWireDrivers(*table, t, s, bt, weights, baseWeights,
                                    frame, &params.restPoints,
@@ -2353,8 +2380,8 @@ RigExecAssembleParameters(
             a.Get(&knots, UsdTimeCode::Default());
             params.curveKnots.assign(knots.begin(), knots.end());
         }
-        if (const UsdAttribute a = moverPrim.GetAttribute(
-                TfToken("inputs:dropoffDistance"))) {
+        if (const UsdAttribute a =
+                moverPrim.GetAttribute(_attrTokens->dropoffDistance)) {
             float dropoff = 0.0f;
             a.Get(&dropoff, time);
             params.dropoffDistance = dropoff;
@@ -3692,21 +3719,21 @@ RigExecReadProjectorTarget(
         }
         return;
     }
-    static const TfToken rayOrigin("rigExec:rayOrigin");
-    static const TfToken rayDirection("rigExec:rayDirection");
-    static const TfToken rayUp("rigExec:rayUp");
-    static const TfToken shaderOffset("rigExec:shaderOffset");
-    static const TfToken projectionMode("rigExec:projectionMode");
     reads->rayOrigin = _RecordedInput<GfVec3d>(
-        projectorPrim, rayOrigin, GfVec3d(0.0, 0.0, 0.0), time, resolved);
+        projectorPrim, _attrTokens->rayOrigin, GfVec3d(0.0, 0.0, 0.0), time,
+        resolved);
     reads->rayDirection = _RecordedInput<GfVec3d>(
-        projectorPrim, rayDirection, GfVec3d(0.0, 0.0, 1.0), time, resolved);
+        projectorPrim, _attrTokens->rayDirection, GfVec3d(0.0, 0.0, 1.0),
+        time, resolved);
     reads->rayUp = _RecordedInput<GfVec3d>(
-        projectorPrim, rayUp, GfVec3d(0.0, 1.0, 0.0), time, resolved);
+        projectorPrim, _attrTokens->rayUp, GfVec3d(0.0, 1.0, 0.0), time,
+        resolved);
     reads->shaderOffset = _RecordedInput<GfMatrix4d>(
-        projectorPrim, shaderOffset, GfMatrix4d(1.0), time, resolved);
-    reads->reproject = _RecordedToken(projectorPrim, projectionMode,
-                                      TfToken("material"), time) ==
+        projectorPrim, _attrTokens->shaderOffset, GfMatrix4d(1.0), time,
+        resolved);
+    reads->reproject = _RecordedToken(projectorPrim,
+                                      _attrTokens->projectionMode,
+                                      _valueTokens->material, time) ==
                        "reproject";
     reads->faceVertexCounts = _Array<int>(
         projectorPrim, binding.topologyCounts, time, resolved);

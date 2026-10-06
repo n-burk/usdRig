@@ -4612,7 +4612,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         const auto askProviders = [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; ++i) {
                 if (mightVary.load(std::memory_order_relaxed)) return;
-                if (_ProviderRestMightVary(_stage, providers[i],
+                if (_ProviderRestMightVary(_stage, _restInputNames,
+                                           providers[i],
                                            chainTargets)) {
                     mightVary.store(true, std::memory_order_relaxed);
                     return;

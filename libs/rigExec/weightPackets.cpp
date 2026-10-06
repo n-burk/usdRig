@@ -4,11 +4,32 @@
 
 #include "rigExecMath/pointFrame.h"
 
+#include "pxr/base/tf/staticTokens.h"
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
 
+// The shape types and plane bounds the packet builders dispatch on. A table
+// rather than function-local statics: these run inside step bodies and the
+// weight oracle on workers, and Build touches the table on the owning thread
+// (RigExecWeightPacketsTouchTokens).
+TF_DEFINE_PRIVATE_TOKENS(
+    _weightTokens,
+    ((sphere, "RigExecSphereWeight"))
+    ((plane, "RigExecPlaneWeight"))
+    ((curve, "RigExecCurveWeight"))
+    ((unbounded, "unbounded"))
+    ((bounded, "bounded"))
+);
+
 namespace rigExec {
+
+void
+RigExecWeightPacketsTouchTokens()
+{
+    (void)_weightTokens.Get();
+}
 
 bool
 RigExecApplyWeightRangePolicy(const TfToken &policy, float *w)
@@ -224,9 +245,8 @@ _ValidateScales(const GfVec3f &scales)
 bool
 _UsesAxisScales(const TfToken &typeName)
 {
-    static const TfToken sphere("RigExecSphereWeight");
-    static const TfToken curve("RigExecCurveWeight");
-    return typeName == sphere || typeName == curve;
+    return typeName == _weightTokens->sphere ||
+           typeName == _weightTokens->curve;
 }
 
 // Everything a volumetric weight can settle before it looks at a single
@@ -372,11 +392,9 @@ _BuildPlaneWeightPacket(const RigExecVolumeWeightInputs &inputs)
     // the bounded arm: unbounded does not use them for the field (they
     // still size the drawn guide), so a bad extent there is a legibility
     // problem, not a reason to invalidate the whole rig.
-    static const TfToken unbounded("unbounded");
-    static const TfToken bounded("bounded");
     RigExecPlaneBounds extent;
     const RigExecPlaneBounds *extentPtr = nullptr;
-    if (inputs.planeBounds == bounded) {
+    if (inputs.planeBounds == _weightTokens->bounded) {
         extent.extentU = inputs.extentU;
         extent.extentV = inputs.extentV;
         for (const float e : {extent.extentU, extent.extentV}) {
@@ -385,7 +403,7 @@ _BuildPlaneWeightPacket(const RigExecVolumeWeightInputs &inputs)
             }
         }
         extentPtr = &extent;
-    } else if (inputs.planeBounds != unbounded) {
+    } else if (inputs.planeBounds != _weightTokens->unbounded) {
         return packet;  // unknown structural token: rejected, not coerced
     }
 
@@ -441,16 +459,13 @@ RigExecWeightPacket
 RigExecBuildVolumeWeightPacket(
     const TfToken &typeName, const RigExecVolumeWeightInputs &inputs)
 {
-    static const TfToken sphere("RigExecSphereWeight");
-    static const TfToken plane("RigExecPlaneWeight");
-    static const TfToken curve("RigExecCurveWeight");
-    if (typeName == sphere) {
+    if (typeName == _weightTokens->sphere) {
         return _BuildSphereWeightPacket(inputs);
     }
-    if (typeName == plane) {
+    if (typeName == _weightTokens->plane) {
         return _BuildPlaneWeightPacket(inputs);
     }
-    if (typeName == curve) {
+    if (typeName == _weightTokens->curve) {
         return _BuildCurveWeightPacket(inputs);
     }
     // Shaped like every other rejection rather than a bare packet, so a

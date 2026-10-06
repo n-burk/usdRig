@@ -4080,9 +4080,15 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         if (!c.weightObject.IsEmpty() && c.pointsTarget.IsEmpty()) {
             c.weightScratch.clear();
             c.weightError.clear();
-            if (!B.resolveWeights(c.weightObject, 1, time, &c.weightScratch,
-                                  &c.weightError, nullptr) ||
-                c.weightScratch.size() != 1) {
+            bool resolved = false;
+            {
+                // The weight oracle: volatile until S4 (bodyPurity.h).
+                const RigExecVolatileRead volatileRead;
+                resolved = B.resolveWeights(c.weightObject, 1, time,
+                                            &c.weightScratch, &c.weightError,
+                                            nullptr);
+            }
+            if (!resolved || c.weightScratch.size() != 1) {
                 step->diagnostics.push_back(
                     c.path.GetString() + ": " + c.weightError +
                     "; constraint passed through");

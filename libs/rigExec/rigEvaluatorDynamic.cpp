@@ -750,14 +750,15 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // used to do.
         // Only a rest input can do it: computeRestFrame reads the seven
         // names below on the provider and on its RigExec ancestors and
-        // nothing else (see _RestInputNames), and this epoch has no rest
+        // nothing else (see _MakeRestInputNames), and this epoch has no rest
         // channel with an authored connection -- _ProviderRestMightVary
         // refuses the epoch path outright when one does -- so no override on
         // any other attribute can reach a rest frame. A computation override
         // names a computation this cannot inspect, so it counts.
         const bool restOverridden = [this]() {
             for (const RigExecValueOverride &o : _interactiveOverrides) {
-                if (o.attribute.IsEmpty() || _IsRestInputName(o.attribute)) {
+                if (o.attribute.IsEmpty() ||
+                    _IsRestInputName(_restInputNames, o.attribute)) {
                     return true;
                 }
             }

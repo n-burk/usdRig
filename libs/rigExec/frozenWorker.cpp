@@ -589,7 +589,7 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             continue;
         }
         RigExecBakedPartitionRevision(
-            &revision, revision.topology->indices.data(),
+            B, &revision, revision.topology->indices.data(),
             revision.topology->indices.size(), revision.topology->elementSize,
             int(revision.chunks.size()));
         revision.partitionTopology = revision.topology;

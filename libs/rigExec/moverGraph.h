@@ -15,6 +15,7 @@
 #ifndef RIGEXEC_MOVER_GRAPH_H
 #define RIGEXEC_MOVER_GRAPH_H
 
+#include "bodyPurity.h"
 #include "types.h"
 
 #include "rigExecMath/simdKernels.h"
@@ -375,6 +376,7 @@ public:
     template <class T>
     bool GetAttribute(
         const UsdAttribute &attribute, UsdTimeCode time, T *out) const {
+        RIGEXEC_PURITY_CHECK();
         if (!out) {
             return false;
         }
@@ -1167,8 +1169,19 @@ RigExecWireTakesSparseEnvelope(const RigExecWeightPacket &w)
             w.rangePolicy == "clamp");
 }
 
+/// RIGEXEC_ENABLE_SIMD (default true), read once when the library loads.
+/// The kernels below take the choice as \p useSimd, so a step body passes
+/// its program's copy and reads neither the environment nor a static; every
+/// caller starts from this answer, so all paths make the same choice.
+bool RigExecSimdEnabled();
+
+/// Constructs this file's token tables on the calling thread. Build calls it
+/// so that their lazy construction, which builds tokens from text, never runs
+/// first on a worker.
+void RigExecMoverGraphTouchTokens();
+
 bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
-                              std::vector<GfVec3f> *pts);
+                              std::vector<GfVec3f> *pts, bool useSimd);
 
 /// Applies the skin operation of \p p to \p pts in place, returning false
 /// when the packet fails atomically (cardinality mismatch, unknown method).
@@ -1179,7 +1192,7 @@ bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
 /// Shared by the mover-graph revision node and by the baked program, which
 /// runs the same operation with no VdfNetwork around it.
 bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
-                            std::vector<GfVec3f> *pts);
+                            std::vector<GfVec3f> *pts, bool useSimd);
 /// One vertex range of the matrix operation, against an envelope the caller
 /// already resolved at the FULL point count.
 ///
@@ -1190,7 +1203,8 @@ bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
 /// array to every range, indexed absolutely.
 void RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
                                    const float *envelope,
-                                   size_t begin, size_t end, GfVec3f *pts);
+                                   size_t begin, size_t end, GfVec3f *pts,
+                                   bool useSimd);
 
 /// Blends \p blended over \p preceding for one vertex range, with
 /// \p envelope the FULL resolved envelope and every array indexed
@@ -1287,14 +1301,14 @@ bool RigExecSkinTransformsAreUsable(const GfMatrix4d *transforms,
 bool RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
                                  const RigExecSkinTransformsView &transforms,
                                  size_t begin, size_t end,
-                                 std::vector<GfVec3f> *pts);
+                                 std::vector<GfVec3f> *pts, bool useSimd);
 
 /// RigExecApplySkinKernel against an influence table other than the packet's
 /// own, for a caller that folds the matrices outside the packet.
 bool RigExecApplySkinKernelWithTransforms(
     const RigExecMoverParameters &p,
     const RigExecSkinTransformsView &transforms,
-    std::vector<GfVec3f> *pts);
+    std::vector<GfVec3f> *pts, bool useSimd);
 
 
 /// Applies the blend-shape operation of \p p to \p pts in place, returning
@@ -1342,7 +1356,7 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
 /// and drifts on the ones that do not.
 bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
                                 const RigExecMoverParameters &p,
-                                std::vector<GfVec3f> *pts);
+                                std::vector<GfVec3f> *pts, bool useSimd);
 
 /// Runs one revision of \p op over \p pts in place, envelope included: the
 /// packet check, the full-strength fast path, RigExecApplyRevisionKernel and
@@ -1355,7 +1369,7 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
 /// operations blend and which fold the envelope into their own arithmetic.
 bool RigExecRunRevisionKernel(RigExecRevisionOp op,
                               const RigExecMoverParameters &p,
-                              std::vector<GfVec3f> *pts);
+                              std::vector<GfVec3f> *pts, bool useSimd);
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the
 /// copy of the preceding revision, the resolved envelope array and the blend

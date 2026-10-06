@@ -1238,13 +1238,21 @@ rigexec_add_baked_parity_test(testRigExecValueEdits REQUIRE_BAKE CONE_VERIFY
 
 # Sampled leaves: every patchable binding and every packet assembly read
 # before the region, equal to the read it replaced, re-read exactly when
-# that read can have moved.
+# that read can have moved; and no step body reads the stage.
 add_executable(testRigExecLeaves tests/testRigExecLeaves.cpp)
 target_link_libraries(testRigExecLeaves PRIVATE rigExecBake rigExecRigging)
+target_include_directories(testRigExecLeaves PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
 target_compile_definitions(testRigExecLeaves PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecLeaves COMMAND testRigExecLeaves
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# The body-purity case under the parallel executor, without the cone
+# verifier's second pass.
+add_test(NAME testRigExecLeaves_parallel COMMAND testRigExecLeaves
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecLeaves_parallel PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=parallel")
 rigexec_add_baked_parity_test(testRigExecLeaves REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 

@@ -2263,6 +2263,17 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     RigExecBakedProgramImpl &B = *impl;
     B.evaluator = evaluator;
     B.stage = E._stage;
+    // What the bodies would otherwise read from the environment or a
+    // function-local static, read once here (bodyPurity.h).
+    B.chunkVertexTarget = RigExecBakedChunkVertexTargetFromEnvironment();
+    B.chunkCap = RigExecBakedChunkCapFromEnvironment();
+    B.useSimd = RigExecSimdEnabled();
+    B.purityAudit = TfGetenvBool("RIGEXEC_PURITY_AUDIT", false);
+    RigExecMoverGraphTouchTokens();
+    RigExecWeightPacketsTouchTokens();
+    RigExecBakedGeometryTouchTokens();
+    RigExecBakedWeightsTouchTokens();
+    RigExecFrozenGeometryTouchTokens();
     B.assetRootPath = E._rigPath.GetParentPath();
     // The evaluator state a frame reads, captured here because this is the
     // only translation unit its friendship reaches; bakedProgramImpl.h says

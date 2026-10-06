@@ -16,9 +16,13 @@
 // of the whole program. The evaluators here run Baked whatever the entry:
 // the leaf check re-reads through the generation's resolved inputs, which
 // a parity generation's dynamic walk would overwrite.
+// The purity cases hold every step body away from the stage and the
+// resolved-input overlay (RIGEXEC_PURITY_AUDIT, bodyPurity.h) over every
+// bakeable example and every fixture above.
 // argv[1] = path to the examples directory.
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
+#include "rigExec/bodyPurity.h"
 #include "rigExec/frozenContextInternal.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBake/bake.h"
@@ -26,12 +30,15 @@
 #include "rigExecBinary/format.h"
 #include "rigExecBinary/generated/rigexec_generated.h"
 #include "rigExecRigging/rigBuilder.h"
+#include "rigExecExampleFixtures.h"
 
+#include "pxr/base/arch/env.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
@@ -43,6 +50,7 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -1973,6 +1981,317 @@ TestAPathLeafIsNotResampledWhenNothingMoved(const std::string &examples)
     }
 }
 
+// Build's settings reach a frozen clone (frozenDetail::_CloneImpl): the
+// worker's re-cut and kernels make the live program's choices, and its
+// bodies count into their own audit counter. The clone starts from other
+// values, so a field the clone skips fails here.
+void
+TestAFrozenCloneKeepsTheBuildSettings(const std::string &examples)
+{
+    const RigExecExampleFixture *row = nullptr;
+    for (const RigExecExampleFixture &candidate : kRigExecExampleFixtures) {
+        if (candidate.bakesToday) {
+            row = &candidate;
+            break;
+        }
+    }
+    CHECK(row);
+    if (!row) {
+        return;
+    }
+    ArchSetEnv("RIGEXEC_BAKED_CHUNK_VERTS", "7", /*overwrite=*/true);
+    ArchSetEnv("RIGEXEC_BAKED_MAX_CHUNKS", "3", /*overwrite=*/true);
+    ArchSetEnv("RIGEXEC_PURITY_AUDIT", "1", /*overwrite=*/true);
+    UsdStageRefPtr stage = UsdStage::Open(examples + "/" + row->stage);
+    CHECK(stage);
+    std::unique_ptr<RigExecRigEvaluator> evaluator;
+    if (stage) {
+        evaluator = MakeEvaluator(stage, RootOf(stage),
+                                  RigExecEvaluationMode::Baked);
+        evaluator->Evaluate(UsdTimeCode(stage->GetStartTimeCode()));
+    }
+    ArchRemoveEnv("RIGEXEC_BAKED_CHUNK_VERTS");
+    ArchRemoveEnv("RIGEXEC_BAKED_MAX_CHUNKS");
+    ArchRemoveEnv("RIGEXEC_PURITY_AUDIT");
+    const RigExecBakedProgramImpl *B = evaluator ? Program(*evaluator) : nullptr;
+    CHECK(B);
+    if (!B) {
+        return;
+    }
+    CHECK(B->chunkVertexTarget == 7);
+    CHECK(B->chunkCap == 3);
+    CHECK(B->purityAudit);
+    auto clone = std::make_unique<RigExecBakedProgramImpl>();
+    clone->chunkVertexTarget = 1;
+    clone->chunkCap = 1;
+    clone->useSimd = !B->useSimd;
+    clone->purityAudit = false;
+    clone->purityViolations.count.store(5);
+    frozenDetail::_CloneImpl(*B, clone.get());
+    CHECK(clone->chunkVertexTarget == B->chunkVertexTarget);
+    CHECK(clone->chunkCap == B->chunkCap);
+    CHECK(clone->useSimd == B->useSimd);
+    CHECK(clone->purityAudit);
+    CHECK(clone->purityViolations.count.load() == 0);
+}
+
+// Body purity. The thread mark itself: a read under RigExecOpBodyScope is
+// counted into the scope's counter, a nested scope restores the outer mark,
+// RigExecVolatileRead lifts it, and no read outside a scope counts.
+void
+TestTheBodyMarkCountsReadsUnderIt()
+{
+    const RigExecResolvedInputs R;
+    float value = 0.0f;
+    std::atomic<uint64_t> outer{0}, inner{0};
+    R.GetAttribute(UsdAttribute(), UsdTimeCode::Default(), &value);
+    CHECK(!RigExecInOpBody());
+    {
+        const RigExecOpBodyScope body(&outer);
+        CHECK(RigExecInOpBody());
+        R.GetAttribute(UsdAttribute(), UsdTimeCode::Default(), &value);
+        {
+            const RigExecOpBodyScope nested(&inner);
+            R.GetAttribute(UsdAttribute(), UsdTimeCode::Default(), &value);
+        }
+        CHECK(RigExecInOpBody());
+        {
+            const RigExecVolatileRead volatileRead;
+            CHECK(!RigExecInOpBody());
+            R.GetAttribute(UsdAttribute(), UsdTimeCode::Default(), &value);
+        }
+        R.GetAttribute(UsdAttribute(), UsdTimeCode::Default(), &value);
+    }
+    CHECK(!RigExecInOpBody());
+    R.GetAttribute(UsdAttribute(), UsdTimeCode::Default(), &value);
+    CHECK(outer.load() == 2);
+    CHECK(inner.load() == 1);
+}
+
+// The volatile reads a program's bodies make, by name: the weight oracle
+// from a Constraint body and from a current-phase RevisionStatic, and the
+// stage assembly of a plugin revision bound to region values.
+std::vector<std::string>
+VolatileReaders(const RigExecBakedProgramImpl &B)
+{
+    std::vector<std::string> out;
+    for (const auto &c : B.constraints) {
+        if (!c.weightObject.IsEmpty() && c.pointsTarget.IsEmpty()) {
+            out.push_back("oracle (constraint) " + c.path.GetString());
+        }
+    }
+    for (const auto &chain : B.chains) {
+        for (const auto &revision : chain.revisions) {
+            if (revision.weightCurrentPhase && revision.weightObject >= 0) {
+                out.push_back("oracle (current phase) " +
+                              revision.moverPath.GetString());
+            }
+            if (!revision.leaves.decl.assembles) {
+                out.push_back("stage assembly " +
+                              revision.moverPath.GetString());
+            }
+        }
+        for (const auto &derived : chain.derived) {
+            if (!derived.matrixTarget &&
+                !derived.revision.leaves.decl.assembles) {
+                out.push_back("stage assembly (derived) " +
+                              derived.revision.moverPath.GetString());
+            }
+        }
+    }
+    return out;
+}
+
+struct PurityFixture {
+    std::string name;
+    std::string stage;
+    std::function<UsdStageRefPtr()> make;
+    /// The example table's frames, or empty for the stage's first frames.
+    std::string frames;
+    /// The example table's two drags, when it names them.
+    std::string controlPrim, controlAvar, operatorPrim, operatorInput;
+};
+
+// Every bakeable example in tests/exampleFixtures.cmake, then every leaf and
+// geometry fixture of this file that the table does not already name.
+std::vector<PurityFixture>
+PurityFixtures(const std::string &examples)
+{
+    std::vector<PurityFixture> out;
+    std::set<std::string> seen;
+    const auto key = [](const std::string &path) {
+        return TfNormPath(TfAbsPath(path));
+    };
+    for (const RigExecExampleFixture &row : kRigExecExampleFixtures) {
+        if (!row.bakesToday) {
+            continue;
+        }
+        PurityFixture f;
+        f.name = row.stage;
+        f.stage = examples + "/" + row.stage;
+        f.frames = row.frames;
+        f.controlPrim = row.controlPrim;
+        f.controlAvar = row.controlAvar;
+        f.operatorPrim = row.operatorPrim;
+        f.operatorInput = row.operatorInput;
+        seen.insert(key(f.stage));
+        out.push_back(std::move(f));
+    }
+    for (const Fixture &leaf : Fixtures(examples)) {
+        if (seen.insert(key(leaf.stage)).second) {
+            PurityFixture f;
+            f.name = leaf.name;
+            f.stage = leaf.stage;
+            out.push_back(std::move(f));
+        }
+    }
+    for (const GeometryFixture &geometry : GeometryFixtures(examples)) {
+        if (geometry.make || seen.insert(key(geometry.stage)).second) {
+            PurityFixture f;
+            f.name = geometry.name;
+            f.stage = geometry.stage;
+            f.make = geometry.make;
+            out.push_back(std::move(f));
+        }
+    }
+    return out;
+}
+
+std::vector<UsdTimeCode>
+PurityFrames(const PurityFixture &f, const UsdStageRefPtr &stage)
+{
+    if (f.frames.empty()) {
+        return Frames(stage);
+    }
+    std::vector<UsdTimeCode> frames;
+    for (const std::string &piece : TfStringSplit(f.frames, ",")) {
+        if (!piece.empty()) {
+            frames.push_back(UsdTimeCode(TfStringToDouble(piece)));
+        }
+    }
+    return frames;
+}
+
+// No step body reads the stage or the resolved-input overlay outside a
+// listed volatile read. Every fixture runs Baked with RIGEXEC_PURITY_AUDIT
+// set (read at Build), at its frames with no override, under the example
+// table's control and operator drags, under a drag on a solver input and on
+// a chain hop, and once after each drag is lifted; after every run the
+// program's purityViolations is read on this thread and must be 0. The
+// schedule is the entry's (RIGEXEC_BAKED_SCHEDULE): testRigExecLeaves is
+// registered serial and parallel.
+void
+TestNoBodyReadsTheStage(const std::string &examples)
+{
+    ArchSetEnv("RIGEXEC_PURITY_AUDIT", "1", /*overwrite=*/true);
+    size_t fixtures = 0, runs = 0, baked = 0;
+    std::vector<std::string> volatileRigs;
+    for (const PurityFixture &f : PurityFixtures(examples)) {
+        UsdStageRefPtr stage =
+            f.make ? f.make() : UsdStage::Open(f.stage);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        const SdfPath rig = RootOf(stage);
+        CHECK(!rig.IsEmpty());
+        if (rig.IsEmpty()) {
+            continue;
+        }
+        auto evaluator =
+            MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+        const std::vector<UsdTimeCode> frames = PurityFrames(f, stage);
+        size_t fixtureRuns = 0, fixtureBaked = 0;
+        bool reported = false;
+        const auto run = [&](const std::vector<RigExecValueOverride> &drag,
+                             UsdTimeCode t, const std::string &what) {
+            evaluator->SetInteractiveOverrides(drag);
+            const size_t generations = evaluator->GetBakedGenerationCount();
+            const RigExecRigPose pose = evaluator->Evaluate(t);
+            CHECK(pose.valid);
+            ++fixtureRuns;
+            if (evaluator->GetBakedGenerationCount() == generations + 1) {
+                ++fixtureBaked;
+            }
+            const RigExecBakedProgramImpl *B = Program(*evaluator);
+            if (!B) {
+                return;
+            }
+            CHECK(B->purityAudit);
+            const uint64_t violations =
+                B->purityViolations.count.load(std::memory_order_relaxed);
+            if (violations != 0 && !reported) {
+                reported = true;
+                std::printf("FAIL %s %s at %s: %llu body read(s) of the "
+                            "stage or the overlay\n",
+                            f.name.c_str(), what.c_str(),
+                            Text(t.GetValue()).c_str(),
+                            static_cast<unsigned long long>(violations));
+            }
+            CHECK(violations == 0);
+        };
+        for (const UsdTimeCode t : frames) {
+            run({}, t, "no override");
+        }
+        const auto dragAndLift = [&](const SdfPath &path, const char *kind) {
+            bool dragged = false;
+            for (const UsdTimeCode t : frames) {
+                const std::vector<RigExecValueOverride> drag =
+                    DragBy(stage, path, t, 0.25);
+                if (drag.empty()) {
+                    return;
+                }
+                run(drag, t, std::string(kind) + " " + path.GetString());
+                dragged = true;
+            }
+            if (dragged) {
+                run({}, frames.back(),
+                    std::string("lifted ") + kind + " " + path.GetString());
+            }
+        };
+        if (!f.controlPrim.empty()) {
+            dragAndLift(SdfPath(f.controlPrim)
+                            .AppendProperty(TfToken(f.controlAvar)),
+                        "control");
+        }
+        if (!f.operatorPrim.empty()) {
+            dragAndLift(SdfPath(f.operatorPrim)
+                            .AppendProperty(TfToken(f.operatorInput)),
+                        "operator input");
+        }
+        if (const RigExecBakedProgramImpl *B = Program(*evaluator)) {
+            const std::vector<SdfPath> solverInputs = SolverInputs(*B);
+            const std::vector<SdfPath> hops = ChainHops(*B);
+            if (!solverInputs.empty()) {
+                dragAndLift(solverInputs.front(), "solver input");
+            }
+            if (!hops.empty()) {
+                dragAndLift(hops.front(), "chain hop");
+            }
+            for (const std::string &reader : VolatileReaders(*B)) {
+                volatileRigs.push_back(f.name + ": " + reader);
+            }
+        }
+        evaluator->ClearInteractiveOverrides();
+        // A fixture whose every run fell back to the dynamic path ran no
+        // body, and would pass vacuously.
+        CHECK(fixtureBaked > 0);
+        std::printf("purity %s: %zu run(s), %zu baked\n", f.name.c_str(),
+                    fixtureRuns, fixtureBaked);
+        ++fixtures;
+        runs += fixtureRuns;
+        baked += fixtureBaked;
+    }
+    std::printf("purity: %zu fixture(s), %zu run(s), %zu baked; volatile "
+                "readers (inside RigExecVolatileRead):\n",
+                fixtures, runs, baked);
+    for (const std::string &reader : volatileRigs) {
+        std::printf("    %s\n", reader.c_str());
+    }
+    // The volatile scope is exercised: some fixture reaches the oracle.
+    CHECK(!volatileRigs.empty());
+}
+
 }  // namespace
 
 int
@@ -1997,6 +2316,9 @@ main(int argc, char **argv)
     TestADragUpstreamOfAMoverInputReachesItsLeaf(examples);
     TestAnUndeclaredReadIsNamed(examples);
     TestRevisionLeavesCoverTheExporterEnumeration(examples);
+    TestTheBodyMarkCountsReadsUnderIt();
+    TestAFrozenCloneKeepsTheBuildSettings(examples);
+    TestNoBodyReadsTheStage(examples);
     std::printf("testRigExecLeaves: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

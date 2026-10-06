@@ -183,10 +183,16 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((sphereWeight, "RigExecSphereWeight"))
     ((planeWeight, "RigExecPlaneWeight"))
     ((curveWeight, "RigExecCurveWeight"))
+    ((targetPointsKey, "frozenWeight:targetPoints"))
+    ((samplePointsKey, "frozenWeight:samplePoints"))
+    ((curvePointsKey, "frozenWeight:curvePoints"))
+    ((combineTargetCountKey, "frozenWeight:combineTargetCount"))
 );
 
+/// \p name is one of the frozenWeight: keys of _frozenWeightTokens, so the
+/// worker's weight step builds no token from text.
 SdfPath
-_FrozenWeightArrayKey(const SdfPath &objectPath, const char *role);
+_FrozenWeightArrayKey(const SdfPath &objectPath, const TfToken &name);
 
 SdfPath
 _FrozenWireInputKey(const SdfPath &moverPath, const char *role);
