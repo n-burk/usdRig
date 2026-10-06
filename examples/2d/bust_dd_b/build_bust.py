@@ -8,8 +8,8 @@ writes, next to this file,
 
     textures/*.png            the painted art (one RGBA texture per layer)
     bust_dd_b_rig.usda        the character at rest: textured art meshes + the rig
-    bust_dd_b_anim.usda       the 180-frame performance (control avars only)
-    bust_dd_b_sweep.usda      the 120-frame parameter sweep for the rig reveal
+    bust_dd_b_anim.usda       the 240-frame performance (control avars only)
+    bust_dd_b_sweep.usda      the 320-frame parameter sweep for the rig reveal
 
 Deterministic. Nothing is baked: every frame is evaluated live by RigExec
 from the control avars.
@@ -26,9 +26,9 @@ RIG STRUCTURE
   parameters, computed by RigExecFloatMathMover chains.
 * The WARP DEFORMER for the head angle is a RigExecLatticeMover (a Bernstein
   cage whose keyforms at +-15/30 turn and +-10/20 nod are FITTED to a
-  pseudo-3D turn of the whole head, see turn.py); the part of the target the
-  cage cannot reach -- the outline redraw, the far eye squeezing into the
-  silhouette -- is a per-mesh residual keyform on the same parameter. The
+  part-specific projections in turn.py); the part of the target the
+  cage cannot reach -- the jaw redraw, coherent eye planes and hair
+  volumes -- is a per-mesh residual keyform on the same parameter. The
   cage's z axis spans the layers' depths, so the one warp gives every layer
   its own parallax. A second cage around the torso carries breathing and
   the body turn.
@@ -51,6 +51,7 @@ sys.path.insert(0, HERE)
 import art_body as AB  # noqa: E402
 import art_face as AF  # noqa: E402
 import art_hair as AH  # noqa: E402
+import art_limbs as AL  # noqa: E402
 import design as D  # noqa: E402
 import paint as P  # noqa: E402
 import parts as PT  # noqa: E402
@@ -77,8 +78,8 @@ T = Sdf.ValueTypeNames
 HEAD_CAGE_LO = np.array([-14.5, -13.0, -3.1])
 HEAD_CAGE_HI = np.array([14.5, 14.5, 1.0])
 HEAD_CAGE_DIV = (6, 7, 3)
-BODY_CAGE_LO = np.array([-24.0, -38.0, -2.1])
-BODY_CAGE_HI = np.array([24.0, -12.0, -0.8])
+BODY_CAGE_LO = np.array([-40.0, -61.0, -2.1])
+BODY_CAGE_HI = np.array([40.0, -12.0, -0.8])
 BODY_CAGE_DIV = (6, 5, 2)
 
 # which layers go into which mesh (one mesh per mover stack)
@@ -93,11 +94,15 @@ MESHES = [
     ("Earring", ["Earring"]),
     ("Eye_R", ["Sclera_R", "LidShadow_R", "Iris_R", "Highlight_R", "EyeMask_R", "LowerLid_R", "Crease_R", "Lash_R"]),
     ("Eye_L", ["Sclera_L", "LidShadow_L", "Iris_L", "Highlight_L", "EyeMask_L", "LowerLid_L", "Crease_L", "Lash_L"]),
-    ("Mouth", ["MouthInside", "Tongue", "Teeth", "LowerLip", "LowerEdge", "MouthLine"]),
+    ("Mouth", ["MouthInside", "Tongue", "Teeth", "LowerLip", "LowerEdge", "MouthLine", "TongueOut"]),
     ("Brow_R", ["Brow_R"]),
     ("Brow_L", ["Brow_L"]),
     ("Hair", ["TuckL", "Ahoge", "Crown", "LooseL", "LockR_A", "LockR_B", "F4", "F5", "F3", "F2", "F1", "Stray", "Pins"]),
 ]
+for _tag in ("L", "R"):
+    MESHES += [("Arm_" + _tag, ["UpperSleeve_" + _tag, "ForeSleeve_" + _tag]),
+               ("Hand_" + _tag, [n + "_" + _tag for n in AL.FINGERS] + ["Palm_" + _tag] +
+                [n + "Fold_" + _tag for n in AL.FOLDED_PATHS])]
 HEAD_MESHES = ["BackHair", "Face", "Earring", "Eye_R", "Eye_L", "Mouth", "Brow_R", "Brow_L", "Hair"]
 
 # depth of each layer in front of (+) / behind (-) the head surface: the
@@ -127,6 +132,8 @@ def channel_specs():
         C.append(("Wide_" + tag, [(1.0, {e + "wide": 1.0})], ("pos", ctl, "ty")))
         C.append(("EyeSmile_" + tag, [(1.0, {e + "smile": 1.0})], ("pos", ctl, "tx")))
         C.append(("LidFlat_" + tag, [(1.0, {e + "flat": 1.0})], ("pos", ctl, "tz")))
+        C.append(("BlinkFlat_" + tag, "corr", [{e + "close": 1.0}, {e + "flat": 1.0}],
+                  ("prod", (-1, ctl, "ty", 1.0), (1, ctl, "tz", 1.0))))
         C.append(("BlinkSmile_" + tag, "corr", [{e + "close": 1.0}, {e + "smile": 1.0}],
                   ("prod", (-1, ctl, "ty", 1.0), (1, ctl, "tx", 1.0))))
         b = "brow%s." % tag
@@ -140,8 +147,13 @@ def channel_specs():
     C.append(("Look_U", [(1.0, {"look.u": 1.0})], ("pos", "Look", "ty")))
     C.append(("Look_D", [(1.0, {"look.d": 1.0})], ("neg", "Look", "ty")))
     C.append(("Shrink", [(1.0, {"iris.shrink": 1.0})], ("pos", "Look", "tz")))
-    C.append(("Open", [(0.5, {"mouth.open": 0.5}), (1.0, {"mouth.open": 1.0}), (1.4, {"mouth.open": 1.4})],
+    C.append(("Open", [(0.15, {"mouth.open": 0.15}), (0.5, {"mouth.open": 0.5}),
+                       (1.0, {"mouth.open": 1.0}), (1.5, {"mouth.open": 1.5})],
               ("neg", "Mouth", "ty")))
+    C.append(("TongueOut", [(1.0, {"mouth.tongue": 1.0})], ("pos", "Tongue", "ty")))
+    C.append(("LipFullness", [(1.0, {"mouth.lipThick": 1.0})], ("pos", "Lip", "ty")))
+    C.append(("Teeth", "corr", [{"mouth.open": 1.0}, {"mouth.teeth": 1.0}],
+              ("prod", (-1, "Mouth", "ty", 1.5), (1, "Teeth", "ty", 1.0))))
     C.append(("Wide", [(1.0, {"mouth.wide": 1.0})], ("pos", "Mouth", "tx")))
     C.append(("Round", [(1.0, {"mouth.round": 1.0})], ("neg", "Mouth", "tx")))
     C.append(("Smile", [(20.0, {"mouth.smile": 1.0})], ("pos", "Mouth", "rz")))
@@ -296,7 +308,7 @@ class Builder(object):
         s.SetMetadata("upAxis", "Y")
         s.SetMetadata("metersPerUnit", 0.01)
         s.SetStartTimeCode(1)
-        s.SetEndTimeCode(180)
+        s.SetEndTimeCode(240)
         s.SetTimeCodesPerSecond(FPS)
         s.SetFramesPerSecond(FPS)
         root = UsdGeom.Xform.Define(s, ROOT)
@@ -313,9 +325,10 @@ class Builder(object):
         face_parts, face_tex = AF.build(fringe_shadow=AH.fringe_shadow_fn(pcs))
         body_parts, body_tex = AB.build(cast=AH.fringe_shadow_fn(pcs, names=("LockR_A", "LockR_B"),
                                                                   offset=(0.45, -0.55)))
-        self.parts = {p.name: p for p in hair_parts + face_parts + body_parts}
+        limb_parts, limb_tex = AL.build()
+        self.parts = {p.name: p for p in hair_parts + face_parts + body_parts + limb_parts}
         self.tex = {}
-        for d in (hair_tex, face_tex, body_tex):
+        for d in (hair_tex, face_tex, body_tex, limb_tex):
             self.tex.update(d)
         self.log("  painted %d layers, %d textures in %.1fs" % (len(self.parts), len(self.tex),
                                                                 __import__("time").time() - t0))
@@ -324,7 +337,7 @@ class Builder(object):
         d = os.path.join(HERE, "textures")
         os.makedirs(d, exist_ok=True)
         for name, t in sorted(self.tex.items()):
-            Image.fromarray(t.rgba, "RGBA").save(os.path.join(d, name + ".png"), optimize=True)
+            Image.fromarray(t.rgba, "RGBA").save(os.path.join(d, name + ".png"), compress_level=6)
 
     def materials(self):
         s = self.stage
@@ -543,6 +556,9 @@ class Builder(object):
             "Brow_R_ctl": ((4.1, 2.4), "diamond", (0.42, 0.42, 0.42), (0, 0, 0)),
             "Brow_L_ctl": ((-4.1, 2.4), "diamond", (0.42, 0.42, 0.42), (0, 0, 0)),
             "Mouth_ctl": ((0.08, -6.9), "sphere", (0.5, 0.5, 0.5), (0, 0, 2.2)),
+            "Teeth_ctl": ((-2.8, -7.4), "diamond", (0.3, 0.3, 0.3), (0, 0, 0)),
+            "Tongue_ctl": ((0.08, -8.8), "diamond", (0.3, 0.3, 0.3), (0, 0, 0)),
+            "Lip_ctl": ((2.8, -7.4), "diamond", (0.3, 0.3, 0.3), (0, 0, 0)),
             "Fx_ctl": ((8.4, 4.6), "diamond", (0.5, 0.5, 0.5), (0, 0, 0)),
         }
         for name, (pos, shape, sc, off) in face.items():
@@ -559,6 +575,8 @@ class Builder(object):
                     "Brow_R": head_ctl + "/Brow_R_ctl", "Brow_L": head_ctl + "/Brow_L_ctl",
                     "Mouth": head_ctl + "/Mouth_ctl", "Fx": head_ctl + "/Fx_ctl",
                     "Torso": body_ctl + "/Torso_ctl", "Head": head_ctl, "Neck": neck_ctl, "Body": body_ctl}
+        for name in ("Teeth", "Tongue", "Lip"):
+            self.ctl[name] = head_ctl + "/" + name + "_ctl"
         # hair chains, nested under the head handle
         scope(s, JNT + "/Hair")
         self.chains = {}
@@ -568,8 +586,8 @@ class Builder(object):
             pts, ts = AH.chain_points(c)
             self.chain(name, pts, head_ctl, H, JNT + "/Hair", (0, 0), big=name.startswith("Lock"))
             self.chains[name]["ts"] = ts
-        for name, pts in (("BackL", [(-8.9, 4.0), (-10.2, -4.0), (-11.6, -12.0), (-13.4, -20.0)]),
-                          ("BackR", [(9.2, 4.0), (10.6, -4.0), (11.9, -12.0), (13.6, -20.0)])):
+        for name, pts in (("BackL", [(-8.9, 4.0), (-9.5, -3.0), (-10., -9.0), (-8.5, -15.0)]),
+                          ("BackR", [(9.2, 4.0), (9.8, -3.0), (10.1, -9.0), (8.7, -15.0)])):
             self.chain(name, pts, head_ctl, H, JNT + "/Hair", (0, 0), big=True)
         self.chain("Earring", [D.EARRING_TOP, (D.EARRING_TOP[0], D.EARRING_TOP[1] - 1.5)], head_ctl, H,
                    JNT + "/Hair", (0, 0), color=(1.0, 0.8, 0.3), jcolor=(1.0, 0.75, 0.3))
@@ -582,6 +600,99 @@ class Builder(object):
             pts = [sp[0], sp[16], sp[30]]
             self.chain("Tail" + tag, pts, body_ctl, B, JNT + "/Ribbon", (0, 0), color=(0.5, 0.75, 1.0),
                        jcolor=(0.4, 0.6, 1.0))
+
+    def articulation(self):
+        """Parent-relative arm and finger chains; independent of hair dynamics."""
+        self.limbs = {}
+
+        def chain(name, labels, points, cp, jp, origin):
+            controls, joints = [], []
+            prev = np.array(origin)
+            for label, point in zip(labels, points):
+                local = np.asarray(point) - prev
+                cp += "/" + label + "_ctl"
+                jp += "/" + label
+                self.control(cp, (*local, 0), "sphere", (.38, .38, .38), color=(.36, .80, .94))
+                self.joint(jp, (*local, 0), .18, (.36, .80, .94))
+                controls.append(cp)
+                joints.append(jp)
+                self.ctl[label] = cp
+                prev = point
+            self.fk(name, controls, joints)
+            result = dict(controls=controls, joints=joints, pts=np.asarray(points))
+            self.limbs[name] = result
+            return result
+
+        for side, tag in ((-1, "L"), (1, "R")):
+            arm = chain("Arm_" + tag, [n + "_" + tag for n in ("Shoulder", "Elbow", "Hand")],
+                        AL.arm_points(side), self.body_ctl, self.body_j, D.BODY_PIVOT)
+            for finger in AL.FINGERS:
+                chain(finger + "_" + tag, [finger + "_" + tag + "_%d" % i for i in range(3)],
+                      AL.finger_points(side, finger)[:3], arm["controls"][-1], arm["joints"][-1], arm["pts"][-1])
+
+    def hand_keyforms(self):
+        for side, tag in ((-1, "L"), (1, "R")):
+            name = "Hand_" + tag
+            rest = self.mesh[name]["rest"]
+            for sign, suffix in ((1, "R"), (-1, "L")):
+                ks = []
+                for angle in (15, 35):
+                    k = rest.copy()
+                    k[:, :2] = AL.turn_points(rest[:, :2], side, sign * angle)
+                    ks.append((angle, k))
+                channel = "PalmTurn_" + suffix
+                self.blend_channel(name, channel, ks, rest)
+                self.channel_src[(name, channel)] = ("pos" if sign > 0 else "neg", name, "turn")
+            for finger in AL.FINGERS:
+                a, b = self.mesh[name]["ranges"][finger + "_" + tag]
+                ks = []
+                for amount in (.25, .5, .65, .8, .9, 1.0):
+                    k = rest.copy()
+                    k[a:b, :2] = AL.curl_points(rest[a:b, :2], side, finger, amount)
+                    if finger in AL.FOLDED_PATHS:
+                        fold = finger + "Fold_" + tag
+                        fa, fb = self.mesh[name]["ranges"][fold]
+                        k[fa:fb, :2] = AL.folded_points(self.parts[fold].uv_pts, side, finger, amount)
+                    ks.append((amount, k))
+                ch = "Curl_" + finger
+                self.blend_channel(name, ch, ks, rest)
+                self.channel_src[(name, ch)] = ("sum", (name, "curl"), (finger + "_" + tag + "_0", "curl"))
+
+    def limb_weights(self, mname):
+        tag = mname[-1]
+        arm = self.limbs["Arm_" + tag]
+        m = self.mesh[mname]
+        n = len(m["rest"])
+        idx = np.zeros((n, 3), dtype=np.int64)
+        wts = np.zeros((n, 3))
+        if mname.startswith("Arm"):
+            x, y = m["rest"][:, 0], m["rest"][:, 1]
+            glue = (1-P.smooth(-18.0, -20.5, y)) * (1-P.smooth(11., 14., np.abs(x))) * .65
+            idx[:] = [0, 1, 2]
+            wts[:, 1] = 1
+            a, b = m["ranges"]["UpperSleeve_"+tag]
+            wts[a:b, 0] = glue[a:b]
+            wts[a:b, 1] = 1-glue[a:b]
+            a, b = m["ranges"]["ForeSleeve_"+tag]
+            wts[a:b] = [0, 0, 1]
+            return [self.body_j] + arm["joints"][:2], idx, wts
+        infl = [arm["joints"][-1]]
+        wts[:, 0] = 1
+        for finger in AL.FINGERS:
+            a, b = m["ranges"][finger + "_" + tag]
+            f = self.limbs[finger + "_" + tag]
+            start = len(infl)
+            infl += f["joints"]
+            side = -1 if tag == "L" else 1
+            t = spine_param(m["rest"][a:b, :2], AL.finger_points(side, finger))
+            W = chain_bone_weights(t, [0, .40, .76])
+            idx[a:b] = np.arange(start, start+3)
+            wts[a:b] = W
+            if finger in AL.FOLDED_PATHS:
+                fa, fb = m["ranges"][finger + "Fold_" + tag]
+                idx[fa:fb, 0] = start
+                wts[fa:fb] = [1, 0, 0]
+        return infl, idx, wts
 
     def blend_channel(self, mesh, channel, samples, rest):
         s = self.stage
@@ -651,9 +762,9 @@ class Builder(object):
         m = self.mesh[mname]
         P3 = m["rest"]
         fn = TU.turn_displacement if kind == "turn" else TU.nod_displacement
-        d = fn(P3[:, :2], m["offsets"], ang)
         out = P3.copy()
-        out[:, :2] += d
+        for part, (a, b) in m["ranges"].items():
+            out[a:b, :2] = TU.project_part(P3[a:b, :2], part, kind, ang)
         if mname == "Face":
             # the contour line is rebuilt along the turned outline, so its
             # width holds instead of squeezing with the far cheek
@@ -670,7 +781,7 @@ class Builder(object):
         scope(s, BI + "/HeadCage")
         P_all = np.vstack([self.mesh[m]["rest"] for m in HEAD_MESHES])
         B_all = bernstein_basis(P_all, HEAD_CAGE_LO, HEAD_CAGE_HI, HEAD_CAGE_DIV)
-        # weight: the face features matter most; the long hair's lower half little
+        # Weight facial features most strongly; peripheral hair can deform more.
         w = np.concatenate([np.where(self.mesh[m]["rest"][:, 1] < -13.0, 0.15, 1.0) *
                             (2.0 if m in ("Face", "Eye_R", "Eye_L", "Mouth", "Brow_R", "Brow_L") else 1.0)
                             for m in HEAD_MESHES])
@@ -767,6 +878,10 @@ class Builder(object):
                 math_mover("Times", "multiply", conn=avar(cb, ab))
                 if sb * scale != 1.0:
                     math_mover("Scale", "multiply", sb * scale)
+            elif src[0] == "sum":
+                math_mover("Read", "add", conn=avar(*src[1]))
+                math_mover("Add", "add", conn=avar(*src[2]))
+                math_mover("Clamp", "clamp", lo=0, hi=1)
             # the LAST child runs first
             s.GetPrimAtPath(base).SetChildrenReorder(order[::-1])
 
@@ -783,33 +898,30 @@ class Builder(object):
             m = mover(path, "RigExecLatticeMover")
             attr(m, "rigExec:basis", T.Token, "bernstein", uniform=True)
             rel(m, "rigExec:cage", [CAGES + "/" + cage], phase="final")
-            attr(m, "rigExec:cageReadPhase", T.Token, "final", uniform=True)
             attr(m, "rigExec:divisions", T.Int3, Gf.Vec3i(*div))
             rel(m, "rigExec:moves", [target + ".points"])
             return m
 
         def matrix(path, target, joint):
             m = mover(path, "RigExecMatrixMover")
-            rel(m, "rigExec:transform", [joint])
-            attr(m, "rigExec:transformReadPhase", T.Token, "final", uniform=True)
+            rel(m, "rigExec:transform", [joint], phase="final")
             rel(m, "rigExec:moves", [target + ".points"])
             return m
 
         def skin(path, target, influences, idx, wts, esize):
             m = mover(path, "RigExecSkinMover")
-            rel(m, "rigExec:influences", influences)
+            rel(m, "rigExec:influences", influences, phase="final")
             attr(m, "rigExec:jointIndices", T.IntArray, Vt.IntArray.FromNumpy(idx.reshape(-1).astype(np.int32)))
             attr(m, "rigExec:jointWeights", T.FloatArray,
                  Vt.FloatArray.FromNumpy(np.round(wts.reshape(-1), 4).astype(np.float32)))
             attr(m, "rigExec:elementSize", T.Int, esize, uniform=True)
             attr(m, "rigExec:skinningMethod", T.Token, "classicLinear", uniform=True)
-            attr(m, "rigExec:transformReadPhase", T.Token, "final", uniform=True)
             rel(m, "rigExec:moves", [target + ".points"])
             return m
 
-        def shapes(path, target, mesh):
+        def shapes(path, target, mesh, channels=None):
             m = mover(path, "RigExecBlendShapeMover")
-            rel(m, "rigExec:blendInputs", ["%s/%s/%s" % (BI, mesh, ch) for ch in self.channels[mesh]])
+            rel(m, "rigExec:blendInputs", ["%s/%s/%s" % (BI, mesh, ch) for ch in (self.channels[mesh] if channels is None else channels)])
             rel(m, "rigExec:moves", [target + ".points"])
             return m
 
@@ -824,12 +936,19 @@ class Builder(object):
             scope(s, base)
             tgt = GEOM + "/" + mname
             run = []            # in execution order
-            if mname in self.channels:
-                shapes(base + "/Keyforms", tgt, mname)
+            turn_channels = [ch for ch in self.channels.get(mname, []) if ch in TURN_SRC] if mname in HEAD_MESHES else []
+            expression_channels = [ch for ch in self.channels.get(mname, []) if ch not in turn_channels]
+            if expression_channels:
+                shapes(base + "/Keyforms", tgt, mname, expression_channels)
                 run.append("Keyforms")
             if mname in HEAD_MESHES:
                 lattice(base + "/HeadWarp", tgt, "HeadCage", HEAD_CAGE_DIV)
                 run.append("HeadWarp")
+                # The lattice and residual both add bind-space deltas.
+                # Keep the authored redraw distinct from expression channels.
+                if turn_channels:
+                    shapes(base + "/TurnRefine", tgt, mname, turn_channels)
+                    run.append("TurnRefine")
             if mname in ("Face", "Eye_R", "Eye_L", "Mouth", "Brow_R", "Brow_L"):
                 matrix(base + "/HeadTilt", tgt, self.head_j)
                 run.append("HeadTilt")
@@ -857,6 +976,11 @@ class Builder(object):
                 infl, idx, wts = self.ribbon_weights()
                 skin(base + "/RibbonSkin", tgt, infl, idx, wts, idx.shape[1])
                 run += ["BodyWarp", "RibbonSkin"]
+            elif mname.startswith(("Arm_", "Hand_")):
+                lattice(base + "/BodyWarp", tgt, "BodyCage", BODY_CAGE_DIV)
+                infl, idx, wts = self.limb_weights(mname)
+                skin(base + "/LimbSkin", tgt, infl, idx, wts, 3)
+                run += ["BodyWarp", "LimbSkin"]
             s.GetPrimAtPath(base).SetChildrenReorder(run[::-1])
             order.append(mname)
         for name, cage, div, joint in (("HeadLatticeWire", "HeadCage", HEAD_CAGE_DIV, self.head_j),
@@ -1001,20 +1125,24 @@ def build_rig(path, log=print):
     b.meshes()
     b.cages()
     b.lattice_wire("HeadLatticeWire", (-11.0, -11.5), (11.0, 12.5), 9, 10, 0.08, (0.18, 0.80, 1.0))
-    b.lattice_wire("BodyLatticeWire", (-22.0, -34.0), (22.0, -15.0), 11, 6, -0.75, (0.55, 0.45, 1.0))
+    b.lattice_wire("BodyLatticeWire", (-22.0, -58.0), (22.0, -15.0), 11, 6, -0.75, (0.55, 0.45, 1.0))
     b.skeleton()
+    b.articulation()
     b.expression_channels()
+    b.hand_keyforms()
     b.head_turn()
     b.body_cage_channels()
     b.wiring()
     b.movers()
+    import interaction
+    interaction.author(b)
     b.save()
     for k, (mean, mx) in sorted(b.fit_report.items()):
         log("  head cage fit %-12s mean %.3f  max %.3f" % (k, mean, mx))
     return b
 
 
-BACKDROP_BOX = (-50.0, -36.0, 50.0, 22.0)
+BACKDROP_BOX = (-50.0, -62.0, 50.0, 22.0)
 
 
 def paint_backdrop():
@@ -1044,7 +1172,7 @@ def build_backdrop(path):
     t = PT.finish(L, bleed=2)
     d = os.path.join(HERE, "textures")
     os.makedirs(d, exist_ok=True)
-    Image.fromarray(t.rgba[..., :3], "RGB").save(os.path.join(d, "Backdrop.png"), optimize=True)
+    Image.fromarray(t.rgba[..., :3], "RGB").save(os.path.join(d, "Backdrop.png"), compress_level=6)
     stage = Usd.Stage.CreateNew(path)
     stage.SetMetadata("upAxis", "Y")
     stage.SetMetadata("metersPerUnit", 0.01)
@@ -1088,6 +1216,11 @@ def main():
     b = build_rig(rig_path)
     perf.write_all(b, HERE, os.path.basename(rig_path))
     build_backdrop(os.path.join(HERE, "bust_dd_b_backdrop.usda"))
+    # Canonical text endings keep USD writer-version whitespace out of diffs.
+    from pathlib import Path
+    for name in ("rig", "anim", "sweep", "backdrop"):
+        path = Path(HERE) / ("bust_dd_b_" + name + ".usda")
+        path.write_text(path.read_text().rstrip() + "\n")
 
 
 if __name__ == "__main__":

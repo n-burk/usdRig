@@ -58,12 +58,6 @@ add_library(rigExecMath STATIC
     libs/rigExecMath/geometryKernels.cpp
     libs/rigExecMath/weightFields.cpp
     libs/rigExecMath/simdKernels.cpp
-    libs/rigExecMath/curvenet.cpp
-    libs/rigExecMath/curvenetWeights.cpp
-    libs/rigExecMath/curvenetAdjustments.cpp
-    libs/rigExecMath/sparseSolve.cpp
-    libs/rigExecMath/cutMesh.cpp
-    libs/rigExecMath/profileMover.cpp
     libs/rigExecMath/dualQuat.cpp
     libs/rigExecMath/splineIk.cpp
     libs/rigExecMath/rbf.cpp
@@ -82,19 +76,17 @@ add_library(rigExec SHARED
     libs/rigExec/moverKernels.cpp
     libs/rigExec/solverKernels.cpp
     libs/rigExec/weightPackets.cpp
-    libs/rigExec/curvenetWeightComputations.cpp
     libs/rigExec/movers/moverRegistry.cpp
     libs/rigExec/movers/matrixMover.cpp
     libs/rigExec/movers/skinMover.cpp
     libs/rigExec/movers/blendShapeMover.cpp
     libs/rigExec/movers/smoothMover.cpp
     libs/rigExec/movers/deltaMushMover.cpp
+    libs/rigExec/movers/wrinkleMover.cpp
     libs/rigExec/movers/volumeCorrectMover.cpp
     libs/rigExec/movers/latticeMover.cpp
     libs/rigExec/movers/surfaceMover.cpp
     libs/rigExec/movers/curveMover.cpp
-    libs/rigExec/movers/curvenetMover.cpp
-    libs/rigExec/movers/curvenetAdjusterMover.cpp
     libs/rigExec/movers/mathMovers.cpp
     libs/rigExec/moverGraph.cpp
     libs/rigExec/tapSet.cpp
@@ -139,6 +131,9 @@ target_link_libraries(rigExec PUBLIC
     plug sdf usd usdGeom usdSkel work
     exec execUsd ef vdf
 )
+
+add_library(rigExec::rigExec ALIAS rigExec)
+include(cmake/rigExecMoverPlugin.cmake)
 
 add_library(rigExecStandalone SHARED
     libs/rigExecStandalone/sceneDb.cpp
@@ -198,7 +193,8 @@ add_library(rigExecBinary STATIC
     libs/rigExecBinary/pose.cpp
     libs/rigExecBinary/geometry.cpp
     libs/rigExecBinary/inputTable.cpp
-    libs/rigExecBinary/propertyChains.cpp)
+    libs/rigExecBinary/propertyChains.cpp
+    libs/rigExecBinary/external.cpp)
 target_include_directories(rigExecBinary PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -223,6 +219,9 @@ target_include_directories(rigExecRuntime PUBLIC
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExecRuntime PUBLIC rigExecBinary)
 set_target_properties(rigExecRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Installed names, so a mover plugin's tests can export and replay its rigs
+# the same way inside this build and against an installed SDK.
+add_library(rigExec::rigExecRuntime ALIAS rigExecRuntime)
 if (MSVC)
     target_compile_options(rigExecRuntime PRIVATE /fp:precise)
 else ()
@@ -241,6 +240,7 @@ target_include_directories(rigExecBake PUBLIC
 target_link_libraries(rigExecBake PUBLIC
     rigExec
     rigExecBinary)
+add_library(rigExec::rigExecBake ALIAS rigExecBake)
 
 add_executable(rigExecBakeTool tools/rigExecBake.cpp)
 set_target_properties(rigExecBakeTool PROPERTIES OUTPUT_NAME rigExecBake)
@@ -261,6 +261,14 @@ endif()
 option(RIGEXEC_BUILD_TESTS "Build the RigExec test and probe executables"
        ${_rigexec_tests_default})
 
+# The USD install the tests RUN against: its bin/lib go on the test
+# PATH, and RIGEXEC_USD_INSTALL points the Python helpers at its
+# site-packages. This is USD_INSTALL_DIR unless that is a CMake shim
+# rather than a real install (as with the Houdini build, where the
+# shim lives in cmake/houdini but the binaries come from HOUDINI_ROOT).
+set(RIGEXEC_TEST_USD_DIR "${USD_INSTALL_DIR}"
+    CACHE PATH "USD install whose binaries the tests run against")
+
 
 if (RIGEXEC_BUILD_TESTS)
 enable_testing()
@@ -271,7 +279,30 @@ set(_rigexec_schema_resource_define
 set(_rigexec_imaging_resource_define
     RIGEXEC_IMAGING_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecImaging/resources")
 
+add_subdirectory(tests/externalMovers)
+add_executable(testRigExecExternalMovers tests/testRigExecExternalMovers.cpp)
+target_link_libraries(testRigExecExternalMovers PRIVATE
+    rigExec rigExecRigging rigExecBake rigExecRuntime usd usdGeom plug)
+add_dependencies(testRigExecExternalMovers testExternalMover)
+add_test(NAME testRigExecExternalMovers COMMAND testRigExecExternalMovers
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+    "$<TARGET_GENEX_EVAL:testExternalMover,$<TARGET_PROPERTY:testExternalMover,RIGEXEC_PLUGIN_RESOURCE_DIR>>")
+
 add_executable(testRigExecMath tests/testRigExecMath.cpp)
+add_executable(testRigExecWrinkleMath tests/testRigExecWrinkleMath.cpp)
+target_link_libraries(testRigExecWrinkleMath PRIVATE rigExecMath)
+add_test(NAME testRigExecWrinkleMath COMMAND testRigExecWrinkleMath)
+add_executable(testRigExecWrinkle tests/testRigExecWrinkle.cpp)
+target_link_libraries(testRigExecWrinkle PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime)
+add_test(NAME testRigExecWrinkle COMMAND testRigExecWrinkle
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+    "${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec")
+set_tests_properties(testRigExecWrinkle PROPERTIES FIXTURES_SETUP WrinkleBinary)
+add_executable(testRigExecWrinkleRuntime tests/testRigExecWrinkleRuntime.cpp)
+target_link_libraries(testRigExecWrinkleRuntime PRIVATE rigExecRuntime)
+add_test(NAME testRigExecWrinkleRuntime COMMAND testRigExecWrinkleRuntime
+    "${CMAKE_CURRENT_BINARY_DIR}/wrinkle_test.rigexec")
+set_tests_properties(testRigExecWrinkleRuntime PROPERTIES FIXTURES_REQUIRED WrinkleBinary)
 add_executable(testRigExecDeltaMush tests/testRigExecDeltaMush.cpp)
 target_link_libraries(testRigExecDeltaMush PRIVATE rigExec rigExecRigging rigExecBake rigExecRuntime)
 add_test(NAME testRigExecDeltaMush COMMAND testRigExecDeltaMush "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -610,21 +641,6 @@ target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecPack PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecPack COMMAND testRigExecPack)
 
-add_executable(testRigExecCurvenet tests/testRigExecCurvenet.cpp)
-target_link_libraries(testRigExecCurvenet PRIVATE rigExecMath)
-add_test(NAME testRigExecCurvenet COMMAND testRigExecCurvenet)
-
-add_executable(testRigExecCurvenetAdjustments tests/testRigExecCurvenetAdjustments.cpp)
-target_link_libraries(testRigExecCurvenetAdjustments PRIVATE rigExecMath)
-add_test(NAME testRigExecCurvenetAdjustments COMMAND testRigExecCurvenetAdjustments)
-
-add_executable(testRigExecCurvenetAdjuster tests/testRigExecCurvenetAdjuster.cpp)
-target_link_libraries(testRigExecCurvenetAdjuster PRIVATE rigExec rigExecRigging)
-target_compile_definitions(testRigExecCurvenetAdjuster PRIVATE ${_rigexec_schema_resource_define})
-add_test(NAME testRigExecCurvenetAdjuster COMMAND testRigExecCurvenetAdjuster)
-rigexec_add_baked_parity_test(testRigExecCurvenetAdjuster
-    REQUIRE_BAKE CONE_VERIFY)
-
 add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
 target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)
 add_test(NAME testRigExecWeightFields COMMAND testRigExecWeightFields)
@@ -764,6 +780,8 @@ add_test(NAME testRigExecWeightOverlay COMMAND testRigExecWeightOverlay
 
 add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
+target_compile_definitions(testRigExecMoverGraph PRIVATE
+    ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 
 # The epoch-fixed skin layout: what has to invalidate it, and what Compile
@@ -1001,7 +1019,7 @@ function(rigexec_add_reference_test name)
     endif()
 endfunction()
 foreach(_suite testRigExecBackgroundScheduler testRigExecConstraints
-               testRigExecCurvenetAdjuster testRigExecFrameCacheSparsity
+               testRigExecFrameCacheSparsity
                testRigExecInteractive testRigExecPoseInterpolator)
     rigexec_add_reference_test(${_suite})
 endforeach()
@@ -1339,6 +1357,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testCacheStripPanel
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_cache_strip_panel.py")
+    add_test(NAME testUsdviewFrameCacheDriver
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_usdview_frame_cache.py")
     add_test(NAME testImagingHandle
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_imaging_handle.py")
@@ -1370,14 +1391,15 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
                          testGraphModel testGraphScreen testCacheStripModel
-                         testCacheStripPanel testImagingHandle
+                         testCacheStripPanel testUsdviewFrameCacheDriver
+                         testImagingHandle
                          testSessionState)
         set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
             "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
-            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+            "RIGEXEC_USD_INSTALL=${RIGEXEC_TEST_USD_DIR}")
     endforeach()
     rigexec_add_digest_gate_test(testRigExecStageEdits
         ${Python3_EXECUTABLE}
@@ -1394,11 +1416,11 @@ if (RIGEXEC_BUILD_USDNOODLES AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s . -p "test*.py"
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/python/UsdNoodles/testenv")
     set_tests_properties(testUsdNoodles PROPERTIES ENVIRONMENT
-        "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+        "RIGEXEC_USD_INSTALL=${RIGEXEC_TEST_USD_DIR}")
     file(GLOB _rigexec_usd_site_dirs LIST_DIRECTORIES true
-        "${USD_INSTALL_DIR}/Lib/site-packages"
-        "${USD_INSTALL_DIR}/lib/python*/site-packages"
-        "${USD_INSTALL_DIR}/lib/python")
+        "${RIGEXEC_TEST_USD_DIR}/Lib/site-packages"
+        "${RIGEXEC_TEST_USD_DIR}/lib/python*/site-packages"
+        "${RIGEXEC_TEST_USD_DIR}/lib/python")
     foreach(_rigexec_usd_site_dir IN LISTS _rigexec_usd_site_dirs)
         if (IS_DIRECTORY "${_rigexec_usd_site_dir}/pxr")
             set_property(TEST testUsdNoodles APPEND PROPERTY
@@ -1412,25 +1434,38 @@ if (RIGEXEC_BUILD_USDNOODLES AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         "PYTHONPATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/python/UsdNoodles/testenv")
 endif()
 
+# External repositories supply their own CMakeLists and register plugin targets.
+set(RIGEXEC_MOVER_PLUGIN_DIRS "" CACHE STRING
+    "Semicolon-separated paths to external mover plugin source directories")
+foreach(_mover_dir IN LISTS RIGEXEC_MOVER_PLUGIN_DIRS)
+    get_filename_component(_mover_dir "${_mover_dir}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if (NOT EXISTS "${_mover_dir}/CMakeLists.txt")
+        message(FATAL_ERROR "Mover plugin directory has no CMakeLists.txt: ${_mover_dir}")
+    endif()
+    string(SHA256 _mover_id "${_mover_dir}")
+    add_subdirectory("${_mover_dir}" "${CMAKE_CURRENT_BINARY_DIR}/mover-plugins/${_mover_id}")
+endforeach()
+
 get_property(_rigexec_tests DIRECTORY PROPERTY TESTS)
 foreach(_rigexec_test IN LISTS _rigexec_tests)
     set_tests_properties(${_rigexec_test} PROPERTIES TIMEOUT 120)
     if (WIN32)
         set_property(TEST ${_rigexec_test} APPEND PROPERTY
             ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:${USD_INSTALL_DIR}/bin"
-            "PATH=path_list_prepend:${USD_INSTALL_DIR}/lib"
+            "PATH=path_list_prepend:${RIGEXEC_TEST_USD_DIR}/bin"
+            "PATH=path_list_prepend:${RIGEXEC_TEST_USD_DIR}/lib"
             "PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
     elseif (APPLE)
         # Mach-O reads DYLD_LIBRARY_PATH and ELF reads LD_LIBRARY_PATH;
         set_property(TEST ${_rigexec_test} APPEND PROPERTY
             ENVIRONMENT_MODIFICATION
-            "DYLD_LIBRARY_PATH=path_list_prepend:${USD_INSTALL_DIR}/lib"
+            "DYLD_LIBRARY_PATH=path_list_prepend:${RIGEXEC_TEST_USD_DIR}/lib"
             "DYLD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
     else()
         set_property(TEST ${_rigexec_test} APPEND PROPERTY
             ENVIRONMENT_MODIFICATION
-            "LD_LIBRARY_PATH=path_list_prepend:${USD_INSTALL_DIR}/lib"
+            "LD_LIBRARY_PATH=path_list_prepend:${RIGEXEC_TEST_USD_DIR}/lib"
             "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
     endif()
 endforeach()
@@ -1438,14 +1473,14 @@ endforeach()
 # Install
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake
+install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${RIGEXEC_INSTALL_LIBDIR}")
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
-foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake)
+foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake rigExecRuntime)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING
@@ -1486,10 +1521,28 @@ configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/generatedSchema.usda"
     "${_rigexec_schema_resources}/generatedSchema.usda" COPYONLY)
 
+# The node-graph icons the plugInfo type entries name (a class's
+# extraPlugInfo nodeGraphIcon, relative to these resources): exactly those,
+# so the plugin ships no art it does not declare.
+file(STRINGS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/plugInfo.json"
+    _rigexec_icon_lines REGEX "\"nodeGraphIcon\"")
+set(_rigexec_schema_icons "")
+foreach(_rigexec_icon_line IN LISTS _rigexec_icon_lines)
+    string(REGEX REPLACE ".*\"nodeGraphIcon\": \"icons/([^\"]+)\".*" "\\1"
+        _rigexec_icon "${_rigexec_icon_line}")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/icons/${_rigexec_icon}"
+        "${_rigexec_schema_resources}/icons/${_rigexec_icon}" COPYONLY)
+    list(APPEND _rigexec_schema_icons
+        "${CMAKE_CURRENT_SOURCE_DIR}/icons/${_rigexec_icon}")
+endforeach()
+
 install(FILES
         "${_rigexec_schema_pluginfo}"
         "${_rigexec_schema_resources}/generatedSchema.usda"
     DESTINATION "${RIGEXEC_INSTALL_PLUGINDIR}/rigExecSchema/resources")
+install(FILES ${_rigexec_schema_icons}
+    DESTINATION "${RIGEXEC_INSTALL_PLUGINDIR}/rigExecSchema/resources/icons")
 
 install(DIRECTORY plugin/rigExecUsdview/
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview"
@@ -1538,6 +1591,7 @@ write_basic_package_version_file(
 install(FILES
         "${CMAKE_CURRENT_BINARY_DIR}/rigExecConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/rigExecConfigVersion.cmake"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/rigExecMoverPlugin.cmake"
     DESTINATION "${RIGEXEC_INSTALL_CMAKEDIR}")
 
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md

@@ -89,8 +89,9 @@ def Xform "WeightAsset"
             )
             {
                 rel rigExec:moves = </WeightAsset/Geom/Strip.points>
-                rel rigExec:transform = </WeightAsset/Rig/Joints/Jnt>
-                uniform token rigExec:transformReadPhase = "final"
+                rel rigExec:transform = </WeightAsset/Rig/Joints/Jnt> (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:weightObject = </WeightAsset/Rig/Weights/Falloff>
                 uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
             }

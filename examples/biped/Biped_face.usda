@@ -34,6 +34,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:worldUpRotationOnly = 1
                     double3 inputs:aimVector = (0, 0, 1)
                     float inputs:defaultWeight.connect = </Biped/Rig/Main/Shot/Aux/Controls/M_Look.avars:lookAt>
                     double3 inputs:upVector = (0, 1, 0)
@@ -48,6 +49,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -61,6 +63,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -77,6 +80,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -90,6 +94,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -103,6 +108,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -116,6 +122,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -129,6 +136,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -142,6 +150,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -158,6 +167,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     float inputs:defaultWeight = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def/face_lower_def/face_mid_def/nose_bridge_def/nose_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/nose_bridge_follow/nose_bridge_compress/M_NoseBridge/nose_compress/M_Nose>
@@ -167,6 +177,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     float inputs:defaultWeight = 0
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/neck_base_def/neck_0_def/neck_1_def/neck_2_def/neck_3_def/skull_def/face_lower_def/face_mid_def/nose_bridge_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/nose_bridge_follow/nose_bridge_compress_twin>
@@ -176,6 +187,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -189,6 +201,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -202,6 +215,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -500,6 +514,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -513,6 +528,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -526,6 +542,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -539,6 +556,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -552,6 +570,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -565,6 +584,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1
@@ -578,6 +598,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     bool inputs:affectScaleX = 1
                     bool inputs:affectScaleY = 1
                     bool inputs:affectScaleZ = 1

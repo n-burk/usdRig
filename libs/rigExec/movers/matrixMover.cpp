@@ -80,8 +80,8 @@ _BindMatrixMover(const rigExec::RigExecMoverBindContext &ctx)
     const SdfPathVector transforms =
         rigExec::RigExecRelationshipTargets(moverPrim, "rigExec:transform");
     SdfPath provider = transforms.empty() ? SdfPath() : transforms[0];
-    binding.transformPhase = rigExec::RigExecPhaseForInput(
-        moverPrim, "rigExec:transform", "rigExec:transformReadPhase");
+    binding.transformPhase =
+        rigExec::RigExecPhaseForInput(moverPrim, "rigExec:transform");
     if (binding.transformPhase.kind == rigExec::RigExecReadPhaseKind::Final) {
         const auto it = frameChainHeads.find(provider);
         if (it != frameChainHeads.end()) {
@@ -100,6 +100,19 @@ _BindMatrixMover(const rigExec::RigExecMoverBindContext &ctx)
         }
     }
     binding.transformSpace = space;
+    // rigExec:space, the rig's carry, read at the transform's phase. Only a
+    // cluster whose points are posed applies it (RigExecClusterInPointFrame).
+    const SdfPathVector carries =
+        rigExec::RigExecRelationshipTargets(moverPrim, "rigExec:space");
+    SdfPath carry = carries.empty() ? SdfPath() : carries[0];
+    if (!carry.IsEmpty() &&
+        binding.transformPhase.kind == rigExec::RigExecReadPhaseKind::Final) {
+        const auto it = frameChainHeads.find(carry);
+        if (it != frameChainHeads.end()) {
+            carry = it->second;
+        }
+    }
+    binding.carrySpace = carry;
     // Matrix movers use the shared ordered provider list for optional
     // neutral references: transform first, then transformSpace. This gives
     // them the same phase, dependency, invalidation and frozen-run handling
@@ -183,19 +196,6 @@ _ValidateMatrixMover(
     }
     if (transforms.size() != 1) {
         *error = who + ": rigExec:transform must have exactly one target";
-        return false;
-    }
-    // preceding is legal only for a dependency specialized to one
-    // consuming application ordinal (spec §4.2); the v0.1 compiler
-    // supports base and acyclic final.
-    TfToken phase("base");
-    if (UsdAttribute a =
-            prim.GetAttribute(TfToken("rigExec:transformReadPhase"))) {
-        a.Get(&phase);
-    }
-    if (phase != "base" && phase != "final") {
-        *error = who + ": unsupported transformReadPhase '" +
-                 phase.GetString() + "' (v0.1 supports base and final)";
         return false;
     }
     // The transform target must be a catalogued computeMatrix provider.
@@ -292,19 +292,16 @@ _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
             ": transform must have exactly one target");
         return RigExecOracleResult::PassThrough;
     }
-    TfToken phase("base");
-    if (const UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:transformReadPhase"))) {
-        a.Get(&phase);
-    }
+    const bool final =
+        rigExec::RigExecPhaseForInput(prim, "rigExec:transform").kind ==
+        rigExec::RigExecReadPhaseKind::Final;
     const auto &matrices =
-        phase == "final" ? ctx.finalProviderMatrices
-                         : ctx.baseProviderMatrices;
+        final ? ctx.finalProviderMatrices : ctx.baseProviderMatrices;
     const auto matrixIt = matrices.find(transforms[0]);
     if (matrixIt == matrices.end()) {
         diagnostics->push_back(
             "MoverFailed " + moverPath.GetString() +
-            ": no " + phase.GetString() + " matrix provider at " +
+            ": no " + (final ? "final" : "base") + " matrix provider at " +
             transforms[0].GetString());
         return RigExecOracleResult::PassThrough;
     }
@@ -330,7 +327,7 @@ _OracleMatrixMover(const rigExec::RigExecMoverOracleContext &ctx)
         if (spaceIt == matrices.end()) {
             diagnostics->push_back(
                 "MoverFailed " + moverPath.GetString() +
-                ": no " + phase.GetString() +
+                ": no " + (final ? "final" : "base") +
                 " matrix provider at " + spaces[0].GetString());
             return RigExecOracleResult::PassThrough;
         }
@@ -358,7 +355,8 @@ _MakeHandler()
     handler.customTargetValidation = true;
     handler.frameRelationships = {
         "rigExec:transform", "rigExec:transformSpace",
-        "rigExec:referenceTransform", "rigExec:referenceTransformSpace"};
+        "rigExec:referenceTransform", "rigExec:referenceTransformSpace",
+        "rigExec:space"};
     handler.transformRelationship = "rigExec:transform";
     handler.spaceRelationship = "rigExec:transformSpace";
     handler.bind = &_BindMatrixMover;

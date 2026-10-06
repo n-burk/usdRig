@@ -32,21 +32,22 @@ namespace rigExec {
 
 class RigExecWarmFrameIndex;
 
-/// Publishes one background warming completion into \p cache, and ONLY into
-/// the cache: never into the snapshot store the viewport reads.
+/// Publishes one background warming completion into \p cache and the
+/// optional warm index, never into the snapshot store the viewport reads.
 ///
 /// The generation fence is checked first: a token that is no longer the
 /// rig's current one means an edit landed while the job ran, and the result
 /// is dropped. An invalid pose is likewise dropped. Either way the frame the
 /// job would have warmed simply evaluates live when asked.
 ///
-/// The fence-check and the cache insert run atomically under the
+/// The fence-check, cache insert and optional index completion run under the
 /// scheduler's fence mutex (plan 3.3): a running job can never pass its
 /// check before a generation bump and insert after the fenced clear. The
 /// fenced clear (generation-bump + queue-purge + cache-clear + index-reset)
 /// holds the same mutex, so a clear-while-warming retires the late
 /// completion instead of letting it repopulate the cache. Lock order: fence
-/// outermost, then the scheduler mutex, then cache shards -- never inverted.
+/// outermost, then the scheduler mutex, cache shards or warm index. Cache
+/// eviction callbacks run outside the shard locks.
 /// The UI-thread memoization path needs no fence (the UI thread serializes
 /// with itself).
 ///
@@ -66,7 +67,9 @@ bool RigExecPublishBackgroundCompletion(
 /// RigExecBackgroundScheduler::IsWarmRequestCurrent): an old job for a
 /// scoped-purged time drops here and can never overwrite the requeued
 /// result. The overload above publishes pose-only under token zero, which
-/// matches only a never-purged time.
+/// matches only a never-purged time. When supplied, \p warmIndex records the
+/// successful completion under the same fence so a scoped edit cannot
+/// retire the entry between publication and the index update.
 bool RigExecPublishBackgroundCompletion(
     const std::shared_ptr<RigExecFrameCache> &cache,
     const RigExecFrameCacheKey &key, UsdTimeCode time,
@@ -74,7 +77,8 @@ bool RigExecPublishBackgroundCompletion(
     const RigExecBackgroundScheduler *scheduler, const SdfPath &rig,
     RigExecWarmFenceToken fenceToken,
     std::shared_ptr<const void> retained, size_t retainedBytes,
-    const RigExecEntryProvenance *provenance);
+    const RigExecEntryProvenance *provenance,
+    RigExecWarmFrameIndex *warmIndex = nullptr);
 
 /// Test-only probe for the deterministic fence-race test: when set, the
 /// fenced publish above runs it while holding the fence mutex, after a
@@ -96,6 +100,7 @@ void RigExecSetPublishFenceProbeForTesting(
 struct RigExecFreshProof {
     uint64_t digest = 0;
     uint64_t unfolded = 0;
+    bool sampledInputs = false;
     std::vector<std::string> paths;
     RigExecFreshProof() = default;
     RigExecFreshProof(uint64_t digestIn, uint64_t unfoldedIn,
@@ -156,6 +161,11 @@ public:
     /// live evaluation with neither lookup nor memoization. The multi-sample
     /// render path below never consults the cache.
     PublishResult EvaluateAndPublishResult(UsdTimeCode time);
+
+    /// Warms one frame synchronously without publishing a viewport snapshot.
+    /// The caller serializes access to the evaluator and bounds idle work.
+    /// Returns true only when a valid pose was stored in the frame cache.
+    bool WarmFrameOnCallingThread(UsdTimeCode time);
 
     /// Render-motion publication: evaluates the rig at
     /// baseTime + offset for every explicit frame-relative shutter offset,
@@ -245,6 +255,10 @@ public:
     /// registry's fenced entries call this under the scheduler's fence
     /// mutex -- it never takes the fence itself (non-recursive).
     void ClearFrameCache();
+
+    /// Retires serial-keyed poses after any stage edit, including edits
+    /// outside the rig's sampled dependency set.
+    void RetirePoseOnlyCacheEntries();
 
     /// The shared warm-frame index memoized completions record into (null
     /// for bare bridges, which warm nothing to query). Set once at
@@ -396,13 +410,14 @@ private:
     /// Publishes the single synthesized guide shape each control draws at
     /// its posed frame (spec §10.3 extension).
     /// Records the stage identity and sample time on a generation.
-    /// Samples this rig's inputs at \p time and folds the cache key, or
-    /// false when no faithful key exists (a bakeable-but-unsampleable rig,
-    /// an undigestible held type): the caller evaluates live and memoizes
-    /// nothing. A rig with no baked program (plan D7) keys on time plus the
-    /// stage-edit serial plus the standing overrides instead of a sampled
-    /// vector.
-    bool _ComputeCacheKey(UsdTimeCode time, RigExecFrameCacheKey *key) const;
+    /// A complete conservative key for operations without a sampled input
+    /// contract: time, stage-edit serial, epoch and standing overrides.
+    bool _ComputePoseOnlyCacheKey(
+        UsdTimeCode time, RigExecFrameCacheKey *key) const;
+
+    /// Shares the frozen executor's input capability check. Unknown or
+    /// unsupported operations still cache complete live poses.
+    bool _CanSampleCacheInputs();
 
     /// Samples one frame's input vector for the live lookup and memoize
     /// paths: through chain bindings pinned for the current epoch and kept
@@ -463,7 +478,7 @@ private:
     /// Memoizes a just-evaluated pose into the frame cache and records its
     /// digest as its time's freshness proof. Sampled after the evaluation,
     /// so the proof names fresh inputs.
-    void _MemoizeLiveResult(UsdTimeCode time, const RigExecRigPose &pose);
+    bool _MemoizeLiveResult(UsdTimeCode time, const RigExecRigPose &pose);
 
     void _StampGeneration(
         UsdTimeCode time, RigExecImagingSnapshot *snapshot) const;
@@ -476,11 +491,6 @@ private:
     /// every placed influence volume draws, so a rigger can see the shape
     /// being placed rather than infer it from the deformation.
     void _FillVolumeGuides(
-        const RigExecRigPose &pose,
-        RigExecImagingSnapshot *snapshot) const;
-
-    /// Samples native curvenets from their evaluated control-point pools.
-    void _FillCurvenetGuides(
         const RigExecRigPose &pose,
         RigExecImagingSnapshot *snapshot) const;
 
@@ -646,6 +656,11 @@ private:
     uint64_t _cacheEditSerial = 0;
     RigExecEvaluationMode _cacheMode = RigExecEvaluationMode::Baked;
     bool _cacheModeValid = false;
+    const RigExecBakedProgram *_sampleSupportProgram = nullptr;
+    uint64_t _sampleSupportEpoch = 0;
+    uint64_t _sampleSupportSerial = 0;
+    bool _sampleSupportValid = false;
+    bool _sampleSupport = false;
     mutable std::unordered_map<SdfPath, _GuideInputs, SdfPath::Hash>
         _guideInputs;
     mutable std::map<SdfPath, std::vector<SdfPath>> _jointChildren;

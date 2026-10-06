@@ -4,7 +4,6 @@
 #include "warmIndex.h"
 
 #include "rigExecMath/pointFrame.h"
-#include "rigExecMath/curvenet.h"
 #include "rigExec/frameCacheSparsity.h"
 
 #include "pxr/base/gf/quatd.h"
@@ -19,7 +18,6 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/tokens.h"
-#include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdGeom/xformable.h"
 
 #include <algorithm>
@@ -1644,86 +1642,6 @@ RigExecImagingBridge::_FillVolumeGuides(
     }
 }
 
-void
-RigExecImagingBridge::_FillCurvenetGuides(
-    const RigExecRigPose &pose, RigExecImagingSnapshot *snapshot) const
-{
-    const SdfPath assetPath = _rigPath.GetParentPath();
-    const UsdPrim asset = _stage->GetPrimAtPath(assetPath);
-    if (!asset) return;
-    UsdGeomXformCache xforms(pose.time);
-    for (const UsdPrim &prim : UsdPrimRange(asset)) {
-        if (prim.GetTypeName() != "RigExecCurvenet") continue;
-        const UsdAttribute pointsAttr = prim.GetAttribute(TfToken("points"));
-        VtVec3fArray points;
-        const auto moved = pose.movedProperties.find(pointsAttr.GetPath());
-        if (moved != pose.movedProperties.end() &&
-            moved->second.IsHolding<VtVec3fArray>()) {
-            points = moved->second.UncheckedGet<VtVec3fArray>();
-        } else if (!pointsAttr.Get(&points, pose.time)) {
-            continue;
-        }
-        VtIntArray indices;
-        if (!prim.GetAttribute(TfToken("rigExec:splineIndices"))
-                 .Get(&indices, pose.time) || indices.empty()) continue;
-        TfToken basis("bezier");
-        prim.GetAttribute(TfToken("rigExec:basis")).Get(&basis, pose.time);
-        if (basis != "bezier" && basis != "catmullRom") continue;
-        int density = 5;
-        prim.GetAttribute(TfToken("rigExec:samplesPerSpline"))
-            .Get(&density, pose.time);
-        if (density < 1) continue;
-        const std::vector<GfVec3f> pool(points.begin(), points.end());
-        RigExecCurvenetTopology topology;
-        std::string error;
-        if (!RigExecBuildCurvenetTopology(
-                std::vector<int>(indices.begin(), indices.end()), pool.size(),
-                basis == "bezier" ? RigExecCurvenetBasis::Bezier
-                                   : RigExecCurvenetBasis::CatmullRom,
-                pool, nullptr, &topology, &error)) continue;
-        const RigExecCurvenetSampling sampled = RigExecSampleCurvenet(
-            topology, pool, std::vector<int>(topology.GetSplineCount(), density));
-        RigExecVolumeGuideElement element;
-        element.primType = HdPrimTypeTokens->basisCurves;
-        element.wireWidth = 0.02;
-        for (size_t c = 0; c < sampled.GetCurveCount(); ++c) {
-            const int begin = sampled.curveBegin[c];
-            const int count = sampled.GetCurveSampleCount(c);
-            if (count < 2) continue;
-            element.counts.push_back(count + (topology.curves[c].closed ? 1 : 0));
-            for (int i = 0; i < count; ++i)
-                element.points.push_back(GfVec3f(sampled.positions[begin + i]));
-            if (topology.curves[c].closed)
-                element.points.push_back(GfVec3f(sampled.positions[begin]));
-        }
-        if (element.points.empty()) continue;
-        RigExecPublishedPrim &published = snapshot->prims[prim.GetPath()];
-        published.assetRoot = assetPath;
-        published.hasVolumeGuides = true;
-        published.volumeGuides = {std::move(element)};
-        published.volumeGuideAnchor = prim.GetPath();
-        // Bounds are exposed in asset space; drawing resolves the native
-        // anchor through the same driven-transform composition as its Points.
-        GfMatrix4d toAsset(1.0);
-        for (UsdPrim ancestor = prim; ancestor && ancestor != asset;
-             ancestor = ancestor.GetParent()) {
-            bool reset = false;
-            GfMatrix4d local = xforms.GetLocalTransformation(ancestor, &reset);
-            const auto revised = pose.providerXforms.find(ancestor.GetPath());
-            if (revised != pose.providerXforms.end()) local = revised->second;
-            toAsset = toAsset * local;
-            if (reset) {
-                toAsset = toAsset * xforms.GetLocalToWorldTransform(asset).GetInverse();
-                break;
-            }
-        }
-        published.volumeGuideAnchorToAsset = toAsset;
-        published.guideColor = GfVec3f(0.15f, 0.8f, 0.45f);
-        published.guideOpacity = 1.0f;
-        _ReadGuideStyle(prim, pose, &published);
-    }
-}
-
 // Paints ONE selected weight object's resolved field onto the geometry it
 // weights (spec §10.3 influence-overlay extension).
 // The field is taken from pose.weightFields -- the packet a mover actually
@@ -1794,19 +1712,27 @@ RigExecPublishBackgroundCompletion(
     const RigExecBackgroundScheduler *scheduler, const SdfPath &rig,
     RigExecWarmFenceToken fenceToken,
     std::shared_ptr<const void> retained, size_t retainedBytes,
-    const RigExecEntryProvenance *provenance)
+    const RigExecEntryProvenance *provenance,
+    RigExecWarmFrameIndex *warmIndex)
 {
     if (!cache || !pose.valid) {
         return false;
     }
+    const auto publish = [&] {
+        const bool stored = cache->Publish(
+            key, time, pose, retainedBytes, retained, provenance);
+        if (stored && warmIndex && time.IsNumeric()) {
+            warmIndex->NoteCompleted(rig, time.GetValue(), key, generation);
+        }
+        return stored;
+    };
     if (!scheduler) {
-        return cache->Publish(key, time, pose, retainedBytes, retained,
-                              provenance);
+        return publish();
     }
-    // Fence-check and cache insert atomically under the fence mutex (plan
+    // Fence-check, cache insert and index completion share the fence (plan
     // 3.3): the fenced clear holds the same mutex across bump + purge +
     // clear + reset, so no clear can land between the check and the store.
-    // Lock order fence, then scheduler, then cache shards.
+    // Lock order: fence, then scheduler, cache shards or warm index.
     std::lock_guard<std::mutex> fenceLock(scheduler->FenceMutex());
     if (!scheduler->IsWarmRequestCurrent(rig, generation, time,
                                          fenceToken)) {
@@ -1815,8 +1741,7 @@ RigExecPublishBackgroundCompletion(
     if (_sPublishFenceProbe) {
         _sPublishFenceProbe();
     }
-    return cache->Publish(key, time, pose, retainedBytes, retained,
-                          provenance);
+    return publish();
 }
 
 void
@@ -1843,6 +1768,29 @@ RigExecImagingBridge::ClearFrameCache()
     _freshDigests.clear();
     _freshEpochValid = false;
     _cacheModeValid = false;
+    _sampleSupportValid = false;
+}
+
+void
+RigExecImagingBridge::RetirePoseOnlyCacheEntries()
+{
+    if (_warmIndex && _frameCache) {
+        for (const auto &entry : _warmIndex->CompletedKeys(_rigPath)) {
+            RigExecEntryProvenance provenance;
+            if (_frameCache->LookupProvenance(entry.second, &provenance) &&
+                provenance.unfoldedControlDigest == 0 &&
+                entry.first.IsNumeric()) {
+                _warmIndex->NoteDirtied(_rigPath, entry.first.GetValue());
+            }
+        }
+    }
+    for (auto it = _freshDigests.begin(); it != _freshDigests.end();) {
+        if (!it->second.sampledInputs) {
+            it = _freshDigests.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 RigExecFreshProof::RigExecFreshProof(
@@ -1851,6 +1799,7 @@ RigExecFreshProof::RigExecFreshProof(
     const std::vector<RigExecValueOverride> *overrides)
     : digest(digestIn)
     , unfolded(unfoldedIn)
+    , sampledInputs(inputs != nullptr)
 {
     // The dependency set the digest covers: first-win sample paths (the
     // digest's own granularity) plus standing override identities.
@@ -2190,51 +2139,39 @@ RigExecImagingBridge::_SampleLive(
 }
 
 bool
-RigExecImagingBridge::_ComputeCacheKey(
+RigExecImagingBridge::_CanSampleCacheInputs()
+{
+    const RigExecBakedProgram *program = _evaluator->GetBakedProgram();
+    if (!program || _evaluator->cpuParityMode) {
+        return false;
+    }
+    const uint64_t epoch = RigExecFrameCacheEpochDigest(*_evaluator);
+    const uint64_t serial = _evaluator->GetStageEditSerial();
+    if (!_sampleSupportValid || _sampleSupportProgram != program ||
+        _sampleSupportEpoch != epoch || _sampleSupportSerial != serial) {
+        _sampleSupport = RigExecCanFreezeProgram(*_evaluator);
+        _sampleSupportProgram = program;
+        _sampleSupportEpoch = epoch;
+        _sampleSupportSerial = serial;
+        _sampleSupportValid = true;
+    }
+    return _sampleSupport;
+}
+
+bool
+RigExecImagingBridge::_ComputePoseOnlyCacheKey(
     UsdTimeCode time, RigExecFrameCacheKey *key) const
 {
-    if (!key || !_frameCache) {
+    if (!key || !_frameCache ||
+        !RigExecRefusalControlDigestible(_interactiveOverrides)) {
         return false;
     }
-    RigExecFrameInputs inputs;
-    if (!_SampleLive(time, &inputs)) {
-        // D7: a rig with no baked program (a bake refusal, or an explicitly
-        // dynamic rig) cannot sample a vector, so it memoizes on time plus
-        // the evaluator's stage-edit serial plus the standing overrides.
-        // The serial advances on every stage notice, so an edit moves the
-        // digest at every frame by construction -- the D1 rule for a rig
-        // that cannot re-sample -- on every path, registry-managed or bare
-        // bridge. A rig that HAS a program but cannot sample (a prologue
-        // read with no hook) stays live-only, as today.
-        if (_evaluator->GetBakedProgram() != nullptr) {
-            return false;
-        }
-        if (!RigExecRefusalControlDigestible(_interactiveOverrides)) {
-            return false;
-        }
-        key->epochDigest = RigExecFrameCacheEpochDigest(*_evaluator);
-        key->controlDigest = RigExecRefusalControlDigest(
-            time, _evaluator->GetStageEditSerial(), _interactiveOverrides);
-        return true;
-    }
-    if (!RigExecControlStateDigestible(inputs, _interactiveOverrides)) {
-        // A held type the digest cannot fold exactly: two different frames
-        // could share one key, which is a plausible wrong pose.
-        return false;
-    }
-    // The sampler folds the overrides into the vector AND the two-argument
-    // digest folds the explicit list: both halves are deterministic in the
-    // same inputs, so lookup and memoization agree, and a drag always
-    // digests apart from the authored frame it started from.
+    // Complete live results remain cacheable when an operation has no
+    // frozen input contract. Every stage edit moves this namespace; no
+    // per-operation input list or partial retained-state proof is needed.
     key->epochDigest = RigExecFrameCacheEpochDigest(*_evaluator);
-    // Epoch constants are not per-frame inputs, so the sampled digest
-    // cannot see a value patch: the constant digest folds beside it (plan
-    // D3), opening a new key namespace while the epoch half stands.
-    const RigExecBakedProgram *program = _evaluator->GetBakedProgram();
-    const uint64_t constants =
-        program ? RigExecEpochConstantDigest(*program) : 0;
-    key->controlDigest = RigExecControlStateDigestWithConstants(
-        inputs, _interactiveOverrides, constants);
+    key->controlDigest = RigExecRefusalControlDigest(
+        time, _evaluator->GetStageEditSerial(), _interactiveOverrides);
     return true;
 }
 
@@ -2245,10 +2182,6 @@ RigExecImagingBridge::_ServeCachedPose(
 {
     _frameCache->NoteProvenanceAlias(key, time);
     RigExecRigPose cached = pose;
-    // A warmed frame never ran Evaluate's projector pass, and the dials it
-    // packs are not part of the cache key: apply it at serve time, from the
-    // current stage and overrides.
-    _evaluator->ApplySurfaceProjectors(&cached, time);
     const bool verify = RigExecFrameCacheVerifyRequested();
     if (verify) {
         // Shadow mode: prove the hit against a live evaluation, the same
@@ -2484,18 +2417,49 @@ RigExecImagingBridge::_TryPublishCachedResult(
     // the proof/sparse paths below, unchanged.
     const double stamped = time.IsDefault() ? 0.0 : time.GetValue();
     const RigExecBakedProgram *program = _evaluator->GetBakedProgram();
-    if (program && _warmIndex && time.IsNumeric()) {
+    const auto proof = _freshDigests.find({time.IsDefault(), stamped});
+    const bool haveProof = proof != _freshDigests.end();
+    if (haveProof && !proof->second.sampledInputs) {
+        RigExecFrameCacheKey key;
+        if (!_ComputePoseOnlyCacheKey(time, &key) ||
+            proof->second.digest != key.controlDigest) {
+            return false;
+        }
+        RigExecRigPose cached;
+        bool hit = false;
+        {
+            RigExecProfileScope scope(MutableProfiler(),
+                                      "Imaging.FrameCacheLookup", "imaging");
+            hit = _frameCache->Lookup(key, &cached);
+        }
+        MutableProfiler()->RecordCacheLookup(hit, stamped);
+        if (!hit || !cached.valid) {
+            return false;
+        }
+        _ServeCachedPose(time, cached, key, result);
+        return true;
+    }
+    if (_warmIndex && time.IsNumeric()) {
         RigExecFrameCacheKey cachedKey{0, 0};
         if (_warmIndex->FindCachedKey(_rigPath, stamped,
                                       _warmIndex->CurrentGeneration(_rigPath),
                                       epoch, &cachedKey)) {
             RigExecRigPose cached;
+            std::shared_ptr<const void> retained;
+            RigExecFrameCacheKey poseOnlyKey;
+            const bool currentPoseOnly =
+                _ComputePoseOnlyCacheKey(time, &poseOnlyKey) &&
+                cachedKey == poseOnlyKey;
             const bool hit = [&] {
                 RigExecProfileScope scope(
                     MutableProfiler(), "Imaging.FrameCacheLookup", "imaging");
-                return _frameCache->Lookup(cachedKey, &cached);
+                return _frameCache->Lookup(cachedKey, &cached, &retained);
             }();
-            if (hit && cached.valid) {
+            // A pose-only entry whose proof was retired cannot use an
+            // index row as its edit-serial check. Sampled entries carry
+            // retained inputs (or their enqueue-time proof).
+            if (hit && cached.valid &&
+                (currentPoseOnly || (program && (retained || haveProof)))) {
                 MutableProfiler()->RecordCacheLookup(true, stamped);
                 _ServeCachedPose(time, cached, cachedKey, result);
                 return true;
@@ -2512,40 +2476,14 @@ RigExecImagingBridge::_TryPublishCachedResult(
     // latency the cache-off path never pays. A time with no proof but WITH
     // a retained base still samples: the sparse plan below may serve it
     // with zero pulls, which is worth one sample.
-    const auto proof = _freshDigests.find({time.IsDefault(), stamped});
-    const bool haveProof = proof != _freshDigests.end();
     RigExecFrameCacheKey baseKey{0, 0};
     const bool haveBase = _warmIndex && time.IsNumeric() &&
         _warmIndex->FindKey(_rigPath, stamped, &baseKey);
     if (!haveProof && !haveBase) {
         return false;
     }
-    if (!program) {
-        // D7: refusal keys name no sampled vector, so nothing plans. The
-        // historical path, unchanged.
-        if (!haveProof) {
-            return false;
-        }
-        RigExecFrameCacheKey key;
-        if (!_ComputeCacheKey(time, &key)) {
-            return false;
-        }
-        if (proof->second.digest != key.controlDigest) {
-            return false;
-        }
-        RigExecRigPose cached;
-        const bool hit = [&] {
-            RigExecProfileScope scope(MutableProfiler(),
-                                      "Imaging.FrameCacheLookup", "imaging");
-            return _frameCache->Lookup(key, &cached);
-        }();
-        MutableProfiler()->RecordCacheLookup(
-            hit, time.IsDefault() ? 0.0 : time.GetValue());
-        if (!hit) {
-            return false;
-        }
-        _ServeCachedPose(time, cached, key, result);
-        return true;
+    if (!program || !_CanSampleCacheInputs()) {
+        return false;
     }
     // The baked path samples once for the proof compare AND the sparse
     // plan: a mismatch falls through to planning on the same vector.
@@ -2598,12 +2536,12 @@ RigExecImagingBridge::_TryPublishCachedResult(
     return _TrySparseServe(time, inputs, key, unfolded, result);
 }
 
-void
+bool
 RigExecImagingBridge::_MemoizeLiveResult(
     UsdTimeCode time, const RigExecRigPose &pose)
 {
     if (!_frameCache || !pose.valid) {
-        return;
+        return false;
     }
     // Scope check, as on the lookup path: the evaluation above may have
     // settled a new epoch.
@@ -2621,7 +2559,6 @@ RigExecImagingBridge::_MemoizeLiveResult(
     // this time: the digest below is the TRUE digest, and recording it as
     // this time's proof is what later lookups prove freshness against.
     // Sampled once, here, for the key AND the retained state:
-    // _ComputeCacheKey samples internally, which would sample twice.
     RigExecFrameCacheKey key;
     RigExecFrameInputs memoInputs;
     uint64_t memoUnfolded = 0;
@@ -2629,12 +2566,11 @@ RigExecImagingBridge::_MemoizeLiveResult(
     {
         RigExecProfileScope scope(MutableProfiler(),
                                   "Imaging.MemoizeSampleDigest", "imaging");
-        if (_evaluator->GetBakedProgram()) {
-            if (!_SampleLive(time, &memoInputs) ||
-                !RigExecControlStateDigestible(memoInputs,
-                                               _interactiveOverrides)) {
-                return;
-            }
+        if (_CanSampleCacheInputs() &&
+            _SampleLive(time, &memoInputs) &&
+            !memoInputs.HasChainResolvedInputs() &&
+            RigExecControlStateDigestible(memoInputs,
+                                          _interactiveOverrides)) {
             key.epochDigest = RigExecFrameCacheEpochDigest(*_evaluator);
             const uint64_t unfolded =
                 RigExecControlStateDigest(memoInputs,
@@ -2645,9 +2581,8 @@ RigExecImagingBridge::_MemoizeLiveResult(
                     *_evaluator->GetBakedProgram()));
             memoUnfolded = unfolded;
             haveInputs = true;
-        } else if (!_ComputeCacheKey(time, &key)) {
-            // D7: no program, no inputs -- the refusal key, pose-only.
-            return;
+        } else if (!_ComputePoseOnlyCacheKey(time, &key)) {
+            return false;
         }
     }
     bool stored = false;
@@ -2711,6 +2646,7 @@ RigExecImagingBridge::_MemoizeLiveResult(
     // No override admission here: memoization runs only when no overrides
     // stand (the drag bypass), so the list is always empty. Admission
     // lives on the warming path, which samples under standing overrides.
+    return stored;
 }
 
 void
@@ -2723,13 +2659,23 @@ RigExecImagingBridge::_PublishPoseSnapshot(
     auto snapshot = std::make_shared<RigExecImagingSnapshot>();
     snapshot->generation = ++_generation;
     _StampGeneration(time, snapshot.get());
-    // Rig-computed matrices a shader on the prim reads, as constant
-    // primvars. Indexed before the geometry loop so a prim carrying only
-    // a shader matrix still gets published.
-    for (const auto &[primPath, matrices] : pose.shaderMatrices) {
-        if (!matrices.empty()) {
-            snapshot->prims[primPath].shaderMatrices = matrices;
+    // Matrix primvars a rig computes for a shader on the prim (a surface
+    // projector's frame and dials), published as constant primvars. The
+    // rig writes them as moved `primvars:<name>` properties and nothing
+    // authors them; indexed before the geometry loop so a prim carrying
+    // only a matrix primvar still gets published.
+    static const std::string primvarsPrefix("primvars:");
+    for (const auto &[propertyPath, value] : pose.movedProperties) {
+        if (!value.IsHolding<GfMatrix4d>()) {
+            continue;
         }
+        const std::string &name = propertyPath.GetName();
+        if (name.compare(0, primvarsPrefix.size(), primvarsPrefix) != 0) {
+            continue;
+        }
+        snapshot->prims[propertyPath.GetPrimPath()]
+            .shaderMatrices[TfToken(name.substr(primvarsPrefix.size()))] =
+            value.UncheckedGet<GfMatrix4d>();
     }
     for (const auto &[propertyPath, value] : pose.movedProperties) {
         const SdfPath primPath = propertyPath.GetPrimPath();
@@ -2787,7 +2733,6 @@ RigExecImagingBridge::_PublishPoseSnapshot(
         _FillGuides(pose, snapshot.get());
         _FillControlGuides(pose, snapshot.get());
         _FillVolumeGuides(pose, snapshot.get());
-        _FillCurvenetGuides(pose, snapshot.get());
         _FillWeightOverlay(pose, snapshot.get());
     }
 
@@ -2813,6 +2758,27 @@ RigExecImagingBridge::_PublishPoseSnapshot(
         result->dirtied = _store->Publish(std::move(snapshot));
     }
     result->ok = true;
+}
+
+bool
+RigExecImagingBridge::WarmFrameOnCallingThread(UsdTimeCode time)
+{
+    if (!RigExecBackgroundWarmingEnabled() ||
+        !_interactiveOverrides.empty()) {
+        return false;
+    }
+    const uint64_t serial = _evaluator->GetStageEditSerial();
+    if (!_warmIndex && _cacheEditSerial != serial) {
+        _freshDigests.clear();
+    }
+    _cacheEditSerial = serial;
+    RigExecRigPose pose;
+    {
+        RigExecProfileScope scope(MutableProfiler(), "Imaging.WarmEvaluate",
+                                  "imaging");
+        pose = _evaluator->Evaluate(time);
+    }
+    return pose.valid && _MemoizeLiveResult(time, pose);
 }
 
 bool
@@ -2984,7 +2950,6 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
             _FillGuides(pose, snapshot.get());
             _FillControlGuides(pose, snapshot.get());
             _FillVolumeGuides(pose, snapshot.get());
-            _FillCurvenetGuides(pose, snapshot.get());
             _FillWeightOverlay(pose, snapshot.get());
         }
         for (const auto &[propertyPath, value] : pose.movedProperties) {

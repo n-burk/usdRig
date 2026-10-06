@@ -5,12 +5,13 @@
 #define RIGEXEC_TYPES_H
 
 #include "rigExecMath/pointFrame.h"
-#include "rigExecMath/curvenetAdjustments.h"
+#include "rigExecMath/wrinkleSettings.h"
 
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/value.h"
 
 #include <memory>
 #include <vector>
@@ -19,8 +20,6 @@ namespace rigExec {
 
 /// Retain the shared computation/type registration library in headless hosts.
 void RigExecLoadComputations();
-
-struct RigExecProfileMoverBinding;
 
 /// Aggregate result of a packed solver boundary (spec §4.3): an immutable
 /// sequence of frames plus the per-element reference (rest) landmark sets
@@ -215,9 +214,8 @@ struct RigExecBlendChannel {
 /// packet, and re-validating every element on every frame, all to arrive at
 /// the same arrays the frame before had.
 ///
-/// Held by shared_ptr and compared by identity, for the same reason
-/// RigExecProfileMoverBinding is: two packets naming the same layout name
-/// the same arrays, and that identity IS the equality that matters.
+/// Held by shared_ptr and compared by identity: two packets naming the same
+/// layout name the same arrays, and that identity is the equality that matters.
 struct RigExecSkinTopology {
     std::vector<int> indices;     ///< pointCount * elementSize
     std::vector<float> weights;   ///< parallel to indices
@@ -277,7 +275,7 @@ struct RigExecMoverParameters {
     bool blendSurfaceFrame = false;
 
     /// Operation scalars: volumeCorrect reference volume and the internal
-    /// full-step strength consumed by smooth/volume/surface/curvenet kernels.
+    /// full-step strength consumed by smooth/volume/surface kernels.
     /// The user-facing blend is always the common weights packet above.
     double referenceVolume = 0.0;
     float strength = 0.0f;
@@ -286,6 +284,7 @@ struct RigExecMoverParameters {
     bool mushPinBorders = true;
     float mushDistanceWeight = 0.0f;
     float mushDisplacement = 1.0f;
+    RigExecWrinkleSettings wrinkleSettings;
 
     /// Standard topology for smooth/normals/surface kernels.
     std::vector<int> topologyCounts;
@@ -336,24 +335,21 @@ struct RigExecMoverParameters {
     /// them once per frame.
     std::shared_ptr<const RigExecSkinTopology> skinTopology;
 
-    /// Profile Mover state: the epoch's cut-mesh and factorization, shared
-    /// rather than copied because it is large and identity IS the equality
-    /// that matters -- two packets naming the same binding name the same
-    /// cut. Held as an incomplete type so the geometry solver's headers stay
-    /// out of every exec translation unit.
-    std::shared_ptr<const RigExecProfileMoverBinding> curvenetBinding;
-    RigExecCurvenetBasis curvenetAdjustmentBasis = RigExecCurvenetBasis::Bezier;
-    std::vector<RigExecCurvenetAdjustmentCommand> curvenetAdjustments;
+    /// Plugin-owned payload. The registered schema identifies its callbacks.
+    TfToken externalSchema;
+    VtValue externalData;
 
     bool operator==(const RigExecMoverParameters &o) const {
         return kind == o.kind && enabled == o.enabled && valid == o.valid &&
-               transform == o.transform && weights == o.weights &&
+               transform == o.transform && radialWeight == o.radialWeight &&
+               weights == o.weights &&
                blendDeltas == o.blendDeltas && blendSurfaceFrame == o.blendSurfaceFrame &&
                referenceVolume == o.referenceVolume &&
                strength == o.strength &&
                mushIterations == o.mushIterations && mushStep == o.mushStep &&
                mushPinBorders == o.mushPinBorders &&
                mushDistanceWeight == o.mushDistanceWeight && mushDisplacement == o.mushDisplacement &&
+               wrinkleSettings == o.wrinkleSettings &&
                topologyCounts == o.topologyCounts &&
                topologyIndices == o.topologyIndices &&
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&
@@ -369,9 +365,8 @@ struct RigExecMoverParameters {
                skinTopology == o.skinTopology &&
                skinElementSize == o.skinElementSize &&
                skinningMethod == o.skinningMethod &&
-               curvenetBinding == o.curvenetBinding &&
-               curvenetAdjustmentBasis == o.curvenetAdjustmentBasis &&
-               curvenetAdjustments == o.curvenetAdjustments;
+               externalSchema == o.externalSchema &&
+               externalData == o.externalData;
     }
     bool operator!=(const RigExecMoverParameters &o) const {
         return !(*this == o);

@@ -1164,7 +1164,7 @@ TestNoticeAdapterRealNotice()
 
 // Override seeds mirror SetOverrides placement exactly: the attribute
 // override on prim-plus-attribute reaches its inputs' clusters, and
-// anything unplaceable (computation, unknown, folded, exec-typed, or
+// anything unplaceable (computation, unknown, folded, or
 // merely routed) reaches nothing -- left foreign, never admitted
 // seedless.
 void
@@ -1181,8 +1181,6 @@ TestOverrideSeeds()
     program.overridableInputs[SdfPath("/P.a")] = {0, 1};
     program.folded.insert(SdfPath("/F.b"));
     program.overridableInputs[SdfPath("/F.b")] = {2};
-    program.execTypedArrayInputs.insert(SdfPath("/E.c"));
-    program.overridableInputs[SdfPath("/E.c")] = {2};
     program.resolvedRoutedPrims.insert(SdfPath("/R"));
 
     RigExecValueOverride place;
@@ -1205,11 +1203,6 @@ TestOverrideSeeds()
     folded.prim = SdfPath("/F");
     folded.attribute = TfToken("b");
     CHECK(RigExecOverrideSeeds(program, folded).empty());
-
-    RigExecValueOverride execTyped;
-    execTyped.prim = SdfPath("/E");
-    execTyped.attribute = TfToken("c");
-    CHECK(RigExecOverrideSeeds(program, execTyped).empty());
 
     RigExecValueOverride routed;
     routed.prim = SdfPath("/R");

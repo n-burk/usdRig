@@ -88,6 +88,7 @@ class CacheStripPanelModel(object):
         if rigPath == self._rigPath:
             return False
         self._rigPath = rigPath
+        self._states = None
         self._forced = True
         return True
 
@@ -142,19 +143,23 @@ class CacheStripPanelModel(object):
         else:
             states = []
         if states is None:
-            # Unknown rig or missing binding: hold the last paint, which
-            # degrades to frame-change-only warming upstream. Paint once
-            # so the view shows the unavailable state instead of nothing.
-            if not self._paintedOnce:
-                self._paintedOnce = True
-                self._paintedStates = []
-                self._paintedCompleted = completed
-                self._paintedPlayhead = self._playhead
-                self._paintedFrames = list(self._frames)
-                self._paintedRig = self._rigPath
-                self._forced = False
-                return True
-            return False
+            # A removed rig or replaced stage must never retain the old
+            # rig's green cells, even when their paths and ranges match.
+            repaint = (not self._paintedOnce
+                       or self._paintedStates is not None
+                       or self._playhead != self._paintedPlayhead
+                       or self._frames != self._paintedFrames
+                       or self._rigPath != self._paintedRig)
+            self._states = None
+            self._completed = completed
+            self._paintedOnce = True
+            self._paintedStates = None
+            self._paintedCompleted = completed
+            self._paintedPlayhead = self._playhead
+            self._paintedFrames = list(self._frames)
+            self._paintedRig = self._rigPath
+            self._forced = False
+            return repaint
         repaint = (
             not self._paintedOnce
             or states != self._paintedStates

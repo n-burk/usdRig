@@ -256,8 +256,6 @@ _PutBinding(std::vector<uint8_t> *out,
     RigExecWirePutI32(out, binding.driverBaseTransformCount);
     RigExecWirePutU32(out, binding.driverFrames);
     RigExecWirePutU32(out, binding.widths);
-    RigExecWirePutU32(out, binding.curvenet);
-    RigExecWirePutU32(out, binding.curvenetPoints);
     _PutU32s(out, binding.blendInputs);
     _PutU32s(out, binding.blendSampleInputs);
     RigExecWirePutU32(out, uint32_t(binding.blendSamples.size()));
@@ -303,8 +301,6 @@ _ReadBinding(RigExecWireReader *reader, RigExecWireRevisionBinding *binding)
         !reader->ReadI32(&binding->driverBaseTransformCount) ||
         !reader->ReadU32(&binding->driverFrames) ||
         !reader->ReadU32(&binding->widths) ||
-        !reader->ReadU32(&binding->curvenet) ||
-        !reader->ReadU32(&binding->curvenetPoints) ||
         !_ReadU32s(reader, &binding->blendInputs) ||
         !_ReadU32s(reader, &binding->blendSampleInputs) ||
         !reader->ReadU32(&rows)) {
@@ -383,20 +379,6 @@ _PutRevision(std::vector<uint8_t> *out, const RigExecWireRevision &revision)
     RigExecWirePutU32(out, revision.moverPrim);
     RigExecWirePutU8(out, revision.op);
     _PutBinding(out, revision.binding);
-    RigExecWirePutI32(out, revision.curvenetChain);
-    RigExecWirePutU8(out, revision.curvenetBindResolved ? uint8_t(1)
-                                                       : uint8_t(0));
-    RigExecWirePutU8(out, revision.hasCurvenetBind ? uint8_t(1)
-                                                     : uint8_t(0));
-    _PutVec3fs(out, revision.curvenetRestNet);
-    _PutI32s(out, revision.curvenetSplineIndices);
-    RigExecWirePutI32(out, revision.curvenetSamplesPerSpline);
-    RigExecWirePutU32(out, revision.curvenetBasis);
-    _PutVec3fs(out, revision.curvenetMeshPoints);
-    _PutI32s(out, revision.curvenetMeshCounts);
-    _PutI32s(out, revision.curvenetMeshIndices);
-    RigExecWirePutU8(out, revision.curvenetBindInputsHeld ? uint8_t(1)
-                                                          : uint8_t(0));
     RigExecWirePutU32(out, uint32_t(revision.blendChannels.size()));
     for (const RigExecWireBlendChannel &channel : revision.blendChannels) {
         RigExecWirePutU32(out, channel.weight);
@@ -471,29 +453,10 @@ _ReadRevision(RigExecWireReader *reader, RigExecWireRevision *revision)
     if (!reader->ReadU32(&revision->moverPath) ||
         !reader->ReadU32(&revision->target) ||
         !reader->ReadU32(&revision->moverPrim) ||
-        !reader->ReadU8(&revision->op) || revision->op > 14 ||
+        !reader->ReadU8(&revision->op) || revision->op > 18 ||
+        revision->op == 10 || revision->op == 11 ||
         !_ReadBinding(reader, &revision->binding) ||
-        !reader->ReadI32(&revision->curvenetChain) ||
-        !reader->ReadU8(&flag) || flag > 1) {
-        return false;
-    }
-    revision->curvenetBindResolved = flag != 0;
-    if (!reader->ReadU8(&flag) || flag > 1) {
-        return false;
-    }
-    revision->hasCurvenetBind = flag != 0;
-    if (!_ReadVec3fs(reader, &revision->curvenetRestNet) ||
-        !_ReadI32s(reader, &revision->curvenetSplineIndices) ||
-        !reader->ReadI32(&revision->curvenetSamplesPerSpline) ||
-        !reader->ReadU32(&revision->curvenetBasis) ||
-        !_ReadVec3fs(reader, &revision->curvenetMeshPoints) ||
-        !_ReadI32s(reader, &revision->curvenetMeshCounts) ||
-        !_ReadI32s(reader, &revision->curvenetMeshIndices) ||
-        !reader->ReadU8(&flag) || flag > 1) {
-        return false;
-    }
-    revision->curvenetBindInputsHeld = flag != 0;
-    if (!reader->ReadU32(&count)) {
+        !reader->ReadU32(&count)) {
         return false;
     }
     revision->blendChannels.resize(count);
@@ -649,33 +612,6 @@ _PutWeightObject(std::vector<uint8_t> *out,
     _PutU32s(out, object.curvePoints);
     _PutU8s(out, object.curveValid);
     _PutF32s(out, object.falloffCurve);
-    _PutU32s(out, object.curvenetMeshPoints);
-    _PutU8s(out, object.curvenetMeshValid);
-    _PutU32s(out, object.curvenetPoints);
-    _PutU8s(out, object.curvenetPointsValid);
-    _PutU32s(out, object.curvenetCounts);
-    _PutU8s(out, object.curvenetCountsValid);
-    _PutU32s(out, object.curvenetIndices);
-    _PutU8s(out, object.curvenetIndicesValid);
-    _PutU32s(out, object.curvenetSplines);
-    _PutU8s(out, object.curvenetSplinesValid);
-    RigExecWirePutU32(out, object.curvenetWeights);
-    RigExecWirePutU8(out, object.curvenetWeightsValid ? uint8_t(1)
-                                                     : uint8_t(0));
-    RigExecWirePutU32(out, object.curvenetAutoSmooth);
-    RigExecWirePutU8(out, object.curvenetAutoSmoothValid ? uint8_t(1)
-                                                         : uint8_t(0));
-    RigExecWirePutU32(out, object.curvenetBasis);
-    RigExecWirePutInput(out, object.curvenetSamples);
-    RigExecWirePutInput(out, object.curvenetUnreached);
-    _PutVec3fs(out, object.boundMesh);
-    _PutVec3fs(out, object.boundNet);
-    _PutI32s(out, object.boundCounts);
-    _PutI32s(out, object.boundIndices);
-    _PutI32s(out, object.boundSplines);
-    _PutI32s(out, object.boundSmooth);
-    RigExecWirePutI32(out, object.boundSamples);
-    RigExecWirePutU8(out, object.bound ? uint8_t(1) : uint8_t(0));
 }
 
 bool
@@ -741,41 +677,9 @@ _ReadWeightObject(RigExecWireReader *reader,
         !readValid(&object->sampleValid) ||
         !_ReadU32s(reader, &object->curvePoints) ||
         !readValid(&object->curveValid) ||
-        !_ReadF32s(reader, &object->falloffCurve) ||
-        !_ReadU32s(reader, &object->curvenetMeshPoints) ||
-        !readValid(&object->curvenetMeshValid) ||
-        !_ReadU32s(reader, &object->curvenetPoints) ||
-        !readValid(&object->curvenetPointsValid) ||
-        !_ReadU32s(reader, &object->curvenetCounts) ||
-        !readValid(&object->curvenetCountsValid) ||
-        !_ReadU32s(reader, &object->curvenetIndices) ||
-        !readValid(&object->curvenetIndicesValid) ||
-        !_ReadU32s(reader, &object->curvenetSplines) ||
-        !readValid(&object->curvenetSplinesValid) ||
-        !reader->ReadU32(&object->curvenetWeights) ||
-        !reader->ReadU8(&flag) || flag > 1) {
+        !_ReadF32s(reader, &object->falloffCurve)) {
         return false;
     }
-    object->curvenetWeightsValid = flag != 0;
-    if (!reader->ReadU32(&object->curvenetAutoSmooth) ||
-        !reader->ReadU8(&flag) || flag > 1) {
-        return false;
-    }
-    object->curvenetAutoSmoothValid = flag != 0;
-    if (!reader->ReadU32(&object->curvenetBasis) ||
-        !RigExecWireReadInput(reader, &object->curvenetSamples) ||
-        !RigExecWireReadInput(reader, &object->curvenetUnreached) ||
-        !_ReadVec3fs(reader, &object->boundMesh) ||
-        !_ReadVec3fs(reader, &object->boundNet) ||
-        !_ReadI32s(reader, &object->boundCounts) ||
-        !_ReadI32s(reader, &object->boundIndices) ||
-        !_ReadI32s(reader, &object->boundSplines) ||
-        !_ReadI32s(reader, &object->boundSmooth) ||
-        !reader->ReadI32(&object->boundSamples) ||
-        !reader->ReadU8(&flag) || flag > 1) {
-        return false;
-    }
-    object->bound = flag != 0;
     return true;
 }
 
@@ -838,6 +742,14 @@ RigExecWireEncodeDomainGeometry(const RigExecWireDomainGeometry &geometry,
         }
         for (const RigExecWireDerived &derived : chain.derived) {
             RigExecWirePutI32(out, derived.revision.carrySpaceSlot);
+        }
+    }
+    // The projector block: per derived entry, its dials and the mesh's
+    // world inverse. Same walk, same reason as the carry block.
+    for (const RigExecWireChain &chain : geometry.chains) {
+        for (const RigExecWireDerived &derived : chain.derived) {
+            _PutU32s(out, derived.revision.shaderDials);
+            RigExecWirePutMatrix4d(out, derived.revision.meshWorldInverse);
         }
     }
     return true;
@@ -927,6 +839,18 @@ RigExecWireDecodeDomainGeometry(RigExecWireReader *reader,
             }
             for (RigExecWireDerived &derived : chain.derived) {
                 if (!reader->ReadI32(&derived.revision.carrySpaceSlot)) {
+                    return _Fail(error);
+                }
+            }
+        }
+    }
+    // The optional projector block; absent means no projector targets.
+    if (!reader->Exhausted()) {
+        for (RigExecWireChain &chain : geometry->chains) {
+            for (RigExecWireDerived &derived : chain.derived) {
+                if (!_ReadU32s(reader, &derived.revision.shaderDials) ||
+                    !RigExecWireReadMatrix4d(
+                        reader, &derived.revision.meshWorldInverse)) {
                     return _Fail(error);
                 }
             }

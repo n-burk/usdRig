@@ -11,7 +11,6 @@
 //                            asset-space bind transform when solver-posed)
 //   <rig>/Solvers/<name>     aggregate solvers (FK, IK, blend, twist, ribbon)
 //   <rig>/Weights/<name>     weight objects
-//   <rig>/Curvenets/<name>   RigExecCurvenet data prims
 //   <rig>/Movers/<chain>     mover chains; top-level operations are siblings
 //                            and may themselves own child movers. The evaluator
 //                            executes them in REVERSE composed child order
@@ -136,16 +135,6 @@ public:
     void SetRotationSign(double sx, double sy, double sz);
     /// RigExecControlAPI rigExec:channelRole (pose | switch | tweak).
     void SetChannelRole(const TfToken &role);
-};
-
-/// A curvenet knot control, with local avars in a deformation-relative frame.
-class RigExecCurvenetAdjustmentHandle : public RigExecControlHandle {
-public:
-    using RigExecControlHandle::RigExecControlHandle;
-    void SetCurvenet(const SdfPath &path);
-    void SetKnotIndex(int index);
-    void SetIncludeTangents(bool include);
-    RigExecCurvenetAdjustmentHandle AddTangent(const std::string &name, int index);
 };
 
 /// A RigExecJoint: a solver-posed output xformable. When posed by a solver
@@ -277,8 +266,6 @@ public:
     void SetTwistFrames(const std::vector<SdfPath> &paths);
     void SetSampleCount(int count);
     void SetParameterization(const TfToken &mode);  // arcLength | parametric
-    void SetDriverCurveReadPhase(const TfToken &phase);
-    void SetSurfaceReadPhase(const TfToken &phase);
     void SetJointElements(const std::vector<int> &elements);
 };
 
@@ -501,8 +488,10 @@ public:
     /// with UsdAttribute::GetSpline(), so the curve IS its time samples --
     /// each (x, y) knot lands at time x. Knots are clamped to [0,1].
     void SetFalloffCurve(const std::vector<std::pair<double, double>> &knots);
-    /// reference (static base points) | current (in-flight stack points).
-    void SetSamplePhase(const TfToken &phase);
+    /// base (the static source points, the default) | preceding (the
+    /// in-flight points at the consuming operator's position), as
+    /// rigExecReadPhase metadata on rigExec:weightTarget.
+    void SetReadPhase(const TfToken &phase);
     /// Optional explicit static sampling source.
     void SetSampleSource(const SdfPath &path);
 };
@@ -586,7 +575,8 @@ public:
     /// its channel weight, which is ~65 ms/frame for 169 correctives on a
     /// 26,276-point body standing at rest.
     void SetBlendShape(const SdfPath &path);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:targetPoints.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -650,21 +640,6 @@ public:
     RigExecPoseHandle AddPose(const std::string &name);
 };
 
-/// A RigExecCurvenet: a net of cubic splines profiling a surface (2022 paper).
-class RigExecCurvenetHandle : public RigExecHandleBase {
-public:
-    using RigExecHandleBase::RigExecHandleBase;
-
-    /// The shared control-point pool (knots AND tangent handles), in the
-    /// projection pose. UsdGeomPoints `points` attribute.
-    void SetPoints(const std::vector<GfVec3f> &points);
-    /// Append one cubic spline: four pool indices p0, h0, h1, p1 (bezier).
-    void AddSpline(int p0, int h0, int h1, int p1);
-    /// bezier | catmullRom.
-    void SetBasis(const TfToken &basis);
-    void SetSamplesPerSpline(int count);
-};
-
 // Mover handles (point-domain and property-domain operations)
 
 /// RigExecMatrixMover: p' = q + w (T q - q). Moves points through one
@@ -676,7 +651,7 @@ public:
 
     /// The GfMatrix4d provider (computeMatrix) -- joint, control, or xform.
     void SetTransformProvider(const SdfPath &path);
-    /// base | preceding | final.
+    /// base | final, as rigExecReadPhase metadata on rigExec:transform.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -702,7 +677,8 @@ public:
     /// skinning: rotation blended on the shortest arc, joint scale and
     /// shear blended linearly in the pre-rotation frame).
     void SetSkinningMethod(const TfToken &method);
-    /// base | preceding | final, for every influence.
+    /// base | final for every influence, as rigExecReadPhase metadata on
+    /// rigExec:influences.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -717,7 +693,8 @@ public:
     /// bspline | bernstein.
     void SetBasis(const TfToken &basis);
     void SetDivisions(int x, int y, int z);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:cage.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -744,7 +721,8 @@ public:
     void SetBindCoordinates(const SdfPath &path);
     /// ribbon | emitGuidePoints.
     void SetMode(const TfToken &mode);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:driverCurve.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -758,7 +736,8 @@ public:
     void SetSurface(const SdfPath &path);
     /// attach | project.
     void SetMode(const TfToken &mode);
-    /// base | preceding | final.
+    /// base | preceding | final, as rigExecReadPhase metadata on
+    /// rigExec:surface.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -772,6 +751,27 @@ public:
     void SetPinBorders(bool pin);
     void SetDistanceWeight(float weight);
     void SetDisplacement(float amount);
+};
+
+/// Quasistatic rest-distance relaxation with attachment bounds and pins.
+class RigExecWrinkleMoverHandle : public RigExecMoverHandle {
+public:
+    using RigExecMoverHandle::RigExecMoverHandle;
+    void SetRestPoints(const std::vector<GfVec3f> &points);
+    void SetIterations(int iterations);
+    void SetTopology(const TfToken &topology);
+    void SetNeighborDistance(int distance);
+    void SetRestLengthScale(float scale);
+    void SetStretchStiffness(float stiffness);
+    void SetCompressionStiffness(float stiffness);
+    void SetBendStiffness(float stiffness);
+    void SetMaxDisplacement(float radius);
+    void SetPinBorders(bool pin);
+    void SetPinPoints(const std::vector<int> &indices);
+    void SetTangentPlaneCollisions(bool enabled);
+    void SetTangentPlaneInset(float inset);
+    void SetWrinkleScale(float scale);
+    void SetSmoothingIterations(int iterations);
 };
 
 /// RigExecSmoothMover: uniform-weight Laplacian smoothing.
@@ -790,24 +790,6 @@ public:
 
     /// Source-compatible alias for SetDefaultWeight.
     void SetStrength(float strength);
-};
-
-/// RigExecCurvenetMover (Profile Mover): propagates a rigged curvenet's
-/// articulation over the target points.
-class RigExecCurvenetMoverHandle : public RigExecMoverHandle {
-public:
-    using RigExecMoverHandle::RigExecMoverHandle;
-
-    /// Exactly one RigExecCurvenet supplying the posed control points.
-    void SetCurvenet(const SdfPath &path);
-    /// Source-compatible alias for SetDefaultWeight.
-    void SetStrength(float strength);
-};
-
-class RigExecCurvenetAdjusterMoverHandle : public RigExecMoverHandle {
-public:
-    using RigExecMoverHandle::RigExecMoverHandle;
-    void SetAdjustments(const std::vector<SdfPath> &paths);
 };
 
 /// RigExecFloatMathMover: add | multiply | clamp | remap | blend over an
@@ -934,6 +916,10 @@ public:
     RigExecDeltaMushMoverHandle AddDeltaMushMover(
         const std::string &name, float defaultWeight = 1.0f,
         const SdfPath &target = SdfPath());
+    /// Quasistatic geometric wrinkles with the common mover envelope.
+    RigExecWrinkleMoverHandle AddWrinkleMover(
+        const std::string &name, float defaultWeight = 1.0f,
+        const SdfPath &target = SdfPath());
     RigExecSmoothMoverHandle AddSmoothMover(
         const std::string &name, float defaultWeight = 1.0f,
         const SdfPath &target = {});
@@ -942,17 +928,6 @@ public:
     RigExecVolumeCorrectMoverHandle AddVolumeCorrectMover(
         const std::string &name, float defaultWeight = 1.0f,
         const SdfPath &target = {});
-
-    /// Profile-mover: propagates a rigged curvenet's articulation.
-    RigExecCurvenetMoverHandle AddCurvenetMover(
-        const std::string &name,
-        const SdfPath &curvenetPrim,
-        float defaultWeight = 1.0f,
-        const SdfPath &target = {});
-    RigExecCurvenetAdjusterMoverHandle AddCurvenetAdjusterMover(
-        const std::string &name, const std::vector<SdfPath> &adjustments,
-        float defaultWeight = 1.0f, const SdfPath &target = {});
-
 
     /// add | multiply | clamp | remap | blend over an exact float property.
     RigExecFloatMathMoverHandle AddFloatMathMover(
@@ -1164,12 +1139,6 @@ public:
     /// blend inputs connect to those.
     RigExecPoseInterpolatorHandle AddPoseInterpolator(
         const std::string &name, const SdfPath &driver);
-
-
-    RigExecCurvenetHandle AddCurvenet(
-        const std::string &name, const std::vector<GfVec3f> &points);
-    RigExecCurvenetAdjustmentHandle AddCurvenetAdjustment(
-        const std::string &name, const SdfPath &curvenet, int knotIndex);
 
 
     /// Start a new chain at <rig>/Movers/<chainName>. Operations added to the

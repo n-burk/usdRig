@@ -1507,7 +1507,9 @@ TestAuthoredEditRepublishesFreshField()
     uint64_t generation = overlay(&field);
     expect(field, _kExpectedWeights, "baseline");
 
-    const UsdAttribute falloffMax = f.stage->GetAttributeAtPath(
+    // Non-const: UsdAttribute::SetSpline is const-only from 26.08; the
+    // Vendored USD 26.05 still takes a mutable handle.
+    UsdAttribute falloffMax = f.stage->GetAttributeAtPath(
         _kVolumePath.AppendProperty(TfToken("inputs:falloffMax")));
     CHECK(bool(falloffMax));
 

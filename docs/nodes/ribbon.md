@@ -113,18 +113,6 @@ Valid values: `arcLength`, `parametric`.
 
 Valid values: `rotationMinimizing`.
 
-#### `rigExec:driverCurveReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `final`.
-
-#### `rigExec:surfaceReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `final`.
-
 #### `rigExec:joints`
 
 *Relationship.*

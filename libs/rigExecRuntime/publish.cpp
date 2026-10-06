@@ -2,7 +2,7 @@
 // Ports of RigExecBakedPublishPose (bakedPose.cpp) and
 // RigExecBakedPublishGeometry (bakedGeometry.cpp): step diagnostics in
 // program order, fallback-joint lines, provider xforms, joint/control
-// publication, weight fields, adjusters and moved properties. Guides
+// publication, weight fields and moved properties. Guides
 // are skipped: the runtime carries no tap request, which is the
 // guides-disabled shape the baked path mirrors.
 #include "rigExecRuntime/store.h"
@@ -199,39 +199,8 @@ RrPublishGeometry(RrProgram *program,
     const RigExecWireDomainGeometry &geo = *program->geometry;
 
     store.movedProperties.clear();
+    store.movedMatrices.clear();
     store.weightFields.clear();
-
-    const auto publishAdjuster = [&](size_t chain, size_t revision) {
-        const RigExecWireRevision &wire =
-            geo.chains[chain].revisions[revision];
-        const RrRevisionPublish &publish =
-            store.revisionPublish[size_t(
-                geo.chainRevisionBegin[chain] + int(revision))];
-        // CurvenetAdjuster is op 11 in RigExecRevisionOp order.
-        if (wire.op != 11 || publish.resultStatus != "ok") {
-            return;
-        }
-        RrMat4d netToAsset;
-        netToAsset.SetIdentity();
-        if (chain < record.revisionAdjusters.size() &&
-            revision < record.revisionAdjusters[chain].size() &&
-            record.revisionAdjusterHave[chain][revision]) {
-            const RigExecWireMatrix4d &wireMatrix =
-                record.revisionAdjusters[chain][revision];
-            for (size_t r = 0; r < 4; ++r) {
-                for (size_t c = 0; c < 4; ++c) {
-                    netToAsset[r][c] = wireMatrix[r * 4 + c];
-                }
-            }
-        }
-        for (size_t j = 0;
-             j < std::min(publish.controlFrames.size(),
-                          publish.adjusterPaths.size());
-             ++j) {
-            store.controlFrames[publish.adjusterPaths[j]] =
-                RrFrameFromMatrix(publish.controlFrames[j] * netToAsset);
-        }
-    };
 
     for (const RigExecWireStep &step : steps) {
         const RrStepOutput &output =
@@ -267,10 +236,6 @@ RrPublishGeometry(RrProgram *program,
             if (!store.chainPublish[chain].haveBase) {
                 continue;
             }
-            for (size_t r = 0;
-                 r < geo.chains[chain].revisions.size(); ++r) {
-                publishAdjuster(chain, r);
-            }
             store.movedProperties[store.chainPublish[chain].target] =
                 store.chainPublish[chain].result;
         } else if (step.kind == RigExecWireStepKind::Derived) {
@@ -282,7 +247,11 @@ RrPublishGeometry(RrProgram *program,
             const RrDerivedPublish &derived =
                 store.derivedPublish[size_t(step.object)];
             if (store.chainPublish[chain].haveBase && derived.haveBase) {
-                store.movedProperties[derived.target] = derived.result;
+                if (!derived.matrixTarget) {
+                    store.movedProperties[derived.target] = derived.result;
+                } else if (derived.haveMatrix) {
+                    store.movedMatrices[derived.target] = derived.matrix;
+                }
             }
         } else {
             switch (step.kind) {

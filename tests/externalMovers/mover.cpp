@@ -1,0 +1,176 @@
+#include "rigExec/movers/moverRegistry.h"
+
+#include <cmath>
+#include <cstring>
+#include <limits>
+
+PXR_NAMESPACE_USING_DIRECTIVE
+using namespace rigExec;
+
+namespace {
+
+// The payload: (gain, reference y, whether a reference was read). A
+// reference is any points property named by rigExec:reference, read at the
+// phase that relationship declares; its first point's y is added to every
+// point, so a phased read that playback re-evaluates shows in the result.
+using Payload = GfVec3f;
+
+void Bind(const RigExecMoverBindContext &ctx)
+{
+    const SdfPathVector references =
+        RigExecRelationshipTargets(ctx.moverPrim, "rigExec:reference");
+    if (references.size() != 1) return;
+    const RigExecReadPhase phase =
+        RigExecPhaseForInput(ctx.moverPrim, "rigExec:reference");
+    if (!phase.IsBase()) {
+        ctx.binding->phases[references[0]] = phase;
+    }
+}
+
+bool Assemble(const UsdPrim &prim, const RigExecRevisionBinding &,
+              const RigExecProviderValues &values, UsdTimeCode time,
+              VtValue *data)
+{
+    if (values.basePoints.empty()) return false;
+    float gain = 1.0f;
+    const UsdAttribute attribute = prim.GetAttribute(TfToken("inputs:gain"));
+    if (values.resolved) {
+        values.resolved->GetAttribute(attribute, time, &gain);
+    } else {
+        attribute.Get(&gain, time);
+    }
+    if (!std::isfinite(gain)) return false;
+    Payload payload(gain, 0.0f, 0.0f);
+    const SdfPathVector references =
+        RigExecRelationshipTargets(prim, "rigExec:reference");
+    if (references.size() == 1) {
+        VtVec3fArray points;
+        const UsdAttribute reference =
+            prim.GetStage()->GetAttributeAtPath(references[0]);
+        const bool read = values.resolved
+            ? values.resolved->GetAttribute(reference, time, &points)
+            : reference.Get(&points, time);
+        if (!read || points.empty()) return false;
+        payload[1] = points[0][1];
+        payload[2] = 1.0f;
+    }
+    *data = VtValue(payload);
+    return true;
+}
+
+// The deformation, shared by the stage-side callback and the playback
+// kernel. False is a failed mover; the -2 and -3 gains exercise the hosts'
+// atomic failure paths (a changed count, a non-finite point).
+bool Deform(float gain, float referenceY, float *xyz, size_t count)
+{
+    if (gain == -3.0f && count > 0) {
+        xyz[2] = std::numeric_limits<float>::quiet_NaN();
+        return true;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        xyz[i * 3 + 1] += referenceY;
+        xyz[i * 3 + 2] += gain * xyz[i * 3] * xyz[i * 3];
+    }
+    return gain >= 0.0f;
+}
+
+bool Apply(const VtValue &data, std::vector<GfVec3f> *points)
+{
+    if (!data.IsHolding<Payload>()) return false;
+    const Payload &payload = data.UncheckedGet<Payload>();
+    if (payload[0] == -2.0f) {
+        points->push_back(GfVec3f(0));
+        return true;
+    }
+    return Deform(payload[0], payload[1],
+                  points->empty() ? nullptr : points->front().data(),
+                  points->size());
+}
+
+RigExecOracleResult Oracle(const RigExecMoverOracleContext &ctx)
+{
+    float gain = 1.0f;
+    ctx.resolved.GetAttribute(ctx.prim.GetAttribute(TfToken("inputs:gain")),
+                              ctx.time, &gain);
+    if (!std::isfinite(gain) || gain < 0.0f) {
+        return RigExecOracleResult::PassThrough;
+    }
+    for (GfVec3f &point : *ctx.points) {
+        point[2] += gain * point[0] * point[0];
+    }
+    return RigExecOracleResult::Blend;
+}
+
+// .rigexec export: epoch bytes are a format tag the kernel checks; frame
+// bytes are the payload's three floats.
+constexpr char kEpochTag[] = {'Q', 'U', 'A', '1'};
+
+bool Encode(const VtValue &data, const RigExecRevisionBinding &,
+            std::vector<uint8_t> *epoch, std::vector<uint8_t> *frame)
+{
+    if (!data.IsHolding<Payload>()) return false;
+    const Payload &payload = data.UncheckedGet<Payload>();
+    epoch->assign(kEpochTag, kEpochTag + sizeof(kEpochTag));
+    frame->resize(sizeof(float) * 3);
+    std::memcpy(frame->data(), payload.data(), frame->size());
+    return true;
+}
+
+std::shared_ptr<const void> Prepare(const uint8_t *epoch, size_t size,
+                                    std::string *error)
+{
+    if (size != sizeof(kEpochTag) ||
+        std::memcmp(epoch, kEpochTag, size) != 0) {
+        if (error) *error = "unknown epoch format";
+        return nullptr;
+    }
+    return std::make_shared<int>(1);
+}
+
+bool Play(const void *, const uint8_t *frame, size_t frameSize,
+          const RigExecExternalPhasedPoints *phased, size_t phasedCount,
+          float *xyz, size_t count)
+{
+    float payload[3];
+    if (frameSize != sizeof(payload)) return false;
+    std::memcpy(payload, frame, sizeof(payload));
+    if (payload[0] == -2.0f) return false;
+    // Playback's own evaluation of the reference wins over the exported
+    // value, so a posed playback moves it.
+    if (payload[2] != 0.0f && phasedCount == 1 && phased[0].xyz &&
+        phased[0].count > 0) {
+        payload[1] = phased[0].xyz[1];
+    }
+    return Deform(payload[0], payload[1], xyz, count);
+}
+
+RigExecMoverHandler Handler()
+{
+    RigExecMoverHandler handler("ExternalQuadraticMover",
+        &RigExecFixedMoverOp<RigExecRevisionOp::External>,
+        RigExecMoverDomain::Points);
+    handler.singleTarget = true;
+    handler.bind = &Bind;
+    handler.assembleExternal = &Assemble;
+    handler.applyExternal = &Apply;
+    handler.oracle = &Oracle;
+    handler.encodeExternal = &Encode;
+    handler.runtimeKernel.prepare = &Prepare;
+    handler.runtimeKernel.apply = &Play;
+    return handler;
+}
+
+// The same mover from a plugin that never adopted .rigexec export.
+RigExecMoverHandler UnexportableHandler()
+{
+    RigExecMoverHandler handler = Handler();
+    handler.schemaType = "ExternalUnexportableMover";
+    handler.encodeExternal = nullptr;
+    handler.runtimeKernel = RigExecExternalKernel();
+    return handler;
+}
+
+}  // namespace
+
+RIGEXEC_REGISTER_MOVER(Handler());
+RIGEXEC_REGISTER_MOVER(UnexportableHandler());

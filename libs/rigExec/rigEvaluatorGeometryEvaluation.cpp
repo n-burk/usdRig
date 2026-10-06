@@ -2,7 +2,6 @@
 
 #include "rigEvaluatorInternal.h"
 #include "rigEvaluatorConstraints.h"
-#include "curvenetWeightComputations.h"
 #include "parallel.h"
 #include "movers/moverRegistry.h"
 #include "frameExtraction.h"
@@ -27,6 +26,17 @@
 namespace rigExec {
 
 using namespace evaluatorDetail;
+
+namespace {
+
+// Blend attribute names read per channel per frame, interned once.
+const TfToken _kEvalBlendWeight("inputs:weight");
+const TfToken _kEvalBlendActivation("rigExec:activation");
+const TfToken _kEvalDense("dense");
+const TfToken _kEvalWeightTarget("rigExec:weightTarget");
+const TfToken _kEvalDefaultWeight("inputs:defaultWeight");
+
+} // namespace
 
 bool
 RigExecRigEvaluator::_EvaluateGeometry(
@@ -124,12 +134,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
     size_t graphRevisionsBuilt = 0;
 
     // Chains run in dependency order, computed at compile (_chainPlan.order).
-    // This used to be "curvenets first, then everything else", which was the
-    // only cross-chain dependency that existed: a Profile Mover needs its
-    // net's own chain already evaluated. A phased read is the same shape of
-    // dependency stated in general -- a cage read at `final` needs the cage's
-    // chain first, exactly as the net does -- so the special case became one
-    // edge in a topological sort and the heuristic went away.
     // What one chain produced, held apart from the pose until the walk folds
     // it in.
     // Independent chains can run at the same time, and two of them appending
@@ -142,7 +146,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
         std::vector<std::string> diagnostics;
         std::vector<std::pair<SdfPath, VtValue>> movedProperties;
         std::map<SdfPath, RigExecResolvedWeightField> weightFields;
-        std::vector<std::pair<SdfPath, RigExecPointFrame>> controlFrames;
         RigExecChainSnapshots snapshots;
         size_t revisionsCreated = 0;
         size_t revisionsExecuted = 0;
@@ -159,9 +162,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
         }
         for (auto &[path, field] : work.weightFields) {
             pose.weightFields[path] = std::move(field);
-        }
-        for (const auto &[path, frame] : work.controlFrames) {
-            pose.controlFrames[path] = frame;
         }
         _chainSnapshots.Merge(std::move(work.snapshots));
         pose.moverGraphRevisionsCreated += work.revisionsCreated;
@@ -373,6 +373,22 @@ RigExecRigEvaluator::_EvaluateGeometry(
             if (values.transform && hasReference) {
                 transform = RigExecMeasureFromReference(transform, referenceMatrix(0));
             }
+            // rigExec:space, the rig's carry: the provider's computeMatrix at
+            // the transform's phase, exactly what the baked fold reads from
+            // its base or final matrix table. A pointer, because a revision
+            // naming no carry must take the untouched branch.
+            GfMatrix4d carry(1.0);
+            if (revision.carrySpaceTap >= 0) {
+                carry = snapshot.Get<GfMatrix4d>(revision.carrySpaceTap);
+                if (revision.transformFinalPhase) {
+                    const auto revisedIt =
+                        finalMatrices.find(revision.binding.carrySpace);
+                    if (revisedIt != finalMatrices.end()) {
+                        carry = revisedIt->second;
+                    }
+                }
+                values.carry = &carry;
+            }
             // A space provider: the transform measured against it, read at
             // the same phase, so the points take only the handle's motion
             // inside the space.
@@ -389,7 +405,11 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 if (hasReference && revision.influenceTaps.size() > 1) {
                     space = RigExecMeasureFromReference(space, referenceMatrix(1));
                 }
-                transform = RigExecMeasureInSpace(transform, space);
+                // The reference refines the space first, then the carry
+                // consumes it, in the baked fold's order.
+                transform = RigExecClusterInPointFrame(
+                    RigExecMeasureInSpace(transform, space), space,
+                    revision.transformPosedPoints, values.carry);
             }
             // Skin influences: the phase rules of the single transform
             // above, applied to every rigExec:influences entry in order.
@@ -427,7 +447,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
                     snapshot.Get<RigExecWeightPacket>(revision.weightTap);
                 values.weights = &weights;
 
-                // rigExec:samplePhase = "current": the field is measured
+                // A volume weight reading `preceding` on
+                // rigExec:weightTarget: the field is measured
                 // against the points AS THEY STAND HERE, not the
                 // authored base, so the volume grabs whatever is inside
                 // it right now.
@@ -454,7 +475,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
                     if (_ResolveWeights(revision.binding.weightObject,
                                         currentPoints.size(), time, &field,
                                         &weightError, &currentPoints)) {
-                        weights.representation = TfToken("dense");
+                        weights.representation = _kEvalDense;
                         weights.values = std::move(field);
                         weights.indices.clear();
                         weights.defaultWeight = 0.0f;
@@ -478,7 +499,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
                             revision.binding.weightObject)) {
                         if (const UsdRelationship rel =
                                 weightPrim.GetRelationship(
-                                    TfToken("rigExec:weightTarget"))) {
+                                    _kEvalWeightTarget)) {
                             rel.GetTargets(&declaredTargets);
                         }
                     }
@@ -505,6 +526,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 revision.op == RigExecRevisionOp::BlendShape ||
                 revision.op == RigExecRevisionOp::VolumeCorrect ||
                 revision.op == RigExecRevisionOp::DeltaMush ||
+                revision.op == RigExecRevisionOp::Wrinkle ||
+                revision.op == RigExecRevisionOp::External ||
                 revision.op == RigExecRevisionOp::Lattice ||
                 revision.op == RigExecRevisionOp::RecomputeNormals ||
                 revision.op == RigExecRevisionOp::RecomputeExtent;
@@ -515,32 +538,19 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 revision.skinTopologyFixed) {
                 values.skinTopologyCache = &_skinTopologies;
             }
-            if (revision.op == RigExecRevisionOp::Curvenet) {
-                values.curvenetCache = &_curvenetBindings;
-                // The curvenet's own chain result if it has one; pass 0 above
-                // guarantees it has already been computed.
-                const auto posed =
-                    pose.movedProperties.find(revision.binding.curvenetPoints);
-                if (posed != pose.movedProperties.end() &&
-                    posed->second.IsHolding<VtVec3fArray>()) {
-                    const VtVec3fArray &net =
-                        posed->second.UncheckedGet<VtVec3fArray>();
-                    values.curvenetPoints.assign(net.begin(), net.end());
-                }
-            }
             if (!revision.binding.blendInputs.empty()) {
                 std::vector<RigExecBlendChannel> channels;
                 for (const SdfPath &input : revision.binding.blendInputs) {
                     RigExecBlendChannel channel;
                     const UsdPrim inputPrim = _stage->GetPrimAtPath(input);
-                    _resolvedInputs.GetAttribute(inputPrim.GetAttribute(TfToken("inputs:weight")),
+                    _resolvedInputs.GetAttribute(inputPrim.GetAttribute(_kEvalBlendWeight),
                                                  time, &channel.weight);
                     const auto sampleBindings = revision.binding.blendSamples.find(input);
                     if (sampleBindings != revision.binding.blendSamples.end()) {
                         for (const auto &binding : sampleBindings->second) {
                             RigExecBlendSampleData sample;
                             const UsdPrim samplePrim = _stage->GetPrimAtPath(binding.sample);
-                            _resolvedInputs.GetAttribute(samplePrim.GetAttribute(TfToken("rigExec:activation")),
+                            _resolvedInputs.GetAttribute(samplePrim.GetAttribute(_kEvalBlendActivation),
                                                          time, &sample.activation);
                             if (!binding.blendShape.IsEmpty()) {
                                 // Sparse: the shape is epoch-constant, so it
@@ -608,7 +618,7 @@ RigExecRigEvaluator::_EvaluateGeometry(
             if (parameters.enabled && !parameters.valid &&
                 revision.binding.weightObject.IsEmpty()) {
                 const float scalar = _ResolvedRead(
-                    _resolvedInputs, moverPrim, "inputs:defaultWeight",
+                    _resolvedInputs, moverPrim, _kEvalDefaultWeight,
                     1.0f, time);
                 if (!std::isfinite(scalar) || scalar < 0.0f ||
                     scalar > 1.0f) {
@@ -660,37 +670,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 work.diagnostics.push_back("MoverFailed " + revisions[i].moverPath.GetString() +
                     ": execution rejected its inputs; revision passed through");
             }
-            if (revisions[i].op == RigExecRevisionOp::CurvenetAdjuster &&
-                graph.GetRevisionStatus(live->revisions[i]).AllowsApply()) {
-                const auto frames = graph.GetRevisionControlFrames(live->revisions[i]);
-                const auto paths = RigExecCurvenetAdjustmentPaths(
-                    _stage->GetPrimAtPath(revisions[i].moverPath));
-                // Kernels operate on net-local points. Control outputs use
-                // the same asset-space contract as ordinary rig controls.
-                GfMatrix4d netToAsset(1.0);
-                for (UsdPrim prim = _stage->GetPrimAtPath(target.GetPrimPath());
-                     prim && !prim.IsPseudoRoot() && prim != assetRoot;
-                     prim = prim.GetParent()) {
-                    const UsdGeomXformable xform(prim);
-                    if (!xform) continue;
-                    GfMatrix4d local(1.0);
-                    bool reset = false;
-                    xform.GetLocalTransformation(&local, &reset, time);
-                    const auto driven = pose.providerXforms.find(prim.GetPath());
-                    if (driven != pose.providerXforms.end()) local = driven->second;
-                    netToAsset = netToAsset * local;
-                    if (reset) {
-                        netToAsset = netToAsset *
-                            chainXformCache.GetLocalToWorldTransform(assetRoot).GetInverse();
-                        break;
-                    }
-                }
-                for (size_t j = 0; j < std::min(frames.size(), paths.size()); ++j) {
-                    work.controlFrames.emplace_back(
-                        paths[j],
-                        RigExecFrameFromMatrix(frames[j] * netToAsset));
-                }
-            }
         }
         work.revisionsExecuted +=
             graph.GetRevisionExecutionCount() - executionsBefore;
@@ -710,6 +689,59 @@ RigExecRigEvaluator::_EvaluateGeometry(
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "Derived " + target.GetString(), "geometry");
         for (const _GraphRevision &derived : derivedIt->second) {
+            if (RigExecIsDerivedMatrixOp(derived.op)) {
+                // A surface projector's matrix primvar: its providers' world
+                // frames (rest times computeMatrix, base and final), the
+                // chain's authored and final points, and the shared kernel.
+                RigExecSurfaceProjectorFrames frames;
+                const SdfPath providers[3] = {derived.binding.transform,
+                                              derived.binding.transformSpace,
+                                              derived.binding.carrySpace};
+                const RigExecTapId matrixTaps[3] = {derived.transformTap,
+                                                    derived.transformSpaceTap,
+                                                    derived.carrySpaceTap};
+                for (int k = 0; k < 3; ++k) {
+                    if (providers[k].IsEmpty()) continue;
+                    frames.named[k] = true;
+                    if (matrixTaps[k] < 0 || derived.projectorRestTaps[k] < 0) {
+                        continue;
+                    }
+                    const GfMatrix4d baseMatrix =
+                        snapshot.Get<GfMatrix4d>(matrixTaps[k]);
+                    GfMatrix4d finalMatrix = baseMatrix;
+                    const auto revised = finalMatrices.find(providers[k]);
+                    if (revised != finalMatrices.end()) {
+                        finalMatrix = revised->second;
+                    }
+                    const RigExecPointFrame rest =
+                        snapshot.Get<RigExecPointFrame>(
+                            derived.projectorRestTaps[k]);
+                    if (!rest.IsValid()) continue;
+                    frames.base[k] = RigExecWorldFromRest(rest.points, baseMatrix);
+                    frames.final[k] =
+                        RigExecWorldFromRest(rest.points, finalMatrix);
+                    frames.resolved[k] = true;
+                }
+                GfMatrix4d matrix(1.0);
+                std::vector<std::string> diagnostics;
+                if (RigExecEvaluateProjectorTarget(
+                        _stage->GetPrimAtPath(derived.moverPath), derived.op,
+                        derived.binding, frames,
+                        std::vector<GfVec3f>(basePoints.begin(),
+                                             basePoints.end()),
+                        std::vector<GfVec3f>(graphPoints.begin(),
+                                             graphPoints.end()),
+                        &_resolvedInputs, time, &matrix, &diagnostics)) {
+                    work.movedProperties.emplace_back(derived.target,
+                                                      VtValue(matrix));
+                }
+                work.diagnostics.insert(work.diagnostics.end(),
+                                        diagnostics.begin(),
+                                        diagnostics.end());
+                ++work.revisionsBuilt;
+                ++work.chainsBuilt;
+                continue;
+            }
             VtVec3fArray derivedBase;
             const UsdAttribute derivedAttr =
                 _stage->GetAttributeAtPath(derived.target);
@@ -869,10 +901,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
                 !graphIt->second.IsHolding<VtVec3fArray>()) {
                 continue;
             }
-            // A Profile Mover has no scalar oracle (see _EvaluateChain), so
-            // comparing against one reports a "mismatch" that means only
-            // "the reference does not implement this". Skipped and said,
-            // rather than counted as a defect.
             const RigExecMoverRecord *unoracled = nullptr;
             for (const RigExecMoverRecord *mover : chain) {
                 const RigExecMoverHandler *parityHandler =
@@ -923,13 +951,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
         }
     }
 
-    // Whatever the Profile Mover binds reported. Emitted here rather than
-    // from inside packet assembly because that has no diagnostic channel,
-    // and drained so a cached bind stays silent on every later frame.
-    for (std::string &message : _curvenetBindings.TakeDiagnostics()) {
-        pose.diagnostics.push_back(std::move(message));
-    }
-
     // Report actual reference comparisons, not every graph/derived chain that
     // happened to build.  Derived normals/extents are not part of this scalar
     // point-chain oracle and a mismatched point chain is never an agreement.
@@ -966,10 +987,6 @@ RigExecRigEvaluator::_EvaluateGeometry(
             }
         }
         for (const auto &[target, chain] : chains) {
-            // A chain containing a Profile Mover has no scalar oracle (see
-            // _EvaluateChain), so publishing a CPU value for it would report
-            // a "mismatch" that means only "the reference does not implement
-            // this". Skip the chain and say so instead.
             const RigExecMoverRecord *unoracled = nullptr;
             for (const RigExecMoverRecord *mover : chain) {
                 const RigExecMoverHandler *parityHandler =

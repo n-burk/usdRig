@@ -31,9 +31,9 @@
     metadata field names are plain identifiers and do not take a namespace.
     It is registered in the schema plugin's SdfMetadata block.
 
-    The older role-named attributes (rigExec:cageReadPhase,
-    rigExec:transformReadPhase, ...) still work and still mean the same thing.
-    Metadata on the property wins when both are authored.
+    It is the only way to declare a read phase: no schema attribute stands
+    in for it. 16_ConnectionReadPhases declares one on an attribute
+    connection, to read a property at a point in its math-mover chain.
 
     WHAT THIS FILE DEMONSTRATES
 
@@ -141,8 +141,9 @@ def Xform "ReadPhaseAsset"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    rel rigExec:transform = </ReadPhaseAsset/Rig/Joints/Lift>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ReadPhaseAsset/Rig/Joints/Lift> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ReadPhaseAsset/Rig/Weights/CageW>
                     rel rigExec:moves = </ReadPhaseAsset/Geom/Cage.points>
                 }
@@ -151,8 +152,9 @@ def Xform "ReadPhaseAsset"
                     prepend apiSchemas = ["RigExecMoverAPI"]
                 )
                 {
-                    rel rigExec:transform = </ReadPhaseAsset/Rig/Joints/Twist>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ReadPhaseAsset/Rig/Joints/Twist> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ReadPhaseAsset/Rig/Weights/CageW>
                     rel rigExec:moves = </ReadPhaseAsset/Geom/Cage.points>
                 }

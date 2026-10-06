@@ -1,26 +1,9 @@
-// RigExec mover registry (spec §4.1).
-// One row per concrete mover schema, registered by the mover's own
-// translation unit under libs/rigExec/movers/. Every dispatch site that
-// used to compare schema-type strings -- the revision-op map, revision
-// binding, compile validation, the parity oracle, and the evaluator's
-// one-off type checks -- reads this table instead, so adding a mover is
-// adding a file rather than editing every switch in the engine.
-// A mover TU owns everything about its mover: the EXEC_REGISTER block and
-// computeMoverParameters builder (where the mover has exec-side
-// computations at all -- skin, the curvenet pair, and the math movers do
-// not), the revision binder, the compile validator, and the parity-oracle
-// branch. Only genuinely shared logic lives here: registration, lookup,
-// predicates, and the small stage-reading helpers every mover TU needs.
-// Registration runs during library load, before any evaluation, exactly
-// like the EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA blocks beside it (which
-// is also why rigExec must stay a SHARED library: a static archive would
-// let the linker drop a TU nothing else references, and with it that
-// mover's row). After load the table is immutable, so lookups need no
-// lock.
+// Mover registration and discovery for built-in and external libraries.
 #ifndef RIGEXEC_MOVERS_MOVER_REGISTRY_H
 #define RIGEXEC_MOVERS_MOVER_REGISTRY_H
 
 #include "../moverGraph.h"
+#include "rigExecBinary/external.h"
 
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
@@ -159,9 +142,8 @@ struct RigExecMoverHandler {
     /// Mover attributes the epoch layout is assembled from (skin only):
     /// override tracking re-reads exactly these on a notice.
     std::vector<TfToken> layoutAttributes;
-    /// False when the mover has no scalar oracle (the Profile Mover):
-    /// parity skips a chain containing it and says so, rather than
-    /// counting the missing reference as a defect.
+    /// False when the mover has no scalar oracle: parity reports that
+    /// the chain was skipped instead of claiming a reference comparison.
     bool hasScalarOracle = true;
     /// Fills the revision binding. Null for property movers.
     void (*bind)(const RigExecMoverBindContext &ctx) = nullptr;
@@ -172,19 +154,73 @@ struct RigExecMoverHandler {
     /// The parity-oracle branch. Null for property movers.
     RigExecOracleResult (*oracle)(const RigExecMoverOracleContext &ctx) =
         nullptr;
+
+    /// External points movers resolve External and supply both callbacks.
+    /// Assemble an immutable, equality-comparable payload at the requested
+    /// time. Read attributes through values.resolved.GetAttribute() when
+    /// available so overrides and connection values retain the same
+    /// semantics as built-in movers. Scene authoring is
+    /// forbidden. The engine supplies enabled and envelope handling.
+    bool (*assembleExternal)(
+        const UsdPrim &prim,
+        const RigExecRevisionBinding &binding,
+        const RigExecProviderValues &values,
+        UsdTimeCode time,
+        VtValue *data) = nullptr;
+    /// Pure, thread-safe computation over the payload and preceding points.
+    /// Produce the full-strength candidate without changing point count.
+    /// No stage access, mutable shared state, or envelope application here.
+    /// Return false for invalid inputs; the engine preserves the preceding
+    /// revision. The library and payload types must remain loaded.
+    bool (*applyExternal)(
+        const VtValue &data, std::vector<GfVec3f> *points) = nullptr;
+
+    /// .rigexec export, optional: a rig holding a mover without it does not
+    /// export. Splits a payload assembleExternal produced into the bytes
+    /// runtimeKernel reads back (see rigExecBinary/external.h). \p epoch
+    /// must come out identical on every baked frame -- the export fails
+    /// otherwise -- and is written once; \p frame is written per frame.
+    /// Points the binding reads at a declared phase (binding.phases) reach
+    /// the kernel as playback evaluates them, so a posed playback moves
+    /// them; the frame bytes may still carry what the export read, for a
+    /// phase playback holds no value at.
+    bool (*encodeExternal)(
+        const VtValue &data, const RigExecRevisionBinding &binding,
+        std::vector<uint8_t> *epoch, std::vector<uint8_t> *frame) = nullptr;
+    /// The playback half of encodeExternal, USD-free. A host that opens a
+    /// .rigexec file installs it into the runtime; a runtime without it
+    /// passes this mover's points through with a warning.
+    RigExecExternalKernel runtimeKernel;
 };
 
-/// Registers one mover. Called once per mover TU during library load;
-/// never after evaluation has begun.
-void RigExecRegisterMoverHandler(RigExecMoverHandler handler);
+/// External libraries identify this contract with
+/// Info.RigExecMoverPlugin in their OpenUSD plugInfo.json. Plugins must also
+/// use the same compiler, USD build, and RigExec SDK as the host.
+/// Version 2 added encodeExternal and runtimeKernel to the handler.
+inline constexpr int RigExecMoverPluginApiVersion = 2;
+
+/// Registers one mover, retaining an immutable copy and its schema name.
+/// Duplicate schema names and incomplete external callbacks are rejected.
+/// Existing handler pointers remain valid when another library registers.
+/// A library must remain loaded for the lifetime of every evaluator.
+bool RigExecRegisterMoverHandler(
+    RigExecMoverHandler handler, std::string *error = nullptr);
+
+/// Loads registered OpenUSD Plug libraries with Info.RigExecMoverPlugin
+/// equal to RigExecMoverPluginApiVersion. PXR_PLUGINPATH_NAME and
+/// PlugRegistry::RegisterPlugins determine the search paths. Repeated calls
+/// also discover newly registered libraries. Returns false with diagnostics
+/// for incompatible versions or load failures; unrelated plugins are ignored.
+bool RigExecLoadMoverPlugins(std::vector<std::string> *diagnostics = nullptr);
 
 /// The registered handler for \p schemaType, or null for an unregistered
 /// type (constraints, solvers, weight objects -- everything that is not
-/// a mover). The pointer is stable: the table never moves after load.
+/// a mover). The first miss loads discoverable external mover libraries.
+/// The pointer stays valid across subsequent plugin registration.
 const RigExecMoverHandler *RigExecFindMoverHandler(const TfToken &schemaType);
 
-/// Every registered handler, in registration order.
-const std::vector<RigExecMoverHandler> &RigExecMoverHandlers();
+/// Snapshot of every registered handler, in registration order.
+std::vector<RigExecMoverHandler> RigExecMoverHandlers();
 
 /// Registers the handler \p handlerExpr evaluates to. Used once at the
 /// bottom of each mover TU.
@@ -212,8 +248,7 @@ RigExecIsPointMover(const TfToken &schemaType)
     return handler && handler->domain == RigExecMoverDomain::Points;
 }
 
-/// A resolveOp returning the fixed \p Op for every mode. What ten of the
-/// thirteen movers register.
+/// A resolveOp returning the fixed \p Op for every mode.
 template <RigExecRevisionOp Op>
 std::optional<RigExecRevisionOp>
 RigExecFixedMoverOp(const TfToken &)
@@ -241,11 +276,16 @@ RigExecPointsOf(const SdfPath &path)
     return path.IsPrimPath() ? path.AppendProperty(TfToken("points")) : path;
 }
 
-/// The read phase declared for the input \p rel names: metadata on the
-/// relationship first, then the legacy attribute, then Base. See
-/// RigExecResolveReadPhase.
+/// The read phase declared for the input \p rel names: the relationship's
+/// rigExecReadPhase metadata, or Base. See RigExecResolveReadPhase.
 RigExecReadPhase RigExecPhaseForInput(
-    const UsdPrim &moverPrim, const char *rel, const char *legacyAttr);
+    const UsdPrim &moverPrim, const char *rel);
+
+/// A property-chain value as a phased input of \p consumerType holds it
+/// (RigExecPhasedConnection). Compile admits only the chain's own
+/// type, or float and double either way round, which this converts.
+VtValue RigExecPhasedConsumerValue(
+    const VtValue &chainValue, const SdfValueTypeName &consumerType);
 
 /// The oracle's phased read, as a free function: resolves the phase for
 /// the input \p relName names and reads the recorded snapshot for it, or
@@ -259,7 +299,6 @@ void RigExecReadPhasedPoints(
     UsdTimeCode time,
     const UsdPrim &prim,
     const char *relName,
-    const char *legacyAttr,
     const SdfPath &pointsPath,
     const SdfPath &readerMover,
     VtVec3fArray *out);

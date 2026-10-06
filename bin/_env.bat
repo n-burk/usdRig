@@ -43,7 +43,17 @@ rem The schema resources MUST be the GENERATED directory: only the generated
 rem plugInfo carries the LibraryPath and implementsComputeExtent that let Plug
 rem load the compute-extent registration. The checked-in copy under plugin\ is
 rem a data-only fallback and will not give RigExec prims their bounds.
-set "PXR_PLUGINPATH_NAME=%RIG%\build\usd\rigExecSchema\resources;%RIG%\build\usd\rigExecImaging\resources;%RIG%\plugin\rigExecUsdview"
+set "PXR_PLUGINPATH_NAME=%RIG%\build\usd\rigExecSchema\resources;%RIG%\build\usd\rigExecImaging\resources;%RIG%\build\usd\rigExecMoverPlugins;%RIG%\plugin\rigExecUsdview;%PXR_PLUGINPATH_NAME%"
+
+rem The usdMayaRig sidecar (Maya ASCII file format) staged beside the repo,
+rem when built: its build-tree plugInfo carries an absolute LibraryPath, and
+rem the checked-in usdview/ companion registers the usdview integration.
+rem Skipped silently when the sidecar was never built; see
+rem ..\usdMayaRig\build_usdmayarig.bat.
+if exist "%RIG%\..\usdMayaRig\build\usd\usdMayaRig\resources\plugInfo.json" (
+    set "PXR_PLUGINPATH_NAME=%RIG%\..\usdMayaRig\build\usd\usdMayaRig\resources;%RIG%\..\usdMayaRig\usdview;%PXR_PLUGINPATH_NAME%"
+    set "PYTHONPATH=%PYTHONPATH%;%RIG%\..\usdMayaRig\usdview"
+)
 
 rem The python tests resolve pxr themselves through this, rather than
 rem inheriting a PYTHONPATH that may or may not carry it (see

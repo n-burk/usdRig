@@ -257,14 +257,18 @@ static void TestBlendSampleReadPhases()
         if (retained) CHECK(pose.moverGraphRevisionsCreated == 0);
     };
     check(GfVec3f(10, 0, 0), false);
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("final"));
+    const UsdRelationship targetPoints =
+        sample.GetRelationship(TfToken("rigExec:targetPoints"));
+    targetPoints.SetMetadata(
+        TfToken(RigExecReadPhaseMetadataName), std::string("final"));
     check(GfVec3f(12, 3, 0), true);
     x.GetAttribute(TfToken("avars:tx")).Set(4.0);
     check(GfVec3f(14, 3, 0), true);
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("preceding"));
+    targetPoints.SetMetadata(
+        TfToken(RigExecReadPhaseMetadataName), std::string("preceding"));
     check(GfVec3f(14, 0, 0), true);
-    sample.GetRelationship(TfToken("rigExec:targetPoints"))
-        .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("final"));
+    targetPoints.SetMetadata(
+        TfToken(RigExecReadPhaseMetadataName), std::string("final"));
     check(GfVec3f(14, 3, 0), true);
     sample.GetRelationship(TfToken("rigExec:targetPoints")).SetTargets({target});
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
@@ -283,67 +287,6 @@ static void TestBlendSampleReadPhases()
     CHECK(fanout.movedProperties.at(secondTarget).Get<VtVec3fArray>()[0] == GfVec3f(57, 1.5f, 0));
     CHECK(fanout.moverGraphRevisionsCreated == 1);
     CHECK(fanout.moverGraphParityMismatches == 0);
-}
-
-static void TestCurvenetWeightsUpdate()
-{
-    auto stage = UsdStage::CreateInMemory();
-    stage->DefinePrim(SdfPath("/Asset"),TfToken("Scope"));
-    stage->DefinePrim(SdfPath("/Asset/Rig"),TfToken("RigExecRoot"));
-    const auto mesh = stage->DefinePrim(SdfPath("/Asset/Mesh"),TfToken("Mesh"));
-    mesh.GetAttribute(TfToken("points")).Set(VtVec3fArray{{0,0,0},{1,0,0},{1,1,0},{0,1,0}});
-    mesh.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{4});
-    mesh.GetAttribute(TfToken("faceVertexIndices")).Set(VtIntArray{0,1,2,3});
-    const auto net = stage->DefinePrim(SdfPath("/Asset/Net"),TfToken("RigExecCurvenet"));
-    net.GetAttribute(TfToken("points")).Set(VtVec3fArray{{0,0.5f,0},{0.33f,0.5f,0},{0.67f,0.5f,0},{1,0.5f,0}});
-    net.GetAttribute(TfToken("rigExec:splineIndices")).Set(VtIntArray{0,1,2,3});
-    const auto weight = stage->DefinePrim(SdfPath("/Asset/Rig/W"),TfToken("RigExecCurvenetWeight"));
-    weight.GetRelationship(TfToken("rigExec:weightTarget")).SetTargets({mesh.GetPath().AppendProperty(TfToken("points"))});
-    weight.GetRelationship(TfToken("rigExec:curvenetPoints")).SetTargets({net.GetPath().AppendProperty(TfToken("points"))});
-    weight.GetRelationship(TfToken("rigExec:curvenetSplineIndices")).SetTargets({net.GetPath().AppendProperty(TfToken("rigExec:splineIndices"))});
-    weight.GetRelationship(TfToken("rigExec:meshFaceCounts")).SetTargets({mesh.GetPath().AppendProperty(TfToken("faceVertexCounts"))});
-    weight.GetRelationship(TfToken("rigExec:meshFaceIndices")).SetTargets({mesh.GetPath().AppendProperty(TfToken("faceVertexIndices"))});
-    weight.GetAttribute(TfToken("inputs:weights")).Set(VtFloatArray(4,1.0f));
-    const auto driver = stage->DefinePrim(SdfPath("/Asset/Rig/C"),TfToken("RigExecControl"));
-    driver.GetAttribute(TfToken("avars:tz")).Set(2.0);
-    const auto mover = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/M"),TfToken("RigExecMatrixMover"));
-    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
-    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({mesh.GetPath().AppendProperty(TfToken("points"))});
-    mover.GetRelationship(TfToken("rigExec:transform")).SetTargets({driver.GetPath()});
-    mover.GetRelationship(TfToken("rigExec:weightObject")).SetTargets({weight.GetPath()});
-    RigExecRigEvaluator evaluator(stage,SdfPath("/Asset/Rig"));
-    evaluator.cpuParityMode = true;
-    auto check = [&](float expected) {
-        auto p = evaluator.Evaluate(UsdTimeCode::Default());
-        CHECK(p.valid);
-        if (!p.valid) { for (const auto &s:p.diagnostics) std::printf("%s\n",s.c_str()); return p; }
-        const auto points = p.movedProperties.at(mesh.GetPath().AppendProperty(TfToken("points"))).Get<VtVec3fArray>();
-        for (const auto &point:points) CHECK(std::abs(point[2]-expected)<1e-4f);
-        CHECK(p.moverGraphParityMismatches == 0);
-        return p;
-    };
-    check(2.0f);
-    const size_t epoch = evaluator.GetBindingEpochDigest();
-    for (float value:{0.25f,0.5f,0.75f}) {
-        weight.GetAttribute(TfToken("inputs:weights")).Set(VtFloatArray(4,value));
-        const auto p = check(2*value);
-        CHECK(p.moverGraphRevisionsCreated == 0);
-        CHECK(p.moverGraphRevisionsExecuted == 1);
-        CHECK(evaluator.GetBindingEpochDigest() == epoch);
-    }
-    weight.GetRelationship(TfToken("rigExec:weightTarget")).SetTargets({mesh.GetPath()});
-    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
-    CHECK(evaluator.GetSkippedOperations().count(mover.GetPath()) == 1);
-    weight.GetRelationship(TfToken("rigExec:weightTarget"))
-        .SetTargets({mesh.GetPath().AppendProperty(TfToken("points"))});
-    check(1.5f);
-    weight.GetRelationship(TfToken("rigExec:meshFaceCounts"))
-        .SetTargets({mesh.GetPath().AppendProperty(TfToken("faceVertexIndices"))});
-    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
-    CHECK(evaluator.GetSkippedOperations().count(mover.GetPath()) == 1);
-    weight.GetRelationship(TfToken("rigExec:meshFaceCounts"))
-        .SetTargets({mesh.GetPath().AppendProperty(TfToken("faceVertexCounts"))});
-    check(1.5f);
 }
 
 static void TestBlendSurfaceFrames()
@@ -791,7 +734,9 @@ static void TestReleasedDragsFollowTheReauthoredSpline()
 
     // gizmoMath.SetAnimated, in C++: one curve-interpolated knot at `frame`,
     // re-authored in place by every later release on the same control.
-    const UsdAttribute attribute =
+    // Non-const: UsdAttribute::SetSpline is const-only from 26.08; the
+    // Vendored USD 26.05 still takes a mutable handle.
+    UsdAttribute attribute =
         stage->GetAttributeAtPath(driver.AppendProperty(tx));
     CHECK(attribute);
     auto author = [&](double value) {
@@ -841,7 +786,6 @@ int main()
     TestPersistentChains();
     TestStructuralSplices();
     TestBlendSampleReadPhases();
-    TestCurvenetWeightsUpdate();
     TestBlendSurfaceFrames();
     TestGeometryConstraintsCompose();
     TestAnimatedPointCounts();

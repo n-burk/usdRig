@@ -140,15 +140,11 @@ _IsVolumeWeightTypeName(const TfToken &type)
 // still refused above by the _volumeWeightMatrixTaps loop, which is about the
 // PLACEMENT a volume's field needs -- which the pose walk now composes, so
 // the two questions have one answer again.
-// RigExecCurvenetWeight is here too, now that the program holds a bind of its
-// own: the cut and the factorization are resolved into the weight object and
-// only the right-hand side is solved per frame.
 bool
 _IsBakedWeightType(const TfToken &type)
 {
     return type == "RigExecStaticWeight" || type == "RigExecDynamicWeight" ||
-           type == "RigExecCombineWeight" ||
-           type == "RigExecCurvenetWeight" || _IsVolumeWeightTypeName(type);
+           type == "RigExecCombineWeight" || _IsVolumeWeightTypeName(type);
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on
@@ -366,6 +362,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 ac.fk[0]);
         }
     }
+    const TfToken rotationSignName("avars:rotationSign");
     for (const auto &[path, tap] : E._firstFramePoseFrames) {
         const UsdPrim prim = E._stage->GetPrimAtPath(path);
         if (!prim) {
@@ -461,6 +458,21 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 say("connected default:space on provider", path);
             }
         }
+        // avars:rotationSign is captured once per slot (Build folds it, so
+        // an edit rebuilds), while exec reads it every frame: a sign that
+        // varies, is connected or is written by a chain is not one value.
+        {
+            const UsdAttribute a = prim.GetAttribute(rotationSignName);
+            if (a && (a.ValueMightBeTimeVarying() ||
+                      a.HasAuthoredConnections())) {
+                say("animated or connected avars:rotationSign on provider",
+                    path);
+            }
+            if (chainTargets.count(path.AppendProperty(rotationSignName))) {
+                say("property chain writes avars:rotationSign on provider",
+                    path);
+            }
+        }
         (void)probe;
     }
     for (const SdfPath &joint : E._jointPaths) {
@@ -551,7 +563,11 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     };
 
     for (const auto &constraint : E._frameConstraints) {
-        if (!_IsBakedConstraintType(constraint.schemaType)) {
+        // A transform-domain matrix mover rides the constraint walk without
+        // being a constraint operator, so it is admitted by name here
+        // rather than through the operator registry's subset check.
+        if (constraint.schemaType != "RigExecMatrixMover" &&
+            !_IsBakedConstraintType(constraint.schemaType)) {
             say("constraint type not baked (" +
                     constraint.schemaType.GetString() + ")",
                 constraint.moverPath);
@@ -659,7 +675,8 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                              bool derived) {
         const bool supported =
             derived ? (r.op == RigExecRevisionOp::RecomputeExtent ||
-                       r.op == RigExecRevisionOp::RecomputeNormals)
+                       r.op == RigExecRevisionOp::RecomputeNormals ||
+                       RigExecIsDerivedMatrixOp(r.op))
                     : (r.op == RigExecRevisionOp::Skin ||
                        r.op == RigExecRevisionOp::Matrix ||
                        // Every operation whose whole packet the per-frame
@@ -671,14 +688,14 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                        // that none of them needs a value the pose walk has
                        // not already produced.
                        r.op == RigExecRevisionOp::BlendShape ||
-                       r.op == RigExecRevisionOp::Curvenet ||
-                       r.op == RigExecRevisionOp::CurvenetAdjuster ||
+                       r.op == RigExecRevisionOp::External ||
                        r.op == RigExecRevisionOp::EmitGuidePoints ||
                        r.op == RigExecRevisionOp::Ribbon ||
                        r.op == RigExecRevisionOp::Wire ||
                        r.op == RigExecRevisionOp::VolumeCorrect ||
                        r.op == RigExecRevisionOp::Smooth ||
                        r.op == RigExecRevisionOp::DeltaMush ||
+                       r.op == RigExecRevisionOp::Wrinkle ||
                        r.op == RigExecRevisionOp::Lattice ||
                        r.op == RigExecRevisionOp::SurfaceProject);
         if (!supported) {
@@ -781,13 +798,6 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
                           RigExecBakedProgramImpl::GeomRevision *source,
                           bool keepRun) {
         destination->created = false;
-        // The adjuster's control frames are the node's MUTABLE member state,
-        // which survives a Compute the node did not run -- so they survive a
-        // rebuild the node survived, whatever happens to its result. A
-        // revision below the first divergence re-executes and overwrites
-        // them; one that does not would otherwise publish nothing where the
-        // dynamic path publishes its last answer.
-        destination->controlFrames = std::move(source->controlFrames);
         if (!keepRun) {
             return;
         }
@@ -847,44 +857,6 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         // position.
         destination->currentSource = source->currentSource;
     };
-    // A curvenet bind is cached against the layout it was cut from, which an
-    // edit that rebuilds the program need not have touched; carrying the
-    // cache is the same judgement the revision results below get, and it also
-    // carries any bind diagnostic the outgoing program had not drained yet.
-    B.curvenetBindings = std::move(P.curvenetBindings);
-    // A curvenet WEIGHT object's bind is the same judgement and the
-    // expensive one -- it cuts the mesh and factorizes its Laplacian, which
-    // is the costliest step a rig can carry on its first frame -- so an edit
-    // that rebuilt the program for some unrelated reason must not pay for it
-    // again. Matched by PATH, because a rebuild can add or drop objects and
-    // the indices need not line up, and only where the TYPE still agrees.
-    // Correctness does not rest on this: the step compares the layout it
-    // holds against the frame's own before it uses the bind, and re-cuts on
-    // any difference, so a carried bind is a hint and never an answer.
-    {
-        std::map<SdfPath, RigExecBakedProgramImpl::WeightObject *> outgoing;
-        for (RigExecBakedProgramImpl::WeightObject &object : P.weightObjects) {
-            if (object.bound) {
-                outgoing.emplace(object.path, &object);
-            }
-        }
-        for (RigExecBakedProgramImpl::WeightObject &object : B.weightObjects) {
-            const auto found = outgoing.find(object.path);
-            if (found == outgoing.end() || found->second->type != object.type) {
-                continue;
-            }
-            RigExecBakedProgramImpl::WeightObject &source = *found->second;
-            object.curvenetBinding = std::move(source.curvenetBinding);
-            object.boundMesh = std::move(source.boundMesh);
-            object.boundNet = std::move(source.boundNet);
-            object.boundCounts = std::move(source.boundCounts);
-            object.boundIndices = std::move(source.boundIndices);
-            object.boundSplines = std::move(source.boundSplines);
-            object.boundSmooth = std::move(source.boundSmooth);
-            object.boundSamples = source.boundSamples;
-            object.bound = true;
-        }
-    }
     std::map<SdfPath, RigExecBakedProgramImpl::GeomChain *> outgoing;
     for (RigExecBakedProgramImpl::GeomChain &chain : P.chains) {
         outgoing.emplace(chain.target, &chain);
@@ -955,6 +927,8 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
             derived.lastBase = std::move(match->second->lastBase);
             derived.result = std::move(match->second->result);
             derived.haveResult = match->second->haveResult;
+            derived.matrix = match->second->matrix;
+            derived.haveMatrix = match->second->haveMatrix;
         }
     }
 }
@@ -1726,15 +1700,6 @@ RigExecBakedProgram::SetOverrides(
             placeable = false;
             continue;
         }
-        // Unplaceable for the opposite reason to `folded`: the value IS
-        // re-read every frame, and the program would honour the override
-        // while exec type-rejects it. See execTypedArrayInputs. Ahead of
-        // the routed-prim test below, which would otherwise say "already
-        // routed, nothing to do" for the prim these properties live on.
-        if (B.execTypedArrayInputs.count(path)) {
-            placeable = false;
-            continue;
-        }
         const auto found = B.overridableInputs.find(path);
         if (found != B.overridableInputs.end()) {
             for (int index : found->second) {
@@ -1743,9 +1708,10 @@ RigExecBakedProgram::SetOverrides(
             B.anyOverridden = true;
             continue;
         }
-        // Nothing to place: every read of this prim already goes through the
-        // resolved inputs the override was written into.
-        if (B.resolvedRoutedPrims.count(o.prim)) {
+        // Routed readers consult resolved inputs at every connection hop,
+        // so an override on their source is placed by that same overlay.
+        if (B.resolvedRoutedPrims.count(o.prim) ||
+            _ConnectedSources(B).count(path)) {
             continue;
         }
         placeable = false;
@@ -1838,7 +1804,6 @@ _PrintProgramDigest(const RigExecBakedProgramImpl &B)
     table("xformPrims").PathSet(B.xformPrims);
     table("folded").PathSet(B.folded);
     table("resolvedRoutedPrims").PathSet(B.resolvedRoutedPrims);
-    table("execTypedArrayInputs").PathSet(B.execTypedArrayInputs);
     {
         _DigestTable &t = table("overridden");
         for (char c : B.overridden) {
@@ -1963,6 +1928,13 @@ RigExecBakedBuildContext::Refuse(const std::string &what, const SdfPath &where)
 
 void
 RigExecBakedBuildContext::Fold(const UsdPrim &prim, const char *name)
+{
+    RigExecBakedProgramSink sink{program};
+    RigExecBakedRecordFold(&sink, prim, name);
+}
+
+void
+RigExecBakedBuildContext::Fold(const UsdPrim &prim, const TfToken &name)
 {
     RigExecBakedProgramSink sink{program};
     RigExecBakedRecordFold(&sink, prim, name);
@@ -2221,9 +2193,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.rebuild.insert(SdfPath::AbsoluteRootPath());
 
     // What a plain Xformable's transform is measured relative to, which is
-    // the one prim rigEvaluator.cpp's pose walk measures against too -- and
-    // the same asset root the adjuster publication composes against, set
-    // once at the head of Build.
+    // the one prim rigEvaluator.cpp's pose walk measures against too.
     B.assetRoot = B.stage->GetPrimAtPath(B.assetRootPath);
 
     phases.Next("Bake.dense_provider_slots");
@@ -2236,6 +2206,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // accepts is seeded); FirstFramePose wins a collision, because that is the kind
     // the compose can actually write.
     {
+        const TfToken rotationSignName("avars:rotationSign");
         std::map<SdfPath, RigExecBakedSlotKind> ordered;
         for (const auto &[path, tap] : E._firstFramePoseFrames) {
             ordered.emplace(path, RigExecBakedSlotKind::FirstFramePose);
@@ -2256,11 +2227,13 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                 prim && _IsVolumeWeightTypeName(prim.GetTypeName()) ? 1 : 0);
             // avars:rotationSign is rig structure, not animation: it is read
             // once here beside the type, and the compose applies it to
-            // whatever the avar inputs carry that frame.
+            // whatever the avar inputs carry that frame. Folded, so an edit
+            // rebuilds the program and a drag on it falls back.
             GfVec3d sign(1, 1, 1);
             if (prim) {
+                ctx.Fold(prim, rotationSignName);
                 if (const UsdAttribute attr =
-                        prim.GetAttribute(TfToken("avars:rotationSign"))) {
+                        prim.GetAttribute(rotationSignName)) {
                     attr.Get(&sign);
                 }
             }
@@ -2770,6 +2743,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             entry.constraint.weightObject = fc.weightObject;
             entry.constraint.worldUpXform = fc.worldUpObject.xformPath;
             entry.constraint.space = fc.spacePath;
+            entry.constraint.blendShear = fc.blendShear;
+            entry.constraint.worldUpRotationOnly = fc.worldUpRotationOnly;
+            entry.constraint.radialBlend = fc.radialBlend;
         }
         walk.push_back(std::move(entry));
     }
@@ -3235,6 +3211,17 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
 // part of a frame that calls the evaluator's own private routines; everything
 // it produces reaches the two halves through the program.
 
+namespace {
+
+// The per-source constraint tables Run reads every frame, interned once at
+// load: interning takes the token registry's lock.
+const TfToken kSourceWeights("inputs:sourceWeights");
+const TfToken kTranslationOffsets("inputs:translationOffsets");
+const TfToken kRotationOffsets("inputs:rotationOffsets");
+const TfToken kPoleVectorWeights("inputs:poleVectorWeights");
+
+} // namespace
+
 bool
 RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
 {
@@ -3342,7 +3329,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                  B.constraintArrays) {
             arrays.diagnostics.clear();
             arrays.ok = RigExecRigEvaluator::_ReadConstraintSourceWeights(
-                arrays.prim, "inputs:sourceWeights", arrays.sourceCount, time,
+                arrays.prim, kSourceWeights, arrays.sourceCount, time,
                 &arrays.diagnostics, &arrays.weights);
             // The dynamic walk stops at the first table it cannot use, so
             // the offsets are not read when the weights were malformed --
@@ -3352,11 +3339,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                 arrays.ok =
                     arrays.ok &&
                     RigExecRigEvaluator::_ReadConstraintSourceOffsets(
-                        arrays.prim, "inputs:translationOffsets",
+                        arrays.prim, kTranslationOffsets,
                         arrays.sourceCount, time, &arrays.diagnostics,
                         &arrays.translationOffsets) &&
                     RigExecRigEvaluator::_ReadConstraintSourceOffsets(
-                        arrays.prim, "inputs:rotationOffsets",
+                        arrays.prim, kRotationOffsets,
                         arrays.sourceCount, time, &arrays.diagnostics,
                         &arrays.rotationOffsets);
             } else {
@@ -3369,7 +3356,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                 arrays.poleDiagnostics.clear();
                 arrays.poleOk =
                     RigExecRigEvaluator::_ReadConstraintSourceWeights(
-                        arrays.prim, "inputs:poleVectorWeights",
+                        arrays.prim, kPoleVectorWeights,
                         arrays.poleCount, time, &arrays.poleDiagnostics,
                         &arrays.poleWeights);
             }
@@ -3542,12 +3529,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         std::fwrite(report.data(), 1, report.size(), stderr);
     }
     if (bailed) {
-        // A step gave the generation back. Before the curvenet drain, which
-        // is destructive: a frame that gave up must not spend the pending
-        // bind lines into a pose nobody publishes. The caller drops the
-        // program, cache and all, and the dynamic fallback emits its own
-        // lines because it re-resolves every bind against the evaluator's
-        // still-empty cache.
+        // A failed step leaves publication to the dynamic fallback.
         _lastBail = RigExecBakedBail::Step;
         return false;
     }
@@ -3563,7 +3545,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     if (B.volumeWeightMatrices) {
         pose->weightFrames = *B.volumeWeightMatrices;
     }
-    RigExecBakedPublishGeometry(&B, time, pose);
+    RigExecBakedPublishGeometry(&B, pose);
 
     // The generation's work counters. Two of them are PROGRAM CONSTANTS
     // rather than observations -- the dynamic path's override rounds are the
@@ -3581,16 +3563,6 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         revisionsBuilt += step.counters.revisionsBuilt;
     }
 
-    // Whatever the Profile Mover binds reported; drained so a cached bind
-    // stays silent on every later frame. Empty on a bakeable rig, drained
-    // anyway so a rig that starts binding reports the same lines the dynamic
-    // path does. It sits here, at the tail of the run and past every return
-    // above it: the position is the one the dynamic walk drains from --
-    // immediately before its summary line -- so a completed frame's
-    // diagnostics interleave identically.
-    for (std::string &message : B.curvenetBindings.TakeDiagnostics()) {
-        pose->diagnostics.push_back(std::move(message));
-    }
     pose->diagnostics.push_back(
         "mover graph: " + std::to_string(chainsBuilt) + " chain(s), " +
         std::to_string(revisionsBuilt) + " revision(s); " +

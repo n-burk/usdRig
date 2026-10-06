@@ -79,6 +79,12 @@ static void TestRequestBoundaries(const RigExecSceneDb &db)
     auto multipleConnectionDb = db;
     multipleConnectionDb.attributes[SdfPath("/Blend.inputs:weight")].connections = {SdfPath("/Driver.w1"), SdfPath("/Driver.w2")};
     CHECK(!multipleConnectionDb.Validate());
+    // A pack cannot lower a read phase: one on a blend target's input
+    // relationship is refused rather than read as base.
+    auto phasedDb = db;
+    phasedDb.relationships[SdfPath("/Sample.rigExec:targetPoints")].metadata["rigExecReadPhase"] = VtValue(std::string("final"));
+    CHECK(phasedDb.Validate());
+    CHECK(!phasedDb.ValidateCapabilities());
     RigExecStandaloneSystem empty(db);
     CHECK(empty.Prepare());
     const auto first = empty.Evaluate(UsdTimeCode::Default());
@@ -86,7 +92,6 @@ static void TestRequestBoundaries(const RigExecSceneDb &db)
     CHECK(first.valid && first.values.empty() && first.generation == 1);
     CHECK(second.valid && second.generation == 2);
     CHECK(!empty.SetConnections(SdfPath("/Blend.inputs:weight"), {SdfPath("/Driver.w1"), SdfPath("/Driver.w2")}));
-    CHECK(!empty.SetValue(SdfPath("/Sample.rigExec:pointsReadPhase"), UsdTimeCode::Default(), VtValue(TfToken("final"))));
     RigExecStandaloneSystem missing(db);
     missing.AddTap(RigExecValueAddress::Prim(SdfPath("/A"), TfToken("unregisteredComputation")));
     const auto unavailable = missing.Evaluate(UsdTimeCode::Default());
@@ -133,7 +138,7 @@ static void TestRequestBoundaries(const RigExecSceneDb &db)
     const auto computed = expression.Evaluate(UsdTimeCode::Default());
     CHECK(computed.valid && computed.Get<GfMatrix4d>(0).ExtractTranslation() == GfVec3d(17, 0, 0));
     for (const char *type : {"RigExecRibbon", "RigExecSphereWeight", "RigExecPlaneWeight",
-                             "RigExecCurveWeight", "RigExecCurvenetAdjuster"}) {
+                             "RigExecCurveWeight"}) {
         auto unsupportedDb = db;
         unsupportedDb.prims[SdfPath("/Unsupported")].type = TfToken(type);
         RigExecStandaloneSystem unsupported(unsupportedDb);

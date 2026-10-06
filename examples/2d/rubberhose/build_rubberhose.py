@@ -538,25 +538,24 @@ class Pip(object):
     def matrix_mover(self, path, moves, transform, space=None, weight=None,
                      phase="final"):
         prim = self.mover(path, "RigExecMatrixMover", moves)
-        self.a.rel(prim, "rigExec:transform", transform)
+        transform_rel = self.a.rel(prim, "rigExec:transform", transform)
+        if phase != "base":
+            transform_rel.SetMetadata("rigExecReadPhase", phase)
         if space:
             self.a.rel(prim, "rigExec:transformSpace", space)
-        self.a.attr(prim, "rigExec:transformReadPhase", T.Token, phase,
-                    uniform=True)
         if weight is not None:
             self.a.attr(prim, "inputs:defaultWeight", T.Float, float(weight))
         return prim
 
     def skin_mover(self, path, moves, influences, indices, weights, size):
         prim = self.mover(path, "RigExecSkinMover", moves)
-        self.a.rel(prim, "rigExec:influences", influences)
+        self.a.rel(prim, "rigExec:influences", influences).SetMetadata(
+            "rigExecReadPhase", "final")
         self.a.attr(prim, "rigExec:jointIndices", T.IntArray,
                     Vt.IntArray(indices))
         self.a.attr(prim, "rigExec:jointWeights", T.FloatArray,
                     Vt.FloatArray(weights))
         self.a.attr(prim, "rigExec:elementSize", T.Int, size, uniform=True)
-        self.a.attr(prim, "rigExec:transformReadPhase", T.Token, "final",
-                    uniform=True)
         return prim
 
     # Build
@@ -1071,11 +1070,10 @@ class Pip(object):
         # defined top-down = runs bottom-up
         lat = self.mover(base + "/HeadLattice", "RigExecLatticeMover",
                          path + ".points")
-        self.a.rel(lat, "rigExec:cage", self.cage)
+        self.a.rel(lat, "rigExec:cage", self.cage).SetMetadata(
+            "rigExecReadPhase", "final")
         self.a.attr(lat, "rigExec:basis", T.Token, "bernstein", uniform=True)
         self.a.attr(lat, "rigExec:divisions", T.Int3, Gf.Vec3i(3, 3, 2))
-        self.a.attr(lat, "rigExec:cageReadPhase", T.Token, "final",
-                    uniform=True)
         if slide:
             self.matrix_mover(base + "/FaceSlide", path + ".points",
                               hp["face"], space=hp["head"], weight=slide)

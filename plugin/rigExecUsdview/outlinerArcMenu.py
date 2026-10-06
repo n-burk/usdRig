@@ -16,7 +16,7 @@
 # that one method, so it is replaced on the controller INSTANCE -- not the
 # class -- with a version that builds the same menu and appends one
 # submenu before exec. Reached through the name-mangled
-# _UsdviewApi__appController, like gizmoUI and curvenetUI reach the stage
+# _UsdviewApi__appController, like gizmoUI reaches the stage
 # view. Anything unexpected (an older usdview without the method, a
 # PrimContextMenu that fails to import) leaves usdview's menu untouched.
 #

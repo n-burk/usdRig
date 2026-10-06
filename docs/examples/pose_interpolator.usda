@@ -225,8 +225,9 @@ def Xform "PsdAsset"
                     )
                     {
                         rel rigExec:moves = </PsdAsset/Geom/Limb.points>
-                        rel rigExec:transform = </PsdAsset/Rig/Joints/Upper>
-                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:transform = </PsdAsset/Rig/Joints/Upper> (
+                            rigExecReadPhase = "final"
+                        )
                         rel rigExec:weightObject = </PsdAsset/Rig/Weights/UpperW>
                         uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
 
@@ -235,8 +236,9 @@ def Xform "PsdAsset"
                         )
                         {
                             rel rigExec:moves = </PsdAsset/Geom/Limb.points>
-                            rel rigExec:transform = </PsdAsset/Rig/Joints/Upper/Fore>
-                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:transform = </PsdAsset/Rig/Joints/Upper/Fore> (
+                                rigExecReadPhase = "final"
+                            )
                             rel rigExec:weightObject = </PsdAsset/Rig/Weights/ForeW>
                             uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                         }

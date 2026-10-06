@@ -21,6 +21,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
+#include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdGeom/gprim.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/mesh.h"
@@ -39,6 +40,17 @@
 namespace rigExec {
 
 using namespace evaluatorDetail;
+
+namespace {
+
+// Removed attributes the compile refuses, interned once at load: interning
+// takes the token registry's lock.
+const TfToken _removedSamplePhase("rigExec:samplePhase");
+const TfToken _removedRibbonPhases[] = {
+    TfToken("rigExec:driverCurveReadPhase"),
+    TfToken("rigExec:surfaceReadPhase")};
+
+} // namespace
 
 bool
 RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
@@ -323,15 +335,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         return fail("Rig is instance-proxy/prototype hosted: " +
                     _rigPath.GetString());
     }
-    std::string adjustmentReadError;
-    SdfPath adjustmentOperation;
-    if (!_ValidateAdjustmentPoseConsumers(_stage, rig, &adjustmentReadError,
-                                          &adjustmentOperation,
-                                          _skippedOperations)) {
-        return fail(adjustmentReadError, adjustmentOperation.IsEmpty()
-            ? SdfPathVector{} : SdfPathVector{adjustmentOperation});
-    }
-
     // Phase A: validation into locals. Nothing below mutates evaluator
     // state until every check passes, so a failed structural edit keeps
     // the previous epoch publishable (spec §4.1 atomic transactions).
@@ -828,12 +831,8 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             if (!prim) {
                 continue;
             }
-            TfToken phase("base");
-            if (UsdAttribute a = prim.GetAttribute(
-                    TfToken("rigExec:transformReadPhase"))) {
-                a.Get(&phase);
-            }
-            if (phase != "final") {
+            if (RigExecPhaseForInput(prim, transformRel).kind !=
+                RigExecReadPhaseKind::Final) {
                 continue;
             }
             SdfPathVector transforms;
@@ -1657,11 +1656,22 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             lutOverride.value = VtValue(lut);
             newFalloffLutOverrides.push_back(std::move(lutOverride));
 
-            TfToken phase("reference");
-            if (UsdAttribute a = w.GetAttribute(_samplePhaseAttr)) {
-                a.Get(&phase);
-            }
-            if (phase == "current") {
+            // Which points the field measures is the read phase declared
+            // on rigExec:weightTarget; the old attribute is refused rather
+            // than composing as an inert custom attribute.
+            bool inFlight = false;
+            std::string phaseError;
+            const UsdAttribute old = w.GetAttribute(_removedSamplePhase);
+            if (old && old.HasAuthoredValue()) {
+                volumeWeightError =
+                    weightPath.GetString() +
+                    " authors rigExec:samplePhase, which was replaced by "
+                    "rigExecReadPhase metadata on rigExec:weightTarget "
+                    "(reference is base, current is preceding)";
+            } else if (!_VolumeWeightSamplesInFlight(w, &inFlight,
+                                                     &phaseError)) {
+                volumeWeightError = phaseError;
+            } else if (inFlight) {
                 newCurrentPhaseWeights.insert(weightPath);
                 isCurrent = true;
             }
@@ -1813,6 +1823,14 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             // the geometry domain reads, carried here as ordered sources so
             // the existing binding and phase machinery resolves them.
             constraint.targets = mover.targets;
+            {
+                TfToken blend("linear");
+                if (const UsdAttribute a = moverPrim.GetAttribute(
+                        TfToken("rigExec:weightBlend"))) {
+                    a.Get(&blend);
+                }
+                constraint.radialBlend = blend == "radial";
+            }
             const SdfPathVector xf = getTargets(moverPrim, "rigExec:transform");
             if (xf.size() != 1) {
                 return fail(mover.moverPath.GetString() +
@@ -1907,6 +1925,25 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         constraint.spacePath = space[0];
                     }
                 }
+            }
+
+            // Opt-in behaviours that change an operator's arithmetic. Both
+            // are uniform, so they are compiled once and hashed by the digest.
+            const auto readUniformBool = [&moverPrim](const char *name) {
+                bool value = false;
+                if (const UsdAttribute a =
+                        moverPrim.GetAttribute(TfToken(name))) {
+                    a.Get(&value);
+                }
+                return value;
+            };
+            if (mover.schemaType == "RigExecScaleConstraint" ||
+                mover.schemaType == "RigExecParentConstraint") {
+                constraint.blendShear = readUniformBool("rigExec:blendShear");
+            }
+            if (mover.schemaType == "RigExecAimConstraint") {
+                constraint.worldUpRotationOnly =
+                    readUniformBool("rigExec:worldUpRotationOnly");
             }
 
             if (mover.schemaType == "RigExecAimConstraint") {
@@ -2278,8 +2315,10 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // solver's kernel.
     std::map<SdfPath, std::vector<_PropertyRevision>> newPropertyChains;
     std::vector<SdfPath> newPropertyChainOrder;
+    std::vector<RigExecPhasedConnection> newPhasedConnections;
     if (!_CompilePropertyChains(newMovers, newPropertyChains,
-                                newPropertyChainOrder, failure)) {
+                                newPropertyChainOrder, newPhasedConnections,
+                                orderedSolvers, failure)) {
         return fail(failure->message, failure->operations);
     }
 
@@ -2317,12 +2356,12 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             revision.op = *op;
             revision.binding =
                 RigExecResolveRevisionBinding(moverPrim, target, {});
-            TfToken phase("base");
-            if (const UsdAttribute a = moverPrim.GetAttribute(
-                    TfToken("rigExec:transformReadPhase"))) {
-                a.Get(&phase);
-            }
-            revision.transformFinalPhase = phase == "final";
+            // The phase each mover's own handler resolved from the input
+            // that names its providers: rigExec:transform, rigExec:influences
+            // or rigExec:driverTransforms.
+            revision.transformFinalPhase =
+                revision.binding.transformPhase.kind ==
+                RigExecReadPhaseKind::Final;
             {
                 TfToken pointFrame;
                 if (const UsdAttribute a = moverPrim.GetAttribute(
@@ -2507,6 +2546,146 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
             newGraphDerivedChains[pointsTarget].push_back(derived);
         }
     }
+    // Surface projectors (RigExecSurfaceProjector): derived MATRIX targets
+    // on the chain they ride, measured from that chain's final points the
+    // way normals and extent are. The shader matrix and the packed dials
+    // are each one target, published as a primvar of the surface and
+    // never authored back.
+    for (const _SurfaceProjectorRecord &projector : newSurfaceProjectors) {
+        const UsdPrim prim = _stage->GetPrimAtPath(projector.path);
+        const SdfPath meshPath = projector.target.GetPrimPath();
+        const UsdPrim mesh = _stage->GetPrimAtPath(meshPath);
+        if (!prim || !mesh || !UsdGeomMesh(mesh)) {
+            return fail(projector.path.GetString() +
+                        ": a surface projector must move one mesh's "
+                        "points", {projector.path});
+        }
+        if (!newGraphChains.count(projector.target)) {
+            TF_WARN("%s projects onto %s, which no mover deforms; it "
+                    "publishes nothing", projector.path.GetText(),
+                    meshPath.GetText());
+            continue;
+        }
+        // The mesh's own transform places the ray when the source names no
+        // sibling space. It is a stage transform the rig does not own, so
+        // it is captured here and must not vary over time.
+        for (UsdPrim p = mesh; p && !p.IsPseudoRoot(); p = p.GetParent()) {
+            if (const UsdGeomXformable xformable{p}) {
+                if (xformable.TransformMightBeTimeVarying()) {
+                    return fail(projector.path.GetString() +
+                                " projects onto " + meshPath.GetString() +
+                                ", whose transform is animated; a surface "
+                                "projector needs a static surface "
+                                "transform", {projector.path});
+                }
+            }
+        }
+        UsdGeomXformCache meshXforms(UsdTimeCode::Default());
+        const GfMatrix4d meshWorldInverse =
+            meshXforms.GetLocalToWorldTransform(mesh).GetInverse();
+        // Source, its sibling space and the rig's space, each at most one
+        // frame provider: bound as the transform, transformSpace and carry
+        // providers, which every evaluator already reads per phase.
+        const auto oneProvider = [&](const char *name, SdfPath *out) {
+            const SdfPathVector targets = getTargets(prim, name);
+            if (targets.size() > 1) {
+                return fail(projector.path.GetString() + " has more than "
+                            "one " + std::string(name), {projector.path});
+            }
+            if (!targets.empty()) {
+                if (!_IsFrameProvider(_stage->GetPrimAtPath(targets[0].GetPrimPath()))) {
+                    return fail(projector.path.GetString() + " " +
+                                std::string(name) + " target " +
+                                targets[0].GetString() +
+                                " is not a RigExec frame provider",
+                                {projector.path});
+                }
+                *out = targets[0].GetPrimPath();
+            }
+            return true;
+        };
+        _GraphRevision base;
+        base.moverPath = projector.path;
+        base.binding.moverPath = projector.path;
+        base.binding.base = projector.target;
+        base.binding.topologyCounts =
+            meshPath.AppendProperty(TfToken("faceVertexCounts"));
+        base.binding.topologyIndices =
+            meshPath.AppendProperty(TfToken("faceVertexIndices"));
+        base.binding.meshWorldInverse = meshWorldInverse;
+        if (!oneProvider("rigExec:sources", &base.binding.transform) ||
+            !oneProvider("rigExec:sourceSpace",
+                         &base.binding.transformSpace) ||
+            !oneProvider("rigExec:space", &base.binding.carrySpace)) {
+            return false;
+        }
+        const auto primvarTarget = [&](const char *attr,
+                                       const TfToken &fallback) {
+            TfToken name = fallback;
+            if (const UsdAttribute a = prim.GetAttribute(TfToken(attr))) {
+                a.Get(&name);
+            }
+            return name.IsEmpty()
+                       ? SdfPath()
+                       : meshPath.AppendProperty(
+                             TfToken("primvars:" + name.GetString()));
+        };
+        const SdfPath shaderTarget =
+            primvarTarget("rigExec:shaderPrimvar", TfToken("eyeProjector"));
+        if (!shaderTarget.IsEmpty()) {
+            _GraphRevision derived = base;
+            derived.target = shaderTarget;
+            derived.binding.target = shaderTarget;
+            derived.op = RigExecRevisionOp::SurfaceProjector;
+            const SdfPath providers[3] = {derived.binding.transform,
+                                          derived.binding.transformSpace,
+                                          derived.binding.carrySpace};
+            RigExecTapId *matrixTaps[3] = {&derived.transformTap,
+                                           &derived.transformSpaceTap,
+                                           &derived.carrySpaceTap};
+            for (int k = 0; k < 3; ++k) {
+                if (providers[k].IsEmpty()) continue;
+                *matrixTaps[k] = newTaps->Add(RigExecValueAddress::Prim(
+                    providers[k], TfToken("computeMatrix")));
+                derived.projectorRestTaps[k] = newTaps->Add(
+                    RigExecValueAddress::Prim(providers[k],
+                                              TfToken("computeRestFrame")));
+            }
+            newGraphDerivedChains[projector.target].push_back(derived);
+        }
+        const SdfPath dialTarget =
+            primvarTarget("rigExec:shaderDialPrimvar", TfToken());
+        if (!dialTarget.IsEmpty()) {
+            _GraphRevision derived = base;
+            derived.target = dialTarget;
+            derived.binding.target = dialTarget;
+            // Packs dial values only: no frames and no surface, so no mesh
+            // topology for the frame cache to sample with every frame.
+            derived.binding.transform = SdfPath();
+            derived.binding.transformSpace = SdfPath();
+            derived.binding.carrySpace = SdfPath();
+            derived.binding.topologyCounts = SdfPath();
+            derived.binding.topologyIndices = SdfPath();
+            derived.op = RigExecRevisionOp::ShaderDials;
+            for (const SdfPath &dial :
+                 getTargets(prim, "rigExec:shaderDialSources")) {
+                if (!dial.IsPropertyPath()) {
+                    return fail(projector.path.GetString() +
+                                " rigExec:shaderDialSources names " +
+                                dial.GetString() + ", not a property",
+                                {projector.path});
+                }
+                if (derived.binding.shaderDials.size() == 16) {
+                    TF_WARN("%s names more than sixteen shader dials; the "
+                            "rest do not fit the primvar",
+                            projector.path.GetText());
+                    break;
+                }
+                derived.binding.shaderDials.push_back(dial);
+            }
+            newGraphDerivedChains[projector.target].push_back(derived);
+        }
+    }
 
     compileBlocks.Next("SolverSchedule.PoseDag");
     // Compile one pose DAG. Constraints retain authored preceding order;
@@ -2610,17 +2789,63 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
         return it->second;
     };
     std::map<SdfPath, std::set<SdfPath>> solverFrameInputs;
+    // The read phase a solver declares on an input relationship, through the
+    // same optional rigExecReadPhase metadata a mover input uses. Without
+    // one the hierarchy decides (spec §4.2): a constraint ABOVE the solver
+    // revises what the solver already read. "final", or a prim path at or
+    // after that constraint, asks for the frame as the constraint left it,
+    // and the solver then waits on it (the frame-inheritance walk below).
+    // Base and preceding are the hierarchy rule and are not stored.
+    std::map<SdfPath, std::map<SdfPath, std::vector<RigExecReadPhase>>>
+        solverInputPhases;
     for (const auto &[solver, dependencies] : newSolverDependencies) {
         const UsdPrim prim = _stage->GetPrimAtPath(solver);
+        // The ribbon's read-phase attributes were replaced by metadata and
+        // would now compose as inert custom attributes.
+        for (const TfToken &removed : _removedRibbonPhases) {
+            const UsdAttribute old = prim.GetAttribute(removed);
+            if (old && old.HasAuthoredValue()) {
+                return fail(solver.GetString() + " authors " +
+                                removed.GetString() +
+                                ", which was replaced by rigExecReadPhase "
+                                "metadata on the input relationship",
+                            {solver});
+            }
+        }
         for (const UsdRelationship &rel : prim.GetRelationships()) {
             if (rel.GetName() == "rigExec:joints") {
                 continue;
             }
+            RigExecReadPhase phase;
+            std::string phaseError;
+            if (!RigExecResolveReadPhase(rel, &phase, &phaseError)) {
+                return fail(solver.GetString() + " " +
+                                rel.GetName().GetString() + ": " + phaseError,
+                            {solver});
+            }
+            const bool phased = phase.kind == RigExecReadPhaseKind::Final ||
+                                phase.kind == RigExecReadPhaseKind::AtPrim;
             SdfPathVector targets;
             rel.GetTargets(&targets);
             for (const SdfPath &target : targets) {
                 if (isFrameProvider(target.GetPrimPath())) {
                     solverFrameInputs[solver].insert(target.GetPrimPath());
+                    if (phased) {
+                        solverInputPhases[solver][target.GetPrimPath()]
+                            .push_back(phase);
+                    }
+                } else if (phased) {
+                    // A solver reads a phase only through a provider's
+                    // frame chain; anything else would read base silently.
+                    return fail(solver.GetString() + " " +
+                                    rel.GetName().GetString() +
+                                    " declares rigExecReadPhase '" +
+                                    phase.GetAsString() + "' on " +
+                                    target.GetString() +
+                                    ", which is not a frame provider; a "
+                                    "solver reads a phase only from a "
+                                    "control or joint",
+                                {solver});
                 }
             }
         }
@@ -2687,10 +2912,27 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                                &poseInfoPrefetch);
     }
     std::map<SdfPath, std::set<SdfPath>> solverPoseReads;
+    // solverInputPhases spread over each input's pose closure, so the walk
+    // that visits closure members finds the phase of the input that reached
+    // them.
+    std::map<SdfPath, std::map<SdfPath, std::vector<RigExecReadPhase>>>
+        solverClosurePhases;
     for (const auto &[solver, inputs] : solverFrameInputs) {
+        const auto declared = solverInputPhases.find(solver);
         for (const SdfPath &input : inputs) {
             const std::set<SdfPath> &closure = poseProviderClosure(input);
             solverPoseReads[solver].insert(closure.begin(), closure.end());
+            if (declared != solverInputPhases.end()) {
+                const auto phases = declared->second.find(input);
+                if (phases != declared->second.end()) {
+                    for (const SdfPath &member : closure) {
+                        std::vector<RigExecReadPhase> &into =
+                            solverClosurePhases[solver][member];
+                        into.insert(into.end(), phases->second.begin(),
+                                    phases->second.end());
+                    }
+                }
+            }
             for (const SdfPath &provider : closure) {
                 const auto owner = newJointBinding.find(provider);
                 if (owner != newJointBinding.end()) {
@@ -2859,6 +3101,46 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     // behaviour of solverPoseReads[solver] identical to the old code, which
     // only reached that operator[] when at least one constraint survived the
     // pointsTarget test.
+    // The last stack ordinal at or beneath a prim: the moment an AtPrim read
+    // phase names, since the stack runs a scope's contents before the scope.
+    // -1 when nothing in the stack is there, which no constraint precedes.
+    std::map<SdfPath, int> phasePrimOrdinals;
+    const auto phaseOrdinal = [&](const SdfPath &prim) {
+        const auto found = phasePrimOrdinals.find(prim);
+        if (found != phasePrimOrdinals.end()) {
+            return found->second;
+        }
+        int last = -1;
+        for (const auto &[step, ordinal] : poseStackOrdinal) {
+            if (step.HasPrefix(prim)) {
+                last = std::max(last, ordinal);
+            }
+        }
+        phasePrimOrdinals.emplace(prim, last);
+        return last;
+    };
+    // Whether \p solver declared that it reads \p input as of \p constraint
+    // or later: a "final" phase, or an AtPrim phase at or after it.
+    const auto readsAfter = [&](const SdfPath &solver, const SdfPath &input,
+                                const SdfPath &constraint) {
+        const auto bySolver = solverClosurePhases.find(solver);
+        if (bySolver == solverClosurePhases.end()) {
+            return false;
+        }
+        const auto phases = bySolver->second.find(input);
+        if (phases == bySolver->second.end()) {
+            return false;
+        }
+        const int at = stackOrdinalOf(constraint);
+        for (const RigExecReadPhase &phase : phases->second) {
+            if (phase.kind == RigExecReadPhaseKind::Final ||
+                (phase.kind == RigExecReadPhaseKind::AtPrim &&
+                 phaseOrdinal(phase.prim) >= at)) {
+                return true;
+            }
+        }
+        return false;
+    };
     if (!constraintsByTarget.empty()) {
         for (const SdfPath &solver : requiredSolvers) {
             for (const SdfPath &input : solverPoseReads[solver]) {
@@ -2872,28 +3154,43 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
                         // solver already read, so the solver must NOT wait
                         // on it -- the constraint waits on the solver
                         // instead. (Producers have no position and keep the
-                        // unconditional edge.)
-                        //
-                        // ONLY WHERE THE TWO WRITE THE SAME JOINT. The pose
-                        // stack orders the steps that write a JOINT; a
-                        // constraint that moves something else this solver
-                        // READS -- an FK control parked on a wrist, so the
-                        // hand travels with the arm -- is an ordinary
-                        // producer, and deferring it leaves the solver
-                        // reading a control still standing at its rest. The
-                        // whole Solvers scope sits after Movers in the
-                        // namespace, so without this test EVERY constraint
-                        // reads as "above" every solver: measured on the
-                        // biped, the finger chains stopped following the
-                        // wrist entirely.
-                        const bool sharedJoint =
-                            newJointBinding.count(p) > 0;
+                        // unconditional edge.) A solver input that declares
+                        // a later read phase is the exception, and the only
+                        // one: it reads the frame as the constraint left it.
                         const bool positional =
-                            sharedJoint && poseStackOrdinal.count(solver) > 0;
+                            poseStackOrdinal.count(solver) > 0;
                         const int here = stackOrdinalOf(solver);
                         for (const SdfPath &constraint : it->second) {
-                            if (positional &&
-                                stackOrdinalOf(constraint) > here) {
+                            const bool above =
+                                positional && stackOrdinalOf(constraint) > here;
+                            const bool declared =
+                                above && readsAfter(solver, input, constraint);
+                            if (declared) {
+                                // The solver also writes the joint this
+                                // constraint moves, and the stack orders the
+                                // two writers by position: a declared read of
+                                // the later one would be a cycle.
+                                const auto writers = newJointBinding.find(p);
+                                if (writers != newJointBinding.end()) {
+                                    for (const auto &[writer, element] :
+                                         writers->second) {
+                                        if (writer != solver) continue;
+                                        return fail(
+                                            solver.GetString() +
+                                                " declares a read phase that "
+                                                "reads " + p.GetString() +
+                                                " after " +
+                                                constraint.GetString() +
+                                                ", but it also writes that "
+                                                "joint and executes before "
+                                                "the constraint; move the "
+                                                "constraint below the solver "
+                                                "instead (spec §4.2)",
+                                            {solver});
+                                    }
+                                }
+                            }
+                            if (above && !declared) {
                                 poseReverseEdges.emplace_back(constraint,
                                                               solver);
                                 continue;
@@ -4298,7 +4595,6 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     _jointPaths = std::move(newJointPaths);
     _controlPaths = std::move(newControlPaths);
     _poseInterpolators = std::move(newPoseInterpolators);
-    _surfaceProjectors = std::move(newSurfaceProjectors);
 
     _poseWeightProperties.clear();
     for (const _PoseInterpolator &interpolator : _poseInterpolators) {
@@ -4441,6 +4737,7 @@ RigExecRigEvaluator::_CompileEpochAttempt(std::vector<std::string> *errors,
     }
     _propertyChains = std::move(newPropertyChains);
     _propertyChainOrder = std::move(newPropertyChainOrder);
+    _phasedConnections = std::move(newPhasedConnections);
     // Every attribute a chain READS through a connection.
     //
     // The avar-only notice path below skips dropping the chain bindings, on

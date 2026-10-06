@@ -74,8 +74,11 @@ answer, only how fast it arrives.
 
 ## Read phases: which version a mover sees
 
-A mover names the moment it reads its provider with
-`rigExec:transformReadPhase`:
+A mover names the moment it reads its provider with `rigExecReadPhase`
+metadata on the relationship that names the input — `rigExec:transform`,
+`rigExec:influences`, `rigExec:cage`, `rigExec:surface`, `rigExec:driverCurve`
+and so on. Metadata is the only way to declare a phase; there is no schema
+attribute for it. With none authored the input reads `base`.
 
 - `base` — the joint **after its last solver**. Note that this is not "before
   every constraint": a constraint that fell *below* the last solver is already
@@ -95,13 +98,78 @@ def RigExecMatrixMover "HandSkin" (
 )
 {
     rel rigExec:moves = </Asset/Geom/Hand.points>
-    rel rigExec:transform = </Asset/Rig/Joints/Shoulder/Elbow/Wrist>
-    uniform token rigExec:transformReadPhase = "final"
+    rel rigExec:transform = </Asset/Rig/Joints/Shoulder/Elbow/Wrist> (
+        rigExecReadPhase = "final"
+    )
 }
 ```
 
-Change that one token to `base` and the hand card follows the FK solve but
-ignores the aim constraint stacked above it. Nothing else in the file moves.
+Change that one value to `base` (or delete it) and the hand card follows the
+FK solve but ignores the aim constraint stacked above it. Nothing else in the
+file moves. [Example 13](../../examples/13_ReadPhases.usda) shows the
+checkpoint form on a lattice cage.
+
+### Solver inputs
+
+A solver reads its inputs — an IK effector or pole, a root control, a space —
+where the stack puts them. A constraint **above** the solver on that input (or
+on one of its frame ancestors) has not fired yet when the solver runs, so by
+default the solver sees the frame before the constraint and the constraint
+then revises the result. To have the solver wait for that constraint instead,
+put the read phase on the solver's input relationship:
+
+```usda
+def RigExecTwoBoneIk "ArmIK"
+{
+    rel rigExec:effectorControl = </Asset/Rig/Controls/HandIK> (
+        rigExecReadPhase = "final"
+    )
+}
+```
+
+`final` reads the input after every constraint on it; a prim-path checkpoint
+reads it as of that step, so only constraints at or before the checkpoint are
+waited on. `base`, `preceding` and an unannotated relationship all mean the
+hierarchy rule. A declared phase cannot make a solver wait on a constraint
+that revises a joint the same solver writes — the stack already orders those
+two writers — and compiling such a rig fails with a message naming the
+solver, the joint and the constraint.
+
+### Connected inputs
+
+An attribute connection reads a property. When math movers revise that
+property, an undeclared connection reads it after all of them: the final
+value. The same metadata on the connected input chooses another point in
+that property's chain:
+
+```usda
+float inputs:defaultWeight (
+    rigExecReadPhase = "base"
+)
+float inputs:defaultWeight.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
+```
+
+- **`final`** — after every math mover on the property. What an undeclared
+  connection reads.
+- **`base`** — the property's authored value, before any math mover.
+- **a checkpoint** — an absolute prim path: the value as the last math mover
+  at or beneath that prim left it.
+
+`preceding` names a position in the reader's own chain, and a connection
+reads another property's, so compiling it fails. The phase applies to the
+first revised property along the connection's single-source hops, and needs
+that property's type, or float and double either way round.
+
+A connection phase is read on `inputs:enabled` and `inputs:defaultWeight` of
+every mover; `inputs:value`, `inputs:min`, `inputs:max`, `inputs:keys` and
+`inputs:tangents` of the math movers; the inputs of a weight object a mover
+binds; `inputs:weight` of a blend input a mover names; and every connected
+attribute of a solver. An unconnected input reads its own value, so a phase
+there has nothing to choose and is ignored. A drag on the revised property
+itself replaces its final value only: `base` and checkpoint readers keep
+reading the chain computed from the authored value.
+[Example 16](../../examples/16_ConnectionReadPhases.usda) reads one dial
+three ways, with math movers and with mover envelopes.
 
 ## A frame, walked through
 
@@ -137,9 +205,9 @@ full reach of the 3 + 3 unit chain, so the arm holds a slight bend. By frame
 - **"My constraint does nothing."** It is probably below the solver that
   overwrites the joint. Move its scope above the `Solvers` scope — i.e. earlier
   in composed order — or accept that it is now feeding the solve.
-- **"My skinning ignores the constraint."** The mover is reading `base`. Set
-  `rigExec:transformReadPhase = "final"`, which is what every shipped example
-  does.
+- **"My skinning ignores the constraint."** The mover is reading `base`. Put
+  `rigExecReadPhase = "final"` on its `rigExec:transform` (or
+  `rigExec:influences`), which is what every shipped example does.
 - **"Two movers on one mesh fight."** They do not fight; they stack, bottom
   sibling first, descendants before their parent. Reorder or renest to choose.
   Stacking matrix movers is how you layer rigid follows, not how you blend

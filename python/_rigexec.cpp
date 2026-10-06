@@ -1120,16 +1120,17 @@ PYBIND11_MODULE(_rigexec, m) {
             }, py::arg("path"),
            "The final rest-to-pose affine map of one joint (16 numbers, row-major).")
 
-        // Shader matrices. A surface projector publishes its frame here
-        // rather than moving points, so without this accessor the only
-        // way to check one was to look at the render -- which is how the
-        // eye projector's material-point drift went unmeasured.
+        // Shader matrices: the matrix-valued `primvars:<name>` a surface
+        // projector publishes on its mesh, as moved properties.
         .def("shader_matrix_keys", [](const rigExec::RigExecRigPose &p) {
                 std::vector<std::pair<std::string, std::string>> out;
-                for (const auto &mesh : p.shaderMatrices) {
-                    for (const auto &named : mesh.second) {
-                        out.emplace_back(_PathStr(mesh.first),
-                                         named.first.GetString());
+                static const std::string prefix("primvars:");
+                for (const auto &[path, value] : p.movedProperties) {
+                    const std::string &name = path.GetName();
+                    if (value.IsHolding<GfMatrix4d>() &&
+                        name.compare(0, prefix.size(), prefix) == 0) {
+                        out.emplace_back(_PathStr(path.GetPrimPath()),
+                                         name.substr(prefix.size()));
                     }
                 }
                 return out;
@@ -1138,15 +1139,14 @@ PYBIND11_MODULE(_rigexec, m) {
            "evaluation.")
         .def("shader_matrix", [](const rigExec::RigExecRigPose &p,
                                  std::string mesh, std::string primvar) {
-                auto it = p.shaderMatrices.find(SdfPath(mesh));
-                if (it == p.shaderMatrices.end()) {
-                    throw py::key_error("no shader matrices for " + mesh);
-                }
-                auto named = it->second.find(TfToken(primvar));
-                if (named == it->second.end()) {
+                const auto it = p.movedProperties.find(
+                    SdfPath(mesh).AppendProperty(
+                        TfToken("primvars:" + primvar)));
+                if (it == p.movedProperties.end() ||
+                    !it->second.IsHolding<GfMatrix4d>()) {
                     throw py::key_error("no " + primvar + " on " + mesh);
                 }
-                return _Mat4ToVec(named->second);
+                return _Mat4ToVec(it->second.UncheckedGet<GfMatrix4d>());
             }, py::arg("mesh"), py::arg("primvar"),
            "One published shader matrix (16 numbers, row-major).")
 
@@ -1566,8 +1566,6 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("paths"))
         .def("set_sample_count", &rigExec::RigExecRibbonHandle::SetSampleCount, py::arg("count"))
         .def("set_parameterization", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetParameterization(TfToken(v)); }, py::arg("mode"))
-        .def("set_driver_curve_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetDriverCurveReadPhase(TfToken(v)); }, py::arg("phase"))
-        .def("set_surface_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetSurfaceReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_joint_elements", [](rigExec::RigExecRibbonHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
 
     py::class_<rigExec::RigExecSplineIkHandle, rigExec::RigExecSolverHandle>(m, "SplineIk",
@@ -1760,7 +1758,7 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_falloff_curve", [](rigExec::RigExecVolumeWeightHandle &h, std::vector<std::pair<double, double>> knots) {
             h.SetFalloffCurve(knots);
         }, py::arg("knots"), "A list of (x, y) pairs over x in [0, 1].")
-        .def("set_sample_phase", [](rigExec::RigExecVolumeWeightHandle &h, std::string v) { h.SetSamplePhase(TfToken(v)); }, py::arg("phase"))
+        .def("set_read_phase", [](rigExec::RigExecVolumeWeightHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_sample_source", [](rigExec::RigExecVolumeWeightHandle &h, py::object p) {
             h.SetSampleSource(_PythonToDependencyPath(p, h.GetStage()));
         }, py::arg("path"));
@@ -1910,28 +1908,6 @@ PYBIND11_MODULE(_rigexec, m) {
             return h.AddPose(name);
         }, py::arg("name"));
 
-    py::class_<rigExec::RigExecCurvenetAdjustmentHandle, rigExec::RigExecControlHandle>(m, "CurvenetAdjustment")
-        .def("set_curvenet", [](rigExec::RigExecCurvenetAdjustmentHandle &h, py::object p) {
-            h.SetCurvenet(_PythonToDependencyPath(p,h.GetStage(),TfToken("RigExecCurvenet"),false));
-        }, py::arg("curvenet"))
-        .def("set_knot_index", &rigExec::RigExecCurvenetAdjustmentHandle::SetKnotIndex, py::arg("index"))
-        .def("set_include_tangents", &rigExec::RigExecCurvenetAdjustmentHandle::SetIncludeTangents, py::arg("include"))
-        .def("add_tangent", &rigExec::RigExecCurvenetAdjustmentHandle::AddTangent, py::arg("name"), py::arg("index"));
-
-    // Curvenet.
-    py::class_<rigExec::RigExecCurvenetHandle, RigExecHandleBase>(m, "Curvenet")
-        .def("set_points", [](rigExec::RigExecCurvenetHandle &h, std::vector<std::array<double, 3>> pts) {
-            std::vector<GfVec3f> v;
-            for (const auto &p : pts) {
-                v.push_back(GfVec3f(float(p[0]), float(p[1]), float(p[2])));
-            }
-            h.SetPoints(v);
-        }, py::arg("points"))
-        .def("add_spline", &rigExec::RigExecCurvenetHandle::AddSpline,
-             py::arg("p0"), py::arg("h0"), py::arg("h1"), py::arg("p1"))
-        .def("set_basis", [](rigExec::RigExecCurvenetHandle &h, std::string v) { h.SetBasis(TfToken(v)); }, py::arg("basis"))
-        .def("set_samples_per_spline", &rigExec::RigExecCurvenetHandle::SetSamplesPerSpline, py::arg("count"));
-
     // Mover handles.
     py::class_<rigExec::RigExecMatrixMoverHandle, rigExec::RigExecMoverHandle>(m, "MatrixMover")
         .def("set_transform_provider", [](rigExec::RigExecMatrixMoverHandle &h, py::object p) { h.SetTransformProvider(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
@@ -2033,23 +2009,36 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_distance_weight", &rigExec::RigExecDeltaMushMoverHandle::SetDistanceWeight, py::arg("weight"))
         .def("set_displacement", &rigExec::RigExecDeltaMushMoverHandle::SetDisplacement, py::arg("amount"));
 
+    py::class_<rigExec::RigExecWrinkleMoverHandle, rigExec::RigExecMoverHandle>(m, "WrinkleMover")
+        .def("set_rest_points", [](rigExec::RigExecWrinkleMoverHandle &h, py::iterable values) {
+            std::vector<GfVec3f> points;
+            for (const auto &point : values) {
+                points.push_back(_PythonToVec3f(point, "wrinkle rest point"));
+            }
+            h.SetRestPoints(points);
+        }, py::arg("points"))
+        .def("set_iterations", &rigExec::RigExecWrinkleMoverHandle::SetIterations, py::arg("iterations"))
+        .def("set_topology", [](rigExec::RigExecWrinkleMoverHandle &h, std::string topology) {
+            h.SetTopology(TfToken(topology));
+        }, py::arg("topology"))
+        .def("set_neighbor_distance", &rigExec::RigExecWrinkleMoverHandle::SetNeighborDistance, py::arg("distance"))
+        .def("set_rest_length_scale", &rigExec::RigExecWrinkleMoverHandle::SetRestLengthScale, py::arg("scale"))
+        .def("set_stretch_stiffness", &rigExec::RigExecWrinkleMoverHandle::SetStretchStiffness, py::arg("stiffness"))
+        .def("set_compression_stiffness", &rigExec::RigExecWrinkleMoverHandle::SetCompressionStiffness, py::arg("stiffness"))
+        .def("set_bend_stiffness", &rigExec::RigExecWrinkleMoverHandle::SetBendStiffness, py::arg("stiffness"))
+        .def("set_max_displacement", &rigExec::RigExecWrinkleMoverHandle::SetMaxDisplacement, py::arg("radius"))
+        .def("set_pin_borders", &rigExec::RigExecWrinkleMoverHandle::SetPinBorders, py::arg("pin"))
+        .def("set_pin_points", &rigExec::RigExecWrinkleMoverHandle::SetPinPoints, py::arg("indices"))
+        .def("set_tangent_plane_collisions", &rigExec::RigExecWrinkleMoverHandle::SetTangentPlaneCollisions, py::arg("enabled"))
+        .def("set_tangent_plane_inset", &rigExec::RigExecWrinkleMoverHandle::SetTangentPlaneInset, py::arg("inset"))
+        .def("set_wrinkle_scale", &rigExec::RigExecWrinkleMoverHandle::SetWrinkleScale, py::arg("scale"))
+        .def("set_smoothing_iterations", &rigExec::RigExecWrinkleMoverHandle::SetSmoothingIterations, py::arg("iterations"));
+
     py::class_<rigExec::RigExecSmoothMoverHandle, rigExec::RigExecMoverHandle>(m, "SmoothMover")
         .def("set_strength", &rigExec::RigExecSmoothMoverHandle::SetStrength, py::arg("strength"));
 
     py::class_<rigExec::RigExecVolumeCorrectMoverHandle, rigExec::RigExecMoverHandle>(m, "VolumeCorrectMover")
         .def("set_strength", &rigExec::RigExecVolumeCorrectMoverHandle::SetStrength, py::arg("strength"));
-
-    py::class_<rigExec::RigExecCurvenetAdjusterMoverHandle, rigExec::RigExecMoverHandle>(m, "CurvenetAdjusterMover")
-        .def("set_adjustments", [](rigExec::RigExecCurvenetAdjusterMoverHandle &h, py::iterable inputs) {
-            std::vector<SdfPath> paths;
-            for (const auto &p:inputs) paths.push_back(_PythonToDependencyPath(
-                py::reinterpret_borrow<py::object>(p),h.GetStage(),TfToken("RigExecCurvenetAdjustment"),false));
-            h.SetAdjustments(paths);
-        },py::arg("adjustments"));
-
-    py::class_<rigExec::RigExecCurvenetMoverHandle, rigExec::RigExecMoverHandle>(m, "CurvenetMover")
-        .def("set_curvenet", [](rigExec::RigExecCurvenetMoverHandle &h, py::object p) { h.SetCurvenet(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecCurvenet"), false)); }, py::arg("path"))
-        .def("set_strength", &rigExec::RigExecCurvenetMoverHandle::SetStrength, py::arg("strength"));
 
     py::class_<rigExec::RigExecFloatMathMoverHandle, rigExec::RigExecMoverHandle>(m, "FloatMathMover")
         .def("set_operation", [](rigExec::RigExecFloatMathMoverHandle &h, std::string v) { h.SetOperation(TfToken(v)); }, py::arg("op"))
@@ -2164,6 +2153,12 @@ PYBIND11_MODULE(_rigexec, m) {
                                          float weight, py::object target) {
             return c.AddDeltaMushMover(name,weight,_PythonToDependencyPath(target,c.GetStage()));
         }, py::arg("name"),py::arg("default_weight")=1.0f,py::arg("target")=py::none())
+        .def("add_wrinkle_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                      float defaultWeight, py::object target) {
+            return c.AddWrinkleMover(name, defaultWeight,
+                                    _PythonToDependencyPath(target, c.GetStage()));
+        }, py::arg("name"), py::arg("default_weight") = 1.0f,
+           py::arg("target") = py::none())
         .def("add_smooth_mover", [](rigExec::RigExecMoverChain &c, std::string name,
                                      float defaultWeight, py::object target) {
             return c.AddSmoothMover(name, defaultWeight,
@@ -2177,23 +2172,6 @@ PYBIND11_MODULE(_rigexec, m) {
                 name, defaultWeight,
                 _PythonToDependencyPath(target, c.GetStage()));
         }, py::arg("name"), py::arg("default_weight") = 1.0f,
-           py::arg("target") = py::none())
-        .def("add_curvenet_adjuster_mover", [](rigExec::RigExecMoverChain &c, std::string name,
-                py::iterable inputs, float defaultWeight, py::object target) {
-            std::vector<SdfPath> paths;
-            for (const auto &p:inputs) paths.push_back(_PythonToDependencyPath(
-                py::reinterpret_borrow<py::object>(p),c.GetStage(),TfToken("RigExecCurvenetAdjustment"),false));
-            return c.AddCurvenetAdjusterMover(name,paths,defaultWeight,
-                _PythonToDependencyPath(target,c.GetStage()));
-        },py::arg("name"),py::arg("adjustments"),py::arg("default_weight")=1.0f,py::arg("target")=py::none())
-        .def("add_curvenet_mover", [](rigExec::RigExecMoverChain &c, std::string name,
-                                       py::object curvenetPrim, float defaultWeight,
-                                       py::object target) {
-            return c.AddCurvenetMover(
-                name, _PythonToDependencyPath(curvenetPrim, c.GetStage(), TfToken("RigExecCurvenet"), false),
-                defaultWeight, _PythonToDependencyPath(target, c.GetStage()));
-        }, py::arg("name"), py::arg("curvenet_prim"),
-           py::arg("default_weight") = 1.0f,
            py::arg("target") = py::none())
         .def("add_float_math_mover", [](rigExec::RigExecMoverChain &c, std::string name,
                                          std::string operation, float value,
@@ -2580,20 +2558,6 @@ PYBIND11_MODULE(_rigexec, m) {
             return b.AddPoseInterpolator(name, _PythonToDependencyPath(
                 driver, b.GetStage(), TfToken(), false));
         }, py::arg("name"), py::arg("driver"))
-
-        .def("add_curvenet_adjustment", [](rigExec::RigExecRigBuilder &b, std::string name,
-                py::object curvenet, int index) {
-            return b.AddCurvenetAdjustment(name,_PythonToDependencyPath(curvenet,
-                b.GetStage(),TfToken("RigExecCurvenet"),false),index);
-        },py::arg("name"),py::arg("curvenet"),py::arg("knot_index"))
-        // Curvenets.
-        .def("add_curvenet", [](rigExec::RigExecRigBuilder &b, std::string name, std::vector<std::array<double, 3>> points) {
-            std::vector<GfVec3f> v;
-            for (const auto &p : points) {
-                v.push_back(GfVec3f(float(p[0]), float(p[1]), float(p[2])));
-            }
-            return b.AddCurvenet(name, v);
-        }, py::arg("name"), py::arg("points") = py::list())
 
         // Mover chains.
         .def("new_mover_chain",

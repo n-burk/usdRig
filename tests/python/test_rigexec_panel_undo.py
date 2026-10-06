@@ -24,9 +24,8 @@ import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()
 
-from pxr import Plug, Sdf, Usd  # noqa: E402
+from pxr import Plug, Usd  # noqa: E402
 
-import curvenetUI  # noqa: E402
 import rigExecUndo  # noqa: E402
 import volumeWeightUI  # noqa: E402
 
@@ -143,118 +142,9 @@ def TestVolumeWeightCreateIsOneUndo():
         volumeWeightUI.SetUndoStack(None)
 
 
-# ---------------------------------------------------------------------
-# The curvenet panel.
-# ---------------------------------------------------------------------
-
-class _Api(object):
-    def __init__(self, stage):
-        self.stage = stage
-        self.selectedPrims = []
-
-
-def _Panel(stage, undo):
-    """A CurvenetPanel with no widgets: see the module docstring."""
-    panel = curvenetUI.CurvenetPanel.__new__(curvenetUI.CurvenetPanel)
-    panel._api = _Api(stage)
-    panel._undo = undo
-    panel._gesture = None
-    panel._curvenetPath = None
-    panel._chainKnot = -1
-    panel._SetStatus = lambda *args, **kwargs: None
-    panel._Refresh = lambda *args, **kwargs: None
-    panel._UpdateDisplay = lambda *args, **kwargs: None
-    return panel
-
-
-def TestCurvenetCreateIsUndoable():
-    stage = _Stage()
-    undo = rigExecUndo.UndoStack()
-    panel = _Panel(stage, undo)
-    panel._OnNewCurvenet()
-
-    path = panel._curvenetPath
-    _Check(path is not None and bool(stage.GetPrimAtPath(path)),
-           "the panel created a curvenet")
-    _Check(undo.CanUndo(), "and pushed an entry for it")
-    undo.Undo()
-    _Check(not stage.GetPrimAtPath(path),
-           "undo removed the curvenet prim, not just its points")
-    undo.Redo()
-    _Check(bool(stage.GetPrimAtPath(path)), "redo brought it back")
-
-
-def TestCurvenetGestureIsOneEntry():
-    """A drag is one Ctrl+Z, however many points it wrote."""
-    stage = _Stage()
-    undo = rigExecUndo.UndoStack()
-    panel = _Panel(stage, undo)
-    panel._OnNewCurvenet()
-    prim = stage.GetPrimAtPath(panel._curvenetPath)
-    curvenetUI.SetPoints(prim, [(0, 0, 0), (1, 0, 0)])
-    undo.Clear()
-
-    panel._BeginGesture("Edit curvenet")
-    for x in range(1, 6):
-        curvenetUI.SetPoints(prim, [(0, 0, 0), (float(x), 0, 0)])
-    panel._EndGesture()
-
-    _Check(undo.CanUndo(), "the gesture pushed an entry")
-    undo.Undo()
-    _Check(not undo.CanUndo(),
-           "five writes inside one gesture are ONE entry")
-    points = [tuple(p) for p in curvenetUI.GetPoints(prim)]
-    _Check(points == [(0, 0, 0), (1, 0, 0)],
-           "undo restored the points the gesture started from, got %s"
-           % (points,))
-
-
-def TestCurvenetGestureReopeningCommitsTheLastOne():
-    """A press whose release never arrives must not swallow the edit."""
-    stage = _Stage()
-    undo = rigExecUndo.UndoStack()
-    panel = _Panel(stage, undo)
-    panel._OnNewCurvenet()
-    prim = stage.GetPrimAtPath(panel._curvenetPath)
-    undo.Clear()
-
-    panel._BeginGesture("First")
-    curvenetUI.SetPoints(prim, [(1, 0, 0)])
-    panel._BeginGesture("Second")          # no _EndGesture in between
-    _Check(undo.CanUndo() and undo.UndoText() == "First",
-           "the abandoned gesture was committed, not dropped")
-    curvenetUI.SetPoints(prim, [(1, 0, 0), (2, 0, 0)])
-    panel._EndGesture()
-    _Check(undo.UndoText() == "Second", "and the second one closed normally")
-
-
-def TestCurvenetBindPathsNamesOnlyWhatAppears():
-    """Binding must not snapshot a Movers scope full of other movers."""
-    stage = _Stage()
-    rig = stage.GetPrimAtPath("/Rig")
-    paths = curvenetUI.CurvenetPanel._BindPaths(stage, rig)
-    _Check(Sdf.Path("/Rig/Movers") in paths
-           and Sdf.Path("/Rig/Movers/Geometry") in paths,
-           "both absent scopes are recorded, got %s" % (paths,))
-
-    stage.DefinePrim("/Rig/Movers", "Scope")
-    stage.DefinePrim("/Rig/Movers/Geometry", "Scope")
-    paths = curvenetUI.CurvenetPanel._BindPaths(stage, rig)
-    _Check(Sdf.Path("/Rig/Movers") not in paths
-           and Sdf.Path("/Rig/Movers/Geometry") not in paths,
-           "scopes that already exist are left out: %s" % (paths,))
-    _Check(paths == [Sdf.Path("/Rig/Movers/Geometry/ProfileMover")],
-           "only the mover itself is recorded, got %s" % (paths,))
-
-
 def TestPanelsAreQuietWithoutAStack():
     """Every panel still authors when nothing is recording."""
     stage = _Stage()
-    panel = _Panel(stage, None)
-    panel._OnNewCurvenet()
-    _Check(bool(stage.GetPrimAtPath(panel._curvenetPath)),
-           "the curvenet panel works with no undo stack")
-
     volumeWeightUI.SetUndoStack(None)
     prim = stage.DefinePrim("/Rig/Weights/Sphere", "RigExecSphereWeight")
     volumeWeightUI.SetVisibleAtTime(prim.GetAttribute("inputs:falloffMax"),
@@ -274,12 +164,6 @@ def main():
          TestVolumeWeightParentPathCreatesNothing),
         ("volume weight: create is one undo",
          TestVolumeWeightCreateIsOneUndo),
-        ("curvenet: create is undoable", TestCurvenetCreateIsUndoable),
-        ("curvenet: a gesture is one entry", TestCurvenetGestureIsOneEntry),
-        ("curvenet: an abandoned gesture commits",
-         TestCurvenetGestureReopeningCommitsTheLastOne),
-        ("curvenet: bind records only what appears",
-         TestCurvenetBindPathsNamesOnlyWhatAppears),
         ("panels work without a stack", TestPanelsAreQuietWithoutAStack),
     ]
     for name, fn in groups:

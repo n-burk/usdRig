@@ -106,8 +106,9 @@ def Xform "DynWeightAsset"
                 )
                 {
                     rel rigExec:moves = </DynWeightAsset/Geom/Strip.points>
-                    rel rigExec:transform = </DynWeightAsset/Rig/Joints/Jnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </DynWeightAsset/Rig/Joints/Jnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </DynWeightAsset/Rig/Weights/KneeDriven>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

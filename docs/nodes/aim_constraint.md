@@ -197,6 +197,17 @@ have exactly one entry per source.
 
 ### Node parameters
 
+#### `rigExec:worldUpRotationOnly`
+
+*Type:* `uniform bool`. *Default:* `false`.
+
+Take the world-up direction from the up object's ROTATION
+alone, orthonormalizing its frame first. A rotation extracted from a
+scaled or sheared frame is not that frame's rotation, so under a
+scaled rig root the derived up can swing far enough to turn an
+aim-constrained foot. Off (the default) extracts the rotation from
+the up object's frame as authored.
+
 #### `inputs:aimVector`
 
 *Type:* `double3`. *Default:* `(1, 0, 0)`.

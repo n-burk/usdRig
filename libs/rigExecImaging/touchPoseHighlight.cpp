@@ -312,7 +312,7 @@ _BuildWrapper(const TfToken &base)
     // through HD_HAS_eyeProjector / HD_HAS_eyeDials to place the iris
     // and the pupil. The rig publishes both every evaluation -- four
     // shader matrices, two per eye, confirmed through
-    // RigExecRigPose::shaderMatrices -- so the data was always there.
+    // the published matrix primvars -- so the data was always there.
     // The moment TouchPose went live on a set that owns an eye mesh,
     // the wrapper dropped the request and the iris went with it.
     //

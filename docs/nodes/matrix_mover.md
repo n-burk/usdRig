@@ -27,7 +27,9 @@ by a weight object. One mover at constant weight is a rigid attachment;
 several stacked on one target are applied in sequence, each from the
 preceding revision, which is exact wherever a point has a single
 influence and is not linear blend skinning where weights overlap — that
-is the Skin Mover's job.
+is the Skin Mover's job. Naming a bare prim — a joint, a control or an
+Xformable — instead of a `points` property moves that prim's FRAME the
+same way, as a step of the pose stack.
 
 Moves the preceding value through one declared target-local
 affine transform, blended by the common MoverAPI envelope.
@@ -57,8 +59,8 @@ The provider publishes `computeMatrix`, the rest-to-posed map of its
 own frame (computations.cpp:401-415), and the mover blends it over the
 incoming points as `p' = q + w (T q - q)` (schema.usda:1677-1679), where
 `w` is the bound weight field or, with none bound,
-`inputs:defaultWeight`. `rigExec:transformReadPhase` chooses which
-revision of the provider is read: the default `base` binds the provider
+`inputs:defaultWeight`. `rigExecReadPhase` metadata on
+`rigExec:transform` chooses which revision of the provider is read: the default `base` binds the provider
 itself, `final` binds the head of its frame chain
 (moverGraph.cpp:1366-1379). The result is passed down the point chain,
 and the compiler synthesizes the recompute revisions that keep authored
@@ -70,7 +72,7 @@ and the compiler synthesizes the recompute revisions that keep authored
 |---|---|---|
 | `rigExec:transform` | Exactly one control or joint to follow. | yes |
 | `rigExec:weightObject` | Weight field scaling the follow (optional; overrides the envelope when bound). | no |
-| `rigExec:moves` | Exact points property to deform. | yes |
+| `rigExec:moves` | Exact points property to deform, or a bare joint, control or Xformable whose frame to move. | yes |
 
 ## Parameters
 
@@ -136,9 +138,7 @@ T * S^-1 gives the same answer either way -- and that is correct
 for a pre-skin cluster, whose own skin is still to come and will
 apply the scale itself. A post-skin cluster gets a mesh twice as
 big and an offset that has not grown, so it pulls the doubled mesh
-by the original distance: on the biped, the six squetch clusters
-left M_HeadwireTop tx=2.0 short by 25.09 units with every wire
-disabled, and 0.000031 with those clusters off.
+by the original distance.
 
 posed conjugates the offset by the rig's CARRY, C^-1 M C, where C
 is rigExec:space's own rest->pose map. That is the whole
@@ -174,9 +174,7 @@ the rig. The measured offset is invariant under the masters by
 construction (both terms carry them on the right and they cancel),
 so applying it to carried points shears them by T*R - T, growing
 with the master's motion and zero only when the offset has no
-rotation. Measured on the biped with the face posed and Main moved
-(40, 0, 25): head_top_aim_cluster, which is aim-driven and so has
-a real rotation, put 5.70 units of shear into body_geo on its own.
+rotation.
 
 The carry used is the named prim's own rest->pose map -- what
 computeMatrix publishes -- so a master sitting at its rest
@@ -210,7 +208,8 @@ Optional neutral-solve provider sharing transform's authored
 rest frame. Normalizes the transform as inverse(M(reference)) *
 M(transform), so the fitted neutral solve produces identity even
 when a solver has rest residuals or controls have default offsets.
-Read at transformReadPhase; the reference must have animation
+Read at rigExec:transform's read phase; the reference must have
+animation
 channels neutralized while sharing the live fitting parameters.
 
 #### `rigExec:referenceTransformSpace`
@@ -220,12 +219,6 @@ channels neutralized while sharing the live fitting parameters.
 Neutral counterpart of transformSpace. Required when both
 referenceTransform and transformSpace are supplied. Normalize both
 transforms independently before removing the space's motion.
-
-#### `rigExec:transformReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
 
 #### `rigExec:weightBlend`
 
@@ -273,6 +266,7 @@ python docs/render_media.py --page matrix_mover
 - The provider may be a control as readily as a joint: those are the only two types `rigExec:transform` accepts (rigEvaluator.cpp:7221-7231).
 - `final` binds the provider's frame-chain head, so every pose step above it is included; the default `base` is the joint after the LAST SOLVER wrote it, which is not the same as "before every constraint" — a constraint that sits below the last solver is folded into `base` through that solver. Name a prim if you want a specific moment: the `Solvers` scope means "after the last solver", the `Movers` scope "after the last constraint" (moverGraph.cpp:1366-1379, schema.usda:1685).
 - Same-target movers are an ordinary stack ordered by the composed namespace: reverse-sibling post-order, so descendants run before their parent and the bottom sibling before the top (spec section 4.2). Stacking is how you layer rigid follows, not how you blend influences on one point — use the Skin Mover for that (schema.usda:1700-1705).
+- `rigExec:weightBlend = "radial"` blends a fraction of the rotation instead of the chord, so a partly weighted point keeps its distance from the driver's pivot; the default `linear` is the classic cluster. A frame mover blends its landmark points the same way (examples/15_TransformMatrixMover.usda).
 
 ## See also
 

@@ -84,7 +84,22 @@ disagreeing.
 
 *Relationship.*
 
-Canonical prim or exact property carrying the weighted domain.
+Canonical prim or exact property carrying the weighted
+domain.
+
+Its rigExecReadPhase metadata chooses which points the distance
+function measures. `base`, the default, samples the STATIC
+authored points (or rigExec:sampleSource), so the field is
+computed once per epoch and a point keeps the weight its bind pose
+earned -- the behaviour of a painted map, and what a matrix mover
+wants so that its own output cannot feed back into its own weights.
+
+`preceding` samples the points AS THEY STAND at the consuming
+operation's position in the mover stack, so the volume grabs
+whatever is inside it right now. That is the dynamic behaviour, and
+it is order dependent by construction: the same volume placed at
+two points in the stack legitimately yields two different fields.
+Any other phase is a compile error.
 
 #### `rigExec:representation`
 
@@ -182,26 +197,6 @@ Held extrapolation outside [0, 1] is the Ts default and is
 exactly right here, so a curve authored over a shorter span still
 yields a total field.
 
-#### `rigExec:samplePhase`
-
-*Type:* `uniform token`. *Default:* `"reference"`.
-
-Valid values: `reference`, `current`.
-
-Which points the distance function measures against.
-
-`reference` samples the STATIC authored base points, so the field
-is computed once per epoch and a point keeps the weight its bind
-pose earned -- the behaviour of a painted map, and what a matrix
-mover wants so that its own output cannot feed back into its own
-weights.
-
-`current` samples the points AS THEY STAND at this operation's
-position in the mover stack, so the volume grabs whatever is
-inside it right now. That is the dynamic behaviour, and it is
-order dependent by construction: the same volume placed at two
-points in the stack legitimately yields two different fields.
-
 #### `rigExec:sampleSource`
 
 *Relationship.*
@@ -210,7 +205,8 @@ Optional explicit static points source to measure
 against, overriding rigExec:weightTarget for SAMPLING only. The
 weighted domain stays the weightTarget, so this is how a volume
 weights one mesh by another mesh's shape -- typically an
-unposed reference copy. Ignored when samplePhase is `current`.
+unposed reference copy. Ignored when rigExec:weightTarget reads
+`preceding`.
 
 #### `guide:drawMode`
 
@@ -480,7 +476,7 @@ python docs/render_media.py --page curve_weight
 
 - The field uses the control polygon, not the evaluated basis, so a cubic curve influences the region around its hull rather than around the smooth curve you see; add control points where you need the tube to bend.
 - `inputs:scaleX/Y/Z` divide the local coordinate before the distance, turning the tube elliptical — but any axis that is non-positive or non-finite invalidates the whole packet rather than collapsing the volume.
-- Leave `rigExec:samplePhase` at `reference` and the tube measures the static bind points, so a point keeps the weight its rest position earned; `current` measures the points as they stand at this mover's place in the stack, which makes the field order dependent by design.
+- Leave `rigExec:weightTarget` at its default `base` read phase and the tube measures the static bind points, so a point keeps the weight its rest position earned; `rigExecReadPhase = "preceding"` measures the points as they stand at this mover's place in the stack, which makes the field order dependent by design.
 
 ## See also
 

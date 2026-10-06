@@ -155,11 +155,6 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::Pure,
          "static free functions over frames and params; guards and packing "
          "only, no retained state"},
-        {"libs/rigExec/curvenetAdjuster.cpp, "
-         "curvenetWeightComputations.cpp packet math",
-         RigExecFrozenPurity::Pure,
-         "bind/evaluate math over caller buffers; the file's one shared "
-         "memo is the row below, never the math"},
         {"libs/rigExec/weightPackets.cpp packet math",
          RigExecFrozenPurity::Pure,
          "only static const tokens; assembly over caller buffers"},
@@ -188,8 +183,7 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::EpochPinned,
          "immutable after Build; safe as the programDigest check names it, "
          "never as a live read of per-frame working state"},
-        {"skin/blend/curvenet bindings (shared_ptr<const> topologies, "
-         "layouts, profiles)",
+        {"skin/blend bindings (shared_ptr<const> topologies and layouts)",
          RigExecFrozenPurity::EpochPinned,
          "immutable snapshots resolved at Build/prologue; the worker runs "
          "from its own references, never from the live caches"},
@@ -218,12 +212,6 @@ RigExecFrozenPurityAudit()
          RigExecFrozenPurity::LiveOnly,
          "OpenExec against the live stage; cannot run concurrently with "
          "stage edits, which is why refusal rigs take the D7 memo path"},
-        {"curvenet binding LRU "
-         "(curvenetWeightComputations.cpp, process-wide, mutex-guarded)",
-         RigExecFrozenPurity::LiveOnly,
-         "thread-safe and answer-preserving, but a lock held across "
-         "allocation; bypassed because baked steps evaluate from "
-         "program-held bindings and never call the memo"},
         {"wire-basis memo (moverGraph.cpp _CachedWireBasis, process-wide, "
          "mutex-guarded)",
          RigExecFrozenPurity::LiveOnly,

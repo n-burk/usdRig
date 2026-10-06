@@ -18,6 +18,14 @@ Purposes → Guide* in usdview to see them. Joints style via `guide:radius` /
 `guide:displayColor` / `guide:displayOpacity`; solvers draw one guide per
 aggregate frame element with their own radius, color, and opacity.
 
+## Articulated 2D character
+
+[Shion](2d/bust_dd_b/README.md) is the latest stomach-up anime example:
+limited head/body turns, subtle speech and expressions, separate teeth and
+tongue, articulated sleeves, hands and fingers, a character picker and
+whole-character TouchPose. Open `2d/bust_dd_b/bust_dd_b_anim.usda` for the
+performance or `2d/bust_dd_b/bust_dd_b_rig.usda` for the neutral rig.
+
 ## The original arm
 
 - **ArmRig.usda** — the spec §4.5 arm asset: FK + IK + blend, twist
@@ -104,24 +112,23 @@ aggregate frame element with their own radius, color, and opacity.
   `inputs:extentU`/`extentV` size them *across* it and, under
   `rigExec:planeBounds = "bounded"`, stop the field at that rectangle. See
   [`docs/specs/volume-weights.md`](../docs/specs/volume-weights.md).
-- **12_CurvenetProfile.usda** — curvenets and the Profile Mover
-  (de Goes, Sheffler & Fleischer, SIGGRAPH 2022). Three profile rings
-  joined by four longitudinal rails around a tube; every ring knot is
-  shared by two ring spans and two rails, which is what makes it an
-  *intersection* and lets §3 deduce the frames, widths and twist that
-  nobody authors. The net's knots are posed by an ORDINARY
-  `RigExecMatrixMover` driven by an FK joint through a weight object —
-  76 pool points against 208 tube vertices the rig never mentions — and
-  `RigExecCurvenetMover` propagates that onto the surface. Re-mesh the
-  tube and the same net still articulates it. **Generated** by
-  `build_curvenet_example.py`; edit that, not the `.usda`. See
-  [`docs/specs/curvenet.md`](../docs/specs/curvenet.md).
 - **13_ReadPhases.usda** — read phases as property metadata. A Slab is
   deformed through a cage that is itself deformed by two movers, and the
   lattice declares which cage it wants. `base` leaves the slab alone,
   `/…/Movers/Cage/CageLift` gives the lifted-but-not-twisted cage, and
   `final` gives both — three different results from one rig with no other
   edit. Cyclic phase reads are rejected at compile.
+- **15_TransformMatrixMover.usda** — a matrix mover in the transform
+  domain: `rigExec:moves` names a joint rather than `.points`, and the
+  joint's frame is carried by the driver's motion in its space. One
+  mover blends radially (`rigExec:weightBlend = "radial"`), one linearly,
+  at half weight.
+- **16_ConnectionReadPhases.usda** — read phases on attribute
+  connections. One dial is doubled and then clamped by two math movers,
+  and three readers connect to it: at `base`, at a checkpoint after the
+  doubling, and undeclared (`final`). Float math movers show the three
+  values as channels; three cards whose matrix-mover envelope is the
+  connection rise by them.
 - **rigexec_flat.usda** — the smallest rig that exists, and a flattened
   capture of the shape an interactive session produces: one aim
   constraint, no joints at all, and both ends plain `UsdGeomXformable`s.
@@ -191,9 +198,8 @@ aggregate frame element with their own radius, color, and opacity.
   a grouping `Scope` means "after everything beneath it", because post-order
   visits a parent last. The field is `rigExecReadPhase`, not
   `rigExec:readPhase`: USD metadata names take no namespace, and metadata
-  follows the target assignment rather than preceding it. The older
-  role-named attributes (`rigExec:cageReadPhase`, …) still work; metadata
-  wins when both are authored. Editing a phase is structural. Chains are
+  follows the target assignment rather than preceding it. It is the only
+  way to declare a phase; there is no role-named attribute. Editing a phase is structural. Chains are
   evaluated in dependency order and a cyclic phase read fails the compile.
   Bind-time (rest) reads always take the authored value — a phase has no
   meaning for the neutral pose a deformation is measured against.

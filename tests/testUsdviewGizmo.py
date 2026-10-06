@@ -1,8 +1,7 @@
 #
 # THE VIEWPORT GIZMO TOOLBAR, end to end.
 #
-# Written for the same reason as testUsdviewCurvenetMove.py: the headless
-# tests in tests/python call the math and the edit helpers directly and
+# The headless tests in tests/python call the math and edit helpers and
 # never go near a camera, so they cannot see the one thing a manipulator
 # is -- a PROJECTION that a mouse has to be able to hit. This script opens
 # examples/ArmShotAnim.usda (the container installs the toolbar when the
@@ -1289,8 +1288,7 @@ def testUsdviewInputFunction(appController):
     d.Pump()
 
     # The landings aim at projected pixels, so the setup first proves
-    # the corners are on screen and unambiguous -- the isolation
-    # discipline testUsdviewCurvenetMove.py:84-97 follows. A collapsed
+    # the corners are on screen and unambiguous. A collapsed
     # framing would stack every corner onto one pixel and "pass" on
     # whichever the ranker happened to keep.
     _, viewport, ratio = controller._Camera()

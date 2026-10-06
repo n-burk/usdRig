@@ -762,8 +762,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/SphereWireCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/SphereWireJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/SphereWireJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/SphereWireW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -773,8 +774,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/CircleWireCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/CircleWireJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/CircleWireJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/CircleWireW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -784,8 +786,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/BoxWireCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/BoxWireJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/BoxWireJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/BoxWireW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -795,8 +798,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/CubeWireCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/CubeWireJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/CubeWireJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/CubeWireW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -806,8 +810,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/DiamondWireCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/DiamondWireJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/DiamondWireJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/DiamondWireW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -817,8 +822,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/PyramidWireCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/PyramidWireJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/PyramidWireJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/PyramidWireW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -828,8 +834,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/SphereGeoCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/SphereGeoJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/SphereGeoJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/SphereGeoW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -839,8 +846,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/CircleGeoCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/CircleGeoJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/CircleGeoJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/CircleGeoW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -850,8 +858,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/BoxGeoCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/BoxGeoJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/BoxGeoJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/BoxGeoW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -861,8 +870,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/CubeGeoCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/CubeGeoJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/CubeGeoJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/CubeGeoW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -872,8 +882,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/DiamondGeoCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/DiamondGeoJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/DiamondGeoJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/DiamondGeoW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -883,8 +894,9 @@ def Xform "ControlAsset"
                 )
                 {
                     rel rigExec:moves = </ControlAsset/Geom/PyramidGeoCard.points>
-                    rel rigExec:transform = </ControlAsset/Rig/Joints/PyramidGeoJnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/PyramidGeoJnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ControlAsset/Rig/Weights/PyramidGeoW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

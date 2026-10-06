@@ -357,6 +357,35 @@ RigExecChainSampleBindingsStillCurrent(
     if (grouped.size() != bindings.chains.size()) {
         return false;
     }
+    // The same phased reads: a phase edit re-epochs the evaluator, which
+    // resolves them afresh.
+    size_t phasedBound = 0;
+    for (const RigExecChainSampleChain &chain : bindings.chains) {
+        phasedBound += chain.phased.size();
+    }
+    const std::vector<RigExecPhasedConnection> &phasedNow =
+        evaluator.GetPhasedConnections();
+    if (phasedBound != phasedNow.size()) {
+        return false;
+    }
+    for (const RigExecChainSampleChain &chain : bindings.chains) {
+        size_t k = 0;
+        for (const RigExecPhasedConnection &connection : phasedNow) {
+            if (connection.target != chain.targetPath) {
+                continue;
+            }
+            if (k >= chain.phased.size() ||
+                chain.phased[k].consumer != connection.consumer ||
+                chain.phased[k].consumerType != connection.consumerType ||
+                chain.phased[k].applied != connection.applied) {
+                return false;
+            }
+            ++k;
+        }
+        if (k != chain.phased.size()) {
+            return false;
+        }
+    }
     for (const RigExecChainSampleChain &chain : bindings.chains) {
         const auto found = grouped.find(chain.targetPath);
         if (found == grouped.end() ||
@@ -457,6 +486,9 @@ RigExecEvaluateChainsForTime(
             continue;
         }
         resolved->ClearProperty(target);
+        for (const RigExecPhasedConnection &phased : chain.phased) {
+            resolved->ClearProperty(phased.consumer);
+        }
         const SdfValueTypeName &valueType = chain.valueType;
 
         // One shared revision loop over the three value domains, as on the
@@ -475,8 +507,17 @@ RigExecEvaluateChainsForTime(
                      ": authored base is not finite; chain skipped");
                 return true;
             }
+            // The value after each revision, base first, for the phased
+            // consumers, as on the live path.
+            std::vector<ValueT> history;
+            if (!chain.phased.empty()) {
+                history.reserve(chain.revisions.size() + 1);
+            }
             for (const RigExecChainSampleRevision &revision :
                  chain.revisions) {
+                if (!chain.phased.empty()) {
+                    history.push_back(value);
+                }
                 const UsdPrim &moverPrim = revision.moverPrim;
                 if (!moverPrim) {
                     continue;
@@ -526,6 +567,19 @@ RigExecEvaluateChainsForTime(
                 (*results)[target] = VtValue(value);
             }
             resolved->SetProperty(target, VtValue(value));
+            if (!chain.phased.empty()) {
+                history.push_back(value);
+                for (const RigExecPhasedConnection &phased : chain.phased) {
+                    const VtValue read = RigExecPhasedConsumerValue(
+                        VtValue(history[std::min(phased.applied,
+                                                 history.size() - 1)]),
+                        phased.consumerType);
+                    if (results) {
+                        (*results)[phased.consumer] = read;
+                    }
+                    resolved->SetProperty(phased.consumer, read);
+                }
+            }
             return true;
         };
 

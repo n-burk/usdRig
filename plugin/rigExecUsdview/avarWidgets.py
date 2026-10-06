@@ -13,11 +13,11 @@
 #               control's Translate / Rotate / Scale / Custom groups fold
 #               away and a long rig stays readable in a narrow dock.
 #
-# THE LOOK IS BLENDER'S SIDEBAR, THE CODE IS OURS. What is borrowed is the
+# THE LOOK IS A VIEWPORT SIDEBAR, THE CODE IS OURS. What is borrowed is the
 # shape of the thing -- flat rows with the value inside the field, tight
 # vertical rhythm, sections that fold, a panel that lives in the viewport
-# rather than in a window of its own. None of Blender's code is used,
-# copied or paraphrased: it is GPL and this repository is not, so the
+# rather than in a window of its own. No third-party UI code is used,
+# copied or paraphrased: that code is GPL and this repository is not, so the
 # behaviour was written from what the UI does, not from how it does it.
 #
 # WHY NO SLIDER. The previous row was a label, a spin box, a slider, a

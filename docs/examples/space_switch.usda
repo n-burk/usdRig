@@ -1,0 +1,186 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecSpaceSwitch.
+
+    A cart slides along X, and a hand control sits above it. The hand's
+    parent space is switched between world (the rig root) and the cart by
+    the HandSpaces switch, whose index is the hand's own avars:space
+    channel. Over 1001-1012 the index is 0: the cart drives away and the
+    hand stays where it is in world. Over 1012-1024 the index eases from 0
+    to 1, a fractional index blending the two spaces, so the hand glides
+    across onto the cart. From 1024 the index stays at 1 and the hand rides
+    the cart out to -1.2 and home again; with the cart back at its rest,
+    world and cart spaces agree and the loop closes where it started.
+    """
+    defaultPrim = "SpaceSwitchAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "SpaceSwitchAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "SpaceSwitchAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Cart" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 2.4; post linear,
+                    1024: 2.4; post linear,
+                    1036: -1.2; post linear,
+                    1048: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0.3, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            # A sibling of the cart, not its child: in namespace its parent
+            # space is world, and only the switch below lets it ride the cart.
+            def RigExecControl "Hand" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                custom double avars:space = 0
+                double avars:space.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 0; post linear,
+                    1024: 1; post linear,
+                    1048: 1; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.9, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Spaces"
+        {
+            def RigExecSpaceSwitch "HandSpaces"
+            {
+                rel rigExec:activeSpaceAttribute = </SpaceSwitchAsset/Rig/Controls/Hand.avars:space>
+                # The rig root is not a frame provider, so it contributes
+                # identity: that is how "world" is spelled.
+                rel rigExec:sources = [
+                    </SpaceSwitchAsset/Rig>,
+                    </SpaceSwitchAsset/Rig/Controls/Cart>,
+                ]
+                uniform token[] rigExec:spaceLabels = ["world", "cart"]
+                rel rigExec:target = </SpaceSwitchAsset/Rig/Controls/Hand>
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "CartW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </SpaceSwitchAsset/Geom/CartBody.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "HandW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </SpaceSwitchAsset/Geom/HandCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecMatrixMover "CartSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:moves = </SpaceSwitchAsset/Geom/CartBody.points>
+                rel rigExec:transform = </SpaceSwitchAsset/Rig/Controls/Cart>
+                rel rigExec:weightObject = </SpaceSwitchAsset/Rig/Weights/CartW>
+                uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+            }
+
+            def RigExecMatrixMover "HandSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:moves = </SpaceSwitchAsset/Geom/HandCard.points>
+                rel rigExec:transform = </SpaceSwitchAsset/Rig/Controls/Hand>
+                rel rigExec:weightObject = </SpaceSwitchAsset/Rig/Weights/HandW>
+                uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # Set dressing, not rig: the floor the cart runs along.
+        def BasisCurves "Track"
+        {
+            uniform token type = "linear"
+            int[] curveVertexCounts = [2]
+            point3f[] points = [(-2.2, 0, 0), (3.4, 0, 0)]
+            float[] widths = [0.05] (
+                interpolation = "constant"
+            )
+            color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
+        }
+
+        def Mesh "CartBody"
+        {
+            color3f[] primvars:displayColor = [(0.14, 0.14, 0.14)]
+            float3[] extent = [(-0.7, 0.05, -0.4), (0.7, 0.55, 0.4)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                4, 5, 6, 7,
+                1, 0, 3, 2,
+                0, 4, 7, 3,
+                5, 1, 2, 6,
+                3, 7, 6, 2,
+                0, 1, 5, 4
+            ]
+            point3f[] points = [(-0.7, 0.05, -0.4), (0.7, 0.05, -0.4), (0.7, 0.55, -0.4), (-0.7, 0.55, -0.4), (-0.7, 0.05, 0.4), (0.7, 0.05, 0.4), (0.7, 0.55, 0.4), (-0.7, 0.55, 0.4)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "HandCard"
+        {
+            color3f[] primvars:displayColor = [(0.35, 0.6, 0.95)]
+            float3[] extent = [(-0.5, 1.5, 0), (0.5, 2.3, 0)]
+            int[] faceVertexCounts = [4, 4]
+            int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-0.5, 1.5, 0), (0, 1.5, 0), (0.5, 1.5, 0), (-0.5, 2.3, 0), (0, 2.3, 0), (0.5, 2.3, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.116, 99.48)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (6.288, 4.977, 9.103)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

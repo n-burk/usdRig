@@ -38,7 +38,8 @@ UsdGeomPointBased points property (spec sections 4.1, 7.5).
 The mover is one revision in its target's point chain, so it runs in
 the mover-application walk after solving and after every earlier revision
 on that chain. It reads the driver prim's `points` at
-`rigExec:surfaceReadPhase` plus its `faceVertexCounts` /
+the `rigExecReadPhase` declared on `rigExec:surface` plus its
+`faceVertexCounts` /
 `faceVertexIndices`, fans every face into a triangle fan, and takes the
 closest point over all of them per moved point; the envelope then blends
 that candidate over the incoming revision, and the compiler re-synthesizes
@@ -53,7 +54,7 @@ facets and pop.
 |---|---|---|
 | `rigExec:surface` | Native mesh prim supplying the driver surface; without it the mover is inert, not an error. | yes |
 | `rigExec:moves` | Exact points property to drape. | yes |
-| `rigExec:surfaceReadPhase` | `base` for the driver's authored points, `final` when the driver is itself rigged. | no |
+| `rigExec:surface` `rigExecReadPhase` | Metadata: `base` for the driver's authored points, `final` when the driver is itself rigged. | no |
 
 ## Parameters
 
@@ -107,12 +108,6 @@ Native mesh prim supplying the driver surface.
 *Type:* `uniform token`. *Default:* `"attach"`.
 
 Valid values: `attach`, `project`.
-
-#### `rigExec:surfaceReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
 
 ## Example
 

@@ -215,9 +215,15 @@ public:
 
     /// The secondary warming trigger: call from the frame loop when the UI
     /// is idle. Enqueues the sweep only (neighbors belong to the commit
-    /// trigger) with the same runner, gate, and generation rules.
+    /// trigger) with the same runner, gate, and generation rules. Once
+    /// workers drain, production fills at most one missing explicit-range
+    /// frame on this thread without changing the published viewport.
     size_t OnIdle(
         RigExecFrozenStepRunner runner = RigExecFrozenStepRunner());
+
+    /// Factory calls plus calling-thread fill attempts. Idle drivers use
+    /// this to distinguish advancing past failed frames from no work.
+    size_t GetWarmingProgressCount();
 
     /// Builds one frame's background work for \p rig at \p time under \p
     /// generation, sampling the input vector on the calling (UI) thread.
@@ -623,7 +629,8 @@ private:
         std::string frozenError;
         /// The session's standing warm burst: rebuilt when its pins move --
         /// the program object, the cache-epoch digest (binding epoch +
-        /// build count + avar region), and the interactive overrides it
+        /// build count + avar region), the stage-edit serial, and the
+        /// interactive overrides it
         /// was built under -- and served across ticks while current, so a
         /// second consecutive trigger pays no rebuild. A pins-determined
         /// unusable outcome latches the same way: overrun (or a shape
@@ -638,6 +645,7 @@ private:
         RigExecBurstSampleCache standingBurst;
         const RigExecBakedProgram *burstProgram = nullptr;
         uint64_t burstEpochDigest = 0;
+        uint64_t burstSerial = ~uint64_t(0);
         std::vector<RigExecValueOverride> burstOverrides;
         bool burstOverrun = false;
         bool burstDeclined = false;
@@ -655,6 +663,11 @@ private:
         /// playhead-relative sweep instead.
         std::vector<double> warmRange;
         bool warmRangeActive = false;
+        // Failed calling-thread fills retry after an edit or range request.
+        // Frozen-worker declines do not suppress this generic fallback.
+        uint64_t fallbackSerial = ~uint64_t(0);
+        std::set<double> fallbackDeclined;
+        size_t fallbackAttempts = 0;
         // The session's epoch-pinned chain bindings, refreshed with the
         // snapshot and verified per burst (a constant edited mid-epoch
         // moves no digest, so the pins are re-read, not trusted -- once,
@@ -775,6 +788,10 @@ private:
     /// leaves the stage holding every one of them at _lastTime. _mutex held.
     bool _NoticeSettlesPreview(const RigSession &session,
                                const UsdNotice::ObjectsChanged &notice) const;
+
+    // Fills at most one missing range frame without publishing to Hydra.
+    // Only the idle trigger calls this, on the stage-owning thread.
+    bool _WarmOneFallbackFrame(RigSession *session, UsdTimeCode playhead);
 
     RigExecImagingBridge::PublishResult _Publish(
         std::shared_ptr<RigExecImagingSnapshot> snapshot,
@@ -1063,6 +1080,7 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_WarmRange(
 /// states and playhead, skips the repaint. Never negative; 0 before the
 /// context's first activation (and with no current context).
 RIGEXEC_IMAGING_C_API long long RigExecImaging_GetWarmingCompletedCount();
+RIGEXEC_IMAGING_C_API long long RigExecImaging_GetWarmingProgressCount();
 
 /// Manipulation preview (see RigExecImagingRegistry::BeginPreview /
 /// UpdatePreview / EndPreview). BeginPreview returns the double count
@@ -1131,6 +1149,8 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_WarmRangeForStage(
     long long stageCacheId, const char *rigPath, const double *frames,
     int count);
 RIGEXEC_IMAGING_C_API long long RigExecImaging_GetWarmingCompletedCountForStage(
+    long long stageCacheId);
+RIGEXEC_IMAGING_C_API long long RigExecImaging_GetWarmingProgressCountForStage(
     long long stageCacheId);
 RIGEXEC_IMAGING_C_API int RigExecImaging_BeginPreviewForStage(
     long long stageCacheId, const char *packedAttributePaths);

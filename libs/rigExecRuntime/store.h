@@ -10,6 +10,7 @@
 #define RIGEXEC_RUNTIME_STORE_H
 
 #include "rigExecBinary/container.h"
+#include "rigExecBinary/external.h"
 #include "rigExecBinary/geometry.h"
 #include "rigExecBinary/inputTable.h"
 #include "rigExecBinary/pose.h"
@@ -92,20 +93,18 @@ enum RrWeightField : int {
     RrWeightInvert = 5,
     RrWeightFalloffMin = 6,
     RrWeightFalloffMax = 7,
-    RrWeightScaleX = 8,
-    RrWeightScaleY = 9,
-    RrWeightScaleZ = 10,
-    RrWeightExtentU = 11,
-    RrWeightExtentV = 12,
-    RrWeightCurvenetSamples = 13,
-    RrWeightCurvenetUnreached = 14,
-    RrWeightScaleXPos = 15,
-    RrWeightScaleYPos = 16,
-    RrWeightScaleZPos = 17,
-    RrWeightScaleXNeg = 18,
-    RrWeightScaleYNeg = 19,
-    RrWeightScaleZNeg = 20,
-    RrWeightFieldCount = 21,
+    RrWeightScaleXPos = 8,
+    RrWeightScaleYPos = 9,
+    RrWeightScaleZPos = 10,
+    RrWeightScaleXNeg = 11,
+    RrWeightScaleYNeg = 12,
+    RrWeightScaleZNeg = 13,
+    RrWeightScaleX = 14,
+    RrWeightScaleY = 15,
+    RrWeightScaleZ = 16,
+    RrWeightExtentU = 17,
+    RrWeightExtentV = 18,
+    RrWeightFieldCount = 19,
 };
 
 // One slot's live ladder values, recomputed by the pose prologue when
@@ -120,14 +119,12 @@ struct RrLadderLive {
 };
 
 // One revision's publish row, filled by the geometry steps for the
-// epilogue's weight-field, adjuster and moved-property publication.
+// epilogue's weight-field and moved-property publication.
 struct RrRevisionPublish {
     bool weightFieldPublished = false;
     uint32_t weightFieldTarget = 0;
     std::vector<float> weightField;
     std::string resultStatus;
-    std::vector<RrMat4d> controlFrames;
-    std::vector<uint32_t> adjusterPaths;
     uint32_t target = 0;
 };
 
@@ -150,6 +147,11 @@ struct RrDerivedPublish {
     bool haveBase = false;
     uint32_t target = 0;
     std::vector<RrVec3f> result;
+    /// A surface projector target publishes a matrix primvar instead,
+    /// when this run measured one.
+    bool matrixTarget = false;
+    bool haveMatrix = false;
+    RrMat4d matrix;
 };
 
 // Family-private scratch, defined in the family's own .cpp.
@@ -204,11 +206,10 @@ struct RrStore {
     std::map<uint32_t, RrPointFrame> jointFramesBase, jointFramesFinal;
     std::map<uint32_t, RrPointFrame> controlFrames;
     std::map<uint32_t, std::vector<RrVec3f>> movedProperties;
+    /// Matrix primvars a surface projector published, by property.
+    std::map<uint32_t, RrMat4d> movedMatrices;
     std::map<uint32_t, RrWeightFieldPublish> weightFields;
     std::vector<char> jointMatrixPublished;
-    // Pending curvenet bind lines, drained by the epilogue so a
-    // cached bind stays silent on every later frame.
-    std::vector<std::string> curvenetBindDiagnostics;
     std::vector<RrInputValue> inputHolders;
     RrSnapshots runSnapshots;
     std::vector<RrStepOutput> stepOutputs;
@@ -230,6 +231,23 @@ struct RrProgram {
     const RigExecWireDomainGeometry *geometry = nullptr;
     const RigExecWireInputTable *inputs = nullptr;
     const RigExecBinaryReader *strings = nullptr;
+    /// The ExternalMovers section, or null when the file has no plugin
+    /// mover.
+    const RigExecWireExternalMovers *external = nullptr;
+    /// The InputTable frame Execute is running, which also selects each
+    /// plugin mover's frame bytes.
+    size_t frameIndex = 0;
+
+    /// One plugin revision's playback state, in ExternalMovers order. No
+    /// prepared state means no kernel here: the revision passes through.
+    struct ExternalRevision {
+        std::string type;
+        RigExecExternalKernel kernel;
+        std::shared_ptr<const void> state;
+    };
+    std::vector<ExternalRevision> externals;
+    /// (chain, revision) -> index into `externals`.
+    std::map<std::pair<uint32_t, uint32_t>, size_t> externalIndex;
 
     RrStore store;
 

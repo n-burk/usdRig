@@ -16,6 +16,7 @@
 #define RIGEXEC_RUNTIME_H
 
 #include "rigExecBinary/container.h"
+#include "rigExecBinary/external.h"
 #include "rigExecBinary/geometry.h"
 #include "rigExecBinary/inputTable.h"
 #include "rigExecBinary/pose.h"
@@ -43,6 +44,13 @@ struct RigExecRuntimeJointMatrix {
 struct RigExecRuntimePoints {
     std::string path;
     std::vector<RrVec3f> points;
+};
+
+// A matrix-primvar output: the `<prim>.primvars:<name>` property a surface
+// projector publishes plus its value, row-major.
+struct RigExecRuntimeMatrixPrimvar {
+    std::string path;
+    RrMat4d matrix;
 };
 
 // A weight-frame output: the volume weight's path plus its placement.
@@ -117,6 +125,23 @@ public:
     // first failing step; outputs keep their previous frame.
     bool Execute(std::string *error);
 
+    // Plugin movers: a file may hold movers an external library registered.
+    // Playback runs each through the kernel the host installs for its type
+    // (rigExecBinary/external.h). A type with no kernel passes its points
+    // through, and every Execute names it in the diagnostics.
+
+    // Every plugin mover type the file holds, sorted, each once.
+    std::vector<std::string> GetExternalMoverTypes() const;
+    // Installs \p kernel for \p type and prepares each of its revisions.
+    // False with the reason when the file holds no such type or a
+    // revision's epoch bytes do not prepare; those revisions keep passing
+    // their points through.
+    bool SetExternalKernel(const std::string &type,
+                           const RigExecExternalKernel &kernel,
+                           std::string *error);
+    // The plugin mover types with no prepared kernel, sorted.
+    std::vector<std::string> GetMissingExternalKernels() const;
+
     // Test-only family mask (bit 0 pose, 1 weights, 2 geometry, all set
     // by default). A masked family's steps are skipped, which is how
     // one family's outputs are compared while another is still landing.
@@ -137,6 +162,12 @@ public:
     const std::vector<RigExecRuntimePoints> &GetPoints() const
     {
         return _points;
+    }
+
+    // Matrix primvars a surface projector published, in path order.
+    const std::vector<RigExecRuntimeMatrixPrimvar> &GetMatrixPrimvars() const
+    {
+        return _matrixPrimvars;
     }
 
     // Volume weight placements, in path order.
@@ -210,6 +241,7 @@ private:
     RigExecWireDomainPose _poses;
     RigExecWireDomainGeometry _geometry;
     RigExecWireInputTable _inputs;
+    RigExecWireExternalMovers _external;
     bool _hasSteps = false;
     bool _hasPoses = false;
     bool _hasGeometry = false;
@@ -251,6 +283,7 @@ private:
 
     std::vector<RigExecRuntimeJointMatrix> _jointMatrices;
     std::vector<RigExecRuntimePoints> _points;
+    std::vector<RigExecRuntimeMatrixPrimvar> _matrixPrimvars;
     std::vector<RigExecRuntimeWeightFrame> _weightFrames;
     std::vector<RigExecRuntimeWeightField> _weightFields;
     std::vector<RigExecRuntimeProviderXform> _providerXforms;

@@ -57,6 +57,8 @@ struct _RrScaleConstraintParams {
     double weight = 1.0;
     RrVec3d offset{1.0, 1.0, 1.0};
     _RrConstraintAxisMask affect;
+    /// rigExec:blendShear: see RigExecScaleConstraintParams.
+    bool blendShear = false;
 };
 
 struct _RrParentConstraintParams {
@@ -67,6 +69,8 @@ struct _RrParentConstraintParams {
     _RrEulerOrder rotationOrder = _RrEulerOrder::XYZ;
     /// rigExec:space, or nullptr: see RigExecParentConstraintParams.
     const RrMat4d *carry = nullptr;
+    /// rigExec:blendShear: see RigExecParentConstraintParams.
+    bool blendShear = false;
 };
 
 struct _RrAimConstraintParams {
@@ -549,7 +553,9 @@ _RrApplyScaleConstraint(
             return _RrConstraintFailure(input);
         }
         targetScale += sourceParams.scale * source.normalizedWeight;
-        targetShear += sourceParams.shear * source.normalizedWeight;
+        if (params.blendShear) {
+            targetShear += sourceParams.shear * source.normalizedWeight;
+        }
         totalWeight += source.normalizedWeight;
     }
     if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
@@ -557,10 +563,14 @@ _RrApplyScaleConstraint(
                                   : _RrConstraintFailure(input);
     }
     targetScale = targetScale / totalWeight + params.offset;
-    targetShear /= totalWeight;
-    if (!_RrConstraintVecFinite(targetScale) ||
-        !_RrConstraintVecFinite(targetShear)) {
+    if (!_RrConstraintVecFinite(targetScale)) {
         return _RrConstraintFailure(input);
+    }
+    if (params.blendShear) {
+        targetShear /= totalWeight;
+        if (!_RrConstraintVecFinite(targetShear)) {
+            return _RrConstraintFailure(input);
+        }
     }
     for (int axis = 0; axis < 3; ++axis) {
         if (_RrAffects(params.affect, axis)) {
@@ -568,8 +578,10 @@ _RrApplyScaleConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
-    _RrBlendGovernedShear(params.affect, targetShear, globalWeight,
-                          &inputParams);
+    if (params.blendShear) {
+        _RrBlendGovernedShear(params.affect, targetShear, globalWeight,
+                              &inputParams);
+    }
     return _RrFrameFromConstraintParams(input, inputParams);
 }
 
@@ -651,7 +663,9 @@ _RrApplyParentConstraint(
         targetTranslation +=
             targetParams.translation * source.normalizedWeight;
         targetScale += targetParams.scale * source.normalizedWeight;
-        targetShear += targetParams.shear * source.normalizedWeight;
+        if (params.blendShear) {
+            targetShear += targetParams.shear * source.normalizedWeight;
+        }
 
         const RrVec3d sourceEuler = _RrEulerDegreesFromQuat(
             targetParams.rotation, params.rotationOrder);
@@ -675,12 +689,14 @@ _RrApplyParentConstraint(
     }
     targetTranslation /= totalWeight;
     targetScale /= totalWeight;
-    targetShear /= totalWeight;
+    if (params.blendShear) {
+        targetShear /= totalWeight;
+    }
     const RrVec3d targetEuler =
         sourceAnchor + weightedRotationDelta / totalWeight;
     if (!_RrConstraintVecFinite(targetTranslation) ||
         !_RrConstraintVecFinite(targetScale) ||
-        !_RrConstraintVecFinite(targetShear) ||
+        (params.blendShear && !_RrConstraintVecFinite(targetShear)) ||
         !_RrConstraintVecFinite(weightedRotationDelta) ||
         !_RrConstraintVecFinite(targetEuler)) {
         return _RrConstraintFailure(input);
@@ -697,8 +713,10 @@ _RrApplyParentConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
-    _RrBlendGovernedShear(params.scaleAxes, targetShear, globalWeight,
-                          &inputParams);
+    if (params.blendShear) {
+        _RrBlendGovernedShear(params.scaleAxes, targetShear, globalWeight,
+                              &inputParams);
+    }
     const RrVec3d outputEuler = _RrApplyEulerDelta(
         inputEuler, targetEuler, params.rotationAxes, globalWeight);
     inputParams.rotation =
@@ -1629,14 +1647,13 @@ _RrResolveWeightPacketAll(const RrProgram *program,
 }
 
 // Whether the wire weight object names a type the oracle understands
-// (_IsWeightObjectType: static, dynamic, curvenet, combine, and the
+// (_IsWeightObjectType: static, dynamic, combine, and the
 // three volumetric kinds).
 bool
 _RrIsWeightObjectType(const RrProgram *program, uint32_t type)
 {
     return program->TokenEquals(type, "RigExecStaticWeight") ||
            program->TokenEquals(type, "RigExecDynamicWeight") ||
-           program->TokenEquals(type, "RigExecCurvenetWeight") ||
            program->TokenEquals(type, "RigExecCombineWeight") ||
            program->TokenEquals(type, "RigExecSphereWeight") ||
            program->TokenEquals(type, "RigExecPlaneWeight") ||
@@ -2168,7 +2185,51 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
                     .GetInverse() *
                 store.posedM[size_t(c.spaceSlot)];
     }
-    if (ctype == "RigExecPositionConstraint") {
+    if (ctype == "RigExecMatrixMover") {
+        // The transform-domain matrix mover, as the USD walks take it: each
+        // source measured as its rest->posed map, the transform in its
+        // space, and the envelope applied to the target's four landmarks
+        // with the point kernel's rule.
+        const auto mapOf = [&](size_t k, RrMat4d *out) {
+            const int32_t slot = c.sources[k];
+            const bool haveRest =
+                slot >= 0 && size_t(slot) < scratch->restFrames.size() &&
+                scratch->restFrames[size_t(slot)].IsValid();
+            const std::array<RrVec3d, 4> &landmarks =
+                haveRest ? scratch->restFrames[size_t(slot)].points
+                         : RrIdentityLandmarks();
+            return RrPointsToMatrix(landmarks, sources[k].frame, out);
+        };
+        RrMat4d transform = _RrIdentity();
+        if (sources.empty() || !mapOf(0, &transform)) {
+            output.diagnostics.push_back(
+                cpath + " could not resolve rigExec:transform; mover passed "
+                "through");
+            return finish();
+        }
+        if (sources.size() > 1) {
+            RrMat4d space = _RrIdentity();
+            if (!mapOf(1, &space)) {
+                output.diagnostics.push_back(
+                    cpath + " could not resolve rigExec:transformSpace; "
+                    "mover passed through");
+                return finish();
+            }
+            transform = RrMeasureInSpace(transform, space);
+        }
+        RrPointFrame solved = input;
+        if (c.flags & RigExecWireConstraintRadialBlend) {
+            const RrMat4d partial = RrPartialTransform(transform, weight);
+            for (RrVec3d &q : solved.points) {
+                q = partial.TransformAffine(q);
+            }
+        } else {
+            for (RrVec3d &q : solved.points) {
+                q = q + weight * (transform.TransformAffine(q) - q);
+            }
+        }
+        candidate = solved;
+    } else if (ctype == "RigExecPositionConstraint") {
         _RrPositionConstraintParams params;
         params.offset =
             program->ReadConstraint(ci, RrConstraintOffset).vec;
@@ -2190,6 +2251,8 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
             program->ReadConstraint(ci, RrConstraintOffset).vec;
         params.affect = affect;
         params.weight = solveWeight;
+        params.blendShear =
+            (c.flags & RigExecWireConstraintBlendShear) != 0;
         candidate = _RrApplyScaleConstraint(input, sources, params);
     } else if (ctype == "RigExecParentConstraint") {
         _RrParentConstraintParams params;
@@ -2214,6 +2277,8 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
         params.rotationOrder = order;
         params.weight = solveWeight;
         params.carry = hasCarry ? &carry : nullptr;
+        params.blendShear =
+            (c.flags & RigExecWireConstraintBlendShear) != 0;
         candidate = _RrApplyParentConstraint(input, sources, params);
     } else {
         RrVec3d target(0.0);
@@ -2307,16 +2372,16 @@ _RrRunConstraintStep(RrProgram *program, size_t step,
                             cpath + " has a degenerate world-up object");
                         candidateReady = false;
                     } else if (candidateReady) {
-                        // Rotation only, never scale -- the same rule the
-                        // USD-side paths follow. Under a scaled rig root
-                        // the up object's frame carries that scale and
-                        // ExtractRotation on a scaled matrix does not
-                        // return the rotation. This copy is why the gate
-                        // exists: fix the two USD paths and leave this
-                        // one and the binary disagrees with the bake.
-                        worldUpStorage = up.GetOrthonormalized(false)
-                                             .ExtractRotation()
-                                             .TransformDir(authoredWorldUp);
+                        // rigExec:worldUpRotationOnly, exactly as the two
+                        // USD-side paths take it.
+                        const bool rotationOnly =
+                            (c.flags &
+                             RigExecWireConstraintWorldUpRotationOnly) != 0;
+                        worldUpStorage =
+                            (rotationOnly ? up.GetOrthonormalized(false)
+                                          : up)
+                                .ExtractRotation()
+                                .TransformDir(authoredWorldUp);
                         haveWorldUp = true;
                     }
                 }

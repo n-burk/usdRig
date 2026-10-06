@@ -15,6 +15,7 @@
 #include "solverKernels.h"
 #include "types.h"
 
+#include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/splineIk.h"
@@ -531,7 +532,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // recompile when the count changes the frame cardinality.
             s.ribbonSampleCount = bind(prim, "rigExec:sampleCount", 5);
             // rigExec:parameterization, frameTransport, startFrame,
-            // endFrame, twistFrames and driverCurveReadPhase are
+            // endFrame and twistFrames are
             // deliberately NOT read: the computation does not read them
             // either -- they shape batching and the epoch digest -- and
             // folding one would rebuild the program for an edit that cannot
@@ -873,6 +874,9 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         // rigExec:space, on the operators the compile reads it for. The
         // compile only keeps a provider here, so a named space that has no
         // slot is a bake-time contradiction, not a per-frame one.
+        c.blendShear = fc.blendShear;
+        c.worldUpRotationOnly = fc.worldUpRotationOnly;
+        c.radialBlend = fc.radialBlend;
         if (!fc.space.IsEmpty()) {
             c.spaceSlot = slotOf(fc.space);
             if (c.spaceSlot < 0) {
@@ -1525,9 +1529,8 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                         RigExecBakedSlotDomain::PosedM, source));
                 }
             }
-            // And the index itself, so that keying a space dirties this
-            // step and only this one.
-            RigExecBakedNoteInput(sw.activeInput, &step);
+            // The index itself is declared by
+            // RigExecBakedDeclareInputDependencies.
         }
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseBase, group.begin, group.end));
@@ -2071,11 +2074,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         step.writes.push_back(RigExecBakedRange(
             RigExecBakedSlotDomain::PoseWeight, interpolator.weightBegin,
             interpolator.weightEnd));
-        RigExecBakedNoteInput(interpolator.enabled, &step);
-        for (const RigExecBakedInput<double> &value :
-                 interpolator.valueInputs) {
-            RigExecBakedNoteInput(value, &step);
-        }
     }
 
     // The store's other pose-half record: every provider's rest -> final
@@ -2138,6 +2136,7 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.minLengthRatio, step);
     NoteInput(solver.twistTurns, step);
     NoteInput(solver.ribbonSampleCount, step);
+    NoteInput(solver.ikSpace, step);
     // The spline parameters the bake could not fold, which the solve re-reads
     // as a group rather than one input at a time.
     step->varyingInputs = step->varyingInputs || solver.splineParamsVary;
@@ -2221,9 +2220,8 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
                     B.spaceSwitchBySlot.empty()
                         ? -1 : B.spaceSwitchBySlot[size_t(slot)];
                 if (switchIndex >= 0) {
-                    RigExecBakedNoteInput(
-                        B.spaceSwitches[size_t(switchIndex)].activeInput,
-                        &step);
+                    NoteInput(B.spaceSwitches[size_t(switchIndex)].activeInput,
+                              &step);
                 }
                 const int clavicleIndex =
                     B.autoClavicleBySlot.empty()
@@ -2231,11 +2229,23 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
                 if (clavicleIndex >= 0) {
                     const RigExecBakedProgramImpl::AutoClavicle &ac =
                         B.autoClavicles[size_t(clavicleIndex)];
-                    RigExecBakedNoteInput(ac.ikBlendInput, &step);
-                    RigExecBakedNoteInput(ac.ikBlendFloat, &step);
-                    RigExecBakedNoteInput(ac.amountInput, &step);
-                    RigExecBakedNoteInput(ac.amountFloat, &step);
+                    NoteInput(ac.ikBlendInput, &step);
+                    NoteInput(ac.ikBlendFloat, &step);
+                    NoteInput(ac.amountInput, &step);
+                    NoteInput(ac.amountFloat, &step);
                 }
+            }
+            break;
+        }
+        case RigExecBakedStepKind::PoseInterpolator: {
+            // Read by the prologue into enabledValue and values, which the
+            // step consumes; the step owns the dependency.
+            const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
+                B.poseInterpolators[size_t(step.object)];
+            NoteInput(interpolator.enabled, &step);
+            for (const RigExecBakedInput<double> &value :
+                     interpolator.valueInputs) {
+                NoteInput(value, &step);
             }
             break;
         }
@@ -3736,7 +3746,56 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             carry = B.defaultRoundTrip[size_t(c.spaceSlot)].GetInverse() *
                     B.posedM[size_t(c.spaceSlot)];
         }
-        if (c.type == "RigExecPositionConstraint") {
+        if (c.type == "RigExecMatrixMover") {
+            // The transform-domain matrix mover, as the dynamic walk's arm:
+            // each source is measured as its rest->posed map, the transform
+            // in its space, and the envelope is applied to the target's four
+            // landmarks with the point kernel's rule.
+            const auto mapOf = [&](size_t k, GfMatrix4d *out) {
+                const int slot = c.sources[k];
+                const bool haveRest =
+                    slot >= 0 && B.restFrames[size_t(slot)].IsValid();
+                const auto &landmarks =
+                    haveRest ? B.restFrames[size_t(slot)].points
+                             : RigExecIdentityLandmarks();
+                return RigExecPointsToMatrix(landmarks, sources[k].frame,
+                                             out);
+            };
+            GfMatrix4d transform(1.0);
+            if (sources.empty() || !mapOf(0, &transform)) {
+                step->diagnostics.push_back(
+                    c.path.GetString() +
+                    " could not resolve rigExec:transform; mover passed "
+                    "through");
+                finish();
+                return;
+            }
+            if (sources.size() > 1) {
+                GfMatrix4d space(1.0);
+                if (!mapOf(1, &space)) {
+                    step->diagnostics.push_back(
+                        c.path.GetString() +
+                        " could not resolve rigExec:transformSpace; mover "
+                        "passed through");
+                    finish();
+                    return;
+                }
+                transform = RigExecMeasureInSpace(transform, space);
+            }
+            RigExecPointFrame solved = input;
+            if (c.radialBlend) {
+                const GfMatrix4d partial =
+                    RigExecPartialTransform(transform, weight);
+                for (GfVec3d &q : solved.points) {
+                    q = partial.TransformAffine(q);
+                }
+            } else {
+                for (GfVec3d &q : solved.points) {
+                    q = q + weight * (transform.TransformAffine(q) - q);
+                }
+            }
+            candidate = solved;
+        } else if (c.type == "RigExecPositionConstraint") {
             RigExecPositionConstraintParams params;
             params.offset = rd(c.offset);
             params.affect = affect;
@@ -3755,6 +3814,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.offset = rd(c.offset);
             params.affect = affect;
             params.weight = solveWeight;
+            params.blendShear = c.blendShear;
             candidate = RigExecApplyScaleConstraint(input, sources, params);
         } else if (c.type == "RigExecParentConstraint") {
             RigExecParentConstraintParams params;
@@ -3770,6 +3830,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.rotationOrder = c.order;
             params.weight = solveWeight;
             params.carry = hasCarry ? &carry : nullptr;
+            params.blendShear = c.blendShear;
             candidate = RigExecApplyParentConstraint(input, sources, params);
         } else {
             // Aim: the same weighted source set reduced to the target point
@@ -3854,10 +3915,12 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                                 " has a degenerate world-up object");
                             candidateReady = false;
                         } else if (candidateReady) {
-                            // Rotation only -- see the dynamic path: a
-                            // scaled up object turned the foot 90 degrees.
+                            // rigExec:worldUpRotationOnly, as the
+                            // dynamic path takes it.
                             params.worldUpDirection =
-                                up.GetOrthonormalized(false)
+                                (c.worldUpRotationOnly
+                                     ? up.GetOrthonormalized(false)
+                                     : up)
                                     .ExtractRotation()
                                     .TransformDir(authoredWorldUp);
                         }

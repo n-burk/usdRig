@@ -48,8 +48,8 @@ contributing source and read in `rigExec:rotationOrder`. That candidate is
 then written per axis through the three `inputs:affect*` mask triples and
 blended over the target's incoming frame by the common mover envelope, so
 the single `rigExec:moves` target is revised in place and anything that reads
-that provider afterwards -- a skinning mover with
-`rigExec:transformReadPhase = "final"`, for instance -- sees the parented
+that provider afterwards -- a skinning mover whose input carries
+`rigExecReadPhase = "final"`, for instance -- sees the parented
 result. A zero envelope is an exact pass-through: the target keeps whatever
 posed it before the constraint ran.
 
@@ -230,6 +230,19 @@ Per-source translation offsets parallel to rigExec:sources.
 *Type:* `double3[]`. *Default:* `[]`.
 
 Per-source Euler rotation offsets parallel to rigExec:sources.
+
+#### `rigExec:blendShear`
+
+*Type:* `uniform bool`. *Default:* `false`.
+
+With all three inputs:affectScale axes on, blend the sources' SHEAR
+as well as their scale. Shear lives in the same linear block as
+scale, so a constraint that replaces scale from a clean source can
+still leave behind a shear the input inherited -- a chain stretched
+by a spline IK with volume preservation carries one down to every
+child. Off (the default) keeps the input's shear, which is the FBX
+behaviour. Ignored when any scale axis is masked off: shear mixes two
+axes at a time, so a partial mask has no meaningful share of it.
 
 ## Example
 

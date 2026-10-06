@@ -1100,16 +1100,23 @@ RigExecApplyScaleConstraint(
             return _ConstraintFailure(input);
         }
         targetScale += sourceParams.scale * source.normalizedWeight;
-        targetShear += sourceParams.shear * source.normalizedWeight;
+        if (params.blendShear) {
+            targetShear += sourceParams.shear * source.normalizedWeight;
+        }
         totalWeight += source.normalizedWeight;
     }
     if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
         return totalWeight == 0.0 ? input : _ConstraintFailure(input);
     }
     targetScale = targetScale / totalWeight + params.offset;
-    targetShear /= totalWeight;
-    if (!_IsFinite(targetScale) || !_IsFinite(targetShear)) {
+    if (!_IsFinite(targetScale)) {
         return _ConstraintFailure(input);
+    }
+    if (params.blendShear) {
+        targetShear /= totalWeight;
+        if (!_IsFinite(targetShear)) {
+            return _ConstraintFailure(input);
+        }
     }
     for (int axis = 0; axis < 3; ++axis) {
         if (_Affects(params.affect, axis)) {
@@ -1117,8 +1124,10 @@ RigExecApplyScaleConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
-    _BlendGovernedShear(params.affect, targetShear, globalWeight,
-                        &inputParams);
+    if (params.blendShear) {
+        _BlendGovernedShear(params.affect, targetShear, globalWeight,
+                            &inputParams);
+    }
     return _FrameFromConstraintParams(input, inputParams);
 }
 
@@ -1203,7 +1212,9 @@ RigExecApplyParentConstraint(
         targetTranslation +=
             targetParams.translation * source.normalizedWeight;
         targetScale += targetParams.scale * source.normalizedWeight;
-        targetShear += targetParams.shear * source.normalizedWeight;
+        if (params.blendShear) {
+            targetShear += targetParams.shear * source.normalizedWeight;
+        }
 
         const GfVec3d sourceEuler =
             _EulerDegreesFromQuat(targetParams.rotation, params.rotationOrder);
@@ -1225,12 +1236,14 @@ RigExecApplyParentConstraint(
     }
     targetTranslation /= totalWeight;
     targetScale /= totalWeight;
-    targetShear /= totalWeight;
+    if (params.blendShear) {
+        targetShear /= totalWeight;
+    }
     const GfVec3d targetEuler =
         sourceAnchor + weightedRotationDelta / totalWeight;
     if (!_IsFinite(targetTranslation) || !_IsFinite(targetScale) ||
-        !_IsFinite(targetShear) || !_IsFinite(weightedRotationDelta) ||
-        !_IsFinite(targetEuler)) {
+        (params.blendShear && !_IsFinite(targetShear)) ||
+        !_IsFinite(weightedRotationDelta) || !_IsFinite(targetEuler)) {
         return _ConstraintFailure(input);
     }
 
@@ -1245,8 +1258,10 @@ RigExecApplyParentConstraint(
                 inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
-    _BlendGovernedShear(params.scaleAxes, targetShear, globalWeight,
-                        &inputParams);
+    if (params.blendShear) {
+        _BlendGovernedShear(params.scaleAxes, targetShear, globalWeight,
+                            &inputParams);
+    }
     const GfVec3d outputEuler = _ApplyEulerDelta(
         inputEuler, targetEuler, params.rotationAxes, globalWeight);
     inputParams.rotation =

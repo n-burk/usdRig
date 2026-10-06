@@ -11,7 +11,6 @@
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
 #include "rigExecMath/avarScale.h"
-#include "rigExecMath/curvenet.h"
 
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
@@ -2820,82 +2819,6 @@ TestMultiRigAtomicActivation(const std::string &examplesDir)
 }
 
 static void
-TestPosedCurvenetGuides(const std::string &examplesDir)
-{
-    const UsdStageRefPtr stage = UsdStage::Open(
-        examplesDir + "/12_CurvenetProfile.usda");
-    CHECK(stage);
-    if (!stage) return;
-    const SdfPath asset("/CurvenetAsset"), net("/CurvenetAsset/Geom/Net");
-    const SdfPath curve = net.AppendChild(TfToken("rigGuideVol_0"));
-    RigExecImagingBridge bridge(stage, asset.AppendChild(TfToken("Rig")));
-    std::vector<std::string> errors;
-    CHECK(bridge.Compile(&errors));
-    auto firstResult = bridge.EvaluateAndPublishResult(UsdTimeCode(1001));
-    CHECK(firstResult.ok);
-    auto first = bridge.GetStore()->Get();
-    CHECK(first && first->prims.count(net));
-    if (!first || !first->prims.count(net)) return;
-    const auto &initial = first->prims.at(net);
-    CHECK(initial.hasVolumeGuides && initial.volumeGuides.size() == 1);
-    if (initial.volumeGuides.empty()) return;
-    CHECK(initial.volumeGuideAnchor == net);
-    const VtVec3fArray restCurve = initial.volumeGuides[0].points;
-
-    auto upstream = HdRetainedSceneIndex::New();
-    GfMatrix4d assetWorld(1), netWorld(1);
-    assetWorld.SetTranslate(GfVec3d(100, 0, 0));
-    netWorld.SetTranslate(GfVec3d(125, 0, 0));
-    const auto xformData = [](const GfMatrix4d &matrix) {
-        const TfToken name = HdXformSchemaTokens->xform;
-        const HdDataSourceBaseHandle data = HdXformSchema::Builder()
-            .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(matrix))
-            .Build();
-        return HdRetainedContainerDataSource::New(1, &name, &data);
-    };
-    upstream->AddPrims({{asset, TfToken("xform"), xformData(assetWorld)},
-                       {net, HdPrimTypeTokens->points, xformData(netWorld)}});
-    auto results = RigExecResultsSceneIndex::New(upstream, bridge.GetStore());
-    _RecordingObserver observer;
-    results->AddObserver(HdSceneIndexObserverPtr(&observer));
-    CHECK(results->GetPrim(curve).primType == HdPrimTypeTokens->basisCurves);
-    CHECK(_GetPointsPrimvar(results->GetPrim(curve)) == restCurve);
-    const auto guideMatrix = HdXformSchema::GetFromParent(
-        results->GetPrim(curve).dataSource).GetMatrix();
-    CHECK(guideMatrix && guideMatrix->GetTypedValue(0) == netWorld);
-
-    const auto posedResult = bridge.EvaluateAndPublishResult(UsdTimeCode(1024));
-    CHECK(posedResult.ok);
-    results->NotifyGenerationPublished(posedResult.dirtied);
-    const auto posed = bridge.GetStore()->Get();
-    CHECK(posed && posed->prims.count(net));
-    if (!posed || !posed->prims.count(net)) return;
-    const auto &published = posed->prims.at(net);
-    CHECK(published.hasPoints && published.volumeGuides.size() == 1);
-    const auto &guide = published.volumeGuides[0];
-    CHECK(guide.points != restCurve);
-    CHECK(_GetPointsPrimvar(results->GetPrim(curve)) == guide.points);
-    CHECK(std::find(observer.dirtied.begin(), observer.dirtied.end(), curve) !=
-          observer.dirtied.end());
-    // Every authored Bezier endpoint occurs exactly in the sampled posed
-    // guide; using the design pool here would fail at the animated end.
-    VtIntArray indices;
-    stage->GetPrimAtPath(net).GetAttribute(TfToken("rigExec:splineIndices"))
-        .Get(&indices);
-    for (size_t i = 0; i < indices.size(); i += 4) {
-        const GfVec3f knot = published.points[indices[i]];
-        CHECK(std::find(guide.points.begin(), guide.points.end(), knot) !=
-              guide.points.end());
-    }
-    // Preserve authored children occupying a generated name.
-    upstream->AddPrims({_MeshShell(curve)});
-    CHECK(results->GetPrim(curve).primType == HdPrimTypeTokens->mesh);
-    upstream->RemovePrims({curve});
-    CHECK(results->GetPrim(curve).primType == HdPrimTypeTokens->basisCurves);
-    results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
-}
-
-static void
 TestEditTriggeredReevaluation(const std::string &examplesDir)
 {
     UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmRig.usda");
@@ -4932,7 +4855,6 @@ main(int argc, char **argv)
     TestDrivenXformResetBoundaries(examplesDir);
     TestLegacyRenderIndexPickup(examplesDir);
     TestMultiRigAtomicActivation(examplesDir);
-    TestPosedCurvenetGuides(examplesDir);
     TestEditTriggeredReevaluation(examplesDir);
     TestFailedActivationKeepsLiveNoticeOrdering();
     TestExternalReadEditsRepublish();

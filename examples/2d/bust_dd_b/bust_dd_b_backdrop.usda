@@ -11,11 +11,11 @@ def Xform "Backdrop"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
-        float3[] extent = [(-50, -36, -9), (50, 22, -9)]
+        float3[] extent = [(-50, -62, -9), (50, 22, -9)]
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         rel material:binding = </Backdrop/Look>
-        point3f[] points = [(-50, -36, -9), (50, -36, -9), (50, 22, -9), (-50, 22, -9)]
+        point3f[] points = [(-50, -62, -9), (50, -62, -9), (50, 22, -9), (-50, 22, -9)]
         texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
             interpolation = "vertex"
         )

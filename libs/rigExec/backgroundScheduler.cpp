@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <set>
 
 #if defined(_WIN32)
 // NOMINMAX and WIN32_LEAN_AND_MEAN arrive on the command line; windows.h
@@ -450,6 +451,29 @@ RigExecBackgroundScheduler::QueuedTimes(const SdfPath &rig) const
     return times;
 }
 
+std::vector<UsdTimeCode>
+RigExecBackgroundScheduler::InFlightTimes(const SdfPath &rig) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::set<double> values;
+    for (const auto &entry : _queuedByRigAndTime) {
+        if (entry.first.first == rig) {
+            values.insert(entry.first.second);
+        }
+    }
+    for (const auto &entry : _runningByRigAndTime) {
+        if (entry.first.first == rig) {
+            values.insert(entry.first.second);
+        }
+    }
+    std::vector<UsdTimeCode> times;
+    times.reserve(values.size());
+    for (const double value : values) {
+        times.emplace_back(value);
+    }
+    return times;
+}
+
 bool
 RigExecBackgroundScheduler::IsGenerationCurrent(
     const SdfPath &rig, RigExecFrameGeneration generation) const
@@ -757,6 +781,8 @@ RigExecBackgroundScheduler::_PopJob(_QueuedJob *job, bool wait)
     // Still in-flight -- the cap counts popped-and-executing -- until
     // _FinishJob lands.
     ++_running;
+    ++_runningByRigAndTime[std::make_pair(job->request.rig,
+                                         job->request.time.GetValue())];
     _ReportTransitionLocked(job->request,
                             RigExecWarmTransitionKind::Running);
     return true;
@@ -805,6 +831,11 @@ RigExecBackgroundScheduler::_FinishJob(const RigExecWarmRequest &request,
     std::unique_lock<std::mutex> lock(_mutex);
     if (_running > 0) {
         --_running;
+    }
+    const auto running = _runningByRigAndTime.find(
+        std::make_pair(request.rig, request.time.GetValue()));
+    if (running != _runningByRigAndTime.end() && --running->second == 0) {
+        _runningByRigAndTime.erase(running);
     }
     const auto inFlight = _inFlight.find(request.rig);
     if (inFlight != _inFlight.end() && inFlight->second > 0) {

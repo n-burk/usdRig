@@ -19,7 +19,9 @@ character converted to RigExec.
 
 - FK, two-bone and single-chain IK, spline IK, twist, and transform constraints.
 - Ordered deformation operations called **movers**, including skinning,
-  blend shapes, lattices, smoothing, Delta Mush, and curvenets.
+  blend shapes, lattices, smoothing, and Delta Mush.
+- External mover plugins built from separate repositories through a public
+  registration API and CMake helper.
 - Scalar, vector, and matrix operations; painted and procedural weight fields.
 - Dynamic evaluation, a baked program, and experimental `.rigexec` export
   with a standalone binary runtime.
@@ -92,9 +94,9 @@ status documented in the third-party notices.
 
 - [Node reference and tutorials](docs/index.md)
 - [Architecture and repository boundaries](docs/specs/spec.md)
-- [Curvenet authoring](docs/specs/curvenet.md)
 - [Viewport tools](docs/specs/viewport-gizmos.md) and [graph editor](docs/specs/graph-editor.md)
 - [Bake and inverse APIs](docs/specs/python-bake-inverse.md)
+- [Build and register external movers](docs/concepts/external-movers.md)
 - [Standalone runtime](docs/specs/standalone-runtime.md)
 - [Public method references](docs/references.md)
 - [Agent and contributor guide](AGENTS.md)
@@ -130,3 +132,27 @@ HTML and local sizzle material are ignored by Git.
 The standalone backends support a subset of the authoring/runtime surface.
 Check their guides before integration. Changes to OpenUSD versions or binary
 formats require explicit compatibility testing.
+
+## OpenExec usage
+
+RigExec uses [OpenExec](https://openusd.org/release/intro_to_openexec.html),
+the execution system in OpenUSD 26.08, from an unmodified installation; its
+[system design](https://openusd.org/dev/api/page__execution__system__design.html)
+describes the parts named here.
+
+- **Schema computations.** `libs/rigExec` registers computations for its
+  schemas with `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA`: provider frames and
+  matrices (`computePointFrame`, `computeRestFrame`, `computeMatrix`), solver
+  outputs (`computePointFrameArray`), weight packets, and mover parameters.
+- **Requests and overrides.** The dynamic evaluator reads those values through
+  `ExecUsdSystem` requests keyed by `ExecUsdValueKey`, and applies interactive
+  edits as `ExecUsdValueOverride` values.
+- **Mover graph.** Mover revision chains are built as an in-memory
+  `VdfNetwork` from the authored relationships, scheduled and run by the Vdf
+  pull-based executor (`libs/rigExec/moverGraph.cpp`).
+- **Standalone adapter.** The experimental `libs/rigExecStandalone` implements
+  the Esf scene interfaces over its own scene database.
+
+The baked program and the `.rigexec` runtime evaluate frames without calling
+OpenExec, and the runtime links no USD library. Other upstream and published
+sources are listed in the [method references](docs/references.md).

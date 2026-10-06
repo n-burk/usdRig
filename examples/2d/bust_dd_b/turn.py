@@ -1,202 +1,150 @@
-"""The pseudo-3D head turn and nod: the TARGET displacement of every head
-point for an angle, from a 3D proxy of the head.
+"""Authored three-quarter head construction for limited 2D rotation.
 
-Turn (AngleX, theta > 0 turns the face to screen right): each ROW of the
-head is a curved surface of depth d(x) in front of the neck axis; a point
-projects to x cos(theta) + d sin(theta). The projection is made MONOTONE
-(a running maximum), so the far side never folds over itself -- the part of
-the face that turns away is squeezed into the silhouette, and the far
-silhouette is whatever projects furthest: the temple notch at eye level
-(the eye socket is shallower) and the cheekbone bump come out of the depth
-function, not out of a drawn outline. The near side keeps its silhouette
-(the side plane of the head rotates into view there). Points outside the
-head's surface (hair) continue rigidly, and every layer adds its own depth
-offset -- the parallax: the fringe floats in front of the forehead, the
-back hair moves the other way.
-
-Nod (AngleY, phi > 0 tips the face DOWN) is the same construction per
-COLUMN: the forehead and crown grow, the lower face shortens.
+The facial silhouette, eye planes and hair volumes use separate projections.
+All maps are identity at zero, preserve local feature proportions, and are
+sampled into ordinary RigExec lattice and corrective keyforms by the builder.
 """
 
 import math
-
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
-
+from scipy.interpolate import PchipInterpolator
 import design as D
-from paint import smooth
 
-YC = -1.0            # the nod pivot height
-ROW_Y = np.linspace(-16.0, 16.0, 161)
-COL_X = np.linspace(-12.0, 12.0, 121)
-NU = 241
-
-
-def head_R(y):
-    """Half width of the head surface at row y: the face outline where
-    there is face, an ellipse over the skull above it, the neck below."""
-    y = np.asarray(y, np.float64)
-    face = D.face_halfwidth(np.clip(y, -9.95, 9.8))
-    skull = 7.85 * np.sqrt(np.clip(1 - ((y - 0.6) / 10.1) ** 2, 0.02, 1))
-    r = np.where(y > 4.0, np.maximum(face, skull), face)
-    r = np.where(y > 9.8, skull, r)
-    r = np.where(y < -9.95, 1.2 + 0.0 * y, r)
-    return np.maximum(r, 1.2)
+# At +30 degrees: near cheek, far cheek, and facial centreline displacement.
+# These landmarks describe the jaw/cheek silhouette, not a spherical squeeze.
+_Y = np.array([-10, -9.3, -7.7, -5.65, -3.5, -1.6, 1, 4.2, 7.4, 9.35, 10.5])
+_NEAR = PchipInterpolator(_Y, [1.85, 2.1, 2.0, 1.8, 1.1, 0.6, 0.2, 0.2, 0.3, 0.35, 0.3])
+_FAR = PchipInterpolator(
+    _Y, [1.85, 0.65, -0.10, -0.7, -0.4, -0.1, 0, 0, -0.05, 0.05, 0.3]
+)
+_CENTRE = PchipInterpolator(
+    _Y, [1.85, 1.90, 2.25, 2.65, 2.9, 1.6, 1.1, 0.7, 0.45, 0.3, 0.3]
+)
+_FRONT_DEPTH = PchipInterpolator(
+    [-17, -10, -7, -4, 0, 5, 10, 16], [4, 4.3, 5.3, 6.1, 5.8, 4.8, 2.3, 1.5]
+)
 
 
-def depth(x, y):
-    """Depth of the head's front surface in front of the neck axis."""
-    x = np.asarray(x, np.float64)
-    y = np.asarray(y, np.float64)
-    R = head_R(y)
-    q = np.clip(np.abs(x) / R, 0, 1)
-    D0 = 6.6 - 1.2 * smooth(-6.0, -10.0, y) - 1.2 * smooth(7.0, 11.0, y)
-    # upper face: a rounded front meeting the side of the head at the
-    # outline; lower face: the jaw is a shallow wedge whose edges (the jaw
-    # line) stay well forward of the neck axis
-    upper = D0 * (1 - q ** 2) ** 0.55
-    edge = 2.2 + 2.7 * smooth(-6.0, -10.0, y)
-    lower = D0 - (D0 - edge) * q ** 2
-    j = smooth(-3.0, -7.5, y)
-    d = upper * (1 - j) + lower * j
-    ax = np.abs(x)
-    # nose, cheekbones, eye sockets, brow ridge
-    d = d + 1.9 * np.exp(-((x - 0.12) / 0.95) ** 2 - ((y + 3.4) / 1.9) ** 2)
-    d = d + 0.55 * np.exp(-((ax - 5.9) / 1.2) ** 2 - ((y + 2.0) / 1.3) ** 2)
-    d = d - 0.75 * np.exp(-((ax - 4.3) / 1.6) ** 2 - ((y + 0.5) / 1.15) ** 2)
-    d = d + 0.25 * np.exp(-((ax - 3.0) / 2.5) ** 2 - ((y - 1.8) / 0.8) ** 2)
-    # mouth/chin: the lips a little forward
-    d = d + 0.35 * np.exp(-(x / 1.6) ** 2 - ((y + 6.9) / 0.9) ** 2)
-    # over the top of the skull the surface turns up and away
-    top = np.sqrt(np.clip(1 - (np.maximum(y - 0.6, 0) / 10.3) ** 2, 0, 1)) ** 0.8
-    return np.maximum(d * np.where(y > 0.6, top, 1.0), 0.0)
+def turn_displacement(pts, offsets, theta_deg, **unused):
+    p = np.asarray(pts, float)
+    x, y = p[:, 0], p[:, 1]
+    sign = 1 if theta_deg >= 0 else -1
+    a = abs(math.sin(math.radians(theta_deg))) / 0.5
+    yy = np.clip(y, _Y[0], _Y[-1])
+    radius = np.maximum(D.face_halfwidth(np.clip(y, -9.9, 9.8)), 1.0)
+    u = np.clip(sign * x / radius, -1, 1)
+    # Monotone Hermite interpolation through both cheeks and the centreline
+    # prevents the far cheek folding when the nose moves forward.
+    near, far, centre = _NEAR(yy), _FAR(yy), _CENTRE(yy)
+    left, right = -radius + near, radius + far
+    centre = np.clip(centre, left + 0.05 * radius, right - 0.05 * radius)
+    d0, d1 = centre - left, right - centre
+    middle = 2 * d0 * d1 / (d0 + d1)
+    m0 = np.clip((3 * d0 - d1) / 2, 0.05 * radius, 2 * d0)
+    m2 = np.clip((3 * d1 - d0) / 2, 0.05 * radius, 2 * d1)
+    t = np.where(u < 0, u + 1, u)
+    start, end = np.where(u < 0, left, centre), np.where(u < 0, centre, right)
+    ds, de = np.where(u < 0, m0, middle), np.where(u < 0, middle, m2)
+    projected = (
+        (2 * t**3 - 3 * t * t + 1) * start
+        + (t**3 - 2 * t * t + t) * ds
+        + (-2 * t**3 + 3 * t * t) * end
+        + (t**3 - t * t) * de
+    )
+    dx = projected - u * radius
+    outside = x - np.clip(x, -radius, radius)
+    dx = sign * a * dx + outside * (math.cos(math.radians(theta_deg)) - 1)
+    dx += np.asarray(offsets) * math.sin(math.radians(theta_deg))
+    return np.column_stack([dx, np.zeros(len(p))])
 
 
-def _row_map(y, theta):
-    """(u grid, x' values) for one row: u = x / R in [-1, 1]."""
-    R = float(head_R(y))
-    u = np.linspace(-1, 1, NU)
-    x = u * R
-    s, c = math.sin(theta), math.cos(theta)
-    p = x * c + depth(x, np.full_like(x, y)) * s
-    # monotone: running max (for a turn to the right; mirrored for left)
-    if theta >= 0:
-        M = np.maximum.accumulate(p)
-    else:
-        M = np.minimum.accumulate(p[::-1])[::-1]
-    # keep a minimum slope so nothing collapses to zero width
-    M = M + 0.035 * R * c * u
-    # the near side holds its silhouette: the side plane rotates into view
-    near = -1.0 if theta >= 0 else 1.0
-    edge_shift = (near * R) - M[0 if theta >= 0 else -1]
-    w = 1.0 - smooth(0.0, 0.45, np.abs(u - near))
-    ext = 0.60 * smooth(-9.0, -5.0, y) * (1 - smooth(1.0, 7.0, y))
-    M = M + edge_shift * w * ext
-    return u, M, R
+def nod_displacement(pts, offsets, phi_deg, **unused):
+    p = np.asarray(pts, float)
+    x, y = p[:, 0], p[:, 1]
+    th = math.radians(phi_deg)
+    radius = np.maximum(D.face_halfwidth(np.clip(y, -9.9, 9.8)), 1.0)
+    depth = _FRONT_DEPTH(np.clip(y, -17, 16)) * (
+        1 - 0.18 * np.minimum((x / radius) ** 2, 1)
+    )
+    dy = (y + 1) * (math.cos(th) - 1) - (depth + offsets) * math.sin(th)
+    return np.column_stack([np.zeros(len(p)), dy])
 
 
-def turn_grid(theta_deg):
-    th = math.radians(theta_deg)
-    F = np.zeros((len(ROW_Y), NU))
-    Rs = np.zeros(len(ROW_Y))
-    for i, y in enumerate(ROW_Y):
-        u, M, R = _row_map(y, th)
-        F[i] = M
-        Rs[i] = R
-    return F, Rs
-
-
-def turn_displacement(pts, offsets, theta_deg, fade_below=(-10.5, -19.0)):
-    """Displacement (N, 2) of rest points `pts` for a turn; `offsets` is each
-    point's depth in front of (+) / behind (-) the head surface."""
-    th = math.radians(theta_deg)
-    F, Rs = turn_grid(theta_deg)
-    x, y = pts[:, 0], pts[:, 1]
-    yy = np.clip(y, -9.9, 9.2)
-    R = np.interp(yy, ROW_Y, Rs)
-    u = x / R
-    uc = np.clip(u, -1, 1)
-    interp = RegularGridInterpolator((ROW_Y, np.linspace(-1, 1, NU)), F)
-    xe = interp(np.stack([yy, uc], axis=1))
-    # outside the head surface: continue rigidly from the silhouette
-    outside = x - uc * R
-    xe = xe + outside * math.cos(th)
-    dx = xe - x + offsets * math.sin(th)
-    # long hair below the head follows less and less
-    f = smooth(fade_below[1], fade_below[0], y)
-    dx = dx * (0.18 + 0.82 * f)
-    # a little vertical arc: the turn dips the far side a hair (perspective)
-    dy = -0.04 * np.abs(dx) * smooth(-2.0, 4.0, y)
-    return np.stack([dx, dy], axis=1)
-
-
-def _col_map(x, phi):
-    """(v grid, y' values) for one column."""
-    ax = abs(x)
-    top = 0.6 + 10.1 * math.sqrt(max(1 - (ax / 7.85) ** 2, 0.0004))
-    bot = float(np.interp(ax, *_bottom_profile()))
-    v = np.linspace(0, 1, NU)
-    y = bot + (top - bot) * v
-    s, c = math.sin(phi), math.cos(phi)
-    d = depth(np.full_like(y, x), y)
-    p = YC + (y - YC) * c - d * s
-    # monotone increasing in y: looking down the chin's underside folds away
-    # (the bottom silhouette is the lowest projection); looking up the
-    # crown folds away (the top silhouette is the highest)
-    if phi >= 0:
-        M = np.minimum.accumulate(p[::-1])[::-1]
-    else:
-        M = np.maximum.accumulate(p)
-    M = M + 0.03 * (top - bot) * c * (v - 0.5)
-    return y, M, bot, top
-
-
-_BP = None
-
-
-def _bottom_profile():
-    global _BP
-    if _BP is None:
-        o = D.face_outline()
-        lo = o[o[:, 1] < -2.0]
-        xs = np.linspace(0, 7.5, 76)
-        ys = []
-        for xv in xs:
-            near = lo[np.abs(np.abs(lo[:, 0]) - xv) < 0.25]
-            ys.append(near[:, 1].min() if len(near) else -2.0)
-        _BP = (xs, np.array(ys))
-    return _BP
-
-
-def nod_grid(phi_deg):
-    ph = math.radians(phi_deg)
-    F = np.zeros((len(COL_X), NU))
-    B = np.zeros(len(COL_X))
-    T = np.zeros(len(COL_X))
-    for i, x in enumerate(COL_X):
-        y, M, bot, top = _col_map(x, ph)
-        F[i] = M
-        B[i] = bot
-        T[i] = top
-    return F, B, T
-
-
-def nod_displacement(pts, offsets, phi_deg, fade_below=(-10.5, -19.0)):
-    ph = math.radians(phi_deg)
-    F, B, T = nod_grid(phi_deg)
-    x, y = pts[:, 0], pts[:, 1]
-    xx = np.clip(x, -7.2, 7.2)
-    bot = np.interp(xx, COL_X, B)
-    top = np.interp(xx, COL_X, T)
-    v = (y - bot) / np.maximum(top - bot, 1e-6)
-    vc = np.clip(v, 0, 1)
-    interp = RegularGridInterpolator((COL_X, np.linspace(0, 1, NU)), F)
-    ye = interp(np.stack([xx, vc], axis=1))
-    outside = y - (bot + vc * (top - bot))
-    ye = ye + outside * math.cos(ph)
-    dy = ye - y - offsets * math.sin(ph)
-    f = smooth(fade_below[1], fade_below[0], y)
-    dy = dy * (0.15 + 0.85 * f)
-    # below the chin (the neck region, hidden) keep it continuous
-    dx = np.zeros_like(dy)
-    return np.stack([dx, dy], axis=1)
+def project_part(points, name, kind, angle):
+    """Project a whole feature plane or hair volume with one coherent map."""
+    p = np.asarray(points, float)
+    th = math.radians(angle)
+    fn = turn_displacement if kind == "turn" else nod_displacement
+    out = p + fn(p, np.zeros(len(p)), angle)
+    eye_side = None
+    if name.startswith(
+        (
+            "Sclera_",
+            "LidShadow_",
+            "Iris_",
+            "Highlight_",
+            "EyeMask_",
+            "LowerLid_",
+            "Crease_",
+            "Lash_",
+            "Brow_",
+        )
+    ):
+        eye_side = 1 if name.endswith("_R") else -1
+    if eye_side is not None:
+        cx, cy = D.EYE_C[eye_side]
+        if kind == "turn":
+            a = abs(math.sin(th)) / 0.5
+            far = eye_side * angle > 0
+            width = 1 - (0.18 if far else 0.025) * a
+            centre = cx * (1 - 0.14 * a) + 1.45 * math.sin(th) / 0.5
+            out[:, 0] = centre + (p[:, 0] - cx) * width
+            out[:, 1] = p[:, 1]
+        else:
+            centre = cy + fn(np.array([[cx, cy]]), np.zeros(1), angle)[0, 1]
+            out[:, 1] = centre + (p[:, 1] - cy) * (
+                1 - 0.07 * abs(math.sin(th)) / math.sin(math.radians(20))
+            )
+        return out
+    if name in (
+        "MouthInside",
+        "Tongue",
+        "Teeth",
+        "LowerLip",
+        "LowerEdge",
+        "MouthLine",
+        "TongueOut",
+    ):
+        centre = np.array(D.MOUTH_C)
+        moved = centre + fn(centre[None], np.zeros(1), angle)[0]
+        out = p - centre
+        out[:, 0] *= 1 - 0.12 * abs(math.sin(th)) / 0.5 if kind == "turn" else 1
+        out[:, 1] *= 1 if kind == "turn" else math.cos(th)
+        return out + moved
+    hair_depth = {
+        "BackHair": -1.0,
+        "Crown": 2.1,
+        "Ahoge": 2.1,
+        "F1": 4.2,
+        "F2": 4.2,
+        "F3": 4.0,
+        "F4": 3.8,
+        "F5": 3.5,
+        "Stray": 4.2,
+        "Pins": 3.6,
+        "LockR_A": 2.6,
+        "LockR_B": 1.7,
+        "LooseL": 1.5,
+        "TuckL": -0.5,
+        "Ear": -0.7,
+        "Earring": -0.7,
+    }
+    if name in hair_depth:
+        depth = hair_depth[name]
+        out = p.copy()
+        if kind == "turn":
+            out[:, 0] = p[:, 0] * math.cos(th) + depth * math.sin(th)
+        else:
+            out[:, 1] = -1 + (p[:, 1] + 1) * math.cos(th) - depth * math.sin(th)
+        return out
+    return out

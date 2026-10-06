@@ -181,8 +181,9 @@ def Xform "ScIkAsset"
                 )
                 {
                     rel rigExec:moves = </ScIkAsset/Geom/Arm.points>
-                    rel rigExec:transform = </ScIkAsset/Rig/Joints/Shoulder>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ScIkAsset/Rig/Joints/Shoulder> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ScIkAsset/Rig/Weights/UpperW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -192,8 +193,9 @@ def Xform "ScIkAsset"
                 )
                 {
                     rel rigExec:moves = </ScIkAsset/Geom/Arm.points>
-                    rel rigExec:transform = </ScIkAsset/Rig/Joints/Shoulder/Elbow>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ScIkAsset/Rig/Joints/Shoulder/Elbow> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ScIkAsset/Rig/Weights/ForeW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

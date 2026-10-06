@@ -136,7 +136,6 @@ def Xform "PlaneWeightAsset"
                 uniform token rigExec:planeAxis = "x"
                 uniform token rigExec:planeBounds = "unbounded"
                 uniform token rigExec:falloffProfile = "smooth"
-                uniform token rigExec:samplePhase = "reference"
                 float inputs:falloffMin = 1.5
                 float inputs:falloffMax = -1.5
                 float inputs:invert = 0
@@ -159,8 +158,9 @@ def Xform "PlaneWeightAsset"
                 )
                 {
                     rel rigExec:moves = </PlaneWeightAsset/Geom/Strip.points>
-                    rel rigExec:transform = </PlaneWeightAsset/Rig/Joints/Hinge>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </PlaneWeightAsset/Rig/Joints/Hinge> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </PlaneWeightAsset/Rig/Weights/Cut>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

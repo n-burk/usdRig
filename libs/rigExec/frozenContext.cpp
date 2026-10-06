@@ -280,6 +280,12 @@ RigExecBindChainSampleInputs(const RigExecRigEvaluator &evaluator,
             revision.tangents = _BindChainInput(prim, "inputs:tangents");
             chain.revisions.push_back(std::move(revision));
         }
+        for (const RigExecPhasedConnection &connection :
+             evaluator.GetPhasedConnections()) {
+            if (connection.target == targetPath) {
+                chain.phased.push_back(connection);
+            }
+        }
         bound.chains.push_back(std::move(chain));
     }
     *out = std::move(bound);

@@ -1274,8 +1274,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkUpper_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkUpper_l_cluster>
@@ -1287,8 +1288,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/blinkLower_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkLower_l_cluster>
@@ -1306,13 +1308,14 @@ over "Biped"
                     rel rigExec:driverBaseTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     rel rigExec:driverCurve = </Biped/Rig/Curves/blinkUpper_l_curve>
                     uniform token rigExec:driverDeltaFrame = "local"
-                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/eyeDrag_upper_l_pivot>
+                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/eyeDrag_upper_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     uniform token rigExec:mode = "wire"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkUpper_l_curve_wire>
                 }
 
@@ -1328,13 +1331,14 @@ over "Biped"
                     rel rigExec:driverBaseTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     rel rigExec:driverCurve = </Biped/Rig/Curves/blinkLower_l_curve>
                     uniform token rigExec:driverDeltaFrame = "local"
-                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/eyeDrag_lower_l_pivot>
+                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/eyeDrag_lower_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     uniform token rigExec:mode = "wire"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkLower_l_curve_wire>
                 }
 
@@ -1344,8 +1348,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_upper_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/lid_squash_upper_l_cluster>
@@ -1357,8 +1362,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_squash_lower_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/lid_squash_lower_l_cluster>
@@ -1370,8 +1376,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketStretch_l_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketStretch_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketStretch_l_cluster>
@@ -1383,8 +1390,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketLine_upper_l_follow/socketLine_upper_l_auto/L_UpSocketLine>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketLine_upper_l_follow/socketLine_upper_l_auto/L_UpSocketLine> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketLine_upper_l_follow>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketLine_upper_l_cluster>
@@ -1396,8 +1404,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketLine_lower_l_auto/L_LowSocketLine>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketLine_lower_l_auto/L_LowSocketLine> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketLine_lower_l_cluster>
@@ -1424,7 +1433,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_low_4_l_follow/L_LoLid5>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_corner_outer_l_follow/L_OutLid>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_up_4_l_follow/L_UpLid5>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_up_3_l_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/lid_up_2_l_follow>,
@@ -1443,7 +1454,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/lid_l_curve_wire>
                 }
 
@@ -1453,8 +1463,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketLift_l_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketLift_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketLift_l_cluster>
@@ -1481,7 +1492,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socket_l_9_follow/L_LoSocket5>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socket_l_10_follow/L_OutSocket>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socket_l_11_follow/L_UpSocket5>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socket_l_0_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socket_l_1_follow>,
@@ -1500,7 +1513,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socket_l_curve_wire>
                 }
 
@@ -1510,8 +1522,9 @@ over "Biped"
                 {
                     custom rel rigExec:moves = </Biped/Geom/l_eye_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketStretch_l_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket/socketStretch_l_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/L_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/eyes/eyeball_stretch_l>
@@ -2526,8 +2539,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkUpper_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkUpper_r_cluster>
@@ -2539,8 +2553,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/blinkLower_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkLower_r_cluster>
@@ -2558,13 +2573,14 @@ over "Biped"
                     rel rigExec:driverBaseTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     rel rigExec:driverCurve = </Biped/Rig/Curves/blinkUpper_r_curve>
                     uniform token rigExec:driverDeltaFrame = "local"
-                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/eyeDrag_upper_r_pivot>
+                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/eyeDrag_upper_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     uniform token rigExec:mode = "wire"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkUpper_r_curve_wire>
                 }
 
@@ -2580,13 +2596,14 @@ over "Biped"
                     rel rigExec:driverBaseTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     rel rigExec:driverCurve = </Biped/Rig/Curves/blinkLower_r_curve>
                     uniform token rigExec:driverDeltaFrame = "local"
-                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/eyeDrag_lower_r_pivot>
+                    rel rigExec:driverTransforms = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/eyeDrag_lower_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     uniform token rigExec:mode = "wire"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/blinkLower_r_curve_wire>
                 }
 
@@ -2596,8 +2613,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_upper_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/lid_squash_upper_r_cluster>
@@ -2609,8 +2627,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_squash_lower_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/lid_squash_lower_r_cluster>
@@ -2622,8 +2641,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketStretch_r_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketStretch_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketStretch_r_cluster>
@@ -2635,8 +2655,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketLine_upper_r_follow/socketLine_upper_r_auto/R_UpSocketLine>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketLine_upper_r_follow/socketLine_upper_r_auto/R_UpSocketLine> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketLine_upper_r_follow>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketLine_upper_r_cluster>
@@ -2648,8 +2669,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketLine_lower_r_auto/R_LowSocketLine>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketLine_lower_r_auto/R_LowSocketLine> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketLine_lower_r_cluster>
@@ -2676,7 +2698,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_low_4_r_follow/R_LoLid5>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_corner_outer_r_follow/R_OutLid>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_up_4_r_follow/R_UpLid5>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_up_3_r_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/lid_up_2_r_follow>,
@@ -2695,7 +2719,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/lid_r_curve_wire>
                 }
 
@@ -2705,8 +2728,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketLift_r_pivot>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketLift_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socketLift_r_cluster>
@@ -2733,7 +2757,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socket_r_9_follow/R_LoSocket5>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socket_r_10_follow/R_OutSocket>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socket_r_11_follow/R_UpSocket5>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socket_r_0_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socket_r_1_follow>,
@@ -2752,7 +2778,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/eyes/socket_r_curve_wire>
                 }
 
@@ -2762,8 +2787,9 @@ over "Biped"
                 {
                     custom rel rigExec:moves = </Biped/Geom/r_eye_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketStretch_r_pivot>
-                    token rigExec:transformReadPhase = "final"
+                    custom rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket/socketStretch_r_pivot> (
+                        rigExecReadPhase = "final"
+                    )
                     custom rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/R_EyeSocket>
                     token rigExec:weightBlend = "radial"
                     custom rel rigExec:weightObject = </Biped/Rig/Weights/eyes/eyeball_stretch_r>

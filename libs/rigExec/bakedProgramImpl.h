@@ -20,7 +20,6 @@
 #include "solverKernels.h"
 #include "tapSet.h"
 #include "types.h"
-#include "curvenetWeightComputations.h"
 #include "weightPackets.h"
 
 #include "rigExecMath/autoClavicleKernel.h"
@@ -376,15 +375,17 @@ RigExecBakedOpName(RigExecRevisionOp op)
     case RigExecRevisionOp::VolumeCorrect: return "volumeCorrect";
     case RigExecRevisionOp::Smooth: return "smooth";
     case RigExecRevisionOp::DeltaMush: return "deltaMush";
+    case RigExecRevisionOp::Wrinkle: return "wrinkle";
     case RigExecRevisionOp::Lattice: return "lattice";
     case RigExecRevisionOp::SurfaceProject: return "surfaceProject";
     case RigExecRevisionOp::Ribbon: return "ribbon";
     case RigExecRevisionOp::Wire: return "wire";
     case RigExecRevisionOp::EmitGuidePoints: return "emitGuidePoints";
-    case RigExecRevisionOp::Curvenet: return "curvenet";
-    case RigExecRevisionOp::CurvenetAdjuster: return "curvenetAdjuster";
+    case RigExecRevisionOp::External: return "external";
     case RigExecRevisionOp::RecomputeNormals: return "recomputeNormals";
     case RigExecRevisionOp::RecomputeExtent: return "recomputeExtent";
+    case RigExecRevisionOp::SurfaceProjector: return "surfaceProjector";
+    case RigExecRevisionOp::ShaderDials: return "shaderDials";
     }
     return "unknown";
 }
@@ -1156,12 +1157,8 @@ struct RigExecBakedProgramImpl {
     UsdStageRefPtr stage;
     /// The rig's asset root: the parent of the RigExecRoot, which is the
     /// space every control frame the rig publishes is expressed in, and the
-    /// prim a plain Xformable's transform is measured relative to. Two
-    /// groups arrived at it independently -- the epilogue's curvenet-adjuster
-    /// publication composes the ladder from the net's own prim up to here,
-    /// and the xform-derived provider seed measures against it -- and it is
-    /// ONE field because it is one prim: rigEvaluator.cpp's pose walk uses
-    /// the same `_rigPath.GetParentPath()` for both.
+    /// prim a plain Xformable's transform is measured relative to. The
+    /// xform-derived provider seeds are measured relative to this prim.
     SdfPath assetRootPath;
 
     // Captured once, at Build, inside the one translation unit the evaluator
@@ -1488,23 +1485,6 @@ struct RigExecBakedProgramImpl {
     /// holds the previous generation's dynamic records.
     RigExecChainSnapshots runSnapshots;
 
-    /// The program's OWN curvenet bind cache, not the evaluator's.
-    ///
-    /// Two reasons, and either alone would be enough. It is drained by
-    /// TakeDiagnostics, so sharing one cache with the dynamic path means
-    /// whichever ran first reports the bind lines and the other reports none
-    /// -- which in a parity generation is a diagnostic difference the
-    /// comparator is right to call a mismatch. And the cache has no locking
-    /// at all, so it belongs to one walk at a time.
-    ///
-    /// THREAD SAFETY, for the step graph being built over this: Resolve()
-    /// mutates the entry map and appends to the pending diagnostics with no
-    /// synchronisation whatever. It may only ever be touched from serial
-    /// code -- the run's prologue or its epilogue -- and never from a step
-    /// body. Carried across a rebuild by AdoptGeometryStateFrom, because a
-    /// bind survives an edit that rebuilds the program the same way a
-    /// revision's cached result does.
-    RigExecCurvenetBindCache curvenetBindings;
     /// True when some revision of this epoch declares a read phase, which is
     /// the only thing that can LOOK the store up. While it is false nothing
     /// can observe a record, so the pose half does not pay to fill it -- and
@@ -1762,6 +1742,14 @@ struct RigExecBakedProgramImpl {
         /// (posedM and defaultRoundTrip); see the dynamic path, which
         /// derives it from the same pair of taps.
         int spaceSlot = -1;
+        /// rigExec:blendShear (Scale, Parent) and
+        /// rigExec:worldUpRotationOnly (Aim), compiled; both off is the
+        /// original arithmetic.
+        bool blendShear = false;
+        bool worldUpRotationOnly = false;
+        /// rigExec:weightBlend == "radial" on a transform-domain
+        /// RigExecMatrixMover, compiled.
+        bool radialBlend = false;
         /// True when any target wants a record, which is the one branch a
         /// rig with no read phase pays per constraint.
         bool snapshotAfter = false;
@@ -2153,42 +2141,6 @@ struct RigExecBakedProgramImpl {
         UsdPrim moverPrim;
         RigExecRevisionOp op = RigExecRevisionOp::Skin;
         RigExecRevisionBinding binding;
-        /// The chain whose published points are this curvenet mover's POSED
-        /// net, as an index into `chains`, or -1. E._chainPlan.order runs a net's
-        /// own chain before any mover that reads it, so the value is this
-        /// run's by the time the revision is assembled -- and the static
-        /// step declares the chain's ChainPoints slot, which is what says so
-        /// to the scheduler.
-        int curvenetChain = -1;
-        /// The curvenet adjuster's second output: one fully adjusted frame
-        /// per adjustment, in RigExecCurvenetAdjustmentPaths order.
-        ///
-        /// Persistent, because the revision node keeps its own as MUTABLE
-        /// member state that survives a Compute it did not run -- a revision
-        /// whose inputs stood still still publishes the frames it last
-        /// produced, and the published map is one of the seven the
-        /// comparator checks.
-        std::vector<GfMatrix4d> controlFrames;
-        /// The net-to-asset ladder the last publish composed for this
-        /// adjuster, retained for the bake (M1 slice 4): the epilogue reads
-        /// it off the stage per frame, past the read recorder's reach.
-        /// Fresh only when the revision published (a CurvenetAdjuster whose
-        /// status is "ok"); the drain consults the same condition.
-        GfMatrix4d lastAdjusterNetToAsset{1.0};
-        /// The Profile Mover bind, resolved in the PROLOGUE.
-        ///
-        /// RigExecCurvenetBindCache has no locking at all and reports one
-        /// diagnostic per bind, so it belongs to serial code; a null pointer
-        /// here is a remembered failed bind and not "not asked yet", which
-        /// `curvenetBindResolved` says.
-        std::shared_ptr<const RigExecProfileMoverBinding> curvenetBind;
-        bool curvenetBindResolved = false;
-        /// The bind's inputs, retained through
-        /// RigExecProviderValues::curvenetBindInputs for the bake (M1 slice
-        /// 3b): the runtime re-binds from these because the factorization
-        /// has no by-value form. Filled once -- the prologue's assembly is
-        /// first -- and epoch data, like every read it holds.
-        RigExecCurvenetBindInputs curvenetBindInputs;
         /// This revision's blend channels, in `binding.blendInputs` order.
         /// Empty for every operation but a blend shape.
         std::vector<GeomBlendChannel> blendChannels;
@@ -2464,6 +2416,12 @@ struct RigExecBakedProgramImpl {
             /// As the chain's, read by the prologue.
             bool haveBase = false;
             bool baseDirty = false;
+            /// A surface projector target (RigExecIsDerivedMatrixOp): no
+            /// authored base, and a MATRIX published in place of a vec3f
+            /// array -- when this run measured one.
+            bool matrixTarget = false;
+            GfMatrix4d matrix{1.0};
+            bool haveMatrix = false;
         };
         std::vector<Derived> derived;
     };
@@ -2561,36 +2519,6 @@ struct RigExecBakedProgramImpl {
         /// The epoch's resampled falloff remap, copied from falloffLuts.
         std::vector<float> falloffCurve;
 
-        // The one weight object whose field is not a formula over a few
-        // floats: it is the solution of a factorized system over the CUT
-        // mesh, so the packet needs the BIND that factorization lives in.
-        // The exec computation keeps a process-wide LRU of those behind a
-        // mutex, and a step body may take no lock -- so the program keeps
-        // one binding per object, in the object, written by that object's
-        // OWN step and read by nothing else. It is the same cache with a
-        // capacity of one entry per weight object, which is all a program
-        // can use: a weight object has exactly one layout per frame.
-        /// The five array relationships, as the attributes their authored
-        /// targets name, read exactly the way `targetPoints` is.
-        std::vector<UsdAttribute> curvenetMeshPoints, curvenetPoints;
-        std::vector<UsdAttribute> curvenetCounts, curvenetIndices;
-        std::vector<UsdAttribute> curvenetSplines;
-        /// inputs:weights and rigExec:autoSmooth, which exec reads per frame
-        /// off the prim itself. Arrays, so they go through the generation's
-        /// resolved inputs rather than through a RigExecBakedInput.
-        UsdAttribute curvenetWeights, curvenetAutoSmooth;
-        TfToken curvenetBasis;
-        RigExecBakedInput<int> curvenetSamples;
-        RigExecBakedInput<float> curvenetUnreached;
-        /// This object's binding, and the layout it was cut for. Compared by
-        /// VALUE, like every other decision in the frame path: an equal
-        /// layout is the same cut, and a rig whose mesh or net moves per
-        /// frame re-cuts on both paths alike.
-        std::shared_ptr<RigExecCurvenetWeightBinding> curvenetBinding;
-        std::vector<GfVec3f> boundMesh, boundNet;
-        std::vector<int> boundCounts, boundIndices, boundSplines, boundSmooth;
-        int boundSamples = -1;
-        bool bound = false;
     };
     std::vector<WeightObject> weightObjects;
     /// Path to index in weightObjects. A NEGATIVE entry is an object whose
@@ -2709,17 +2637,6 @@ struct RigExecBakedProgramImpl {
     /// Properties folded into bake state. An override here cannot be placed
     /// without rebaking, so it forces the dynamic path instead.
     std::set<SdfPath> folded;
-    /// Properties a step reads through the generation's resolved inputs but
-    /// that EXEC reads as a typed scalar input of its own -- a curvenet
-    /// weight's inputs:weights and rigExec:autoSmooth are the case, and the
-    /// only one: they are arrays, and exec's computeWeightPacket declares
-    /// them AttributeValue<float>/<int>, so an override carrying a VtArray
-    /// is rejected there by type and the dynamic path answers from the
-    /// authored value. The program would see it, so placing it would make
-    /// the program answer a question the dynamic path refuses -- a
-    /// divergence with pose.valid on both sides. Unplaceable on purpose,
-    /// which sends the generation down the path that decides.
-    std::set<SdfPath> execTypedArrayInputs;
     bool anyOverridden = false;
     /// RigExecBakedProgram::SetPublishWeightFields.
     bool publishWeightFields = true;
@@ -2928,16 +2845,26 @@ RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
 /// RigExecBakedBuildContext::Fold, which is this into the program.
 template <class Sink>
 void
+RigExecBakedRecordFold(Sink *sink, const UsdPrim &prim, const TfToken &name)
+{
+    if (!prim) {
+        return;
+    }
+    const SdfPath path = prim.GetPath().AppendProperty(name);
+    sink->Rebuild(path);
+    sink->Folded(path);
+    sink->Named(path);
+    sink->Prim(prim.GetPath());
+}
+
+template <class Sink>
+void
 RigExecBakedRecordFold(Sink *sink, const UsdPrim &prim, const char *name)
 {
     if (!prim) {
         return;
     }
-    const SdfPath path = prim.GetPath().AppendProperty(TfToken(name));
-    sink->Rebuild(path);
-    sink->Folded(path);
-    sink->Named(path);
-    sink->Prim(prim.GetPath());
+    RigExecBakedRecordFold(sink, prim, TfToken(name));
 }
 
 // The compiled epoch, in terms the program can name.
@@ -2983,6 +2910,11 @@ struct RigExecBakedConstraintSpec {
     SdfPath worldUpXform;
     /// rigExec:space on a rotation constraint; empty when none is named.
     SdfPath space;
+    /// rigExec:blendShear and rigExec:worldUpRotationOnly, compiled.
+    bool blendShear = false;
+    bool worldUpRotationOnly = false;
+    /// rigExec:weightBlend == "radial" (transform-domain matrix mover).
+    bool radialBlend = false;
     /// rigExec:weightObject, empty when the constraint binds none.
     SdfPath weightObject;
 };
@@ -3061,6 +2993,7 @@ struct RigExecBakedBuildContext {
     /// Records \p name as read for its VALUE: an edit rebuilds the program
     /// and an interactive override on it cannot be placed.
     void Fold(const UsdPrim &prim, const char *name);
+    void Fold(const UsdPrim &prim, const TfToken &name);
     /// Records \p name as read for its SHAPE -- whether it is authored at
     /// all. An edit rebuilds; an override, which authors nothing, places.
     void FoldShape(const UsdPrim &prim, const char *name);
@@ -3313,12 +3246,9 @@ void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
 bool RigExecBakedPublishPose(RigExecBakedProgramImpl *program,
                              RigExecRigPose *pose);
 
-/// The geometry half of the epilogue: each chain's diagnostics and points
-/// and each derived target's, in chain order, plus the control frames a
-/// curvenet adjuster publishes -- which need \p time, because the ladder
-/// from the net to the asset root is composed at the evaluated time.
+/// Publishes each geometry chain and derived target in chain order.
 void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
-                                 UsdTimeCode time, RigExecRigPose *pose);
+                                 RigExecRigPose *pose);
 
 /// Cuts \p revision's vertices into chunks, from \p indices and
 /// \p elementSize.
@@ -3388,10 +3318,6 @@ int RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
 /// \p packets holds the packets already built for the objects BEFORE this
 /// one in the table, which dependency order guarantees are the ones it
 /// composes.
-///
-/// \p object is NOT const, and only a curvenet weight uses that: it carries
-/// its own bind, which is state this frame may replace and which nothing
-/// but this object's own step ever touches.
 RigExecWeightPacket RigExecBakedWeightPacket(
     const RigExecBakedProgramImpl &program,
     RigExecBakedProgramImpl::WeightObject *object,
@@ -3429,7 +3355,7 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///  * what only a NOTICE writes and no run reads: `valueEditSerial`/
 ///    `editSerial` and the routing's `connectedSources` cache.
 ///  * what the PROLOGUE writes: `propertyResults`, `avarsDisturbed`,
-///    `overridden`/`anyOverridden`/`folded`, `curvenetBindings`, and the
+///    `overridden`/`anyOverridden`/`folded`, and the
 ///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
 ///    `scheduleDirty`/`topology`/the partition. The prologue runs ONCE per
 ///    generation, before either pass, so both passes see one value of each
@@ -3520,6 +3446,8 @@ struct RigExecBakedRunShadow {
         RevisionState revision;
         VtVec3fArray result, spare, lastBase;
         bool haveResult = false, haveBase = false, baseDirty = false;
+        GfMatrix4d matrix{1.0};
+        bool haveMatrix = false;
     };
     struct ChainState {
         std::vector<RevisionState> revisions;
@@ -3594,6 +3522,21 @@ struct RigExecBakedRunStatistics {
 
 /// Whether RIGEXEC_BAKED_VERIFY_CONES asks a run to prove its cone.
 bool RigExecBakedVerifyConesRequested();
+
+/// A projector target's provider world frames, out of the program's rest
+/// frames and its base and final matrix tables.
+RigExecSurfaceProjectorFrames RigExecBakedProjectorFrames(
+    const RigExecBakedProgramImpl &B,
+    const RigExecBakedProgramImpl::GeomRevision &revision);
+
+/// One projector target of \p chain, run against its authored base and
+/// final points: what the baked Derived step does for a matrix target.
+bool RigExecBakedRunProjectorTarget(
+    const RigExecBakedProgramImpl &B,
+    const RigExecBakedProgramImpl::GeomChain &chain,
+    const RigExecBakedProgramImpl::GeomRevision &revision,
+    const RigExecResolvedInputs &resolved, UsdTimeCode time,
+    GfMatrix4d *matrix, std::vector<std::string> *diagnostics);
 
 }  // namespace rigExec
 

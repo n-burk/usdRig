@@ -13,6 +13,27 @@ namespace evaluatorDetail {
 SdfPathVector
 _AuthoredConnections(const UsdAttribute &attribute);
 
+// The attributes the structure digest hashes as bindings -- connection walk
+// and declared read phase -- on every mover, on every weight object a mover
+// binds, and on every blend input a mover names. With every connected
+// attribute of an aggregate solver, these are where a read phase on a
+// connection is honoured (RigExecPhasedConnection), and the digest hashing
+// them is what makes a phase edit re-epoch the rig.
+inline constexpr const char *kDigestMoverInputs[] = {
+    "inputs:defaultWeight", "inputs:enabled", "inputs:value", "inputs:min",
+    "inputs:max", "inputs:keys", "inputs:tangents"};
+inline constexpr const char *kDigestWeightObjectFields[] = {
+    "rigExec:values", "rigExec:indices", "rigExec:defaultWeight",
+    "rigExec:representation", "rigExec:rangePolicy", "rigExec:operation",
+    "inputs:driver", "inputs:scale", "inputs:bias", "inputs:falloffMin",
+    "inputs:falloffMax", "inputs:invert", "inputs:strength", "inputs:scaleX",
+    "inputs:scaleXPos", "inputs:scaleYPos", "inputs:scaleZPos",
+    "inputs:scaleXNeg", "inputs:scaleYNeg", "inputs:scaleZNeg",
+    "inputs:scaleY", "inputs:scaleZ", "inputs:extentU", "inputs:extentV",
+    "inputs:weights", "rigExec:autoSmooth", "rigExec:basis",
+    "rigExec:samplesPerSpline", "rigExec:unreachedValue"};
+inline constexpr const char *kDigestBlendInputFields[] = {"inputs:weight"};
+
 // Prefer the generation's resolved value, including property and interactive overrides.
 template <class T>
 T
@@ -25,6 +46,24 @@ _ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
     }
     const TfToken token(name);
     if (const UsdAttribute a = prim.GetAttribute(token)) {
+        resolved.GetAttribute(a, time, &value);
+    }
+    return value;
+}
+
+// The same read through an already-interned name, for the per-frame call
+// sites that hold one. Interning takes the token registry lock, so a name
+// read every frame is a file-scope constant rather than spelled per call.
+template <class T>
+T
+_ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
+              const TfToken &name, T fallback, UsdTimeCode time)
+{
+    T value = fallback;
+    if (!prim) {
+        return value;
+    }
+    if (const UsdAttribute a = prim.GetAttribute(name)) {
         resolved.GetAttribute(a, time, &value);
     }
     return value;
@@ -45,6 +84,21 @@ _ReadAttribute(const UsdPrim &prim, const char *name, T fallback)
     return value;
 }
 
+// The same epoch read through an already-interned name.
+template <class T>
+T
+_ReadAttribute(const UsdPrim &prim, const TfToken &name, T fallback)
+{
+    T value = fallback;
+    if (!prim) {
+        return value;
+    }
+    if (const UsdAttribute a = prim.GetAttribute(name)) {
+        a.Get(&value);
+    }
+    return value;
+}
+
 inline const TfToken _computePointFrame("computePointFrame");
 inline const TfToken _computePointFrameArray("computePointFrameArray");
 
@@ -57,7 +111,15 @@ inline const TfToken _enabledAttr("inputs:enabled");
 inline const TfToken _computeFalloffLut("computeFalloffLut");
 inline const TfToken _falloffProfileAttr("rigExec:falloffProfile");
 inline const TfToken _falloffCurveAttr("rigExec:falloffCurve");
-inline const TfToken _samplePhaseAttr("rigExec:samplePhase");
+inline const TfToken _weightTargetRel("rigExec:weightTarget");
+
+/// Whether a volume weight measures its distance against the points as
+/// they stand at the consuming operator's position (`preceding` declared
+/// on rigExec:weightTarget) rather than against its static source (`base`,
+/// the default). Any other phase, or an unparseable one, is false with
+/// \p error filled.
+bool _VolumeWeightSamplesInFlight(const UsdPrim &weight, bool *inFlight,
+                                  std::string *error);
 
 std::vector<UsdPrim>
 _GetPoseStackOrder(const UsdPrim &root);

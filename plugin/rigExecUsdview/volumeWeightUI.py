@@ -151,8 +151,8 @@ def SetAtTime(attr, value, time):
 
     Adapted from Pixar's invertibleRigsExample usdview plugin.  The one
     behavioural addition is the uniform guard: half of what this panel
-    edits is `uniform token` (falloffProfile, planeAxis, samplePhase,
-    rangePolicy, drawMode), and a uniform attribute cannot legally carry
+    edits is `uniform token` (falloffProfile, planeAxis, rangePolicy,
+    drawMode), and a uniform attribute cannot legally carry
     a time sample, so those always go to the default.
     """
     with _AttributeScope(attr, "Set"):
@@ -1287,6 +1287,71 @@ class AttributeValueSelectWidget(QtWidgets.QComboBox):
         self.blockSignals(False)
 
 
+class ReadPhaseSelectWidget(QtWidgets.QComboBox):
+    """
+    A combo for the rigExecReadPhase metadata on one input relationship.
+
+    A read phase is metadata on the relationship that names the input,
+    never an attribute, so it is authored with SetMetadata. `base` is the
+    default and is authored by clearing the field.
+    """
+
+    def __init__(self, relationship, phases, parent=None):
+        super(ReadPhaseSelectWidget, self).__init__(parent)
+        self._relationship = relationship
+        self._phases = list(phases)
+        self._noticeKey = None
+        if not relationship:
+            self.setEnabled(False)
+            return
+        self.addItems(self._phases)
+        self._Refresh()
+        self.currentIndexChanged.connect(self._onSelectionChanged)
+        self._noticeKey = Tf.Notice.Register(
+            Usd.Notice.ObjectsChanged, self._onObjectsChanged,
+            relationship.GetStage())
+
+    def Detach(self):
+        """Revokes the notice key."""
+        if self._noticeKey is not None:
+            self._noticeKey.Revoke()
+            self._noticeKey = None
+
+    def _Current(self):
+        value = self._relationship.GetMetadata("rigExecReadPhase")
+        return str(value) if value else "base"
+
+    def _Refresh(self):
+        self.blockSignals(True)
+        self.setCurrentText(self._Current())
+        self.blockSignals(False)
+
+    def _onSelectionChanged(self, index):
+        if index < 0 or index >= len(self._phases):
+            return
+        phase = self._phases[index]
+        if phase == self._Current():
+            return
+        path = self._relationship.GetPath()
+        try:
+            with Recording(self._relationship.GetStage(),
+                           [path.GetPrimPath()],
+                           "Set read phase %s" % path.name):
+                if phase == "base":
+                    self._relationship.ClearMetadata("rigExecReadPhase")
+                else:
+                    self._relationship.SetMetadata("rigExecReadPhase", phase)
+        except Exception as err:
+            Tf.Warn("Failed to set the read phase of <%s> to %s : %s"
+                    % (path, phase, err))
+            self._Refresh()
+
+    def _onObjectsChanged(self, notice, stage):
+        if AttributeValueMayHaveChanged(self._relationship.GetPath(),
+                                        notice):
+            self._Refresh()
+
+
 class AttributeValueSliderWidget(QtWidgets.QWidget):
     """
     A munging line edit paired with a horizontal slider, for the
@@ -2166,9 +2231,12 @@ class VolumeWeightPanel(QtWidgets.QWidget):
             # actually reads the spline, so track the token live.
             profileWidget.valueChanged.connect(self._onProfileChanged)
 
-        self._AddAttributeRow(
-            self._parametersLayout, prim, "rigExec:samplePhase",
-            "samplePhase")
+        # Which points the field measures: the read phase declared on
+        # rigExec:weightTarget, base (static) or preceding (in flight).
+        self._parametersLayout.addRow(
+            "readPhase", ReadPhaseSelectWidget(
+                prim.GetRelationship("rigExec:weightTarget"),
+                ("base", "preceding")))
         self._AddAttributeRow(
             self._parametersLayout, prim, "rigExec:rangePolicy",
             "rangePolicy")

@@ -19,10 +19,6 @@ bool Fail(std::string *error, const std::string &message) {
     if (error) *error = message;
     return false;
 }
-bool SupportedPhaseValue(const SdfPath &path, const VtValue &value) {
-    return path.GetNameToken() != "rigExec:pointsReadPhase" || value.IsEmpty() ||
-        value == VtValue(TfToken("base"));
-}
 class Core : public ExecSystem {
 public:
     explicit Core(const RigExecSceneDb *db) : ExecSystem(RigExecAdaptStandaloneStage(db)) {}
@@ -209,10 +205,6 @@ RigExecStandaloneResult RigExecStandaloneSystem::EvaluateResolved(
             failure.diagnostics.push_back("invalid transient resolved state for " + path.GetString());
             return failure;
         }
-        if (!SupportedPhaseValue(path, state->second)) {
-            failure.diagnostics.push_back("transient blend target read phase requires evaluator lowering: " + path.GetString());
-            return failure;
-        }
     }
     const bool retainedIdentity = _impl->database.identities.count(identity) != 0;
     std::map<SdfPath, VtValue> previous;
@@ -241,8 +233,6 @@ bool RigExecStandaloneSystem::SetValue(const SdfPath &path, UsdTimeCode time,
         return Fail(error, "attribute or exported identity not found");
     if (!value.IsEmpty() && value.GetType() != attr->second.type.GetType())
         return Fail(error, "value does not match exact native attribute type");
-    if (!SupportedPhaseValue(path, value))
-        return Fail(error, "blend target read phase requires evaluator lowering");
     if (attr->second.resolved[identity] == value) return true;
     attr->second.resolved[identity] = value;
     _impl->core.Values({path});

@@ -244,7 +244,7 @@ BuildConstraintStage(UsdPrim *positionOut)
               Matrix(GfVec3d(0),
                      GfRotation(GfVec3d(0, 0, 1), 90)));
     MakeXform(stage, SdfPath("/Asset/Sources/Scale"),
-              Matrix(GfVec3d(0), GfRotation(), GfVec3d(2, 3, 4)));
+              Matrix(GfVec3d(0), GfRotation(GfVec3d(0, 0, 1), 0.0), GfVec3d(2, 3, 4)));
     MakeXform(stage, SdfPath("/Asset/Sources/Parent"),
               Matrix(GfVec3d(4, 5, 6),
                      GfRotation(GfVec3d(0, 0, 1), 90),
@@ -258,9 +258,9 @@ BuildConstraintStage(UsdPrim *positionOut)
               Matrix(GfVec3d(1, 1, 5)));
     MakeXform(stage, SdfPath("/Asset/Targets/Rotation"), Matrix());
     MakeXform(stage, SdfPath("/Asset/Targets/Scale"),
-              Matrix(GfVec3d(0), GfRotation(), GfVec3d(1, 2, 3)));
+              Matrix(GfVec3d(0), GfRotation(GfVec3d(0, 0, 1), 0.0), GfVec3d(1, 2, 3)));
     MakeXform(stage, SdfPath("/Asset/Targets/Parent"),
-              Matrix(GfVec3d(1, 0, 0), GfRotation(),
+              Matrix(GfVec3d(1, 0, 0), GfRotation(GfVec3d(0, 0, 1), 0.0),
                      GfVec3d(1, 1.5, 0.5)));
     MakeXform(stage, SdfPath("/Asset/Targets/Aim"), Matrix());
 

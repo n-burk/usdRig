@@ -154,7 +154,7 @@ the strut, and the arms merged with the legs in the squash.
   lattice exactly once.
 - **Deformed cages**: the lattice cage is an ordinary `Points` prim with a
   skin mover on it; the lattice movers read it with
-  `rigExec:cageReadPhase = "final"`.
+  `rigExecReadPhase = "final"` on `rigExec:cage`.
 - **Constraints on controls**: aim and parent constraints may revise
   controls (`EyeAim_*`, `SpineMidFollow`, `Hat_ctl`); movers read them at
   `final`.

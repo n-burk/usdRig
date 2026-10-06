@@ -1063,11 +1063,8 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
 // A rig whose refusal is not a gap in the bake but a property of the rig:
 // one provider's posed:space is CONNECTED, so its value is whatever an
 // arbitrary exec computation says from the middle of the pose walk, and
-// there is no epoch-constant summary of that to compile. Every other refusal
-// in IsBakeable is a feature waiting to be baked, and this suite's negative
-// direction used to rest on two of them (11_VolumeWeights and
-// 12_CurvenetProfile) -- so it would have evaporated the moment those
-// landed, taking the only test that the fallback works at all with it.
+// there is no epoch-constant summary of that to compile. This fixture keeps
+// fallback coverage independent of support for individual mover types.
 // Built in memory rather than shipped as an example, because an example is
 // something a rigger should copy and this is a rig that deliberately opts
 // out of the fast path.
@@ -1208,131 +1205,6 @@ TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
     CHECK(rig.GetBakedProgramBuildAttemptCount() == attempts);
 }
 
-
-// A curvenet weight driving a matrix mover: the one baked object that reads
-// an ARRAY off its own prim every frame.
-static UsdStageRefPtr
-MakeACurvenetWeightRig()
-{
-    UsdStageRefPtr stage = UsdStage::CreateInMemory();
-    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
-    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
-    const UsdPrim mesh =
-        stage->DefinePrim(SdfPath("/Asset/Mesh"), TfToken("Mesh"));
-    mesh.GetAttribute(TfToken("points"))
-        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
-                          GfVec3f(2, 0, 0), GfVec3f(0, 1, 0),
-                          GfVec3f(1, 1, 0), GfVec3f(2, 1, 0)});
-    mesh.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{4, 4});
-    mesh.GetAttribute(TfToken("faceVertexIndices"))
-        .Set(VtIntArray{0, 1, 4, 3, 1, 2, 5, 4});
-    const UsdPrim net =
-        stage->DefinePrim(SdfPath("/Asset/Net"), TfToken("RigExecCurvenet"));
-    net.GetAttribute(TfToken("points"))
-        .Set(VtVec3fArray{GfVec3f(0, 0.5f, 0), GfVec3f(0.67f, 0.5f, 0),
-                          GfVec3f(1.33f, 0.5f, 0), GfVec3f(2, 0.5f, 0)});
-    net.GetAttribute(TfToken("rigExec:splineIndices"))
-        .Set(VtIntArray{0, 1, 2, 3});
-
-    const SdfPath target = mesh.GetPath().AppendProperty(TfToken("points"));
-    const UsdPrim weight = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Weights/Net"), TfToken("RigExecCurvenetWeight"));
-    weight.GetRelationship(TfToken("rigExec:weightTarget"))
-        .SetTargets({target});
-    weight.GetRelationship(TfToken("rigExec:curvenetPoints"))
-        .SetTargets({net.GetPath().AppendProperty(TfToken("points"))});
-    weight.GetRelationship(TfToken("rigExec:curvenetSplineIndices"))
-        .SetTargets({net.GetPath().AppendProperty(
-            TfToken("rigExec:splineIndices"))});
-    weight.GetRelationship(TfToken("rigExec:meshFaceCounts"))
-        .SetTargets({mesh.GetPath().AppendProperty(
-            TfToken("faceVertexCounts"))});
-    weight.GetRelationship(TfToken("rigExec:meshFaceIndices"))
-        .SetTargets({mesh.GetPath().AppendProperty(
-            TfToken("faceVertexIndices"))});
-    weight.GetAttribute(TfToken("inputs:weights"))
-        .Set(VtFloatArray{1.0f, 0.75f, 0.25f, 0.0f});
-
-    const UsdPrim driver = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Controls/Push"), TfToken("RigExecControl"));
-    driver.GetAttribute(TfToken("avars:tz")).Set(4.0);
-    const UsdPrim mover = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/M"),
-                                            TfToken("RigExecMatrixMover"));
-    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
-    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
-    mover.GetRelationship(TfToken("rigExec:transform"))
-        .SetTargets({driver.GetPath()});
-    mover.GetRelationship(TfToken("rigExec:weightObject"))
-        .SetTargets({weight.GetPath()});
-    return stage;
-}
-
-// The fourth shape of unplaceable, and the one that is unplaceable because
-// the DYNAMIC path cannot hold it either.
-// A curvenet weight's inputs:weights and rigExec:autoSmooth are arrays, read
-// through the generation's resolved inputs every frame -- which an override
-// is written into, so the program would honour one. Exec cannot: its
-// computeWeightPacket declares both as AttributeValue<float>/<int>, and an
-// override carrying the array they actually hold is rejected there by type
-// ("expected 'float', got 'VtArray<float>'"), leaving the dynamic path
-// answering from the authored value. Honouring it here would be the program
-// answering a question the dynamic path refuses -- pose.valid on both sides
-// and a different mesh. Measured before the two properties were declared
-// unplaceable: the program published z = 2.368 where the dynamic path
-// published z = 4.
-// It lives in THIS suite and not beside the curvenet's own tests because a
-// deliberate fallback is a "bake required" line, and that suite runs under
-// RIGEXEC_BAKE_REQUIRED=1 where such a line is a failure -- correctly.
-static void
-TestAnArrayOverrideOnACurvenetWeightFallsBack()
-{
-    UsdStageRefPtr stage = MakeACurvenetWeightRig();
-    const SdfPath rigPath("/Asset/Rig");
-    const SdfPath target("/Asset/Mesh.points");
-    RigExecRigEvaluator rig(stage, rigPath);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    CHECK(rig.Compile(&errors));
-    CHECK(rig.Evaluate(UsdTimeCode(1.0)).valid);
-    // The program is standing and answering, so a generation that does not
-    // run baked below fell back rather than never having been baked at all.
-    CHECK(rig.GetBakedGenerationCount() == 1);
-
-    const std::vector<std::pair<const char *, RigExecValueOverride>> cases{
-        {"an overridden inputs:weights",
-         RigExecValueOverride{
-             SdfPath("/Asset/Rig/Weights/Net"), TfToken(),
-             TfToken("inputs:weights"),
-             VtValue(VtFloatArray{0.5f, 0.375f, 0.125f, 0.0f})}},
-        {"an overridden rigExec:autoSmooth",
-         RigExecValueOverride{SdfPath("/Asset/Rig/Weights/Net"), TfToken(),
-                              TfToken("rigExec:autoSmooth"),
-                              VtValue(VtIntArray{1, 1, 1, 1})}}};
-    for (const auto &[what, override] : cases) {
-        rig.SetInteractiveOverrides({override});
-        const size_t bakedGenerations = rig.GetBakedGenerationCount();
-        const RigExecRigPose held = rig.Evaluate(UsdTimeCode(1.0));
-        CHECK(held.valid);
-        if (rig.GetBakedGenerationCount() != bakedGenerations) {
-            ++failures;
-            std::printf("FAIL %s: the program answered a generation holding "
-                        "an override exec rejects by type\n", what);
-        }
-        // And what it fell back to is the dynamic path's own answer, which
-        // is the authored field: the override reaches neither side.
-        UsdStageRefPtr referenceStage = MakeACurvenetWeightRig();
-        RigExecRigEvaluator reference(referenceStage, rigPath);
-        reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
-        CHECK(reference.Compile(&errors));
-        reference.SetInteractiveOverrides({override});
-        const RigExecRigPose expected = reference.Evaluate(UsdTimeCode(1.0));
-        CHECK(expected.valid);
-        CompareEveryMap(what, expected, held);
-        CHECK(expected.movedProperties.count(target) == 1);
-        CHECK(held.movedProperties.count(target) == 1);
-    }
-    rig.SetInteractiveOverrides({});
-}
 
 // The other half of override placement, and the half that has to be wrong
 // SAFELY: an override the program cannot place must send the generation down
@@ -2199,12 +2071,12 @@ MakeAConstrainedVolumeRig()
                            SdfValueTypeNames->Float).Set(8.0f);
     sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
                            SdfValueTypeNames->Token).Set(TfToken("linear"));
-    // `current`, so the field is resolved by the oracle on both paths: a
-    // `reference` field on a constrained volume is the arm the dynamic
-    // path's own parity mode refuses, and this test is about the SLOT
-    // collision rather than about that.
-    sphere.CreateAttribute(TfToken("rigExec:samplePhase"),
-                           SdfValueTypeNames->Token).Set(TfToken("current"));
+    // `preceding`, so the field is resolved by the oracle on both paths: a
+    // `base` field on a constrained volume is the arm the dynamic path's own
+    // parity mode refuses, and this test is about the SLOT collision rather
+    // than about that.
+    sphere.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetMetadata(TfToken("rigExecReadPhase"), std::string("preceding"));
 
     // The constraint that moves the volume. This is the whole fixture.
     const UsdPrim move = stage->DefinePrim(
@@ -2360,15 +2232,21 @@ MakeAPoseWalkReadPhaseRig(const char *phase)
     const UsdRelationship transform =
         mover.CreateRelationship(TfToken("rigExec:transform"));
     transform.SetTargets({jointPath});
-    // The phase itself, as METADATA on the relationship rather than through
-    // the role-named attribute: rigExec:transformReadPhase is the v0.1
-    // spelling and admits only base and final, so a pose-walk point can only
-    // be said the general way. "A" is spelled as the constraint's own path
-    // because an AtPrim phase is an ABSOLUTE prim path and nothing else.
+    // The phase itself, as rigExecReadPhase metadata on the relationship.
+    // "A" is spelled as the constraint's own path because an AtPrim phase is
+    // an ABSOLUTE prim path and nothing else.
     const std::string authored = std::string(phase) == "atPrim"
                                      ? constraintA.GetPath().GetString()
                                      : std::string(phase);
     transform.SetMetadata(TfToken(RigExecReadPhaseMetadataName), authored);
+    // Bottom siblings run first. Constrain sits below Geometry, so both
+    // constraints run before the mover -- a `final` read of the joint is
+    // only satisfiable when no writer of it comes later in the stack -- and
+    // A sits below B, so A writes first and B last.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+        .SetChildrenReorder({TfToken("Geometry"), TfToken("Constrain")});
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Constrain"))
+        .SetChildrenReorder({TfToken("B"), TfToken("A")});
 
     // A SKIN mover with the same phase on rigExec:influences is deliberately
     // NOT here. Compile validates an AtPrim phase against
@@ -2853,6 +2731,58 @@ TestRotationSignBakesExactly()
               /* expectBakeable = */ true) > 0);
 }
 
+static void RefusalNames(const char *what,
+                         const std::vector<std::string> &reasons,
+                         const char *expected);
+
+// The program captures the sign once, so an edit to it after the bake has
+// to rebuild the program rather than leave the old sign composing, and a
+// sign that animates is one the capture cannot hold at all.
+static void
+TestRotationSignEditRebuildsTheProgram()
+{
+    const GfVec3d plain(1, 1, 1);
+    const GfVec3d mirrored(-1, -1, 1);
+    const GfVec3d pose(30, 20, 40);
+    const SdfPath rigPath("/Asset/Rig");
+    const UsdStageRefPtr stage = MakeARotationSignRig(plain, pose);
+    RigExecRigEvaluator baked(stage, rigPath);
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    CHECK(baked.Compile());
+    CHECK(baked.Evaluate(UsdTimeCode(1.0)).valid);
+    const size_t builds = baked.GetBakedProgramBuildCount();
+
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Arm"))
+        .GetAttribute(TfToken("avars:rotationSign"))
+        .Set(mirrored);
+    const size_t generations = baked.GetBakedGenerationCount();
+    const RigExecRigPose edited = baked.Evaluate(UsdTimeCode(1.0));
+    CHECK(edited.valid);
+    CHECK(baked.GetBakedProgramBuildCount() > builds);
+    CHECK(baked.GetBakedGenerationCount() == generations + 1);
+    RigExecRigEvaluator reference(MakeARotationSignRig(mirrored, pose),
+                                  rigPath);
+    MakeItTheReference(&reference);
+    CHECK(reference.Compile());
+    CompareEveryMap("a rotation sign edited after the bake",
+                    reference.Evaluate(UsdTimeCode(1.0)), edited);
+
+    std::vector<std::string> refusals;
+    const char *const what = "an animated rotation sign";
+    const UsdStageRefPtr animated = MakeARotationSignRig(plain, pose);
+    const UsdStageRefPtr animatedReference = MakeARotationSignRig(plain, pose);
+    for (const UsdStageRefPtr &s : {animated, animatedReference}) {
+        const UsdAttribute sign = s->GetPrimAtPath(SdfPath("/Asset/Rig/Arm"))
+                                      .GetAttribute(TfToken("avars:rotationSign"));
+        sign.Set(plain, UsdTimeCode(1.0));
+        sign.Set(mirrored, UsdTimeCode(3.0));
+    }
+    CHECK(BakedAgreesWithDynamic(what, animated, animatedReference,
+                                 /* expectBakeable = */ false,
+                                 &refusals) == 0);
+    RefusalNames(what, refusals, "animated or connected avars:rotationSign");
+}
+
 // Asserts that \p reasons names \p expected, so a refusal that changed its
 // mind about WHY is a failure rather than a pass.
 static void
@@ -3089,7 +3019,6 @@ main(int argc, char **argv)
     TestAnInteractiveOverrideAfterTheBakeIsFollowed(examplesDir);
     TestAnOverrideOnAConstraintWeightIsFollowed(examplesDir);
     TestAnUnplaceableOverrideFallsBack(examplesDir);
-    TestAnArrayOverrideOnACurvenetWeightFallsBack();
 
     // Invalidation, both directions.
     TestEditAfterTheBake(examplesDir, "biped/Biped.usda",
@@ -3146,6 +3075,7 @@ main(int argc, char **argv)
     // The mirrored-limb rotation sign, in the compose and in the program.
     TestRotationSignNegatesTheAvar();
     TestRotationSignBakesExactly();
+    TestRotationSignEditRebuildsTheProgram();
     // The second deliberate negative: a volume weight a constraint moves,
     // which the DYNAMIC path gives two placements at once.
     TestAConstrainedVolumeWeightFallsBack();

@@ -1,5 +1,6 @@
 // RigExec baked playback for Hydra (M2b). See playback.h for the contract.
 #include "playback.h"
+#include "rigExec/movers/moverRegistry.h"
 
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/usd/attribute.h"
@@ -103,6 +104,25 @@ RigExecBakedPlayback::Open(const std::string &resolvedPath,
             *error = resolvedPath + " carries no baked frames";
         }
         return false;
+    }
+    // Plugin movers play through the kernel their plugin registered. One
+    // with none loaded here passes its points through: said once here, and
+    // in the diagnostics of every frame it does.
+    for (const std::string &type : reader->GetExternalMoverTypes()) {
+        const RigExecMoverHandler *handler =
+            RigExecFindMoverHandler(TfToken(type));
+        std::string why;
+        if (!handler || !handler->runtimeKernel.IsSet()) {
+            TF_WARN("rigExec: %s holds %s movers and no loaded plugin "
+                    "provides their playback kernel; they pass their "
+                    "points through",
+                    resolvedPath.c_str(), type.c_str());
+        } else if (!reader->SetExternalKernel(type, handler->runtimeKernel,
+                                              &why)) {
+            TF_WARN("rigExec: %s: %s; those movers pass their points "
+                    "through",
+                    resolvedPath.c_str(), why.c_str());
+        }
     }
     _epochDigest = _PlaybackDigestBytes(bytes);
     _reader = std::move(reader);

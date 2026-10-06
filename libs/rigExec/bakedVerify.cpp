@@ -72,8 +72,6 @@ inline bool Same(const RigExecMoverParameters &a,
                  const RigExecMoverParameters &b);
 inline bool Same(const RigExecConstraintSource &a,
                  const RigExecConstraintSource &b);
-inline bool Same(const RigExecCurvenetAdjustmentCommand &a,
-                 const RigExecCurvenetAdjustmentCommand &b);
 /// Containers, elementwise.
 template <class T, size_t N>
 bool Same(const std::array<T, N> &a, const std::array<T, N> &b);
@@ -191,9 +189,8 @@ Same(const RigExecMoverParameters &a, const RigExecMoverParameters &b)
 {
     // Mirrors RigExecMoverParameters::operator== field for field. It has to
     // be kept beside it: a field added there and not here is a field this
-    // mode stops looking at. The two shared_ptr members are compared by
-    // IDENTITY, exactly as operator== compares them -- two packets naming
-    // one epoch-fixed layout or one curvenet cut name the same object.
+    // mode stops looking at. Shared layouts are compared by identity,
+    // exactly as operator== compares them.
     return a.kind == b.kind && a.enabled == b.enabled && a.valid == b.valid &&
            a.radialWeight == b.radialWeight &&
            Same(a.transform, b.transform) && Same(a.weights, b.weights) &&
@@ -217,9 +214,8 @@ Same(const RigExecMoverParameters &a, const RigExecMoverParameters &b)
            a.skinTopology == b.skinTopology &&
            a.skinElementSize == b.skinElementSize &&
            a.skinningMethod == b.skinningMethod &&
-           a.curvenetBinding == b.curvenetBinding &&
-           a.curvenetAdjustmentBasis == b.curvenetAdjustmentBasis &&
-           Same(a.curvenetAdjustments, b.curvenetAdjustments);
+           a.externalSchema == b.externalSchema &&
+           a.externalData == b.externalData;
 }
 
 inline bool
@@ -229,16 +225,6 @@ Same(const RigExecConstraintSource &a, const RigExecConstraintSource &b)
            Same(a.normalizedWeight, b.normalizedWeight) &&
            Same(a.translationOffset, b.translationOffset) &&
            Same(a.rotationOffsetDegrees, b.rotationOffsetDegrees);
-}
-
-inline bool
-Same(const RigExecCurvenetAdjustmentCommand &a,
-     const RigExecCurvenetAdjustmentCommand &b)
-{
-    return a.pointIndex == b.pointIndex &&
-           a.parentCommand == b.parentCommand &&
-           a.includeTangents == b.includeTangents &&
-           Same(a.localTransform, b.localTransform);
 }
 
 template <class T, size_t N>
@@ -590,6 +576,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
             chains[c].derived[d].haveResult = chain.derived[d].haveResult;
             chains[c].derived[d].haveBase = chain.derived[d].haveBase;
             chains[c].derived[d].baseDirty = chain.derived[d].baseDirty;
+            chains[c].derived[d].matrix = chain.derived[d].matrix;
+            chains[c].derived[d].haveMatrix = chain.derived[d].haveMatrix;
         }
     }
     steps.resize(program.steps.size());
@@ -659,6 +647,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
             chain.derived[d].haveResult = chains[c].derived[d].haveResult;
             chain.derived[d].haveBase = chains[c].derived[d].haveBase;
             chain.derived[d].baseDirty = chains[c].derived[d].baseDirty;
+            chain.derived[d].matrix = chains[c].derived[d].matrix;
+            chain.derived[d].haveMatrix = chains[c].derived[d].haveMatrix;
         }
     }
     for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
@@ -790,6 +780,17 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                              " haveResult",
                          chains[c].derived[d].haveResult,
                          chain.derived[d].haveResult);
+            CompareValue(differences, &count,
+                         where + " derived " +
+                             chain.derived[d].target.GetString() +
+                             " haveMatrix",
+                         chains[c].derived[d].haveMatrix,
+                         chain.derived[d].haveMatrix);
+            if (!Same(chains[c].derived[d].matrix, chain.derived[d].matrix)) {
+                Differ(differences, &count,
+                       where + " derived " +
+                           chain.derived[d].target.GetString() + " matrix");
+            }
             CompareRevision(differences, &count,
                             where + " derived " +
                                 chain.derived[d].target.GetString(),

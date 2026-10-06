@@ -306,7 +306,7 @@ def testUsdviewInputFunction(appController):
            "the same submenu still carries rigExecUsdview's own items: %s"
            % titles)
     order = ["Graph Editor", "Shape Editor", "Control Picker", "TouchPose",
-             "Volume Weight Editor", "Curvenet Authoring"]
+             "Volume Weight Editor"]
     _Check([t for t in order if t in titles] == titles,
            "and the items are in layout order: %s" % titles)
     _Check("TouchPose" not in menus,

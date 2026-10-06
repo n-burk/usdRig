@@ -216,8 +216,9 @@ def Xform "SplineAsset"
                 )
                 {
                     rel rigExec:moves = </SplineAsset/Geom/Tube.points>
-                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine0W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -227,8 +228,9 @@ def Xform "SplineAsset"
                 )
                 {
                     rel rigExec:moves = </SplineAsset/Geom/Tube.points>
-                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine1W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -238,8 +240,9 @@ def Xform "SplineAsset"
                 )
                 {
                     rel rigExec:moves = </SplineAsset/Geom/Tube.points>
-                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine2W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -249,8 +252,9 @@ def Xform "SplineAsset"
                 )
                 {
                     rel rigExec:moves = </SplineAsset/Geom/Tube.points>
-                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine3W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -260,8 +264,9 @@ def Xform "SplineAsset"
                 )
                 {
                     rel rigExec:moves = </SplineAsset/Geom/Tube.points>
-                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine4W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -271,8 +276,9 @@ def Xform "SplineAsset"
                 )
                 {
                     rel rigExec:moves = </SplineAsset/Geom/Tube.points>
-                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4/Spine5>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4/Spine5> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine5W>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

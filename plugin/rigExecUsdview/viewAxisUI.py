@@ -1,6 +1,6 @@
 #
 # RigExec usdview plugin: a navigation axis gizmo in the viewport's
-# bottom-left corner, in the style of Blender's -- the world X, Y and Z
+# bottom-left corner: the world X, Y and Z
 # axes as coloured balls around a circle. Click a ball to look down that
 # axis; drag inside the circle to tumble the view. Toggled from
 # RigExec -> Viewport -> View Axis.

@@ -567,12 +567,10 @@ RrProgram::WeightInput(size_t object, int field) const
         return w.extentU;
     case RrWeightExtentV:
         return w.extentV;
-    case RrWeightCurvenetSamples:
-        return w.curvenetSamples;
     default:
         break;
     }
-    return w.curvenetUnreached;
+    return w.defaultWeight;
 }
 
 }  // namespace rigExec

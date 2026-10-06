@@ -121,15 +121,10 @@ emitGuidePoints writes its sample positions; wire moves each point by
 the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the
 parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)
 per point from rigExec:bindCoordinates, C the curve's posed control
-points at rigExec:driverCurveReadPhase and C0 its authored ones. With
+points at rigExec:driverCurve's read phase and C0 its authored
+ones. With
 a sparse weight object the bind table may be sparse too: one (u, d)
 per weighted point, in the weight object's index order.
-
-#### `rigExec:driverCurveReadPhase`
-
-*Type:* `uniform token`. *Default:* `"base"`.
-
-Valid values: `base`, `preceding`, `final`.
 
 #### `rigExec:driverTransforms`
 
@@ -141,7 +136,9 @@ control point, or one for all. A periodic curve's repeated points
 take their unique point's provider. The posed point is
 C0 + w (M C0 - C0), M the provider measured against its entry in
 rigExec:driverTransformSpaces and w its inputs:driverWeights entry.
-No chain runs on the curve, so no phased read is needed.
+No chain runs on the curve, so its points need no phased read;
+rigExecReadPhase metadata on this relationship chooses base or
+final for the providers.
 
 #### `rigExec:driverTransformSpaces`
 
@@ -165,10 +162,7 @@ matrix: world = local * parent, so T * S^-1 cancels the space
 entirely. The curve's control points are world positions, so
 applying it to them uses a local offset as though it were a world
 one -- the offset points wherever it pointed at the bind pose, no
-matter where the space has since been carried. Measured on the
-biped's arm bendies: swing the shoulder 70 degrees, push a bend
-control, and the bulge comes out in the same world direction to
-0.00 degrees.
+matter where the space has since been carried.
 
 posed conjugates that offset into the space's current frame,
 S^-1 * T, which is S^-1 * local * S. The offset then rides the
@@ -204,10 +198,7 @@ in the chain the wire sits, and only the asset knows which.
 rest is a wire that runs BEFORE the skin on its target. Its
 displacement stays in the asset's units, because the skin will
 apply the rig's scale to it afterwards and applying it here too
-applies it twice -- measured on the biped's blink wires under a
-master scaled to 2, that is the difference between a mesh that
-scales and one that comes apart by 1.54 units with the torso
-merely turned 15 degrees.
+applies it twice.
 
 posed is a wire that runs AFTER it, adding to points a skin has
 already carried into the rig's posed frame. Its displacement is
@@ -218,22 +209,29 @@ mesh as far as the posed rig moved.
 The two corrections are in OPPOSITE directions, which is why one
 blanket rule cannot serve both families and why the wire has to
 say. Which one a given wire is, is not a rigging choice -- it is
-where the compiler put it relative to its skin -- so
-the builder reads the compiled mover order
-and authors this, rather than asking for a list kept by hand.
+where the compiler put it relative to its skin -- so a build tool
+should author it from the compiled mover order rather than from a
+list kept by hand.
 
 Both are IDENTICAL while nothing above the rig is scaled,
-because the scale in question measures one. A rig with no scaled
-master is therefore bit for bit what it was, whichever of the
-two it says.
+because the scale in question measures one. A wire that names
+neither posed frame keeps the plain measurement bit for bit.
 
-#### `rigExec:transformReadPhase`
+#### `rigExec:space`
 
-*Type:* `uniform token`. *Default:* `"base"`.
+*Relationship.*
 
-Valid values: `base`, `final`.
+wire: the prim whose movement away from its rest carries
+the whole rig -- normally a TRS master. Only meaningful with
+rigExec:driverTransforms and rigExec:pointFrame = "posed".
 
-wire: which revision of the driver transforms is read.
+A posed wire adds a displacement computed in the uncarried frame
+to points a skin has already carried. With a space named, both
+control polygons are transformed by that space's rest->pose map
+(its computeMatrix) before the wire is evaluated, so the
+displacement is carried with the points; the scale-only correction
+of rigExec:pointFrame is then not applied beside it. Read at the
+phase declared on rigExec:driverTransforms.
 
 #### `inputs:driverWeights`
 

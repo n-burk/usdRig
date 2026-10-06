@@ -62,11 +62,6 @@ struct _PoseInputInfo {
 UsdPrim
 _NamespaceFrameProvider(UsdPrim prim);
 
-bool
-_ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
-    const UsdPrim &rig, std::string *error, SdfPath *operation,
-    const std::map<SdfPath, std::string> &skipped = {});
-
 _PoseInputInfo
 _CollectPoseInputInfo(const UsdPrim &prim);
 

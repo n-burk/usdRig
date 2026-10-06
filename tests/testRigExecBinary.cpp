@@ -3,6 +3,7 @@
 #include "rigExecBake/capture.h"
 #include "rigExec/rigEvaluator.h"
 #include "rigExecBinary/container.h"
+#include "rigExecBinary/external.h"
 #include "rigExecExampleFixtures.h"
 
 #include "pxr/base/plug/registry.h"
@@ -39,6 +40,98 @@ Bytes(const std::string &path)
     std::ifstream stream(path, std::ios::binary);
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(stream),
                                 std::istreambuf_iterator<char>());
+}
+
+static void
+TestWrinkleWireExtensions()
+{
+    std::vector<uint8_t> bytes;
+    std::string error;
+    RigExecWireDomainGeometry geometry;
+    geometry.chains.resize(1);
+    geometry.chains[0].revisions.resize(1);
+    geometry.chains[0].revisions[0].op = 15;
+    bytes.clear();
+    CHECK(RigExecWireEncodeDomainGeometry(geometry, &bytes));
+    RigExecWireReader geoCursor(bytes.data(), bytes.size());
+    RigExecWireDomainGeometry decodedGeometry;
+    CHECK(RigExecWireDecodeDomainGeometry(&geoCursor, &decodedGeometry, &error));
+    CHECK(decodedGeometry.chains.size() == 1);
+    if (decodedGeometry.chains.size() == 1) {
+        CHECK(decodedGeometry.chains[0].revisions.size() == 1);
+        if (decodedGeometry.chains[0].revisions.size() == 1) {
+            CHECK(decodedGeometry.chains[0].revisions[0].op == 15);
+        }
+    }
+    // 10 and 11 stay reserved and 19 is past the last op. 16, a plugin
+    // mover, decodes since minor 3; the runtime then requires its entry in
+    // the ExternalMovers section (TestExternalMoversWire).
+    for (const uint8_t op : {10, 11, 19}) {
+        geometry.chains[0].revisions[0].op = op;
+        bytes.clear();
+        CHECK(RigExecWireEncodeDomainGeometry(geometry, &bytes));
+        RigExecWireReader unknownOp(bytes.data(), bytes.size());
+        CHECK(!RigExecWireDecodeDomainGeometry(
+            &unknownOp, &decodedGeometry, &error));
+    }
+    geometry.chains[0].revisions[0].op = RigExecWireExternalRevisionOp;
+    bytes.clear();
+    CHECK(RigExecWireEncodeDomainGeometry(geometry, &bytes));
+    RigExecWireReader pluginOp(bytes.data(), bytes.size());
+    CHECK(RigExecWireDecodeDomainGeometry(&pluginOp, &decodedGeometry,
+                                          &error));
+}
+
+// The ExternalMovers section: a strict round trip, frame entries that name
+// no blob refused on both sides, and no trailing bytes.
+static void
+TestExternalMoversWire()
+{
+    RigExecWireExternalMovers movers;
+    RigExecWireExternalRevision revision;
+    revision.chain = 2;
+    revision.revision = 1;
+    revision.type = 7;
+    revision.epoch = {'T', 'A', 'G', '1', 0, 255};
+    movers.revisions.push_back(revision);
+    movers.blobs = {{1, 2, 3}, {}};
+    movers.frames = {{0}, {1}, {RigExecWireExternalNoFrame}, {0}};
+    std::vector<uint8_t> bytes;
+    CHECK(RigExecWireEncodeExternalMovers(movers, &bytes));
+    RigExecWireReader cursor(bytes.data(), bytes.size());
+    RigExecWireExternalMovers decoded;
+    std::string error;
+    CHECK(RigExecWireDecodeExternalMovers(&cursor, &decoded, &error));
+    CHECK(decoded.revisions.size() == 1);
+    if (decoded.revisions.size() == 1) {
+        CHECK(decoded.revisions[0].chain == 2);
+        CHECK(decoded.revisions[0].revision == 1);
+        CHECK(decoded.revisions[0].type == 7);
+        CHECK(decoded.revisions[0].epoch == revision.epoch);
+    }
+    CHECK(decoded.blobs == movers.blobs);
+    CHECK(decoded.frames == movers.frames);
+
+    RigExecWireExternalMovers dangling = movers;
+    dangling.frames[1][0] = 2;
+    bytes.clear();
+    CHECK(!RigExecWireEncodeExternalMovers(dangling, &bytes));
+
+    bytes.clear();
+    CHECK(RigExecWireEncodeExternalMovers(movers, &bytes));
+    // The last frame entry, rewritten to name a blob that does not exist.
+    bytes[bytes.size() - 4] = 9;
+    RigExecWireReader corrupt(bytes.data(), bytes.size());
+    CHECK(!RigExecWireDecodeExternalMovers(&corrupt, &decoded, &error));
+
+    bytes.clear();
+    CHECK(RigExecWireEncodeExternalMovers(movers, &bytes));
+    bytes.push_back(0);
+    RigExecWireReader trailing(bytes.data(), bytes.size());
+    CHECK(!RigExecWireDecodeExternalMovers(&trailing, &decoded, &error));
+    bytes.resize(bytes.size() - 2);
+    RigExecWireReader truncated(bytes.data(), bytes.size());
+    CHECK(!RigExecWireDecodeExternalMovers(&truncated, &decoded, &error));
 }
 
 static void
@@ -102,10 +195,12 @@ TestContainerRejections()
 
     CHECK(!RigExecBinaryReader::Open(good.data(), 3, &error));
 
-    bad = good;
-    bad[4] = 1;  // legacy records must be rejected by the major 2 reader
-    CHECK(!RigExecBinaryReader::Open(bad.data(), bad.size(), &error));
-    CHECK(error.find("version") != std::string::npos);
+    for (const uint8_t legacyMajor : {1, 2}) {
+        bad = good;
+        bad[4] = legacyMajor;
+        CHECK(!RigExecBinaryReader::Open(bad.data(), bad.size(), &error));
+        CHECK(error.find("version") != std::string::npos);
+    }
 
     // A section count the buffer cannot hold.
     bad = good;
@@ -172,8 +267,9 @@ _BinaryExpectedVariance(const std::string &fixture)
         "05_TwistRibbonSpine.usda", "06_LatticeBulge.usda",
         "07_SurfaceDrape.usda", "08_AimEyes.usda",
         "09_PropertyMathMovers.usda", "10_AimXformTurret.usda",
-        "11_VolumeWeights.usda", "12_CurvenetProfile.usda",
+        "11_VolumeWeights.usda",
         "13_ReadPhases.usda", "14_VolumeConstrainedSweep.usda",
+        "16_ConnectionReadPhases.usda",
         "aimtest.usda", "aimtest_points.usda",
         "rotateConstraint.usda", "rigexec_flat.usda",
         "par_rot_aim.usd", "par_rot_aim_redorder.usd",
@@ -435,6 +531,8 @@ main(int argc, char **argv)
     }
     TestContainerRoundTrip();
     TestContainerRejections();
+    TestWrinkleWireExtensions();
+    TestExternalMoversWire();
     auto BakeOne = [&](const std::string &stage,
                        const std::vector<double> &frames) {
         std::printf("bake conformance: %s\n", stage.c_str());

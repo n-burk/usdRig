@@ -53,6 +53,19 @@ struct RigExecMoverRecord {
     bool enabledFallback = true;
 };
 
+/// An operator input whose connection reads a property chain at a declared
+/// phase rather than its final value: rigExecReadPhase on the input.
+/// `applied` is how many of the chain's revisions the value includes -- 0
+/// for `base`, the revision count through a named prim for a checkpoint.
+/// The value is published on the consumer itself, so every reader of the
+/// input gets it through the routes a chain result takes.
+struct RigExecPhasedConnection {
+    SdfPath consumer;
+    SdfValueTypeName consumerType;
+    SdfPath target;
+    size_t applied = 0;
+};
+
 /// One weight object's resolved field, as a mover actually consumed it.
 ///
 /// Dense and already range-policed, so a consumer can index it by element
@@ -108,19 +121,6 @@ struct RigExecRigPose {
     /// native-instancing prototype resolves to prototype-common space).
     /// Keyed identically, so a lookup that finds one finds the other.
     std::map<SdfPath, GfMatrix4d> providerBaseXforms;
-
-    /// Prim path -> constant matrices the rig computed for a SHADER on that prim,
-    /// by primvar name.
-    ///
-    /// The eye's projector is why this exists. Its shader needs a frame
-    /// that is NOT the prim's own placement: the eyeball is moved by a
-    /// skin and a cluster, so its transform is its placement, while the
-    /// projector is anchored to the eye's bind joint and rides the
-    /// deforming surface. Storm cannot hand a material a matrix that
-    /// changes per evaluation, but it does expose a primvar to a glslfx
-    /// as HdGet_<name>(), so a constant matrix primvar is the one
-    /// channel a rig-computed frame has into the geometry stage.
-    std::map<SdfPath, std::map<TfToken, GfMatrix4d>> shaderMatrices;
 
     /// Aggregate solver path -> posed frame elements straight from the
     /// solver's computePointFrameArray (guide drawing and inspection).
@@ -517,6 +517,21 @@ public:
         return _movers;
     }
 
+    /// The read phases the last compile resolved on operator inputs'
+    /// connections: the movers' inputs in mover order, then the solvers'.
+    /// A connection with no declaration, or one declaring `final`, reads
+    /// the chain's final value and has none.
+    const std::vector<RigExecPhasedConnection> &GetPhasedConnections() const {
+        return _phasedConnections;
+    }
+
+    /// Whether the last compile has a property chain revising \p attribute.
+    /// An override on such a property replaces the chain's final value,
+    /// while an authored value is the base the chain revises.
+    bool IsPropertyChainTarget(const SdfPath &attribute) const {
+        return _propertyChains.count(attribute) > 0;
+    }
+
     /// Operations the last compile set aside -- operation prim -> the error
     /// that disqualified it. A broken operation (a mover whose target is
     /// not on this stage, a solver naming a prim that is not a joint, ...)
@@ -539,7 +554,7 @@ public:
     /// another, in order, and concatenating them reproduces the compiled
     /// chain order exactly. A level a rig cannot safely spread out -- one
     /// that is too short to pay for the dispatch, or that holds a phased
-    /// read, a Profile Mover, or two chains sharing a weight object -- says
+    /// read or two chains sharing a weight object -- says
     /// so here and is walked in order like any other.
     size_t GetChainLevelCount() const { return _chainPlan.levels.size(); }
 
@@ -721,9 +736,9 @@ private:
     ///
     /// \p currentPoints, when non-null, are the IN-FLIGHT points at the
     /// consuming operation's position in the mover stack. A volumetric
-    /// weight whose rigExec:samplePhase is `current` measures against
+    /// weight whose rigExec:weightTarget reads `preceding` measures against
     /// those; everything else ignores them and reads the authored base.
-    /// Passing null where `current` was authored is an error rather than
+    /// Passing null where `preceding` was authored is an error rather than
     /// a silent fall back to the base, because the two fields differ and
     /// quietly publishing the wrong one is exactly the failure the
     /// parity harness exists to catch.
@@ -743,8 +758,8 @@ private:
     /// authored value at \p time. Accepts either an exact property path
     /// or a prim path canonicalizing to .points.
     bool _ReadTargetPoints(
-        const UsdPrim &prim, const char *relationshipName, UsdTimeCode time,
-        std::vector<GfVec3f> *points) const;
+        const UsdPrim &prim, const TfToken &relationshipName,
+        UsdTimeCode time, std::vector<GfVec3f> *points) const;
 
     /// Compiles if this rig never has, recompiles if a structural edit moved
     /// the epoch digest, and clears the structure-dirty flag. False when the
@@ -773,31 +788,12 @@ private:
     bool _CompileEpochAttempt(std::vector<std::string> *errors,
                               _CompileFailure *failure);
 
-    /// RigExecSurfaceProjector prims, with the points property each one
-    /// rides. Kept OUT of _movers on purpose: a projector is resolved in
-    /// one post-geometry pass that both counter-moves the points and
-    /// publishes the transform, because the two are the same answer and
-    /// splitting them across the mover graph and the pose walk would let
-    /// them disagree. See _ApplySurfaceProjectors.
+    /// RigExecSurfaceProjector prims and the points property each rides.
+    /// Compile turns each into derived matrix targets on that chain
+    /// (RigExecRevisionOp::SurfaceProjector / ShaderDials).
     struct _SurfaceProjectorRecord {
         SdfPath path;
         SdfPath target;   ///< the points property it rides
-        GfVec3d rayOrigin;
-        GfVec3d rayDirection;
-        GfVec3d rayUp;
-        SdfPath source;          ///< frame the projector is anchored to
-        SdfPath sourceSpace;     ///< the source's sibling space, if any
-        /// rigExec:space -- the provider whose own rest->pose map
-        /// carries the whole rig, normally a TRS master. The REST
-        /// cast needs it taken back off: the rest ray is built from
-        /// the source's base frame, which composes through the
-        /// masters' posed avars, while the base POINTS it is cast at
-        /// are the mesh as authored and carry nothing. Move a master
-        /// forty units and the ray starts forty units off the rest
-        /// eyeball and misses, and the projector publishes nothing.
-        SdfPath space;
-        GfMatrix4d shaderOffset{1.0};
-        TfToken shaderPrimvar;
     };
 
     /// Discover and validate movers without changing the active epoch.
@@ -1476,6 +1472,9 @@ private:
         /// counterpart is carrySpaceSlot against the same base/final
         /// matrix table, so the two paths read the same value.
         RigExecTapId carrySpaceTap = -1;
+        /// Surface projector only: computeRestFrame of transform,
+        /// transformSpace and carrySpace, for their world frames.
+        RigExecTapId projectorRestTaps[3] = {-1, -1, -1};
         /// computeMatrix per binding.influences entry, in that order (skin).
         std::vector<RigExecTapId> influenceTaps;
         RigExecTapId weightTap = -1;
@@ -1573,18 +1572,10 @@ private:
         const std::map<SdfPath, std::vector<_GraphRevision>> &graphChains,
         const std::set<SdfPath> &currentPhaseWeights);
 
-    /// Profile Mover cut-meshes and factorizations, kept across frames.
-    ///
-    /// Lives on the evaluator rather than in the parameter packet because it
-    /// is epoch state, not a value: the cut depends on the layout, and the
-    /// layout is what an epoch IS. Keyed and digest-checked internally, so a
-    /// curvenet edit rebinds and an unchanged one does not.
-    mutable RigExecCurvenetBindCache _curvenetBindings;
     /// Per-epoch skin layouts, keyed by mover path.
     ///
-    /// Lives here for the same reason the curvenet bindings do: it is epoch
-    /// state, not a value, and it must not outlive the evaluator that read
-    /// the stage it came from. Cleared by a change notice that reaches a
+    /// This is epoch state, not a value, and must not outlive the evaluator
+    /// that read the stage it came from. Cleared by a change notice that reaches a
     /// layout input (_ClearValueCaches), by an interactive-override change
     /// that can reach one, and by the commit of a new epoch.
     RigExecSkinTopologyCache _skinTopologies;
@@ -1687,6 +1678,16 @@ private:
         SdfPath spacePath;
         RigExecTapId spacePosedTap = -1;
         RigExecTapId spaceDefaultTap = -1;
+        /// rigExec:blendShear (Scale, Parent): blend the sources' shear when
+        /// every scale axis is governed. Off is the FBX behaviour.
+        bool blendShear = false;
+        /// rigExec:worldUpRotationOnly (Aim): orthonormalize the world-up
+        /// object's frame before taking its rotation, so a scaled up object
+        /// gives the same up direction as an unscaled one.
+        bool worldUpRotationOnly = false;
+        /// rigExec:weightBlend == "radial" on a transform-domain matrix
+        /// mover: take a fraction of the rotation, as the point kernel does.
+        bool radialBlend = false;
         _FrameSourceBinding effector;
         std::vector<_FrameSourceBinding> poleObjects;
         std::vector<SdfPath> ikChain;
@@ -1863,13 +1864,20 @@ private:
         TfToken schemaType;
     };
 
-    /// Bind property revisions and order their attribute/weight dependencies.
+    /// Bind property revisions and order their attribute/weight dependencies,
+    /// and resolve the read phases declared on connected inputs of the
+    /// movers and of \p solvers.
     bool _CompilePropertyChains(
         const std::vector<RigExecMoverRecord> &movers,
         std::map<SdfPath, std::vector<_PropertyRevision>> &chains,
-        std::vector<SdfPath> &order, _CompileFailure *failure) const;
+        std::vector<SdfPath> &order,
+        std::vector<RigExecPhasedConnection> &phased,
+        const std::vector<UsdPrim> &solvers,
+        _CompileFailure *failure) const;
     /// Exact scalar property target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;
+    /// Phased connections; see GetPhasedConnections.
+    std::vector<RigExecPhasedConnection> _phasedConnections;
 
     /// Every attribute a property chain READS through a connection, so that
     /// an avar-only notice naming one of them still drops the chain
@@ -1986,15 +1994,16 @@ private:
     /// evaluator and the baked program have to read it the same way -- so
     /// both read it here, and the cardinality diagnostic has one wording
     /// rather than one per caller. An absent or empty array is not a
-    /// failure: it means the neutral value on every source.
+    /// failure: it means the neutral value on every source. The name
+    /// arrives already interned: both frame paths read it every frame.
     static bool _ReadConstraintSourceWeights(
-        const UsdPrim &prim, const char *name, size_t count,
+        const UsdPrim &prim, const TfToken &name, size_t count,
         UsdTimeCode time, std::vector<std::string> *diagnostics,
         std::vector<double> *weights);
 
     /// The same read for a per-source offset array, whose neutral is zero.
     static bool _ReadConstraintSourceOffsets(
-        const UsdPrim &prim, const char *name, size_t count,
+        const UsdPrim &prim, const TfToken &name, size_t count,
         UsdTimeCode time, std::vector<std::string> *diagnostics,
         std::vector<GfVec3d> *offsets);
 
@@ -2110,45 +2119,6 @@ private:
     std::map<SdfPath, _DerivedResult> _derivedCache;
     std::vector<RigExecMoverRecord> _movers;
 
-    std::vector<_SurfaceProjectorRecord> _surfaceProjectors;
-
-    /// Resolve every surface projector against the posed geometry: the
-    /// ray cast at the base points names a material point, and the delta
-    /// is how the surface frame at that point moved on the posed points. Fills
-    /// providerXforms and rewrites the posed points so composed world
-    /// geometry is unchanged.
-    void _ApplySurfaceProjectors(RigExecRigPose *pose, UsdTimeCode time) const;
-public:
-    /// Re-applies the surface projectors (eye placement and shader dials)
-    /// to \p pose, which a cached or background-warmed frame did not get
-    /// from Evaluate. Reads the stage and the standing interactive
-    /// overrides, so a served frame shows the current dials.
-    void ApplySurfaceProjectors(RigExecRigPose *pose, UsdTimeCode time) const
-    {
-        if (_surfaceProjectors.empty() || !pose) {
-            return;
-        }
-        // Idempotent apart from its diagnostics: a frame memoized from a
-        // live evaluation already carries them, so only new lines are kept.
-        const size_t before = pose->diagnostics.size();
-        _ApplySurfaceProjectors(pose, time);
-        std::vector<std::string> added(
-            pose->diagnostics.begin() + before, pose->diagnostics.end());
-        pose->diagnostics.resize(before);
-        for (std::string &line : added) {
-            if (std::find(pose->diagnostics.begin(),
-                          pose->diagnostics.begin() + before, line) ==
-                pose->diagnostics.begin() + before) {
-                pose->diagnostics.push_back(std::move(line));
-            }
-        }
-    }
-private:
-
-    /// Resolve projectors on the pose Evaluate is about to publish,
-    /// whichever path produced it.
-    RigExecRigPose _WithSurfaceProjectors(RigExecRigPose pose,
-                                          UsdTimeCode time);
 
     /// Baked falloff remaps for every volumetric weight object reachable
     /// in this epoch, ready to hand to RigExecTapSet::Evaluate as value
@@ -2161,7 +2131,7 @@ private:
     /// the next epoch.
     std::vector<RigExecValueOverride> _falloffLutOverrides;
 
-    /// Volume weight objects whose rigExec:samplePhase is `current`,
+    /// Volume weight objects whose rigExec:weightTarget reads `preceding`,
     /// which have to measure the IN-FLIGHT points at their own position
     /// in the mover stack rather than the authored base.
     std::set<SdfPath> _currentPhaseWeights;

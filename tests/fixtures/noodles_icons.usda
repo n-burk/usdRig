@@ -1,8 +1,8 @@
 #usda 1.0
 (
     """
-    Fixture for tests/testUsdviewNoodlesIcons.py: three sibling prims that
-    differ only in what ui:nodegraph:node:icon says.
+    Fixture for tests/testUsdviewNoodlesIcons.py: sibling prims that differ
+    in what ui:nodegraph:node:icon says and in their schema type.
 
     The icon paths are RELATIVE, exactly as every docs/examples stage
     authors them, because that is the case that broke: a relative asset
@@ -10,13 +10,17 @@
     usdview was started, so ../../icons reaches the repository's icons
     directory.
 
-      Iconed       an icon that exists  -> that image, on the title bar
-      MissingIcon  an icon that does not exist -> the built-in default,
-                   silently (the path still anchors to this layer)
-      NoIcon       no opinion at all -> the built-in default
+      Iconed        an icon that exists  -> that image, on the title bar
+      MissingIcon   an icon that does not exist -> the built-in default,
+                    silently (the path still anchors to this layer)
+      NoIcon        no opinion at all -> the built-in default
+      TypedDefault  a RigExecControl with no opinion -> the icon its schema
+                    plugin declares for the type (nodeGraphIcon)
+      TypedAuthored a RigExecJoint authoring the control icon -> the
+                    authored icon, not the joint's
 
-    Plain Xforms on purpose: the node factory's generic fallback handles
-    them, so the test says nothing about rig schemas.
+    The first three are plain Xforms on purpose: no schema plugin declares
+    an icon for them, so they say nothing about type defaults.
     """
     defaultPrim = "World"
 )
@@ -39,5 +43,16 @@ def Xform "World"
 
     def Xform "NoIcon"
     {
+    }
+
+    def RigExecControl "TypedDefault"
+    {
+    }
+
+    def RigExecJoint "TypedAuthored" (
+        prepend apiSchemas = ["NodeGraphNodeAPI"]
+    )
+    {
+        uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
     }
 }

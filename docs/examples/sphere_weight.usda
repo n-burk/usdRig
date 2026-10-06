@@ -92,7 +92,6 @@ def Xform "SphereWeightAsset"
                     uniform token rigExec:representation = "dense"
                     uniform token rigExec:rangePolicy = "clamp"
                     uniform token rigExec:falloffProfile = "linear"
-                    uniform token rigExec:samplePhase = "reference"
                     float inputs:falloffMin = 0.6
                     float inputs:falloffMax = 1.6
                     float inputs:invert = 0
@@ -133,8 +132,9 @@ def Xform "SphereWeightAsset"
                 )
                 {
                     rel rigExec:moves = </SphereWeightAsset/Geom/Plank.points>
-                    rel rigExec:transform = </SphereWeightAsset/Rig/Joints/Lift>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SphereWeightAsset/Rig/Joints/Lift> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SphereWeightAsset/Rig/Joints/ProbeJnt/Ball>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

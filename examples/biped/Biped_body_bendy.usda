@@ -470,7 +470,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_2_l_follow/arm_bend_2_l_cst/L_ArmBend2>,
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_3_l_follow/arm_bend_3_l_cst/L_ArmBend3>,
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_4_l_follow/arm_bend_4_l_cst/L_ArmBend4>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_0_l_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_1_l_follow>,
@@ -482,7 +484,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "posed"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/bendy/arm_l_curve_wire>
                 }
 
@@ -500,7 +501,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_2_r_follow/arm_bend_2_r_cst/R_ArmBend2>,
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_3_r_follow/arm_bend_3_r_cst/R_ArmBend3>,
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_4_r_follow/arm_bend_4_r_cst/R_ArmBend4>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_0_r_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/arm_bend_1_r_follow>,
@@ -512,7 +515,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "posed"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/bendy/arm_r_curve_wire>
                 }
 
@@ -530,7 +532,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_2_l_follow/leg_bend_2_l_cst/L_LegBend2>,
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_3_l_follow/leg_bend_3_l_cst/L_LegBend3>,
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_4_l_follow/leg_bend_4_l_cst/L_LegBend4>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_0_l_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_1_l_follow>,
@@ -542,7 +546,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "posed"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/bendy/leg_l_curve_wire>
                 }
 
@@ -560,7 +563,9 @@ over "Biped"
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_2_r_follow/leg_bend_2_r_cst/R_LegBend2>,
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_3_r_follow/leg_bend_3_r_cst/R_LegBend3>,
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_4_r_follow/leg_bend_4_r_cst/R_LegBend4>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:driverTransformSpaces = [
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_0_r_follow>,
                         </Biped/Rig/Main/Shot/Aux/Controls/leg_bend_1_r_follow>,
@@ -572,7 +577,6 @@ over "Biped"
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "posed"
                     rel rigExec:space
-                    uniform token rigExec:transformReadPhase = "final"
                     rel rigExec:weightObject = </Biped/Rig/Weights/bendy/leg_r_curve_wire>
                 }
             }

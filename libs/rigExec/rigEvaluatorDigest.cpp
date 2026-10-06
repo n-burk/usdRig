@@ -5,6 +5,7 @@
 #include "rigEvaluatorConstraints.h"
 #include "parallel.h"
 #include "pathText.h"
+#include "movers/moverRegistry.h"
 
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/withScopedParallelism.h"
@@ -110,6 +111,10 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     std::string digest;
     // Every path this call writes is spelled through here (see _PathText).
     _PathText pathText;
+    // Made once here, never per read: constructing a token from text takes
+    // the token registry's lock, and readOf below runs on the prefetch's
+    // parallel lanes.
+    const TfToken phaseField(RigExecReadPhaseMetadataName);
 
     const bool profileDigest = _profiler.IsEnabled();
     uint64_t digestRegionStart =
@@ -214,17 +219,22 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // exactly the way retargeting the relationship does. Authored on the
     // property, so it is hashed alongside that property's targets rather than
     // as another prim-level token.
-    auto appendPhase = [&digest](const UsdPrim &prim, const char *name) {
+    auto appendPhaseNamed = [&digest, &phaseField](const UsdPrim &prim,
+                                                   const TfToken &name) {
         std::string authored;
-        if (const UsdRelationship rel = prim.GetRelationship(TfToken(name))) {
-            rel.GetMetadata(TfToken(RigExecReadPhaseMetadataName), &authored);
-        } else if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-            a.GetMetadata(TfToken(RigExecReadPhaseMetadataName), &authored);
+        if (const UsdRelationship rel = prim.GetRelationship(name)) {
+            rel.GetMetadata(phaseField, &authored);
+        } else if (const UsdAttribute a = prim.GetAttribute(name)) {
+            a.GetMetadata(phaseField, &authored);
         }
-        digest += name;
+        digest += name.GetString();
         digest += "@phase=";
         digest += authored;
         digest += '|';
+    };
+    auto appendPhase = [&appendPhaseNamed](const UsdPrim &prim,
+                                           const char *name) {
+        appendPhaseNamed(prim, TfToken(name));
     };
     auto appendToken = [&digest](const UsdPrim &prim, const char *name) {
         TfToken value;
@@ -254,8 +264,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += '|';
     };
     auto appendAttributeBinding =
-        [this, &digest, &noteRead, &pathText, &appendRelTargets](const UsdPrim &prim,
-                                              const char *name) {
+        [this, &digest, &noteRead, &pathText, &appendRelTargets,
+         &phaseField](const UsdPrim &prim, const char *name) {
         const UsdAttribute attr = prim.GetAttribute(TfToken(name));
         digest += name;
         digest += "@sources=";
@@ -294,6 +304,15 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             visiting.erase(a.GetPath());
         };
         append(attr);
+        // The read phase a connected input declares selects which revision
+        // of a property chain its connection reads, which Compile resolves.
+        // An unconnected input has nothing to choose, so it is not read.
+        if (attr && attr.HasAuthoredConnections()) {
+            std::string phase;
+            attr.GetMetadata(phaseField, &phase);
+            digest += "@phase=";
+            digest += phase;
+        }
         digest += '|';
     };
     auto appendFrameBindingIdentityNamed =
@@ -360,9 +379,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += '|';
         appendRelTargets(w, "rigExec:weightTarget", true);
         appendRelTargets(w, "rigExec:baseWeight", true);
-        for (const char *input : {"rigExec:curvenetPoints", "rigExec:curvenetSplineIndices",
-                "rigExec:meshFaceCounts", "rigExec:meshFaceIndices"})
-            appendRelTargets(w, input, true);
         appendToken(w, "rigExec:representation");
         appendToken(w, "rigExec:rangePolicy");
         appendToken(w, "rigExec:operation");
@@ -389,22 +405,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // to carry the same value at the current time. Static fields include
         // these markers too so adding an illegal source re-enters Compile and
         // is rejected instead of replaying the old request.
-        for (const char *field : {
-                 "rigExec:values", "rigExec:indices",
-                 "rigExec:defaultWeight", "rigExec:representation",
-                 "rigExec:rangePolicy", "rigExec:operation",
-                 "inputs:driver", "inputs:scale", "inputs:bias",
-                 "inputs:falloffMin", "inputs:falloffMax",
-                 "inputs:invert", "inputs:strength", "inputs:scaleX",
-                 "inputs:scaleXPos",
-                 "inputs:scaleYPos",
-                 "inputs:scaleZPos",
-                 "inputs:scaleXNeg",
-                 "inputs:scaleYNeg",
-                 "inputs:scaleZNeg",
-                 "inputs:scaleY", "inputs:scaleZ", "inputs:extentU",
-                 "inputs:extentV", "inputs:weights", "rigExec:autoSmooth",
-                 "rigExec:basis", "rigExec:samplesPerSpline", "rigExec:unreachedValue"}) {
+        for (const char *field : kDigestWeightObjectFields) {
             appendAttributeBinding(w, field);
         }
 
@@ -417,7 +418,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // because it selects which field function runs, exactly as
         // rigExec:planeAxis selects which coordinate it measures.
         appendToken(w, "rigExec:falloffProfile");
-        appendToken(w, "rigExec:samplePhase");
+        appendPhase(w, "rigExec:weightTarget");
         appendToken(w, "rigExec:planeAxis");
         appendToken(w, "rigExec:planeBounds");
         appendToken(w, "rigExec:combineMode");
@@ -714,6 +715,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         bool exists = false;
         TfToken typeName;
         SdfPathVector sources;
+        /// A connected attribute's declared read phase, which selects the
+        /// revision of a property chain its connection reads.
+        std::string phase;
     };
     const bool memoizeReads = !(segments & _DigestUnmemoizedReads);
     std::unordered_map<SdfPath, _DigestAttribute, SdfPath::Hash>
@@ -721,13 +725,16 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // The three facts of one attribute, and the text an attribute is written
     // out as. One definition of each, shared by the walk and by the prefetch
     // below, so the two cannot spell an attribute differently.
-    const auto readOf = [](const UsdAttribute &attribute) {
+    const auto readOf = [&phaseField](const UsdAttribute &attribute) {
         _DigestAttribute read;
         read.exists = static_cast<bool>(attribute);
         if (read.exists) {
             read.typeName = attribute.GetTypeName().GetAsToken();
         }
         read.sources = _AuthoredConnections(attribute);
+        if (!read.sources.empty()) {
+            attribute.GetMetadata(phaseField, &read.phase);
+        }
         return read;
     };
     const auto entryOf = [](_PathText &text, const SdfPath &path,
@@ -740,6 +747,10 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         for (const SdfPath &source : attribute.sources) {
             entry += text(source);
             entry += ',';
+        }
+        if (!attribute.phase.empty()) {
+            entry += "@phase=";
+            entry += attribute.phase;
         }
         entry += '|';
         return entry;
@@ -1379,6 +1390,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                     const SdfPathVector targets =
                         appendRelTargetsNamed(solver, name, false);
                     appendFrameBindingIdentityNamed(solver, name);
+                    // A read phase on a solver input orders it against the
+                    // constraints above it, so it is schedule identity.
+                    appendPhaseNamed(solver, name);
                     for (const SdfPath &target : targets) {
                         digest += ancestorChainToken(target.GetPrimPath());
                     }
@@ -1604,15 +1618,14 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             appendRelTargets(prim, "rigExec:driverBaseTransformSpaces", false);
             // Influence order is semantic: jointIndices index into it.
             appendRelTargets(prim, "rigExec:influences", false);
-            appendToken(prim, "rigExec:transformReadPhase");
             appendToken(prim, "rigExec:skinningMethod");
             appendToken(prim, "rigExec:operation");
             appendToken(prim, "rigExec:mode");
             appendToken(prim, "rigExec:deltaSpace");
-            for (const char *input : {
-                     "inputs:defaultWeight", "inputs:enabled",
-                     "inputs:value", "inputs:min", "inputs:max",
-                     "inputs:keys"}) {
+            // Compiled into the revision: it selects the cluster's
+            // point-frame correction in the fold.
+            appendToken(prim, "rigExec:pointFrame");
+            for (const char *input : kDigestMoverInputs) {
                 appendAttributeBinding(prim, input);
             }
             // Pose-constraint wiring. Source order is semantic because every
@@ -1644,6 +1657,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 appendToken(prim, "rigExec:poleVectorMode");
                 appendToken(prim, "rigExec:evaluationMode");
                 appendToken(prim, "rigExec:orientationMode");
+                // Uniform opt-ins compiled into the constraint record.
+                appendScalar(prim, "rigExec:blendShear");
+                appendScalar(prim, "rigExec:worldUpRotationOnly");
             }
             // Static-input relationships captured at compile into generated
             // resolved*/rest* wiring (lattice cage, surface, curve bind/
@@ -1656,18 +1672,27 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             appendRelTargets(prim, "rigExec:cage", false);
             appendRelTargets(prim, "rigExec:surface", false);
             appendRelTargets(prim, "rigExec:bindCoordinates", false);
-            for (const char *phased : {"rigExec:transform", "rigExec:cage",
-                                       "rigExec:surface", "rigExec:curvenet",
+            for (const char *phased : {"rigExec:transform",
+                                       "rigExec:influences",
+                                       "rigExec:driverTransforms",
+                                       "rigExec:cage", "rigExec:surface",
                                        "rigExec:bindCoordinates",
                                        "rigExec:driverCurve"}) {
                 appendPhase(prim, phased);
             }
             appendRelTargets(prim, "rigExec:driverFrames", false);
             appendRelTargets(prim, "rigExec:driverCurve", false);
-            // Authored order, not sorted: the binding takes targets[0], so
-            // reordering a multi-target relationship changes the wiring and
-            // must therefore change the digest.
-            appendRelTargets(prim, "rigExec:curvenet", false);
+            if (const RigExecMoverHandler *handler =
+                    RigExecFindMoverHandler(prim.GetTypeName());
+                handler && handler->assembleExternal) {
+                // Plugin bindings may use relationships unknown to core.
+                // Their target order and read phases are compiled wiring.
+                for (const UsdRelationship &rel : prim.GetRelationships()) {
+                    if (rel.GetName() == _movesRel) continue;
+                    appendRelTargetsNamed(prim, rel.GetName(), false);
+                    appendPhaseNamed(prim, rel.GetName());
+                }
+            }
             for (const SdfPath &w :
                  appendRelTargets(prim, "rigExec:weightObject", true)) {
                 appendWeightObject(w);
@@ -1678,6 +1703,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 if (!input) {
                     continue;
                 }
+                for (const char *field : kDigestBlendInputFields) {
+                    appendAttributeBinding(input, field);
+                }
                 for (const SdfPath &samplePath :
                      appendRelTargets(input, "rigExec:samples", true)) {
                     const UsdPrim sample =
@@ -1687,7 +1715,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                     }
                     appendRelTargets(sample, "rigExec:targetPoints", true);
                     appendPhase(sample, "rigExec:targetPoints");
-                    appendToken(sample, "rigExec:pointsReadPhase");
                     // WHICH blend shape a sparse sample names is structure,
                     // so it belongs in the epoch digest. What the shape
                     // CONTAINS deliberately does not: offsets and

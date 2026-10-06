@@ -4,7 +4,6 @@
 #include "frameExtraction.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigEvaluatorConstraints.h"
-#include "curvenetWeightComputations.h"
 #include "movers/moverRegistry.h"
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/weightFields.h"
@@ -21,6 +20,35 @@
 #include <unordered_map>
 
 namespace rigExec {
+
+namespace evaluatorDetail {
+
+bool
+_VolumeWeightSamplesInFlight(const UsdPrim &weight, bool *inFlight,
+                             std::string *error)
+{
+    *inFlight = false;
+    RigExecReadPhase phase;
+    std::string why;
+    if (!RigExecResolveReadPhase(weight.GetRelationship(_weightTargetRel),
+                                 &phase, &why)) {
+        *error = why;
+        return false;
+    }
+    if (phase.kind == RigExecReadPhaseKind::Preceding) {
+        *inFlight = true;
+    } else if (!phase.IsBase()) {
+        *error = weight.GetPath().GetString() + ": rigExecReadPhase '" +
+                 phase.GetAsString() +
+                 "' on rigExec:weightTarget is not supported; a volume "
+                 "weight measures its source at base or the points in flight "
+                 "at preceding";
+        return false;
+    }
+    return true;
+}
+
+}  // namespace evaluatorDetail
 
 using namespace evaluatorDetail;
 
@@ -49,6 +77,69 @@ _IsEnabled(const UsdPrim &mover, UsdTimeCode time)
     }
     return enabled;
 }
+
+// Attribute names, values, and weight types the weight oracle reads per
+// weight object per frame, interned once. A per-frame TfToken construction
+// takes the token registry lock.
+const TfToken _kGeoInputWeights("rigExec:inputWeights");
+const TfToken _kGeoCombineMode("rigExec:combineMode");
+const TfToken _kGeoPlaneAxis("rigExec:planeAxis");
+const TfToken _kGeoPlaneBounds("rigExec:planeBounds");
+const TfToken _kGeoRangePolicy("rigExec:rangePolicy");
+const TfToken _kGeoRepresentation("rigExec:representation");
+const TfToken _kGeoDefaultWeight("rigExec:defaultWeight");
+const TfToken _kGeoOperation("rigExec:operation");
+const TfToken _kGeoBaseWeight("rigExec:baseWeight");
+const TfToken _kGeoWeightTarget("rigExec:weightTarget");
+const TfToken _kGeoIndices("rigExec:indices");
+const TfToken _kGeoValues("rigExec:values");
+const TfToken _kGeoSampleSource("rigExec:sampleSource");
+const TfToken _kGeoCurve("rigExec:curve");
+const TfToken _kGeoStrength("inputs:strength");
+const TfToken _kGeoInvert("inputs:invert");
+const TfToken _kGeoFalloffMin("inputs:falloffMin");
+const TfToken _kGeoFalloffMax("inputs:falloffMax");
+const TfToken _kGeoExtentU("inputs:extentU");
+const TfToken _kGeoExtentV("inputs:extentV");
+const TfToken _kGeoScaleX("inputs:scaleX");
+const TfToken _kGeoScaleY("inputs:scaleY");
+const TfToken _kGeoScaleZ("inputs:scaleZ");
+const TfToken _kGeoScaleXPos("inputs:scaleXPos");
+const TfToken _kGeoScaleYPos("inputs:scaleYPos");
+const TfToken _kGeoScaleZPos("inputs:scaleZPos");
+const TfToken _kGeoScaleXNeg("inputs:scaleXNeg");
+const TfToken _kGeoScaleYNeg("inputs:scaleYNeg");
+const TfToken _kGeoScaleZNeg("inputs:scaleZNeg");
+const TfToken _kGeoDriver("inputs:driver");
+const TfToken _kGeoScale("inputs:scale");
+const TfToken _kGeoBias("inputs:bias");
+const TfToken _kGeoMultiply("multiply");
+const TfToken _kGeoAdd("add");
+const TfToken _kGeoSubtract("subtract");
+const TfToken _kGeoMax("max");
+const TfToken _kGeoMin("min");
+const TfToken _kGeoAverage("average");
+const TfToken _kGeoOverlay("overlay");
+const TfToken _kGeoAxisX("x");
+const TfToken _kGeoAxisY("y");
+const TfToken _kGeoAxisZ("z");
+const TfToken _kGeoUnbounded("unbounded");
+const TfToken _kGeoBounded("bounded");
+const TfToken _kGeoConstant("constant");
+const TfToken _kGeoStrict("strict");
+const TfToken _kGeoClamp("clamp");
+const TfToken _kGeoDense("dense");
+const TfToken _kGeoSparse("sparse");
+const TfToken _kGeoCombineWeight("RigExecCombineWeight");
+const TfToken _kGeoPlaneWeight("RigExecPlaneWeight");
+const TfToken _kGeoSphereWeight("RigExecSphereWeight");
+const TfToken _kGeoCurveWeight("RigExecCurveWeight");
+const TfToken _kGeoDynamicWeight("RigExecDynamicWeight");
+const TfToken _kGeoWeightObject("rigExec:weightObject");
+const TfToken _kGeoPoints("points");
+// The mover envelope default, in the inputs: namespace -- distinct from a
+// weight object's rigExec:defaultWeight above.
+const TfToken _kGeoInputsDefaultWeight("inputs:defaultWeight");
 
 } // namespace
 
@@ -122,7 +213,7 @@ _ResolveGeometryInput(const UsdStageRefPtr &stage, const SdfPath &target)
     if (target.IsPrimPath()) {
         const UsdPrim prim = stage->GetPrimAtPath(target);
         if (prim && prim.IsA<UsdGeomPointBased>()) {
-            return target.AppendProperty(TfToken("points"));
+            return target.AppendProperty(_kGeoPoints);
         }
     }
     return target;
@@ -132,12 +223,12 @@ _ResolveGeometryInput(const UsdStageRefPtr &stage, const SdfPath &target)
 
 bool
 RigExecRigEvaluator::_ReadTargetPoints(
-    const UsdPrim &prim, const char *relationshipName, UsdTimeCode time,
+    const UsdPrim &prim, const TfToken &relationshipName, UsdTimeCode time,
     std::vector<GfVec3f> *points) const
 {
     points->clear();
     SdfPathVector targets;
-    if (UsdRelationship rel = prim.GetRelationship(TfToken(relationshipName))) {
+    if (UsdRelationship rel = prim.GetRelationship(relationshipName)) {
         rel.GetTargets(&targets);
     }
     if (targets.size() != 1) {
@@ -165,31 +256,31 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     const TfToken typeName = prim.GetTypeName();
 
     // The composed field folds its inputs; it measures nothing itself.
-    if (typeName == "RigExecCombineWeight") {
+    if (typeName == _kGeoCombineWeight) {
         SdfPathVector inputs;
         if (UsdRelationship rel =
-                prim.GetRelationship(TfToken("rigExec:inputWeights"))) {
+                prim.GetRelationship(_kGeoInputWeights)) {
             rel.GetTargets(&inputs);
         }
-        TfToken modeName("multiply");
+        TfToken modeName = _kGeoMultiply;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:combineMode"))) {
+                prim.GetAttribute(_kGeoCombineMode)) {
             a.Get(&modeName, time);
         }
         RigExecWeightCombine mode;
-        if (modeName == "multiply") {
+        if (modeName == _kGeoMultiply) {
             mode = RigExecWeightCombine::Multiply;
-        } else if (modeName == "add") {
+        } else if (modeName == _kGeoAdd) {
             mode = RigExecWeightCombine::Add;
-        } else if (modeName == "subtract") {
+        } else if (modeName == _kGeoSubtract) {
             mode = RigExecWeightCombine::Subtract;
-        } else if (modeName == "max") {
+        } else if (modeName == _kGeoMax) {
             mode = RigExecWeightCombine::Max;
-        } else if (modeName == "min") {
+        } else if (modeName == _kGeoMin) {
             mode = RigExecWeightCombine::Min;
-        } else if (modeName == "average") {
+        } else if (modeName == _kGeoAverage) {
             mode = RigExecWeightCombine::Average;
-        } else if (modeName == "overlay") {
+        } else if (modeName == _kGeoOverlay) {
             mode = RigExecWeightCombine::Overlay;
         } else {
             *error = who() + ": unknown rigExec:combineMode " +
@@ -214,9 +305,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
             return false;
         }
         const float strength = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:strength", 1.0f, time);
+            _resolvedInputs, prim, _kGeoStrength, 1.0f, time);
         const float invert = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:invert", 0.0f, time);
+            _resolvedInputs, prim, _kGeoInvert, 0.0f, time);
         for (float &w : *weights) {
             w = (w + (1.0f - 2.0f * w) * invert) * strength;
         }
@@ -248,32 +339,30 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
 
     // Which points the distance function measures.
     std::vector<GfVec3f> samplePoints;
-    TfToken samplePhase("reference");
-    if (UsdAttribute a = prim.GetAttribute(_samplePhaseAttr)) {
-        a.Get(&samplePhase, time);
+    bool inFlight = false;
+    std::string phaseError;
+    if (!_VolumeWeightSamplesInFlight(prim, &inFlight, &phaseError)) {
+        *error = who() + ": " + phaseError;
+        return false;
     }
-    if (samplePhase == "current") {
+    if (inFlight) {
         if (!currentPoints) {
             *error = who() +
-                     ": rigExec:samplePhase is `current` but no in-flight "
-                     "points were supplied";
+                     ": rigExec:weightTarget reads `preceding` but no "
+                     "in-flight points were supplied";
             return false;
         }
         samplePoints = *currentPoints;
-    } else if (samplePhase == "reference") {
+    } else {
         // An explicit sampleSource wins over the weighted domain, which
         // is how one mesh is weighted by another mesh's shape.
-        if (!_ReadTargetPoints(prim, "rigExec:sampleSource", time,
+        if (!_ReadTargetPoints(prim, _kGeoSampleSource, time,
                                &samplePoints) &&
-            !_ReadTargetPoints(prim, "rigExec:weightTarget", time,
+            !_ReadTargetPoints(prim, _kGeoWeightTarget, time,
                                &samplePoints)) {
             *error = who() + ": could not read the points to sample";
             return false;
         }
-    } else {
-        *error = who() + ": unknown rigExec:samplePhase " +
-                 samplePhase.GetString();
-        return false;
     }
     if (samplePoints.size() != count) {
         *error = who() + ": sampled point count does not match the target";
@@ -281,23 +370,24 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     }
 
     RigExecFalloffParams params;
-    auto readFloat = [this, &prim, time](const char *name, float fallback) {
+    auto readFloat = [this, &prim, time](const TfToken &name, float fallback) {
         return _ResolvedRead(
             _resolvedInputs, prim, name, fallback, time);
     };
-    params.falloffMin = readFloat("inputs:falloffMin", 0.0f);
-    params.falloffMax = readFloat("inputs:falloffMax", 1.0f);
-    params.invert = readFloat("inputs:invert", 0.0f);
-    params.strength = readFloat("inputs:strength", 1.0f);
+    params.falloffMin = readFloat(_kGeoFalloffMin, 0.0f);
+    params.falloffMax = readFloat(_kGeoFalloffMax, 1.0f);
+    params.invert = readFloat(_kGeoInvert, 0.0f);
+    params.strength = readFloat(_kGeoStrength, 1.0f);
     params.curve = _BakeFalloffLut(prim);
 
-    if (typeName == "RigExecPlaneWeight") {
-        TfToken axis("y");
-        if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:planeAxis"))) {
+    if (typeName == _kGeoPlaneWeight) {
+        TfToken axis = _kGeoAxisY;
+        if (UsdAttribute a = prim.GetAttribute(_kGeoPlaneAxis)) {
             a.Get(&axis, time);
         }
         const int axisIndex =
-            axis == "x" ? 0 : (axis == "y" ? 1 : (axis == "z" ? 2 : -1));
+            axis == _kGeoAxisX ? 0
+            : (axis == _kGeoAxisY ? 1 : (axis == _kGeoAxisZ ? 2 : -1));
         if (axisIndex < 0) {
             *error = who() + ": unknown rigExec:planeAxis " + axis.GetString();
             return false;
@@ -306,16 +396,16 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
         // _BuildPlaneWeightPacket exactly, including reading the extents
         // only in the bounded arm -- the two paths have to agree value
         // for value or the parity harness fires.
-        TfToken boundsMode("unbounded");
+        TfToken boundsMode = _kGeoUnbounded;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:planeBounds"))) {
+                prim.GetAttribute(_kGeoPlaneBounds)) {
             a.Get(&boundsMode, time);
         }
         RigExecPlaneBounds extent;
         const RigExecPlaneBounds *extentPtr = nullptr;
-        if (boundsMode == "bounded") {
-            extent.extentU = readFloat("inputs:extentU", 1.0f);
-            extent.extentV = readFloat("inputs:extentV", 1.0f);
+        if (boundsMode == _kGeoBounded) {
+            extent.extentU = readFloat(_kGeoExtentU, 1.0f);
+            extent.extentV = readFloat(_kGeoExtentV, 1.0f);
             for (const float e : {extent.extentU, extent.extentV}) {
                 if (!std::isfinite(e) || e <= 0.0f) {
                     *error = who() +
@@ -325,7 +415,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
                 }
             }
             extentPtr = &extent;
-        } else if (boundsMode != "unbounded") {
+        } else if (boundsMode != _kGeoUnbounded) {
             *error = who() + ": unknown rigExec:planeBounds " +
                      boundsMode.GetString();
             return false;
@@ -337,9 +427,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
 
     // Sphere and curve both take the per-axis divisors, folded into the
     // matrix so the hot loop stays one transform.
-    const float sx = readFloat("inputs:scaleX", 1.0f);
-    const float sy = readFloat("inputs:scaleY", 1.0f);
-    const float sz = readFloat("inputs:scaleZ", 1.0f);
+    const float sx = readFloat(_kGeoScaleX, 1.0f);
+    const float sy = readFloat(_kGeoScaleY, 1.0f);
+    const float sz = readFloat(_kGeoScaleZ, 1.0f);
     for (float s : {sx, sy, sz}) {
         if (!std::isfinite(s) || s <= 0.0f) {
             *error = who() + ": inputs:scaleX/Y/Z must be finite and positive";
@@ -351,15 +441,15 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
                             1.0 / double(sz)));
     worldToLocal = worldToLocal * divide;
 
-    if (typeName == "RigExecSphereWeight") {
+    if (typeName == _kGeoSphereWeight) {
         const GfVec3f positiveScales(
-            readFloat("inputs:scaleXPos", 1.0f),
-            readFloat("inputs:scaleYPos", 1.0f),
-            readFloat("inputs:scaleZPos", 1.0f));
+            readFloat(_kGeoScaleXPos, 1.0f),
+            readFloat(_kGeoScaleYPos, 1.0f),
+            readFloat(_kGeoScaleZPos, 1.0f));
         const GfVec3f negativeScales(
-            readFloat("inputs:scaleXNeg", 1.0f),
-            readFloat("inputs:scaleYNeg", 1.0f),
-            readFloat("inputs:scaleZNeg", 1.0f));
+            readFloat(_kGeoScaleXNeg, 1.0f),
+            readFloat(_kGeoScaleYNeg, 1.0f),
+            readFloat(_kGeoScaleZNeg, 1.0f));
         for (int axis = 0; axis < 3; ++axis) {
             if (!std::isfinite(positiveScales[axis]) || positiveScales[axis] <= 0 ||
                 !std::isfinite(negativeScales[axis]) || negativeScales[axis] <= 0) {
@@ -371,9 +461,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
                                  positiveScales, negativeScales);
         return true;
     }
-    if (typeName == "RigExecCurveWeight") {
+    if (typeName == _kGeoCurveWeight) {
         std::vector<GfVec3f> curvePoints;
-        if (!_ReadTargetPoints(prim, "rigExec:curve", time, &curvePoints) ||
+        if (!_ReadTargetPoints(prim, _kGeoCurve, time, &curvePoints) ||
             curvePoints.empty()) {
             *error = who() + ": rigExec:curve must name exactly one points source";
             return false;
@@ -411,42 +501,15 @@ RigExecRigEvaluator::_ResolveWeights(
                  " on " + weightPrimPath.GetString();
         return false;
     }
-    if (typeName == "RigExecCurvenetWeight") {
-        auto array = [&](const char *relationship, auto *out) {
-            SdfPathVector paths;
-            prim.GetRelationship(TfToken(relationship)).GetTargets(&paths);
-            return paths.size() == 1 && _resolvedInputs.GetAttribute(
-                _stage->GetAttributeAtPath(paths[0]), time, out);
-        };
-        VtVec3fArray mesh, net;
-        VtIntArray counts, indices, splines, smooth;
-        VtFloatArray authored;
-        if (!array("rigExec:weightTarget", &mesh) || !array("rigExec:curvenetPoints", &net) ||
-            !array("rigExec:meshFaceCounts", &counts) || !array("rigExec:meshFaceIndices", &indices) ||
-            !array("rigExec:curvenetSplineIndices", &splines)) {
-            *error = "unresolved curvenet weight geometry"; return false;
-        }
-        _resolvedInputs.GetAttribute(prim.GetAttribute(TfToken("inputs:weights")), time, &authored);
-        _resolvedInputs.GetAttribute(prim.GetAttribute(TfToken("rigExec:autoSmooth")), time, &smooth);
-        const auto packet = RigExecComputeCurvenetWeightPacket(
-            {mesh.begin(),mesh.end()}, {counts.begin(),counts.end()}, {indices.begin(),indices.end()},
-            {net.begin(),net.end()}, {splines.begin(),splines.end()},
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:basis",TfToken("catmullRom"),time),
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:samplesPerSpline",5,time),
-            {smooth.begin(),smooth.end()}, {authored.begin(),authored.end()},
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:rangePolicy",TfToken("clamp"),time),
-            _ResolvedRead(_resolvedInputs,prim,"rigExec:unreachedValue",0.0f,time),error);
-        return packet.ResolveAll(count, weights);
-    }
-    if (_IsVolumeWeightType(typeName) || typeName == "RigExecCombineWeight") {
+    if (_IsVolumeWeightType(typeName) || typeName == _kGeoCombineWeight) {
         std::vector<float> resolved;
         if (!_ResolveVolumeWeights(prim, count, time, &resolved, error,
                                    currentPoints)) {
             return false;
         }
-        TfToken volumePolicy("clamp");
+        TfToken volumePolicy = _kGeoClamp;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:rangePolicy"))) {
+                prim.GetAttribute(_kGeoRangePolicy)) {
             a.Get(&volumePolicy, time);
         }
         for (float &w : resolved) {
@@ -455,7 +518,7 @@ RigExecRigEvaluator::_ResolveWeights(
                 return false;
             }
             if (w < 0.0f || w > 1.0f) {
-                if (volumePolicy != "clamp") {
+                if (volumePolicy != _kGeoClamp) {
                     *error = "strict range violation on " +
                              weightPrimPath.GetString();
                     return false;
@@ -467,30 +530,30 @@ RigExecRigEvaluator::_ResolveWeights(
         return true;
     }
 
-    TfToken representation("constant");
+    TfToken representation = _kGeoConstant;
     if (UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:representation"))) {
+            _kGeoRepresentation)) {
         a.Get(&representation, time);
     }
     const float defaultWeight = _ResolvedRead(
-        _resolvedInputs, prim, "rigExec:defaultWeight", 0.0f, time);
-    TfToken rangePolicy("strict");
-    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:rangePolicy"))) {
+        _resolvedInputs, prim, _kGeoDefaultWeight, 0.0f, time);
+    TfToken rangePolicy = _kGeoStrict;
+    if (UsdAttribute a = prim.GetAttribute(_kGeoRangePolicy)) {
         a.Get(&rangePolicy, time);
     }
-    if (rangePolicy != "strict" && rangePolicy != "clamp") {
+    if (rangePolicy != _kGeoStrict && rangePolicy != _kGeoClamp) {
         *error = "unknown rangePolicy on " + weightPrimPath.GetString();
         return false;
     }
 
-    const bool isDynamic = prim.GetTypeName() == "RigExecDynamicWeight";
+    const bool isDynamic = typeName == _kGeoDynamicWeight;
     if (isDynamic) {
-        TfToken operation("multiply");
+        TfToken operation = _kGeoMultiply;
         if (UsdAttribute a =
-                prim.GetAttribute(TfToken("rigExec:operation"))) {
+                prim.GetAttribute(_kGeoOperation)) {
             a.Get(&operation, time);
         }
-        if (operation != "multiply") {
+        if (operation != _kGeoMultiply) {
             *error = "unknown dynamic-weight operation on " +
                      weightPrimPath.GetString();
             return false;
@@ -500,7 +563,7 @@ RigExecRigEvaluator::_ResolveWeights(
         std::vector<float> base(count, 1.0f);
         SdfPathVector baseTargets;
         if (UsdRelationship rel =
-                prim.GetRelationship(TfToken("rigExec:baseWeight"))) {
+                prim.GetRelationship(_kGeoBaseWeight)) {
             rel.GetTargets(&baseTargets);
         }
         if (baseTargets.size() > 1) {
@@ -511,7 +574,7 @@ RigExecRigEvaluator::_ResolveWeights(
         if (baseTargets.empty()) {
             // Without a base, only constant representation is legal and
             // b_i = 1 everywhere (spec §4.1).
-            if (representation != "constant") {
+            if (representation != _kGeoConstant) {
                 *error = "no-base dynamic weight must be constant on " +
                          weightPrimPath.GetString();
                 return false;
@@ -530,7 +593,7 @@ RigExecRigEvaluator::_ResolveWeights(
                 [this, &time](const UsdPrim &p) -> SdfPath {
                 SdfPathVector t;
                 if (UsdRelationship rel = p.GetRelationship(
-                        TfToken("rigExec:weightTarget"))) {
+                        _kGeoWeightTarget)) {
                     rel.GetTargets(&t);
                 }
                 return t.size() == 1 ? _ResolveGeometryInput(_stage, t[0])
@@ -543,9 +606,9 @@ RigExecRigEvaluator::_ResolveWeights(
                          weightPrimPath.GetString();
                 return false;
             }
-            TfToken baseRepresentation("constant");
+            TfToken baseRepresentation = _kGeoConstant;
             if (UsdAttribute a = basePrim.GetAttribute(
-                    TfToken("rigExec:representation"))) {
+                    _kGeoRepresentation)) {
                 a.Get(&baseRepresentation, time);
             }
             if (baseRepresentation != representation) {
@@ -553,19 +616,19 @@ RigExecRigEvaluator::_ResolveWeights(
                          weightPrimPath.GetString();
                 return false;
             }
-            if (representation == "sparse") {
+            if (representation == _kGeoSparse) {
                 // The dynamic descriptor's sparse support is inherited
                 // from the base; a dynamic prim that authors its own
                 // support must match the base exactly (spec §4.1).
                 VtIntArray mine;
                 if (UsdAttribute a =
-                        prim.GetAttribute(TfToken("rigExec:indices"))) {
+                        prim.GetAttribute(_kGeoIndices)) {
                     a.Get(&mine, time);
                 }
                 if (!mine.empty()) {
                     VtIntArray theirs;
                     if (UsdAttribute a = basePrim.GetAttribute(
-                            TfToken("rigExec:indices"))) {
+                            _kGeoIndices)) {
                         a.Get(&theirs, time);
                     }
                     const std::set<int> mySupport(mine.begin(), mine.end());
@@ -588,11 +651,11 @@ RigExecRigEvaluator::_ResolveWeights(
             }
         }
         const float driver = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:driver", 1.0f, time);
+            _resolvedInputs, prim, _kGeoDriver, 1.0f, time);
         const float scale = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:scale", 1.0f, time);
+            _resolvedInputs, prim, _kGeoScale, 1.0f, time);
         const float bias = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:bias", 0.0f, time);
+            _resolvedInputs, prim, _kGeoBias, 0.0f, time);
         for (size_t i = 0; i < count; ++i) {
             float r = (base[i] * driver) * scale + bias;
             if (!std::isfinite(r)) {
@@ -601,7 +664,7 @@ RigExecRigEvaluator::_ResolveWeights(
                 return false;
             }
             if (r < 0.0f || r > 1.0f) {
-                if (rangePolicy == "clamp") {
+                if (rangePolicy == _kGeoClamp) {
                     r = std::min(std::max(r, 0.0f), 1.0f);
                 } else {
                     *error = "strict range violation on " +
@@ -616,31 +679,31 @@ RigExecRigEvaluator::_ResolveWeights(
 
     // Static weights are time-invariant by contract: reject time samples
     // and value connections on every field (spec §4.1).
-    static const TfToken staticFields[] = {
-        TfToken("rigExec:values"), TfToken("rigExec:indices"),
-        TfToken("rigExec:defaultWeight"), TfToken("rigExec:representation"),
-        TfToken("rigExec:rangePolicy")};
-    for (const TfToken &field : staticFields) {
-        const UsdAttribute a = prim.GetAttribute(field);
+    const TfToken *const staticFields[] = {
+        &_kGeoValues, &_kGeoIndices,
+        &_kGeoDefaultWeight, &_kGeoRepresentation,
+        &_kGeoRangePolicy};
+    for (const TfToken *field : staticFields) {
+        const UsdAttribute a = prim.GetAttribute(*field);
         if (a && (a.GetNumTimeSamples() > 0 || a.HasAuthoredConnections())) {
-            *error = "static weight field " + field.GetString() +
+            *error = "static weight field " + field->GetString() +
                      " has time samples or connections on " +
                      weightPrimPath.GetString();
             return false;
         }
     }
     VtFloatArray values;
-    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:values"))) {
+    if (UsdAttribute a = prim.GetAttribute(_kGeoValues)) {
         a.Get(&values, time);
     }
-    if (representation == "constant") {
+    if (representation == _kGeoConstant) {
         if (!values.empty()) {
             *error = "constant weight must not author values on " +
                      weightPrimPath.GetString();
             return false;
         }
         weights->assign(count, defaultWeight);
-    } else if (representation == "dense") {
+    } else if (representation == _kGeoDense) {
         if (values.size() != count) {
             *error = "dense weight cardinality mismatch on " +
                      weightPrimPath.GetString();
@@ -653,9 +716,9 @@ RigExecRigEvaluator::_ResolveWeights(
             return false;
         }
         weights->assign(values.begin(), values.end());
-    } else if (representation == "sparse") {
+    } else if (representation == _kGeoSparse) {
         VtIntArray indices;
-        if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:indices"))) {
+        if (UsdAttribute a = prim.GetAttribute(_kGeoIndices)) {
             a.Get(&indices, time);
         }
         if (indices.size() != values.size()) {
@@ -688,13 +751,13 @@ RigExecRigEvaluator::_ResolveWeights(
 
     for (float w : *weights) {
         if (!std::isfinite(w) ||
-            (rangePolicy == "strict" && (w < 0.0f || w > 1.0f))) {
+            (rangePolicy == _kGeoStrict && (w < 0.0f || w > 1.0f))) {
             *error = "weight range violation on " +
                      weightPrimPath.GetString();
             return false;
         }
     }
-    if (rangePolicy == "clamp") {
+    if (rangePolicy == _kGeoClamp) {
         for (float &w : *weights) {
             w = std::min(std::max(w, 0.0f), 1.0f);
         }
@@ -743,7 +806,7 @@ RigExecRigEvaluator::_EvaluateChain(
         std::vector<float> envelope(points.size(), 1.0f);
         SdfPathVector weightObjects;
         if (const UsdRelationship rel =
-                prim.GetRelationship(TfToken("rigExec:weightObject"))) {
+                prim.GetRelationship(_kGeoWeightObject)) {
             rel.GetTargets(&weightObjects);
         }
         if (!weightObjects.empty()) {
@@ -759,7 +822,7 @@ RigExecRigEvaluator::_EvaluateChain(
             }
         } else {
             const float scalar = _ResolvedRead(
-                _resolvedInputs, prim, "inputs:defaultWeight", 1.0f, time);
+                _resolvedInputs, prim, _kGeoInputsDefaultWeight, 1.0f, time);
             if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
                 diagnostics->push_back(
                     "MoverFailed " + mover->moverPath.GetString() +
@@ -935,579 +998,6 @@ size_t
 RigExecRigEvaluator::GetBlendSampleCacheSize() const
 {
     return _blendSampleShapes.GetSize();
-}
-
-void
-RigExecRigEvaluator::_ApplySurfaceProjectors(RigExecRigPose *pose,
-                                             UsdTimeCode time) const
-{
-    for (const _SurfaceProjectorRecord &record : _surfaceProjectors) {
-        const SdfPath meshPath = record.target.GetPrimPath();
-        const UsdPrim mesh = _stage->GetPrimAtPath(meshPath);
-        if (!mesh) {
-            pose->diagnostics.push_back(
-                "SurfaceProjector " + record.path.GetString() +
-                ": no prim at " + meshPath.GetString());
-            continue;
-        }
-        VtVec3fArray base;
-        if (const UsdAttribute a = _stage->GetAttributeAtPath(record.target)) {
-            a.Get(&base, time);
-        }
-        // The POSED points, if a deformer produced any. A projector on an
-        // undeformed surface is not an error -- the delta is simply
-        // identity, which is what an unposed rig should publish.
-        VtVec3fArray posed = base;
-        const auto it = pose->movedProperties.find(record.target);
-        if (it != pose->movedProperties.end() &&
-            it->second.IsHolding<VtVec3fArray>()) {
-            posed = it->second.UncheckedGet<VtVec3fArray>();
-        }
-        VtIntArray counts, indices;
-        mesh.GetAttribute(TfToken("faceVertexCounts")).Get(&counts, time);
-        mesh.GetAttribute(TfToken("faceVertexIndices")).Get(&indices, time);
-        if (base.empty() || counts.empty() || posed.size() != base.size()) {
-            pose->diagnostics.push_back(
-                "SurfaceProjector " + record.path.GetString() +
-                ": surface has no usable points or topology");
-            continue;
-        }
-        const std::vector<int> faceCounts(counts.begin(), counts.end());
-        const std::vector<int> faceIndices(indices.begin(), indices.end());
-        const std::vector<GfVec3f> basePoints(base.begin(), base.end());
-        const std::vector<GfVec3f> posedPoints(posed.begin(), posed.end());
-
-        // The ray is cast at the BASE points, and what it finds is a
-        // MATERIAL point: a triangle and a place inside it. The posed
-        // points then say where that point went and which way the surface
-        // faces there. Re-casting at the posed surface would find where
-        // the deformed surface happens to cross the same fixed line, which
-        // is a different material point whenever the surface slides across
-        // the ray -- and the socket stretch slides the whole cornea up it.
-        // Read that way the iris centre's motion was invisible: the hit
-        // crept back along the ray and tilted, while the material under
-        // the projector had moved a third of an eye radius.
-        // The ray comes from the SOURCE frame when there is one -- the
-        // eye's bind joint -- expressed in the surface's own space. The
-        // authored rayOrigin/rayDirection are the fallback for a
-        // projector with no source.
-        //
-        // Not optional once the surface carries its points in asset
-        // space: an origin of (0,0,0) in object space is then the world
-        // origin, metres from the eyeball, and the ray misses entirely.
-        GfVec3d rayOrigin = record.rayOrigin;
-        GfVec3d rayDirection = record.rayDirection;
-        GfVec3d rayUp = record.rayUp;
-        const auto frameOf = [&](const std::map<SdfPath,
-                                                RigExecPointFrame> &frames,
-                                 const SdfPath &path, GfMatrix4d *out) {
-            const auto it = frames.find(path);
-            return it != frames.end() &&
-                   RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                         it->second.points, out);
-        };
-        if (!record.source.IsEmpty() && !record.sourceSpace.IsEmpty()) {
-            // THE RAY IN THE SOURCE'S SIBLING SPACE.
-            //
-            // The old route mapped the source's WORLD frame into the
-            // mesh's object space through UsdGeomXformCache. That cache
-            // reads the STAGE, and the eye mesh's stage transform is the
-            // identity -- the rig moves its points, not its xform -- so
-            // the ray origin came out as the bind's world position, 164
-            // units from a unit eyeball authored at the origin. It hit
-            // only because the direction happened to point back at the
-            // ball, and past about 20 degrees of head turn it stopped
-            // hitting at all: measured, the projector published no matrix
-            // for either eye at head ry 30, in BOTH projection modes.
-            //
-            // Measuring the source against a sibling space instead --
-            // eye_?_bind against eyeSocket_?_bind -- gives the eye's own
-            // motion with the head's taken out, which is the space the
-            // points are authored in. Head and face_upper then cancel
-            // exactly rather than being carried in and missing.
-            GfMatrix4d sourceRest(1.0), sourceFinal(1.0);
-            GfMatrix4d spaceRest(1.0), spaceFinal(1.0);
-            if (frameOf(pose->jointFramesBase, record.source, &sourceRest) &&
-                frameOf(pose->jointFramesFinal, record.source, &sourceFinal) &&
-                frameOf(pose->jointFramesBase, record.sourceSpace,
-                        &spaceRest) &&
-                frameOf(pose->jointFramesFinal, record.sourceSpace,
-                        &spaceFinal)) {
-                const GfMatrix4d restLocal =
-                    sourceRest * spaceRest.GetInverse();
-                const GfMatrix4d posedLocal =
-                    sourceFinal * spaceFinal.GetInverse();
-                // The source's motion within its space, applied to the
-                // authored rest ray. At rest this is the identity, so the
-                // ray is exactly rigExec:rayOrigin / rayDirection.
-                const GfMatrix4d motion =
-                    restLocal.GetInverse() * posedLocal;
-                rayOrigin = motion.Transform(record.rayOrigin);
-                rayDirection = motion.TransformDir(record.rayDirection);
-                rayUp = motion.TransformDir(record.rayUp);
-            }
-        } else if (!record.source.IsEmpty()) {
-            GfMatrix4d sourceFrame(1.0);
-            if (frameOf(pose->jointFramesFinal, record.source, &sourceFrame)) {
-                UsdGeomXformCache rayCache(time);
-                const GfMatrix4d toMesh =
-                    rayCache.GetLocalToWorldTransform(mesh).GetInverse();
-                const GfMatrix4d local = sourceFrame * toMesh;
-                rayOrigin = local.ExtractTranslation();
-                rayDirection = GfVec3d(local.GetRow3(2));
-                rayUp = GfVec3d(local.GetRow3(1));
-            }
-        }
-
-        // A RAY PER CONFIGURATION. The one above is the POSED ray: it
-        // comes from the source's final frame, so it travels with the
-        // head. The first cast, though, is against the BASE points, and
-        // those do not travel with anything -- so casting the posed ray
-        // at them walks the origin out of the rest surface as soon as the
-        // head turns far enough. Measured on the biped: at head ry 30 the
-        // origin sat at (5.369, 161.956, 1.379), 3.07 from a rest eyeball
-        // of radius 2.48, and the cast simply missed. Both eyes, every
-        // projection mode, and the projector published nothing at all.
-        //
-        // So the rest cast gets a REST ray, built the same way from the
-        // source's base frame. Each cast then meets the surface it is
-        // aimed at, and the head cancels because it moves both.
-        GfVec3d restRayOrigin = rayOrigin;
-        GfVec3d restRayDirection = rayDirection;
-        GfVec3d restRayUp = rayUp;
-        if (!record.source.IsEmpty() && record.sourceSpace.IsEmpty()) {
-            GfMatrix4d sourceBase(1.0);
-            if (frameOf(pose->jointFramesBase, record.source, &sourceBase)) {
-                UsdGeomXformCache rayCache(time);
-                const GfMatrix4d toMesh =
-                    rayCache.GetLocalToWorldTransform(mesh).GetInverse();
-                const GfMatrix4d local = sourceBase * toMesh;
-                restRayOrigin = local.ExtractTranslation();
-                restRayDirection = GfVec3d(local.GetRow3(2));
-                restRayUp = GfVec3d(local.GetRow3(1));
-            }
-        }
-
-        // AND THE MASTERS COME BACK OFF IT. The rest ray above is built
-        // from the source's BASE frame, and a base frame still composes
-        // through the masters' posed avars -- while the base POINTS it is
-        // about to be cast at are the mesh exactly as authored, which
-        // carry nothing. At the origin the two agree and the cast lands.
-        // Move Main forty units and the ray starts forty units away from
-        // the rest eyeball: measured at o(43.5628 164.3010 24.1881)
-        // against a ball of radius 2.48, cast=MISS, restFrame=FAILED, and
-        // the projector published NOTHING at all -- both eyes lost their
-        // iris the moment the character left the origin.
-        //
-        // The carry is rest-inverse-times-posed on whatever rigExec:space
-        // names, so a master sitting at its rest contributes identity and
-        // a rig that names no space is bit for bit what it was.
-        // The masters' uniform scale, taken off the rest ray below and
-        // put back on the shader matrix further down. 1.0 when the rig
-        // names no space or the masters stand at their rest.
-        double spaceScale = 1.0;
-        if (!record.space.IsEmpty()) {
-            // THE SPACE IS NORMALLY A CONTROL, AND CONTROLS ARE NOT JOINTS.
-            //
-            // This looked only in the joint frame maps, and a rig names the
-            // innermost TRS MASTER here -- /Biped/Rig/Main/Shot/Aux, a
-            // RigExecControl. The lookup missed every time, the correction
-            // never ran, and the failure was silent: deleting the
-            // relationship altogether changed nothing, which is how it was
-            // found. Measured on the biped, both eyes lost their iris the
-            // moment the character left the origin -- ray
-            // o(43.3842 166.3989 22.1251) against a rest eyeball at
-            // (-3.3828 164.3012 1.3808), cast=MISS, and the projector
-            // published no shader matrix at all.
-            //
-            // AND THE QUANTITY WAS THE WRONG ONE. base^-1 * final is the
-            // PRE- to POST-CONSTRAINT delta, not rest to pose. A master is
-            // not constrained, so that product is the identity and the
-            // correction was a no-op even where the lookup succeeded:
-            // pointing rigExec:space at a joint instead did not help, which
-            // is what ruled the lookup out as the whole story.
-            //
-            // The carry is the space's POSED frame, exactly as
-            // RigExecClusterInPointFrame takes it, and it carries that
-            // function's contract with it: a space standing at its rest
-            // must measure the identity. The biped's masters do, measured.
-            GfMatrix4d carry(1.0);
-            bool haveCarry =
-                frameOf(pose->jointFramesFinal, record.space, &carry);
-            if (!haveCarry) {
-                const auto it = pose->controlFrames.find(record.space);
-                haveCarry = it != pose->controlFrames.end() &&
-                            RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                                  it->second.points, &carry);
-            }
-            if (haveCarry) {
-                const GfMatrix4d back = carry.GetInverse();
-                restRayOrigin = back.Transform(restRayOrigin);
-                restRayDirection = back.TransformDir(restRayDirection);
-                restRayUp = back.TransformDir(restRayUp);
-                // THE MASTERS' SCALE LIVES HERE AND NOWHERE ELSE.
-                // A base frame already composes through the masters'
-                // posed avars -- this file says so a few lines up -- so
-                // the source's own rest-to-posed ratio sees the master
-                // scale in BOTH frames and cancels it. Measured: with
-                // only the source ratio, Head x2 scaled the projector
-                // correctly and Main x2 left it at 2.4829. The carry is
-                // the master's posed frame and measures identity at
-                // rest, so its scale is the missing factor and costs
-                // nothing when no master is scaled.
-                double carried = 0.0;
-                for (int i = 0; i < 3; ++i) {
-                    carried += GfVec3d(carry.GetRow3(i)).GetLength();
-                }
-                if (carried > 1e-9 && std::isfinite(carried)) {
-                    spaceScale = carried / 3.0;
-                }
-            } else {
-                pose->diagnostics.push_back(
-                    "SurfaceProjector " + record.path.GetString() +
-                    ": rigExec:space names " + record.space.GetString() +
-                    ", which is neither a joint nor a control frame; the "
-                    "rest ray keeps the masters and will miss once the rig "
-                    "leaves its rest");
-            }
-        }
-
-        // WHICH SURFACE THE POSED FRAME IS READ FROM. See
-        // rigExec:projectionMode in the schema.
-        //
-        //   material   one ray, cast at the base surface; the posed frame
-        //              is that same material point after deformation. The
-        //              projector then rides the skin, and the socket
-        //              stretch carries the iris with it.
-        //   reproject  the ray is cast AGAIN at the posed surface, so the
-        //              frame is wherever the look meets the deformed
-        //              eyeball now: the look aims the projector and the
-        //              result is shrink-wrapped onto the projection
-        //              sphere, which re-projects every frame rather than
-        //              following a material point.
-        TfToken projection("material");
-        if (const UsdPrim projector = _stage->GetPrimAtPath(record.path)) {
-            if (const UsdAttribute a = projector.GetAttribute(
-                    TfToken("rigExec:projectionMode"))) {
-                a.Get(&projection);
-            }
-        }
-
-        RigExecSurfaceHit hit;
-        GfMatrix4d restFrame(1.0), posedFrame(1.0);
-        bool ok = RigExecRaycastSurface(basePoints, faceCounts, faceIndices,
-                                        restRayOrigin, restRayDirection,
-                                        &hit) &&
-                  RigExecSurfaceFrameAtHit(basePoints, faceCounts,
-                                           faceIndices, hit, restRayUp,
-                                           &restFrame);
-        bool reprojected = false;
-        if (ok && projection == "reproject") {
-            // A second cast, against the deformed surface. The rest frame
-            // stays the first cast's: it is the projector's own placement,
-            // and re-deriving it per frame would move the thing the offset
-            // is quoted against.
-            RigExecSurfaceHit posedHit;
-            reprojected =
-                RigExecRaycastSurface(posedPoints, faceCounts, faceIndices,
-                                      rayOrigin, rayDirection, &posedHit) &&
-                RigExecSurfaceFrameAtHit(posedPoints, faceCounts,
-                                         faceIndices, posedHit, rayUp,
-                                         &posedFrame);
-            if (!reprojected) {
-                // THE MATERIAL POINT IS THE FALLBACK, not nothing.
-                //
-                // The ray is built from the eye bind, and the bind does
-                // not follow the head wire, so pushing the wire far
-                // enough walks the deformed eyeball out from under the
-                // ray: measured on the biped, M_HeadwireMid tx = 2.5 is
-                // the last value that re-casts and tx = 3 misses. Until
-                // then the drift is 1.4-2.2% of the ball's radius.
-                //
-                // Dropping the projector there took BOTH irises off the
-                // face at once -- a hard cliff mid-drag, with the
-                // material answer sitting right there and no worse than
-                // the frame before it. So the miss degrades to the
-                // material point and says so, rather than publishing
-                // nothing.
-                ok = RigExecSurfaceFrameAtHit(posedPoints, faceCounts,
-                                              faceIndices, hit, rayUp,
-                                              &posedFrame);
-                if (ok) {
-                    pose->diagnostics.push_back(
-                        "SurfaceProjector " + record.path.GetString() +
-                        ": the re-cast missed the deformed surface; "
-                        "falling back to the material point");
-                }
-            }
-        } else if (ok) {
-            ok = RigExecSurfaceFrameAtHit(posedPoints, faceCounts,
-                                          faceIndices, hit, rayUp,
-                                          &posedFrame);
-        }
-        if (!ok) {
-            // Which step failed, and the ray it failed with. The single
-            // message covered three different faults -- no hit, no rest
-            // frame, no posed frame -- and they need different fixes.
-            RigExecSurfaceHit probe;
-            const bool castHit =
-                RigExecRaycastSurface(basePoints, faceCounts, faceIndices,
-                                      restRayOrigin, restRayDirection,
-                                      &probe);
-            // The re-cast is a SEPARATE cast at the posed surface, and
-            // reporting only the rest one said "cast=hit" while the
-            // failure was the other cast missing entirely.
-            RigExecSurfaceHit posedProbe;
-            const bool posedCast =
-                projection != "reproject" ||
-                RigExecRaycastSurface(posedPoints, faceCounts, faceIndices,
-                                      rayOrigin, rayDirection, &posedProbe);
-            GfMatrix4d scratch(1.0);
-            const bool restOk =
-                castHit && RigExecSurfaceFrameAtHit(basePoints, faceCounts,
-                                                    faceIndices, probe,
-                                                    rayUp, &scratch);
-            const bool posedOk =
-                castHit && RigExecSurfaceFrameAtHit(posedPoints, faceCounts,
-                                                    faceIndices, probe,
-                                                    rayUp, &scratch);
-            pose->diagnostics.push_back(
-                "SurfaceProjector " + record.path.GetString() +
-                ": ray o(" + TfStringPrintf("%.4f %.4f %.4f", rayOrigin[0],
-                                            rayOrigin[1], rayOrigin[2]) +
-                ") d(" + TfStringPrintf("%.4f %.4f %.4f", rayDirection[0],
-                                        rayDirection[1], rayDirection[2]) +
-                ") up(" + TfStringPrintf("%.4f %.4f %.4f", rayUp[0],
-                                         rayUp[1], rayUp[2]) +
-                ") cast=" + (castHit ? "hit" : "MISS") +
-                " recast=" + (posedCast ? "hit" : "MISS") +
-                " restFrame=" + (restOk ? "ok" : "FAILED") +
-                " posedFrame=" + (posedOk ? "ok" : "FAILED"));
-            continue;
-        }
-
-        // How the material at the hit MOVED: the rigid motion that carries
-        // the rest frame onto the posed frame, in the mesh's object space
-        // (row vectors, so rest * delta == posed). The projector keeps its
-        // own placement and takes only this, exactly as a parent constraint
-        // with an offset does -- the projector does not sit at the hit.
-        const GfMatrix4d delta = restFrame.GetInverse() * posedFrame;
-
-        // THE HIT FRAME IS THE PROJECTOR. The eye bind supplies only the
-        // ray; where that ray meets the DEFORMED surface, and the surface
-        // normal there, is the frame -- and driving the projector with it
-        // is what translates and rotates it to keep the projection
-        // spherical while the eyeball itself stretches.
-        //
-        // delta is that frame's motion from the rest surface to the posed
-        // one, so a projector placed at its rest frame and carried by
-        // delta stays on the surface, turns with it, and keeps the iris
-        // round. The anchor the bind joint used to supply is gone: the
-        // ray already carries the look-at, because rotating the bind
-        // sweeps the hit around the ball.
-        // TWO CONTRIBUTIONS, and they are not the same thing.
-        //
-        // delta is DEFORMATION only. The ray is cast once and the frame
-        // evaluated on the rest and posed surfaces, so it follows one
-        // material point and the look cancels straight out of it -- which
-        // is why dropping the anchor left the projector deaf to a look-at
-        // even though the ray had turned.
-        //
-        // The look is the source's own rotation about the eye centre, and
-        // it has to be put back beside the deformation. The projector then
-        // turns to face where the eye looks AND rides the surface where
-        // that lands.
-        // THE LOOK IS ONLY SEPARATE IN MATERIAL MODE.
-        //
-        // material casts once and follows one material point, so the
-        // source's own rotation cancels out of delta and has to be put
-        // back beside it. reproject casts again with the POSED ray, so
-        // delta already carries both the look and the head -- and
-        // multiplying by look as well counted them twice. Measured before
-        // this: a 30-degree head turn moved the bind 3.07 and the
-        // projector 5.94, and a socket stretch of 2.00 moved it 4.00.
-        GfMatrix4d look(1.0);
-        if (!record.source.IsEmpty() && projection != "reproject") {
-            GfMatrix4d sourceRest(1.0), sourcePosed(1.0);
-            if (frameOf(pose->jointFramesBase, record.source, &sourceRest) &&
-                frameOf(pose->jointFramesFinal, record.source,
-                        &sourcePosed)) {
-                if (!record.sourceSpace.IsEmpty()) {
-                    // Measured in the SAME sibling space as the ray. In
-                    // world the look carries the head's rotation, so
-                    // turning the head swung the iris as though the eye
-                    // had looked -- which is the other half of what
-                    // "moving the head control breaks it" looks like.
-                    GfMatrix4d spaceRest(1.0), spacePosed(1.0);
-                    if (frameOf(pose->jointFramesBase, record.sourceSpace,
-                                &spaceRest) &&
-                        frameOf(pose->jointFramesFinal, record.sourceSpace,
-                                &spacePosed)) {
-                        sourceRest = sourceRest * spaceRest.GetInverse();
-                        sourcePosed = sourcePosed * spacePosed.GetInverse();
-                    }
-                }
-                look = sourceRest.GetInverse() * sourcePosed;
-            }
-        }
-        // THE HIT FRAME IS ORTHONORMAL, SO delta CANNOT CARRY A SCALE.
-        //
-        // RigExecSurfaceFrameAtHit normalizes side, up and normal -- it
-        // has to, the normal is a direction -- so restFrame^-1 * posedFrame
-        // is a RIGID motion however the surface was resized. Scale the rig
-        // and the eyeball grows while the projector does not, and worse:
-        // the hit's outward motion is recorded as pure translation, which
-        // pushes the projector off the ball by exactly one radius.
-        // Measured 2026-09-29 on l_eye_geo, before this:
-        //
-        //     case                ball r   projector   off-centre
-        //     rest                2.4846     2.4829       0.0051
-        //     Main x2             4.9692     2.4829       2.4904
-        //     Main x2 + Head x2   9.9386     2.4829       7.4614
-        //
-        // The scale is taken from the SOURCE's own world frame and not
-        // from the surface. The surface's local scale would also pick up
-        // every deformer that squashes the ball -- the socket stretch and
-        // the blink both do -- and start resizing the iris on a blink,
-        // which is a behaviour change nobody asked for. The source's world
-        // frame moves only with the rig: the head controls, the TRS
-        // masters, and their product. It is exactly "the scale of the head
-        // and the world" and nothing else.
-        //
-        // Mean row length, so a non-uniform scale is taken as its uniform
-        // part rather than refused; the biped only ever scales uniformly
-        // here, and a projector is a sphere's worth of placement anyway.
-        double sourceScale = 1.0;
-        if (!record.source.IsEmpty()) {
-            GfMatrix4d worldRest(1.0), worldPosed(1.0);
-            if (frameOf(pose->jointFramesBase, record.source, &worldRest) &&
-                frameOf(pose->jointFramesFinal, record.source, &worldPosed)) {
-                double rest = 0.0, posed = 0.0;
-                for (int i = 0; i < 3; ++i) {
-                    rest += GfVec3d(worldRest.GetRow3(i)).GetLength();
-                    posed += GfVec3d(worldPosed.GetRow3(i)).GetLength();
-                }
-                if (rest > 1e-9 && std::isfinite(rest) &&
-                    std::isfinite(posed)) {
-                    sourceScale = posed / rest;
-                }
-            }
-        }
-        // The head's scale and the world's are independent and multiply:
-        // Main x2 with Head x2 is a x4 eyeball, and the projector has to
-        // be a x4 projector.
-        sourceScale *= spaceScale;
-        GfMatrix4d carried = delta;
-        if (std::abs(sourceScale - 1.0) > 1e-9 &&
-            std::isfinite(sourceScale) && sourceScale > 0.0) {
-            // Anchored at the rest hit, which is restFrame's own origin:
-            // the material point must still map to where it ended up, and
-            // only the size around it changes. p' = p (s L) + t with
-            // t = t0 + (1 - s) (p_rest L), so a pure scale about any
-            // centre comes out as that same scale and no stray offset.
-            const GfVec3d restHit(restFrame.ExtractTranslation());
-            GfMatrix4d linear = delta;
-            linear.SetTranslateOnly(GfVec3d(0));
-            const GfVec3d mapped = linear.TransformDir(restHit);
-            for (int i = 0; i < 3; ++i) {
-                carried.SetRow3(i, GfVec3d(delta.GetRow3(i)) * sourceScale);
-            }
-            carried.SetTranslateOnly(GfVec3d(delta.ExtractTranslation())
-                                     + (1.0 - sourceScale) * mapped);
-        }
-        if (!record.shaderPrimvar.IsEmpty()) {
-            pose->shaderMatrices[meshPath][record.shaderPrimvar] =
-                record.shaderOffset * look * carried;
-        }
-        // The animator's shader dials, packed into one matrix primvar.
-        //
-        // Read off the stage here rather than cached on the record: this
-        // runs twice per frame on a biped and reads sixteen scalars at
-        // most, which is nothing beside the pose it rides on, and the
-        // alternative was another field on RigExecRigPose -- which is a
-        // struct that, for reasons not yet understood, breaks four
-        // constraint tests when anything is added to it.
-        if (const UsdPrim projector = _stage->GetPrimAtPath(record.path)) {
-            TfToken dialPrimvar;
-            if (const UsdAttribute a = projector.GetAttribute(
-                    TfToken("rigExec:shaderDialPrimvar"))) {
-                a.Get(&dialPrimvar);
-            }
-            if (!dialPrimvar.IsEmpty()) {
-                SdfPathVector dials;
-                if (const UsdRelationship rel = projector.GetRelationship(
-                        TfToken("rigExec:shaderDialSources"))) {
-                    rel.GetTargets(&dials);
-                }
-                GfMatrix4d packed(0.0);
-                const size_t slots =
-                    std::min<size_t>(dials.size(), 16);
-                for (size_t i = 0; i < slots; ++i) {
-                    double value = 0.0;
-                    // A held drag (an interactive override) wins, then a
-                    // mover's revision of the dial, then the authored
-                    // value: a slider previews without authoring.
-                    const RigExecValueOverride *held = nullptr;
-                    for (const RigExecValueOverride &o :
-                         _interactiveOverrides) {
-                        if (o.prim == dials[i].GetPrimPath() &&
-                            o.attribute == dials[i].GetNameToken()) {
-                            held = &o;
-                        }
-                    }
-                    const auto moved = pose->movedProperties.find(dials[i]);
-                    if (held && held->value.IsHolding<double>()) {
-                        value = held->value.UncheckedGet<double>();
-                    } else if (held && held->value.IsHolding<float>()) {
-                        value = held->value.UncheckedGet<float>();
-                    } else if (moved != pose->movedProperties.end() &&
-                        moved->second.IsHolding<double>()) {
-                        value = moved->second.UncheckedGet<double>();
-                    } else if (const UsdAttribute attr =
-                                   _stage->GetAttributeAtPath(dials[i])) {
-                        attr.Get(&value, time);
-                    }
-                    if (std::isfinite(value)) {
-                        packed[int(i / 4)][int(i % 4)] = value;
-                    }
-                }
-                pose->shaderMatrices[meshPath][dialPrimvar] = packed;
-            }
-        }
-
-        // The bone, so anything parented to it rides along. The surface
-        // it rides is moved by its own deformers, so nothing here touches
-        // the mesh: rewriting its points would fight the skin that moves
-        // it, which is what the old arrangement did when the transform
-        // was the projector rather than the placement.
-        if (!record.source.IsEmpty()) {
-            const auto boneBase = pose->jointFramesBase.find(record.target);
-            const auto bonePosed = pose->jointFramesFinal.find(record.target);
-            GfMatrix4d base(1.0), posedBone(1.0);
-            if (boneBase != pose->jointFramesBase.end() &&
-                bonePosed != pose->jointFramesFinal.end() &&
-                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                      boneBase->second.points, &base) &&
-                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                      bonePosed->second.points, &posedBone)) {
-                pose->providerBaseXforms[record.target] = base;
-                pose->providerXforms[record.target] =
-                    posedBone * look * delta;
-            }
-        }
-
-    }
-}
-
-RigExecRigPose
-RigExecRigEvaluator::_WithSurfaceProjectors(RigExecRigPose pose,
-                                            UsdTimeCode time)
-{
-    if (!_surfaceProjectors.empty()) {
-        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SurfaceProjectors", "publish");
-        _ApplySurfaceProjectors(&pose, time);
-    }
-    return pose;
 }
 
 } // namespace rigExec

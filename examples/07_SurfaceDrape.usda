@@ -46,7 +46,6 @@ def Xform "DrapeAsset"
                     uniform token rigExec:mode = "project"
                     rel rigExec:moves = </DrapeAsset/Geom/ProjectSticker.points>
                     rel rigExec:surface = </DrapeAsset/Geom/Ground>
-                    uniform token rigExec:surfaceReadPhase = "base"
                     uniform asset ui:nodegraph:node:icon = @../icons/surface_mover.png@
                 }
 
@@ -57,7 +56,6 @@ def Xform "DrapeAsset"
                     uniform token rigExec:mode = "attach"
                     rel rigExec:moves = </DrapeAsset/Geom/AttachSticker.points>
                     rel rigExec:surface = </DrapeAsset/Geom/Ground>
-                    uniform token rigExec:surfaceReadPhase = "base"
                     uniform asset ui:nodegraph:node:icon = @../icons/surface_mover.png@
                 }
             }

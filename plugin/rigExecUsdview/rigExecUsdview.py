@@ -110,6 +110,11 @@ def _LoadRigExecImaging():
             ctypes.c_longlong)
     except AttributeError:
         pass
+    try:
+        lib.RigExecImaging_GetWarmingProgressCount.argtypes = []
+        lib.RigExecImaging_GetWarmingProgressCount.restype = ctypes.c_longlong
+    except AttributeError:
+        pass
     lib.RigExecImaging_Deactivate.argtypes = []
     lib.RigExecImaging_Deactivate.restype = None
     try:
@@ -165,10 +170,11 @@ def _LoadRigExecImaging():
 #   Viewport            10: Viewport Tools 10, View Cube 20, View Axis 30
 #   General Editors     20: Avar Editor 10, Layer Stack 15,
 #                           Layer Opinions 20, Execution Stack 30,
-#                           Profiler 40
+#                           Deformer Toggles 35, Profiler 40,
+#                           Cache Strip 50
 #   Animation Editors   30: Graph Editor 10, Shape Editor 20,
 #                           Control Picker 30, TouchPose 40,
-#                           Volume Weight Editor 50, Curvenet Authoring 60
+#                           Volume Weight Editor 50
 _SUBMENU_RANKS = {"Viewport": 10, "General Editors": 20,
                   "Animation Editors": 30}
 _MENU_RANK = "rigExecMenuRank"
@@ -189,6 +195,10 @@ _WARMING_COMMIT_DELAY_MS = 500
 # batched state query plus at most one budgeted OnIdle sweep, and the
 # driver sleeps as soon as every frame reads cached.
 _WARMING_IDLE_TICK_MS = 120
+
+# Native sampling can defer a declined frame before choosing its live
+# evaluation fallback. Allow that retry window before parking the driver.
+_WARMING_STALL_TICKS = 4
 
 
 def _PlaceByRank(qMenu, action, rank):
@@ -268,6 +278,7 @@ class RigExecUsdviewContainer(PluginContainer):
         self._warmingFlushArmed = False
         self._warmingTimer = None
         self._warmingIdleTimer = None
+        self._cacheDisplayTimer = None
         self._warmingIdleLastStates = None
         self._warmRangeFrames = []
         self._stripPanel = None
@@ -309,13 +320,6 @@ class RigExecUsdviewContainer(PluginContainer):
             "RigExecUsdviewContainer.volumeWeights",
             "Volume Weight Editor",
             lambda api: self._OpenVolumeWeightPanel(api))
-
-        # The curvenet authoring window. Same lazy-import reasoning as the
-        # volume weight panel: its module pulls in Qt.
-        self._curvenets = plugRegistry.registerCommandPlugin(
-            "RigExecUsdviewContainer.curvenets",
-            "Curvenet Authoring",
-            lambda api: self._OpenCurvenetPanel(api))
 
         # The conventional animation graph editor. Same lazy-import
         # reasoning as the panels above: graphEditorUI pulls in Qt.
@@ -449,8 +453,6 @@ class RigExecUsdviewContainer(PluginContainer):
                          self._picker, 30)
         AddToRigExecMenu(plugUIBuilder, "Animation Editors",
                          self._volumeWeights, 50)
-        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
-                         self._curvenets, 60)
         self._InstallOutlinerArcMenu()
 
     def _InstallOutlinerArcMenu(self):
@@ -571,6 +573,7 @@ class RigExecUsdviewContainer(PluginContainer):
             Tf.Warn("rigExecUsdview: SetWeightOverlay(%s) failed (%d)"
                     % (primPath, status))
             return False
+        self._WakeWarmingDriver()
         return True
 
     def _OpenVolumeWeightPanel(self, usdviewApi):
@@ -591,17 +594,6 @@ class RigExecUsdviewContainer(PluginContainer):
             setWeightOverlay=self._SetWeightOverlay,
             hasWeightOverlay=self._HasWeightOverlay,
             undoStack=self._UndoStack())
-
-    def _OpenCurvenetPanel(self, usdviewApi):
-        # Same lazy sibling import as _OpenVolumeWeightPanel.
-        try:
-            import curvenetUI
-        except ImportError:
-            sys.path.insert(
-                0, os.path.dirname(os.path.abspath(__file__)))
-            import curvenetUI
-
-        return curvenetUI.OpenCurvenetPanel(usdviewApi, self._UndoStack())
 
     def _OpenLayerOpinionsPanel(self, usdviewApi):
         # Same lazy sibling import as _OpenVolumeWeightPanel. Shares the
@@ -681,6 +673,43 @@ class RigExecUsdviewContainer(PluginContainer):
 
         return deformerTogglesUI.OpenDeformerTogglesPanel(
             usdviewApi or self._api)
+
+    def _OpenCacheStripPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenProfilerPanel: cacheStripUI
+        # pulls in Qt, and this container must stay importable headless.
+        # cacheStripPanel beside it does not, which is what lets the
+        # headless tests drive the same poll/skip/action logic.
+        try:
+            import cacheStripUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import cacheStripUI
+
+        panel = cacheStripUI.OpenCacheStripPanel(
+            usdviewApi or self._api, self)
+        self._stripPanel = panel
+        return panel
+
+    def StripLibrary(self):
+        """
+        This session's imaging handle, or None before the library loads.
+
+        A handle, not the raw library: it answers to the same
+        RigExecImaging_* names (cacheStripModel looks them up by name) and
+        routes every one of them to THIS session's stage.
+        """
+        return self._Imaging()
+
+    def StripRigs(self):
+        """Active rig paths as strings, for the strip chooser."""
+        return [str(path) for path in self._rigPaths]
+
+    def StripWakeDriver(self):
+        """Restart the recurring driver after a strip action."""
+        # Older native libraries clear the configured range with the cache.
+        self._PushWarmRangeFromStage()
+        self._WakeWarmingDriver()
 
     def _OpenExecStackPanel(self, usdviewApi=None):
         # Same lazy sibling import as _OpenVolumeWeightPanel: execStackUI
@@ -841,7 +870,11 @@ class RigExecUsdviewContainer(PluginContainer):
                 entry = self._Entry("RigExecImaging_BeginPreview")
                 if entry is None:
                     return -1
-                return entry(packedPaths.encode("utf-8"))
+                result = entry(packedPaths.encode("utf-8"))
+                if result >= 0:
+                    container._previewWarmingPaused = True
+                    container._SleepWarmingDriver()
+                return result
 
             def Update(self, values):
                 entry = self._Entry("RigExecImaging_UpdatePreview")
@@ -860,7 +893,14 @@ class RigExecUsdviewContainer(PluginContainer):
                     entry = self._Entry("RigExecImaging_EndPreview")
                 if entry is None:
                     return False
-                return entry() == 0
+                ended = entry() == 0
+                if ended:
+                    container._previewWarmingPaused = False
+                    if getattr(container, "_warmingCommitPending", False):
+                        container._ScheduleWarmingFlush()
+                    else:
+                        container._WakeWarmingDriver()
+                return ended
 
         return _Sink()
 
@@ -1094,7 +1134,8 @@ class RigExecUsdviewContainer(PluginContainer):
         except Exception:
             pass
         try:
-            for _name in ("_warmingTimer", "_warmingIdleTimer"):
+            for _name in ("_warmingTimer", "_warmingIdleTimer",
+                          "_cacheDisplayTimer"):
                 timer = getattr(self, _name, None)
                 if timer is not None:
                     timer.stop()
@@ -1195,7 +1236,12 @@ class RigExecUsdviewContainer(PluginContainer):
         # synchronous sampling burst off the gesture (see
         # _WARMING_COMMIT_DELAY_MS).
         self._warmingCommitPending = True
+        # An already-running idle timer must observe the same debounce as
+        # the commit timer; otherwise a drag still samples its changing rig
+        # every idle tick before the delayed commit has a chance to fire.
+        self._SleepWarmingDriver()
         self._ScheduleWarmingFlush()
+        self._ScheduleCacheDisplayRefresh()
         rigPaths = self._FindRigPaths(stage)
         if not (rigPaths != self._rigPaths or
                 (rigPaths and not self._active)):
@@ -1250,6 +1296,7 @@ class RigExecUsdviewContainer(PluginContainer):
             return
         self._activating = True
         try:
+            self._ResetWarmingDriver()
             self._active = False
             self._rigPaths = []
             # A scene-index store outlives a stage replacement.  Clear the old
@@ -1306,6 +1353,7 @@ class RigExecUsdviewContainer(PluginContainer):
                 # it. A later edit notice retries the compile.
         finally:
             self._activating = False
+            self._NotifyStripTick(False)
 
     def _ScheduleWarmingFlush(self):
         # Coalesced like the pending flag, and deferred past the gesture.
@@ -1337,6 +1385,64 @@ class RigExecUsdviewContainer(PluginContainer):
         except Exception:
             self._warmingFlushArmed = False
 
+    def _ResetWarmingDriver(self):
+        """Discard the previous activation's delayed work and display."""
+        self._SleepWarmingDriver()
+        timer = getattr(self, "_warmingTimer", None)
+        if timer is not None:
+            timer.stop()
+        displayTimer = getattr(self, "_cacheDisplayTimer", None)
+        if displayTimer is not None:
+            displayTimer.stop()
+        self._warmingCommitPending = False
+        self._warmingFlushArmed = False
+        self._warmRangeFrames = []
+        self._previewWarmingPaused = False
+        self._ClearTimelineOverlay()
+
+    def _ScheduleCacheDisplayRefresh(self):
+        # The native notice handlers retire entries after this listener.
+        # Refresh on the next Qt turn, independently of the warming debounce,
+        # so a sustained edit displays dirty frames while warming is paused.
+        try:
+            from pxr.Usdviewq.qt import QtCore
+            timer = getattr(self, "_cacheDisplayTimer", None)
+            if timer is None:
+                timer = QtCore.QTimer()
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._RefreshCacheDisplay)
+                self._cacheDisplayTimer = timer
+            if not timer.isActive():
+                timer.start(0)
+        except Exception:
+            pass
+
+    def _RefreshCacheDisplay(self):
+        # Display only: sampling and warming wait for _FlushWarmingCommit.
+        if not (self._active and self._lib):
+            return
+        panel = getattr(self, "_stripPanel", None)
+        if panel is not None:
+            try:
+                panel.PollAfterEdit()
+            except Exception:
+                self._stripPanel = None
+        frames = self._WarmRangeFrames(getattr(self, "_cachedStage", None))
+        if frames != getattr(self, "_warmRangeFrames", None):
+            # The delayed commit will push a changed range to native warming.
+            # Until then, old frame positions must not retain green cells.
+            self._ClearTimelineOverlay()
+            return
+        model = self._CacheStripModel()
+        states = []
+        for rigPath in self._rigPaths:
+            one = model.FetchFrameStates(self._Imaging(), str(rigPath), frames)
+            if one is None:
+                self._ClearTimelineOverlay()
+                return
+            states.extend(one)
+        self._UpdateTimelineOverlay(states)
+
     def _FlushWarmingCommit(self):
         # The release path: consume a pending edit-commit at the held
         # playhead. Fires from the idle timer, so the synchronous sampling
@@ -1347,6 +1453,8 @@ class RigExecUsdviewContainer(PluginContainer):
         if not self._warmingCommitPending:
             return
         if not (self._active and self._lib):
+            return
+        if getattr(self, "_previewWarmingPaused", False):
             return
         self._warmingCommitPending = False
         try:
@@ -1392,15 +1500,13 @@ class RigExecUsdviewContainer(PluginContainer):
     def _PushWarmRangeFromStage(self):
         # SetWarmRange from the stage range on activation, so the
         # full-range cursor visits the timeline instead of the default
-        # playhead-relative sweep. A stage with no whole frames, or an
-        # older library without the binding, leaves the default sweep.
+        # playhead-relative sweep. Empty ranges must also be pushed to
+        # replace any range left over from earlier stage metadata.
         stage = self._cachedStage
         if stage is None or self._lib is None:
             return
         frames = self._WarmRangeFrames(stage)
         self._warmRangeFrames = frames
-        if not frames:
-            return
         try:
             model = self._CacheStripModel()
         except Exception:
@@ -1442,6 +1548,9 @@ class RigExecUsdviewContainer(PluginContainer):
         if not (self._active and self._lib):
             return
         self._RepushWarmRangeIfChanged()
+        if (getattr(self, "_warmingCommitPending", False)
+                or getattr(self, "_previewWarmingPaused", False)):
+            return
         if not self._HasFrameStates():
             return
         try:
@@ -1456,6 +1565,8 @@ class RigExecUsdviewContainer(PluginContainer):
                 timer.timeout.connect(self._TickWarmingDriver)
                 self._warmingIdleTimer = timer
             self._warmingIdleLastStates = None
+            self._warmingIdleLastProgress = None
+            self._warmingIdleStallTicks = 0
             if not timer.isActive():
                 timer.start(_WARMING_IDLE_TICK_MS)
         except Exception:
@@ -1469,6 +1580,8 @@ class RigExecUsdviewContainer(PluginContainer):
         except Exception:
             pass
         self._warmingIdleLastStates = None
+        self._warmingIdleLastProgress = None
+        self._warmingIdleStallTicks = 0
 
     def _NotifyStripTick(self, mayHaveEnqueued, states=None):
         # Forward one recurring tick to the open strip panel, with
@@ -1536,15 +1649,21 @@ class RigExecUsdviewContainer(PluginContainer):
     def _TickWarmingDriver(self):
         # One recurring tick at a held playhead: query every rig's
         # states over the warm range and idle-sweep while any frame
-        # is unwarm, else sleep until the next wake. Sleeps too when a
-        # tick changes nothing with nothing in flight -- un-warmable
-        # frames (refusals, D7 rigs) read Uncached forever, and
-        # ticking OnIdle at them would spin the timer with no work to
-        # do. The next SetTime, edit, or range change wakes it again.
+        # is unwarm, else sleep until the next wake. Several unchanged
+        # ticks with nothing in flight allow native sampling retries and
+        # its live fallback before parking uncacheable work.
         if not (self._active and self._lib):
             self._SleepWarmingDriver()
             self._ClearTimelineOverlay()
             self._NotifyStripTick(False)
+            return
+        if (getattr(self, "_warmingCommitPending", False)
+                or getattr(self, "_previewWarmingPaused", False)):
+            self._SleepWarmingDriver()
+            return
+        if self._IsPlaying():
+            # Keep the timer armed: RootDataModel has no playingChanged
+            # signal, so the next idle tick resumes after playback stops.
             return
         # A range edit that lands mid-warm re-centers the sweep from
         # here, so the tick below queries the timeline the stage has,
@@ -1575,11 +1694,22 @@ class RigExecUsdviewContainer(PluginContainer):
             self._NotifyStripTick(False, states)
             return
         last = getattr(self, "_warmingIdleLastStates", None)
-        if last == states and not model.AnyWarming(states):
-            self._SleepWarmingDriver()
-            self._NotifyStripTick(False, states)
-            return
+        progressEntry = getattr(self._Imaging(),
+                               "RigExecImaging_GetWarmingProgressCount", None)
+        progress = int(progressEntry()) if progressEntry is not None else None
+        lastProgress = getattr(self, "_warmingIdleLastProgress", None)
+        if (last == states and lastProgress == progress
+                and not model.AnyWarming(states)):
+            self._warmingIdleStallTicks = (
+                getattr(self, "_warmingIdleStallTicks", 0) + 1)
+            if self._warmingIdleStallTicks >= _WARMING_STALL_TICKS:
+                self._SleepWarmingDriver()
+                self._NotifyStripTick(False, states)
+                return
+        else:
+            self._warmingIdleStallTicks = 0
         self._warmingIdleLastStates = states
+        self._warmingIdleLastProgress = progress
         try:
             self._Imaging().OnIdle()
         except AttributeError:
@@ -1602,6 +1732,11 @@ class RigExecUsdviewContainer(PluginContainer):
         except Exception:
             return False
 
+    def _IsPlaying(self):
+        api = getattr(self, "_api", None)
+        return bool(getattr(getattr(api, "dataModel", None),
+                            "playing", False))
+
     def _OnFrameChanged(self, frame):
         # The SIGNAL's frame, never dataModel.currentFrame -- see
         # _FrameValue. Reading the property here published the previous
@@ -1614,6 +1749,8 @@ class RigExecUsdviewContainer(PluginContainer):
             return
         imaging = self._Imaging()
         imaging.SetTime(self._FrameValue(frame))
+        if getattr(self, "_previewWarmingPaused", False):
+            return
         # Warming, from the frame loop: an edit since the last tick commits
         # (neighbors plus sweep re-center on the playhead), otherwise the
         # tick is an idle sweep -- unless the recurring driver is already
@@ -1627,7 +1764,7 @@ class RigExecUsdviewContainer(PluginContainer):
             if self._warmingCommitPending:
                 self._warmingCommitPending = False
                 imaging.OnEditCommitted()
-            elif not self._WarmingDriverTicking():
+            elif not self._WarmingDriverTicking() and not self._IsPlaying():
                 imaging.OnIdle()
         except AttributeError:
             pass

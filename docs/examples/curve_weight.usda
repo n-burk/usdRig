@@ -235,7 +235,6 @@ def Xform "CurveWeightAsset"
                 float inputs:scaleY = 1
                 float inputs:scaleZ = 1
                 uniform token rigExec:falloffProfile = "smooth"
-                uniform token rigExec:samplePhase = "reference"
                 uniform token rigExec:representation = "dense"
                 uniform token rigExec:rangePolicy = "clamp"
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
@@ -256,8 +255,9 @@ def Xform "CurveWeightAsset"
                 )
                 {
                     rel rigExec:moves = </CurveWeightAsset/Geom/Sheet.points>
-                    rel rigExec:transform = </CurveWeightAsset/Rig/Joints/Jnt>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </CurveWeightAsset/Rig/Joints/Jnt> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </CurveWeightAsset/Rig/Weights/Tube>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

@@ -110,7 +110,8 @@ struct RigExecPublishedPrim {
     GfMatrix4d xformBase{1.0};
 
     /// Constant matrix primvars the rig computed for this prim's shader.
-    /// See RigExecRigPose::shaderMatrices for why a primvar.
+    /// Matrix-valued `primvars:<name>` the rig moved on this prim, by
+    /// name: a shader's only per-evaluation channel into Storm.
     std::map<TfToken, GfMatrix4d> shaderMatrices;
 
     bool hasPoints = false;
@@ -232,11 +233,6 @@ struct RigExecPublishedPrim {
     /// joint or a control, never two of them.
     bool hasVolumeGuides = false;
     std::vector<RigExecVolumeGuideElement> volumeGuides;
-    /// Curvenet guides reuse the self-describing geometry payload, anchored
-    /// to their native Points prim rather than the character asset. Empty
-    /// retains the asset-space convention used by influence volumes.
-    SdfPath volumeGuideAnchor;
-    GfMatrix4d volumeGuideAnchorToAsset{1.0};
 };
 
 /// One complete immutable generation (spec §8.2: consumers see complete
@@ -577,8 +573,6 @@ private:
         // for the identical consequence.
         if (after.hasVolumeGuides &&
             (before->volumeGuides != after.volumeGuides ||
-             before->volumeGuideAnchor != after.volumeGuideAnchor ||
-             before->volumeGuideAnchorToAsset != after.volumeGuideAnchorToAsset ||
              before->guidePurpose != after.guidePurpose || styleChanged)) {
             changes |= RigExecChangeGuides;
         }

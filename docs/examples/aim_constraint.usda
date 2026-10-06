@@ -166,8 +166,9 @@ def Xform "AimAsset"
                 )
                 {
                     rel rigExec:moves = </AimAsset/Geom/EyeL.points>
-                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeL>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeL> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </AimAsset/Rig/Weights/EyeLW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -177,8 +178,9 @@ def Xform "AimAsset"
                 )
                 {
                     rel rigExec:moves = </AimAsset/Geom/PupilL.points>
-                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeL>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeL> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </AimAsset/Rig/Weights/PupilLW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -188,8 +190,9 @@ def Xform "AimAsset"
                 )
                 {
                     rel rigExec:moves = </AimAsset/Geom/EyeR.points>
-                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeR>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeR> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </AimAsset/Rig/Weights/EyeRW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }
@@ -199,8 +202,9 @@ def Xform "AimAsset"
                 )
                 {
                     rel rigExec:moves = </AimAsset/Geom/PupilR.points>
-                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeR>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </AimAsset/Rig/Joints/EyeR> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </AimAsset/Rig/Weights/PupilRW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

@@ -106,8 +106,9 @@ def Xform "ScaleAsset"
                 )
                 {
                     rel rigExec:moves = </ScaleAsset/Geom/Card.points>
-                    rel rigExec:transform = </ScaleAsset/Rig/Joints/Card>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </ScaleAsset/Rig/Joints/Card> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </ScaleAsset/Rig/Weights/CardW>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

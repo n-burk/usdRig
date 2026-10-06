@@ -86,8 +86,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/M_HeadTip/brow_main_l_auto/L_Brow/brow_inner_l_auto/L_InBrow/brow_corrugator_l_auto/L_BrowTense>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/M_HeadTip/brow_main_l_auto/L_Brow/brow_inner_l_auto/L_InBrow/brow_corrugator_l_auto/L_BrowTense> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/M_HeadTip/brow_main_l_auto/L_Brow/brow_inner_l_auto/L_InBrow>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/brows/brow_corrugator_l_cluster>
@@ -99,8 +100,9 @@ over "Biped"
                 {
                     rel rigExec:moves = </Biped/Geom/body_geo.points>
                     uniform token rigExec:pointFrame = "rest"
-                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/M_HeadTip/brow_main_r_auto/R_Brow/brow_inner_r_auto/R_InBrow/brow_corrugator_r_auto/R_BrowTense>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/M_HeadTip/brow_main_r_auto/R_Brow/brow_inner_r_auto/R_InBrow/brow_corrugator_r_auto/R_BrowTense> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:transformSpace = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/M_Neck/M_Head/M_HeadGimbal/skull_follow/M_Skull/M_UpFace/M_HeadTip/brow_main_r_auto/R_Brow/brow_inner_r_auto/R_InBrow>
                     token rigExec:weightBlend = "radial"
                     rel rigExec:weightObject = </Biped/Rig/Weights/brows/brow_corrugator_r_cluster>

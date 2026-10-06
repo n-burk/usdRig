@@ -43,7 +43,6 @@ def Xform "VolumeAsset"
                 {
                     uniform token rigExec:basis = "bernstein"
                     rel rigExec:cage = </VolumeAsset/Geom/Cage>
-                    uniform token rigExec:cageReadPhase = "base"
                     int3 rigExec:divisions = (2, 3, 2)
                     rel rigExec:moves = </VolumeAsset/Geom/Raw.points>
                     uniform asset ui:nodegraph:node:icon = @../../icons/lattice_mover.png@
@@ -63,7 +62,6 @@ def Xform "VolumeAsset"
                     {
                         uniform token rigExec:basis = "bernstein"
                         rel rigExec:cage = </VolumeAsset/Geom/Cage>
-                        uniform token rigExec:cageReadPhase = "base"
                         int3 rigExec:divisions = (2, 3, 2)
                         rel rigExec:moves = </VolumeAsset/Geom/Fixed.points>
                         uniform asset ui:nodegraph:node:icon = @../../icons/lattice_mover.png@

@@ -44,6 +44,9 @@ public:
     bool ReadU64(uint64_t *out);
     bool ReadF32(float *out);
     bool ReadF64(double *out);
+    /// Appends the next \p count bytes to \p out; false, appending
+    /// nothing, when fewer remain.
+    bool ReadBytes(size_t count, std::vector<uint8_t> *out);
     bool Exhausted() const { return _at == _size; }
 
 private:

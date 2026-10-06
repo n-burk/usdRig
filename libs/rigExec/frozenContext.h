@@ -126,15 +126,6 @@ struct RigExecFrameInputs {
     std::vector<std::vector<std::vector<
         std::shared_ptr<const RigExecBlendSampleLayout>>>>
         blendLayouts;
-    /// One curvenet profile bind per revisionIndex position, resolved at
-    /// sample time by the same build the live prologue runs: the bind
-    /// cache has no locking, so the worker cannot resolve it, and the
-    /// bind's every input is Default-time epoch data. Null for a
-    /// non-curvenet revision, for a revision whose net is missing (the
-    /// worker breaks before reading it, as live), and for a remembered
-    /// failed bind. Excluded from the digest like the other transports.
-    std::vector<std::shared_ptr<const RigExecProfileMoverBinding>>
-        curvenetBinds;
     /// One frame's stage-derived constraint seeds, sampled on the UI thread
     /// through RigExecBakedProgram::SampleStageFrameSeeds: the xform-slot
     /// bases and frames, the native-source ok/frame pairs, and the
@@ -266,14 +257,12 @@ struct RigExecFrozenProgram {
 ///
 /// Answers false, having left \p frozen untouched, when the rig cannot warm:
 /// no baked program (D7), the evaluator's CPU-parity mode is on (live runs
-/// dynamically, which no snapshot can reproduce), a prologue read the frozen
-/// executor cannot reproduce (xform-derived seeds, native constraint
-/// sources, geometry-delta bases), any constraint or property chain binding
-/// a weight object (whose oracle resolves from the live stage), any
-/// current-phase weight read, any revision op outside
-/// skin/normals/extent/matrix/wire, any blend channel, any read phase, any
-/// curvenet or driver-frames binding, a time-varying provider ladder, or an
-/// unfixed skin layout. \p error, when given, says which. Anything refused
+/// dynamically, which no snapshot can reproduce), a pose-domain constraint
+/// or property chain binding a weight object (whose oracle resolves from
+/// the live stage), a current-phase weight read, an unsupported revision
+/// operation, a blend-sample read phase, a derived-target read phase, a
+/// time-varying provider ladder, or an unfixed skin layout.
+/// \p error, when given, says which. Anything refused
 /// here evaluates live when asked; a refusal is never served wrong. Weight
 /// objects and their steps DO freeze: their scalars patch from samples and
 /// their point arrays sample per frame into the shared packet kernels.
@@ -295,6 +284,12 @@ struct RigExecFrozenProgram {
 bool RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
                           std::shared_ptr<const RigExecFrozenProgram> *frozen,
                           std::string *error = nullptr);
+
+/// Checks the same sampling/worker support contract as FreezeProgram without
+/// cloning its slot state. UI thread only. Unsupported rigs must use a cache
+/// key fenced by stage edits and frame time, not an incomplete sampled digest.
+bool RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
+                             std::string *error = nullptr);
 
 /// The digest of a baked program's patchable avar region: every constant
 /// binding's value and varying flag, the promoted set, and the constant
@@ -565,13 +560,15 @@ struct RigExecChainSampleRevision {
     RigExecChainSampleInput tangents;
 };
 
-/// One sampled property chain: its target and its revisions.
+/// One sampled property chain: its target, its revisions, and the mover
+/// inputs that read it at a declared phase (RigExecPhasedConnection).
 struct RigExecChainSampleChain {
     SdfPath targetPath;
     UsdAttribute target;
     UsdAttributeQuery targetQuery;
     SdfValueTypeName valueType;
     std::vector<RigExecChainSampleRevision> revisions;
+    std::vector<RigExecPhasedConnection> phased;
 };
 
 /// The epoch-pinned chain bindings one sampling call evaluates through.
@@ -742,6 +739,7 @@ struct RigExecBurstSampleCache {
     /// in table order, so the cached sampler visits in emission order.
     /// avarBindings needs none: it holds the varying ones only.
     std::vector<size_t> ladderSites;
+    std::vector<size_t> spaceSwitchSites;
     std::vector<size_t> solverSites;
     std::vector<size_t> constraintSites;
     std::vector<size_t> weightSites;
@@ -754,12 +752,6 @@ struct RigExecBurstSampleCache {
         staticStage;
     std::unordered_map<SdfPath, RigExecBurstStaticSample, SdfPath::Hash>
         staticResolved;
-    /// Curvenet profile binds by mover path, built once per burst: the
-    /// bind's every input is Default-time, so one build serves the whole
-    /// range. A null holding is a remembered failed bind, served as-is.
-    std::unordered_map<SdfPath, std::shared_ptr<
-        const RigExecProfileMoverBinding>, SdfPath::Hash>
-        curvenetBinds;
     /// Emission indices in sorted-path order, recorded from the first
     /// frame's vector: the emission path sequence is timeless (every Add
     /// site's guard is validity-only), so it is identical for every frame

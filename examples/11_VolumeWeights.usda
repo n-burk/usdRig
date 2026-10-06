@@ -283,9 +283,10 @@ def Xform "VolumeAsset"
             )
             {
                 rel rigExec:moves = </VolumeAsset/Geom/Strip.points>
-                rel rigExec:transform = </VolumeAsset/Rig/Joints/Shoulder>
+                rel rigExec:transform = </VolumeAsset/Rig/Joints/Shoulder> (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:weightObject = </VolumeAsset/Rig/Joints/Shoulder/ShoulderVolume>
-                uniform token rigExec:transformReadPhase = "final"
                 uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 
                 def RigExecMatrixMover "MidMatrix" (
@@ -293,9 +294,10 @@ def Xform "VolumeAsset"
                 )
                 {
                     rel rigExec:moves = </VolumeAsset/Geom/Strip.points>
-                    rel rigExec:transform = </VolumeAsset/Rig/Joints/Mid>
+                    rel rigExec:transform = </VolumeAsset/Rig/Joints/Mid> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </VolumeAsset/Rig/Weights/MidCombined>
-                    uniform token rigExec:transformReadPhase = "final"
                     uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 
                     def RigExecMatrixMover "TipMatrix" (
@@ -303,9 +305,10 @@ def Xform "VolumeAsset"
                     )
                     {
                         rel rigExec:moves = </VolumeAsset/Geom/Strip.points>
-                        rel rigExec:transform = </VolumeAsset/Rig/Joints/Tip>
+                        rel rigExec:transform = </VolumeAsset/Rig/Joints/Tip> (
+                            rigExecReadPhase = "final"
+                        )
                         rel rigExec:weightObject = </VolumeAsset/Rig/Weights/TipTube>
-                        uniform token rigExec:transformReadPhase = "final"
                         uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
                     }
                 }

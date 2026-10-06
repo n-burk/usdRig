@@ -411,8 +411,8 @@ class SpecRecorder(object):
 
     The difference is what it can see. EditRecorder snapshots attribute
     specs, which is everything a pose edit touches and nothing a panel
-    that BUILDS rig does: creating a curvenet, binding a mover, deleting
-    a spline and retargeting a relationship are all invisible to it --
+    that BUILDS rig does: creating a weight, binding a mover, deleting
+    a prim and retargeting a relationship are all invisible to it --
     it records no entry at all and the undo stack stays empty while the
     stage changes underneath. This one copies whole specs, so a prim
     that did not exist is removed again on undo and one that did comes

@@ -82,11 +82,23 @@ struct RigExecPropertyChainBindings
         std::vector<SdfPath> missingSources;
         bool stale = false;
 
+        // Mover inputs that read this chain at a declared phase rather than
+        // its final value: each is published on the consumer with the value
+        // after `applied` revisions, cast to the consumer's own type.
+        struct Phased {
+            SdfPath consumer;
+            SdfValueTypeName consumerType;
+            size_t applied = 0;
+        };
+        std::vector<Phased> phased;
+
         // The last run: whether it published, what, and the diagnostics it
-        // pushed, all replayed verbatim when the chain is clean.
+        // pushed, all replayed verbatim when the chain is clean. lastPhased
+        // parallels `phased`.
         bool cached = false;
         bool published = false;
         VtValue lastValue;
+        std::vector<VtValue> lastPhased;
         std::vector<std::string> lastDiagnostics;
         bool changedThisRun = false;
     };

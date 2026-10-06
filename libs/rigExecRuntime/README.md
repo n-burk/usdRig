@@ -31,3 +31,20 @@ the interpolator's live slot, as the baked gather does. Both use the
 evaluator's own kernels (`rigExecMath/propertyMathKernel.h`), and
 `testRigExecRuntimeLiveFace` holds the biped's runtime to the evaluator point
 for point. A file without the chain section replays the recorded chain values.
+`geometry.cpp` evaluates geometry revisions, including the quasistatic Wrinkle
+mover, with the same pure kernels as the USD evaluator. Wrinkle supports cloth
+and surface-strut constraints, point pins, tangent-plane collisions, and its
+final displacement blend. Every evaluation starts from the incoming geometry;
+playback does not depend on frame history. Wrinkle uses revision opcode 15;
+earlier readers reject files containing that opcode. Existing revision ordinals
+and binary records retain their meaning.
+
+Plugin movers use revision opcode 16 and the ExternalMovers section. The
+runtime stores their bytes and calls the kernel a host installs with
+`SetExternalKernel` (see `rigExecBinary/external.h` and
+[External mover plugins](../../docs/concepts/external-movers.md)). A type with
+no kernel passes its points through, with a warning in every `Execute`.
+
+The frozen frame-cache executor and the provider-only `.rigpack` runtime
+remain separate subsets and reject Wrinkle movers. The `.rigexec` binary
+runtime supports them.

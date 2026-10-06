@@ -215,8 +215,7 @@ The metric belongs to the pose and not to the interpolator because one
 driver usually carries both at once and they mean different things: a
 neck that has twisted has not bent, and its bend shapes should stay at
 zero. Measuring the whole rotation instead leaks about 0.05 of every
-swing pose into a pure twist on the shipped biped
-.
+swing pose into a pure twist on the shipped biped.
 
 #### `rigExec:rotation`
 
@@ -249,8 +248,7 @@ The driver's translation in this pose, in CENTIMETRES, in the
 driver's own frame. Read only when the interpolator has
 rigExec:enableTranslation on; an interpolator with no authored
 translations has nothing to say about translation, and saying every
-pose is equally close would peg its weights at 1/n
-.
+pose is equally close would peg its weights at 1/n.
 
 #### `rigExec:rotationRadius`
 

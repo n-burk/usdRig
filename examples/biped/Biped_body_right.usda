@@ -279,6 +279,7 @@ over "Biped"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
+                    uniform bool rigExec:blendShear = 1
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def>
                     rel rigExec:sources = </Biped/Rig/Main/Shot/Aux/Controls/M_Body/M_Torso/M_Chest/M_ChestTop/R_Shldr>
                     uniform float2 ui:nodegraph:node:pos = (6.76, 7.26)
@@ -309,6 +310,7 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/ball_l_bind_scAim/ball_l_def_aim>
                 )
                 {
+                    uniform bool rigExec:worldUpRotationOnly = 1
                     double3 inputs:aimVector = (-0.23189309080662804, -0.9727412782626985, 8.879605041259261e-17)
                     float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_r_ikfk.inputs:weight>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_r_def/thigh_r_def/knee_r_def/ankle_r_def/ball_r_def>
@@ -324,6 +326,7 @@ over "Biped"
                     prepend references = @./Biped_body_left.usda@</Biped/Rig/Movers/ankle_l_bind_scAim/ankle_l_def_aim>
                 )
                 {
+                    uniform bool rigExec:worldUpRotationOnly = 1
                     double3 inputs:aimVector = (-0.45116147412328517, -0.8924423366620973, -5.661771601785919e-17)
                     float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_r_ikfk.inputs:weight>
                     rel rigExec:moves = </Biped/Rig/Main/Shot/Aux/Joints/hips_def/pelvis_r_def/thigh_r_def/knee_r_def/ankle_r_def>
@@ -926,7 +929,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/index_001_r_bind_fk_follow/R_IndexMeta/R_IndexBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/index_001_r_bind_fk_follow/R_IndexMeta/R_IndexBase/R_IndexMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/index_001_r_bind_fk_follow/R_IndexMeta/R_IndexBase/R_IndexMid/R_IndexTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/index_001_r_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/index_001_r_def/index_002_r_def>,
@@ -945,7 +950,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/middle_001_r_bind_fk_follow/R_MiddleMeta/R_MiddleBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/middle_001_r_bind_fk_follow/R_MiddleMeta/R_MiddleBase/R_MiddleMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/middle_001_r_bind_fk_follow/R_MiddleMeta/R_MiddleBase/R_MiddleMid/R_MiddleTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/middle_001_r_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/middle_001_r_def/middle_002_r_def>,
@@ -965,7 +972,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/pinkyCup_r_bind_fk_follow/R_PinkyCup/R_PinkyMeta/R_PinkyBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/pinkyCup_r_bind_fk_follow/R_PinkyCup/R_PinkyMeta/R_PinkyBase/R_PinkyMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/pinkyCup_r_bind_fk_follow/R_PinkyCup/R_PinkyMeta/R_PinkyBase/R_PinkyMid/R_PinkyTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/pinkyCup_r_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/pinkyCup_r_def/pinky_001_r_def>,
@@ -985,7 +994,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/ring_001_r_bind_fk_follow/R_RingMeta/R_RingBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/ring_001_r_bind_fk_follow/R_RingMeta/R_RingBase/R_RingMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/ring_001_r_bind_fk_follow/R_RingMeta/R_RingBase/R_RingMid/R_RingTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/ring_001_r_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/ring_001_r_def/ring_002_r_def>,
@@ -1004,7 +1015,9 @@ over "Biped"
                     </Biped/Rig/Main/Shot/Aux/Controls/thumbCup_r_bind_fk_follow/R_ThumbMeta/R_ThumbBase>,
                     </Biped/Rig/Main/Shot/Aux/Controls/thumbCup_r_bind_fk_follow/R_ThumbMeta/R_ThumbBase/R_ThumbMid>,
                     </Biped/Rig/Main/Shot/Aux/Controls/thumbCup_r_bind_fk_follow/R_ThumbMeta/R_ThumbBase/R_ThumbMid/R_ThumbTip>,
-                ]
+                ] (
+                    rigExecReadPhase = "final"
+                )
                 rel rigExec:joints = [
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/thumbCup_r_def>,
                     </Biped/Rig/Main/Shot/Aux/Joints/hips_def/spine_0_def/spine_1_def/spine_2_def/spine_3_def/spine_4_def/spine_5_def/chest_def/clavicle_r_def/shoulder_r_def/elbow_r_def/wrist_r_def/thumbCup_r_def/thumb_001_r_def>,

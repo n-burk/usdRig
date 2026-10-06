@@ -827,6 +827,11 @@ RigExecWireEncodeDomainPose(const RigExecWireDomainPose &pose,
     for (const RigExecWireConstraint &constraint : pose.constraints) {
         RigExecWirePutI32(out, constraint.spaceSlot);
     }
+    // The constraints' opt-in flags, a second trailing block for the same
+    // reason: a binary that ends before it decodes as no flags.
+    for (const RigExecWireConstraint &constraint : pose.constraints) {
+        RigExecWirePutU8(out, constraint.flags);
+    }
     return true;
 }
 
@@ -1254,6 +1259,15 @@ RigExecWireDecodeDomainPose(RigExecWireReader *reader,
     if (!reader->Exhausted()) {
         for (RigExecWireConstraint &constraint : pose->constraints) {
             if (!reader->ReadI32(&constraint.spaceSlot)) {
+                return _Fail(error);
+            }
+        }
+    }
+    // The optional trailing flags block: absent means every flag off.
+    if (!reader->Exhausted()) {
+        for (RigExecWireConstraint &constraint : pose->constraints) {
+            if (!reader->ReadU8(&constraint.flags) ||
+                (constraint.flags & ~RigExecWireConstraintKnownFlags)) {
                 return _Fail(error);
             }
         }

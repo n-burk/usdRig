@@ -1,0 +1,261 @@
+#usda 1.0
+(
+    """
+    RigExec example 16 - read phases on attribute connections.
+
+    A mover input connected to a property reads that property's FINAL value:
+    every math mover that revises it has already run. 13_ReadPhases declares
+    a different phase on a relationship; this file declares one on a
+    connection, with the same metadata on the connected input:
+
+        float inputs:value.connect = </Asset/Rig/Channels/Dial.rigExec:amount>
+        float inputs:value (
+            rigExecReadPhase = "base"
+        )
+
+    Three phases apply to a connection:
+
+      final       the value after every math mover on the property. What an
+                  undeclared connection reads.
+      base        the property's authored value, before any math mover.
+      <prim path> the value as the last math mover at or beneath that prim
+                  left it. A Scope names everything beneath it.
+
+    `preceding` names a position in the reader's own chain, and a connection
+    reads someone else's, so it is refused here. The connection must reach
+    the revised property through single-source hops; the first property a
+    math mover writes on that walk is the one whose phase is chosen.
+
+    The phase is read on these inputs: inputs:enabled and
+    inputs:defaultWeight on every mover, and inputs:value, inputs:min,
+    inputs:max, inputs:keys and inputs:tangents on the math movers. It
+    needs the property's own type, or float and double either way round.
+
+    WHAT THIS FILE DEMONSTRATES
+
+    One dial, Channels/Dial.rigExec:amount, keyed from 0.1 to 0.45 and back,
+    revised by two math movers in this order:
+
+      Gain    multiply by 2      0.45 -> 0.9
+      Limit   clamp to [0, 0.6]  0.9  -> 0.6
+
+    Three readers each connect to the dial and choose a phase:
+
+      Base     rigExecReadPhase = "base"        reads 0.45 at frame 1024
+      Gain     a path naming the Gain mover     reads 0.9
+      Final    no metadata                      reads 0.6
+
+    The readers come in two kinds. The Readouts are float math movers that
+    add what they read to a channel of their own, so the three values are
+    visible as Channels/Readouts.rigExec:base, :gain and :final. The Cards
+    are matrix movers whose inputs:defaultWeight is the connection, so each
+    card follows the lifted joint by the dial value its phase selects: at
+    frame 1024 the base card rises 0.45 x 3, the gain card 0.9 x 3 and the
+    final card 0.6 x 3.
+    """
+    defaultPrim = "PhaseConnectAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PhaseConnectAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PhaseConnectAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "LiftCtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 3; post linear,
+                    1048: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "LiftChain"
+            {
+                rel rigExec:controls = </PhaseConnectAsset/Rig/Controls/LiftCtl>
+                rel rigExec:joints = </PhaseConnectAsset/Rig/Joints/Lift>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Lift"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Channels"
+        {
+            # The dial the movers below revise and the readers read.
+            def Scope "Dial"
+            {
+                float rigExec:amount = 0.1
+                float rigExec:amount.timeSamples = {
+                    1001: 0.1,
+                    1024: 0.45,
+                    1048: 0.1,
+                }
+            }
+
+            # What each readout reads, added to zero.
+            def Scope "Readouts"
+            {
+                float rigExec:base = 0
+                float rigExec:final = 0
+                float rigExec:gain = 0
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # The dial's own chain: bottom-to-top Gain, then Limit.
+            def Scope "Dial"
+            {
+                reorder nameChildren = ["Limit", "Gain"]
+
+                def RigExecFloatMathMover "Gain" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "multiply"
+                    float inputs:value = 2
+                    rel rigExec:moves = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                }
+
+                def RigExecFloatMathMover "Limit" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "clamp"
+                    float inputs:min = 0
+                    float inputs:max = 0.6
+                    rel rigExec:moves = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                }
+            }
+
+            def Scope "Readouts"
+            {
+                def RigExecFloatMathMover "Base" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "add"
+                    float inputs:value (
+                        rigExecReadPhase = "base"
+                    )
+                    float inputs:value.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:moves = </PhaseConnectAsset/Rig/Channels/Readouts.rigExec:base>
+                }
+
+                def RigExecFloatMathMover "Gain" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "add"
+                    float inputs:value (
+                        rigExecReadPhase = "/PhaseConnectAsset/Rig/Movers/Dial/Gain"
+                    )
+                    float inputs:value.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:moves = </PhaseConnectAsset/Rig/Channels/Readouts.rigExec:gain>
+                }
+
+                def RigExecFloatMathMover "Final" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    uniform token rigExec:operation = "add"
+                    float inputs:value.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:moves = </PhaseConnectAsset/Rig/Channels/Readouts.rigExec:final>
+                }
+            }
+
+            # Each card follows the lifted joint by the dial, read at its own
+            # phase, as its envelope. No weight object is bound: one would be
+            # the envelope instead of inputs:defaultWeight.
+            def Scope "Cards"
+            {
+                def RigExecMatrixMover "BaseCard" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:defaultWeight (
+                        rigExecReadPhase = "base"
+                    )
+                    float inputs:defaultWeight.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:transform = </PhaseConnectAsset/Rig/Joints/Lift> (
+                        rigExecReadPhase = "final"
+                    )
+                    rel rigExec:moves = </PhaseConnectAsset/Geom/BaseCard.points>
+                }
+
+                def RigExecMatrixMover "GainCard" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:defaultWeight (
+                        rigExecReadPhase = "/PhaseConnectAsset/Rig/Movers/Dial/Gain"
+                    )
+                    float inputs:defaultWeight.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:transform = </PhaseConnectAsset/Rig/Joints/Lift> (
+                        rigExecReadPhase = "final"
+                    )
+                    rel rigExec:moves = </PhaseConnectAsset/Geom/GainCard.points>
+                }
+
+                def RigExecMatrixMover "FinalCard" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:defaultWeight.connect = </PhaseConnectAsset/Rig/Channels/Dial.rigExec:amount>
+                    rel rigExec:transform = </PhaseConnectAsset/Rig/Joints/Lift> (
+                        rigExecReadPhase = "final"
+                    )
+                    rel rigExec:moves = </PhaseConnectAsset/Geom/FinalCard.points>
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "BaseCard"
+        {
+            float3[] extent = [(-4, -0.5, 0), (-2, 0.5, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-4, -0.5, 0), (-2, -0.5, 0), (-2, 0.5, 0), (-4, 0.5, 0)]
+        }
+
+        def Mesh "GainCard"
+        {
+            float3[] extent = [(-1, -0.5, 0), (1, 0.5, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-1, -0.5, 0), (1, -0.5, 0), (1, 0.5, 0), (-1, 0.5, 0)]
+        }
+
+        def Mesh "FinalCard"
+        {
+            float3[] extent = [(2, -0.5, 0), (4, 0.5, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(2, -0.5, 0), (4, -0.5, 0), (4, 0.5, 0), (2, 0.5, 0)]
+        }
+    }
+}

@@ -802,6 +802,13 @@ _BinaryCompareConstraint(
     CHECK(live.worldUpPath.GetString() ==
           _BinaryString(reader, wire.worldUpPath));
     CHECK(live.worldUpObjectNamed == wire.worldUpObjectNamed);
+    CHECK(live.spaceSlot == wire.spaceSlot);
+    CHECK(live.blendShear ==
+          ((wire.flags & RigExecWireConstraintBlendShear) != 0));
+    CHECK(live.worldUpRotationOnly ==
+          ((wire.flags & RigExecWireConstraintWorldUpRotationOnly) != 0));
+    CHECK(live.radialBlend ==
+          ((wire.flags & RigExecWireConstraintRadialBlend) != 0));
     CHECK(live.snapshotAfter == wire.snapshotAfter);
     CHECK(live.singleChainIk == wire.singleChainIk);
     CHECK(uint8_t(live.ikMode) == wire.ikMode);
@@ -1117,10 +1124,6 @@ _BinaryCompareBinding(const rigExec::RigExecRevisionBinding &live,
     CHECK(live.driverFrames.GetString() ==
           _BinaryString(reader, wire.driverFrames));
     CHECK(live.widths.GetString() == _BinaryString(reader, wire.widths));
-    CHECK(live.curvenet.GetString() ==
-          _BinaryString(reader, wire.curvenet));
-    CHECK(live.curvenetPoints.GetString() ==
-          _BinaryString(reader, wire.curvenetPoints));
     CHECK(live.blendInputs.size() == wire.blendInputs.size());
     for (size_t i = 0; i < wire.blendInputs.size(); ++i) {
         CHECK(live.blendInputs[i].GetString() ==
@@ -1211,40 +1214,6 @@ _BinaryCompareRevision(
     }
     CHECK(uint8_t(live.op) == wire.op);
     _BinaryCompareBinding(live.binding, wire.binding, reader);
-    CHECK(live.curvenetChain == wire.curvenetChain);
-    CHECK(live.curvenetBindResolved == wire.curvenetBindResolved);
-    CHECK(bool(live.curvenetBind) == wire.hasCurvenetBind);
-    CHECK(live.curvenetBindInputs.restNet.size() ==
-          wire.curvenetRestNet.size());
-    for (size_t i = 0; i < wire.curvenetRestNet.size(); ++i) {
-        CHECK(live.curvenetBindInputs.restNet[i][0] ==
-              wire.curvenetRestNet[i][0]);
-        CHECK(live.curvenetBindInputs.restNet[i][1] ==
-              wire.curvenetRestNet[i][1]);
-        CHECK(live.curvenetBindInputs.restNet[i][2] ==
-              wire.curvenetRestNet[i][2]);
-    }
-    _BinaryCheckEqual(live.curvenetBindInputs.splineIndices,
-                      wire.curvenetSplineIndices);
-    CHECK(live.curvenetBindInputs.samplesPerSpline ==
-          wire.curvenetSamplesPerSpline);
-    CHECK(live.curvenetBindInputs.basis.GetString() ==
-          _BinaryString(reader, wire.curvenetBasis));
-    CHECK(live.curvenetBindInputs.meshPoints.size() ==
-          wire.curvenetMeshPoints.size());
-    for (size_t i = 0; i < wire.curvenetMeshPoints.size(); ++i) {
-        CHECK(live.curvenetBindInputs.meshPoints[i][0] ==
-              wire.curvenetMeshPoints[i][0]);
-        CHECK(live.curvenetBindInputs.meshPoints[i][1] ==
-              wire.curvenetMeshPoints[i][1]);
-        CHECK(live.curvenetBindInputs.meshPoints[i][2] ==
-              wire.curvenetMeshPoints[i][2]);
-    }
-    _BinaryCheckEqual(live.curvenetBindInputs.meshCounts,
-                      wire.curvenetMeshCounts);
-    _BinaryCheckEqual(live.curvenetBindInputs.meshIndices,
-                      wire.curvenetMeshIndices);
-    CHECK(live.curvenetBindInputs.held == wire.curvenetBindInputsHeld);
     CHECK(live.blendChannels.size() == wire.blendChannels.size());
     for (size_t i = 0; i < wire.blendChannels.size(); ++i) {
         if (live.blendChannels[i].weight) {
@@ -1310,6 +1279,8 @@ _BinaryCompareRevision(
     _BinaryCheckEqual(live.influenceSlots, wire.influenceSlots);
     CHECK(live.transformSlot == wire.transformSlot);
     CHECK(live.transformSpaceSlot == wire.transformSpaceSlot);
+    CHECK(live.carrySpaceSlot == wire.carrySpaceSlot);
+    CHECK(live.binding.shaderDials.size() == wire.shaderDials.size());
     CHECK(live.constraintDelta == wire.constraintDelta);
     CHECK(live.driverFramesSolver == wire.driverFramesSolver);
     CHECK(live.finalPhase == wire.finalPhase);
@@ -1401,55 +1372,6 @@ _BinaryCompareWeightObject(
     _BinaryCompareAttributes(live.curvePoints, wire.curvePoints,
                              wire.curveValid, reader);
     _BinaryCheckEqual(live.falloffCurve, wire.falloffCurve);
-    _BinaryCompareAttributes(live.curvenetMeshPoints,
-                             wire.curvenetMeshPoints,
-                             wire.curvenetMeshValid, reader);
-    _BinaryCompareAttributes(live.curvenetPoints, wire.curvenetPoints,
-                             wire.curvenetPointsValid, reader);
-    _BinaryCompareAttributes(live.curvenetCounts, wire.curvenetCounts,
-                             wire.curvenetCountsValid, reader);
-    _BinaryCompareAttributes(live.curvenetIndices, wire.curvenetIndices,
-                             wire.curvenetIndicesValid, reader);
-    _BinaryCompareAttributes(live.curvenetSplines, wire.curvenetSplines,
-                             wire.curvenetSplinesValid, reader);
-    if (live.curvenetWeights) {
-        CHECK(live.curvenetWeights.GetPath().GetString() ==
-              _BinaryString(reader, wire.curvenetWeights));
-    } else {
-        CHECK(wire.curvenetWeights == 0);
-    }
-    CHECK(bool(live.curvenetWeights) == wire.curvenetWeightsValid);
-    if (live.curvenetAutoSmooth) {
-        CHECK(live.curvenetAutoSmooth.GetPath().GetString() ==
-              _BinaryString(reader, wire.curvenetAutoSmooth));
-    } else {
-        CHECK(wire.curvenetAutoSmooth == 0);
-    }
-    CHECK(bool(live.curvenetAutoSmooth) == wire.curvenetAutoSmoothValid);
-    CHECK(live.curvenetBasis.GetString() ==
-          _BinaryString(reader, wire.curvenetBasis));
-    _BinaryCompareInput(live.curvenetSamples, wire.curvenetSamples,
-                        reader);
-    _BinaryCompareInput(live.curvenetUnreached, wire.curvenetUnreached,
-                        reader);
-    CHECK(live.boundMesh.size() == wire.boundMesh.size());
-    for (size_t i = 0; i < wire.boundMesh.size(); ++i) {
-        CHECK(live.boundMesh[i][0] == wire.boundMesh[i][0]);
-        CHECK(live.boundMesh[i][1] == wire.boundMesh[i][1]);
-        CHECK(live.boundMesh[i][2] == wire.boundMesh[i][2]);
-    }
-    CHECK(live.boundNet.size() == wire.boundNet.size());
-    for (size_t i = 0; i < wire.boundNet.size(); ++i) {
-        CHECK(live.boundNet[i][0] == wire.boundNet[i][0]);
-        CHECK(live.boundNet[i][1] == wire.boundNet[i][1]);
-        CHECK(live.boundNet[i][2] == wire.boundNet[i][2]);
-    }
-    _BinaryCheckEqual(live.boundCounts, wire.boundCounts);
-    _BinaryCheckEqual(live.boundIndices, wire.boundIndices);
-    _BinaryCheckEqual(live.boundSplines, wire.boundSplines);
-    _BinaryCheckEqual(live.boundSmooth, wire.boundSmooth);
-    CHECK(live.boundSamples == wire.boundSamples);
-    CHECK(live.bound == wire.bound);
 }
 
 void
@@ -1670,8 +1592,6 @@ _BinaryCollectOracle(const rigExec::RigExecBakedProgramImpl &program)
         _BinaryCollectOne(object.scaleZ, Tag::Float, &oracle);
         _BinaryCollectOne(object.extentU, Tag::Float, &oracle);
         _BinaryCollectOne(object.extentV, Tag::Float, &oracle);
-        _BinaryCollectOne(object.curvenetSamples, Tag::Int, &oracle);
-        _BinaryCollectOne(object.curvenetUnreached, Tag::Float, &oracle);
     }
     for (const auto &binding : program.avarBindings) {
         _BinaryCollectOne(binding.input, Tag::Double, &oracle);
@@ -2164,15 +2084,6 @@ _BinaryCompareTableFrame(const rigExec::RigExecBakedProgramImpl &program,
             CHECK(packet.defaultWeight == wire.defaultWeight);
             CHECK(packet.valid == wire.valid);
         };
-    auto CheckRevisionAdjuster =
-        [&](const RigExecBakedProgramImpl::GeomRevision &revision,
-            const RigExecWireMatrix4d &wire, uint8_t wireHave) {
-            const bool published =
-                revision.op == RigExecRevisionOp::CurvenetAdjuster &&
-                revision.resultStatus == "ok";
-            CHECK(published == (wireHave != 0));
-            _BinaryCheckMatrix(revision.lastAdjusterNetToAsset, wire);
-        };
     CHECK(program.chains.size() == frame.blendWeights.size());
     CHECK(program.chains.size() == frame.blendActivations.size());
     CHECK(program.chains.size() == frame.blendPoints.size());
@@ -2182,8 +2093,6 @@ _BinaryCompareTableFrame(const rigExec::RigExecBakedProgramImpl &program,
     CHECK(program.chains.size() == frame.revisionDefaultWeights.size());
     CHECK(program.chains.size() == frame.revisionPhasePackets.size());
     CHECK(program.chains.size() == frame.derivedPhasePackets.size());
-    CHECK(program.chains.size() == frame.revisionAdjusters.size());
-    CHECK(program.chains.size() == frame.revisionAdjusterHave.size());
     size_t refusedExpected = 0;
     for (size_t i = 0; i < program.chains.size(); ++i) {
         if (i >= frame.blendWeights.size() ||
@@ -2194,9 +2103,7 @@ _BinaryCompareTableFrame(const rigExec::RigExecBakedProgramImpl &program,
             i >= frame.derivedBlendPoints.size() ||
             i >= frame.revisionDefaultWeights.size() ||
             i >= frame.revisionPhasePackets.size() ||
-            i >= frame.derivedPhasePackets.size() ||
-            i >= frame.revisionAdjusters.size() ||
-            i >= frame.revisionAdjusterHave.size()) {
+            i >= frame.derivedPhasePackets.size()) {
             continue;
         }
         const auto &chain = program.chains[i];
@@ -2227,20 +2134,14 @@ _BinaryCompareTableFrame(const rigExec::RigExecBakedProgramImpl &program,
                 // fill IS the consumption site (RevisionStatic reads the
                 // member for staticDirty two lines below the read), and a
                 // cone-skipped step legitimately holds last frame's.
-                // Main revisions only: derived ones never fill these
-                // (no RevisionStatic arm, no adjuster publish), so they
-                // carry no streams at all.
+                // Derived revisions have no RevisionStatic arm and do
+                // not publish this stream.
                 if (!derived) {
-                    if (r >= frame.revisionDefaultWeights[i].size() ||
-                        r >= frame.revisionAdjusters[i].size() ||
-                        r >= frame.revisionAdjusterHave[i].size()) {
+                    if (r >= frame.revisionDefaultWeights[i].size()) {
                         return;
                     }
                     CHECK(revision.defaultWeight ==
                           frame.revisionDefaultWeights[i][r]);
-                    CheckRevisionAdjuster(
-                        revision, frame.revisionAdjusters[i][r],
-                        frame.revisionAdjusterHave[i][r]);
                 }
                 for (const auto &channel : revision.blendChannels) {
                     for (const auto &sample : channel.samples) {
@@ -2261,10 +2162,6 @@ _BinaryCompareTableFrame(const rigExec::RigExecBakedProgramImpl &program,
               frame.revisionDefaultWeights[i].size());
         CHECK(chain.revisions.size() ==
               frame.revisionPhasePackets[i].size());
-        CHECK(chain.revisions.size() ==
-              frame.revisionAdjusters[i].size());
-        CHECK(chain.revisions.size() ==
-              frame.revisionAdjusterHave[i].size());
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             CheckOne(chain.revisions[r], r, false);
         }
@@ -2654,12 +2551,6 @@ _BinaryFrameInputsDiff(const rigExec::RigExecWireFrameInputs &a,
     if (Packets2Differ(a.derivedPhasePackets, b.derivedPhasePackets)) {
         Note("derivedPhasePackets");
     }
-    if (a.revisionAdjusters != b.revisionAdjusters) {
-        Note("revisionAdjusters");
-    }
-    if (a.revisionAdjusterHave != b.revisionAdjusterHave) {
-        Note("revisionAdjusterHave");
-    }
     if (a.solverRibbonPoints != b.solverRibbonPoints) {
         Note("solverRibbonPoints");
     }
@@ -2721,8 +2612,6 @@ _BinaryFrameInputsEqual(const rigExec::RigExecWireFrameInputs &a,
         a.derivedBlendActivations != b.derivedBlendActivations ||
         a.derivedBlendPoints != b.derivedBlendPoints ||
         a.revisionDefaultWeights != b.revisionDefaultWeights ||
-        a.revisionAdjusters != b.revisionAdjusters ||
-        a.revisionAdjusterHave != b.revisionAdjusterHave ||
         a.solverRibbonPoints != b.solverRibbonPoints ||
         a.constraintWeights != b.constraintWeights ||
         a.constraintHaveWeight != b.constraintHaveWeight) {

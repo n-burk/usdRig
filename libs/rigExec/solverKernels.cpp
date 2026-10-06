@@ -299,9 +299,10 @@ RigExecFilterSpaceRotation(const GfMatrix4d &m, const GfVec3d &axis,
     const GfVec3d a = axis / length;
     _Decomposed d = _Decompose(m);
     const GfQuatd q = d.rotation.GetNormalized();
-    // Swing-twist: the twist is the part of the rotation whose axis IS the
-    // limb axis, which is the quaternion's imaginary component along it,
-    // renormalized; the swing is whatever is left over.
+    // Swing-twist (Dobrowolski 2015, see docs/references.md): the twist is
+    // the part of the rotation whose axis IS the limb axis, which is the
+    // quaternion's imaginary component along it, renormalized; the swing is
+    // whatever is left over.
     const double along = GfDot(q.GetImaginary(), a);
     GfQuatd twist(q.GetReal(), along * a);
     const double norm = std::sqrt(twist.GetReal() * twist.GetReal() +

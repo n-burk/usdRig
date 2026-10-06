@@ -17,7 +17,6 @@
 
 #include "types.h"
 
-#include "rigExecMath/profileMover.h"
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
 
@@ -67,26 +66,38 @@ enum class RigExecRevisionOp {
     /// displacement at their bind parameter (RigExecApplyWire).
     Wire,
     EmitGuidePoints,
-    Curvenet,
-    CurvenetAdjuster,
-    RecomputeNormals,
+    // Values 10 and 11 are reserved by the binary wire format.
+    RecomputeNormals = 12,
     RecomputeExtent,
     // Append new ops: existing values are pinned by the binary wire format.
     DeltaMush,
+    Wrinkle,
+    /// A registered plugin supplies parameter assembly and point deformation.
+    External,
+    /// RigExecSurfaceProjector: a derived matrix primvar measured from the
+    /// chain's final points (rigExec:shaderPrimvar).
+    SurfaceProjector,
+    /// RigExecSurfaceProjector: its shader dials packed into a derived
+    /// matrix primvar (rigExec:shaderDialPrimvar).
+    ShaderDials,
 };
+
+/// Whether \p op publishes a derived MATRIX primvar rather than revising
+/// points or a vec3f array.
+inline bool
+RigExecIsDerivedMatrixOp(RigExecRevisionOp op)
+{
+    return op == RigExecRevisionOp::SurfaceProjector ||
+           op == RigExecRevisionOp::ShaderDials;
+}
 
 /// When in the walk a side input takes its value from.
 ///
-/// A mover reads things other movers write. Which REVISION of those things it
-/// gets is a separate authored choice from which path it reads, and the two
-/// were never expressible together: a read phase had to be a schema attribute
-/// named for one specific role (rigExec:cageReadPhase, rigExec:surfaceRead-
-/// Phase, ...), so every new input needed a new attribute and an input with no
-/// attribute of its own had no way to say anything at all.
-///
-/// Declaring it as metadata ON the relationship or attribute that names the
-/// input puts the phase where the binding is, so any input can carry one and
-/// nothing has to be added to a schema to introduce another.
+/// A mover or solver reads things other operators write. Which REVISION of
+/// those things it gets is a separate authored choice from which path it
+/// reads, declared as rigExecReadPhase metadata ON the relationship that
+/// names the input: the phase sits where the binding is, so any input can
+/// carry one and no schema attribute is needed to introduce another.
 enum class RigExecReadPhaseKind {
     Base,       ///< the authored value: what the stage resolves at this time
     Preceding,  ///< the value immediately before the reading mover
@@ -130,15 +141,14 @@ inline constexpr const char *RigExecReadPhaseMetadataName = "rigExecReadPhase";
 bool RigExecParseReadPhase(
     const std::string &authored, RigExecReadPhase *phase, std::string *error);
 
-/// The read phase declared for \p property, if any.
+/// The read phase declared for \p property: its rigExecReadPhase metadata,
+/// or Base when none is authored.
 ///
-/// Metadata first, then \p legacyAttribute on the property's own prim (the
-/// rigExec:<role>ReadPhase attributes, still honored so existing assets keep
-/// working), then Base. Returns false and fills \p error on an unparseable
-/// authored value; an absent declaration is Base and true.
+/// Metadata is the only way to declare one; no schema attribute stands in
+/// for it. Returns false and fills \p error on an unparseable authored
+/// value; an absent declaration is Base and true.
 bool RigExecResolveReadPhase(
     const UsdObject &property,
-    const char *legacyAttribute,
     RigExecReadPhase *phase,
     std::string *error);
 
@@ -417,36 +427,48 @@ public:
         // double while the math movers compute in float, so a float input
         // connected to (or standing on) a control's avar reads its value
         // cast, instead of failing and falling back to a default.
-        if (std::is_same<T, float>::value && attribute &&
-            attribute.GetTypeName() == SdfValueTypeNames->Double) {
-            double wide = 0.0;
-            if (!GetAttribute<double>(attribute, time, &wide)) {
-                return false;
+        // Compile-time gated: a non-float instantiation asks no type
+        // question of the attribute at all.
+        if constexpr (std::is_same<T, float>::value) {
+            if (attribute &&
+                attribute.GetTypeName() == SdfValueTypeNames->Double) {
+                double wide = 0.0;
+                if (!GetAttribute<double>(attribute, time, &wide)) {
+                    return false;
+                }
+                return _CoerceFromDouble(wide, out);
             }
-            return _CoerceFromDouble(wide, out);
         }
         // An input that cannot change until the stage does answers from the
         // cache -- but only after the in-memory value for this exact property
         // has been ruled out, because a property chain result outranks the
         // authored value the cache holds.
-        if (attribute && !_values.count(attribute.GetPath())) {
-            if (_cache) {
-                bool handled = false;
-                const bool got = _cache->Read(
-                    attribute, attribute.GetPath(), time, out, &handled);
-                if (handled) {
-                    return got;
+        // While no overlay is published there is nothing to rule out, so the
+        // read skips the path hash; the path itself is spelled once, because
+        // the cache lookup below used to spell it a second time.
+        if (attribute) {
+            const bool checkOverlay = !_values.empty();
+            const SdfPath attrPath =
+                (checkOverlay || _cache) ? attribute.GetPath() : SdfPath();
+            if (!checkOverlay || !_values.count(attrPath)) {
+                if (_cache) {
+                    bool handled = false;
+                    const bool got = _cache->Read(
+                        attribute, attrPath, time, out, &handled);
+                    if (handled) {
+                        return got;
+                    }
                 }
-            }
-            // The cache refused it: a connection to follow, or a value that
-            // varies with time -- which is every avar, so the refused reads
-            // are exactly the ones that recur every frame. MEASURED
-            // 2026-09-13, biped: ~11 600 scalar reads per frame, and an
-            // unconnected one still reaches the walk below, which allocates
-            // a std::set and a std::vector to discover there is no single
-            // connection to follow. Same answer, no allocation.
-            if (!attribute.HasAuthoredConnections()) {
-                return attribute.Get(out, time);
+                // The cache refused it: a connection to follow, or a value
+                // that varies with time -- which is every avar, so the
+                // refused reads are exactly the ones that recur every frame.
+                // MEASURED 2026-09-13, biped: ~11 600 scalar reads per frame,
+                // and an unconnected one still reaches the walk below, which
+                // allocates a std::set and a std::vector to discover there is
+                // no single connection to follow. Same answer, no allocation.
+                if (!attribute.HasAuthoredConnections()) {
+                    return attribute.Get(out, time);
+                }
             }
         }
         std::set<SdfPath> visiting;
@@ -457,13 +479,14 @@ public:
                 return true;
             }
             // A float connection chain may end on a double (an avar).
-            if (std::is_same<T, float>::value &&
-                a.GetTypeName() == SdfValueTypeNames->Double) {
-                double wide = 0.0;
-                if (!GetAttribute<double>(a, time, &wide)) {
-                    return false;
+            if constexpr (std::is_same<T, float>::value) {
+                if (a.GetTypeName() == SdfValueTypeNames->Double) {
+                    double wide = 0.0;
+                    if (!GetAttribute<double>(a, time, &wide)) {
+                        return false;
+                    }
+                    return _CoerceFromDouble(wide, out);
                 }
-                return _CoerceFromDouble(wide, out);
             }
             fallback.push_back(a);
             SdfPathVector connections;
@@ -657,8 +680,11 @@ struct RigExecRevisionBinding {
     int driverBaseTransformCount = 0;
     SdfPath driverFrames;     ///< aggregate frame provider
     SdfPath widths;           ///< authored widths (extent maintenance)
-    SdfPath curvenet;         ///< RigExecCurvenet prim (Profile Mover)
-    SdfPath curvenetPoints;   ///< that curvenet's points property
+    /// Surface projector: rigExec:shaderDialSources, in order, at most
+    /// sixteen, and the inverse of the projected mesh's local-to-world,
+    /// which compile requires to be static.
+    std::vector<SdfPath> shaderDials;
+    GfMatrix4d meshWorldInverse{1.0};
     std::vector<SdfPath> blendInputs;  ///< sorted blend channels
     std::map<SdfPath, std::vector<RigExecBlendSampleBinding>> blendSamples;
 
@@ -684,54 +710,9 @@ struct RigExecRevisionBinding {
     bool operator==(const RigExecRevisionBinding &o) const;
 };
 
-/// Profile Mover bindings, held across frames and keyed by (mover, target).
-///
-/// Cutting a mesh and factorizing its Laplacian is the expensive half of the
-/// technique and depends only on the layout -- the curvenet's rest points,
-/// its spline indices, and the target's base geometry. Rebuilding it per
-/// frame would make the mover unusable, and rebuilding it never would make an
-/// edited curvenet silently stale, so the cache is keyed by a digest of
-/// exactly those inputs.
-///
-/// A failed bind is remembered too: a rig whose curvenet cannot be bound
-/// should report that once, not re-attempt the cut on every frame.
-class RigExecCurvenetBindCache
-{
-public:
-    /// Returns the binding for \p key, calling \p build when the cached
-    /// digest differs. Returns null on a failed bind and fills \p error.
-    std::shared_ptr<const RigExecProfileMoverBinding> Resolve(
-        const SdfPath &mover, const SdfPath &target, size_t digest,
-        const std::function<bool(RigExecProfileMoverBinding *, std::string *)>
-            &build,
-        std::string *error);
-
-    /// Messages accumulated by binds since the last call, and clears them.
-    ///
-    /// Cutting a mesh is where a curvenet's real problems surface -- faces
-    /// the cut lost, segments it could not route, a net floating so far off
-    /// the surface that its profile means nothing. None of that is fatal, so
-    /// none of it can be an error return, and a silently bad deformation is
-    /// exactly the failure mode worth spending a diagnostic on.
-    std::vector<std::string> TakeDiagnostics();
-
-    void Clear() { _entries.clear(); }
-    size_t GetSize() const { return _entries.size(); }
-
-private:
-    struct _Entry {
-        size_t digest = 0;
-        std::shared_ptr<const RigExecProfileMoverBinding> binding;
-        std::string error;
-    };
-    std::map<std::pair<SdfPath, SdfPath>, _Entry> _entries;
-    std::vector<std::string> _pending;
-};
-
 /// Per-epoch skin layouts, keyed by the mover that owns them.
 ///
-/// Peer of RigExecCurvenetBindCache, and there for the same reason: the
-/// expensive half of the operation depends only on the layout, and the
+/// The expensive half of the operation depends only on the layout, and the
 /// layout is what an epoch IS. Here that half is reading two megabyte-scale
 /// arrays off the stage and range-checking every element of them.
 ///
@@ -939,22 +920,6 @@ RigExecMoverParameters RigExecAssembleSkinParameters(
     const std::shared_ptr<const RigExecSkinTopology> *resolvedTopology =
         nullptr);
 
-/// Assembles a curvenet-adjuster mover parameter packet.
-///
-/// The adjustment commands this mover poses, resolved against the target
-/// curvenet rest points and spline indices. See
-/// movers/curvenetAdjusterMover.cpp.
-RigExecMoverParameters RigExecAssembleCurvenetAdjusterParameters(
-    const UsdPrim &mover,
-    const SdfPath &target,
-    const RigExecWeightPacket *weights,
-    UsdTimeCode time,
-    const RigExecResolvedInputs *resolved);
-
-/// The adjustment prims a curvenet-adjuster mover poses, in canonical
-/// order: the rigExec:adjustments targets plus any nested
-/// RigExecCurvenetAdjustment descendants.
-std::vector<SdfPath> RigExecCurvenetAdjustmentPaths(const UsdPrim &mover);
 /// Derives a mover's status from its packet (spec §6.6): disabled and failed
 /// movers both pass their preceding revision through, and a failure records the
 /// first bad canonical address.
@@ -1163,6 +1128,111 @@ RigExecCarryWireCurves(std::vector<GfVec3f> *rest,
     }
 }
 
+/// How a transform-driven wire measures its drivers.
+///
+/// \p posedPoints is rigExec:pointFrame == "posed" (the wire runs after a
+/// skin on its target), \p posedDelta is rigExec:driverDeltaFrame ==
+/// "posed" (the offset is applied in the space's current frame), and
+/// \p carry is rigExec:space's computeMatrix, or null when none is named.
+struct RigExecWireDriverFrame {
+    bool posedPoints = false;
+    bool posedDelta = false;
+    const GfMatrix4d *carry = nullptr;
+};
+
+/// One driver's offset from its space, as a wire applies it.
+///
+/// "local" is RigExecMeasureInSpace and "posed" RigExecMeasureInPosedSpace.
+/// When either frame option is posed and the space carries a scale, both
+/// matrices are unscaled first so the offset is measured in the asset's own
+/// units; \p spaceScale receives that scale for the posed-point correction.
+/// A wire asking for neither keeps the plain measurement bit for bit. The
+/// runtime twin is the `measured` lambda in RrGeoAssembleWire.
+inline GfMatrix4d
+RigExecMeasureWireDriver(GfMatrix4d transform, GfMatrix4d space,
+                         const RigExecWireDriverFrame &frame,
+                         GfVec3d *spaceScale)
+{
+    const GfVec3d k = RigExecFrameScale(space);
+    if (spaceScale) {
+        *spaceScale = k;
+    }
+    if ((frame.posedPoints || frame.posedDelta) &&
+        k != GfVec3d(1.0, 1.0, 1.0)) {
+        GfMatrix4d unscale(1.0);
+        unscale.SetScale(GfVec3d(1.0 / k[0], 1.0 / k[1], 1.0 / k[2]));
+        transform = transform * unscale;
+        space = space * unscale;
+    }
+    return frame.posedDelta ? RigExecMeasureInPosedSpace(transform, space)
+                            : RigExecMeasureInSpace(transform, space);
+}
+
+/// Poses a transform-driven wire's control polygon from its provider table.
+///
+/// \p table holds the driver transforms, then their spaces, then the base
+/// transforms, then their spaces (counts \p t, \p s, \p bt, and the rest).
+/// \p restPoints is the authored polygon on input and the base-moved rest
+/// polygon on output; \p auxPoints receives the posed polygon. A posed wire
+/// with no carry has its displacement multiplied by the space's scale; one
+/// with a carry has both polygons carried instead (RigExecCarryWireCurves).
+/// Shared by the live assembler, the frozen replay and nothing else, so the
+/// two USD-side paths cannot drift; the runtime restates it.
+inline void
+RigExecPoseWireDrivers(const std::vector<GfMatrix4d> &table, size_t t,
+                       size_t s, size_t bt, const VtFloatArray &weights,
+                       const VtFloatArray &baseWeights,
+                       const RigExecWireDriverFrame &frame,
+                       std::vector<GfVec3f> *restPoints,
+                       std::vector<GfVec3f> *auxPoints)
+{
+    const size_t bs = table.size() - t - s - bt;
+    const auto pick = [](size_t count, size_t j) {
+        return count <= 1 ? size_t(0) : j % count;
+    };
+    const auto measured = [&](size_t first, size_t count, size_t spaceFirst,
+                              size_t spaceCount, size_t j,
+                              GfVec3d *spaceScale) {
+        GfMatrix4d m = table[first + pick(count, j)];
+        if (spaceCount > 0) {
+            m = RigExecMeasureWireDriver(
+                m, table[spaceFirst + pick(spaceCount, j)], frame,
+                spaceScale);
+        }
+        return m;
+    };
+    const bool carried = frame.posedPoints && frame.carry;
+    auxPoints->resize(restPoints->size());
+    for (size_t j = 0; j < restPoints->size(); ++j) {
+        GfVec3f &rest = (*restPoints)[j];
+        // A base motion moves the curve AND its rest: the wire then deforms
+        // by the driver's motion on top of it.
+        if (bt > 0) {
+            const GfMatrix4d b = measured(t + s, bt, t + s + bt, bs, j,
+                                          nullptr);
+            const float wb = baseWeights.empty()
+                ? 1.0f : baseWeights[pick(baseWeights.size(), j)];
+            const GfVec3f moved(b.TransformAffine(GfVec3d(rest)));
+            rest = rest + (moved - rest) * wb;
+        }
+        GfVec3d scale(1.0, 1.0, 1.0);
+        const GfMatrix4d m = measured(0, t, t, s, j, &scale);
+        const float w =
+            weights.empty() ? 1.0f : weights[pick(weights.size(), j)];
+        const GfVec3f moved(m.TransformAffine(GfVec3d(rest)));
+        GfVec3f displacement = (moved - rest) * w;
+        if (frame.posedPoints && !carried) {
+            displacement = GfVec3f(displacement[0] * float(scale[0]),
+                                   displacement[1] * float(scale[1]),
+                                   displacement[2] * float(scale[2]));
+        }
+        (*auxPoints)[j] = rest + displacement;
+    }
+    if (carried) {
+        RigExecCarryWireCurves(restPoints, auxPoints, *frame.carry);
+    }
+}
+
 /// Whether a wire applies its envelope itself: a valid sparse field with a
 /// zero default, where only the named points are worth evaluating.
 inline bool
@@ -1337,9 +1407,7 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
                                std::vector<GfVec3f> *pts);
 
 /// Applies \p op to \p pts in place, returning false when the packet fails
-/// atomically. \p controlFrames receives the curvenet adjuster's fully
-/// adjusted control frames and is unread by every other operation; it may be
-/// null only when \p op is not RigExecRevisionOp::CurvenetAdjuster.
+/// atomically.
 ///
 /// The envelope is NOT applied here for the operations that take a separate
 /// blend: RigExecRunRevisionKernel below is where the "apply once" rule
@@ -1351,8 +1419,7 @@ bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
 /// and drifts on the ones that do not.
 bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
                                 const RigExecMoverParameters &p,
-                                std::vector<GfVec3f> *pts,
-                                std::vector<GfMatrix4d> *controlFrames);
+                                std::vector<GfVec3f> *pts);
 
 /// Runs one revision of \p op over \p pts in place, envelope included: the
 /// packet check, the full-strength fast path, RigExecApplyRevisionKernel and
@@ -1365,8 +1432,7 @@ bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
 /// operations blend and which fold the envelope into their own arithmetic.
 bool RigExecRunRevisionKernel(RigExecRevisionOp op,
                               const RigExecMoverParameters &p,
-                              std::vector<GfVec3f> *pts,
-                              std::vector<GfMatrix4d> *controlFrames);
+                              std::vector<GfVec3f> *pts);
 
 /// Whether \p envelope makes the "apply once" blend the identity, so the
 /// copy of the preceding revision, the resolved envelope array and the blend
@@ -1402,26 +1468,6 @@ RigExecEnvelopeIsFullStrength(const RigExecWeightPacket &envelope)
 /// the application rather than substituting a default (spec §6.6). The one
 /// deliberate exception is weights: null means no weight object was bound,
 /// so inputs:defaultWeight supplies the common envelope.
-/// The Profile Mover bind's inputs, retained for the bake (M1 slice 3b).
-///
-/// The bind itself owns a factorization, which has no by-value form; the
-/// runtime re-binds from these, which are everything RigExecBindProfileMover
-/// takes plus the topology inputs RigExecBuildCurvenetTopology takes. Every
-/// one is read at Default with the resolved inputs bypassed, so the answer
-/// is epoch data however many frames fill it -- and only the first fill
-/// lands, because the arrays are mesh-scale and a second copy per frame per
-/// curvenet revision would be a performance regression for identical bytes.
-struct RigExecCurvenetBindInputs {
-    std::vector<GfVec3f> restNet;
-    std::vector<int> splineIndices;
-    int samplesPerSpline = 5;
-    TfToken basis;
-    std::vector<GfVec3f> meshPoints;
-    std::vector<int> meshCounts;
-    std::vector<int> meshIndices;
-    bool held = false;
-};
-
 struct RigExecProviderValues {
     const GfMatrix4d *transform = nullptr;          ///< computeMatrix
     /// computeMatrix per binding.influences entry, in that order (skin).
@@ -1438,31 +1484,9 @@ struct RigExecProviderValues {
     const RigExecPointFrameArray *driverFrames = nullptr;
     std::vector<GfVec3f> basePoints;   ///< authored base of the target
     std::vector<GfVec3f> blendDeltas;  ///< summed channel deltas
-    /// Posed control points of the mover's curvenet. Supplied by the
-    /// evaluator, which runs curvenet chains first so a curvenet posed by
-    /// ordinary movers reaches the Profile Mover already articulated; empty
-    /// falls back to reading the curvenet's authored points at the time.
-    std::vector<GfVec3f> curvenetPoints;
-    /// Cache for the expensive half of the Profile Mover. Null binds fresh
-    /// every call, which is correct but only sane in a test.
-    RigExecCurvenetBindCache *curvenetCache = nullptr;
-    /// A bind the CALLER already resolved, for a caller that may not touch
-    /// the cache where it assembles -- RigExecCurvenetBindCache has no
-    /// locking at all, so the baked program resolves it in its serial
-    /// prologue and hands the answer in here. Set -- even to a shared_ptr
-    /// holding null, which is a remembered failed bind -- it is used and
-    /// `curvenetCache` is not consulted. Peer of `skinTopology` below, and
-    /// there for the same reason.
-    const std::shared_ptr<const RigExecProfileMoverBinding> *curvenetBinding =
-        nullptr;
     /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
     /// and re-validates the arrays every call, which is what a layout that
     /// is animated, connected, or written by a property chain requires.
-    /// Retention sink for the bind inputs above. Null looks away; set, the
-    /// Curvenet assembly fills it once (see `held`) on whichever path reads
-    /// the inputs -- the baked program points it at the revision's own
-    /// storage, so the bake carries what the runtime re-binds from.
-    RigExecCurvenetBindInputs *curvenetBindInputs = nullptr;
     RigExecSkinTopologyCache *skinTopologyCache = nullptr;
     /// A layout the CALLER already resolved, for a caller that may not take
     /// the cache's lock where it assembles. Set -- even to a shared_ptr
@@ -1474,6 +1498,68 @@ struct RigExecProviderValues {
     /// what a rig with no property chains wants and what a test may pass.
     const RigExecResolvedInputs *resolved = nullptr;
 };
+
+/// The provider frames a surface projector reads, as WORLD frames: each
+/// provider's rest frame times its base or final computeMatrix. Index 0 is
+/// binding.transform (the source), 1 binding.transformSpace (the source's
+/// sibling space), 2 binding.carrySpace (the rig's space). `named` says the
+/// binding names the provider; `resolved` says its frames were read.
+struct RigExecSurfaceProjectorFrames {
+    bool named[3] = {false, false, false};
+    bool resolved[3] = {false, false, false};
+    GfMatrix4d base[3] = {GfMatrix4d(1.0), GfMatrix4d(1.0), GfMatrix4d(1.0)};
+    GfMatrix4d final[3] = {GfMatrix4d(1.0), GfMatrix4d(1.0), GfMatrix4d(1.0)};
+};
+
+/// A provider's world frame from its rest landmarks and a rest->pose map:
+/// row-vector world = rest * M. Identity rest landmarks give M itself.
+GfMatrix4d RigExecWorldFromRest(const std::array<GfVec3d, 4> &restPoints,
+                                const GfMatrix4d &restToPose);
+
+/// What a surface projector target reads besides frames and points: its
+/// settings, its dials and its surface's topology. Gathered from the stage
+/// by RigExecReadProjectorTarget and from samples by the frozen replay, so
+/// both hand RigExecRunProjectorTarget the same values.
+struct RigExecProjectorReads {
+    GfVec3d rayOrigin{0.0, 0.0, 0.0};
+    GfVec3d rayDirection{0.0, 0.0, 1.0};
+    GfVec3d rayUp{0.0, 1.0, 0.0};
+    GfMatrix4d shaderOffset{1.0};
+    bool reproject = false;
+    std::vector<double> dials;
+    std::vector<int> faceVertexCounts;
+    std::vector<int> faceVertexIndices;
+};
+
+/// Reads (and records, for the bake) what \p op needs off the stage,
+/// through the generation's resolved inputs where the live assemblers do.
+void RigExecReadProjectorTarget(
+    const UsdPrim &projectorPrim, RigExecRevisionOp op,
+    const RigExecRevisionBinding &binding,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    RigExecProjectorReads *reads);
+
+/// Runs a surface projector target (SurfaceProjector or ShaderDials) on its
+/// gathered reads: the shared kernel on \p finalPoints against the authored
+/// \p basePoints. False, with diagnostics, when no matrix is published.
+bool RigExecRunProjectorTarget(
+    RigExecRevisionOp op, const RigExecRevisionBinding &binding,
+    const RigExecSurfaceProjectorFrames &frames,
+    const RigExecProjectorReads &reads,
+    const std::vector<GfVec3f> &basePoints,
+    const std::vector<GfVec3f> &finalPoints, GfMatrix4d *matrix,
+    std::vector<std::string> *diagnostics);
+
+/// RigExecReadProjectorTarget then RigExecRunProjectorTarget: what the
+/// dynamic walk and the baked program both call.
+bool RigExecEvaluateProjectorTarget(
+    const UsdPrim &projectorPrim, RigExecRevisionOp op,
+    const RigExecRevisionBinding &binding,
+    const RigExecSurfaceProjectorFrames &frames,
+    const std::vector<GfVec3f> &basePoints,
+    const std::vector<GfVec3f> &finalPoints,
+    const RigExecResolvedInputs *resolved, UsdTimeCode time,
+    GfMatrix4d *matrix, std::vector<std::string> *diagnostics);
 
 /// Sums blend channels into dense per-point deltas against \p base
 /// (spec §7.3): deltas derive against the authored base, never the preceding
@@ -1570,8 +1656,6 @@ public:
     /// Actual cached execution status, including kernel-time rejection.
     /// Evaluate the revision or a downstream output before querying it.
     RigExecMoverStatus GetRevisionStatus(const VdfMaskedOutput &revision) const;
-    /// Cached deformation-relative control frames produced by an adjuster.
-    std::vector<GfMatrix4d> GetRevisionControlFrames(const VdfMaskedOutput &revision) const;
 
     /// Number of revision nodes currently in the graph (excludes sources).
     size_t GetRevisionCount() const { return _revisionCount; }

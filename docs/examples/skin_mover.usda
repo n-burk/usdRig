@@ -147,7 +147,9 @@ def Xform "SkinAsset"
                         </SkinAsset/Rig/Joints/Root>,
                         </SkinAsset/Rig/Joints/Root/Mid>,
                         </SkinAsset/Rig/Joints/Root/Mid/Tip>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     int[] rigExec:jointIndices = [
                         0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2,
                         1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
@@ -168,7 +170,6 @@ def Xform "SkinAsset"
                     ]
                     rel rigExec:moves = </SkinAsset/Geom/StripDq.points>
                     uniform token rigExec:skinningMethod = "dualQuaternion"
-                    uniform token rigExec:transformReadPhase = "final"
                     uniform asset ui:nodegraph:node:icon = @../../icons/skin_mover.png@
                 }
 
@@ -181,7 +182,9 @@ def Xform "SkinAsset"
                         </SkinAsset/Rig/Joints/Root>,
                         </SkinAsset/Rig/Joints/Root/Mid>,
                         </SkinAsset/Rig/Joints/Root/Mid/Tip>,
-                    ]
+                    ] (
+                        rigExecReadPhase = "final"
+                    )
                     int[] rigExec:jointIndices = [
                         0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2,
                         1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
@@ -202,7 +205,6 @@ def Xform "SkinAsset"
                     ]
                     rel rigExec:moves = </SkinAsset/Geom/StripLinear.points>
                     uniform token rigExec:skinningMethod = "classicLinear"
-                    uniform token rigExec:transformReadPhase = "final"
                     uniform asset ui:nodegraph:node:icon = @../../icons/skin_mover.png@
                 }
             }

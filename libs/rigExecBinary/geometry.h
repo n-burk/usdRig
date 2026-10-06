@@ -4,14 +4,9 @@
 // objects, falloff LUTs, delta descriptors and the dense revision index.
 // Per-frame values -- packets, influence tables, envelopes, published
 // points -- are NOT on the wire: the runtime re-derives them by running.
-// Two deliberate deferrals, both documented where they land:
-//   * Curvenet profile binds own a factorization, which has no by-value
-//     form; M2 re-binds from the bind inputs. The weight side already
-//     retains its inputs (bound*), the profile side needs retention state
-//     (M1 slice 3b).
-//   * Blend layouts and skin topologies the epoch cache refused vary per
-//     frame; their streams arrive with the InputTable (slice 4), keyed by
-//     the sample/mover paths recorded here.
+// Blend layouts and skin topologies the epoch cache refused vary per
+// frame; their streams arrive with the InputTable (slice 4), keyed by
+// the sample/mover paths recorded here.
 #ifndef RIGEXEC_BINARY_GEOMETRY_H
 #define RIGEXEC_BINARY_GEOMETRY_H
 
@@ -56,8 +51,6 @@ struct RigExecWireRevisionBinding {
     int32_t driverBaseTransformCount = 0;
     uint32_t driverFrames = 0;
     uint32_t widths = 0;
-    uint32_t curvenet = 0;
-    uint32_t curvenetPoints = 0;
     std::vector<uint32_t> blendInputs;
     std::vector<uint32_t> blendSampleInputs;
     std::vector<std::vector<RigExecWireBlendSampleBinding>> blendSamples;
@@ -118,23 +111,9 @@ struct RigExecWireRevision {
     uint32_t moverPath = 0;
     uint32_t target = 0;
     uint32_t moverPrim = 0;
-    /// Matrix..RecomputeExtent, in RigExecRevisionOp order.
+    /// The stable RigExecRevisionOp value; reserved values are rejected.
     uint8_t op = 1;
     RigExecWireRevisionBinding binding;
-    int32_t curvenetChain = -1;
-    bool curvenetBindResolved = false;
-    /// Whether the prologue's bind produced a binding (as opposed to a
-    /// remembered failure): M2's re-bind must agree.
-    bool hasCurvenetBind = false;
-    /// The bind's retained inputs, for M2's re-bind.
-    std::vector<RigExecWireVec3f> curvenetRestNet;
-    std::vector<int32_t> curvenetSplineIndices;
-    int32_t curvenetSamplesPerSpline = 5;
-    uint32_t curvenetBasis = 0;
-    std::vector<RigExecWireVec3f> curvenetMeshPoints;
-    std::vector<int32_t> curvenetMeshCounts;
-    std::vector<int32_t> curvenetMeshIndices;
-    bool curvenetBindInputsHeld = false;
     std::vector<RigExecWireBlendChannel> blendChannels;
     std::vector<int32_t> influenceSlots;
     int32_t transformSlot = -1;
@@ -168,6 +147,13 @@ struct RigExecWireRevision {
     bool weightCurrentPhase = false;
     RigExecWireSkinTopology topology;
     bool topologyResolved = false;
+    /// A surface projector target (ops 17 and 18): its shader dial
+    /// properties and the projected mesh's static world inverse. A third
+    /// trailing block of the geometry section, written for derived
+    /// entries only; absent decodes as no dials and identity.
+    std::vector<uint32_t> shaderDials;
+    RigExecWireMatrix4d meshWorldInverse{{1, 0, 0, 0, 0, 1, 0, 0,
+                                          0, 0, 1, 0, 0, 0, 0, 1}};
 };
 
 struct RigExecWireDerived {
@@ -182,8 +168,7 @@ struct RigExecWireChain {
 };
 
 /// One weight object: the composed formula, by value. Packets are per-frame
-/// and NOT on the wire; the curvenet binding is re-cut from the retained
-/// bound* inputs.
+/// and NOT on the wire.
 struct RigExecWireWeightObject {
     uint32_t path = 0;
     uint32_t type = 0;
@@ -226,31 +211,6 @@ struct RigExecWireWeightObject {
     std::vector<uint32_t> curvePoints;
     std::vector<uint8_t> curveValid;
     std::vector<float> falloffCurve;
-    std::vector<uint32_t> curvenetMeshPoints;
-    std::vector<uint8_t> curvenetMeshValid;
-    std::vector<uint32_t> curvenetPoints;
-    std::vector<uint8_t> curvenetPointsValid;
-    std::vector<uint32_t> curvenetCounts;
-    std::vector<uint8_t> curvenetCountsValid;
-    std::vector<uint32_t> curvenetIndices;
-    std::vector<uint8_t> curvenetIndicesValid;
-    std::vector<uint32_t> curvenetSplines;
-    std::vector<uint8_t> curvenetSplinesValid;
-    uint32_t curvenetWeights = 0;
-    bool curvenetWeightsValid = false;
-    uint32_t curvenetAutoSmooth = 0;
-    bool curvenetAutoSmoothValid = false;
-    uint32_t curvenetBasis = 0;
-    RigExecWireInput curvenetSamples;
-    RigExecWireInput curvenetUnreached;
-    std::vector<RigExecWireVec3f> boundMesh;
-    std::vector<RigExecWireVec3f> boundNet;
-    std::vector<int32_t> boundCounts;
-    std::vector<int32_t> boundIndices;
-    std::vector<int32_t> boundSplines;
-    std::vector<int32_t> boundSmooth;
-    int32_t boundSamples = -1;
-    bool bound = false;
 };
 
 /// The DomainGeometry section.

@@ -292,13 +292,9 @@ Valid values: `X`, `Y`, `Z`.
 Which LOCAL axis the planar guides' normal points along,
 for circle and box. Ignored by the volumetric shapes.
 
-The planar guides were drawn in the XZ plane and nowhere else,
-while a rig's control curves lie in whichever plane the rigger
-drew them in. Measured on the biped's own control curves: 37 lie
-in the local YZ plane, 26 in XY and only 7 in XZ, so 181 of 213
-planar controls were drawn edge-on as slivers -- correct sizes,
-wrong plane. The only ones that looked right were the uniform
-TRS masters and the leg bendys, which genuinely are thin in Y.
+A rig's control curves lie in whichever plane the rigger drew
+them in. A planar guide drawn in a different plane from its
+curve shows edge-on, as a sliver of the right size.
 
 Y is the default and reproduces the historical drawing exactly,
 so a control that does not author this is unchanged.

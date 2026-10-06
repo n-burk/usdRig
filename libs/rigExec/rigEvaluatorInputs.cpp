@@ -192,21 +192,36 @@ _GetMoverExecutionOrder(const UsdPrim &rig)
     return _GetPoseStackOrder(rig);
 }
 
+namespace {
+
+// Type names the predicates below compare against, interned once at load:
+// they are asked per weight object per frame, and token comparison is a
+// pointer comparison while literal comparison is not.
+const TfToken _kSphereWeightType("RigExecSphereWeight");
+const TfToken _kPlaneWeightType("RigExecPlaneWeight");
+const TfToken _kCurveWeightType("RigExecCurveWeight");
+const TfToken _kJointType("RigExecJoint");
+const TfToken _kControlType("RigExecControl");
+const TfToken _kStaticWeightType("RigExecStaticWeight");
+const TfToken _kDynamicWeightType("RigExecDynamicWeight");
+const TfToken _kCombineWeightType("RigExecCombineWeight");
+
+} // namespace
+
 /// True for the schema types that GENERATE a weight field from a placed
 /// volume, as opposed to storing or modulating one.
 bool
 _IsVolumeWeightType(const TfToken &typeName)
 {
-    return typeName == "RigExecSphereWeight" ||
-           typeName == "RigExecPlaneWeight" ||
-           typeName == "RigExecCurveWeight";
+    return typeName == _kSphereWeightType || typeName == _kPlaneWeightType ||
+           typeName == _kCurveWeightType;
 }
 
 // Types whose frames participate in namespace-based pose dependencies.
 bool
 _IsFrameProviderType(const TfToken &type)
 {
-    return type == "RigExecJoint" || type == "RigExecControl" ||
+    return type == _kJointType || type == _kControlType ||
            _IsVolumeWeightType(type);
 }
 
@@ -226,11 +241,9 @@ _IsFrameProvider(const UsdPrim &prim)
 bool
 _IsWeightObjectType(const TfToken &typeName)
 {
-    return typeName == "RigExecStaticWeight" ||
-           typeName == "RigExecCurvenetWeight" ||
-           typeName == "RigExecDynamicWeight" ||
-           typeName == "RigExecCombineWeight" ||
-           _IsVolumeWeightType(typeName);
+    return typeName == _kStaticWeightType ||
+           typeName == _kDynamicWeightType ||
+           typeName == _kCombineWeightType || _IsVolumeWeightType(typeName);
 }
 
 bool
@@ -334,19 +347,13 @@ RigExecRigEvaluator::_ClearValueCachesWholesale(bool avarValuesOnly)
     // avar-only notice: it holds the edited avar's OLD authored value, and
     // it is the one cache below that can.
     _staticInputs.Clear();
-    // Everything else below is skipped for a notice that is only avar
-    // VALUES, because none of it can hold one. Measured on the biped, the
-    // re-reads they force cost ~15 ms of a ~23 ms Avar Editor tick:
-    //   * property chains are float-typed with type-strict connections
-    //     (_ValidateScalarConnection), so no binding can reach a double avar;
-    //   * skin layouts, blend sample shapes and the base points a live graph
-    //     pushes are jointIndices/weights, shape offsets and mesh points --
-    //     none of them avars, and a notice that named any of them would not
-    //     be avar-only.
+    // Property chains can read numeric avars through scalar connections.
+    // Their cached result must be dropped even for an avar-only notice.
+    _propertyChainBindings.reset();
+    // Skin layouts, blend samples and base geometry cannot hold avar values.
     if (avarValuesOnly) {
         return;
     }
-    _propertyChainBindings.reset();
     // Dropped as answers and kept as candidates (see the caches' Clear), so
     // a re-read that finds the same arrays keeps the same pointer.
     _skinTopologies.Clear();
@@ -384,11 +391,6 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
         }
         _staticInputs.ErasePrefixes(prefixes);
     }
-    // An avar-only notice can reach nothing below; see
-    // _ClearValueCachesWholesale for why.
-    if (avarValuesOnly) {
-        return;
-    }
     // A property chain answers from what it bound and from the value it
     // cached last run, so it is marked stale -- and rebound, and re-run, by
     // the next frame -- when the notice reaches anything that answer came
@@ -421,6 +423,11 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
                 _propertyChainBindings->anyStale = true;
             }
         }
+    }
+    // Avar-only edits may invalidate a property chain above, but cannot
+    // change skin layouts, blend offsets or base geometry below.
+    if (avarValuesOnly) {
+        return;
     }
     // The skin layouts, and which properties can reach one. A layout is read
     // from its mover's own layout attributes, and _skinLayoutInputs holds

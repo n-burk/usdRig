@@ -25,13 +25,13 @@ _BindSkinMover(const rigExec::RigExecMoverBindContext &ctx)
     rigExec::RigExecRevisionBinding &binding = *ctx.binding;
     const UsdPrim &moverPrim = ctx.moverPrim;
     const std::map<SdfPath, SdfPath> &frameChainHeads = ctx.frameChainHeads;
-    // Every influence shares one declared phase, on rigExec:influences
-    // or the legacy attribute, and "final" binds each provider's
-    // frame-chain head exactly as the matrix mover does for its one.
+    // Every influence shares the one phase declared on rigExec:influences,
+    // and "final" binds each provider's frame-chain head exactly as the
+    // matrix mover does for its one.
     binding.influences = rigExec::RigExecRelationshipTargets(
         moverPrim, "rigExec:influences");
-    binding.transformPhase = rigExec::RigExecPhaseForInput(
-        moverPrim, "rigExec:influences", "rigExec:transformReadPhase");
+    binding.transformPhase =
+        rigExec::RigExecPhaseForInput(moverPrim, "rigExec:influences");
     if (binding.transformPhase.kind == rigExec::RigExecReadPhaseKind::Final) {
         for (SdfPath &provider : binding.influences) {
             const auto it = frameChainHeads.find(provider);
@@ -97,16 +97,6 @@ _ValidateSkinMover(
                      " is not a catalogued matrix provider";
             return false;
         }
-    }
-    TfToken phase("base");
-    if (UsdAttribute a =
-            prim.GetAttribute(TfToken("rigExec:transformReadPhase"))) {
-        a.Get(&phase);
-    }
-    if (phase != "base" && phase != "final") {
-        *error = who + ": unsupported transformReadPhase '" +
-                 phase.GetString() + "' (v0.1 supports base and final)";
-        return false;
     }
 
     // Strict about the method: a declared token the kernel cannot honour is
@@ -193,14 +183,11 @@ _OracleSkinMover(const rigExec::RigExecMoverOracleContext &ctx)
             prim.GetRelationship(TfToken("rigExec:influences"))) {
         rel.GetTargets(&influences);
     }
-    TfToken phase("base");
-    if (const UsdAttribute a = prim.GetAttribute(
-            TfToken("rigExec:transformReadPhase"))) {
-        a.Get(&phase);
-    }
+    const bool final =
+        rigExec::RigExecPhaseForInput(prim, "rigExec:influences").kind ==
+        rigExec::RigExecReadPhaseKind::Final;
     const auto &matrices =
-        phase == "final" ? ctx.finalProviderMatrices
-                         : ctx.baseProviderMatrices;
+        final ? ctx.finalProviderMatrices : ctx.baseProviderMatrices;
     std::vector<GfMatrix4d> transforms;
     bool failed = false;
     for (const SdfPath &provider : influences) {
@@ -208,8 +195,8 @@ _OracleSkinMover(const rigExec::RigExecMoverOracleContext &ctx)
         if (matrixIt == matrices.end()) {
             diagnostics->push_back(
                 "MoverFailed " + moverPath.GetString() +
-                ": no " + phase.GetString() + " matrix provider at " +
-                provider.GetString());
+                ": no " + (final ? "final" : "base") +
+                " matrix provider at " + provider.GetString());
             failed = true;
             break;
         }

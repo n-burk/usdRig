@@ -935,9 +935,6 @@ class RigExecRibbon "RigExecRibbon" (
         }
     )
     rel rigExec:driverCurve
-    uniform token rigExec:driverCurveReadPhase = "base" (
-        allowedTokens = ["base", "final"]
-    )
     rel rigExec:endFrame
     uniform token rigExec:frameTransport = "rotationMinimizing" (
         allowedTokens = ["rotationMinimizing"]
@@ -959,9 +956,6 @@ class RigExecRibbon "RigExecRibbon" (
     )
     uniform int rigExec:sampleCount = 5
     rel rigExec:startFrame
-    uniform token rigExec:surfaceReadPhase = "base" (
-        allowedTokens = ["base", "final"]
-    )
     rel rigExec:twistFrames
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
@@ -1352,6 +1346,12 @@ class RigExecAimConstraint "RigExecAimConstraint" (
             string userDocBrief = "Optional single transform provider used by object world-up modes."
         }
     )
+    uniform bool rigExec:worldUpRotationOnly = 0 (
+        customData = {
+            string userDocBrief = """Take the world-up direction from the up object's ROTATION
+        alone, orthonormalizing its frame first."""
+        }
+    )
     uniform token rigExec:worldUpType = "none" (
         allowedTokens = ["sceneUp", "objectUp", "objectRotationUp", "vector", "none"]
     )
@@ -1540,6 +1540,12 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
             string userDocBrief = "Additive translation offset applied after the source blend."
         }
     )
+    uniform bool rigExec:blendShear = 0 (
+        customData = {
+            string userDocBrief = """With all three scale axes governed, blend the sources' SHEAR
+        as well as their scale."""
+        }
+    )
     uniform bool rigExec:locked = 0 (
         customData = {
             string userDocBrief = "Authoring lock metadata for application interchange."
@@ -1615,6 +1621,12 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     double3[] inputs:translationOffsets = [] (
         customData = {
             string userDocBrief = "Per-source translation offsets parallel to rigExec:sources."
+        }
+    )
+    uniform bool rigExec:blendShear = 0 (
+        customData = {
+            string userDocBrief = """With all three inputs:affectScale axes on, blend the sources' SHEAR
+        as well as their scale."""
         }
     )
     uniform bool rigExec:locked = 0 (
@@ -2004,41 +2016,6 @@ class "RigExecWeightObject" (
     )
 }
 
-class RigExecCurvenetWeight "RigExecCurvenetWeight" (
-    customData = {
-        string userDocBrief = "Surface parametrization from scalar maps on a curvenet."
-    }
-)
-{
-    float[] inputs:weights = []
-    int[] rigExec:autoSmooth = [] (
-        customData = {
-            string userDocBrief = "Control-pool indices whose values are interpolated from anchored neighbors."
-        }
-    )
-    uniform token rigExec:basis = "catmullRom" (
-        allowedTokens = ["bezier", "catmullRom"]
-    )
-    rel rigExec:curvenetPoints
-    rel rigExec:curvenetSplineIndices
-    rel rigExec:meshFaceCounts
-    rel rigExec:meshFaceIndices
-    uniform token rigExec:rangePolicy = "clamp" (
-        allowedTokens = ["strict", "clamp"]
-    )
-    uniform token rigExec:representation = "dense" (
-        allowedTokens = ["dense"]
-    )
-    uniform int rigExec:samplesPerSpline = 5
-    float rigExec:unreachedValue = 0
-    rel rigExec:weightTarget (
-        customData = {
-            string userDocBrief = """Canonical prim or exact property carrying the weighted
-        domain."""
-        }
-    )
-}
-
 class RigExecStaticWeight "RigExecStaticWeight" (
     customData = {
         string userDocBrief = """Time-invariant constant, dense, or sparse authored weight field;
@@ -2263,12 +2240,6 @@ class "RigExecVolumeWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = "Which points the distance function measures against."
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure
@@ -2277,7 +2248,8 @@ class "RigExecVolumeWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
+        domain."""
         }
     )
     token visibility = "inherited" (
@@ -2507,12 +2479,6 @@ class RigExecSphereWeight "RigExecSphereWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = "Which points the distance function measures against."
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure
@@ -2521,7 +2487,8 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
+        domain."""
         }
     )
     token visibility = "inherited" (
@@ -2735,12 +2702,6 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = "Which points the distance function measures against."
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure
@@ -2749,7 +2710,8 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
+        domain."""
         }
     )
     token visibility = "inherited" (
@@ -2953,12 +2915,6 @@ class RigExecCurveWeight "RigExecCurveWeight" (
         is the only representation it can honestly publish."""
         }
     )
-    uniform token rigExec:samplePhase = "reference" (
-        allowedTokens = ["reference", "current"]
-        customData = {
-            string userDocBrief = "Which points the distance function measures against."
-        }
-    )
     rel rigExec:sampleSource (
         customData = {
             string userDocBrief = """Optional explicit static points source to measure
@@ -2967,7 +2923,8 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = "Canonical prim or exact property carrying the weighted domain."
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
+        domain."""
         }
     )
     token visibility = "inherited" (
@@ -3067,9 +3024,6 @@ class RigExecMatrixMover "RigExecMatrixMover" (
             string userDocBrief = "Exactly one GfMatrix4d provider (computeMatrix)."
         }
     )
-    uniform token rigExec:transformReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-    )
     rel rigExec:transformSpace (
         customData = {
             string userDocBrief = """Optional second provider the transform is measured against:
@@ -3120,12 +3074,6 @@ class RigExecSkinMover "RigExecSkinMover" (
     uniform token rigExec:skinningMethod = "classicLinear" (
         allowedTokens = ["classicLinear", "dualQuaternion"]
     )
-    uniform token rigExec:transformReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-        customData = {
-            string userDocBrief = "Which revision of every influence's matrix is read."
-        }
-    )
 }
 
 class RigExecBlendShapeMover "RigExecBlendShapeMover" (
@@ -3173,9 +3121,6 @@ class RigExecBlendSample "RigExecBlendSample" (
         expresses as a full moved-points array, stored as only the points that
         move."""
         }
-    )
-    uniform token rigExec:pointsReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
     )
     rel rigExec:targetPoints (
         customData = {
@@ -3364,9 +3309,6 @@ class RigExecCurveMover "RigExecCurveMover" (
         }
     )
     rel rigExec:driverCurve
-    uniform token rigExec:driverCurveReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-    )
     uniform token rigExec:driverDeltaFrame = "local" (
         allowedTokens = ["local", "posed"]
         customData = {
@@ -3396,7 +3338,8 @@ class RigExecCurveMover "RigExecCurveMover" (
         the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the
         parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)
         per point from rigExec:bindCoordinates, C the curve's posed control
-        points at rigExec:driverCurveReadPhase and C0 its authored ones."""
+        points at rigExec:driverCurve's read phase and C0 its authored
+        ones."""
         }
     )
     uniform token rigExec:pointFrame = "rest" (
@@ -3406,10 +3349,10 @@ class RigExecCurveMover "RigExecCurveMover" (
         already in when it runs."""
         }
     )
-    uniform token rigExec:transformReadPhase = "base" (
-        allowedTokens = ["base", "final"]
+    rel rigExec:space (
         customData = {
-            string userDocBrief = "wire: which revision of the driver transforms is read."
+            string userDocBrief = """wire: the prim whose movement away from its rest carries
+        the whole rig -- normally a TRS master."""
         }
     )
 }
@@ -3458,9 +3401,6 @@ class RigExecLatticeMover "RigExecLatticeMover" (
             string userDocBrief = "Native mesh/points prim supplying cage control points."
         }
     )
-    uniform token rigExec:cageReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-    )
     int3 rigExec:divisions = (2, 2, 2)
 }
 
@@ -3480,19 +3420,12 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
             string userDocBrief = "Native mesh prim supplying the driver surface."
         }
     )
-    uniform token rigExec:surfaceReadPhase = "base" (
-        allowedTokens = ["base", "preceding", "final"]
-    )
 }
 
 class RigExecSurfaceProjector "RigExecSurfaceProjector" (
     customData = {
-        string userDocBrief = """Carries a projector on a deforming surface: casts a ray at
-    the surface's rest points to pick a material point on it, follows
-    that point onto the surface's OWN posed points, and moves the target
-    so that the frame there -- its position and its interpolated surface
-    normal -- drives the prim's transform while the geometry stays
-    exactly where the deformation put it (spec sections 4.1, 7.5)."""
+        string userDocBrief = """Publishes a frame that rides a deforming surface to the
+    renderer, as a constant matrix primvar on that surface."""
     }
 )
 {
@@ -3576,6 +3509,94 @@ class RigExecDeltaMushMover "RigExecDeltaMushMover" (
     float inputs:step = 0.5
 }
 
+class RigExecWrinkleMover "RigExecWrinkleMover" (
+    customData = {
+        string userDocBrief = """Adds automatic quasistatic wrinkles to one native mesh points
+    property."""
+    }
+)
+{
+    float inputs:bendStiffness = 0.1 (
+        customData = {
+            string userDocBrief = "Bend-link and surface-strut correction strength, finite and in [0,1]."
+        }
+    )
+    float inputs:compressionStiffness = 1 (
+        customData = {
+            string userDocBrief = "Correction strength for structural links compressed in the incoming pose, finite and in [0,1]."
+        }
+    )
+    int inputs:iterations = 80 (
+        customData = {
+            string userDocBrief = "Constraint solver iteration count in [0,1000]."
+        }
+    )
+    float inputs:maxDisplacement = 0.2 (
+        customData = {
+            string userDocBrief = """Finite nonnegative attachment radius around each incoming point
+        in mesh local units."""
+        }
+    )
+    int inputs:neighborDistance = 2 (
+        customData = {
+            string userDocBrief = "Exact triangulated-edge graph distance for surfaceStruts, in [1,8]."
+        }
+    )
+    bool inputs:pinBorders = 1 (
+        customData = {
+            string userDocBrief = "Keep vertices incident to a boundary edge at their incoming position."
+        }
+    )
+    uniform int[] inputs:pinPoints = [] (
+        customData = {
+            string userDocBrief = "Static, unconnected, unique nonnegative indices of additional pinned vertices."
+        }
+    )
+    float inputs:restLengthScale = 1 (
+        customData = {
+            string userDocBrief = "Finite positive scale on reference constraint lengths."
+        }
+    )
+    uniform point3f[] inputs:restPoints = [] (
+        customData = {
+            string userDocBrief = """Static, unconnected reference points in target mesh local space,
+        with the same ordering and count as the target."""
+        }
+    )
+    int inputs:smoothingIterations = 0 (
+        customData = {
+            string userDocBrief = "Displacement-field averaging passes in [0,100]; not rest-detail transport."
+        }
+    )
+    float inputs:stretchStiffness = 1 (
+        customData = {
+            string userDocBrief = "Correction strength for structural links stretched in the incoming pose, finite and in [0,1]."
+        }
+    )
+    bool inputs:tangentPlaneCollisions = 1 (
+        customData = {
+            string userDocBrief = """Prevent inward movement through each incoming vertex's local
+        tangent plane, offset inward by tangentPlaneInset."""
+        }
+    )
+    float inputs:tangentPlaneInset = 0 (
+        customData = {
+            string userDocBrief = "Finite nonnegative inward tangent-plane offset in mesh local units."
+        }
+    )
+    uniform token inputs:topology = "cloth" (
+        allowedTokens = ["cloth", "surfaceStruts"]
+        customData = {
+            string userDocBrief = "Static, unconnected constraint topology."
+        }
+    )
+    float inputs:wrinkleScale = 1 (
+        customData = {
+            string userDocBrief = "Finite nonnegative scale on solved displacement, still bounded by maxDisplacement."
+        }
+    )
+}
+
 class RigExecSmoothMover "RigExecSmoothMover" (
     customData = {
         string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points
@@ -3586,385 +3607,6 @@ class RigExecSmoothMover "RigExecSmoothMover" (
     }
 )
 {
-}
-
-class RigExecCurvenet "RigExecCurvenet" (
-    customData = {
-        string userDocBrief = '''A net of cubic splines profiling a surface, the rigging
-    representation of de Goes, Sheffler and Fleischer, "Character
-    Articulation through Profile Curves" (SIGGRAPH 2022), section 3.'''
-    }
-)
-{
-    vector3f[] accelerations (
-        customData = {
-            string userDocBrief = """If provided, 'accelerations' should be used with
-        velocities to compute positions between samples for the 'points'
-        attribute rather than interpolating between neighboring 'points'
-        samples."""
-        }
-    )
-    uniform bool doubleSided = 0 (
-        customData = {
-            string userDocBrief = """Although some renderers treat all parametric or polygonal
-        surfaces as if they were effectively laminae with outward-facing
-        normals on both sides, some renderers derive significant optimizations
-        by considering these surfaces to have only a single outward side,
-        typically determined by control-point winding order and/or 
-        orientation."""
-        }
-    )
-    float3[] extent (
-        customData = {
-            string userDocBrief = """Extent is a three dimensional range measuring the geometric
-        extent of the authored gprim in its own local space (i.e."""
-        }
-    )
-    int64[] ids (
-        customData = {
-            string userDocBrief = """Ids are optional; if authored, the ids array should be the same
-                 length as the points array, specifying (at each timesample if
-                 point identities are changing) the id of each point."""
-        }
-    )
-    normal3f[] normals (
-        customData = {
-            string userDocBrief = """Provide an object-space orientation for individual points, 
-        which, depending on subclass, may define a surface, curve, or free 
-        points."""
-        }
-    )
-    uniform token orientation = "rightHanded" (
-        allowedTokens = ["rightHanded", "leftHanded"]
-        customData = {
-            string userDocBrief = """Orientation specifies whether the gprim's surface normal 
-        should be computed using the right hand rule, or the left hand rule."""
-        }
-    )
-    point3f[] points (
-        customData = {
-            string userDocBrief = """The primary geometry attribute for all PointBased
-        primitives, describes points in (local) space."""
-        }
-    )
-    color3f[] primvars:displayColor (
-        customData = {
-            string userDocBrief = '''It is useful to have an "official" colorSet that can be used
-        as a display or modeling color, even in the absence of any specified
-        shader for a gprim.'''
-        }
-    )
-    float[] primvars:displayOpacity (
-        customData = {
-            string userDocBrief = """Companion to displayColor that specifies opacity, broken
-        out as an independent attribute rather than an rgba color, both so that
-        each can be independently overridden, and because shaders rarely consume
-        rgba parameters."""
-        }
-    )
-    rel proxyPrim (
-        customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
-        purpose="proxy" prim.'''
-        }
-    )
-    uniform token purpose = "default" (
-        allowedTokens = ["default", "render", "proxy", "guide"]
-        customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
-        on a stage, such as rendering or bounding-box computation traversals."""
-        }
-    )
-    uniform token rigExec:basis = "bezier" (
-        allowedTokens = ["bezier", "catmullRom"]
-        customData = {
-            string userDocBrief = "Curve basis."
-        }
-    )
-    uniform int rigExec:samplesPerSpline = 5 (
-        customData = {
-            string userDocBrief = """Sampling density before the mesh-resolution scaling of
-        section 3: the count per spline is this value times the ratio of the
-        spline's control polygon length to the surface's mean edge length."""
-        }
-    )
-    int[] rigExec:splineIndices = [] (
-        customData = {
-            string userDocBrief = "Four control point indices per cubic spline."
-        }
-    )
-    vector3f[] velocities (
-        customData = {
-            string userDocBrief = """If provided, 'velocities' should be used by renderers to 
-
-        compute positions between samples for the 'points' attribute, rather
-        than interpolating between neighboring 'points' samples."""
-        }
-    )
-    token visibility = "inherited" (
-        allowedTokens = ["inherited", "invisible"]
-        customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most applications.'''
-        }
-    )
-    float[] widths (
-        customData = {
-            string userDocBrief = """Widths are defined as the diameter of the points, in 
-                 object space."""
-        }
-    )
-    uniform token[] xformOpOrder (
-        customData = {
-            string userDocBrief = """Encodes the sequence of transformation operations in the
-        order in which they should be pushed onto a transform stack while
-        visiting a UsdStage's prims in a graph traversal that will effect
-        the desired positioning for this prim and its descendant prims."""
-        }
-    )
-}
-
-class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
-    customData = {
-        string userDocBrief = "An animation control on a curvenet knot."
-    }
-)
-{
-    matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
-        computed default:space."""
-        }
-    )
-    token avars:rotationOrder = "XYZ" (
-        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
-    )
-    double3 avars:rotationSign = (1, 1, 1) (
-        customData = {
-            string userDocBrief = """Per-axis sign applied to rx, ry and rz -- and to rspin,
-        which is an X rotation -- before they are composed."""
-        }
-    )
-    double avars:rspin = 0
-    double avars:rx = 0
-    double avars:ry = 0
-    double avars:rz = 0
-    double avars:sx = 1 (
-        customData = {
-            string userDocBrief = "Local X scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
-        }
-    )
-    double avars:sy = 1 (
-        customData = {
-            string userDocBrief = "Local Y scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
-        }
-    )
-    double avars:sz = 1 (
-        customData = {
-            string userDocBrief = "Local Z scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
-        }
-    )
-    double avars:tx = 0
-    double avars:ty = 0
-    double avars:tz = 0
-    double avars:unitScaleFactor = 1 (
-        customData = {
-            string userDocBrief = "Multiplier converting translation avars into local distance units before the selected default and parent transforms."
-        }
-    )
-    double default:rx = 0
-    double default:ry = 0
-    double default:rz = 0
-    matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        customData = {
-            string userDocBrief = "Local-to-world zero position for posing."
-        }
-    )
-    double default:tx = 0
-    double default:ty = 0
-    double default:tz = 0
-    float3[] extent (
-        customData = {
-            string userDocBrief = """Extent is a three dimensional range measuring the geometric
-        extent of the authored gprim in its own local space (i.e."""
-        }
-    )
-    color3f guide:displayColor = (1, 0.85, 0.2) (
-        customData = {
-            string userDocBrief = "Constant colour of the synthesized guide."
-        }
-    )
-    float guide:displayOpacity = 1 (
-        customData = {
-            string userDocBrief = "Constant opacity of the synthesized guide."
-        }
-    )
-    uniform bool guide:displayOpacityInvert = 0 (
-        customData = {
-            string userDocBrief = """When guide:displayOpacity is connected, draw 1 - source
-        instead of source."""
-        }
-    )
-    uniform float guide:displayOpacityMin = 0.15 (
-        customData = {
-            string userDocBrief = """Floor applied to a CONNECTED guide:displayOpacity after the
-        optional inversion."""
-        }
-    )
-    uniform token guide:drawMode = "wire" (
-        allowedTokens = ["wire", "geometry"]
-        customData = {
-            string userDocBrief = """wire draws the guide as curves, widthed by
-        guide:wireWidth."""
-        }
-    )
-    double3 guide:offset = (0, 0, 0) (
-        customData = {
-            string userDocBrief = """Where the guide shape is drawn, in the control's LOCAL frame,
-        relative to the control's origin."""
-        }
-    )
-    quatf guide:orient = (1, 0, 0, 0) (
-        customData = {
-            string userDocBrief = """Rotation of the drawn shape in the control's LOCAL frame,
-        applied after guide:scaleX/Y/Z and guide:planeNormal and before
-        guide:offset."""
-        }
-    )
-    uniform token guide:planeNormal = "Y" (
-        allowedTokens = ["X", "Y", "Z"]
-        customData = {
-            string userDocBrief = """Which LOCAL axis the planar guides' normal points along,
-        for circle and box."""
-        }
-    )
-    double guide:scaleX = 1 (
-        customData = {
-            string userDocBrief = """Positive per-axis draw multiplier of the guide shape whose
-        final size is abs(evaluated frame axis) * guide:scaleAxis, authored as
-        three separate double properties rather than a vec3."""
-        }
-    )
-    double guide:scaleY = 1 (
-        customData = {
-            string userDocBrief = "Per-axis draw scale along the local Y axis; see guide:scaleX."
-        }
-    )
-    double guide:scaleZ = 1 (
-        customData = {
-            string userDocBrief = "Per-axis draw scale along the local Z axis; see guide:scaleX."
-        }
-    )
-    uniform token guide:shape = "circle" (
-        allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
-        customData = {
-            string userDocBrief = """Guide primitive synthesized at the control's posed frame
-        origin (spec section 10.3 extension), exactly parallel to the
-        RigExecJoint sphere/cone guides."""
-        }
-    )
-    double guide:wireWidth = 0.05 (
-        customData = {
-            string userDocBrief = """Width authored onto the wire curves, in the LOCAL
-        pre-scale units of the unit shape -- so the drawn width tracks the
-        evaluated control-frame scale multiplied by guide:scaleX/Y/Z along
-        with the rest of the shape."""
-        }
-    )
-    matrix4d parent:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        customData = {
-            string userDocBrief = "Selected parent's default local-to-world space."
-        }
-    )
-    matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        customData = {
-            string userDocBrief = "Selected parent's posed local-to-world space."
-        }
-    )
-    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
-        }
-    )
-    matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        customData = {
-            string userDocBrief = "Final local-to-world transform."
-        }
-    )
-    rel proxyPrim (
-        customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
-        purpose="proxy" prim.'''
-        }
-    )
-    uniform token purpose = "default" (
-        allowedTokens = ["default", "render", "proxy", "guide"]
-        customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
-        on a stage, such as rendering or bounding-box computation traversals."""
-        }
-    )
-    double rest:rx = 0
-    double rest:ry = 0
-    double rest:rz = 0
-    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
-        }
-    )
-    double rest:tx = 0
-    double rest:ty = 0
-    double rest:tz = 0
-    rel rigExec:curvenet
-    uniform bool rigExec:includeTangents = 1
-    uniform int rigExec:knotIndex = -1
-    uniform token rigExec:pointKind = "knot" (
-        allowedTokens = ["knot", "tangent"]
-    )
-    token visibility = "inherited" (
-        allowedTokens = ["inherited", "invisible"]
-        customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
-        visibility that is supported by most applications.'''
-        }
-    )
-    uniform token[] xformOpOrder (
-        customData = {
-            string userDocBrief = """Encodes the sequence of transformation operations in the
-        order in which they should be pushed onto a transform stack while
-        visiting a UsdStage's prims in a graph traversal that will effect
-        the desired positioning for this prim and its descendant prims."""
-        }
-    )
-}
-
-class RigExecCurvenetAdjusterMover "RigExecCurvenetAdjusterMover" (
-    customData = {
-        string userDocBrief = """Applies deformation-relative knot and tangent animation controls
-    to exactly one native RigExecCurvenet points property."""
-    }
-)
-{
-    rel rigExec:adjustments
-}
-
-class RigExecCurvenetMover "RigExecCurvenetMover" (
-    customData = {
-        string userDocBrief = """The Profile Mover: propagates a rigged curvenet's articulation
-    over one exact native UsdGeomPointBased points property (2022 paper
-    section 4)."""
-    }
-)
-{
-    rel rigExec:curvenet (
-        customData = {
-            string userDocBrief = "Exactly one RigExecCurvenet supplying the posed control points."
-        }
-    )
 }
 
 class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (

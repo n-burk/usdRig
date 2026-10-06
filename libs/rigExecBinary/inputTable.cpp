@@ -517,46 +517,6 @@ _ReadVec3fs5(RigExecWireReader *reader,
 }
 
 void
-_PutMatrices2(std::vector<uint8_t> *out,
-              const std::vector<std::vector<RigExecWireMatrix4d>> &values)
-{
-    RigExecWirePutU32(out, uint32_t(values.size()));
-    for (const std::vector<RigExecWireMatrix4d> &row : values) {
-        _PutMatrices(out, row);
-    }
-}
-
-bool
-_ReadMatrices2(RigExecWireReader *reader,
-               std::vector<std::vector<RigExecWireMatrix4d>> *values)
-{
-    uint32_t count = 0;
-    if (!reader->ReadU32(&count)) {
-        return false;
-    }
-    values->resize(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        if (!_ReadMatrices(reader, &(*values)[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void
-_PutU8s2(std::vector<uint8_t> *out,
-         const std::vector<std::vector<uint8_t>> &values)
-{
-    RigExecWirePutU32(out, uint32_t(values.size()));
-    for (const std::vector<uint8_t> &row : values) {
-        RigExecWirePutU32(out, uint32_t(row.size()));
-        for (uint8_t v : row) {
-            RigExecWirePutU8(out, v);
-        }
-    }
-}
-
-void
 _PutPackets2(std::vector<uint8_t> *out,
              const std::vector<std::vector<RigExecWireWeightPacket>> &values)
 {
@@ -864,8 +824,6 @@ _PutFrame(std::vector<uint8_t> *out, const RigExecWireFrameInputs &frame)
     _PutF32s2(out, frame.revisionDefaultWeights);
     _PutPackets2(out, frame.revisionPhasePackets);
     _PutPackets2(out, frame.derivedPhasePackets);
-    _PutMatrices2(out, frame.revisionAdjusters);
-    _PutU8s2(out, frame.revisionAdjusterHave);
     _PutVec3fs2(out, frame.solverRibbonPoints);
     _PutF32s(out, frame.constraintWeights);
     RigExecWirePutU32(out, uint32_t(frame.constraintHaveWeight.size()));
@@ -892,23 +850,6 @@ _ReadU8sChecked(RigExecWireReader *reader, std::vector<uint8_t> *values)
             return false;
         }
         (*values)[i] = value;
-    }
-    return true;
-}
-
-bool
-_ReadU8sChecked2(RigExecWireReader *reader,
-                 std::vector<std::vector<uint8_t>> *values)
-{
-    uint32_t count = 0;
-    if (!reader->ReadU32(&count)) {
-        return false;
-    }
-    values->resize(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        if (!_ReadU8sChecked(reader, &(*values)[i])) {
-            return false;
-        }
     }
     return true;
 }
@@ -1045,8 +986,6 @@ _ReadFrame(RigExecWireReader *reader, RigExecWireFrameInputs *frame)
     if (!_ReadF32s2(reader, &frame->revisionDefaultWeights) ||
         !_ReadPackets2(reader, &frame->revisionPhasePackets) ||
         !_ReadPackets2(reader, &frame->derivedPhasePackets) ||
-        !_ReadMatrices2(reader, &frame->revisionAdjusters) ||
-        !_ReadU8sChecked2(reader, &frame->revisionAdjusterHave) ||
         !_ReadVec3fs2(reader, &frame->solverRibbonPoints) ||
         !_ReadF32s(reader, &frame->constraintWeights) ||
         !_ReadU8sChecked(reader, &frame->constraintHaveWeight) ||

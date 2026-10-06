@@ -2370,6 +2370,88 @@ RrLookAtRotation(const RrVec3d &forward, const RrVec3d &up)
     return basis.ExtractRotation();
 }
 
+
+// A fraction of the transform's ROTATION about the pivot it turns about,
+// not a fraction of the resulting position. The USD twin is
+// RigExecPartialTransform in rigExecMath/geometryKernels.cpp; the two must
+// agree bit for bit, so this is a transcription of it and not a second
+// derivation. See that function for why the pivot has to be recovered from
+// the screw axis rather than taken from the translation.
+inline RrMat4d
+RrPartialTransform(const RrMat4d &transform, double weight)
+{
+    const double w = RrClamp(weight, 0.0, 1.0);
+    if (w <= 0.0) {
+        return RrMat4d(1.0);
+    }
+    if (w >= 1.0) {
+        return transform;
+    }
+
+    // Row lengths are the scale; dividing them out leaves the rotation.
+    RrMat4d basis = transform;
+    basis.SetTranslateOnly(RrVec3d(0.0, 0.0, 0.0));
+    RrVec3d scale(1.0, 1.0, 1.0);
+    for (int axis = 0; axis < 3; ++axis) {
+        const RrVec3d row(basis[axis][0], basis[axis][1], basis[axis][2]);
+        const double length = row.GetLength();
+        if (length > 1e-12) {
+            scale[axis] = length;
+            const RrVec3d unit = row / length;
+            basis[axis][0] = unit[0];
+            basis[axis][1] = unit[1];
+            basis[axis][2] = unit[2];
+        }
+    }
+
+    const RrRotation rotation = basis.ExtractRotation();
+    const RrVec3d axis = rotation.GetAxis().GetNormalized();
+    const double angle = rotation.GetAngle();
+    const RrVec3d translation = transform.ExtractTranslation();
+
+    RrMat4d scaled(1.0);
+    scaled.SetScale(RrVec3d(1.0 + (scale[0] - 1.0) * w,
+                            1.0 + (scale[1] - 1.0) * w,
+                            1.0 + (scale[2] - 1.0) * w));
+
+    RrMat4d out(1.0);
+    out.SetRotate(RrRotation(axis, angle * w));
+    out = scaled * out;
+
+    // Below about a tenth of a degree there is no meaningful axis to turn
+    // about and the chord and the arc agree to within float noise.
+    const double radians = RrDegreesToRadians(angle);
+    if (std::abs(std::sin(0.5 * radians)) < 1e-4) {
+        out.SetTranslateOnly(translation * w);
+        return out;
+    }
+
+    // Split the translation into the part along the axis and the part
+    // across it, which is (I - R) applied to the pivot and so names it.
+    const double along = RrDot(translation, axis);
+    const RrVec3d across = translation - axis * along;
+    const double half = 0.5 / std::tan(0.5 * radians);
+    const RrVec3d pivot = across * 0.5 + RrCross(axis, across) * half;
+
+    // p' = R_w (p - pivot) + pivot + w * along * axis.
+    const RrMat4d partial = out;
+    out.SetTranslateOnly(pivot - partial.TransformDir(pivot) +
+                         axis * (along * w));
+    return out;
+}
+
+// M(transform) * inverse(M(space)) with the projective column set exactly.
+// The USD twin is RigExecMeasureInSpace in moverGraph.h.
+inline RrMat4d
+RrMeasureInSpace(const RrMat4d &transform, const RrMat4d &space)
+{
+    RrMat4d m = transform * space.GetInverse();
+    m[0][3] = 0.0;
+    m[1][3] = 0.0;
+    m[2][3] = 0.0;
+    m[3][3] = 1.0;
+    return m;
+}
 }  // namespace rigExec
 
 #endif  // RIGEXEC_RUNTIME_MATH_H

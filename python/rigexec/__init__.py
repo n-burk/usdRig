@@ -101,7 +101,6 @@ __version__ = _native.__version__
 
 from .bake import export_baked
 from .inverse import InverseResult, solve_parameters
-from .curvenet import create_curvenet_weight
 
 # Re-exported native surface.
 
@@ -143,7 +142,6 @@ CombineWeight = _native.CombineWeight
 
 BlendInput = _native.BlendInput
 BlendSample = _native.BlendSample
-Curvenet = _native.Curvenet
 
 MatrixMover = _native.MatrixMover
 SkinMover = _native.SkinMover
@@ -153,10 +151,8 @@ CurveMover = _native.CurveMover
 SurfaceMover = _native.SurfaceMover
 SmoothMover = _native.SmoothMover
 DeltaMushMover = _native.DeltaMushMover
+WrinkleMover = _native.WrinkleMover
 VolumeCorrectMover = _native.VolumeCorrectMover
-CurvenetMover = _native.CurvenetMover
-CurvenetAdjustment = _native.CurvenetAdjustment
-CurvenetAdjusterMover = _native.CurvenetAdjusterMover
 FloatMathMover = _native.FloatMathMover
 Vec3fMathMover = _native.Vec3fMathMover
 MatrixMathMover = _native.MatrixMathMover
@@ -173,14 +169,13 @@ __all__ = [
     "SingleChainIkConstraint",
     "Weight", "StaticWeight", "DynamicWeight", "VolumeWeight", "SphereWeight",
     "PlaneWeight", "CurveWeight", "CombineWeight",
-    "BlendInput", "BlendSample", "Curvenet", "CurvenetAdjustment", "CurvenetAdjusterMover",
+    "BlendInput", "BlendSample",
     "MatrixMover", "SkinMover", "LatticeMover", "BlendShapeMover", "CurveMover",
-    "SurfaceMover", "SmoothMover", "DeltaMushMover", "VolumeCorrectMover", "CurvenetMover",
+    "SurfaceMover", "SmoothMover", "DeltaMushMover", "WrinkleMover", "VolumeCorrectMover",
     "FloatMathMover", "Vec3fMathMover", "MatrixMathMover",
     "MoverChain",
     "load_schema_plugin", "identity",
     "export_baked", "InverseResult", "solve_parameters",
-    "create_curvenet_weight",
 ]
 
 # Schema plugin registration.
@@ -288,11 +283,6 @@ _CONCRETE_SCHEMA_NAMES = (
     "Control",
     "CurveMover",
     "CurveWeight",
-    "Curvenet",
-    "CurvenetMover",
-    "CurvenetAdjustment",
-    "CurvenetAdjusterMover",
-    "CurvenetWeight",
     "DynamicWeight",
     "FkChain",
     "FloatMathMover",
@@ -311,6 +301,7 @@ _CONCRETE_SCHEMA_NAMES = (
     "SingleChainIkConstraint",
     "SmoothMover",
     "DeltaMushMover",
+    "WrinkleMover",
     "SphereWeight",
     "SplineIk",
     "StaticWeight",

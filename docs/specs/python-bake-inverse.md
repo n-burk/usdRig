@@ -76,13 +76,3 @@ responsibilities.
 Regression coverage is in `testRigExecBake` and `testRigExecInverse`; default
 space/twist semantics and gizmo composition are covered by
 `testRigExecDefaultSpaces` and `testGizmoMath`.
-
-`rigexec.create_curvenet_weight(stage, path, curvenet, mesh, weights,
-auto_smooth=())` authors the native `RigExecCurvenetWeight` schema. It accepts
-source paths, USD prim/schema objects or RigExec handles, validates one finite
-weight per control-pool point and any auto-smoothing indices, then connects the
-mesh points/topology and curvenet points/spline indices through exact-property
-relationships. Basis and sampling attributes remain connected to the net;
-editing them or the authored weights updates the runtime's existing dependency
-graph. The helper returns a strict `SchemaPrim` that can be bound as an
-operation's `rigExec:weightObject`. The default range policy is `clamp`.

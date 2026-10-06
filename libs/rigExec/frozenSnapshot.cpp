@@ -99,7 +99,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.baseLast = src.baseLast;
     D.propertyResults = src.propertyResults;
     D.runSnapshots = src.runSnapshots;
-    D.curvenetBindings = src.curvenetBindings;
     D.phasedReads = src.phasedReads;
     D.finalMatrix = src.finalMatrix;
     D.baseMatrix = src.baseMatrix;
@@ -203,7 +202,6 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.resolvedRoutedPrims = src.resolvedRoutedPrims;
     D.avarsDisturbed = src.avarsDisturbed;
     D.folded = src.folded;
-    D.execTypedArrayInputs = src.execTypedArrayInputs;
     D.anyOverridden = src.anyOverridden;
     D.publishWeightFields = src.publishWeightFields;
 }
@@ -211,9 +209,8 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
 } // namespace frozenDetail
 
 bool
-RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
-                     std::shared_ptr<const RigExecFrozenProgram> *frozen,
-                     std::string *error)
+RigExecCanFreezeProgram(const RigExecRigEvaluator &evaluator,
+                        std::string *error)
 {
     const auto fail = [&error](const std::string &why) {
         if (error) {
@@ -221,9 +218,6 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
         }
         return false;
     };
-    if (!frozen) {
-        return fail("no snapshot to freeze into");
-    }
     if (evaluator.cpuParityMode) {
         return fail("CPU parity mode runs the dynamic path, which no "
                     "snapshot can reproduce");
@@ -299,11 +293,12 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
                 revision.op != RigExecRevisionOp::BlendShape &&
                 revision.op != RigExecRevisionOp::VolumeCorrect &&
                 revision.op != RigExecRevisionOp::Smooth &&
+                revision.op != RigExecRevisionOp::DeltaMush &&
+                revision.op != RigExecRevisionOp::Wrinkle &&
                 revision.op != RigExecRevisionOp::Lattice &&
                 revision.op != RigExecRevisionOp::SurfaceProject &&
                 revision.op != RigExecRevisionOp::Ribbon &&
-                revision.op != RigExecRevisionOp::EmitGuidePoints &&
-                revision.op != RigExecRevisionOp::Curvenet) {
+                revision.op != RigExecRevisionOp::EmitGuidePoints) {
                 return fail("revision " +
                             revision.moverPath.GetString() + " runs op '" +
                             RigExecRevisionKindToken(revision.op)
@@ -335,10 +330,9 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
                             " measures its weight field against the current "
                             "phase, which resolves through the live oracle");
             }
-            // Driver frames, the curvenet net chain, and the
-            // geometry-delta hand-off are implemented: the worker's own
-            // Solve-step aggregate and net-chain result, read in program
-            // order, and the delta through the shared constraint step and
+            // Driver frames and the geometry-delta hand-off use the
+            // worker's own Solve-step aggregate, read in program order,
+            // and the delta through the shared constraint step and
             // the shared fold -- the seeds patch the delta bases the
             // constraint step measures against, the step stashes the delta,
             // and FoldInfluences reads the stash, all shared bodies in
@@ -354,7 +348,8 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
             if (derived.revision.op != RigExecRevisionOp::RecomputeNormals &&
-                derived.revision.op != RigExecRevisionOp::RecomputeExtent) {
+                derived.revision.op != RigExecRevisionOp::RecomputeExtent &&
+                !RigExecIsDerivedMatrixOp(derived.revision.op)) {
                 return fail("derived target " +
                             derived.target.GetString() +
                             " runs an op the frozen executor does not "
@@ -369,6 +364,25 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
         }
     }
 
+    return true;
+}
+
+bool
+RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
+                     std::shared_ptr<const RigExecFrozenProgram> *frozen,
+                     std::string *error)
+{
+    if (!frozen) {
+        if (error) {
+            *error = "no snapshot to freeze into";
+        }
+        return false;
+    }
+    if (!RigExecCanFreezeProgram(evaluator, error)) {
+        return false;
+    }
+    const RigExecBakedProgramImpl &B =
+        evaluator.GetBakedProgram()->GetStepGraph();
     auto snapshot = std::make_shared<RigExecFrozenProgram>();
     _CloneImpl(B, &snapshot->program);
     if (B.jointSolverBinding) {

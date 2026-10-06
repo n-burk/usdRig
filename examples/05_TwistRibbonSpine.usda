@@ -181,8 +181,9 @@ def Xform "SpineAsset"
                 )
                 {
                     rel rigExec:moves = </SpineAsset/Geom/Fin.points>
-                    rel rigExec:transform = </SpineAsset/Rig/Joints/TwistMid>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </SpineAsset/Rig/Joints/TwistMid> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </SpineAsset/Rig/Weights/FinW>
                     uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
                 }

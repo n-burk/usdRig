@@ -128,11 +128,11 @@ _ValidateWeightObjectDomain(
     };
     const TfToken representation = readToken(
         "rigExec:representation",
-        (typeName == "RigExecCombineWeight" || typeName == "RigExecCurvenetWeight" ||
+        (typeName == "RigExecCombineWeight" ||
          _IsVolumeWeightType(typeName)) ? "dense" : "constant");
     const TfToken rangePolicy = readToken(
         "rigExec:rangePolicy",
-        (typeName == "RigExecCombineWeight" || typeName == "RigExecCurvenetWeight" ||
+        (typeName == "RigExecCombineWeight" ||
          _IsVolumeWeightType(typeName)) ? "clamp" : "strict");
     if (rangePolicy != "strict" && rangePolicy != "clamp") {
         *error = weightPath.GetString() +
@@ -154,46 +154,6 @@ _ValidateWeightObjectDomain(
                  ": generated/composed weights require dense "
                  "rigExec:representation";
         return false;
-    }
-
-    if (typeName == "RigExecCurvenetWeight") {
-        if (!pointDomain) { *error = "curvenet weights require a mesh point domain"; return false; }
-        const UsdPrim mesh = stage->GetPrimAtPath(moverTarget.GetPrimPath());
-        if (!mesh.IsA<UsdGeomMesh>()) {
-            *error = weightPath.GetString() + ": curvenet weights require a native mesh target";
-            return false;
-        }
-        const std::pair<const char *, SdfValueTypeName> inputs[] = {
-            {"rigExec:weightTarget", SdfValueTypeNames->Point3fArray},
-            {"rigExec:curvenetPoints", SdfValueTypeNames->Point3fArray},
-            {"rigExec:curvenetSplineIndices", SdfValueTypeNames->IntArray},
-            {"rigExec:meshFaceCounts", SdfValueTypeNames->IntArray},
-            {"rigExec:meshFaceIndices", SdfValueTypeNames->IntArray}};
-        for (const auto &[name, type] : inputs) {
-            SdfPathVector targets;
-            weightPrim.GetRelationship(TfToken(name)).GetTargets(&targets);
-            const UsdAttribute attr = targets.size() == 1 ?
-                weightPrim.GetStage()->GetAttributeAtPath(targets[0]) : UsdAttribute();
-            if (!attr || attr.GetTypeName() != type) {
-                *error = weightPath.GetString() + ": " + name + " must name one native property of the expected type";
-                return false;
-            }
-        }
-        auto targetOf = [&](const char *name) {
-            SdfPathVector targets;
-            weightPrim.GetRelationship(TfToken(name)).GetTargets(&targets);
-            return targets.front();
-        };
-        const SdfPath netPoints = targetOf("rigExec:curvenetPoints");
-        const UsdPrim net = stage->GetPrimAtPath(netPoints.GetPrimPath());
-        if (targetOf("rigExec:weightTarget") != moverTarget ||
-            targetOf("rigExec:meshFaceCounts") != mesh.GetPath().AppendProperty(TfToken("faceVertexCounts")) ||
-            targetOf("rigExec:meshFaceIndices") != mesh.GetPath().AppendProperty(TfToken("faceVertexIndices")) ||
-            net.GetTypeName() != "RigExecCurvenet" || netPoints.GetNameToken() != TfToken("points") ||
-            targetOf("rigExec:curvenetSplineIndices") != net.GetPath().AppendProperty(TfToken("rigExec:splineIndices"))) {
-            *error = weightPath.GetString() + ": parametrization inputs must name the matching native mesh and curvenet properties";
-            return false;
-        }
     }
 
     if (typeName == "RigExecStaticWeight") {
@@ -412,6 +372,34 @@ _ValidateWeightObjectDomain(
 
 } // namespace evaluatorDetail
 
+namespace {
+
+// Names every mover's checks below look up, interned once at load:
+// interning takes the token registry's lock.
+
+// A read-phase attribute replaced by metadata, and the input it moved to.
+struct _RemovedPhase {
+    TfToken name;
+    const char *input;
+};
+
+const _RemovedPhase _removedPhases[] = {
+    {TfToken("rigExec:transformReadPhase"),
+     "rigExec:transform, rigExec:influences or rigExec:driverTransforms"},
+    {TfToken("rigExec:cageReadPhase"), "rigExec:cage"},
+    {TfToken("rigExec:surfaceReadPhase"), "rigExec:surface"},
+    {TfToken("rigExec:driverCurveReadPhase"), "rigExec:driverCurve"},
+    {TfToken("rigExec:pointsReadPhase"), "rigExec:targetPoints"},
+};
+
+const TfToken _phasedInputs[] = {
+    TfToken("rigExec:transform"),   TfToken("rigExec:influences"),
+    TfToken("rigExec:driverTransforms"), TfToken("rigExec:cage"),
+    TfToken("rigExec:surface"),     TfToken("rigExec:bindCoordinates"),
+    TfToken("rigExec:driverCurve")};
+
+} // namespace
+
 bool
 RigExecRigEvaluator::_DiscoverMovers(
     std::vector<RigExecMoverRecord> &newMovers,
@@ -465,10 +453,9 @@ RigExecRigEvaluator::_DiscoverMovers(
                 continue;
             }
             if (prim.GetTypeName() == "RigExecSurfaceProjector") {
-                // Discovered here for the execution order, resolved in one
-                // post-geometry pass. It does not become a mover record: a
-                // projector needs the POSED surface, which does not exist
-                // until the geometry chains have run.
+                // Not a mover record: compile makes it derived targets on
+                // the chain it rides, which run on that chain's final
+                // points as the normals and extent maintenance do.
                 SdfPathVector projected;
                 moves.GetTargets(&projected);
                 for (const SdfPath &t : projected) {
@@ -481,44 +468,6 @@ RigExecRigEvaluator::_DiscoverMovers(
                     _SurfaceProjectorRecord record;
                     record.path = prim.GetPath();
                     record.target = t;
-                    record.rayOrigin = GfVec3d(0, 0, 0);
-                    record.rayDirection = GfVec3d(0, 0, 1);
-                    record.rayUp = GfVec3d(0, 1, 0);
-                    prim.GetAttribute(TfToken("rigExec:rayOrigin"))
-                        .Get(&record.rayOrigin);
-                    prim.GetAttribute(TfToken("rigExec:rayDirection"))
-                        .Get(&record.rayDirection);
-                    prim.GetAttribute(TfToken("rigExec:rayUp"))
-                        .Get(&record.rayUp);
-                    SdfPathVector anchors;
-                    if (const UsdRelationship r = prim.GetRelationship(
-                            TfToken("rigExec:sources"))) {
-                        r.GetTargets(&anchors);
-                    }
-                    if (!anchors.empty()) {
-                        record.source = anchors[0].GetPrimPath();
-                    }
-                    SdfPathVector spaces;
-                    if (const UsdRelationship r = prim.GetRelationship(
-                            TfToken("rigExec:sourceSpace"))) {
-                        r.GetTargets(&spaces);
-                    }
-                    if (!spaces.empty()) {
-                        record.sourceSpace = spaces[0].GetPrimPath();
-                    }
-                    SdfPathVector rigSpaces;
-                    if (const UsdRelationship r = prim.GetRelationship(
-                            TfToken("rigExec:space"))) {
-                        r.GetTargets(&rigSpaces);
-                    }
-                    if (!rigSpaces.empty()) {
-                        record.space = rigSpaces[0].GetPrimPath();
-                    }
-                    prim.GetAttribute(TfToken("rigExec:shaderOffset"))
-                        .Get(&record.shaderOffset);
-                    record.shaderPrimvar = TfToken("eyeProjector");
-                    prim.GetAttribute(TfToken("rigExec:shaderPrimvar"))
-                        .Get(&record.shaderPrimvar);
                     newSurfaceProjectors.push_back(std::move(record));
                 }
                 continue;
@@ -863,6 +812,21 @@ RigExecRigEvaluator::_DiscoverMovers(
                     }
                 }
             }
+            // The read-phase attributes were replaced by rigExecReadPhase
+            // metadata on the input relationship. An old opinion would now
+            // compose as an inert custom attribute, so it is refused.
+            for (const _RemovedPhase &removed : _removedPhases) {
+                const UsdAttribute old = prim.GetAttribute(removed.name);
+                if (old && old.HasAuthoredValue()) {
+                    return fail(record.schemaType.GetString() + " " +
+                                    prim.GetPath().GetString() + " authors " +
+                                    removed.name.GetString() +
+                                    ", which was replaced by "
+                                    "rigExecReadPhase metadata on " +
+                                    removed.input,
+                                {prim.GetPath()});
+                }
+            }
             // Read phases, validated from the AUTHORED stage.
             // Binding resolution parses these too, but it has to be total --
             // it returns a binding, not a verdict -- so an unparseable phase
@@ -870,31 +834,24 @@ RigExecRigEvaluator::_DiscoverMovers(
             // silently: the author asked for a specific revision and got the
             // authored value. The parse verdict belongs here, in Phase A,
             // where it can reject the compile before any epoch state moves.
-            {
-                static const std::pair<const char *, const char *> kPhased[] = {
-                    {"rigExec:transform", "rigExec:transformReadPhase"},
-                    {"rigExec:cage", "rigExec:cageReadPhase"},
-                    {"rigExec:surface", "rigExec:surfaceReadPhase"},
-                    {"rigExec:curvenet", nullptr},
-                    {"rigExec:bindCoordinates", nullptr},
-                    {"rigExec:driverCurve", "rigExec:driverCurveReadPhase"},
-                };
-                for (const auto &[relName, legacyAttr] : kPhased) {
+            for (const TfToken &relName : _phasedInputs) {
+                RigExecReadPhase phase;
+                std::string phaseError;
+                if (!RigExecResolveReadPhase(prim.GetRelationship(relName),
+                                             &phase, &phaseError)) {
+                    return fail(record.schemaType.GetString() + " " +
+                                prim.GetPath().GetString() + ": " +
+                                phaseError, {prim.GetPath()});
+                }
+            }
+            if (const RigExecMoverHandler *handler =
+                    RigExecFindMoverHandler(record.schemaType);
+                handler && handler->assembleExternal) {
+                for (const UsdRelationship &rel : prim.GetRelationships()) {
                     RigExecReadPhase phase;
                     std::string phaseError;
-                    bool ok = true;
-                    if (const UsdRelationship rel =
-                            prim.GetRelationship(TfToken(relName))) {
-                        ok = RigExecResolveReadPhase(rel, legacyAttr, &phase,
-                                                     &phaseError);
-                    } else if (legacyAttr) {
-                        if (const UsdAttribute a =
-                                prim.GetAttribute(TfToken(legacyAttr))) {
-                            ok = RigExecResolveReadPhase(a, legacyAttr, &phase,
-                                                         &phaseError);
-                        }
-                    }
-                    if (!ok) {
+                    if (!RigExecResolveReadPhase(rel, &phase,
+                                                 &phaseError)) {
                         return fail(record.schemaType.GetString() + " " +
                                     prim.GetPath().GetString() + ": " +
                                     phaseError, {prim.GetPath()});
@@ -910,9 +867,7 @@ RigExecRigEvaluator::_DiscoverMovers(
             // resolving them at evaluation time. The same rule
             // the aggregate cardinality attributes already follow.
             std::vector<const char *> structuralTokens = {
-                "rigExec:mode", "rigExec:operation",
-                "rigExec:transformReadPhase", "rigExec:cageReadPhase",
-                "rigExec:surfaceReadPhase"};
+                "rigExec:mode", "rigExec:operation"};
             // Which operators carry a rotation order is a table column, not
             // a list of type names repeated at each site that asks.
             const _ConstraintHandler *orderHandler =

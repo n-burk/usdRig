@@ -113,8 +113,9 @@ def Xform "DrapeAsset"
                     float inputs:defaultWeight = 0.75
                     uniform token rigExec:mode = "project"
                     rel rigExec:moves = </DrapeAsset/Geom/Stickers.points>
-                    rel rigExec:surface = </DrapeAsset/Geom/Sheet>
-                    uniform token rigExec:surfaceReadPhase = "final"
+                    rel rigExec:surface = </DrapeAsset/Geom/Sheet> (
+                        rigExecReadPhase = "final"
+                    )
                     uniform asset ui:nodegraph:node:icon = @../../icons/surface_mover.png@
 
                     def RigExecMatrixMover "FollowSheet" (
@@ -122,8 +123,9 @@ def Xform "DrapeAsset"
                     )
                     {
                         rel rigExec:moves = </DrapeAsset/Geom/Stickers.points>
-                        rel rigExec:transform = </DrapeAsset/Rig/Joints/Hinge>
-                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:transform = </DrapeAsset/Rig/Joints/Hinge> (
+                            rigExecReadPhase = "final"
+                        )
                         rel rigExec:weightObject = </DrapeAsset/Rig/Weights/StickerFalloff>
                         uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                     }
@@ -134,8 +136,9 @@ def Xform "DrapeAsset"
                 )
                 {
                     rel rigExec:moves = </DrapeAsset/Geom/Sheet.points>
-                    rel rigExec:transform = </DrapeAsset/Rig/Joints/Hinge>
-                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transform = </DrapeAsset/Rig/Joints/Hinge> (
+                        rigExecReadPhase = "final"
+                    )
                     rel rigExec:weightObject = </DrapeAsset/Rig/Weights/SheetFalloff>
                     uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
                 }

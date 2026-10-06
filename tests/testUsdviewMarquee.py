@@ -68,6 +68,20 @@ def testUsdviewInputFunction(appController):
     view = controller._view
     _Check(view is not None, "the controller found usdview's stage view")
 
+    # TouchPose switches itself on when a rig with touch regions opens, and
+    # while it is on the native marquee stands down. Steps 1-5 exercise the
+    # native marquee, so TouchPose starts them off; step 6 turns it on.
+    try:
+        import touchPoseUI
+        running = touchPoseUI.TouchPoseController._instance
+        if running is not None and running.active:
+            running.SetActive(False)
+            appController._processEvents()
+    except ImportError:
+        pass
+    _Check(not controller._TouchPoseActive(),
+           "TouchPose is off for the native marquee steps")
+
     # --- 1. the controls are there and selectable ----------------------
     selectable = gizmoMarquee.SelectablePaths(stage)
     _Check(len(selectable) > 50,

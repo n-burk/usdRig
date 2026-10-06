@@ -1949,7 +1949,7 @@ TestPurityAuditNamesEveryUnit()
         RigExecFrozenPurityAudit();
     CHECK(!audit.empty());
     size_t pure = 0, pinned = 0, liveOnly = 0;
-    bool sawCurvenetMemo = false, sawWireMemo = false;
+    bool sawWireMemo = false;
     bool sawStage = false, sawEvaluator = false, sawDynamic = false;
     bool sawSolverKernels = false, sawMoverKernels = false;
     for (const RigExecPurityFinding &finding : audit) {
@@ -1963,9 +1963,6 @@ TestPurityAuditNamesEveryUnit()
         case RigExecFrozenPurity::LiveOnly: ++liveOnly; break;
         }
         const bool isLive = finding.verdict == RigExecFrozenPurity::LiveOnly;
-        if (std::strstr(finding.unit, "curvenet binding LRU")) {
-            sawCurvenetMemo = isLive;
-        }
         if (std::strstr(finding.unit, "wire-basis memo")) {
             sawWireMemo = isLive;
         }
@@ -1990,7 +1987,6 @@ TestPurityAuditNamesEveryUnit()
     CHECK(pure > 0);
     CHECK(pinned > 0);
     CHECK(liveOnly > 0);
-    CHECK(sawCurvenetMemo);
     CHECK(sawWireMemo);
     CHECK(sawStage);
     CHECK(sawEvaluator);
@@ -2082,6 +2078,148 @@ TestBipedWarmsBitIdentical(const std::string &examplesDir,
     const RigExecRigPose live4 = evaluator.Evaluate(UsdTimeCode(4.0));
     CHECK(live4.valid);
     CheckPosesBitIdentical(what4.c_str(), live4, warmed4);
+}
+
+// Per-frame operator inputs that move nothing else: a space switch's index,
+// a numeric pose driver's dial, a TwoBoneIk rigExec:spaceMatrix, and the
+// controls behind a radial cluster and a posed wire. Each is keyed to differ
+// between frames 3 and 4 in the session layer. Live runs with the parity
+// check, so a baked step that does not declare one of them (and is skipped
+// on the time change) disagrees with the dynamic path; a warm that replays a
+// stale constant -- an input the sampler never visits -- disagrees with live.
+void
+TestKeyedOperatorInputsWarmBitIdentical(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/biped/Biped_stack.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const auto keyNumber = [](const UsdAttribute &a, double v3, double v4) {
+        if (!a) return false;
+        if (a.GetTypeName() == SdfValueTypeNames->Double) {
+            a.Set(v3, UsdTimeCode(3.0));
+            a.Set(v4, UsdTimeCode(4.0));
+            return true;
+        }
+        if (a.GetTypeName() == SdfValueTypeNames->Float) {
+            a.Set(float(v3), UsdTimeCode(3.0));
+            a.Set(float(v4), UsdTimeCode(4.0));
+            return true;
+        }
+        return false;
+    };
+    const auto keyAvar = [&](const SdfPath &path, const char *avar,
+                             double v3, double v4) {
+        const UsdPrim prim = stage->GetPrimAtPath(path);
+        if (!prim || prim.GetTypeName() != "RigExecControl") return false;
+        UsdAttribute a = prim.GetAttribute(TfToken(avar));
+        if (!a) {
+            a = prim.CreateAttribute(TfToken(avar),
+                                     SdfValueTypeNames->Double);
+        }
+        return keyNumber(a, v3, v4);
+    };
+    SdfPath rig;
+    bool switchKeyed = false, dialKeyed = false, ikKeyed = false;
+    bool radialKeyed = false, wireKeyed = false;
+    for (const UsdPrim &prim : stage->TraverseAll()) {
+        const TfToken type = prim.GetTypeName();
+        SdfPathVector targets;
+        if (type == "RigExecRoot" && rig.IsEmpty()) {
+            rig = prim.GetPath();
+        } else if (type == "RigExecSpaceSwitch" && !switchKeyed) {
+            prim.GetRelationship(TfToken("rigExec:activeSpaceAttribute"))
+                .GetTargets(&targets);
+            switchKeyed = keyNumber(
+                targets.empty()
+                    ? prim.GetAttribute(TfToken("inputs:activeSpace"))
+                    : stage->GetAttributeAtPath(targets[0]),
+                0.0, 1.0);
+        } else if (type == "RigExecPoseInterpolator" && !dialKeyed) {
+            prim.GetRelationship(TfToken("rigExec:driverAttributes"))
+                .GetTargets(&targets);
+            dialKeyed = !targets.empty() &&
+                        keyNumber(stage->GetAttributeAtPath(targets[0]), 0.0,
+                                  2.0);
+        } else if (type == "RigExecTwoBoneIk" && !ikKeyed) {
+            GfMatrix4d scaled(1.0);
+            scaled.SetScale(1.1);
+            UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:spaceMatrix"));
+            if (a) {
+                a.Set(GfMatrix4d(1.0), UsdTimeCode(3.0));
+                a.Set(scaled, UsdTimeCode(4.0));
+                ikKeyed = true;
+            }
+        } else if (type == "RigExecMatrixMover" && !radialKeyed) {
+            TfToken blend;
+            if (UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:weightBlend"))) {
+                a.Get(&blend);
+            }
+            prim.GetRelationship(TfToken("rigExec:transform"))
+                .GetTargets(&targets);
+            radialKeyed = blend == "radial" && !targets.empty() &&
+                          keyAvar(targets[0], "avars:rx", 0.0, 20.0);
+        } else if (type == "RigExecCurveMover" && !wireKeyed) {
+            TfToken delta;
+            if (UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:driverDeltaFrame"))) {
+                a.Get(&delta);
+            }
+            prim.GetRelationship(TfToken("rigExec:driverTransforms"))
+                .GetTargets(&targets);
+            wireKeyed = delta == "posed" && !targets.empty() &&
+                        keyAvar(targets[0], "avars:ty", 0.0, 1.0);
+        }
+    }
+    CHECK(!rig.IsEmpty());
+    CHECK(switchKeyed);
+    CHECK(dialKeyed);
+    CHECK(ikKeyed);
+    CHECK(radialKeyed);
+    CHECK(wireKeyed);
+    if (rig.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+    CHECK(evaluator.Evaluate(UsdTimeCode(2.0)).valid);
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    if (!frozen) {
+        std::printf("keyed operator inputs: freeze refused: %s\n",
+                    error.c_str());
+        return;
+    }
+    RigExecBackgroundScheduler scheduler;
+    std::vector<RigExecValueOverride> noOverrides;
+    for (const double frame : {3.0, 4.0}) {
+        RigExecFrameInputs inputs;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                                       noOverrides, &inputs, &error));
+        const RigExecRigPose warmed = RunWarmingJob(
+            &evaluator, rig, frozen, inputs, &scheduler, nullptr);
+        const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+        CHECK(live.valid);
+        if (live.bakedParityMismatches != 0) {
+            for (const std::string &diagnostic : live.diagnostics) {
+                std::printf("keyed operator inputs live frame %g: %s\n",
+                            frame, diagnostic.c_str());
+            }
+        }
+        CHECK(live.bakedParityMismatches == 0);
+        const std::string what =
+            "keyed operator inputs warmed frame " + std::to_string(frame);
+        CheckPosesBitIdentical(what.c_str(), live, warmed);
+    }
 }
 
 // The stack (examples/biped/Biped_stack_anim.usda) warms bit-identically:
@@ -2264,6 +2402,124 @@ CheckExampleWarmsBitIdentical(const std::string &stagePath,
     }
 }
 
+void
+TestIterativeMoversWarmBitIdentical()
+{
+    for (bool wrinkle : {false, true}) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const SdfPath rig("/Rig"), target("/Rig/Mesh.points");
+        auto builder = RigExecRigBuilder::Create(stage, rig);
+        const UsdPrim mesh = stage->DefinePrim(target.GetPrimPath(), TfToken("Mesh"));
+        VtVec3fArray rest, posed;
+        VtIntArray counts, indices;
+        for (int y = 0; y < 5; ++y) {
+            for (int x = 0; x < 5; ++x) {
+                rest.push_back(GfVec3f(0.25f * x, 0.25f * y, 0.0f));
+                posed.push_back(GfVec3f(0.15f * x, 0.25f * y,
+                                      (x == 2 && y == 2) ? 0.2f : 0.0f));
+            }
+        }
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                const int a = y * 5 + x;
+                counts.push_back(4);
+                for (int index : {a, a + 1, a + 6, a + 5}) {
+                    indices.push_back(index);
+                }
+            }
+        }
+        CHECK(mesh.CreateAttribute(TfToken("points"),
+            SdfValueTypeNames->Point3fArray).Set(posed));
+        CHECK(mesh.CreateAttribute(TfToken("faceVertexCounts"),
+            SdfValueTypeNames->IntArray).Set(counts));
+        CHECK(mesh.CreateAttribute(TfToken("faceVertexIndices"),
+            SdfValueTypeNames->IntArray).Set(indices));
+        auto chain = builder.NewMoverChain("Deform", target);
+        const UsdPrim mover = wrinkle
+            ? chain.AddWrinkleMover("Mover").GetPrim()
+            : chain.AddDeltaMushMover("Mover").GetPrim();
+        CHECK(mover.GetAttribute(TfToken("inputs:restPoints")).Set(rest));
+        CHECK(mover.GetAttribute(TfToken("inputs:pinBorders")).Set(false));
+        const UsdAttribute iterations = mover.GetAttribute(TfToken("inputs:iterations"));
+        CHECK(iterations.Set(4, UsdTimeCode(1.0)));
+        CHECK(iterations.Set(12, UsdTimeCode(3.0)));
+        const TfToken amplitudeName(wrinkle ? "inputs:wrinkleScale"
+                                            : "inputs:displacement");
+        const UsdAttribute amplitude = mover.GetAttribute(amplitudeName);
+        // A connected scalar exercises the same resolved read as live.
+        const UsdAttribute driver = mesh.CreateAttribute(TfToken("deformAmount"),
+            SdfValueTypeNames->Float);
+        CHECK(driver.Set(0.0f, UsdTimeCode(1.0)));
+        CHECK(driver.Set(1.0f, UsdTimeCode(3.0)));
+        CHECK(amplitude.SetConnections({driver.GetPath()}));
+        if (wrinkle) {
+            CHECK(mover.GetAttribute(TfToken("inputs:topology"))
+                .Set(TfToken("surfaceStruts")));
+            CHECK(mover.GetAttribute(TfToken("inputs:pinPoints"))
+                .Set(VtIntArray{0, 4}));
+        }
+        RigExecRigEvaluator evaluator(stage, rig);
+        CHECK(evaluator.Compile());
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
+        std::string error;
+        CHECK(RigExecCanFreezeProgram(evaluator, &error));
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        if (!frozen) {
+            std::printf("iterative mover freeze refused: %s\n", error.c_str());
+            continue;
+        }
+        RigExecChainSampleBindings bindings;
+        CHECK(RigExecBindChainSampleInputs(evaluator, &bindings, &error));
+        RigExecBurstSampleCache cache;
+        CHECK(RigExecBuildBurstSampleCache(*evaluator.GetBakedProgram(),
+            bindings, {}, RigExecFrameCacheEpochDigest(evaluator), &cache, &error));
+        RigExecBackgroundScheduler scheduler;
+        uint64_t previousDigest = 0;
+        VtVec3fArray previousPoints;
+        for (double frame : {3.0, 2.0, 1.0, 3.0}) {
+            RigExecFrameInputs plain, burst;
+            CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame),
+                {}, &plain, &error));
+            CHECK(RigExecSampleFrameInputsWithBurstCache(evaluator,
+                UsdTimeCode(frame), {}, &cache, &burst, &error));
+            const uint64_t digest = RigExecControlStateDigest(plain);
+            CHECK(digest == RigExecControlStateDigestWithBurstCache(burst, {}, &cache));
+            CHECK(digest != previousDigest);
+            previousDigest = digest;
+            const auto warmed = RunWarmingJob(&evaluator, rig, frozen,
+                burst, &scheduler, nullptr);
+            const auto live = evaluator.Evaluate(UsdTimeCode(frame));
+            CheckPosesBitIdentical(wrinkle ? "wrinkle" : "delta mush", live, warmed);
+            const auto found = warmed.movedProperties.find(target);
+            CHECK(found != warmed.movedProperties.end());
+            if (found != warmed.movedProperties.end() &&
+                found->second.IsHolding<VtVec3fArray>()) {
+                const auto &points = found->second.UncheckedGet<VtVec3fArray>();
+                CHECK(points != previousPoints);
+                previousPoints = points;
+            }
+            CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        }
+        // A standing override at the same time must also change the digest
+        // and match a live evaluation of that override.
+        RigExecValueOverride override;
+        override.prim = mover.GetPath();
+        override.attribute = amplitudeName;
+        override.value = VtValue(0.25f);
+        evaluator.SetInteractiveOverrides({override});
+        RigExecFrameInputs overridden;
+        CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(3.0),
+            {override}, &overridden, &error));
+        CHECK(RigExecControlStateDigest(overridden) != previousDigest);
+        const auto warmed = RunWarmingJob(&evaluator, rig, frozen,
+            overridden, &scheduler, nullptr);
+        const auto live = evaluator.Evaluate(UsdTimeCode(3.0));
+        CheckPosesBitIdentical("iterative mover override", live, warmed);
+    }
+}
+
 // The lattice stack (examples/06_LatticeBulge.usda) warms bit-identically:
 // a Lattice cage bulge through a Smooth pass into a VolumeCorrect hold,
 // with the cage keyed at 1001/1024/1048.
@@ -2312,18 +2568,6 @@ TestArmRigWarmsBitIdentical(const std::string &examplesDir)
                                   /*expectMotion=*/false);
 }
 
-// The curvenet profile (examples/12_CurvenetProfile.usda) warms
-// bit-identically: a Curvenet revision over a net chain's posed result,
-// with the bind transported from the sample.
-void
-TestCurvenetProfileWarmsBitIdentical(const std::string &examplesDir)
-{
-    CheckExampleWarmsBitIdentical(
-        examplesDir + "/12_CurvenetProfile.usda", {1001.0},
-        {1012.0, 1024.0, 1036.0, 1048.0},
-        SdfPath("/CurvenetAsset/Geom/Tube.points"));
-}
-
 // The read phases (examples/13_ReadPhases.usda) warm bit-identically: a
 // lattice reading its cage at `final` through the run's snapshot store,
 // over two matrix movers that pose the cage first.
@@ -2334,6 +2578,18 @@ TestReadPhasesWarmBitIdentical(const std::string &examplesDir)
         examplesDir + "/13_ReadPhases.usda", {1001.0},
         {1012.0, 1024.0, 1036.0, 1048.0},
         SdfPath("/ReadPhaseAsset/Geom/Slab.points"));
+}
+
+// Read phases on connections (examples/16_ConnectionReadPhases.usda) warm
+// bit-identically: the frame-cache sampler publishes each phased reader's
+// value from its own pass over the dial's chain, as the live path does.
+void
+TestConnectionReadPhasesWarmBitIdentical(const std::string &examplesDir)
+{
+    CheckExampleWarmsBitIdentical(
+        examplesDir + "/16_ConnectionReadPhases.usda", {1001.0},
+        {1012.0, 1024.0, 1036.0, 1048.0},
+        SdfPath("/PhaseConnectAsset/Geom/GainCard.points"));
 }
 
 // A constraint stage warms bit-identically: freeze after the history,
@@ -2819,40 +3075,6 @@ TestPoseConstraintWeightObjectRefusesFreeze()
     }
 }
 
-// CurvenetAdjuster is the one revision op no shipped baked example
-// authors, so it keeps a named refusal: freeze must decline a rig
-// carrying one, and the message must name the op.
-void
-TestCurvenetAdjusterRefusesFreeze()
-{
-    UsdStageRefPtr stage = UsdStage::CreateInMemory();
-    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
-    auto builder = RigExecRigBuilder::Create(stage, SdfPath("/Asset/Rig"));
-    const std::vector<GfVec3f> rest{
-        {0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {3, 0, 0}};
-    auto net = builder.AddCurvenet("Net", rest);
-    net.AddSpline(0, 1, 2, 3);
-    auto knot = builder.AddCurvenetAdjustment("Knot", net.GetPath(), 0);
-    knot.SetAvarTranslation(1, 0, 0);
-    const SdfPath target = net.GetPath().AppendProperty(TfToken("points"));
-    auto chain = builder.NewMoverChain("Shape", target);
-    chain.AddCurvenetAdjusterMover("Adjust", {knot.GetPath()});
-    RigExecRigEvaluator evaluator(stage, builder.GetRootPath());
-    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
-    std::vector<std::string> errors;
-    CHECK(evaluator.Compile(&errors));
-    CHECK(evaluator.Evaluate(UsdTimeCode(1.0)).valid);
-    std::shared_ptr<const RigExecFrozenProgram> frozen;
-    std::string error;
-    CHECK(!RigExecFreezeProgram(evaluator, &frozen, &error));
-    CHECK(frozen == nullptr);
-    if (error.find("curvenetAdjuster") == std::string::npos) {
-        ++failures;
-        std::printf("FAIL adjuster refusal names the op: %s\n",
-                    error.c_str());
-    }
-}
-
 // The Stream 0 9-mesh rig (reports/frame-cache-measurements.md §1): the
 // MakeMultiMeshRig construction -- 9 skinned meshes over two shared
 // controls -- animated (time samples at 1..40, so consecutive frames
@@ -3191,14 +3413,15 @@ main(int argc, char **argv)
         TestBipedWarmsBitIdentical(argv[1]);
         TestBipedWarmsBitIdenticalAtSweepDistance(argv[1]);
         TestStackAnimWarmsBitIdentical(argv[1]);
+        TestKeyedOperatorInputsWarmBitIdentical(argv[1]);
         TestStackAnimWarmsBitIdenticalAtSweepDistance(argv[1]);
         TestBlendFaceWarmsBitIdentical(argv[1]);
         TestLatticeStackWarmsBitIdentical(argv[1]);
         TestSurfaceDrapeWarmsBitIdentical(argv[1]);
         TestRibbonSpineWarmsBitIdentical(argv[1]);
         TestArmRigWarmsBitIdentical(argv[1]);
-        TestCurvenetProfileWarmsBitIdentical(argv[1]);
         TestReadPhasesWarmBitIdentical(argv[1]);
+        TestConnectionReadPhasesWarmBitIdentical(argv[1]);
         TestAimXformTurretWarmsBitIdentical(argv[1]);
         TestAimtestWarmsBitIdentical(argv[1]);
         TestAimtestPointsWarmsBitIdentical(argv[1]);
@@ -3217,6 +3440,7 @@ main(int argc, char **argv)
         std::printf("skipping the biped (no examples directory given)\n");
     }
     Test9MeshWarmsBitIdentical();
+    TestIterativeMoversWarmBitIdentical();
     Test9MeshWarmsBitIdenticalAtSweepDistance();
     TestProductionRunnerDeclinesWithoutProof();
     TestFrozenRunIsBitIdentical();
@@ -3227,7 +3451,6 @@ main(int argc, char **argv)
     TestArenaIsolation();
     TestConcurrentFrozenRunsAgree();
     TestPurityAuditNamesEveryUnit();
-    TestCurvenetAdjusterRefusesFreeze();
     TestFreezeIntoNullSnapshotRefuses();
     TestCpuParityModeRefusesFreeze();
     TestPoseConstraintWeightObjectRefusesFreeze();

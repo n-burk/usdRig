@@ -1,7 +1,7 @@
 // RigExec end-to-end tests for volumetric weight objects (spec §4.1
 // volumetric extension): sphere, plane, and curve fields driving real
 // matrix movers, weight-object composition, the authored falloff spline,
-// and the reference/current sample phases.
+// and the base/preceding read phases of the sampled points.
 // Every case also asserts pose.moverGraphParityMismatches == 0, which is
 // the assertion that actually matters: it means the OpenExec
 // computeWeightPacket kernels and the CPU oracle independently computed
@@ -1041,10 +1041,10 @@ TestAuthoredFalloffCurve()
     }
 }
 
-// rigExec:samplePhase decides WHICH points the distance is measured
-// against, and the two answers genuinely differ: a volume the geometry has
-// already been moved out of grabs nothing under `current` and still grabs
-// under `reference`.
+// The read phase on rigExec:weightTarget decides WHICH points the
+// distance is measured against, and the two answers genuinely differ: a
+// volume the geometry has already been moved out of grabs nothing under
+// `preceding` and still grabs under `base`.
 static void
 TestSamplePhase(bool current)
 {
@@ -1061,9 +1061,9 @@ TestSamplePhase(bool current)
 
     UsdPrim v = f.MakeVolume("Sphere", TfToken("RigExecSphereWeight"),
                              GfVec3d(0, 0, 0), 0.0f, 3.0f);
-    v.CreateAttribute(TfToken("rigExec:samplePhase"),
-                      SdfValueTypeNames->Token)
-        .Set(TfToken(current ? "current" : "reference"));
+    v.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetMetadata(TfToken("rigExecReadPhase"),
+                     std::string(current ? "preceding" : "base"));
 
     // Composed post-order: the DEEPER mover runs first, so Lift is
     // nested inside Second and applies before it.
@@ -1076,7 +1076,7 @@ TestSamplePhase(bool current)
     (void)second;
 
     const VtVec3fArray points =
-        f.Resolve(current ? "samplePhase-current" : "samplePhase-reference");
+        f.Resolve(current ? "readPhase-preceding" : "readPhase-base");
     CHECK(points.size() == 4);
     if (points.size() != 4) return;
 
@@ -1212,8 +1212,8 @@ TestCurrentPhaseThroughCombine()
 
     UsdPrim v = f.MakeVolume("Sphere", TfToken("RigExecSphereWeight"),
                              GfVec3d(0, 0, 0), 0.0f, 3.0f);
-    v.CreateAttribute(TfToken("rigExec:samplePhase"),
-                      SdfValueTypeNames->Token).Set(TfToken("current"));
+    v.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetMetadata(TfToken("rigExecReadPhase"), std::string("preceding"));
 
     // The mover binds the COMBINE, not the sphere.
     UsdPrim combine = f.stage->DefinePrim(
@@ -1302,7 +1302,7 @@ struct ConstraintEnvelopeFixture {
     // than to the bake: see TestAConstrainedVolumeWeightFallsBack in
     // testRigExecBakedMode.
     ConstraintEnvelopeFixture(const GfVec3d &volumeAt,
-                              const char *samplePhase)
+                              const char *readPhase)
     {
         stage = UsdStage::CreateInMemory();
         stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
@@ -1339,9 +1339,8 @@ struct ConstraintEnvelopeFixture {
         sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
                                SdfValueTypeNames->Token)
             .Set(TfToken("linear"));
-        sphere.CreateAttribute(TfToken("rigExec:samplePhase"),
-                               SdfValueTypeNames->Token)
-            .Set(TfToken(samplePhase));
+        sphere.GetRelationship(TfToken("rigExec:weightTarget"))
+            .SetMetadata(TfToken("rigExecReadPhase"), std::string(readPhase));
 
         // The geometry-domain constraint, and the weight object on it.
         const UsdPrim constraint = stage->DefinePrim(
@@ -1404,13 +1403,13 @@ SplitByMovement(const VtVec3fArray &points, const VtVec3fArray &base)
 }  // namespace
 
 static void
-TestVolumeWeightOnAConstraint(const char *samplePhase)
+TestVolumeWeightOnAConstraint(const char *readPhase)
 {
     const std::string what =
         std::string("volume envelope on a geometry constraint, ") +
-        samplePhase;
-    ConstraintEnvelopeFixture low(GfVec3d(0, 0, 0), samplePhase);
-    ConstraintEnvelopeFixture high(GfVec3d(0, 8, 0), samplePhase);
+        readPhase;
+    ConstraintEnvelopeFixture low(GfVec3d(0, 0, 0), readPhase);
+    ConstraintEnvelopeFixture high(GfVec3d(0, 8, 0), readPhase);
     const VtVec3fArray lowPoints = low.Resolve(what + ", low");
     const VtVec3fArray highPoints = high.Resolve(what + ", high");
     if (lowPoints.size() != low.base.size() ||
@@ -1479,8 +1478,8 @@ main(int argc, char **argv)
     TestSamplePhase(/* current */ true);
     TestVolumeWeightTargetMismatchSkipsMover();
     TestCurveWeightRejectsTwoCurves();
-    TestVolumeWeightOnAConstraint("reference");
-    TestVolumeWeightOnAConstraint("current");
+    TestVolumeWeightOnAConstraint("base");
+    TestVolumeWeightOnAConstraint("preceding");
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

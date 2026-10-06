@@ -45,11 +45,11 @@ struct RigExecFrameInputs;
 struct RigExecSampledInput;
 struct RigExecBurstSampleCache;
 
-/// Default per-rig byte cap: 1 GiB holds the 200-frame stack full range
-/// (slot-backed retained state, ~3.1 MiB/frame) plus headroom. The 512 MiB
-/// sources-only sizing thrashed once Stream 2 attached per-frame slots,
-/// never converging to cached.
-constexpr size_t kRigExecFrameCacheDefaultByteCap = 1024 * 1024 * 1024;
+/// Default per-rig byte cap: holds the 200-frame stack full range
+/// (slot-backed retained state, measured at 5.4 MB/frame, 1.08 GB in all)
+/// with headroom. A cap below the full range never converges to cached: the
+/// LRU keeps evicting the frame the warmer just filled.
+constexpr size_t kRigExecFrameCacheDefaultByteCap = size_t(1280) * 1024 * 1024;
 
 /// What a cached pose is a function of. Time is deliberately absent: see the
 /// file header.

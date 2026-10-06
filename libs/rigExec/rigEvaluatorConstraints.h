@@ -4,6 +4,8 @@
 
 #include "rigEvaluatorInternal.h"
 
+#include "pxr/base/tf/token.h"
+
 namespace rigExec {
 
 namespace evaluatorDetail {
@@ -30,6 +32,8 @@ struct _ConstraintSolveContext {
     /// the kernel's untouched branch rather than one multiplied by an
     /// identity (see RigExecRotationConstraintParams::carry).
     const GfMatrix4d *carry = nullptr;
+    /// rigExec:blendShear, compiled (Scale and Parent).
+    bool blendShear = false;
 };
 
 using _ConstraintSolveFn =
@@ -40,7 +44,9 @@ enum class _ChannelGroup { None, Translation, Rotation, Scale, All };
 
 // Operator dispatch and authored-channel contracts shared by compile and evaluate.
 struct _ConstraintHandler {
-    const char *schemaType;
+    // Interned once with the table: dispatch compares tokens, so a lookup
+    // never interns the name it is looking up.
+    TfToken schemaType;
     bool sourceFrame;      ///< blends rigExec:sources into one revision
     bool frameConstraint;  ///< compiles to frame wiring at all
     bool usesRotationOrder;

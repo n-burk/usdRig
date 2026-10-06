@@ -267,6 +267,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     RrStore &store = program.store;
     const RigExecWireFrameInputs &record = _inputs.frames[_frameIndex];
     const double time = record.frame;
+    program.frameIndex = _frameIndex;
 
     // The property chains' published values, straight from the record.
     if (record.propertyPaths.size() != record.propertyValues.size()) {
@@ -347,13 +348,6 @@ RigExecRuntimeReader::Execute(std::string *error)
     }
     RrPublishGeometry(&program, record, &poseDiagnostics);
 
-    // Whatever the curvenet binds reported; drained so a cached bind
-    // stays silent on every later frame. Then the summary line, in
-    // the same words the baked epilogue uses.
-    for (std::string &message : store.curvenetBindDiagnostics) {
-        poseDiagnostics.push_back(std::move(message));
-    }
-    store.curvenetBindDiagnostics.clear();
     RigExecRuntimeCounters counters;
     for (const RrStepOutput &output : store.stepOutputs) {
         counters.revisionsExecuted += output.counters.revisionsExecuted;
@@ -370,6 +364,21 @@ RigExecRuntimeReader::Execute(std::string *error)
         std::to_string(counters.revisionsExecuted) + " executed, " +
         std::to_string(counters.schedulesBuilt) +
         " schedule(s) built");
+
+    // A plugin mover this runtime has no kernel for is a no-op, said on
+    // every frame it is one, beside the lines of the step it sat in.
+    for (const auto &[slot, index] : program.externalIndex) {
+        const RrProgram::ExternalRevision &state = program.externals[index];
+        if (state.state) {
+            continue;
+        }
+        const RigExecWireRevision &wire =
+            _geometry.chains[slot.first].revisions[slot.second];
+        poseDiagnostics.push_back(
+            "warning: " + program.TextOrEmpty(wire.moverPath) + " is a " +
+            state.type + ", which this runtime has no kernel for; its "
+            "points pass through");
+    }
 
     // The compile notices a fresh evaluator seeds its first generation
     // with (inert movers, purpose warnings): manifest order, ahead of
@@ -400,6 +409,14 @@ RigExecRuntimeReader::Execute(std::string *error)
         moved.path = program.TextOrEmpty(entry.first);
         moved.points = entry.second;
         points.push_back(std::move(moved));
+    }
+    std::vector<RigExecRuntimeMatrixPrimvar> matrixPrimvars;
+    matrixPrimvars.reserve(store.movedMatrices.size());
+    for (const auto &entry : store.movedMatrices) {
+        RigExecRuntimeMatrixPrimvar primvar;
+        primvar.path = program.TextOrEmpty(entry.first);
+        primvar.matrix = entry.second;
+        matrixPrimvars.push_back(std::move(primvar));
     }
     std::vector<RigExecRuntimeWeightFrame> weightFrames;
     weightFrames.reserve(store.weightFrames.size());
@@ -438,6 +455,7 @@ RigExecRuntimeReader::Execute(std::string *error)
     _SortByPath(&providerXforms);
     _jointMatrices = std::move(jointMatrices);
     _points = std::move(points);
+    _matrixPrimvars = std::move(matrixPrimvars);
     _weightFrames = std::move(weightFrames);
     _weightFields = std::move(weightFieldsOut);
     _providerXforms = std::move(providerXforms);

@@ -14,7 +14,7 @@ KEYS = [
     "browR.up", "browR.down", "browR.angry", "browR.worried",
     "browL.up", "browL.down", "browL.angry", "browL.worried",
     "mouth.open", "mouth.wide", "mouth.round", "mouth.smile", "mouth.frown",
-    "mouth.smirkR", "mouth.smirkL",
+    "mouth.smirkR", "mouth.smirkL", "mouth.teeth", "mouth.tongue", "mouth.lipThick",
     "blush", "sweat", "hatch",
 ]
 
@@ -64,7 +64,8 @@ def brow_params(st, side):
 
 def mouth_params(st):
     return dict(open=st["mouth.open"], wide=st["mouth.wide"] - st["mouth.round"],
-                smile=st["mouth.smile"] - st["mouth.frown"], smirk=st["mouth.smirkR"] - st["mouth.smirkL"])
+                smile=st["mouth.smile"] - st["mouth.frown"], smirk=st["mouth.smirkR"] - st["mouth.smirkL"],
+                teeth=st["mouth.teeth"])
 
 
 copy = copy

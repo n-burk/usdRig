@@ -416,7 +416,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
             _ReportBakeRequired(why, &dynamic);
             _ReportAttributeBakeFallback(why, &dynamic);
         }
-        return _WithSurfaceProjectors(std::move(dynamic), time);
+        return dynamic;
     }
     RigExecRigPose baked;
     baked.time = time;
@@ -448,7 +448,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
             _ReportBakeRequired("program run failed", &dynamic);
             _ReportAttributeBakeFallback("program run failed", &dynamic);
         }
-        return _WithSurfaceProjectors(std::move(dynamic), time);
+        return dynamic;
     }
     ++_bakedGenerations;
     // A generation given back at the stage frames ran no geometry, so it
@@ -458,7 +458,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
     }
     // Baked, and Dynamic running the program, publish what it answered.
     if (_evaluationMode != RigExecEvaluationMode::BakedWithParityCheck) {
-        return _WithSurfaceProjectors(std::move(baked), time);
+        return baked;
     }
     // BakedWithParityCheck publishes the DYNAMIC generation: it is the
     // reference, so a disagreement must not also change what consumers see.
@@ -475,7 +475,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
                     ? "default"
                     : TfStringPrintf("%g", time.GetValue()).c_str());
     }
-    return _WithSurfaceProjectors(std::move(reference), time);
+    return reference;
 }
 
 void

@@ -26,6 +26,37 @@ namespace frozenDetail {
 // doubles is three orders of magnitude past anything a real job sizes.
 inline constexpr size_t kMaxFrozenArenaSlots = size_t(1) << 27;
 
+// Shared scalar schema for sampling and worker reconstruction. The stage
+// sampler and worker must agree on every iterative deformer input.
+template <class Fn>
+void
+_VisitIterativeMoverScalars(RigExecRevisionOp op,
+                           RigExecMoverParameters &params, Fn &&fn)
+{
+    if (op == RigExecRevisionOp::DeltaMush) {
+        fn("inputs:iterations", 10, params.mushIterations);
+        fn("inputs:step", 0.5f, params.mushStep);
+        fn("inputs:pinBorders", true, params.mushPinBorders);
+        fn("inputs:distanceWeight", 0.0f, params.mushDistanceWeight);
+        fn("inputs:displacement", 1.0f, params.mushDisplacement);
+    } else if (op == RigExecRevisionOp::Wrinkle) {
+        auto &settings = params.wrinkleSettings;
+        fn("inputs:iterations", 80, settings.iterations);
+        fn("inputs:neighborDistance", 2, settings.neighborDistance);
+        fn("inputs:restLengthScale", 1.0f, settings.restLengthScale);
+        fn("inputs:stretchStiffness", 1.0f, settings.stretchStiffness);
+        fn("inputs:compressionStiffness", 1.0f, settings.compressionStiffness);
+        fn("inputs:bendStiffness", 0.1f, settings.bendStiffness);
+        fn("inputs:maxDisplacement", 0.2f, settings.maxDisplacement);
+        fn("inputs:pinBorders", true, settings.pinBorders);
+        fn("inputs:tangentPlaneCollisions", true,
+           settings.tangentPlaneCollisions);
+        fn("inputs:tangentPlaneInset", 0.0f, settings.tangentPlaneInset);
+        fn("inputs:wrinkleScale", 1.0f, settings.wrinkleScale);
+        fn("inputs:smoothingIterations", 0, settings.smoothingIterations);
+    }
+}
+
 // One ordered field list per binding type. Sampling, burst-site discovery,
 // snapshot capture, and worker patching all use these visitors.
 template <class Obj, class Fn>
@@ -59,6 +90,7 @@ _VisitSolverInputs(Obj &solver, Fn &&fn)
     fn(solver.minLengthRatio);
     fn(solver.twistTurns);
     fn(solver.ribbonSampleCount);
+    fn(solver.ikSpace);
 }
 
 template <class Obj, class Fn>
@@ -95,6 +127,17 @@ _VisitInterpolatorInputs(
     Obj &interp, Fn &&fn)
 {
     fn(interp.enabled);
+    // A numeric driver's dials, in rigExec:driverAttributes order.
+    for (auto &value : interp.valueInputs) {
+        fn(value);
+    }
+}
+
+template <class Obj, class Fn>
+void
+_VisitSpaceSwitchInputs(Obj &spaceSwitch, Fn &&fn)
+{
+    fn(spaceSwitch.activeInput);
 }
 
 template <class Obj, class Fn>
@@ -120,8 +163,6 @@ _VisitWeightInputs(Obj &object, Fn &&fn)
     fn(object.scaleZ);
     fn(object.extentU);
     fn(object.extentV);
-    fn(object.curvenetSamples);
-    fn(object.curvenetUnreached);
 }
 
 // The weight-object schema types the frozen packet build mirrors
@@ -134,7 +175,6 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((sphereWeight, "RigExecSphereWeight"))
     ((planeWeight, "RigExecPlaneWeight"))
     ((curveWeight, "RigExecCurveWeight"))
-    ((curvenetWeight, "RigExecCurvenetWeight"))
 );
 
 SdfPath
@@ -159,9 +199,6 @@ _FrozenLatticeInputKey(const SdfPath &moverPath, const char *role);
 
 SdfPath
 _FrozenRibbonInputKey(const SdfPath &moverPath, const char *role);
-
-SdfPath
-_FrozenCurvenetInputKey(const SdfPath &moverPath, const char *role);
 
 bool
 _ChainIsFinite(float v);
@@ -207,17 +244,14 @@ extern thread_local std::shared_ptr<const void> _lastFrozenSlots;
 
 extern thread_local size_t _lastFrozenSlotBytes;
 
-// Visits the inputs the compose reads beside the avars: each space switch's
-// active index and each auto clavicle's IK/FK blend and dial. They are read
-// live (RigExecIsLiveAvarName), so they must key the frame cache and be
+// Visits each auto clavicle's IK/FK blend and dial, which the compose reads
+// beside the avars (space switches have their own visitor above). They are
+// read live (RigExecIsLiveAvarName), so they must key the frame cache and be
 // patched into a frozen run like any other varying input.
 template <class Impl, class Fn>
 void
 _VisitComposeInputs(Impl &B, Fn &&fn)
 {
-    for (auto &sw : B.spaceSwitches) {
-        fn(sw.activeInput);
-    }
     for (auto &ac : B.autoClavicles) {
         fn(ac.ikBlendInput);
         fn(ac.ikBlendFloat);
@@ -242,6 +276,9 @@ _ForEachPatchableInput(Impl &B, Fn &&fn)
     }
     for (auto &ladder : B.ladders) {
         _VisitLadderInputs(ladder, fn);
+    }
+    for (auto &spaceSwitch : B.spaceSwitches) {
+        _VisitSpaceSwitchInputs(spaceSwitch, fn);
     }
     for (auto &interpolator : B.poseInterpolators) {
         _VisitInterpolatorInputs(interpolator, fn);

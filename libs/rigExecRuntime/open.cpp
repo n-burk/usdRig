@@ -321,7 +321,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         }
         self->_hasPoses = true;
     }
-    // Optional since minor 1: absent in older binaries, which load with
+    // Optional since major 1 minor 1: absent in older binaries, which load with
     // every chain absolute. Present but dangling or malformed: fail.
     if (section(RigExecBinarySection::SolverStart, "solver starts", &data,
                 &bytesOut)) {
@@ -343,7 +343,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             solver.startRead = entry.read;
         }
     }
-    // Optional since minor 2: absent in older binaries, which load with
+    // Optional since minor 1: absent in older binaries, which load with
     // every interpolator solving a transform's rotation alone. Present
     // but dangling or malformed: fail.
     if (section(RigExecBinarySection::PoseNumeric, "pose numerics", &data,
@@ -370,7 +370,7 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             interp.valueInputs = entry.values;
         }
     }
-    // Optional since minor 2, in the same way: absent means every
+    // Optional since minor 1, in the same way: absent means every
     // provider composes against its authored parent.
     if (section(RigExecBinarySection::SpaceSwitch, "space switches", &data,
                 &bytesOut)) {
@@ -414,6 +414,63 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
             return fail("malformed input-table section");
         }
         self->_hasInputTable = true;
+    }
+    // Plugin movers' bytes, since minor 3. Every op-16 revision needs its
+    // entry and every entry an op-16 revision, with one frame row per
+    // InputTable frame; anything else is a file that does not close.
+    bool hasExternal = false;
+    if (reader.FindSection(RigExecBinarySection::ExternalMovers, &data,
+                           &bytesOut)) {
+        RigExecWireReader cursor(data, bytesOut);
+        if (!RigExecWireDecodeExternalMovers(&cursor, &self->_external,
+                                             error)) {
+            return fail(*error);
+        }
+        if (self->_external.frames.size() != self->_inputs.frames.size()) {
+            return fail("external movers carry a frame count the input "
+                        "table does not");
+        }
+        hasExternal = true;
+    }
+    {
+        RrProgram &program = self->_program;
+        for (const RigExecWireExternalRevision &entry :
+             self->_external.revisions) {
+            const auto &chains = self->_geometry.chains;
+            if (size_t(entry.chain) >= chains.size() ||
+                size_t(entry.revision) >=
+                    chains[entry.chain].revisions.size() ||
+                chains[entry.chain].revisions[entry.revision].op !=
+                    uint8_t(RigExecWireExternalRevisionOp)) {
+                return fail("an external mover entry names no plugin "
+                            "revision");
+            }
+            RrProgram::ExternalRevision state;
+            if (!reader.GetString(entry.type, &state.type) ||
+                state.type.empty()) {
+                return fail("an external mover names no type");
+            }
+            if (!program.externalIndex
+                     .emplace(std::make_pair(entry.chain, entry.revision),
+                              program.externals.size())
+                     .second) {
+                return fail("an external mover entry is duplicated");
+            }
+            program.externals.push_back(std::move(state));
+        }
+        for (size_t c = 0; c < self->_geometry.chains.size(); ++c) {
+            const auto &revisions = self->_geometry.chains[c].revisions;
+            for (size_t r = 0; r < revisions.size(); ++r) {
+                if (revisions[r].op ==
+                        uint8_t(RigExecWireExternalRevisionOp) &&
+                    !program.externalIndex.count(
+                        std::make_pair(uint32_t(c), uint32_t(r)))) {
+                    return fail("a plugin revision carries no external "
+                                "mover entry");
+                }
+            }
+        }
+        program.external = hasExternal ? &self->_external : nullptr;
     }
     // The manifest is advisory except for its compile-diagnostics seed,
     // which the first Execute replays. Absent (or seedless) in binaries
@@ -1028,6 +1085,70 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
                           : std::string("weight sizing failed"));
     }
     return self;
+}
+
+std::vector<std::string>
+RigExecRuntimeReader::GetExternalMoverTypes() const
+{
+    std::set<std::string> types;
+    for (const RrProgram::ExternalRevision &state : _program.externals) {
+        types.insert(state.type);
+    }
+    return std::vector<std::string>(types.begin(), types.end());
+}
+
+bool
+RigExecRuntimeReader::SetExternalKernel(const std::string &type,
+                                        const RigExecExternalKernel &kernel,
+                                        std::string *error)
+{
+    const auto fail = [error](const std::string &why) {
+        if (error) {
+            *error = why;
+        }
+        return false;
+    };
+    if (!kernel.IsSet()) {
+        return fail("a playback kernel needs prepare and apply");
+    }
+    bool found = false;
+    bool prepared = true;
+    std::string why;
+    for (size_t k = 0; k < _program.externals.size(); ++k) {
+        RrProgram::ExternalRevision &state = _program.externals[k];
+        if (state.type != type) {
+            continue;
+        }
+        found = true;
+        const std::vector<uint8_t> &epoch = _external.revisions[k].epoch;
+        std::string reason;
+        state.kernel = kernel;
+        state.state = kernel.prepare(epoch.data(), epoch.size(), &reason);
+        if (!state.state) {
+            state.kernel = RigExecExternalKernel();
+            if (prepared) {
+                why = type + " could not prepare its epoch data" +
+                      (reason.empty() ? std::string() : ": " + reason);
+            }
+            prepared = false;
+        }
+    }
+    if (!found) {
+        return fail("the file holds no " + type + " mover");
+    }
+    return prepared || fail(why);
+}
+
+std::vector<std::string>
+RigExecRuntimeReader::GetMissingExternalKernels() const
+{
+    std::set<std::string> types;
+    for (const RrProgram::ExternalRevision &state : _program.externals) {
+        if (!state.state) {
+            types.insert(state.type);
+        }
+    }
+    return std::vector<std::string>(types.begin(), types.end());
 }
 
 }  // namespace rigExec

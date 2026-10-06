@@ -261,7 +261,7 @@ def TestSpecSnapshotUndoesPrimCreation():
     """The gap that let a panel build rig with an empty undo stack.
 
     AttributeSnapshot restores the ATTRIBUTE and leaves the prim, so a
-    "New curvenet" or "Create sphere weight" undone through it removed
+    "Create sphere weight" undone through it removed
     the values and kept the prim -- a half-built thing on the stage with
     nothing left on the stack to finish taking it away.
     """

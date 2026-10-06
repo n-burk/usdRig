@@ -330,8 +330,9 @@ def Xform "ArmAsset" (
                         )
                         {
                             rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
-                            rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder>
-                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder> (
+                                rigExecReadPhase = "final"
+                            )
                             rel rigExec:weightObject = </ArmAsset/Rig/Weights/ShoulderPoints>
                             uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 
@@ -340,8 +341,9 @@ def Xform "ArmAsset" (
                             )
                             {
                                 rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
-                                rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder/Elbow>
-                                uniform token rigExec:transformReadPhase = "final"
+                                rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder/Elbow> (
+                                    rigExecReadPhase = "final"
+                                )
                                 rel rigExec:weightObject = </ArmAsset/Rig/Weights/ElbowDriven>
                                 uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 
@@ -350,8 +352,9 @@ def Xform "ArmAsset" (
                                 )
                                 {
                                     rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
-                                    rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>
-                                    uniform token rigExec:transformReadPhase = "final"
+                                    rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist> (
+                                        rigExecReadPhase = "final"
+                                    )
                                     rel rigExec:weightObject = </ArmAsset/Rig/Weights/WristPoints>
                                     uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
 

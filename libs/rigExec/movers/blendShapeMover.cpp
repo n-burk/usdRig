@@ -29,6 +29,10 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
 
+// Interned once at load: validation asks per sample, and interning takes
+// the token registry's lock.
+const TfToken _removedPointsPhase("rigExec:pointsReadPhase");
+
 RigExecMoverParameters
 _BuildBlendMoverParameters(const VdfContext &ctx)
 {
@@ -152,7 +156,7 @@ _BindBlendShapeMover(const rigExec::RigExecMoverBindContext &ctx)
             }
             rigExec::RigExecResolveReadPhase(
                 sample.GetRelationship(TfToken("rigExec:targetPoints")),
-                "rigExec:pointsReadPhase", &phase, &error);
+                &phase, &error);
             binding.blendSamples[input].push_back(
                 {samplePath, rigExec::RigExecPointsOf(points[0]), phase,
                  SdfPath()});
@@ -235,20 +239,23 @@ _ValidateBlendShapeMover(
                 // is no preceding or final version of them.
                 continue;
             }
+            if (const UsdAttribute old =
+                    sample.GetAttribute(_removedPointsPhase);
+                old && old.HasAuthoredValue()) {
+                *error = samplePath.GetString() +
+                         ": authors rigExec:pointsReadPhase, which was "
+                         "replaced by rigExecReadPhase metadata on "
+                         "rigExec:targetPoints";
+                return false;
+            }
             rigExec::RigExecReadPhase phase;
             std::string phaseError;
-            const UsdAttribute legacy = sample.GetAttribute(
-                TfToken("rigExec:pointsReadPhase"));
             if (!rigExec::RigExecResolveReadPhase(
                     sample.GetRelationship(
                         TfToken("rigExec:targetPoints")),
-                    "rigExec:pointsReadPhase", &phase, &phaseError) ||
-                (legacy && legacy.GetNumTimeSamples() != 0)) {
+                    &phase, &phaseError)) {
                 *error = samplePath.GetString() +
-                         ": blend sample points read phase must be a valid"
-                         " static phase" +
-                         (phaseError.empty() ? std::string()
-                                             : ": " + phaseError);
+                         ": blend sample points read phase: " + phaseError;
                 return false;
             }
         }

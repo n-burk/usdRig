@@ -12,7 +12,7 @@ rendered for it (such a page still links a stage if it sets "example_key").
 
 CATEGORIES = [
     ("Rig", ["rig_root"]),
-    ("Transform providers", ["control", "joint"]),
+    ("Transform providers", ["control", "joint", "space_switch"]),
     ("Solvers", ["fk_chain", "two_bone_ik", "spline_ik",
                  "blend_point_frames", "twist_distribution", "ribbon"]),
     ("Constraints", ["aim_constraint", "position_constraint",
@@ -20,16 +20,14 @@ CATEGORIES = [
                      "parent_constraint", "single_chain_ik_constraint"]),
     ("Geometry movers", ["matrix_mover", "skin_mover", "blendshape_mover",
                          "curve_mover", "lattice_mover", "surface_mover",
-                         "smooth_mover", "delta_mush_mover", "volume_correct_mover"]),
-    ("Curvenet", ["curvenet", "curvenet_adjustment",
-                  "curvenet_adjuster_mover", "curvenet_mover"]),
+                         "smooth_mover", "delta_mush_mover", "wrinkle_mover", "volume_correct_mover"]),
     ("Blend channels", ["blend_input", "blend_sample"]),
     ("Pose space", ["pose_interpolator", "pose"]),
     ("Weights", ["static_weight", "dynamic_weight", "sphere_weight",
-                 "plane_weight", "curve_weight", "combine_weight",
-                 "curvenet_weight"]),
+                 "plane_weight", "curve_weight", "combine_weight"]),
     ("Property math", ["float_math_mover", "vec3f_math_mover",
                        "matrix_math_mover"]),
+    ("Shading", ["surface_projector"]),
     ("Interface", ["picker", "picker_panel", "picker_button",
                    "touch_regions", "touch_region"]),
 ]
@@ -284,6 +282,83 @@ for the whole loop and the only motion in frame comes from the one driver.""",
             ("fk_chain", "FK Chain"),
             ("aim_constraint", "Aim Constraint"),
             ("matrix_mover", "Matrix Mover"),
+        ],
+    },
+    "space_switch": {
+        "title": "Space Switch",
+        "schema": "RigExecSpaceSwitch",
+        "summary": "Gives a control a labelled list of parent spaces, selected or blended by an index.",
+        "description": """A space switch replaces one control's PARENT SPACE with
+one of an ordered list of sources — world, the chest, the head — chosen by
+a live index. It does not write the control's pose: the control keeps
+composing from its own avars, so it still drags, still carries its
+namespace children, and its avars read as offsets in whichever space is
+selected. A whole-number index selects a space exactly; a fractional one
+blends the two it lies between, so a switch can be eased instead of
+stepped.""",
+        "how_it_works": """The switch is read at compile time and changes how its target
+composes. In row-vector convention the target's world matrix is
+`avars * default:space * inverse(source default:space) * source posed:space`:
+the ordinary transform ladder with the namespace parent's pair of spaces
+swapped for the selected source's pair. Both halves come from the same
+source, so at rest they cancel and every space gives the same answer —
+adding a switch never moves a rig at rest. A source that is not a frame
+provider (the `RigExecRoot` itself is the idiomatic one) contributes
+identity, which is how "world" is spelled. The inherited per-axis masks
+act on the delta the space contributes, expressed in the target's own
+default frame, and `rigExec:rotationFilters` can pass only the twist of a
+source's rotation about `rigExec:twistAxis`, or only the swing, by an
+exact swing-twist decomposition. The index is an ordinary per-frame input:
+the dynamic path, the baked program, the frame cache and a `.rigexec`
+binary all re-read it every frame, and keying it re-runs only the compose
+of the switched control's subtree.""",
+        "wiring": [
+            ("`rigExec:target`", "The one control (or other transform provider) "
+             "whose parent space is switched. Zero or several is a compile error.", "yes"),
+            ("`rigExec:sources`", "The spaces, in index order. The rig root (or any "
+             "prim that is not a frame provider) means world.", "yes"),
+            ("`rigExec:activeSpaceAttribute`", "A float or double property supplying "
+             "the index, normally an avar on the control itself; when authored it "
+             "wins over `inputs:activeSpace`.", "no"),
+            ("`rigExec:space`", "The master whose rest-to-posed motion carries the "
+             "whole rig, so a rotation filter does not discard it.", "no"),
+        ],
+        "param_groups": [
+            ("Constraint base", "RigExecConstraint"),
+            ("Ordered sources", "RigExecSourceConstraint"),
+        ],
+        "example": """A cart slides along a track and a hand control floats above
+it. The hand is the cart's sibling, not its child, so in namespace it lives
+in world space; the `HandSpaces` switch lists world (the rig root) and the
+cart, and reads its index from the hand's own `avars:space`. For the first
+eleven frames the index is 0 and the cart drives away beneath a hand that
+stays put. Over the next twelve the index eases from 0 to 1 and the hand
+glides across onto the cart — halfway at the midpoint, because a fractional
+index blends the two spaces. From then on the hand rides the cart out and
+home again, and with the cart back at rest both spaces agree, so the loop
+closes where it began.""",
+        "tips": [
+            "Switching mid-pose moves the control: the same avars now mean an "
+            "offset in a different space. Matching the pose across a switch is "
+            "a tool's job (key the avars at the switch frame), not the "
+            "evaluator's.",
+            "Put the index on the control the animator already selects, through "
+            "`rigExec:activeSpaceAttribute` — an `avars:space` channel keys, "
+            "shows in the avar editor and undoes like any other avar.",
+            "`inputs:sourceWeights` has no meaning here — the index is the "
+            "selector — and authoring it is a compile error rather than a "
+            "silent no-op.",
+            "A pole vector that should follow a hand's twist but not its swing "
+            "takes `rigExec:rotationFilters = [\"all\", \"twist\"]` with "
+            "`rigExec:twistAxis` along the forearm.",
+            "Two switches that each need the other composed first are a cycle "
+            "and refuse to compile; a switch that reads a space below it in "
+            "namespace is fine.",
+        ],
+        "see_also": [
+            ("control", "Control"),
+            ("parent_constraint", "Parent Constraint"),
+            ("two_bone_ik", "Two-Bone IK"),
         ],
     },
     "fk_chain": {
@@ -660,15 +735,12 @@ the bind-time curve.""",
             ("`rigExec:driverCurve`", "Native BasisCurves supplying the spine path; "
              "without it the solver publishes no frames rather than erroring.", "yes"),
             # bakedPose.cpp:475-481: "rigExec:parameterization, frameTransport,
-            # startFrame, endFrame, twistFrames and driverCurveReadPhase are
+            # startFrame, endFrame and twistFrames are
             # deliberately NOT read: the computation does not read them
             # either". The exec computation's inputs are sampleCount and the two
             # point packets and nothing else (moverKernels.cpp:1203-1208). The
-            # only place in libs/rigExec that names these three tokens at all is
-            # _ValidateAdjustmentPoseConsumers (rigEvaluator.cpp:1193-1196), a
-            # walk that returns early unless the stage carries a
-            # RigExecCurvenetAdjustment. Deleting all three from the docs
-            # example leaves every posed point bit-identical (measured).
+            # frame relationships declare authoring intent without adding
+            # inputs to this computation.
             ("`rigExec:startFrame`", "Joint provider naming the run's base; declared "
              "for authoring intent, read by no computation.", "no"),
             ("`rigExec:endFrame`", "Joint provider naming the run's tip; the same.", "no"),
@@ -1055,8 +1127,8 @@ contributing source and read in `rigExec:rotationOrder`. That candidate is
 then written per axis through the three `inputs:affect*` mask triples and
 blended over the target's incoming frame by the common mover envelope, so
 the single `rigExec:moves` target is revised in place and anything that reads
-that provider afterwards -- a skinning mover with
-`rigExec:transformReadPhase = "final"`, for instance -- sees the parented
+that provider afterwards -- a skinning mover whose input carries
+`rigExecReadPhase = "final"`, for instance -- sees the parented
 result. A zero envelope is an exact pass-through: the target keeps whatever
 posed it before the constraint ran.""",
         "wiring": [
@@ -1217,13 +1289,15 @@ by a weight object. One mover at constant weight is a rigid attachment;
 several stacked on one target are applied in sequence, each from the
 preceding revision, which is exact wherever a point has a single
 influence and is not linear blend skinning where weights overlap — that
-is the Skin Mover's job.""",
+is the Skin Mover's job. Naming a bare prim — a joint, a control or an
+Xformable — instead of a `points` property moves that prim's FRAME the
+same way, as a step of the pose stack.""",
         "how_it_works": """The provider publishes `computeMatrix`, the rest-to-posed map of its
 own frame (computations.cpp:401-415), and the mover blends it over the
 incoming points as `p' = q + w (T q - q)` (schema.usda:1677-1679), where
 `w` is the bound weight field or, with none bound,
-`inputs:defaultWeight`. `rigExec:transformReadPhase` chooses which
-revision of the provider is read: the default `base` binds the provider
+`inputs:defaultWeight`. `rigExecReadPhase` metadata on
+`rigExec:transform` chooses which revision of the provider is read: the default `base` binds the provider
 itself, `final` binds the head of its frame chain
 (moverGraph.cpp:1366-1379). The result is passed down the point chain,
 and the compiler synthesizes the recompute revisions that keep authored
@@ -1242,7 +1316,8 @@ and the compiler synthesizes the recompute revisions that keep authored
             # entirely is not an error: the prim is then not a mover at all --
             # skipped as a grouping scope, :3543-3557 -- and an authored but empty
             # one is reported inert, :3561-3578.)
-            ("`rigExec:moves`", "Exact points property to deform.", "yes"),
+            ("`rigExec:moves`", "Exact points property to deform, or a bare joint, "
+             "control or Xformable whose frame to move.", "yes"),
         ],
         "param_groups": [
             ("Common mover envelope", "RigExecMoverAPI"),
@@ -1271,6 +1346,11 @@ stays at 1, so the follow is full strength over every point of the card.""",
             "4.2). Stacking is how you layer rigid follows, not how you blend "
             "influences on one point — use the Skin Mover for that "
             "(schema.usda:1700-1705).",
+            "`rigExec:weightBlend = \"radial\"` blends a fraction of the "
+            "rotation instead of the chord, so a partly weighted point keeps "
+            "its distance from the driver's pivot; the default `linear` is the "
+            "classic cluster. A frame mover blends its landmark points the same "
+            "way (examples/15_TransformMatrixMover.usda).",
         ],
         "see_also": [
             ("skin_mover", "Skin Mover"),
@@ -1294,8 +1374,8 @@ for linear blend skinning, `dualQuaternion` for the volume-preserving
 one.""",
         "how_it_works": """The mover is one revision in its target's point chain, so it runs in
 the mover-application walk after solving: it reads
-every influence's `computeMatrix` (the rest-to-posed map) at
-`rigExec:transformReadPhase`, gathers `rigExec:elementSize` index/weight
+every influence's `computeMatrix` (the rest-to-posed map) at the
+`rigExecReadPhase` declared on `rigExec:influences`, gathers `rigExec:elementSize` index/weight
 slots per point in point order, and accumulates them — `classicLinear`
 sums `w_k T_k p` and leaves the weight shortfall `1 - sum w_k` on the
 rest point, while `dualQuaternion` splits each influence once per
@@ -1489,8 +1569,8 @@ shaping — bulges, bends, squash and stretch.""",
         "how_it_works": """Each moved point is located in the bind cage's lattice coordinates,
 then re-evaluated in the posed cage under the `bernstein` or `bspline`
 basis. `rigExec:divisions` sets the cage resolution per axis with
-x-fastest point ordering; the cage is read at `rigExec:cageReadPhase`
-(usually `base`, the authored animation).""",
+x-fastest point ordering; the cage is read at the `rigExecReadPhase`
+declared on `rigExec:cage` (`base`, the authored animation, when none is).""",
         "wiring": [
             ("`rigExec:cage`", "Native Points/mesh prim supplying cage points.", "yes"),
             ("`rigExec:moves`", "Exact points property to deform.", "yes"),
@@ -1527,7 +1607,8 @@ contact pass, not a slide-along-the-surface follow.""",
         "how_it_works": """The mover is one revision in its target's point chain, so it runs in
 the mover-application walk after solving and after every earlier revision
 on that chain. It reads the driver prim's `points` at
-`rigExec:surfaceReadPhase` plus its `faceVertexCounts` /
+the `rigExecReadPhase` declared on `rigExec:surface` plus its
+`faceVertexCounts` /
 `faceVertexIndices`, fans every face into a triangle fan, and takes the
 closest point over all of them per moved point; the envelope then blends
 that candidate over the incoming revision, and the compiler re-synthesizes
@@ -1547,13 +1628,11 @@ facets and pop.""",
             # reclassified as a grouping scope; 3560-3577: authored but empty
             # targets report a notice and go inert for the generation.
             ("`rigExec:moves`", "Exact points property to drape.", "yes"),
-            # moverGraph.cpp:1450-1460: only a non-base phase binds the driver
-            # to a moved chain output. moverGraph.cpp:1101-1135: read-phase
-            # metadata on the rigExec:surface relationship wins, and this uniform
-            # token is the role-named fallback. rigEvaluator.cpp:4174-4202
-            # rejects an unparseable token at compile.
-            ("`rigExec:surfaceReadPhase`", "`base` for the driver's authored "
-             "points, `final` when the driver is itself rigged.", "no"),
+            # Only a non-base phase binds the driver to a moved chain
+            # output; an unparseable phase is a compile error.
+            ("`rigExec:surface` `rigExecReadPhase`", "Metadata: `base` for "
+             "the driver's authored points, `final` when the driver is "
+             "itself rigged.", "no"),
         ],
         "param_groups": [
             ("Common mover envelope", "RigExecMoverAPI"),
@@ -1668,6 +1747,56 @@ baked, and binary evaluation share `libs/rigExecMath/deltaMushKernel.h`.""",
                  "Use compatible rest geometry and topology."],
         "see_also": [("smooth_mover", "Smooth Mover"), ("skin_mover", "Skin Mover")],
     },
+    "wrinkle_mover": {
+        "title": "Wrinkle Mover",
+        "no_gif": True,
+        "example_key": "wrinkle_mover",
+        "schema": "RigExecWrinkleMover",
+        "summary": "Solves coherent compression-driven folds on an already deformed mesh.",
+        "description": """Adds fine folds after skinning or other mesh deformation by
+comparing the posed mesh with its reference lengths. A deterministic fold guide
+keeps the wrinkle pattern consistent as compression changes. Each pose solves
+independently, so forward playback, reverse playback, and direct frame seeking
+give the same result.
+See [Wrinkle deformation](../concepts/wrinkle-deformation.md) for the supported
+method and [algorithm references](../references.md) for its sources.""",
+        "how_it_works": """The cloth topology builds links from a triangulated
+surface and weak bending links across neighboring triangles.
+Surface struts retain the structural edges and replace the bending links
+with weak links at exactly neighborDistance hops through triangulated adjacency.
+Vertex-index phase values are smoothed along less compressed edges to guide
+the folds. Compression and the guide define fixed target edge vectors for the
+current pose. Iterations adjust points in three dimensions toward those targets
+while keeping them within an attachment radius of the incoming shape. Explicit and boundary
+pins hold their incoming positions. Optional tangent-plane collisions restrict
+inward motion relative to the incoming surface. The solved displacement can be
+scaled and smoothed before the attachment bound and common mover envelope are
+applied. Displacement averaging does not transport rest detail like Delta Mush.
+Topology changes and degenerate surface normals can interrupt fold continuity.
+There is no external-object or self-collision solve.""",
+        "wiring": [("`rigExec:moves`", "One native mesh points property.", "yes")],
+        "param_groups": [("Common mover envelope", "RigExecMoverAPI")],
+        "example": """A 33-by-17 quad sheet starts flat. An upstream matrix mover
+animates its width from full size to 65% and back. The wrinkle mover responds to
+that changing compression with bounded folds while keeping its border pinned.
+The authored base sheet supplies rest points and the envelope stays at one.
+One displacement-smoothing pass softens the transition to pinned borders.""",
+        "tips": [
+            "Run after deformation; with the Builder, add the wrinkle mover before "
+            "the earlier deformer because sibling application order is reversed.",
+            "Mesh resolution, constraint neighborhood, and maximum displacement "
+            "set the available fold shapes.",
+            "Use cloth for across-triangle bending or surfaceStruts for weak "
+            "connections at the selected edge-graph distance.",
+            "Rest points, topology, and explicit pins must be static and unconnected. "
+            "Empty rest points use the target's authored base points before its mover chain.",
+            "The attachment radius also bounds the final result when wrinkleScale exceeds one.",
+            "Keep vertex correspondence, topology, and normals consistent through animation.",
+        ],
+        "see_also": [("skin_mover", "Skin Mover"),
+                     ("delta_mush_mover", "Delta Mush Mover"),
+                     ("smooth_mover", "Smooth Mover")],
+    },
     "volume_correct_mover": {
         "title": "Volume Correct Mover",
         "schema": "RigExecVolumeCorrectMover",
@@ -1698,372 +1827,6 @@ corrector, so the pair shows exactly what the correction takes away.""",
         "see_also": [
             ("lattice_mover", "Lattice Mover"),
             ("smooth_mover", "Smooth Mover"),
-            ("matrix_mover", "Matrix Mover"),
-        ],
-    },
-    "curvenet": {
-        "title": "Curvenet",
-        "schema": "RigExecCurvenet",
-        "summary": "A net of cubic profile curves that articulates a surface "
-                   "independently of its tessellation.",
-        "description": """The rigging primitive of de Goes, Sheffler & Fleischer,
-*Character Articulation through Profile Curves* (SIGGRAPH 2022): instead of
-painting influences per vertex, a rigger traces a handful of profile curves
-over the form — rings around a limb, rails along it, creases around a mouth —
-and articulates those.""",
-        "how_it_works": """A curvenet authors no behavior of its own — it is
-geometry that other nodes read. Its `points` pool is posed like any other
-points array, in the geometry phase, by ordinary movers writing
-`Net.points`; the compiler puts that chain ahead of every chain that reads
-the net, so a Profile Mover always sees the finished pool
-(`libs/rigExec/rigEvaluator.cpp:6817-6821`, `libs/rigExec/rigEvaluator.cpp:12083-12090`).
-Everything structural is *derived* from `rigExec:splineIndices` and never
-authored: `RigExecBuildCurvenetTopology` classifies an endpoint shared by
-three or more splines as an intersection and one incident to a single spline
-as an anchor, and chains the splines between them into curves
-(`libs/rigExecMath/curvenet.cpp:305-333`, called from
-`libs/rigExecMath/curvenetAdjustments.cpp:195` and
-`libs/rigExec/curvenetWeightComputations.cpp:28-31`); the orientation and
-non-uniform scale along every curve are then derived too, the Profile Mover's
-bind re-orienting each intersection fan against the projection surface's
-normals (`libs/rigExecMath/profileMover.cpp:58-70`). Readers take
-`rigExec:basis` and `rigExec:samplesPerSpline` off the net prim itself
-(`libs/rigExec/moverGraph.cpp:2120-2126`; the adjuster reads the basis the
-same way at `libs/rigExec/curvenetAdjuster.cpp:102-104`).""",
-        "wiring": [
-            # moverGraph.cpp:2112,2138: an empty pool makes the Profile Mover's
-            # parameters invalid, which is a MoverFailed pass-through; the
-            # adjuster's copy of the same check (curvenetAdjuster.cpp:97,127) is
-            # promoted to a compile error at rigEvaluator.cpp:3825.
-            ("`points`", "Inherited control-point pool in the projection pose: "
-             "knots and tangent handles in one array.", "yes"),
-            # moverGraph.cpp:2138 (empty splineIndices -> invalid params);
-            # curvenetAdjuster.cpp:100,127 + rigEvaluator.cpp:3825 (compile error).
-            ("`rigExec:splineIndices`", "Four pool indices per cubic spline; for "
-             "the bezier basis they are p0, h0, h1, p1.", "yes"),
-            # rigEvaluator.cpp:3825 -> curvenetAdjuster.cpp:113: an adjustment
-            # whose rigExec:curvenet is not exactly this net fails compilation.
-            ("(read by)", "A Curvenet Mover's `rigExec:curvenet`, a Curvenet "
-             "Adjustment's `rigExec:curvenet`, and a Curvenet Weight's "
-             "`rigExec:curvenetPoints` / `rigExec:curvenetSplineIndices`.", "-"),
-            # moverGraph.cpp:1481 binds the net's points; moverGraph.cpp:2147-2150
-            # + rigEvaluator.cpp:12435-12444: the posed pool arrives from the net's
-            # own chain when it has one, from the authored value otherwise.
-            ("(posed by)", "Any mover whose `rigExec:moves` names this net's "
-             "`points` — a matrix mover, a curve mover, an adjuster.", "-"),
-        ],
-        "param_groups": [],
-        "example": """A tube of 120 vertices profiled by three rings and four
-rails — 28 cubic splines over 76 pooled control points, none of which mentions
-a tube vertex. An FK-driven matrix mover bends the upper pool with a painted
-field, a Curvenet Adjustment (`RingPush`, on pool knot 4) pushes one
-middle-ring knot straight out through the Adjuster Mover, and the Profile
-Mover carries both onto the surface under a `RigExecCurvenetWeight` envelope
-painted on the same 76 pool points, which pins the tube's base row.
-In the picture: the cyan wire cage is the rest pose, the green cables floating
-clear of it are the posed net, the orange ring is the Bend control you animate,
-and the small yellow diamond off to the side is `RingPush` on pool knot 4 —
-the bulge in the silhouette under it is the Adjuster Mover's output reaching
-the surface through the net.""",
-        "tips": [
-            "Index sharing is the whole connectivity model: give two splines the "
-            "same pool entry and they join. Valence is then derived — three or "
-            "more incident splines make an intersection, one makes an anchor — "
-            "so there is nothing else to declare, and no normal, twist or tangent "
-            "frame is ever authored.",
-            "Readers take the basis off the net prim, but `RigExecCurvenetWeight` "
-            "carries its own `rigExec:basis`, which defaults to `catmullRom` "
-            "while the net defaults to `bezier`. Author it to match the net, or "
-            "connect it to the net's attribute, or the parametrization is built "
-            "against a different curve than the deformation.",
-            "Pose the pool with the rig you already have. `points` is an exact "
-            "native `point3f[]`, so a matrix mover plus a weight object works "
-            "exactly as it does on a mesh, and the evaluator hands the Profile "
-            "Mover the result of the net's own chain rather than the authored "
-            "value.",
-        ],
-        "see_also": [
-            ("curvenet_mover", "Curvenet Mover"),
-            ("curvenet_adjustment", "Curvenet Adjustment"),
-            ("curvenet_adjuster_mover", "Curvenet Adjuster Mover"),
-        ],
-    },
-    "curvenet_adjustment": {
-        "title": "Curvenet Adjustment",
-        "schema": "RigExecCurvenetAdjustment",
-        "example_key": "curvenet",
-        "summary": "A handle on one curvenet knot, posed in the deformed frame.",
-        "description": """A curvenet adjustment is an ordinary animator control — the same
-avar channels as a `RigExecControl` — bound to one entry of a curvenet's
-shared control-point pool. It is how a face rig tweaks a profile curve on
-top of whatever already moved it: the handle's local delta is applied in a
-frame deduced from the curvenet's own deformed shape, so the same key reads
-as "lift this knot away from the surface" whether the head is at rest or
-mid-turn. Nothing places the control: there is no rest position to author
-and no offset to keep in sync with the net, because the frame is recomputed
-from the incoming points every evaluation.""",
-        "how_it_works": """The adjustment is not evaluated in the pose phase at all — it is read
-in the geometry (mover-graph) phase by the `RigExecCurvenetAdjusterMover`
-whose `rigExec:adjustments` names it, while that mover revises the curvenet's
-own `points`. The adjuster reads the prim's `rest:*`/`default:*`/`avars:*`
-channels and space matrices into one local matrix, and the kernel builds a
-deformation-relative frame per pool point by sampling the rest and incoming
-nets at 16 intervals per spline: an intersection knot takes a best-fit
-rotation from its incident tangents, and knots along a curve take the
-neighbouring intersections' rotations transported along the curve and slerped
-by the sample's fractional arc length between them. The local matrix is then
-conjugated by that frame and applied to the knot (and, with `rigExec:includeTangents`, its incident Bezier
-handles), the mover envelope blends the result over the incoming revision, and
-the adjusted frames are published with the evaluated geometry as control
-frames in asset space — which is what draws the handle's guide and what the
-usdview manipulator edits.""",
-        "wiring": [
-            # curvenetAdjuster.cpp:111-113 - exactly one target and it must be the
-            # net the adjuster mover writes, or the mover parameters stay invalid
-            # and the compile fails (rigEvaluator.cpp:3823-3827).
-            ("`rigExec:curvenet`", "The RigExecCurvenet this handle adjusts; must be the "
-             "same net the adjuster mover targets.", "yes"),
-            # curvenetAdjuster.cpp:105-106 + :78-80 - the mover collects each
-            # listed prim and every RigExecCurvenetAdjustment beneath it, and :110
-            # rejects a listed prim that is not itself an adjustment (rigBuilder.cpp
-            # :2350-2351 refuses to author such a target). Listing a Scope of
-            # adjustments therefore fails the compile; listing a knot adjustment
-            # picks up its tangent children. An adjustment no mover reaches is
-            # simply never evaluated.
-            ("(listed by the adjuster)", "The RigExecCurvenetAdjusterMover's "
-             "`rigExec:adjustments` names this prim itself, or -- for a tangent -- "
-             "the knot adjustment it is a child of.", "yes"),
-            # curvenetAdjuster.cpp:115 reads it; curvenetAdjustments.cpp:204-205
-            # rejects <0 (the schema fallback), out of range and duplicates, and
-            # :220-221 rejects a pool entry that is not a curve endpoint.
-            ("`rigExec:knotIndex`", "Index into the curvenet's shared `points` pool — the "
-             "knot this handle moves, or, on a tangent child, the handle entry.", "yes"),
-            # curvenetAdjuster.cpp:117-122 - default "knot"; any token other than
-            # "knot"/"tangent" invalidates the mover.
-            ("`rigExec:pointKind`", "\"knot\" (default) or \"tangent\".", "no"),
-            # curvenetAdjuster.cpp:118-121 requires the namespace parent to be an
-            # already-collected adjustment; curvenetAdjustments.cpp:213-216 requires
-            # that parent to be a knot command whose incident handles include this
-            # point index.
-            ("(namespace parent)", "A `pointKind = \"tangent\"` adjustment must be a child "
-             "of the knot adjustment whose Bezier handle it names.", "yes, for tangents"),
-            # curvenetAdjuster.cpp:116 reads it; curvenetAdjustments.cpp:222-225
-            # adds the knot's incident handles to the affected set when true.
-            ("`rigExec:includeTangents`", "Carry the knot's incident Bezier handles with it "
-             "(default true).", "no"),
-        ],
-        "param_groups": [
-            ("Control channel", "RigExecControl"),
-            ("Transform provider", "RigExecXformable"),
-        ],
-        "example": """The shared curvenet stage profiles its tube with a small net and poses
-that net with ordinary rig machinery; `RingPush` is the extra handle layered on
-top, bound to one knot of the middle profile ring through `rigExec:curvenet`
-and `rigExec:knotIndex = 4`. Watch the **diamond** on the right of the net, not
-the ring on the tube: the chip in the corner names `Bend`, the FK control that
-swings the whole thing, while the knot the page is about is the one the diamond
-rides. The same key is authored twice with the same value — `avars:tx = 1.8` at
-frame 1005 and again at 1022 — first with the rig at rest, then under a bend
-held at 45 degrees from 1018 to 1030, and the knot leaves the surface the same
-way both times because the adjuster rebuilds its frame from the incoming net.
-Between the two pushes (1010-1018) only the bend moves, so the two deltas can be
-told apart. The adjuster mover writes that knot and its incident Bezier handles
-into the net's points, and the Profile Mover carries the tube along.""",
-        "tips": [
-            "An adjustment's frame is an output of the point graph, so nothing in "
-            "the pose phase may read it: naming one in a solver's "
-            "`rigExec:controls`, a constraint's `rigExec:sources`, a matrix mover's "
-            "transform provider — or nesting a RigExecControl under it, which would "
-            "reach it through the default-space namespace fallback — is a compile "
-            "error. Connecting a single avar scalar from it stays legal.",
-            "On a tangent child, `rigExec:knotIndex` names the HANDLE's pool entry, "
-            "not the knot's, and it must be one of the parent knot's incident "
-            "handles; the tangent's delta then applies in the parent's already "
-            "adjusted frame.",
-            "`rigExec:includeTangents` only does anything on a `bezier` net — a "
-            "`catmullRom` net has no separate handles, so a knot adjustment moves "
-            "only its own pool entry and tangent children cannot be bound at all.",
-        ],
-        "see_also": [
-            ("curvenet", "Curvenet"),
-            ("curvenet_adjuster_mover", "Curvenet Adjuster Mover"),
-            ("control", "Control"),
-        ],
-    },
-    "curvenet_adjuster_mover": {
-        "title": "Curvenet Adjuster Mover",
-        "schema": "RigExecCurvenetAdjusterMover",
-        "summary": "Applies knot and tangent controls in the frame of the already-deformed net.",
-        "description": """The animation-facing half of the curvenet technique (2023 talk): a
-deformer that writes the curvenet's *own* `points`, so an animator can push a
-knot after every earlier deformer has fired. Each listed
-`RigExecCurvenetAdjustment` contributes a local translate/rotate/scale delta
-that is interpreted in a frame computed from the incoming deformation, not in
-asset space — the same dial means "out along the curve" whether the net is at
-rest or fully bent. Tangent adjustments parented under a knot control come
-along automatically, so the relationship only ever names the knot controls.""",
-        "how_it_works": """The adjuster is a revision in the point graph, on the curvenet's own
-`points` property, so it runs after the pose pass and after whatever movers
-precede it in the chain. It reads the net's authored (default-time) `points`
-as the rest pose plus `rigExec:splineIndices` and `rigExec:basis`, samples
-both the rest and the incoming configurations, and builds one frame per
-control point: a best-fit rotation of the incident tangents at every
-intersection, parallel transport elsewhere, and between two intersections a
-slerp weighted by inverse arc distance. Each adjustment's local channel
-matrix is then conjugated into its frame and applied to the knot (and, with
-`rigExec:includeTangents`, its incident Bezier handles); the adjusted points
-go through the common mover envelope, and the adjusted frames are published
-per control prim in asset space for guides and viewport manipulation.""",
-        "wiring": [
-            # required, and must be exactly one native points attribute:
-            # rigEvaluator.cpp:3777 (points-target set), :3814 (exactly one target
-            # in v0.1); the owner must be typed RigExecCurvenet:
-            # curvenetAdjuster.cpp:97.
-            ("`rigExec:moves`", "The RigExecCurvenet's own exact `points` property — exactly one.", "yes"),
-            # empty list -> parameters stay invalid (curvenetAdjuster.cpp:106) ->
-            # RigExecValidateCurvenetAdjuster fails the compile
-            # (curvenetAdjuster.cpp:141-144, called from rigEvaluator.cpp:3825).
-            ("`rigExec:adjustments`", "The knot RigExecCurvenetAdjustment controls; their tangent children are collected automatically (curvenetAdjuster.cpp:70-85).", "yes"),
-            # each adjustment must name this same net, or assembly bails:
-            # curvenetAdjuster.cpp:111-113.
-            ("`rigExec:curvenet` (on each adjustment)", "The same net the mover targets; a knot naming a different net fails the compile.", "yes"),
-            # weights ? *weights : Constant(inputs:defaultWeight) --
-            # curvenetAdjuster.cpp:93-94; the wrapper resolves the envelope per
-            # point and blends against the preceding revision
-            # (moverGraph.cpp:905-912), and the published frames are weighted
-            # per control point at moverGraph.cpp:822-827.
-            ("`rigExec:weightObject`", "Optional per-point envelope field; without one `inputs:defaultWeight` broadcasts.", "no"),
-        ],
-        "param_groups": [
-            ("Common mover envelope", "RigExecMoverAPI"),
-        ],
-        "example": """This page has its own stage, and the loop plays three beats, one
-motion at a time. First the rig is at rest and `RingPush` spends
-`avars:tx = 1.8` on pool knot 8: the knot leaves along world **+X** and the
-Profile Mover carries the surface with it. Then the push comes off and the
-`Bend` control alone swings the net 45 degrees — that bulge is the *Matrix
-Mover's* work, not the adjuster's. Then, inside the held bend, the same
-`avars:tx = 1.8` fires again: the knot travels the same 1.8 units, but now
-**along the bent net normal**, about 46 degrees off where it went the first
-time (knot 8 carries `NetBend` weight 1.0, so its frame rides the whole
-bend). Same dial, same number, a frame that moved — which is the sentence at
-the top of this page, on screen.""",
-        "tips": [
-            "Chain order is the whole point: the adjuster belongs last on the net's "
-            "points so its frames follow earlier deformation. In "
-            "`tests/testRigExecCurvenetAdjuster.cpp:193-209` a 90 degree warp ahead "
-            "of it turns a knot's `avars:tx` into motion along world +Y.",
-            "Tangent children need `rigExec:basis = \"bezier\"`: a Catmull-Rom net "
-            "has no separate handles, so `rigExec:includeTangents` moves nothing and "
-            "a tangent adjustment fails the mover outright "
-            "(rigExecMath/curvenetAdjustments.cpp:115-123, 213-218).",
-            "Bindings fail atomically and at compile time — a duplicate knot index, "
-            "a knot of valence 0, a tangent that is not a direct child of its knot, "
-            "or a nonfinite transform is a compile error, and `inputs:enabled = "
-            "false` does not excuse it: validation re-reads the mover with enabled "
-            "forced true (curvenetAdjuster.cpp:119-121, 134-147; "
-            "rigExecMath/curvenetAdjustments.cpp:204-221).",
-        ],
-        "see_also": [
-            ("curvenet", "Curvenet"),
-            ("curvenet_adjustment", "Curvenet Adjustment"),
-            ("curvenet_mover", "Curvenet Mover"),
-        ],
-    },
-    "curvenet_mover": {
-        "title": "Curvenet Mover",
-        "schema": "RigExecCurvenetMover",
-        "example_key": "curvenet",
-        "summary": "The Profile Mover: propagates a posed curvenet onto a surface.",
-        "description": """The deformer half of curvenet rigging (de Goes, Sheffler & Fleischer,
-*Character Articulation through Profile Curves*, SIGGRAPH 2022): a net of
-profile splines is articulated like any other geometry, and this mover
-carries that articulation onto one mesh's `points`. The surface reproduces
-the curves while keeping its own detail, and because the mesh is cut along
-the net, each side of a curve deforms independently — a crease can fold
-without dragging the other side with it. Nothing in the wiring mentions the
-target's tessellation, so re-meshing the surface only re-cuts and re-binds:
-no wiring changes.""",
-        "how_it_works": """It runs as one revision of the target's point chain, after the solve
-and after every earlier revision on that chain; same-target movers are
-ordered by the reverse-sibling post-order walk of `<rig>/Movers`, so
-descendants run before their mover parent and sibling branches run
-bottom-to-top in usdview (`libs/rigExec/rigEvaluator.cpp:149-163, 3531-3533`).
-Every frame it reads the *projection pose* — the curvenet's `points`,
-`rigExec:splineIndices`, `rigExec:basis` and `rigExec:samplesPerSpline`,
-plus the target's `faceVertexCounts`, `faceVertexIndices` and `points`, all
-at **default** time (`libs/rigExec/moverGraph.cpp:2109-2137`) — and hashes
-them into a bind digest; the expensive half, cutting the mesh along the net
-and factorizing the cut-aware Laplacian, is done once and cached under that
-digest (`libs/rigExecMath/profileMover.h:1-11`,
-`libs/rigExec/moverGraph.cpp:2167-2199`). It then reads the net's *posed*
-points — the result of the curvenet's own mover chain, which the evaluator
-guarantees has already run by recording the net's points as a dependency
-edge (`libs/rigExec/rigEvaluator.cpp:6821`) — harmonically interpolates the
-per-side deformation gradients over the cut mesh, and Poisson-reconstructs
-vertex positions from the incoming point revision, which is the surface it
-deforms FROM (`libs/rigExec/moverGraph.cpp:830-848`). The solved points are
-then blended over that incoming revision by the common MoverAPI envelope
-(`libs/rigExec/moverGraph.cpp:888-913`) and written back to the target's
-`points`.""",
-        "wiring": [
-            # Not rejected at compile: an absent or unresolvable net leaves the
-            # packet invalid, which is the MoverFailed pass-through
-            # (libs/rigExec/moverGraph.cpp:2106, 2138-2141).
-            ("`rigExec:curvenet`", "The `RigExecCurvenet` supplying the control "
-             "points; the first target is the one used. Omitting it is not a "
-             "compile error — the mover then fails and passes its incoming "
-             "points through unchanged.", "yes"),
-            # Exactly one target, and it must be a native point3f[] `points`
-            # attribute on a UsdGeomPointBased
-            # (libs/rigExec/rigEvaluator.cpp:3770-3802 native points target,
-            # 3810-3823 exactly one target for RigExecCurvenetMover).
-            ("`rigExec:moves`", "Exactly one exact native `point3f[] points` "
-             "property — the surface this deforms. Multi-target fan-out is "
-             "rejected at compile.", "yes"),
-            # Common envelope, at most one target
-            # (libs/rigExecSchema/schema.usda:79-88; rel rigExec:curvenet at 2307).
-            ("`rigExec:weightObject`", "Optional weight field over the target's "
-             "points, supplying the envelope instead of `inputs:defaultWeight`.",
-             "no"),
-        ],
-        "param_groups": [
-            ("Common mover envelope", "RigExecMoverAPI"),
-            ("Curvenet source (read from `rigExec:curvenet`)", "RigExecCurvenet"),
-        ],
-        "example": """Shares the Curvenet page's stage: a profile net drawn over a
-144-quad capped tube, its knots posed by ordinary rig machinery — a matrix
-mover under an FK-driven joint, then a Curvenet Adjustment through the
-Adjuster Mover — and `ProfileMover` propagating that posed net onto
-`Tube.points` under a `RigExecCurvenetWeight` envelope. In the picture the
-**green** curves are the posed net, the **cyan** wireframe is the rest pose
-the whole thing departs from, and the small **yellow diamond** off the
-middle ring is the `RingPush` knot handle. The wide swing is the bend; the
-local lobe pushed out beside that diamond is *one* knot moved through the
-Adjuster, and the surface reproducing it — with the rest of the tube left
-alone — is the thing a skin cluster cannot do. The net's 76 pooled control
-points are the only thing the rig names; the tube's 168 vertices appear in
-no relationship anywhere — the whole point of the representation.""",
-        "tips": [
-            "The projection pose is read at **default** time on both the net and "
-            "the target, never at the evaluated frame: author the drawn pose as "
-            "the default value and keep animation in time samples. A target whose "
-            "`points` exist only as time samples binds nothing and passes "
-            "through.",
-            "Everything the cut depends on — `rigExec:basis`, "
-            "`rigExec:samplesPerSpline`, `rigExec:splineIndices`, the net's "
-            "default points and the target's default points and topology — is "
-            "hashed into the bind key, so editing any of it re-cuts the mesh and "
-            "re-factorizes. Animating the net's posed points changes none of "
-            "those, which is why every frame after the first is cheap.",
-            "The incoming point revision is the surface it deforms from, so a "
-            "curvenet stacked after skinning, after another curvenet or over "
-            "simulated points needs no extra setup — put the mover later in the "
-            "chain and it layers.",
-        ],
-        "see_also": [
-            ("curvenet", "Curvenet"),
-            ("curvenet_adjuster_mover", "Curvenet Adjuster Mover"),
             ("matrix_mover", "Matrix Mover"),
         ],
     },
@@ -2477,11 +2240,11 @@ which changes *what is measured* without changing what is weighted.
 `inputs:invert`, remapped through the falloff lookup table, multiplied by
 `inputs:strength`, and bounded by `rigExec:rangePolicy` (`clamp` by
 default, so scrubbing strength saturates instead of invalidating the
-rig). `rigExec:samplePhase` chooses the points measured: `reference`
-(the default) uses the STATIC authored base points, so a point keeps
-the weight its bind pose earned and a mover's own output cannot feed
-back into its own weights; `current` re-measures the points as they
-stand at that position in the mover stack. The band, invert and strength
+rig). The `rigExecReadPhase` metadata on `rigExec:weightTarget` chooses
+the points measured: `base` (the default) uses the STATIC authored base
+points, so a point keeps the weight its bind pose earned and a mover's
+own output cannot feed back into its own weights; `preceding` re-measures
+the points as they stand at that position in the mover stack. The band, invert and strength
 are live per-frame inputs; `rigExec:falloffProfile` and `rigExec:falloffCurve` are
 structural and are baked to one lookup table per binding epoch.""",
         "wiring": [
@@ -2569,9 +2332,10 @@ shared remap of the signed axis coordinate `d` —
 `1 - u`, and scaled by `inputs:strength` — so the field is fully ON at
 `falloffMin` and fully OFF at `falloffMax`. With `bounded`, a point outside
 the in-plane rectangle gets exactly zero instead, with no edge ramp. Which
-points are measured is `rigExec:samplePhase`: `reference` (the default)
-measures the authored base points, `current` the points as they stand at
-that mover's position in the stack.""",
+points are measured is the `rigExecReadPhase` metadata on
+`rigExec:weightTarget`: `base` (the default) measures the authored base
+points, `preceding` the points as they stand at that mover's position in
+the stack.""",
         "wiring": [
             # rigEvaluator.cpp:874 ("rigExec:weightTarget must have exactly one
             # target") and :882 (must equal the bound mover's target).
@@ -2589,8 +2353,8 @@ that mover's position in the stack.""",
             # rigEvaluator.cpp:7563 - sampleSource is tried first and falls back
             # to weightTarget, so authoring it is optional.
             ("`rigExec:sampleSource`", "Optional static points to measure against "
-             "instead of the weighted domain; ignored when `rigExec:samplePhase` "
-             "is `current`.", "no"),
+             "instead of the weighted domain; ignored when `rigExec:weightTarget` "
+             "reads `preceding`.", "no"),
             # rigEvaluator.cpp:4041 - the mover's weightObject binding is what
             # runs _ValidateWeightObjectDomain, so an unbound volume weight is
             # never validated or compiled at all.
@@ -2705,10 +2469,11 @@ geometry it weights.""",
             "turning the tube elliptical — but any axis that is non-positive or "
             "non-finite invalidates the whole packet rather than collapsing the "
             "volume.",
-            "Leave `rigExec:samplePhase` at `reference` and the tube measures the "
-            "static bind points, so a point keeps the weight its rest position "
-            "earned; `current` measures the points as they stand at this mover's "
-            "place in the stack, which makes the field order dependent by design.",
+            "Leave `rigExec:weightTarget` at its default `base` read phase and "
+            "the tube measures the static bind points, so a point keeps the "
+            "weight its rest position earned; `rigExecReadPhase = \"preceding\"` "
+            "measures the points as they stand at this mover's place in the "
+            "stack, which makes the field order dependent by design.",
         ],
         "see_also": [
             ("sphere_weight", "Sphere Weight"),
@@ -2797,90 +2562,6 @@ intersection.""",
             ("dynamic_weight", "Dynamic Weight"),
         ],
     },
-    "curvenet_weight": {
-        "title": "Curvenet Weight",
-        "schema": "RigExecCurvenetWeight",
-        "summary": "Paints a weight field on a curvenet and solves it onto a mesh.",
-        "description": """Weight painting that survives a re-mesh. Instead of one scalar per
-vertex, the values live on a curvenet's control-point pool — a few dozen
-numbers on curves traced over the surface — and the field is *solved*
-onto whatever mesh the net is pointed at. Bound through a mover's
-`rigExec:weightObject`, it is an ordinary dense envelope: the mover never
-learns that the falloff came from curves. Retessellate the mesh and the
-same painted net produces the same falloff.""",
-        "how_it_works": """The prim publishes `computeWeightPacket`, so the field is solved in
-the weight computation that feeds its bound mover, before that mover's
-application runs in the geometry phase. It reads the five native arrays
-its relationships name — the mesh `points`, `faceVertexCounts` and
-`faceVertexIndices`, and the net's `points` and `rigExec:splineIndices` —
-at the requested time, walks each spline with `rigExec:basis` and
-`rigExec:samplesPerSpline`, projects every sample onto the surface, and
-minimizes `xᵀLx + κ‖Bx − Sw‖²` with `κ = 100 × mean edge length`
-(`libs/rigExecMath/curvenetWeights.cpp:34`), where `S` interpolates `inputs:weights` at the
-samples. Indices listed in `rigExec:autoSmooth` are solved harmonically
-along the net's own connectivity first and their authored values ignored;
-mesh components no sample reaches keep `rigExec:unreachedValue`
-(`libs/rigExecMath/curvenetWeights.cpp:78-121,137-145,156`). `L + κBᵀB` is factorized once per
-geometry/layout/basis/sampling/auto-smooth key and kept in a 32-entry
-cache, so re-painting or animating `inputs:weights` re-solves against the
-existing factors instead of re-cutting the mesh.""",
-        "wiring": [
-            # rigEvaluator.cpp:651-687 -- all five must resolve to exactly ONE
-            # native property of the expected type, and each is then checked
-            # against the matching mesh/net owner; a bare prim path fails.
-            ("`rigExec:weightTarget`", "The moved mesh's exact `points` property — "
-             "the same property the bound mover moves.", "yes"),  # rigEvaluator.cpp:659, 681
-            ("`rigExec:curvenetPoints`", "One RigExecCurvenet's `points` control pool.",
-             "yes"),  # rigEvaluator.cpp:660, 684
-            ("`rigExec:curvenetSplineIndices`", "That same curvenet's "
-             "`rigExec:splineIndices`.", "yes"),  # rigEvaluator.cpp:661, 685
-            ("`rigExec:meshFaceCounts`", "The target mesh's `faceVertexCounts`.",
-             "yes"),  # rigEvaluator.cpp:662, 682
-            ("`rigExec:meshFaceIndices`", "The target mesh's `faceVertexIndices`.",
-             "yes"),  # rigEvaluator.cpp:663, 683
-            ("`inputs:weights`", "One float per control-pool point, including the "
-             "tangent handles; auto-smoothed entries are ignored.",
-             "yes"),  # libs/rigExecMath/curvenetWeights.cpp:131 rejects any other cardinality
-            ("(bound by)", "A mover's `rigExec:weightObject` applies this field.",
-             "-"),
-        ],
-        "param_groups": [
-            ("Weight field", "RigExecWeightObject"),
-        ],
-        "example": """A flat slab is crossed by a curvenet: one rail down its length and
-two profile curves meeting the rail at shared knots. The green splines are
-that curvenet itself — it holds the numbers and stays at rest while the slab
-bends, because the parametrization reads the authored pool, not a mover's
-output. Eight knot values are painted and the solve turns them into a field
-over all 65 slab vertices, which a matrix mover uses as its envelope: grey at
-the Lift end, saturating to red at the far end, and the far edge stays paler
-than the near edge, so the single `avars:rz` rotation lands as a graded bend
-that also twists. Re-meshing the slab from three rows to five changed nothing
-on the net — the same eight numbers re-solve onto whatever vertices are
-there.""",
-        "tips": [
-            "Paint knots, auto-smooth handles: listing every tangent handle in "
-            "`rigExec:autoSmooth` lets the net interpolate them harmonically, but "
-            "each unknown run must reach at least one painted point or the bind "
-            "fails with `auto-smooth component has no authored weight anchor` "
-            "(libs/rigExecMath/curvenetWeights.cpp:104-105).",
-            "Editing `inputs:weights` is a value edit — the factorization is keyed "
-            "by geometry, layout, basis, sample count and auto-smooth membership "
-            "(curvenetWeightComputations.cpp:88-90), and the arrays are read through "
-            "the generation's resolved inputs every frame (bakedWeights.cpp:233-236), so an animated "
-            "field costs one re-solve, not a re-cut.",
-            "The least-squares fit can land just outside [0, 1]; the type's "
-            "`clamp` default bounds it, while `strict` invalidates the packet "
-            "(curvenetWeightComputations.cpp:48-55) and a mover handed an "
-            "invalid envelope passes its preceding revision through unchanged "
-            "(moverKernels.cpp:446).",
-        ],
-        "see_also": [
-            ("curvenet", "Curvenet"),
-            ("static_weight", "Static Weight"),
-            ("matrix_mover", "Matrix Mover"),
-        ],
-    },
     "float_math_mover": {
         "title": "Float Math Mover",
         "schema": "RigExecFloatMathMover",
@@ -2947,6 +2628,13 @@ and it drives nothing, the blendshape does all the work.""",
             "`remap` only normalizes: `(v − min) / (max − min)`, with a "
             "zero-width range returning 0 rather than dividing. Chain a `clamp` "
             "after it whenever the incoming channel can overshoot.",
+            # rigEvaluatorProperties.cpp, _CompilePropertyChains: the phased
+            # connections, published on the reader by _EvaluatePropertyChains.
+            "A connection to a property these movers revise reads it after "
+            "all of them. `rigExecReadPhase` on the connected input reads it "
+            "at `base` or as a named prim's movers left it instead; see "
+            "[Connected inputs](../concepts/how-operators-fire.md#connected-inputs) "
+            "and example 16.",
         ],
         "see_also": [
             ("blend_input", "Blend Input"),
@@ -3100,6 +2788,79 @@ the rest pose the pair departs from.""",
             ("matrix_mover", "Matrix Mover"),
             ("control", "Control"),
             ("float_math_mover", "Float Math Mover"),
+        ],
+    },
+    "surface_projector": {
+        "title": "Surface Projector",
+        "schema": "RigExecSurfaceProjector",
+        "no_gif": True,
+        "summary": "Publishes a frame riding a deforming surface to its shader, as a matrix primvar.",
+        "description": """A surface projector hands a shader a frame that rides a
+deforming surface — the canonical case is an iris and pupil projected onto
+an eyeball that the lids, the socket and the look all deform. It casts a
+ray at the surface's rest points to pick a point on it, follows that point
+onto the surface's final points, and publishes the motion as a constant
+`matrix4d` primvar on the surface for the material to read. It writes
+nothing to the stage and moves no point; the geometry is exactly what the
+surface's other movers make it, and the frame reaches only the renderer.""",
+        "how_it_works": """The projector is compiled into a derived target of the surface's
+point chain, beside the normals and extent the compiler already keeps
+current, so it runs after every mover on that surface and again whenever
+the chain's final points or one of its source frames change. The ray —
+`rigExec:rayOrigin` and `rigExec:rayDirection` in the surface's object
+space — is moved by the `rigExec:sources` frame, measured against
+`rigExec:sourceSpace` so that motion common to the eye and its socket
+cancels. A Möller–Trumbore cast against the base points names a triangle
+and a place inside it; the frame there (position, interpolated vertex
+normal, `rigExec:rayUp` for roll) is evaluated on the base and the final
+points, and `rigExec:projectionMode` chooses whether the posed frame
+follows that material point or re-casts at the posed surface. The
+published matrix is `rigExec:shaderOffset * look * delta`. Up to sixteen
+scalar `rigExec:shaderDialSources` are packed into a second matrix primvar
+for the same material. The dynamic path, the baked program, the frame
+cache and the `.rigexec` runtime all run one header-only kernel.""",
+        "wiring": [
+            ("`rigExec:moves`", "The surface's `points` property; the primvars are "
+             "published on that prim.", "yes"),
+            ("`rigExec:sources`", "The frame provider that aims the ray — normally "
+             "the eye's bind joint.", "no"),
+            ("`rigExec:sourceSpace`", "The sibling space the source is measured in — "
+             "normally the socket the bind joint hangs from.", "no"),
+            ("`rigExec:space`", "The master whose motion carries the whole rig, "
+             "taken back off the rest ray.", "no"),
+            ("`rigExec:shaderDialSources`", "Scalar properties (usually control avars) "
+             "packed into `rigExec:shaderDialPrimvar`.", "no"),
+        ],
+        "param_groups": [],
+        "example": """The biped's eyes are the worked example
+([Biped_eyes.usda](../../examples/biped/Biped_eyes.usda)). Each eye mesh
+has one projector whose source is the eye's bind joint and whose source
+space is its socket, so turning the head carries the iris and only the
+eye's own look aims it. The material, a glslfx shader in
+`examples/biped/shaders`, reads `eyeProjector` to place the iris and
+pupil and `eyeDials` for the pupil and iris sizes and offsets, which are
+avars on each eye control. Nothing on the eye mesh moves; open the stage
+in `usdview` and turn an eye control to watch the iris slide over the
+ball while the ball itself stays still.""",
+        "tips": [
+            "A glslfx material sees a primvar only if its own `attributes` "
+            "block names it: Storm filters every other primvar out before the "
+            "shader runs.",
+            "The projector does not show in a GIF of the plain viewport: its "
+            "whole output is a primvar, so it is visible only through a "
+            "material that reads it.",
+            "Name `rigExec:sourceSpace`. Without it the ray is the source's "
+            "world frame mapped through the surface's authored transform. That "
+            "transform must be static either way: a projector onto a surface "
+            "whose transform is animated fails to compile.",
+            "Use `reproject` when a deformer slides the surface along the look "
+            "(a socket stretch dragging the eyeball) and the iris should stay "
+            "on the line of sight; `material` keeps it on the same skin.",
+        ],
+        "see_also": [
+            ("surface_mover", "Surface Mover"),
+            ("aim_constraint", "Aim Constraint"),
+            ("control", "Control"),
         ],
     },
     "picker": {

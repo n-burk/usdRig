@@ -19,16 +19,10 @@
 // bit. A connected weight target is a known residual risk: the correct
 // fix is a bake-side recorder hook in the weight gather (a capture
 // hole, not a runtime approximation), which this file cannot add.
-// Two deliberate deferrals, both loud rather than silent:
-//   * RigExecCurvenetWeight's numerical bind (cutMesh + curvenet +
-//     sparseSolve, ~140KB of numerics with no fixture coverage) is not
-//     ported: a curvenet weight whose tokens are valid fails the step
-//     naming the object. The token-invalid path needs no bind and is
-//     exact. No shipped fixture carries a curvenet weight.
-//   * Unknown weight object TYPES and unknown structural tokens stay
-//     exactly what the baked builders return for them: invalid packets
-//     (bare for an unknown type, carrying the object's tokens
-//     otherwise), never a defaulted valid field.
+// Unknown weight object TYPES and unknown structural tokens stay
+// exactly what the baked builders return for them: invalid packets
+// (bare for an unknown type, carrying the object's tokens
+// otherwise), never a defaulted valid field.
 #include "rigExecRuntime/store.h"
 
 #include <algorithm>
@@ -140,22 +134,6 @@ _RrReadWeightFloat(const RrProgram *program, size_t object, int field)
     return 0.0f;
 }
 
-int
-_RrReadWeightInt(const RrProgram *program, size_t object, int field)
-{
-    const RrInputValue value = program->ReadWeight(object, field);
-    if (value.tag == RigExecWireInput::Tag::Int) {
-        return int(value.i32);
-    }
-    if (value.tag == RigExecWireInput::Tag::Float) {
-        return int(value.f32);
-    }
-    if (value.tag == RigExecWireInput::Tag::Double) {
-        return int(value.f64);
-    }
-    return 0;
-}
-
 // Appends one attribute's points to a volume gather. A failed read --
 // no live entry, a known-absent mark, a mistyped holding, or a chain
 // with no base this frame -- contributes nothing, exactly as a false
@@ -216,71 +194,6 @@ _RrGatherPointCount(const RrProgram *program, RrWeightScratch *scratch,
     return record->chainBases[chain->second].size();
 }
 
-// Appends one attribute's ints to a curvenet gather. No chain layer:
-// only the recorded stage reads carry these arrays.
-void
-_RrGatherInts(const RrProgram *program, RrWeightScratch *scratch,
-              const RigExecWireFrameInputs *record, uint32_t path,
-              std::vector<int> *out)
-{
-    const auto live = scratch->liveReads.find(path);
-    if (live == scratch->liveReads.end() ||
-        live->second >= record->pathReads.size()) {
-        return;
-    }
-    const RigExecWirePathValue &value =
-        record->pathReads[live->second].value;
-    if (value.tag != RigExecWirePathValue::Tag::IntArray) {
-        return;
-    }
-    for (int32_t v : value.ints) {
-        out->push_back(int(v));
-    }
-}
-
-// Reads one attribute's array wholesale, for the two arrays a curvenet
-// weight reads off its own prim. A failed read leaves the baked empty
-// default: the baked `array` step assigns only on success.
-void
-_RrReadFloatArray(const RrProgram *program, RrWeightScratch *scratch,
-                  const RigExecWireFrameInputs *record, uint32_t path,
-                  std::vector<float> *out)
-{
-    out->clear();
-    const auto live = scratch->liveReads.find(path);
-    if (live == scratch->liveReads.end() ||
-        live->second >= record->pathReads.size()) {
-        return;
-    }
-    const RigExecWirePathValue &value =
-        record->pathReads[live->second].value;
-    if (value.tag != RigExecWirePathValue::Tag::FloatArray) {
-        return;
-    }
-    out->assign(value.floats.begin(), value.floats.end());
-}
-
-void
-_RrReadIntArray(const RrProgram *program, RrWeightScratch *scratch,
-                const RigExecWireFrameInputs *record, uint32_t path,
-                std::vector<int> *out)
-{
-    out->clear();
-    const auto live = scratch->liveReads.find(path);
-    if (live == scratch->liveReads.end() ||
-        live->second >= record->pathReads.size()) {
-        return;
-    }
-    const RigExecWirePathValue &value =
-        record->pathReads[live->second].value;
-    if (value.tag != RigExecWirePathValue::Tag::IntArray) {
-        return;
-    }
-    for (int32_t v : value.ints) {
-        out->push_back(int(v));
-    }
-}
-
 void
 _RrGatherPointList(const RrProgram *program, RrWeightScratch *scratch,
                    const RigExecWireFrameInputs *record,
@@ -293,21 +206,6 @@ _RrGatherPointList(const RrProgram *program, RrWeightScratch *scratch,
             continue;
         }
         _RrGatherPoints(program, scratch, record, paths[i], out);
-    }
-}
-
-void
-_RrGatherIntList(const RrProgram *program, RrWeightScratch *scratch,
-                 const RigExecWireFrameInputs *record,
-                 const std::vector<uint32_t> &paths,
-                 const std::vector<uint8_t> &valid,
-                 std::vector<int> *out)
-{
-    for (size_t i = 0; i < paths.size(); ++i) {
-        if (i < valid.size() && !valid[i]) {
-            continue;
-        }
-        _RrGatherInts(program, scratch, record, paths[i], out);
     }
 }
 
@@ -1414,65 +1312,6 @@ _RrRunWeightPacket(RrProgram *program, size_t step,
                 samplePoints, curvePoints);
         }
         return true;
-    }
-    if (program->TokenEquals(wire.type, "RigExecCurvenetWeight")) {
-        std::vector<RrVec3f> mesh, net;
-        std::vector<int> counts, indices, splines, autoSmooth;
-        std::vector<float> weights;
-        _RrGatherPointList(program, scratch, record,
-                           wire.curvenetMeshPoints,
-                           wire.curvenetMeshValid, &mesh);
-        _RrGatherPointList(program, scratch, record,
-                           wire.curvenetPoints,
-                           wire.curvenetPointsValid, &net);
-        _RrGatherIntList(program, scratch, record,
-                         wire.curvenetCounts,
-                         wire.curvenetCountsValid, &counts);
-        _RrGatherIntList(program, scratch, record,
-                         wire.curvenetIndices,
-                         wire.curvenetIndicesValid, &indices);
-        _RrGatherIntList(program, scratch, record,
-                         wire.curvenetSplines,
-                         wire.curvenetSplinesValid, &splines);
-        (void)mesh;
-        (void)net;
-        (void)counts;
-        (void)indices;
-        (void)splines;
-        if (wire.curvenetWeightsValid) {
-            _RrReadFloatArray(program, scratch, record,
-                              wire.curvenetWeights, &weights);
-        }
-        if (wire.curvenetAutoSmoothValid) {
-            _RrReadIntArray(program, scratch, record,
-                            wire.curvenetAutoSmooth, &autoSmooth);
-        }
-        (void)weights;
-        (void)autoSmooth;
-        _RrReadWeightInt(program, index, RrWeightCurvenetSamples);
-        const bool basisOk =
-            program->TokenEquals(wire.curvenetBasis, "bezier") ||
-            program->TokenEquals(wire.curvenetBasis, "catmullRom");
-        const bool policyOk =
-            program->TokenEquals(wire.rangePolicy, "strict") ||
-            program->TokenEquals(wire.rangePolicy, "clamp");
-        if (!basisOk || !policyOk) {
-            RrWeightPacket packet;
-            packet.representation = wire.representation;
-            packet.rangePolicy = wire.rangePolicy;
-            store.weightPackets[index] = packet;
-            return true;
-        }
-        // The bind itself (cutMesh + curvenet + sparseSolve) has no
-        // zero-USD port: failing names the object rather than
-        // publishing an invalid packet the baked path would not.
-        if (error) {
-            *error = "weight object " +
-                     program->TextOrEmpty(wire.path) +
-                     " needs the curvenet weight binding, which the "
-                     "zero-USD runtime does not port";
-        }
-        return false;
     }
     // Every weight object type the epoch can hold has an arm above; an
     // unknown type is an invalid packet, which is a MoverFailed

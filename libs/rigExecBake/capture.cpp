@@ -221,8 +221,6 @@ RigExecBakeCapture::RigExecBakeCapture(RigExecRigEvaluator &evaluator,
         Add(object.scaleZ, RigExecWireInput::Tag::Float);
         Add(object.extentU, RigExecWireInput::Tag::Float);
         Add(object.extentV, RigExecWireInput::Tag::Float);
-        Add(object.curvenetSamples, RigExecWireInput::Tag::Int);
-        Add(object.curvenetUnreached, RigExecWireInput::Tag::Float);
     }
     for (const RigExecBakedProgramImpl::AvarBinding &binding :
          program.avarBindings) {
@@ -535,17 +533,6 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
         wire.valid = packet.valid;
         return wire;
     };
-    auto DrainAdjuster =
-        [&](const RigExecBakedProgramImpl::GeomRevision &revision,
-            RigExecWireMatrix4d *matrix, uint8_t *have) {
-            *matrix = _ToMatrix(revision.lastAdjusterNetToAsset);
-            // The publish's own condition, re-evaluated: the matrix is
-            // fresh only for an adjuster that published this frame.
-            const bool published =
-                revision.op == RigExecRevisionOp::CurvenetAdjuster &&
-                revision.resultStatus == "ok";
-            *have = published ? uint8_t(1) : uint8_t(0);
-        };
     record.blendWeights.reserve(program.chains.size());
     record.blendActivations.reserve(program.chains.size());
     record.blendPoints.reserve(program.chains.size());
@@ -555,8 +542,6 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
     record.revisionDefaultWeights.reserve(program.chains.size());
     record.revisionPhasePackets.reserve(program.chains.size());
     record.derivedPhasePackets.reserve(program.chains.size());
-    record.revisionAdjusters.reserve(program.chains.size());
-    record.revisionAdjusterHave.reserve(program.chains.size());
     for (const RigExecBakedProgramImpl::GeomChain &chain : program.chains) {
         std::vector<std::vector<float>> weights;
         std::vector<std::vector<std::vector<float>>> activations;
@@ -564,15 +549,11 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
             points;
         std::vector<float> defaults;
         std::vector<RigExecWireWeightPacket> packets;
-        std::vector<RigExecWireMatrix4d> adjusters;
-        std::vector<uint8_t> adjusterHave;
         weights.reserve(chain.revisions.size());
         activations.reserve(chain.revisions.size());
         points.reserve(chain.revisions.size());
         defaults.reserve(chain.revisions.size());
         packets.reserve(chain.revisions.size());
-        adjusters.reserve(chain.revisions.size());
-        adjusterHave.reserve(chain.revisions.size());
         auto DrainRefused =
             [&](const RigExecBakedProgramImpl::GeomRevision &revision) {
                 for (const auto &channel : revision.blendChannels) {
@@ -621,11 +602,6 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
                 points.push_back(std::move(revisionPoints));
                 defaults.push_back(revision.defaultWeight);
                 packets.push_back(DrainPacket(revision.currentPhasePacket));
-                RigExecWireMatrix4d adjuster;
-                uint8_t have = 0;
-                DrainAdjuster(revision, &adjuster, &have);
-                adjusters.push_back(adjuster);
-                adjusterHave.push_back(have);
                 return DrainRefused(revision);
             };
         for (const RigExecBakedProgramImpl::GeomRevision &revision :
@@ -639,8 +615,6 @@ RigExecBakeCapture::_Drain(const RigExecBakedProgramImpl &program,
         record.blendPoints.push_back(std::move(points));
         record.revisionDefaultWeights.push_back(std::move(defaults));
         record.revisionPhasePackets.push_back(std::move(packets));
-        record.revisionAdjusters.push_back(std::move(adjusters));
-        record.revisionAdjusterHave.push_back(std::move(adjusterHave));
         std::vector<std::vector<float>> derivedWeights;
         std::vector<std::vector<std::vector<float>>> derivedActivations;
         std::vector<std::vector<std::vector<std::vector<RigExecWireVec3f>>>>

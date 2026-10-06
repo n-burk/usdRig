@@ -27,7 +27,7 @@ multipliers default to 1 and must be finite and positive. The origin stays
 fixed; placement rotation determines the axes. These inputs are animatable
 and affect evaluation, guides, and framing bounds.
 
-Binary exports use major version 2 to carry the six new inputs. Re-export
+Binary exports use major version 3 and carry all six directional inputs. Re-export
 older `.rigexec` files and rebuild runtime consumers; USD source stages
 retain their previous shape when directional inputs are absent.
 
@@ -191,21 +191,22 @@ applied on one path still moves points, just not the same ones.
 
 ## Sample phase
 
-`rigExec:samplePhase` decides which points the distance is measured
-against.
+The `rigExecReadPhase` metadata on `rel rigExec:weightTarget` decides which
+points the distance is measured against. Any phase other than these two is
+a compile error.
 
-- **`reference`** (default) samples the static authored base points, so a
+- **`base`** (default) samples the static authored base points, so a
   point keeps the weight its bind pose earned — the behaviour of a
   painted map, and what a matrix mover wants so its own output cannot
   feed back into its own weights. `rel rigExec:sampleSource` optionally
   overrides *what* is sampled without changing what is weighted, which is
   how one mesh is weighted by another mesh's shape.
-- **`current`** samples the points as they stand at that operation's
+- **`preceding`** samples the points as they stand at that operation's
   position in the mover stack, so the volume grabs whatever is inside it
   right now. Order dependent by construction: the same volume at two
   points in the stack legitimately yields two different fields.
 
-`current` cannot come from exec. A revision node's only inputs are its
+`preceding` cannot come from exec. A revision node's only inputs are its
 parameters, its status, and the read-write point buffer, and the
 parameters are baked as a VDF constant when the graph is built — nothing
 in the packet can depend on a value the graph has not computed yet. What
@@ -216,10 +217,10 @@ parameters. See the graph build loop in `rigEvaluator.cpp::Evaluate`.
 
 **Know the cost before reaching for it.** Each `Evaluate` builds its own
 request, schedule, and executor over the whole prefix, so a chain of *N*
-revisions containing *K* current-phase weights does *O(N·K)* point work —
-quadratic if every mover in a long chain samples `current`. `reference` is
+revisions containing *K* in-flight weights does *O(N·K)* point work —
+quadratic if every mover in a long chain samples `preceding`. `base` is
 the default precisely because it is free: the field is a per-generation
-constant that exec computes once. Reach for `current` where the behaviour
+constant that exec computes once. Reach for `preceding` where the behaviour
 is actually wanted (a volume that should grab whatever has been deformed
 into it), not as a general-purpose "more correct" setting.
 

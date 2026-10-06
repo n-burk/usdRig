@@ -30,13 +30,6 @@
 //     measured against the in-flight points.
 //   * pose.weightFrames copies the walk's FINAL frames, which is what
 //     _UpdateVolumePlacements publishes and what the oracle then reads.
-//   * a CURVENET weight copies EXEC, like any other mover binding, and is
-//     the one object whose kernel had to be CUT to be copied: the exec
-//     computation resolves its bind out of a process-wide LRU behind a
-//     mutex, and a step body may take no lock. So the kernel is split into
-//     a bind half and a field half (curvenetWeightComputations.h) and exec
-//     calls both in order; the program holds a bind of its own, one per
-//     weight object, and calls the field half with the same arguments.
 // The two placements genuinely differ for a volume some constraint revises,
 // and reproducing BOTH is the contract: parity is with the dynamic path as
 // it stands, not with the dynamic path as it might be tidied.
@@ -55,7 +48,7 @@
 #include <string>
 #include <vector>
 
-// The seven weight object types, spelled once. The per-frame dispatch runs a
+// The weight object types, spelled once. The per-frame dispatch runs a
 // step body down this list, and TfToken(const char *) takes the token
 // registry's spin lock on every construction -- which a step body may not
 // take (docs/specs/baked-step-graph.md section 2) -- so the comparison is against
@@ -68,7 +61,6 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((sphereWeight, "RigExecSphereWeight"))
     ((planeWeight, "RigExecPlaneWeight"))
     ((curveWeight, "RigExecCurveWeight"))
-    ((curvenetWeight, "RigExecCurvenetWeight"))
 );
 
 namespace rigExec {
@@ -169,8 +161,6 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     // The array-bearing relationships, as the properties exec would have
     // reached: authored target order, nothing inferred. See
     // WeightObject::targetPoints for why authored and not canonicalized.
-    // Hoisted out of the volumetric branch because a curvenet weight reaches
-    // five of its inputs the same way.
     const auto attributesOf = [&](const char *name) {
         std::vector<UsdAttribute> out;
         for (const SdfPath &target : ctx->Targets(prim, name)) {
@@ -222,43 +212,6 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
         object.targetPoints = attributesOf("rigExec:weightTarget");
         object.samplePoints = attributesOf("rigExec:sampleSource");
         object.curvePoints = attributesOf("rigExec:curve");
-    } else if (object.type == _tokens->curvenetWeight) {
-        object.curvenetMeshPoints = attributesOf("rigExec:weightTarget");
-        object.curvenetPoints = attributesOf("rigExec:curvenetPoints");
-        object.curvenetCounts = attributesOf("rigExec:meshFaceCounts");
-        object.curvenetIndices = attributesOf("rigExec:meshFaceIndices");
-        object.curvenetSplines = attributesOf("rigExec:curvenetSplineIndices");
-        // The two ARRAYS exec reads off the prim itself. No RigExecBakedInput
-        // covers an array, so they are read through the generation's resolved
-        // inputs every frame -- which is what lets an animated inputs:weights
-        // move the field without re-cutting the mesh.
-        // An interactive OVERRIDE on one is another matter, and the prim is
-        // deliberately NOT routed: exec declares both AttributeValue<float>
-        // and AttributeValue<int>, so an override carrying the array they
-        // actually hold is rejected there by type and the dynamic path goes
-        // on answering from the authored value. The program would honour it.
-        // Naming them unplaceable makes such a generation fall back, which
-        // is the only answer that agrees with the path parity is measured
-        // against -- see execTypedArrayInputs, and
-        // TestAnArrayOverrideOnACurvenetWeightFallsBack for the numbers a
-        // routed prim published instead (z = 2.368 against the dynamic 4).
-        for (const char *name : {"inputs:weights", "rigExec:autoSmooth"}) {
-            const SdfPath property = path.AppendProperty(TfToken(name));
-            B.named.insert(property);
-            B.execTypedArrayInputs.insert(property);
-        }
-        B.prims.insert(path);
-        object.curvenetWeights = prim.GetAttribute(TfToken("inputs:weights"));
-        object.curvenetAutoSmooth =
-            prim.GetAttribute(TfToken("rigExec:autoSmooth"));
-        // uniform by schema, so it folds; the sample count and the unreached
-        // value are bound, because the schema lets both CONNECT to the
-        // curvenet's own attributes and a connection is not an epoch value.
-        object.curvenetBasis = ctx->ReadToken(prim, "rigExec:basis",
-                                              "catmullRom");
-        object.curvenetSamples = ctx->Bind(prim, "rigExec:samplesPerSpline", 5);
-        object.curvenetUnreached =
-            ctx->Bind(prim, "rigExec:unreachedValue", 0.0f);
     } else if (object.type == _tokens->combineWeight) {
         // Read for its SIZE and never for its points: the combine consults
         // its own weight target only when no input is dense enough to carry
@@ -280,8 +233,7 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     // any, else the painted table, else one element.
     object.costElements = std::max<size_t>(object.values.size(), 1);
     for (const std::vector<UsdAttribute> *points :
-             {&object.targetPoints, &object.combineTargetPoints,
-              &object.curvenetMeshPoints}) {
+             {&object.targetPoints, &object.combineTargetPoints}) {
         for (const UsdAttribute &a : *points) {
             VtVec3fArray value;
             if (a.Get(&value, UsdTimeCode::EarliestTime())) {
@@ -431,96 +383,6 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         }
         return RigExecBuildVolumeWeightPacket(object.type, inputs);
     }
-    if (object.type == _tokens->curvenetWeight) {
-        // The layout, gathered the way exec's Relationship().TargetedObjects
-        // inputs are: every targeted property, concatenated in authored
-        // order.
-        std::vector<GfVec3f> mesh, net;
-        std::vector<int> counts, indices, splines, autoSmooth;
-        std::vector<float> weights;
-        const auto gather = [&](const std::vector<UsdAttribute> &attributes,
-                                auto *out) {
-            for (const UsdAttribute &a : attributes) {
-                VtArray<typename std::decay_t<decltype(*out)>::value_type>
-                    value;
-                if (B.resolvedInputs->GetAttribute(a, time, &value)) {
-                    RigExecRecordStageRead(
-                        B.resolvedInputs, B.resolvedInputs->bakeRecorder,
-                        a.GetPath(), a, time, VtValue(value),
-                        /*forceFrame=*/true);
-                    out->insert(out->end(), value.begin(), value.end());
-                }
-            }
-        };
-        gather(object.curvenetMeshPoints, &mesh);
-        gather(object.curvenetPoints, &net);
-        gather(object.curvenetCounts, &counts);
-        gather(object.curvenetIndices, &indices);
-        gather(object.curvenetSplines, &splines);
-        const auto array = [&](const UsdAttribute &a, auto *out) {
-            VtArray<typename std::decay_t<decltype(*out)>::value_type> value;
-            if (a && B.resolvedInputs->GetAttribute(a, time, &value)) {
-                RigExecRecordStageRead(
-                    B.resolvedInputs, B.resolvedInputs->bakeRecorder,
-                    a.GetPath(), a, time, VtValue(value),
-                    /*forceFrame=*/true);
-                out->assign(value.begin(), value.end());
-            }
-        };
-        array(object.curvenetWeights, &weights);
-        array(object.curvenetAutoSmooth, &autoSmooth);
-        const int samples = RigExecBakedRead(object.curvenetSamples,
-                                             *B.resolvedInputs, time,
-                                             &B.overridden);
-        // The structural check first, and the same one, so a bad token is
-        // an invalid packet here exactly as it is there.
-        if (!RigExecCurvenetWeightTokensAreValid(object.curvenetBasis,
-                                                 object.rangePolicy)) {
-            RigExecWeightPacket packet;
-            packet.representation = object.representation;
-            packet.rangePolicy = object.rangePolicy;
-            return packet;
-        }
-        // The BIND, and the reason this object carries one: cutting the mesh
-        // and factorizing its Laplacian is the expensive half and depends on
-        // nothing but the layout. Exec keeps those in a process-wide LRU
-        // behind a mutex, which a step body may not take; this is the same
-        // cache with one entry, owned by this object and written by this
-        // object's own step, so no two steps can be inside it at once.
-        if (!object.bound || object.boundMesh != mesh ||
-            object.boundNet != net ||
-            object.boundCounts != counts ||
-            object.boundIndices != indices ||
-            object.boundSplines != splines ||
-            object.boundSmooth != autoSmooth ||
-            object.boundSamples != samples) {
-            object.curvenetBinding = RigExecBindCurvenetWeightPacket(
-                mesh, counts, indices, net, splines, object.curvenetBasis,
-                samples, autoSmooth, nullptr);
-            object.boundMesh = mesh;
-            object.boundNet = net;
-            object.boundCounts = counts;
-            object.boundIndices = indices;
-            object.boundSplines = splines;
-            object.boundSmooth = autoSmooth;
-            object.boundSamples = samples;
-            object.bound = true;
-        }
-        if (!object.curvenetBinding) {
-            // A bind that failed is an invalid packet, which is the kernel's
-            // MoverFailed pass-through -- the same answer exec publishes
-            // when its own bind fails.
-            RigExecWeightPacket packet;
-            packet.representation = object.representation;
-            packet.rangePolicy = object.rangePolicy;
-            return packet;
-        }
-        return RigExecCurvenetWeightPacketFromBinding(
-            *object.curvenetBinding, weights, object.rangePolicy,
-            RigExecBakedRead(object.curvenetUnreached, *B.resolvedInputs,
-                             time, &B.overridden),
-            nullptr);
-    }
     // Every weight object type the epoch can hold has an arm above.
     // IsBakeable refuses any other by name, so nothing reaches this -- and
     // an unknown type is an invalid packet, which is a MoverFailed
@@ -556,34 +418,19 @@ RigExecBakedNoteWeightInputs(
     RigExecBakedNoteInput(weight.scaleZ, step);
     RigExecBakedNoteInput(weight.extentU, step);
     RigExecBakedNoteInput(weight.extentV, step);
-    RigExecBakedNoteInput(weight.curvenetSamples, step);
-    RigExecBakedNoteInput(weight.curvenetUnreached, step);
     // The point arrays a volume measures, which no RigExecBakedInput covers:
     // they are read through the generation's resolved inputs every frame, so
     // a property chain or a drag on the weighted mesh reaches this step the
     // same way it reaches a geometry mover.
     for (const std::vector<UsdAttribute> *points :
              {&weight.targetPoints, &weight.samplePoints, &weight.curvePoints,
-              &weight.combineTargetPoints, &weight.curvenetMeshPoints,
-              &weight.curvenetPoints, &weight.curvenetCounts,
-              &weight.curvenetIndices, &weight.curvenetSplines}) {
+              &weight.combineTargetPoints}) {
         if (!points->empty()) {
             step->resolvedInputReads = true;
             for (const UsdAttribute &a : *points) {
                 step->varyingInputs =
                     step->varyingInputs || a.ValueMightBeTimeVarying();
             }
-        }
-    }
-    // The two arrays a curvenet weight reads off its own prim. Same rule:
-    // no RigExecBakedInput covers an array, so the step reads them through
-    // the generation's resolved inputs and must say so.
-    for (const UsdAttribute *a :
-             {&weight.curvenetWeights, &weight.curvenetAutoSmooth}) {
-        if (*a) {
-            step->resolvedInputReads = true;
-            step->varyingInputs =
-                step->varyingInputs || a->ValueMightBeTimeVarying();
         }
     }
 }

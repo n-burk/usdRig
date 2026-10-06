@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <limits>
 #include <string>
 
@@ -955,11 +956,13 @@ TestBlendDeltasUseBase()
 
     // A static sample has identical base/final/preceding values. Phase edits
     // remain valid and preserve that result without rebuilding point nodes.
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("final"));
+    sample.GetRelationship(TfToken("rigExec:targetPoints"))
+        .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("final"));
     const auto finalSample = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(finalSample.valid);
     CHECK(finalSample.moverGraphRevisionsCreated == 0);
-    sample.GetAttribute(TfToken("rigExec:pointsReadPhase")).Set(TfToken("base"));
+    sample.GetRelationship(TfToken("rigExec:targetPoints"))
+        .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("base"));
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
     sample.GetRelationship(TfToken("rigExec:targetPoints"))
         .SetMetadata(TfToken(RigExecReadPhaseMetadataName), std::string("preceding"));
@@ -1258,7 +1261,9 @@ TestControlAvarScaleDrivesMatrixMover()
     const GfVec3d singleKnotScale(2.5, 1.25, 3.75);
     const TfType doubleType = TfType::Find<double>();
     for (int axis = 0; axis < 3; ++axis) {
-        const UsdAttribute attr = control.GetAttribute(
+        // Non-const: UsdAttribute::SetSpline is const-only from 26.08; the
+        // Vendored USD 26.05 still takes a mutable handle.
+        UsdAttribute attr = control.GetAttribute(
             TfToken(scaleNames[axis]));
         CHECK(attr.ClearAtTime(UsdTimeCode(0)));
         CHECK(attr.ClearAtTime(UsdTimeCode(10)));
@@ -2199,6 +2204,7 @@ TestMoverGraphParity(const std::string &examplesDir)
         {"/ArmRig.usda", 0, false},
         {"/09_PropertyMathMovers.usda", 0, false},
         {"/13_ReadPhases.usda", 1024, true},
+        {"/16_ConnectionReadPhases.usda", 1024, true},
         // At an ANIMATED time, not just the rest pose. Default-time parity is
         // structurally blind to two whole classes of bug: operands that are
         // equal at rest (the lattice rest cage vs the live cage) and static
@@ -3554,6 +3560,285 @@ TestBadReadPhasesRejected(const std::string &examplesDir)
     CHECK(compileWith("/ReadPhaseAsset/Rig/Movers/Cage", &errors));
 }
 
+// Read phases on connections (examples/16_ConnectionReadPhases.usda): one
+// dial revised by Gain (x2) then Limit (clamp to 0.6), read at `base`, at
+// the Gain checkpoint and at `final` -- by float math movers that add what
+// they read to channels of their own, and by matrix movers whose envelope
+// is the connection. Dynamic and baked alike, and under a drag on Gain.
+static void
+TestConnectionReadPhasesSelectRevision(const std::string &examplesDir)
+{
+    const auto readout = [](const RigExecRigPose &pose, const char *name) {
+        const auto it = pose.movedProperties.find(SdfPath(
+            std::string("/PhaseConnectAsset/Rig/Channels/Readouts.rigExec:") +
+            name));
+        return it != pose.movedProperties.end() &&
+                       it->second.IsHolding<float>()
+                   ? double(it->second.UncheckedGet<float>())
+                   : -1.0;
+    };
+    // How far a card rose: the lift (3 at frame 1024) times the dial value
+    // its phase selects.
+    const auto rise = [](const RigExecRigPose &pose, const char *card) {
+        const auto it = pose.movedProperties.find(SdfPath(
+            std::string("/PhaseConnectAsset/Geom/") + card + ".points"));
+        if (it == pose.movedProperties.end() ||
+            !it->second.IsHolding<VtVec3fArray>() ||
+            it->second.UncheckedGet<VtVec3fArray>().empty()) {
+            return -1.0;
+        }
+        return double(it->second.UncheckedGet<VtVec3fArray>()[0][1]) + 0.5;
+    };
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/16_ConnectionReadPhases.usda");
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/PhaseConnectAsset/Rig"));
+        evaluator.cpuParityMode = true;
+        evaluator.SetEvaluationMode(mode);
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        CHECK(evaluator.GetSkippedOperations().empty());
+        // The Base and Gain readouts and cards; a `final` or undeclared
+        // connection reads what it always did and needs no record.
+        CHECK(evaluator.GetPhasedConnections().size() == 4);
+
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(1024));
+        CHECK(pose.valid);
+        CHECK(std::abs(readout(pose, "base") - 0.45) < 1e-6);
+        CHECK(std::abs(readout(pose, "gain") - 0.9) < 1e-6);
+        CHECK(std::abs(readout(pose, "final") - 0.6) < 1e-6);
+        CHECK(std::abs(rise(pose, "BaseCard") - 0.45 * 3) < 1e-5);
+        CHECK(std::abs(rise(pose, "GainCard") - 0.9 * 3) < 1e-5);
+        CHECK(std::abs(rise(pose, "FinalCard") - 0.6 * 3) < 1e-5);
+
+        // A drag on Gain's factor moves the checkpoint, and the clamp no
+        // longer bites, so final follows it; the base reader stays put.
+        evaluator.SetInteractiveOverrides({RigExecValueOverride{
+            SdfPath("/PhaseConnectAsset/Rig/Movers/Dial/Gain"), TfToken(),
+            TfToken("inputs:value"), VtValue(1.2f)}});
+        const RigExecRigPose dragged = evaluator.Evaluate(UsdTimeCode(1024));
+        CHECK(dragged.valid);
+        CHECK(std::abs(readout(dragged, "base") - 0.45) < 1e-6);
+        CHECK(std::abs(readout(dragged, "gain") - 0.54) < 1e-5);
+        CHECK(std::abs(readout(dragged, "final") - 0.54) < 1e-5);
+        CHECK(std::abs(rise(dragged, "GainCard") - 0.54 * 3) < 1e-4);
+        CHECK(std::abs(rise(dragged, "BaseCard") - 0.45 * 3) < 1e-5);
+    }
+}
+
+// Connection phases that cannot be satisfied set their reader aside with a
+// warning that says why, and editing one is structural.
+static void
+TestBadConnectionReadPhasesRejected(const std::string &examplesDir)
+{
+    const SdfPath reader("/PhaseConnectAsset/Rig/Movers/Readouts/Base");
+    const SdfPath readerInput(
+        "/PhaseConnectAsset/Rig/Movers/Readouts/Base.inputs:value");
+    const TfToken phaseField("rigExecReadPhase");
+    // Opens the example with \p edit applied in the session layer, compiles,
+    // and answers whether the reader was set aside with \p expect said.
+    const auto setAside = [&](const std::function<void(const UsdStageRefPtr &)>
+                                  &edit,
+                              const char *expect) {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/16_ConnectionReadPhases.usda");
+        if (!stage) {
+            return false;
+        }
+        stage->SetEditTarget(stage->GetSessionLayer());
+        edit(stage);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/PhaseConnectAsset/Rig"));
+        evaluator.cpuParityMode = true;
+        std::vector<std::string> errors;
+        const bool compiled = evaluator.Compile(&errors);
+        bool said = false;
+        for (const std::string &e : errors) {
+            said |= e.find(expect) != std::string::npos;
+        }
+        if (!said) {
+            std::printf("  expected \"%s\" among %zu compile message(s)\n",
+                        expect, errors.size());
+            for (const std::string &e : errors) {
+                std::printf("    %s\n", e.c_str());
+            }
+        }
+        return compiled && evaluator.GetSkippedOperations().count(reader) &&
+               said;
+    };
+    const auto withPhase = [&](const char *phase) {
+        return [&, phase](const UsdStageRefPtr &stage) {
+            stage->GetAttributeAtPath(readerInput)
+                .SetMetadata(phaseField, std::string(phase));
+        };
+    };
+
+    // `preceding` names a position in the reader's own chain, and the
+    // connection reads someone else's.
+    CHECK(setAside(withPhase("preceding"), "'preceding' names no position"));
+    // A prim beneath which nothing revises the dial.
+    CHECK(setAside(withPhase("/PhaseConnectAsset/Rig/Movers/Cards"),
+                   "which revises nothing on"));
+    // A checkpoint on a connection that reaches no revised property.
+    CHECK(setAside(
+        [&](const UsdStageRefPtr &stage) {
+            const UsdPrim dial = stage->GetPrimAtPath(
+                SdfPath("/PhaseConnectAsset/Rig/Channels/Dial"));
+            UsdAttribute spare = dial.CreateAttribute(
+                TfToken("rigExec:spare"), SdfValueTypeNames->Float);
+            spare.Set(0.3f);
+            UsdAttribute input = stage->GetAttributeAtPath(readerInput);
+            input.SetConnections({spare.GetPath()});
+            input.SetMetadata(phaseField,
+                              std::string("/PhaseConnectAsset/Rig/Movers/"
+                                          "Dial/Gain"));
+        },
+        "reaches no property a math mover writes"));
+    // An input that math movers revise themselves: which value would the
+    // phase choose?
+    CHECK(setAside(
+        [&](const UsdStageRefPtr &stage) {
+            const UsdPrim nudge = stage->DefinePrim(
+                SdfPath("/PhaseConnectAsset/Rig/Movers/Readouts/Nudge"),
+                TfToken("RigExecFloatMathMover"));
+            nudge.AddAppliedSchema(TfToken("RigExecMoverAPI"));
+            nudge.CreateAttribute(TfToken("rigExec:operation"),
+                                  SdfValueTypeNames->Token, false,
+                                  SdfVariabilityUniform)
+                .Set(TfToken("add"));
+            nudge.CreateAttribute(TfToken("inputs:value"),
+                                  SdfValueTypeNames->Float)
+                .Set(0.1f);
+            nudge.CreateRelationship(TfToken("rigExec:moves"), false)
+                .SetTargets({readerInput});
+        },
+        "ambiguous"));
+
+    // An unconnected input reads its own value, so a phase there has
+    // nothing to choose: accepted, and no record.
+    {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/16_ConnectionReadPhases.usda");
+        CHECK(stage);
+        if (stage) {
+            stage->SetEditTarget(stage->GetSessionLayer());
+            stage->GetAttributeAtPath(readerInput).SetConnections({});
+            RigExecRigEvaluator evaluator(
+                stage, SdfPath("/PhaseConnectAsset/Rig"));
+            evaluator.cpuParityMode = true;
+            CHECK(evaluator.Compile(nullptr));
+            CHECK(evaluator.GetSkippedOperations().empty());
+            CHECK(evaluator.GetPhasedConnections().size() == 3);
+        }
+    }
+
+    // Changing a connection's phase is structural: the epoch digest moves,
+    // and the next evaluation reads at the new phase.
+    {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/16_ConnectionReadPhases.usda");
+        CHECK(stage);
+        if (!stage) {
+            return;
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/PhaseConnectAsset/Rig"));
+        evaluator.cpuParityMode = true;
+        CHECK(evaluator.Compile(nullptr));
+        CHECK(evaluator.Evaluate(UsdTimeCode(1024)).valid);
+        const size_t before = evaluator.GetBindingEpochDigest();
+        stage->SetEditTarget(stage->GetSessionLayer());
+        stage->GetAttributeAtPath(readerInput)
+            .SetMetadata(phaseField, std::string("final"));
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(1024));
+        CHECK(pose.valid);
+        CHECK(evaluator.GetBindingEpochDigest() != before);
+        const auto it = pose.movedProperties.find(SdfPath(
+            "/PhaseConnectAsset/Rig/Channels/Readouts.rigExec:base"));
+        CHECK(it != pose.movedProperties.end() &&
+              it->second.IsHolding<float>() &&
+              std::abs(it->second.UncheckedGet<float>() - 0.6f) < 1e-6f);
+    }
+}
+
+// A phase on a SOLVER's connected input. 03's blend weight is moved onto a
+// channel the solver connects to, with the clamp mover turned into a halving
+// of that channel: undeclared, the solver reads the halved weight; at `base`
+// it reads the channel as authored, posing exactly as an unrevised weight.
+static void
+TestConnectionReadPhaseOnSolverInput(const std::string &examplesDir)
+{
+    const SdfPath rig("/BlendArmAsset/Rig");
+    const SdfPath weight("/BlendArmAsset/Rig/Solvers/IKFKBlend.inputs:weight");
+    const SdfPath wrist("/BlendArmAsset/Rig/Joints/Shoulder/Elbow/Wrist");
+    enum class Wiring { Authored, Connected, ConnectedBase };
+    const auto wristAt = [&](Wiring wiring, RigExecEvaluationMode mode,
+                             GfMatrix4d *out) {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/03_IkFkBlendClamp.usda");
+        if (!stage) {
+            return false;
+        }
+        stage->SetEditTarget(stage->GetSessionLayer());
+        const UsdPrim channel = stage->DefinePrim(
+            SdfPath("/BlendArmAsset/Rig/Channels/Blend"), TfToken("Scope"));
+        UsdAttribute w = channel.CreateAttribute(TfToken("rigExec:w"),
+                                                 SdfValueTypeNames->Float);
+        w.Set(0.525f);
+        const UsdPrim mover = stage->GetPrimAtPath(
+            SdfPath("/BlendArmAsset/Rig/Movers/Pose/ClampBlendWeight"));
+        if (!mover) {
+            return false;
+        }
+        mover.GetAttribute(TfToken("rigExec:operation"))
+            .Set(TfToken("multiply"));
+        mover.CreateAttribute(TfToken("inputs:value"),
+                              SdfValueTypeNames->Float)
+            .Set(0.5f);
+        mover.GetRelationship(TfToken("rigExec:moves"))
+            .SetTargets({w.GetPath()});
+        UsdAttribute input = stage->GetAttributeAtPath(weight);
+        if (wiring == Wiring::Authored) {
+            input.Set(0.525f);
+        } else {
+            input.SetConnections({w.GetPath()});
+        }
+        if (wiring == Wiring::ConnectedBase) {
+            input.SetMetadata(TfToken("rigExecReadPhase"), std::string("base"));
+        }
+        RigExecRigEvaluator evaluator(stage, rig);
+        evaluator.cpuParityMode = true;
+        evaluator.SetEvaluationMode(mode);
+        if (!evaluator.Compile(nullptr) ||
+            !evaluator.GetSkippedOperations().empty()) {
+            return false;
+        }
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(1024));
+        const auto it = pose.jointMatricesFinal.find(wrist);
+        if (!pose.valid || it == pose.jointMatricesFinal.end()) {
+            return false;
+        }
+        *out = it->second;
+        return true;
+    };
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, RigExecEvaluationMode::Baked}) {
+        GfMatrix4d authored, connected, base;
+        CHECK(wristAt(Wiring::Authored, mode, &authored));
+        CHECK(wristAt(Wiring::Connected, mode, &connected));
+        CHECK(wristAt(Wiring::ConnectedBase, mode, &base));
+        // The halving reaches the solver through the connection...
+        CHECK(!Near(connected.ExtractTranslation(),
+                    authored.ExtractTranslation(), 1e-3));
+        // ...and `base` reads around it.
+        CHECK(Near(base.ExtractTranslation(), authored.ExtractTranslation(),
+                   1e-9));
+    }
+}
+
 // A property result that drives a DynamicWeight input must reach both Exec's
 // tapped weight packet and the evaluator's independent CPU resolver. Before
 // this regression the tap saw driver=1 while _ResolveWeights reread authored
@@ -4104,6 +4389,9 @@ main(int argc, char **argv)
     TestReadPhaseSelectsRevision(examplesDir);
     TestReadPhaseIsStructural(examplesDir);
     TestBadReadPhasesRejected(examplesDir);
+    TestConnectionReadPhasesSelectRevision(examplesDir);
+    TestBadConnectionReadPhasesRejected(examplesDir);
+    TestConnectionReadPhaseOnSolverInput(examplesDir);
     TestPointChainConsumesPrecedingRevision(examplesDir);
     TestPropertyMoverReachesStaticPacketReads(examplesDir);
     TestPropertyMoverDrivesDynamicWeight();
