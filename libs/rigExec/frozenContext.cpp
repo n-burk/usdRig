@@ -1,6 +1,7 @@
 // Frozen evaluation API, input containers, serial scopes, and purity audit.
 
 #include "frozenContextInternal.h"
+#include "frameCache.h"
 #include "generation.h"
 #include <algorithm>
 #include <cmath>
@@ -41,7 +42,8 @@ RigExecUpstreamValuesOf(const std::vector<RigExecValueOverride> &inputs)
     std::vector<RigExecUpstreamValue> values;
     values.reserve(byPath.size());
     for (const auto &[path, value] : byPath) {
-        values.push_back(RigExecUpstreamValue{path, *value, 0});
+        values.push_back(
+            RigExecUpstreamValue{path, *value, RigExecUpstreamFoldHash(*value)});
     }
     return values;
 }

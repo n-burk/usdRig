@@ -1574,6 +1574,10 @@ struct RigExecProviderValues {
     /// read the assembler makes. Null reads the stage throughout, which is
     /// what a rig with no property chains wants and what a test may pass.
     const RigExecResolvedInputs *resolved = nullptr;
+    /// The admitted upstream values by path, or null. Authored-level, so
+    /// an array read that bypasses `resolved` (a lattice's or a wire's rest
+    /// data at Default) still answers from it before the stage.
+    const std::map<SdfPath, VtValue> *upstream = nullptr;
 };
 
 /// The provider frames a surface projector reads, as ASSET frames: each

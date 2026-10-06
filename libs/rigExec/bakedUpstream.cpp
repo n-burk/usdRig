@@ -7,15 +7,20 @@
 #include "frozenContextInternal.h"
 #include "moverGraph.h"
 #include "rigEvaluator.h"
+#include "rigEvaluatorInternal.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/token.h"
+#include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <set>
 #include <string>
@@ -37,10 +42,47 @@ RigExecUpstreamSlotType(const SdfValueTypeName &typeName)
            type == TfType::Find<GfVec3d>() || type == TfType::Find<GfVec3f>();
 }
 
+namespace {
+
+// The array part of admission. Off until the .rigexec format carries array
+// slots (AI); a test turns it on. Read on the owning thread and the
+// sampler's, set only by a test between evaluations.
+std::atomic<bool> _upstreamArrays{false};
+
+}  // namespace
+
+void
+RigExecSetUpstreamArrayAdmissionForTesting(bool on)
+{
+    _upstreamArrays.store(on, std::memory_order_relaxed);
+}
+
+bool
+RigExecUpstreamArrayAdmission()
+{
+    return _upstreamArrays.load(std::memory_order_relaxed);
+}
+
+bool
+RigExecUpstreamArraySlotType(const SdfValueTypeName &typeName)
+{
+    if (!typeName || !typeName.IsArray()) {
+        return false;
+    }
+    const TfType type = typeName.GetType();
+    return type == TfType::Find<VtIntArray>() ||
+           type == TfType::Find<VtFloatArray>() ||
+           type == TfType::Find<VtDoubleArray>() ||
+           type == TfType::Find<VtVec2fArray>() ||
+           type == TfType::Find<VtVec3fArray>();
+}
+
 std::string
 RigExecUpstreamDropReason(const UsdStageRefPtr &stage,
                           const std::map<SdfPath, TfType> *listed,
-                          const SdfPath &path, const VtValue &value)
+                          const SdfPath &path, const VtValue &value,
+                          UsdTimeCode time, RigExecUpstreamCountMemo *memo,
+                          const std::map<SdfPath, TfType> *listedArrays)
 {
     const UsdAttribute attribute =
         stage ? stage->GetAttributeAtPath(path) : UsdAttribute();
@@ -58,19 +100,242 @@ RigExecUpstreamDropReason(const UsdStageRefPtr &stage,
         return "the attribute has no stage value";
     }
     const SdfValueTypeName typeName = attribute.GetTypeName();
-    if (!RigExecUpstreamSlotType(typeName)) {
-        return typeName.IsArray() ? std::string("array values are not admitted")
-                                  : "no input slot holds a " +
-                                        typeName.GetAsToken().GetString();
+    const bool array = typeName.IsArray();
+    if (array && !RigExecUpstreamArrayAdmission()) {
+        return "array values are not admitted";
+    }
+    if (array ? !RigExecUpstreamArraySlotType(typeName)
+              : !RigExecUpstreamSlotType(typeName)) {
+        return "no input slot holds a " + typeName.GetAsToken().GetString();
     }
     if (value.GetType() != typeName.GetType()) {
         return "a " + value.GetTypeName() + " value on a " +
                typeName.GetAsToken().GetString() + " attribute";
     }
-    if (listed && !listed->count(path)) {
+    if (array ? !listedArrays || !listedArrays->count(path)
+              : listed && !listed->count(path)) {
         return "no listed read reaches it";
     }
+    if (!array) {
+        return std::string();
+    }
+    // Condition 4: the element count of the stage value at this time, from
+    // the memo while the stage cannot vary it.
+    const auto known =
+        memo ? memo->find(path) : RigExecUpstreamCountMemo::iterator();
+    size_t count = 0;
+    if (memo && known != memo->end() && !known->second.varying) {
+        count = known->second.count;
+    } else {
+        VtValue stageValue;
+        if (!attribute.Get(&stageValue, time) ||
+            !stageValue.IsArrayValued()) {
+            return "the attribute has no stage value at this time";
+        }
+        count = stageValue.GetArraySize();
+        if (memo && known == memo->end()) {
+            RigExecUpstreamCountEntry &entry = (*memo)[path];
+            // One time sample is not time-varying, yet Default and a
+            // numeric time read different opinions of it.
+            entry.varying = attribute.ValueMightBeTimeVarying() ||
+                            attribute.GetNumTimeSamples() > 0;
+            entry.count = entry.varying ? 0 : count;
+        }
+    }
+    if (value.GetArraySize() != count) {
+        return "its element count " + std::to_string(value.GetArraySize()) +
+               " differs from the stage value's " + std::to_string(count);
+    }
     return std::string();
+}
+
+std::vector<RigExecUpstreamArrayRow>
+RigExecBakedUpstreamAdmissibleArrays(const RigExecRigEvaluator &evaluator)
+{
+    return RigExecBakedProgram::DescribeUpstreamArrays(evaluator);
+}
+
+std::vector<RigExecUpstreamArrayRow>
+RigExecBakedProgram::DescribeUpstreamArrays(const RigExecRigEvaluator &E)
+{
+    using Time = RigExecUpstreamArrayRow::Time;
+    std::map<SdfPath, RigExecUpstreamArrayRow> rows;
+    const UsdStageRefPtr &stage = E._stage;
+    const auto add = [&](const SdfPath &path, Time time,
+                         const std::string &consumer) {
+        if (path.IsEmpty() || !path.IsPrimPropertyPath()) {
+            return;
+        }
+        const UsdAttribute a = stage->GetAttributeAtPath(path);
+        if (!a || !RigExecUpstreamArraySlotType(a.GetTypeName())) {
+            return;
+        }
+        const auto [it, fresh] = rows.try_emplace(path);
+        RigExecUpstreamArrayRow &row = it->second;
+        if (fresh) {
+            row.path = path;
+            row.type = a.GetTypeName().GetType();
+            row.time = time;
+            row.consumer = consumer;
+            return;
+        }
+        if (row.time != time) {
+            row.time = Time::Both;
+        }
+        if (("," + row.consumer + ",").find("," + consumer + ",") ==
+            std::string::npos) {
+            row.consumer += "," + consumer;
+        }
+    };
+    const auto isArrayLeaf = [](RigExecRevisionLeafType type) {
+        return type == RigExecRevisionLeafType::IntArray ||
+               type == RigExecRevisionLeafType::FloatArray ||
+               type == RigExecRevisionLeafType::DoubleArray ||
+               type == RigExecRevisionLeafType::Vec2fArray ||
+               type == RigExecRevisionLeafType::Vec3fArray;
+    };
+    std::set<SdfPath> weightObjects;
+    // The objects whose packet exec computes in the dynamic walk (a point
+    // revision's weight tap): seeds of the exec-read points below.
+    std::set<SdfPath> execWeightObjects;
+    const auto revisionRows = [&](const auto &revision, const char *owner) {
+        RigExecRevisionLeafDecl decl;
+        RigExecDeclareRevisionLeaves(revision.op, revision.moverPath,
+                                     revision.binding, &decl);
+        const int indices = decl.Role(RigExecRevisionLeafRole::JointIndices);
+        const int weights = decl.Role(RigExecRevisionLeafRole::JointWeights);
+        for (size_t k = 0; k < decl.keys.size(); ++k) {
+            const RigExecRevisionLeafKey &key = decl.keys[k];
+            if (!isArrayLeaf(key.type)) {
+                continue;
+            }
+            const bool layout = int(k) == indices || int(k) == weights;
+            add(key.path,
+                key.time == RigExecRevisionLeafTime::AtDefault
+                    ? Time::AtDefault
+                    : Time::AtTime,
+                layout ? "skin layout" : owner);
+        }
+        for (const auto &[input, samples] : revision.binding.blendSamples) {
+            for (const RigExecBlendSampleBinding &sample : samples) {
+                if (sample.blendShape.IsEmpty()) {
+                    add(sample.points, Time::AtTime, "blend sample");
+                }
+            }
+        }
+        if (!revision.binding.weightObject.IsEmpty()) {
+            weightObjects.insert(revision.binding.weightObject);
+            execWeightObjects.insert(revision.binding.weightObject);
+        }
+    };
+    for (const auto &[target, revisions] : E._graphChains) {
+        add(target, Time::AtTime, "chain base");
+        for (const auto &revision : revisions) {
+            revisionRows(revision, "revision");
+        }
+    }
+    // A derived target's base is not a leaf: only its revisions' reads.
+    for (const auto &[target, revisions] : E._graphDerivedChains) {
+        for (const auto &revision : revisions) {
+            revisionRows(revision, "derived");
+        }
+    }
+
+    // Every weight object a mover or a constraint binds, and what each
+    // composes.
+    const TfToken weightObjectRel("rigExec:weightObject");
+    for (const RigExecMoverRecord &mover : E._movers) {
+        if (const UsdPrim prim = stage->GetPrimAtPath(mover.moverPath)) {
+            SdfPathVector targets;
+            if (const UsdRelationship rel =
+                    prim.GetRelationship(weightObjectRel)) {
+                rel.GetTargets(&targets);
+            }
+            weightObjects.insert(targets.begin(), targets.end());
+        }
+    }
+    for (const auto &constraint : E._frameConstraints) {
+        if (!constraint.weightObject.IsEmpty()) {
+            weightObjects.insert(constraint.weightObject);
+        }
+    }
+    const TfToken baseWeightRel("rigExec:baseWeight");
+    const TfToken inputWeightsRel("rigExec:inputWeights");
+    const TfToken weightTargetRel("rigExec:weightTarget");
+    const TfToken sampleSourceRel("rigExec:sampleSource");
+    const TfToken curveRel("rigExec:curve");
+    const TfToken combineType("RigExecCombineWeight");
+    // Visits every object \p seeds reach through composition and hands
+    // \p point each array its packet gathers (authored property targets)
+    // and, as `true`, the one target the oracle reads, canonicalized.
+    const auto visitPoints = [&](const std::set<SdfPath> &seeds,
+                                 const auto &point) {
+        std::set<SdfPath> visited;
+        std::vector<SdfPath> pending(seeds.begin(), seeds.end());
+        while (!pending.empty()) {
+            const SdfPath path = pending.back();
+            pending.pop_back();
+            if (!visited.insert(path).second) {
+                continue;
+            }
+            const UsdPrim prim = stage->GetPrimAtPath(path);
+            if (!prim) {
+                continue;
+            }
+            const auto targetsOf = [&prim](const TfToken &name) {
+                SdfPathVector targets;
+                if (const UsdRelationship rel = prim.GetRelationship(name)) {
+                    rel.GetTargets(&targets);
+                }
+                return targets;
+            };
+            for (const TfToken &name : {baseWeightRel, inputWeightsRel}) {
+                for (const SdfPath &t : targetsOf(name)) {
+                    pending.push_back(t);
+                }
+            }
+            const TfToken type = prim.GetTypeName();
+            const bool volumetric =
+                evaluatorDetail::_IsVolumeWeightType(type);
+            if (!volumetric && type != combineType) {
+                continue;
+            }
+            const std::vector<TfToken> relationships =
+                volumetric ? std::vector<TfToken>{weightTargetRel,
+                                                  sampleSourceRel, curveRel}
+                           : std::vector<TfToken>{weightTargetRel};
+            for (const TfToken &name : relationships) {
+                const SdfPathVector targets = targetsOf(name);
+                for (const SdfPath &t : targets) {
+                    if (t.IsPropertyPath()) {
+                        point(t, false);
+                    }
+                }
+                if (volumetric && targets.size() == 1) {
+                    point(evaluatorDetail::_ResolveGeometryInput(stage,
+                                                                 targets[0]),
+                          true);
+                }
+            }
+        }
+    };
+    visitPoints(weightObjects, [&](const SdfPath &path, bool oracle) {
+        add(path, Time::AtTime, oracle ? "weight oracle" : "weight packet");
+    });
+    // Exec reads a computed packet's points element by element, and an exec
+    // value override cannot replace such a read with an array, so the
+    // dynamic walk could not follow a value there: those attributes are
+    // structural for every reader and in every backend.
+    visitPoints(execWeightObjects, [&rows](const SdfPath &path, bool) {
+        rows.erase(path);
+    });
+
+    std::vector<RigExecUpstreamArrayRow> out;
+    out.reserve(rows.size());
+    for (auto &[path, row] : rows) {
+        out.push_back(std::move(row));
+    }
+    return out;
 }
 
 void

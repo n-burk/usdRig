@@ -324,10 +324,12 @@ RigExecRigEvaluator::_ClearValueCachesWholesale(bool avarValuesOnly)
     // Property chains can read numeric avars through scalar connections.
     // Their cached result must be dropped even for an avar-only notice.
     _propertyChainBindings.reset();
-    // Skin layouts, blend samples and base geometry cannot hold avar values.
+    // Skin layouts, blend samples and base geometry cannot hold avar values,
+    // and no avar is an array.
     if (avarValuesOnly) {
         return;
     }
+    _upstreamCounts.clear();
     // Dropped as answers and kept as candidates (see the caches' Clear), so
     // a re-read that finds the same arrays keeps the same pointer.
     _skinTopologies.Clear();
@@ -402,6 +404,11 @@ RigExecRigEvaluator::_ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
     // change skin layouts, blend offsets or base geometry below.
     if (avarValuesOnly) {
         return;
+    }
+    // Upstream admission's stage counts (condition 4), by the same reach.
+    for (auto it = _upstreamCounts.begin(); it != _upstreamCounts.end();) {
+        it = reach.Reaches(it->first) ? _upstreamCounts.erase(it)
+                                      : std::next(it);
     }
     // The skin layouts, and which properties can reach one. A layout is read
     // from its mover's own layout attributes, and _skinLayoutInputs holds
@@ -637,6 +644,13 @@ RigExecRigEvaluator::GetUpstreamInputPaths() const
 void
 RigExecRigEvaluator::_AdmitUpstreamInputs()
 {
+    _AdmitUpstreamInputs(_upstreamAdmissionTime);
+}
+
+void
+RigExecRigEvaluator::_AdmitUpstreamInputs(UsdTimeCode time)
+{
+    _upstreamAdmissionTime = time;
     std::vector<RigExecValueOverride> admitted;
     std::vector<std::string> dropLines;
     if (_upstreamRequested.empty()) {
@@ -649,6 +663,19 @@ RigExecRigEvaluator::_AdmitUpstreamInputs()
     // such an epoch has no file to agree with.
     const std::map<SdfPath, TfType> *listed =
         _bakedProgram ? &_bakedProgram->GetUpstreamAdmissible() : nullptr;
+    // The array part, from the compiled epoch in every mode (program or
+    // none), and only while array admission is on and an array is given.
+    std::map<SdfPath, TfType> arrays;
+    if (RigExecUpstreamArrayAdmission() &&
+        std::any_of(_upstreamRequested.begin(), _upstreamRequested.end(),
+                    [](const RigExecValueOverride &o) {
+                        return o.value.IsArrayValued();
+                    })) {
+        for (const RigExecUpstreamArrayRow &row :
+             RigExecBakedUpstreamAdmissibleArrays(*this)) {
+            arrays.emplace_hint(arrays.end(), row.path, row.type);
+        }
+    }
     // One entry per attribute, the last given winning, sorted by path.
     std::map<SdfPath, const RigExecValueOverride *> byPath;
     for (const RigExecValueOverride &o : _upstreamRequested) {
@@ -665,8 +692,8 @@ RigExecRigEvaluator::_AdmitUpstreamInputs()
             drop("names no attribute");
             continue;
         }
-        const std::string reason =
-            RigExecUpstreamDropReason(_stage, listed, path, o.value);
+        const std::string reason = RigExecUpstreamDropReason(
+            _stage, listed, path, o.value, time, &_upstreamCounts, &arrays);
         if (!reason.empty()) {
             drop(reason);
             continue;
@@ -707,6 +734,18 @@ RigExecRigEvaluator::_SetUpstreamAdmitted(
     }
     _upstreamAdmitted = std::move(admitted);
     _RebuildValueInputs();
+    // The chain bases answer from the upstream values alone; a base placed,
+    // moved or lifted is re-read by the next generation.
+    _upstreamValues.clear();
+    for (const RigExecValueOverride &o : _upstreamAdmitted) {
+        _upstreamValues[o.prim.AppendProperty(o.attribute)] = o.value;
+    }
+    for (const RigExecValueOverride &o : moved) {
+        const auto live = _liveGraphs.find(o.prim.AppendProperty(o.attribute));
+        if (live != _liveGraphs.end() && live->second) {
+            live->second->basePointsPushed = false;
+        }
+    }
     if (_OverridesReachSkinLayout(moved)) {
         _skinTopologies.Clear();
     }

@@ -1639,23 +1639,44 @@ RigExecStatusForParameters(
 
 namespace {
 
+// An upstream array at \p path: authored-level, so it answers a read that
+// bypasses the resolved inputs (rest data read at Default).
+template <typename A>
+bool
+_StageUpstreamArray(const std::map<SdfPath, VtValue> *upstream,
+                    const SdfPath &path, A *value)
+{
+    if (!upstream || path.IsEmpty()) {
+        return false;
+    }
+    const auto it = upstream->find(path);
+    if (it == upstream->end() || !it->second.IsHolding<A>()) {
+        return false;
+    }
+    *value = it->second.UncheckedGet<A>();
+    return true;
+}
+
 // Reads a typed array from an exact property path on the mover's stage.
 // \p resolved is null for BIND-TIME reads and only for those. A rest cage, a
 // rest geometry, a bind-time topology: those are the authored neutral pose the
 // deformation is measured against, so a read phase has nothing to say about
 // them -- and serving one the same phased value as the live read makes the two
-// operands equal and the whole deformation an identity.
+// operands equal and the whole deformation an identity. \p upstream, when
+// given, answers before the stage at any time.
 template <typename T>
 std::vector<T>
 _Array(const UsdPrim &moverPrim, const SdfPath &path, UsdTimeCode time,
-       const RigExecResolvedInputs *resolved = nullptr)
+       const RigExecResolvedInputs *resolved = nullptr,
+       const std::map<SdfPath, VtValue> *upstream = nullptr)
 {
     std::vector<T> out;
     if (path.IsEmpty() || !moverPrim) {
         return out;
     }
     VtArray<T> value;
-    if (resolved && resolved->Get(path, &value)) {
+    if ((resolved && resolved->Get(path, &value)) ||
+        _StageUpstreamArray(upstream, path, &value)) {
         out.assign(value.begin(), value.end());
         return out;
     }
@@ -2288,7 +2309,7 @@ RigExecAssembleParameters(
         // capture was itself only `a.Get(&v, UsdTimeCode::Default())` on this
         // same attribute -- so reading it here is identical and needs nothing
         // authored. The live cage is the same attribute at the evaluated time.
-        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.cagePoints, UsdTimeCode::Default(), /*resolved=*/nullptr);
+        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.cagePoints, UsdTimeCode::Default(), /*resolved=*/nullptr, values.upstream);
         params.auxPointsB = _Array<GfVec3f>(moverPrim, binding.cagePoints, time, values.resolved);
         if (const UsdAttribute a =
                 moverPrim.GetAttribute(_attrTokens->divisions)) {
@@ -2344,12 +2365,9 @@ RigExecAssembleParameters(
         // Posed control points at the declared phase; rest control points
         // are the curve's AUTHORED ones, which is what the bind coordinates
         // were computed against.
-        if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
-                binding.driverCurvePoints)) {
-            VtVec3fArray rest;
-            a.Get(&rest, UsdTimeCode::Default());
-            params.restPoints.assign(rest.begin(), rest.end());
-        }
+        params.restPoints = _Array<GfVec3f>(moverPrim,
+            binding.driverCurvePoints, UsdTimeCode::Default(),
+            /*resolved=*/nullptr, values.upstream);
         if (binding.driverTransformCount > 0) {
             // Posed control points from the providers: C_j = C0_j +
             // w_j (M_j C0_j - C0_j), M_j the transform measured in its
@@ -2393,19 +2411,24 @@ RigExecAssembleParameters(
             params.auxPoints = _Array<GfVec3f>(
                 moverPrim, binding.driverCurvePoints, time, values.resolved);
         }
-        if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
-                binding.driverCurveOrder)) {
+        {
             VtIntArray order;
-            if (a.Get(&order, UsdTimeCode::Default()) && !order.empty()) {
-                params.curveOrder = order[0];
+            if (_StageUpstreamArray(values.upstream, binding.driverCurveOrder,
+                                    &order)) {
+                if (!order.empty()) {
+                    params.curveOrder = order[0];
+                }
+            } else if (const UsdAttribute a =
+                           moverPrim.GetStage()->GetAttributeAtPath(
+                               binding.driverCurveOrder)) {
+                if (a.Get(&order, UsdTimeCode::Default()) && !order.empty()) {
+                    params.curveOrder = order[0];
+                }
             }
         }
-        if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
-                binding.driverCurveKnots)) {
-            VtDoubleArray knots;
-            a.Get(&knots, UsdTimeCode::Default());
-            params.curveKnots.assign(knots.begin(), knots.end());
-        }
+        params.curveKnots = _Array<double>(moverPrim,
+            binding.driverCurveKnots, UsdTimeCode::Default(),
+            /*resolved=*/nullptr, values.upstream);
         if (const UsdAttribute a =
                 moverPrim.GetAttribute(_attrTokens->dropoffDistance)) {
             float dropoff = 0.0f;
@@ -2773,7 +2796,32 @@ RigExecDeclareSkinLayoutLeaves(const SdfPath &moverPath,
 
 namespace {
 
-// One typed read, site for site: \p flavour over \p fallback.
+template <class T>
+struct _IsVtArray : std::false_type {};
+template <class E>
+struct _IsVtArray<VtArray<E>> : std::true_type {};
+
+// An upstream array at \p path in \p layer: authored-level, so it answers a
+// raw read at any time, Default included, as a stage holding it would.
+template <class T>
+bool
+_UpstreamArray(const std::map<SdfPath, VtValue> *layer, const SdfPath &path,
+               T *value)
+{
+    if constexpr (_IsVtArray<T>::value) {
+        if (layer && !layer->empty()) {
+            const auto it = layer->find(path);
+            if (it != layer->end() && it->second.IsHolding<T>()) {
+                *value = it->second.UncheckedGet<T>();
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// One typed read, site for site: \p flavour over \p fallback. An array read
+// of any flavour answers from the upstream \p layer before the stage.
 template <class T>
 T
 _LeafRead(RigExecRevisionLeafFlavour flavour, const SdfPath &path,
@@ -2782,6 +2830,9 @@ _LeafRead(RigExecRevisionLeafFlavour flavour, const SdfPath &path,
 {
     switch (flavour) {
     case RigExecRevisionLeafFlavour::Raw:
+        if (_UpstreamArray(layer, path, &value)) {
+            return value;
+        }
         if (a) {
             a.Get(&value, time);
         }
@@ -2802,6 +2853,9 @@ _LeafRead(RigExecRevisionLeafFlavour flavour, const SdfPath &path,
         return value;
     case RigExecRevisionLeafFlavour::OverlayThenRaw:
         if (resolved && resolved->Get(path, &value)) {
+            return value;
+        }
+        if (_UpstreamArray(layer, path, &value)) {
             return value;
         }
         if (a) {

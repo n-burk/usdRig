@@ -238,10 +238,18 @@ RigExecRigEvaluator::_ReadTargetPoints(
         return false;
     }
     const SdfPath canonical = _ResolveGeometryInput(_stage, targets[0]);
-    const UsdAttribute attr = _stage->GetAttributeAtPath(canonical);
+    // An admitted upstream value is the attribute's authored value, for the
+    // oracle as for every other reader (read-only while a generation runs).
     VtVec3fArray value;
-    if (!attr || !attr.Get(&value, time)) {
-        return false;
+    const auto upstream = _upstreamValues.find(canonical);
+    if (upstream != _upstreamValues.end() &&
+        upstream->second.IsHolding<VtVec3fArray>()) {
+        value = upstream->second.UncheckedGet<VtVec3fArray>();
+    } else {
+        const UsdAttribute attr = _stage->GetAttributeAtPath(canonical);
+        if (!attr || !attr.Get(&value, time)) {
+            return false;
+        }
     }
     points->assign(value.begin(), value.end());
     return true;

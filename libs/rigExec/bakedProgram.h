@@ -47,19 +47,85 @@ namespace rigExec {
 /// array does. Upstream admission condition 2.
 bool RigExecUpstreamSlotType(const SdfValueTypeName &typeName);
 
+/// Whether \p typeName is an array type an upstream value may hold while
+/// array admission is on (RigExecUpstreamArrayAdmission): an int, float,
+/// double, vec2f or vec3f array, the element types a .rigexec array slot
+/// carries.
+bool RigExecUpstreamArraySlotType(const SdfValueTypeName &typeName);
+
+/// Whether upstream array values are admitted (the array part of
+/// admission conditions 2 and 3). Off unless
+/// RigExecSetUpstreamArrayAdmissionForTesting turned it on.
+bool RigExecUpstreamArrayAdmission();
+
+/// Admission condition 4's memo, per array attribute: its stage element
+/// count, answered with no stage read while the stage value cannot vary
+/// (`varying` false: no time sample, asked when the entry was filled). An
+/// entry with `varying` set holds no count: such a key reads the stage at
+/// each time.
+struct RigExecUpstreamCountEntry {
+    size_t count = 0;
+    bool varying = false;
+};
+using RigExecUpstreamCountMemo = std::map<SdfPath, RigExecUpstreamCountEntry>;
+
 /// Why an upstream value \p value at attribute \p path is not admitted on
 /// \p stage, or empty when it is: the attribute stands there, is
 /// unconnected, has a stage value, has a slot type (condition 2) the value
-/// holds exactly, and (condition 3) \p listed, the standing program's
-/// GetUpstreamAdmissible() or null when none stands, holds it. The text is
-/// the "<reason>" of the "upstream input <path>: <reason>; ignored" line.
-/// Owning thread: it reads the stage.
-std::string RigExecUpstreamDropReason(const UsdStageRefPtr &stage,
-                                      const std::map<SdfPath, TfType> *listed,
-                                      const SdfPath &path,
-                                      const VtValue &value);
+/// holds exactly, (condition 3) \p listed, the standing program's
+/// GetUpstreamAdmissible() or null when none stands, holds it, and
+/// (condition 4, arrays) the value's element count equals the stage
+/// value's at \p time. \p memo, when given, answers condition 4 for a key
+/// the stage cannot vary and is filled the first time a key is judged;
+/// with none the stage is read. The text is the "<reason>" of the
+/// "upstream input <path>: <reason>; ignored" line. Owning thread: it reads
+/// the stage.
+std::string RigExecUpstreamDropReason(
+    const UsdStageRefPtr &stage, const std::map<SdfPath, TfType> *listed,
+    const SdfPath &path, const VtValue &value,
+    UsdTimeCode time = UsdTimeCode::Default(),
+    RigExecUpstreamCountMemo *memo = nullptr,
+    const std::map<SdfPath, TfType> *listedArrays = nullptr);
+
+/// One array attribute an upstream value may stand on: an array leaf read
+/// that reads it through the upstream layer in every backend.
+struct RigExecUpstreamArrayRow {
+    /// Which reads take it: at the evaluated time, at Default (authored
+    /// rest data), or both (a lattice cage, a wire curve). An upstream value
+    /// replaces the attribute for both kinds.
+    enum class Time { AtTime, AtDefault, Both };
+    SdfPath path;
+    /// The array type (VtIntArray, VtFloatArray, VtDoubleArray,
+    /// VtVec2fArray or VtVec3fArray), the attribute's own.
+    TfType type;
+    Time time = Time::AtTime;
+    /// The readers, comma separated: "chain base", "revision", "derived",
+    /// "skin layout", "blend sample", "weight packet", "weight oracle".
+    std::string consumer;
+};
 
 class RigExecRigEvaluator;
+
+/// Every array attribute of \p evaluator's compiled epoch an upstream value
+/// may stand on, sorted by path, one row per attribute: each chain's base
+/// points; every array read a revision or derived target declares
+/// (RigExecDeclareRevisionLeaves: topology, widths, surface points, bind
+/// coordinates, rest points, pin points, lattice cages, wire curves, order,
+/// knots and driver weights, skin jointIndices and jointWeights); dense blend
+/// sample points; the point arrays a weight object's packet gathers, by
+/// relationship target; and the point arrays the weight oracle reads, by
+/// canonical attribute. Structural arrays are absent (painted weight
+/// values and indices, solver and SplineIk arrays, constraint arrays,
+/// property curve keys and tangents, ribbon solver points, derived bases,
+/// sparse blend shapes), and so is every point array a weight object a
+/// point revision binds (or one it composes) reads, whatever else reads
+/// it: exec computes that packet in the dynamic walk and takes no array
+/// override of an attribute it reads per element. The exporter lists exactly these as array input
+/// slots. Owning thread: it reads the stage. Independent of
+/// RigExecUpstreamArrayAdmission.
+std::vector<RigExecUpstreamArrayRow> RigExecBakedUpstreamAdmissibleArrays(
+    const RigExecRigEvaluator &evaluator);
+
 struct RigExecRigPose;
 /// The program's whole state, declared in bakedProgramImpl.h so that the
 /// files building and running each domain of it can name the same type.
@@ -316,6 +382,9 @@ public:
         const RigExecRigEvaluator &evaluator,
         std::vector<RigExecBakedPropertyChainDesc> *chains,
         std::string *error);
+    /// RigExecBakedUpstreamAdmissibleArrays.
+    static std::vector<RigExecUpstreamArrayRow> DescribeUpstreamArrays(
+        const RigExecRigEvaluator &evaluator);
 
     /// Runs the whole program at \p time and publishes into \p pose.
     ///

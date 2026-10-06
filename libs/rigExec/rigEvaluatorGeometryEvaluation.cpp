@@ -211,9 +211,20 @@ RigExecRigEvaluator::_EvaluateGeometry(
             // weight fields), and handing it over is a refcount.
             basePoints = live->basePoints;
         } else {
-            const UsdAttribute baseAttr = _stage->GetAttributeAtPath(target);
-            if (!baseAttr || !baseAttr.Get(&basePoints, time)) {
-                return;
+            // An upstream value is the authored base at every time, so it
+            // stands until SetUpstreamInputs moves it; the interactive list
+            // is never consulted here.
+            const auto upstream = _upstreamValues.find(target);
+            const bool fromUpstream = upstream != _upstreamValues.end() &&
+                upstream->second.IsHolding<VtVec3fArray>();
+            UsdAttribute baseAttr;
+            if (fromUpstream) {
+                basePoints = upstream->second.UncheckedGet<VtVec3fArray>();
+            } else {
+                baseAttr = _stage->GetAttributeAtPath(target);
+                if (!baseAttr || !baseAttr.Get(&basePoints, time)) {
+                    return;
+                }
             }
             if (live &&
                 !live->graph.UpdatePointSource(live->source, basePoints)) {
@@ -228,7 +239,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
             }
             live->basePoints = basePoints;
             live->basePointsPushed = true;
-            live->basePointsStatic = !baseAttr.ValueMightBeTimeVarying();
+            live->basePointsStatic =
+                fromUpstream || !baseAttr.ValueMightBeTimeVarying();
         }
         // Match stable operation identities, reconnect surviving nodes, and
         // delete removed nodes. A rebind only updates packets; insertion,
@@ -327,6 +339,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
             }
             RigExecProviderValues values;
             values.resolved = resolved;
+            values.upstream =
+                _upstreamValues.empty() ? nullptr : &_upstreamValues;
             GfMatrix4d transform(1.0);
             RigExecWeightPacket weights;
             RigExecPointFrameArray driverFrames;
@@ -766,6 +780,8 @@ RigExecRigEvaluator::_EvaluateGeometry(
             }
             RigExecProviderValues values;
             values.resolved = &_resolvedInputs;
+            values.upstream =
+                _upstreamValues.empty() ? nullptr : &_upstreamValues;
             values.basePoints.assign(graphPoints.begin(), graphPoints.end());
 
             const RigExecMoverParameters parameters = [&]() {

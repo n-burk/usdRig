@@ -27,10 +27,13 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/layer.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/prim.h"
@@ -840,17 +843,20 @@ TestALiftReachesAnOlderSnapshot()
 // under another list. Cases: a constant avar, the source hop of a pinned
 // ladder binding, a chain mover's inputs:value (a head leaf, chains bound)
 // and a skin mover's inputs:defaultWeight (a memoized mover scalar).
+struct Burst {
+    std::string name;
+    std::string stagePath;
+    SdfPath rig;
+    RigExecValueOverride input;
+    double first;
+};
+
+void CheckBurst(const Burst &burst);
+
 void
 TestABurstCarriesUpstream()
 {
     std::printf("case: a burst carries upstream values\n");
-    struct Burst {
-        std::string name;
-        std::string stagePath;
-        SdfPath rig;
-        RigExecValueOverride input;
-        double first;
-    };
     const SdfPath space("/LimbsAsset/Upstream.inputs:space");
     const std::vector<Burst> bursts = {
         {"A0 avars:rz", Fixture("upstream_inputs.usda"), kLimbsRig,
@@ -870,6 +876,15 @@ TestABurstCarriesUpstream()
          1},
     };
     for (const Burst &burst : bursts) {
+        CheckBurst(burst);
+    }
+}
+
+// One burst case (TestABurstCarriesUpstream).
+void
+CheckBurst(const Burst &burst)
+{
+    {
         const std::string what = "burst " + burst.name;
         const UsdStageRefPtr stage = UsdStage::Open(burst.stagePath);
         auto evaluator = Make(stage, burst.rig, BakedMode());
@@ -882,7 +897,7 @@ TestABurstCarriesUpstream()
         const std::shared_ptr<const RigExecFrozenProgram> snapshot =
             Freeze(*evaluator, what);
         if (!program || !snapshot) {
-            continue;
+            return;
         }
         RigExecChainSampleBindings pinned;
         std::string error;
@@ -899,7 +914,7 @@ TestABurstCarriesUpstream()
         if (!cache.usable) {
             std::printf("FAIL %s: burst unusable: %s\n", what.c_str(),
                         error.c_str());
-            continue;
+            return;
         }
         for (int k = 0; k < 3; ++k) {
             const UsdTimeCode time(burst.first + k);
@@ -1140,6 +1155,795 @@ TestDroppedKeys()
     CHECK(HasLine(pose, "upstream input " + scheme.GetString() +
                             ": no listed read reaches it; ignored"));
     CHECK(evaluator->GetUpstreamInputPaths().empty());
+}
+
+// --- Arrays (array admission forced on) -------------------------------------
+
+// Array admission is off until the .rigexec format carries array slots.
+// Registration note: array admission defaults on when AI (W.3.11, format 8)
+// merges; that merge flips the default and extends
+// TestEveryAdmissiblePathIsAnInput to array slots. The .rigexec legs of
+// these cases are the runtime session's (W.5), skipped here until then.
+struct ArrayAdmission {
+    ArrayAdmission() { RigExecSetUpstreamArrayAdmissionForTesting(true); }
+    ~ArrayAdmission() { RigExecSetUpstreamArrayAdmissionForTesting(false); }
+};
+
+// An environment variable set for a scope, restored after.
+struct ScopedEnv {
+    std::string name, old;
+    ScopedEnv(const std::string &n, const std::string &value)
+        : name(n), old(TfGetenv(n))
+    {
+        TfSetenv(name, value);
+    }
+    ~ScopedEnv()
+    {
+        if (old.empty()) {
+            TfUnsetenv(name);
+        } else {
+            TfSetenv(name, old);
+        }
+    }
+};
+
+const SdfPath kTailRig("/TailAsset/Rig");
+const SdfPath kSeg1Values("/TailAsset/Rig/Weights/Seg1W.rigExec:values");
+const SdfPath kMeshAPoints("/LimbsAsset/Geom/MeshA.points");
+const SdfPath kMeshASkin("/LimbsAsset/Rig/Movers/MeshASkin");
+const SdfPath kJointIndices("/LimbsAsset/Rig/Movers/MeshASkin."
+                            "rigExec:jointIndices");
+const SdfPath kJointWeights("/LimbsAsset/Rig/Movers/MeshASkin."
+                            "rigExec:jointWeights");
+const SdfPath kVolumeRig("/VolumeAsset/Rig");
+const SdfPath kTipCurvePoints("/VolumeAsset/Drivers/TipCurve.points");
+const SdfPath kStripPoints("/VolumeAsset/Geom/Strip.points");
+
+// The authored default of \p path on \p stagePath.
+template <class A>
+A
+AuthoredArray(const std::string &stagePath, const SdfPath &path)
+{
+    A value;
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    const UsdAttribute a = stage ? stage->GetAttributeAtPath(path)
+                                 : UsdAttribute();
+    CHECK(a && a.Get(&value));
+    return value;
+}
+
+// MeshASkin's revision in \p evaluator's program.
+const RigExecBakedProgramImpl::GeomRevision *
+SkinRevision(const RigExecRigEvaluator &evaluator)
+{
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (!program) {
+        return nullptr;
+    }
+    for (const auto &chain : program->GetStepGraph().chains) {
+        for (const auto &revision : chain.revisions) {
+            if (revision.moverPath == kMeshASkin) {
+                return &revision;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// Upstream \p input is dropped in each of \p modes with \p reason: the
+// generation names it, admits nothing, and publishes the authored pose; in
+// baked mode the sampler admits nothing either.
+void
+CheckDropped(const std::string &stagePath, const SdfPath &rig, double t,
+             const RigExecValueOverride &input, const std::string &reason)
+{
+    const SdfPath path = input.prim.AppendProperty(input.attribute);
+    const UsdTimeCode time(t);
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, BakedMode()}) {
+        const std::string what = path.GetString() + " dropped (" +
+                                 ModeName(mode) + ")";
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        auto evaluator = Make(stage, rig, mode);
+        evaluator->SetUpstreamInputs({input});
+        const RigExecRigPose pose = evaluator->Evaluate(time);
+        CHECK(evaluator->GetUpstreamInputPaths().empty());
+        const std::string line =
+            "upstream input " + path.GetString() + ": " + reason + "; ignored";
+        if (!HasLine(pose, line)) {
+            ++failures;
+            std::printf("FAIL %s: no line '%s'\n", what.c_str(), line.c_str());
+            for (const std::string &l : pose.diagnostics) {
+                std::printf("    %s\n", l.c_str());
+            }
+        }
+        CheckSamePose(what, Reference(stagePath, rig, mode, {}, time), pose);
+        if (mode != RigExecEvaluationMode::Dynamic &&
+            evaluator->GetBakedProgram()) {
+            RigExecFrameInputs inputs;
+            std::string error;
+            CHECK(RigExecSampleFrameInputs(*evaluator, time, {},
+                                           RigExecUpstreamValuesOf({input}),
+                                           &inputs, &error));
+            CHECK(inputs.upstream.empty());
+        }
+    }
+}
+
+// The array rows a bake lists: chain bases, revision and layout arrays,
+// weight-object points; never the structural ones. They do not depend on
+// the admission hook.
+void
+TestTheArrayRows()
+{
+    std::printf("case: array rows\n");
+    // Registered by the runtime session when AI lands (W.5): the .rigexec
+    // leg of every array case here.
+    std::printf("  skipped: .rigexec array legs (enable when AI, W.3.11 "
+                "format 8, merges; runtime session, W.5)\n");
+    const auto rowsOf = [](const std::string &stagePath, const SdfPath &rig) {
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        auto evaluator = Make(stage, rig, RigExecEvaluationMode::Dynamic);
+        std::map<SdfPath, RigExecUpstreamArrayRow> rows;
+        for (const RigExecUpstreamArrayRow &row :
+             RigExecBakedUpstreamAdmissibleArrays(*evaluator)) {
+            CHECK(RigExecUpstreamArraySlotType(
+                stage->GetAttributeAtPath(row.path).GetTypeName()));
+            CHECK(!rows.count(row.path));
+            rows[row.path] = row;
+        }
+        return rows;
+    };
+    using Time = RigExecUpstreamArrayRow::Time;
+    {
+        const auto rows = rowsOf(Fixture("upstream_inputs.usda"), kLimbsRig);
+        const auto has = [&rows](const SdfPath &path, const TfType &type,
+                                 Time time, const std::string &consumer) {
+            const auto it = rows.find(path);
+            const bool ok = it != rows.end() && it->second.type == type &&
+                            it->second.time == time &&
+                            it->second.consumer == consumer;
+            if (!ok) {
+                std::printf("FAIL array row %s (%s)\n", path.GetText(),
+                            consumer.c_str());
+            }
+            CHECK(ok);
+        };
+        has(kMeshAPoints, TfType::Find<VtVec3fArray>(), Time::AtTime,
+            "chain base");
+        has(kJointIndices, TfType::Find<VtIntArray>(), Time::AtTime,
+            "skin layout");
+        has(kJointWeights, TfType::Find<VtFloatArray>(), Time::AtTime,
+            "skin layout");
+        CHECK(!rows.count(SdfPath("/LimbsAsset/Geom/MeshA.faceVertexCounts")));
+    }
+    {
+        const auto rows = rowsOf(Example("01_FkChainTail.usda"), kTailRig);
+        // Structural: the painted values (exec takes them per element) and
+        // a derived target's base.
+        CHECK(!rows.count(kSeg1Values));
+        CHECK(!rows.count(SdfPath("/TailAsset/Geom/TailStrip.normals")));
+        // The derived normals read the mesh topology.
+        CHECK(rows.count(SdfPath("/TailAsset/Geom/TailStrip.faceVertexCounts")));
+        CHECK(rows.count(SdfPath("/TailAsset/Geom/TailStrip.points")));
+    }
+    {
+        // One attribute read at Default (the rest cage) and at the time
+        // (the live cage): one row, both kinds.
+        const auto rows = rowsOf(Example("06_LatticeBulge.usda"),
+                                 SdfPath("/LatticeAsset/Rig"));
+        const auto it = rows.find(SdfPath("/LatticeAsset/Geom/Cage.points"));
+        CHECK(it != rows.end() && it->second.time == Time::Both &&
+              it->second.type == TfType::Find<VtVec3fArray>());
+    }
+    {
+        // A SplineIk's volume weights fold at Build.
+        const auto rows = rowsOf(Fixture("computed_ik_space.usda"),
+                                 SdfPath("/IkSpaceAsset/Rig"));
+        CHECK(!rows.count(SdfPath("/IkSpaceAsset/Rig/Solvers/TailIK."
+                                  "rigExec:volumeWeights")));
+    }
+    {
+        // Points a mover-bound weight object reads are exec's per-element
+        // reads in the dynamic walk: structural, even as a chain base.
+        const auto rows = rowsOf(Example("11_VolumeWeights.usda"),
+                                 kVolumeRig);
+        CHECK(!rows.count(kTipCurvePoints));
+        CHECK(!rows.count(kStripPoints));
+    }
+}
+
+// The painted values of a weight object (Seg1W, read by the Seg1Skin matrix
+// mover). This case gated the array list: with the value placed as an exec
+// value override, the dynamic walk refused it ("Expected override of value
+// key '...Seg1W.rigExec:values [__computeValue]' to have type 'float'; got
+// 'VtArray<float>'": exec takes the painted table as a vectorized input) and
+// did not follow. So painted values and indices are structural in every
+// backend: dropped as no listed read.
+void
+TestAPaintedWeightIsDropped()
+{
+    std::printf("case: painted values dropped\n");
+    const ArrayAdmission arrays;
+    CheckDropped(Example("01_FkChainTail.usda"), kTailRig, 1012,
+                 Up(kSeg1Values,
+                    VtValue(VtFloatArray{0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.9f,
+                                         0.1f, 0.4f, 0.3f, 0.2f})),
+                 "no listed read reaches it");
+}
+
+// The chain base points of MeshA's chain, every point moved by (0, 1, 0):
+// the base every revision skins, read from the upstream layer and never the
+// interactive overlay, in each backend.
+void
+TestUpstreamChainBasePoints()
+{
+    const ArrayAdmission arrays;
+    const std::string stagePath = Fixture("upstream_inputs.usda");
+    const VtVec3fArray authored =
+        AuthoredArray<VtVec3fArray>(stagePath, kMeshAPoints);
+    const auto moved = [&authored](float dy) {
+        VtVec3fArray points = authored;
+        for (GfVec3f &p : points) {
+            p += GfVec3f(0.0f, dy, 0.0f);
+        }
+        return points;
+    };
+    RunCase("chain base points", stagePath, kLimbsRig, 5,
+            {Up(kMeshAPoints, VtValue(moved(1.0f)))},
+            {{kMeshAPoints, VtValue(moved(1.0f)), {}}});
+    const UsdTimeCode time(5);
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, BakedMode()}) {
+        const std::string what =
+            std::string("chain base points (") + ModeName(mode) + ")";
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        auto evaluator = Make(stage, kLimbsRig, mode);
+        evaluator->Evaluate(time);
+        evaluator->SetUpstreamInputs({Up(kMeshAPoints, VtValue(moved(1.0f)))});
+        const RigExecRigPose first = evaluator->Evaluate(time);
+        const RigExecRigPose expected = Reference(
+            stagePath, kLimbsRig, mode,
+            {{kMeshAPoints, VtValue(moved(1.0f)), {}}}, time);
+        CheckSamePose(what + ": first", expected, first);
+        // The same value again: nothing re-reads or moves.
+        evaluator->SetUpstreamInputs({Up(kMeshAPoints, VtValue(moved(1.0f)))});
+        const RigExecRigPose same = evaluator->Evaluate(time);
+        CheckSamePose(what + ": the same again", expected, same);
+        if (mode == RigExecEvaluationMode::Dynamic) {
+            CHECK(same.moverGraphRevisionsExecuted == 0);
+        } else {
+            CHECK(evaluator->GetBakedClustersRunLastGeneration() == 0);
+        }
+        // Another value: the base is read again.
+        evaluator->SetUpstreamInputs({Up(kMeshAPoints, VtValue(moved(2.0f)))});
+        CheckSamePose(what + ": another value",
+                      Reference(stagePath, kLimbsRig, mode,
+                                {{kMeshAPoints, VtValue(moved(2.0f)), {}}},
+                                time),
+                      evaluator->Evaluate(time));
+        // An interactive value on the same points is not a chain base, in
+        // either backend: the upstream base stands. The program cannot place
+        // it (as today), so that generation is the dynamic walk's; under
+        // RIGEXEC_BAKE_REQUIRED that fallback is the reported failure, so
+        // the leg runs where no bake is required.
+        evaluator->SetUpstreamInputs({Up(kMeshAPoints, VtValue(moved(1.0f)))});
+        CheckSamePose(what + ": back to the first value", expected,
+                      evaluator->Evaluate(time));
+        if (mode == RigExecEvaluationMode::Dynamic || !BakeRequired()) {
+            evaluator->SetInteractiveOverrides(
+                {Up(kMeshAPoints, VtValue(moved(3.0f)))});
+            CheckSamePose(what + ": interactive points ignored", expected,
+                          evaluator->Evaluate(time));
+            evaluator->ClearInteractiveOverrides();
+            CheckSamePose(what + ": interactive lifted", expected,
+                          evaluator->Evaluate(time));
+        }
+        evaluator->SetUpstreamInputs({});
+        CheckSamePose(what + ": lifted",
+                      Reference(stagePath, kLimbsRig, mode, {}, time),
+                      evaluator->Evaluate(time));
+    }
+}
+
+// MeshASkin's painted skin weights: the SkinTopology op builds a handle from
+// the moved leaf, its indices are the partition's, so the chunks adopt it
+// and keep running.
+void
+TestUpstreamJointWeights()
+{
+    const ArrayAdmission arrays;
+    const ScopedEnv always("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    const ScopedEnv verts("RIGEXEC_BAKED_CHUNK_VERTS", "5");
+    const std::string stagePath = Fixture("upstream_inputs.usda");
+    VtFloatArray weights = AuthoredArray<VtFloatArray>(stagePath,
+                                                       kJointWeights);
+    CHECK(weights.size() == 20);
+    // Vertex 0 and vertex 3 shared between the two joints.
+    weights[0] = 0.5f;
+    weights[1] = 0.5f;
+    weights[6] = 0.25f;
+    weights[7] = 0.75f;
+    RunCase("skin jointWeights", stagePath, kLimbsRig, 5,
+            {Up(kJointWeights, VtValue(weights))},
+            {{kJointWeights, VtValue(weights), {}}});
+
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    auto evaluator = Make(stage, kLimbsRig, BakedMode());
+    const UsdTimeCode time(5);
+    evaluator->Evaluate(time);
+    const RigExecBakedProgramImpl::GeomRevision *revision =
+        SkinRevision(*evaluator);
+    CHECK(revision && revision->chunked && revision->chunks.size() >= 2);
+    if (!revision || !revision->chunked) {
+        return;
+    }
+    const auto before = revision->topology;
+    evaluator->SetUpstreamInputs({Up(kJointWeights, VtValue(weights))});
+    evaluator->Evaluate(time);
+    revision = SkinRevision(*evaluator);
+    CHECK(revision != nullptr);
+    if (!revision) {
+        return;
+    }
+    // A new handle, adopted: the chunks ran with it.
+    CHECK(revision->topology && revision->topology != before);
+    CHECK(revision->partitionTopology == revision->topology);
+    CHECK(!revision->partitionStale);
+    for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision->chunks) {
+        CHECK(chunk.ok);
+    }
+    std::printf("  jointWeights: adopted, %zu chunk(s) ran\n",
+                revision->chunks.size());
+}
+
+// An upstream jointIndices on a chunked revision that binds a first-half
+// vertex to LimbA1: the partition is stale while it stands, so the revision
+// runs whole and no chunk reads a joint its key never declared, even when
+// only LimbA1 moves. Lifted, the next handle matches the partition and the
+// chunks run again.
+void
+TestUpstreamChunkedJointIndices()
+{
+    std::printf("case: chunked jointIndices\n");
+    const ArrayAdmission arrays;
+    const ScopedEnv always("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    const ScopedEnv verts("RIGEXEC_BAKED_CHUNK_VERTS", "5");
+    const std::string stagePath = Fixture("upstream_inputs_chunked.usda");
+    VtIntArray indices = AuthoredArray<VtIntArray>(stagePath, kJointIndices);
+    CHECK(indices.size() == 10);
+    indices[0] = 1;
+    const RigExecValueOverride input = Up(kJointIndices, VtValue(indices));
+    const UsdTimeCode time(1);
+    const std::vector<RigExecValueOverride> drag = {Up(kA1Rz, VtValue(40.0))};
+    const Authored dragged{kA1Rz, VtValue(40.0), {}};
+    const Authored repainted{kJointIndices, VtValue(indices), {}};
+
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    auto evaluator = Make(stage, kLimbsRig, BakedMode());
+    CheckSamePose("chunked: authored",
+                  Reference(stagePath, kLimbsRig, BakedMode(), {}, time),
+                  evaluator->Evaluate(time));
+    const RigExecBakedProgramImpl::GeomRevision *revision =
+        SkinRevision(*evaluator);
+    CHECK(revision && revision->chunked && revision->chunks.size() == 2);
+    if (!revision || !revision->chunked || revision->chunks.size() != 2) {
+        return;
+    }
+    CHECK(revision->chunks[0].key == std::vector<int>{0});
+    CHECK(revision->chunks[1].key == std::vector<int>{1});
+    CHECK(!revision->partitionStale);
+
+    evaluator->SetUpstreamInputs({input});
+    CheckSamePose("chunked: standing",
+                  Reference(stagePath, kLimbsRig, RigExecEvaluationMode::Dynamic,
+                            {repainted}, time),
+                  evaluator->Evaluate(time));
+    // Only LimbA1 moves.
+    evaluator->SetInteractiveOverrides(drag);
+    const RigExecRigPose moved = evaluator->Evaluate(time);
+    CheckSamePose("chunked: standing, LimbA1 moved (dynamic reference)",
+                  Reference(stagePath, kLimbsRig,
+                            RigExecEvaluationMode::Dynamic,
+                            {repainted, dragged}, time),
+                  moved);
+    CheckSamePose("chunked: standing, LimbA1 moved (baked reference)",
+                  Reference(stagePath, kLimbsRig, BakedMode(),
+                            {repainted, dragged}, time),
+                  moved);
+    revision = SkinRevision(*evaluator);
+    CHECK(revision != nullptr);
+    if (!revision) {
+        return;
+    }
+    CHECK(revision->chunks[0].key == std::vector<int>{0});
+    CHECK(revision->chunks[1].key == std::vector<int>{1});
+    CHECK(revision->partitionStale);
+    CHECK(revision->partitionTopology != revision->topology);
+    for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision->chunks) {
+        CHECK(!chunk.ok);
+    }
+    // A frozen job under the same value and drag agrees.
+    {
+        const std::shared_ptr<const RigExecFrozenProgram> snapshot =
+            Freeze(*evaluator, "chunked");
+        RigExecFrameInputs inputs;
+        std::string error;
+        CHECK(RigExecSampleFrameInputs(*evaluator, time, drag,
+                                       RigExecUpstreamValuesOf({input}),
+                                       &inputs, &error));
+        CHECK(inputs.upstream == RigExecUpstreamValuesOf({input}));
+        const FrozenJob job = RunSampled(*evaluator, snapshot,
+                                         std::move(inputs), "chunked job");
+        CheckSamePose("chunked: frozen, standing, LimbA1 moved", moved,
+                      job.pose);
+    }
+    // Lifted: the handle matches the partition again.
+    evaluator->SetUpstreamInputs({});
+    CheckSamePose("chunked: lifted",
+                  Reference(stagePath, kLimbsRig, BakedMode(), {dragged},
+                            time),
+                  evaluator->Evaluate(time));
+    revision = SkinRevision(*evaluator);
+    CHECK(revision != nullptr);
+    if (!revision) {
+        return;
+    }
+    CHECK(!revision->partitionStale);
+    CHECK(revision->partitionTopology == revision->topology);
+    for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision->chunks) {
+        CHECK(chunk.ok);
+    }
+    evaluator->ClearInteractiveOverrides();
+    CheckSamePose("chunked: drag lifted",
+                  Reference(stagePath, kLimbsRig, BakedMode(), {}, time),
+                  evaluator->Evaluate(time));
+}
+
+// An upstream jointIndices naming an influence that does not exist: the
+// layout does not validate and the skin fails, passing its base through, as
+// the same array authored as a value edit fails it. (Compile refuses an
+// invalid authored default outright, so the reference edits an evaluator
+// already compiled.) Dynamic, baked and a frozen job agree; the lift
+// restores the authored skin.
+void
+TestUpstreamInvalidLayout()
+{
+    std::printf("case: invalid jointIndices\n");
+    const ArrayAdmission arrays;
+    const std::string stagePath = Fixture("upstream_inputs.usda");
+    VtIntArray indices = AuthoredArray<VtIntArray>(stagePath, kJointIndices);
+    indices[3] = 2;  // MeshASkin binds two influences
+    const std::vector<RigExecValueOverride> inputs = {
+        Up(kJointIndices, VtValue(indices))};
+    const UsdTimeCode time(5);
+    const auto skinFailed = [](const RigExecRigPose &pose) {
+        for (const std::string &line : pose.diagnostics) {
+            if (line.rfind("MoverFailed", 0) == 0 &&
+                line.find("MeshASkin") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, BakedMode()}) {
+        const std::string what =
+            std::string("invalid jointIndices (") + ModeName(mode) + ")";
+        const UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
+        auto reference = Make(referenceStage, kLimbsRig, mode);
+        reference->Evaluate(time);
+        {
+            UsdEditContext context(referenceStage,
+                                   referenceStage->GetSessionLayer());
+            CHECK(referenceStage->GetAttributeAtPath(kJointIndices)
+                      .Set(indices));
+        }
+        const RigExecRigPose expected = reference->Evaluate(time);
+        CHECK(skinFailed(expected));
+
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        auto evaluator = Make(stage, kLimbsRig, mode);
+        const RigExecRigPose authored = evaluator->Evaluate(time);
+        std::shared_ptr<const RigExecFrozenProgram> snapshot;
+        if (mode != RigExecEvaluationMode::Dynamic) {
+            snapshot = Freeze(*evaluator, what);
+        }
+        evaluator->SetUpstreamInputs(inputs);
+        const RigExecRigPose standing = evaluator->Evaluate(time);
+        CHECK(evaluator->GetUpstreamInputPaths() == PathsOf(inputs));
+        CheckSamePose(what + ": standing", expected, standing);
+        CHECK(skinFailed(standing));
+        if (snapshot) {
+            const FrozenJob job =
+                RunJob(*evaluator, snapshot, time, inputs, what);
+            CheckSamePose(what + ": frozen", standing, job.pose);
+        }
+        evaluator->SetUpstreamInputs({});
+        const RigExecRigPose lifted = evaluator->Evaluate(time);
+        CheckSamePose(what + ": lifted", authored, lifted);
+        CHECK(!skinFailed(lifted));
+    }
+}
+
+// Painted skin weights set per frame, as a time-varying source is pulled:
+// live and a frozen job at each frame equal a stage authoring that frame's
+// array, and the jobs key apart.
+void
+TestUpstreamTimeVaryingJointWeights()
+{
+    std::printf("case: jointWeights per frame\n");
+    const ArrayAdmission arrays;
+    const std::string stagePath = Fixture("upstream_inputs.usda");
+    const VtFloatArray authored =
+        AuthoredArray<VtFloatArray>(stagePath, kJointWeights);
+    const auto at = [&authored](int f) {
+        VtFloatArray w = authored;
+        w[2] = 0.75f - 0.1f * float(f);
+        w[3] = 0.25f + 0.1f * float(f);
+        return w;
+    };
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, BakedMode()}) {
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        auto evaluator = Make(stage, kLimbsRig, mode);
+        std::shared_ptr<const RigExecFrozenProgram> snapshot;
+        std::set<uint64_t> digests;
+        for (int f = 1; f <= 5; ++f) {
+            const std::string what = std::string("jointWeights per frame (") +
+                                     ModeName(mode) + ") at " +
+                                     std::to_string(f);
+            const std::vector<RigExecValueOverride> inputs = {
+                Up(kJointWeights, VtValue(at(f)))};
+            evaluator->SetUpstreamInputs(inputs);
+            const RigExecRigPose expected =
+                Reference(stagePath, kLimbsRig, mode,
+                          {{kJointWeights, VtValue(at(f)), {}}},
+                          UsdTimeCode(f));
+            const RigExecRigPose live = evaluator->Evaluate(UsdTimeCode(f));
+            CheckSamePose(what, expected, live);
+            if (mode == RigExecEvaluationMode::Dynamic) {
+                continue;
+            }
+            if (!snapshot) {
+                snapshot = Freeze(*evaluator, what);
+            }
+            const FrozenJob job =
+                RunJob(*evaluator, snapshot, UsdTimeCode(f), inputs, what);
+            CheckSamePose(what + " (frozen)", expected, job.pose);
+            CHECK(job.inputs.upstream.size() == 1 &&
+                  job.inputs.upstream[0].foldHash ==
+                      RigExecUpstreamFoldHash(VtValue(at(f))));
+            digests.insert(RigExecControlStateDigest(job.inputs));
+        }
+        if (mode != RigExecEvaluationMode::Dynamic) {
+            CHECK(digests.size() == 5);
+        }
+    }
+}
+
+// A lattice cage: the rest cage (read at Default) and the live cage (at the
+// time) read one attribute, so an upstream value, authored-level at every
+// time, makes them equal and the deformation the identity, as a stage
+// whose default overrides the cage's samples does. The stage cage varies,
+// so admission reads its count at each time.
+void
+TestUpstreamLatticeCage()
+{
+    const ArrayAdmission arrays;
+    const std::string stagePath = Example("06_LatticeBulge.usda");
+    const SdfPath cage("/LatticeAsset/Geom/Cage.points");
+    VtVec3fArray bulged;
+    {
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage->GetAttributeAtPath(cage).Get(&bulged,
+                                                  UsdTimeCode(1024)));
+    }
+    RunCase("lattice cage (identity while it stands)", stagePath,
+            SdfPath("/LatticeAsset/Rig"), 1024, {Up(cage, VtValue(bulged))},
+            {{cage, VtValue(bulged), {}}});
+}
+
+// Bursts under array values sample as the plain route does.
+void
+TestABurstCarriesUpstreamArrays()
+{
+    std::printf("case: a burst carries upstream arrays\n");
+    const ArrayAdmission arrays;
+    const std::string stagePath = Fixture("upstream_inputs.usda");
+    VtVec3fArray points = AuthoredArray<VtVec3fArray>(stagePath, kMeshAPoints);
+    for (GfVec3f &p : points) {
+        p += GfVec3f(0.0f, 1.0f, 0.0f);
+    }
+    VtFloatArray weights = AuthoredArray<VtFloatArray>(stagePath,
+                                                       kJointWeights);
+    weights[0] = 0.5f;
+    weights[1] = 0.5f;
+    CheckBurst({"chain base points", stagePath, kLimbsRig,
+                Up(kMeshAPoints, VtValue(points)), 1});
+    CheckBurst({"skin jointWeights", stagePath, kLimbsRig,
+                Up(kJointWeights, VtValue(weights)), 1});
+}
+
+// A burst judges admission once, so a listed array over a stage array
+// that varies (condition 4 is per time) fails the build, whether or not it
+// is admitted at the burst's judging time: such frames take the plain
+// route.
+void
+TestABurstRefusesAnArrayOverAVaryingStage()
+{
+    std::printf("case: a burst refuses an array over a varying stage\n");
+    const ArrayAdmission arrays;
+    const std::string stagePath = Example("06_LatticeBulge.usda");
+    const SdfPath rig("/LatticeAsset/Rig");
+    const SdfPath cage("/LatticeAsset/Geom/Cage.points");
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    VtVec3fArray bulged;
+    CHECK(stage->GetAttributeAtPath(cage).Get(&bulged, UsdTimeCode(1024)));
+    VtVec3fArray shorter = bulged;
+    shorter.pop_back();
+    auto evaluator = Make(stage, rig, BakedMode());
+    evaluator->Evaluate(UsdTimeCode(1024));
+    const RigExecBakedProgram *program = evaluator->GetBakedProgram();
+    CHECK(program);
+    if (!program) {
+        return;
+    }
+    RigExecChainSampleBindings pinned;
+    std::string error;
+    CHECK(RigExecBindChainSampleInputs(*evaluator, &pinned, &error));
+    for (const VtVec3fArray &value : {bulged, shorter}) {
+        RigExecBurstSampleCache cache;
+        error.clear();
+        CHECK(!RigExecBuildBurstSampleCache(
+            *program, pinned, {},
+            RigExecUpstreamValuesOf({Up(cage, VtValue(value))}),
+            RigExecFrameCacheEpochDigest(*evaluator), &cache, &error));
+        CHECK(!cache.usable);
+        CHECK(error.find("time-varying") != std::string::npos);
+    }
+}
+
+// Condition 4 against an attribute whose default and one time sample
+// differ in count: the memo, first filled at Default, does not answer the
+// numeric time with the default's count.
+void
+TestTheCountMemoReadsEachOpinion()
+{
+    std::printf("case: the count memo reads each opinion\n");
+    const ArrayAdmission arrays;
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const UsdPrim prim = stage->DefinePrim(SdfPath("/P"));
+    const UsdAttribute a =
+        prim.CreateAttribute(TfToken("w"), SdfValueTypeNames->FloatArray);
+    CHECK(a.Set(VtFloatArray{1, 2}));
+    CHECK(a.Set(VtFloatArray{1, 2, 3}, UsdTimeCode(5)));
+    const std::map<SdfPath, TfType> listed = {
+        {a.GetPath(), TfType::Find<VtFloatArray>()}};
+    RigExecUpstreamCountMemo memo;
+    CHECK(RigExecUpstreamDropReason(stage, nullptr, a.GetPath(),
+                                    VtValue(VtFloatArray{4, 5}),
+                                    UsdTimeCode::Default(), &memo, &listed)
+              .empty());
+    CHECK(RigExecUpstreamDropReason(stage, nullptr, a.GetPath(),
+                                    VtValue(VtFloatArray{4, 5, 6}),
+                                    UsdTimeCode(5), &memo, &listed)
+              .empty());
+    CHECK(RigExecUpstreamDropReason(stage, nullptr, a.GetPath(),
+                                    VtValue(VtFloatArray{4, 5}),
+                                    UsdTimeCode(5), &memo, &listed) ==
+          "its element count 2 differs from the stage value's 3");
+}
+
+// Condition 4's memo holds the stage count until a notice reaches the
+// attribute: a stage edit that changes the count drops the standing value
+// at the next generation, with the count in the line.
+void
+TestTheCountMemoFollowsEdits()
+{
+    std::printf("case: the count memo follows edits\n");
+    const ArrayAdmission arrays;
+    const std::string stagePath = Fixture("upstream_inputs.usda");
+    const VtFloatArray weights =
+        AuthoredArray<VtFloatArray>(stagePath, kJointWeights);
+    VtFloatArray painted = weights;
+    painted[0] = 0.5f;
+    painted[1] = 0.5f;
+    for (const RigExecEvaluationMode mode :
+         {RigExecEvaluationMode::Dynamic, BakedMode()}) {
+        const std::string what =
+            std::string("count memo (") + ModeName(mode) + ")";
+        const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        auto evaluator = Make(stage, kLimbsRig, mode);
+        evaluator->SetUpstreamInputs({Up(kJointWeights, VtValue(painted))});
+        evaluator->Evaluate(UsdTimeCode(5));
+        CHECK(evaluator->GetUpstreamInputPaths() ==
+              std::vector<SdfPath>{kJointWeights});
+        // The stage's weights grow to 22 (and the indices with them): the
+        // standing 20 no longer match.
+        {
+            UsdEditContext context(stage, stage->GetSessionLayer());
+            VtFloatArray longer = weights;
+            longer.push_back(0.0f);
+            longer.push_back(0.0f);
+            VtIntArray indices =
+                AuthoredArray<VtIntArray>(stagePath, kJointIndices);
+            indices.push_back(0);
+            indices.push_back(0);
+            CHECK(stage->GetAttributeAtPath(kJointWeights).Set(longer));
+            CHECK(stage->GetAttributeAtPath(kJointIndices).Set(indices));
+        }
+        const RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode(5));
+        CHECK(evaluator->GetUpstreamInputPaths().empty());
+        const std::string line = "upstream input " +
+                                 kJointWeights.GetString() +
+                                 ": its element count 20 differs from the "
+                                 "stage value's 22; ignored";
+        if (!HasLine(pose, line)) {
+            ++failures;
+            std::printf("FAIL %s: no line '%s'\n", what.c_str(),
+                        line.c_str());
+        }
+    }
+}
+
+// Array keys admission drops: a count that differs from the stage's, the
+// structural arrays, and, with the hook off, every array.
+void
+TestDroppedArrayKeys()
+{
+    std::printf("case: dropped array keys\n");
+    const std::string limbs = Fixture("upstream_inputs.usda");
+    VtFloatArray shortWeights =
+        AuthoredArray<VtFloatArray>(limbs, kJointWeights);
+    shortWeights.pop_back();
+    {
+        const ArrayAdmission arrays;
+        CheckDropped(limbs, kLimbsRig, 5,
+                     Up(kJointWeights, VtValue(shortWeights)),
+                     "its element count 19 differs from the stage value's "
+                     "20");
+        CheckDropped(Fixture("computed_ik_space.usda"),
+                     SdfPath("/IkSpaceAsset/Rig"), 5,
+                     Up(SdfPath("/IkSpaceAsset/Rig/Solvers/TailIK."
+                                "rigExec:volumeWeights"),
+                        VtValue(VtFloatArray{1, 1, 1, 1, 1})),
+                     "no listed read reaches it");
+        VtVec3fArray normals(10, GfVec3f(0.0f, 1.0f, 0.0f));
+        CheckDropped(Example("01_FkChainTail.usda"), kTailRig, 1012,
+                     Up(SdfPath("/TailAsset/Geom/TailStrip.normals"),
+                        VtValue(normals)),
+                     "no listed read reaches it");
+        // Points a mover-bound weight object reads: exec would refuse the
+        // value per element and the dynamic walk keep the stage's, so no
+        // backend admits them (a curve weight's curve, and a chain base the
+        // volumes measure).
+        const std::string volumes = Example("11_VolumeWeights.usda");
+        for (const SdfPath &path : {kTipCurvePoints, kStripPoints}) {
+            VtVec3fArray points = AuthoredArray<VtVec3fArray>(volumes, path);
+            for (GfVec3f &p : points) {
+                p += GfVec3f(0.5f, 0.0f, 0.0f);
+            }
+            CheckDropped(volumes, kVolumeRig, 1024, Up(path, VtValue(points)),
+                         "no listed read reaches it");
+        }
+    }
+    // With the hook off, the keys the cases above admit.
+    VtVec3fArray points = AuthoredArray<VtVec3fArray>(limbs, kMeshAPoints);
+    points[0] += GfVec3f(0.0f, 1.0f, 0.0f);
+    VtFloatArray weights = AuthoredArray<VtFloatArray>(limbs, kJointWeights);
+    weights[0] = 0.5f;
+    weights[1] = 0.5f;
+    VtIntArray indices = AuthoredArray<VtIntArray>(limbs, kJointIndices);
+    indices[0] = 1;
+    indices[1] = 0;
+    for (const RigExecValueOverride &input :
+         {Up(kMeshAPoints, VtValue(points)),
+          Up(kJointWeights, VtValue(weights)),
+          Up(kJointIndices, VtValue(indices))}) {
+        CheckDropped(limbs, kLimbsRig, 5, input,
+                     "array values are not admitted");
+    }
 }
 
 // The posed variant: the dynamic walk follows; the program refuses the
@@ -1484,6 +2288,21 @@ main(int argc, char **argv)
         TestDroppedKeys();
         TestThePosedVariant();
         TestTheBakeGuard();
+        // Arrays, behind the admission hook: the painted case first (it
+        // gated the array list), then the admitted arrays.
+        TestAPaintedWeightIsDropped();
+        TestTheArrayRows();
+        TestUpstreamChainBasePoints();
+        TestUpstreamJointWeights();
+        TestUpstreamChunkedJointIndices();
+        TestUpstreamInvalidLayout();
+        TestUpstreamTimeVaryingJointWeights();
+        TestUpstreamLatticeCage();
+        TestABurstCarriesUpstreamArrays();
+        TestABurstRefusesAnArrayOverAVaryingStage();
+        TestTheCountMemoReadsEachOpinion();
+        TestTheCountMemoFollowsEdits();
+        TestDroppedArrayKeys();
         // Structural: the same answer in every mode, so once, unverified.
         if (TfGetenv("RIGEXEC_EVALUATION_MODE").empty() && !ConeVerify()) {
             TestEveryAdmissiblePathIsAnInput();

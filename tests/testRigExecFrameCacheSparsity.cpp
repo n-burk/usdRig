@@ -563,6 +563,33 @@ TestUpstreamMissesSparseReuse()
     hashed[0].foldHash = 5;
     CHECK(!RigExecSameUpstream(cached.inputs.upstream, hashed));
 
+    // An array table: the fold hash decides first (equal arrays share it),
+    // and a differing hash misses even over equal bytes.
+    const VtFloatArray painted(10, 0.5f);
+    const auto upArray = [](const VtFloatArray &value) {
+        return RigExecUpstreamValue{SdfPath("/Ctl/S.rigExec:jointWeights"),
+                                    VtValue(value),
+                                    RigExecUpstreamFoldHash(VtValue(value))};
+    };
+    RigExecRetainedFrameState arrayCached = cached;
+    arrayCached.inputs.upstream = {upArray(painted)};
+    RigExecFrameInputs arraySame = arrayCached.inputs;
+    arraySame.upstream = {upArray(VtFloatArray(10, 0.5f))};
+    CHECK(RigExecPlanSparseReuse(index, nullptr, arrayCached, 7, arraySame,
+                                 noOverrides).verdict ==
+          RigExecSparseVerdict::Hit);
+    RigExecFrameInputs arrayMoved = arrayCached.inputs;
+    VtFloatArray repainted = painted;
+    repainted[3] = 0.75f;
+    arrayMoved.upstream = {upArray(repainted)};
+    CHECK(RigExecPlanSparseReuse(index, nullptr, arrayCached, 7, arrayMoved,
+                                 noOverrides).verdict ==
+          RigExecSparseVerdict::Miss);
+    RigExecFrameInputs arrayRehashed = arrayCached.inputs;
+    arrayRehashed.upstream[0].foldHash += 1;
+    CHECK(!RigExecSameUpstream(arrayCached.inputs.upstream,
+                               arrayRehashed.upstream));
+
     // Retained bytes: path bytes plus the payload per value.
     RigExecRetainedFrameState arrays = authored;
     const size_t without = RigExecRetainedSourcesBytes(arrays);

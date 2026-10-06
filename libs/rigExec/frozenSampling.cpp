@@ -468,10 +468,11 @@ template <class T>
 bool
 _FrozenReadWeightArray(const RigExecResolvedInputs *refreshed,
                        const UsdAttribute &attribute, UsdTimeCode time,
-                       VtArray<T> *out)
+                       VtArray<T> *out,
+                       const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     if (attribute.IsValid() && refreshed &&
-        refreshed->GetAttribute(attribute, time, out)) {
+        refreshed->GetAttributeOverStageLayer(attribute, time, layer, out)) {
         return true;
     }
     if (attribute.IsValid() && attribute.Get(out, time)) {
@@ -488,7 +489,8 @@ _FrozenReadWeightArray(const RigExecResolvedInputs *refreshed,
 void
 _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
                     const RigExecResolvedInputs *refreshed, UsdTimeCode time,
-                    RigExecFrameInputs *out)
+                    RigExecFrameInputs *out,
+                    const std::map<SdfPath, VtValue> *layer = nullptr)
 {
     const auto gatherPoints =
         [&](const std::vector<UsdAttribute> &attributes,
@@ -499,7 +501,8 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
             VtVec3fArray gathered;
             for (const UsdAttribute &a : attributes) {
                 VtVec3fArray value;
-                if (_FrozenReadWeightArray(refreshed, a, time, &value)) {
+                if (_FrozenReadWeightArray(refreshed, a, time, &value,
+                                           layer)) {
                     for (const GfVec3f &p : value) {
                         gathered.push_back(p);
                     }
@@ -515,7 +518,7 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
         size_t count = 0;
         for (const UsdAttribute &a : object.combineTargetPoints) {
             VtVec3fArray value;
-            if (_FrozenReadWeightArray(refreshed, a, time, &value)) {
+            if (_FrozenReadWeightArray(refreshed, a, time, &value, layer)) {
                 count += value.size();
             }
         }
@@ -928,6 +931,24 @@ _SampleQuery(const SdfPath &key, const UsdAttributeQuery &query,
     VtValue value;
     const bool hasValue = query.Get(&value, time);
     out->Add(key, value, hasValue);
+}
+
+// A chain base an upstream value stands on, sampled from \p layer as the
+// live prologue reads it. False when none stands there.
+bool
+_SampleUpstreamBase(const SdfPath &target,
+                    const std::map<SdfPath, VtValue> *layer,
+                    RigExecFrameInputs *out)
+{
+    if (!layer || target.IsEmpty()) {
+        return false;
+    }
+    const auto it = layer->find(target);
+    if (it == layer->end() || !it->second.IsHolding<VtVec3fArray>()) {
+        return false;
+    }
+    out->Add(target, it->second, /*hasValue=*/true);
+    return true;
 }
 
 // Samples one mover scalar input the packet assembly reads: the resolved
@@ -1523,27 +1544,60 @@ namespace {
 void
 _AdmitFrameUpstream(const RigExecBakedProgram &program,
                     const std::vector<RigExecUpstreamValue> &upstream,
+                    UsdTimeCode time,
                     std::vector<RigExecUpstreamValue> *admitted,
-                    std::map<SdfPath, VtValue> *layer)
+                    std::map<SdfPath, VtValue> *layer,
+                    bool *arrayOverVaryingStage = nullptr)
 {
     admitted->clear();
     layer->clear();
+    if (arrayOverVaryingStage) {
+        *arrayOverVaryingStage = false;
+    }
     if (upstream.empty()) {
         return;
     }
     const RigExecBakedProgramImpl &B = program.GetStepGraph();
     const std::map<SdfPath, TfType> &listed = program.GetUpstreamAdmissible();
+    // The array part, as live judges it (RigExecBakedUpstreamAdmissibleArrays
+    // over the same compiled epoch).
+    std::map<SdfPath, TfType> arrays;
+    if (RigExecUpstreamArrayAdmission() && B.evaluator &&
+        std::any_of(upstream.begin(), upstream.end(),
+                    [](const RigExecUpstreamValue &v) {
+                        return v.value.IsArrayValued();
+                    })) {
+        for (const RigExecUpstreamArrayRow &row :
+             RigExecBakedUpstreamAdmissibleArrays(*B.evaluator)) {
+            arrays.emplace_hint(arrays.end(), row.path, row.type);
+        }
+    }
     std::map<SdfPath, const RigExecUpstreamValue *> byPath;
     for (const RigExecUpstreamValue &value : upstream) {
-        if (value.path.IsPrimPropertyPath() &&
-            RigExecUpstreamDropReason(B.stage, &listed, value.path,
-                                      value.value)
+        if (!value.path.IsPrimPropertyPath()) {
+            continue;
+        }
+        // A listed array over a stage array that can vary is judged per
+        // time (condition 4), whatever the answer at \p time.
+        if (arrayOverVaryingStage && value.value.IsArrayValued() &&
+            arrays.count(value.path)) {
+            const UsdAttribute a = B.stage->GetAttributeAtPath(value.path);
+            *arrayOverVaryingStage = *arrayOverVaryingStage ||
+                                     (a && a.ValueMightBeTimeVarying());
+        }
+        if (RigExecUpstreamDropReason(B.stage, &listed, value.path,
+                                      value.value, time, nullptr, &arrays)
                 .empty()) {
             byPath[value.path] = &value;
         }
     }
     for (const auto &[path, value] : byPath) {
         admitted->push_back(*value);
+        // An array keys by its fold hash; one handed over without it gets
+        // it here, once.
+        if (value->value.IsArrayValued() && admitted->back().foldHash == 0) {
+            admitted->back().foldHash = RigExecUpstreamFoldHash(value->value);
+        }
         layer->emplace_hint(layer->end(), path, value->value);
     }
 }
@@ -1672,7 +1726,7 @@ _SampleWithPinnedChainBindings(
     // binding with a value on a hop of its walk is read the long way, as an
     // overridden one is, so `readFlags` stands for both.
     std::map<SdfPath, VtValue> upstreamLayer;
-    _AdmitFrameUpstream(*program, upstream, &sampled.upstream,
+    _AdmitFrameUpstream(*program, upstream, time, &sampled.upstream,
                         &upstreamLayer);
     const std::map<SdfPath, VtValue> *layer =
         upstreamLayer.empty() ? nullptr : &upstreamLayer;
@@ -1738,7 +1792,7 @@ _SampleWithPinnedChainBindings(
          B.weightObjects) {
         _SampleWeightBindings(object, &refreshed, readFlags, time, &sampled,
                               layer);
-        _SampleWeightArrays(object, &refreshed, time, &sampled);
+        _SampleWeightArrays(object, &refreshed, time, &sampled, layer);
     }
     // Ribbon driver points: read straight off the stage by the prologue,
     // honouring neither connections nor the resolved inputs, so sampled the
@@ -1817,9 +1871,12 @@ _SampleWithPinnedChainBindings(
         }
     }
     // Chain base points: the prologue reads every chain base off the stage
-    // per frame, and a worker cannot -- so the UI thread samples these too.
+    // (or the upstream layer) per frame, and a worker cannot -- so the UI
+    // thread samples these too.
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
-        _SampleQuery(chain.target, chain.baseQuery, time, &sampled);
+        if (!_SampleUpstreamBase(chain.target, layer, &sampled)) {
+            _SampleQuery(chain.target, chain.baseQuery, time, &sampled);
+        }
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
             _SampleQuery(derived.target, derived.baseQuery, time, &sampled);
@@ -2114,8 +2171,16 @@ RigExecBuildBurstSampleCache(
     cache->bindings = bindings;
     cache->overrides = overrides;
     cache->upstream = upstream;
-    _AdmitFrameUpstream(program, upstream, &cache->upstreamAdmitted,
-                        &cache->upstreamLayer);
+    // A burst judges admission once, so an array over a stage array that
+    // can vary (condition 4 is per time) samples on the plain route.
+    bool arrayOverVaryingStage = false;
+    _AdmitFrameUpstream(program, upstream, UsdTimeCode::EarliestTime(),
+                        &cache->upstreamAdmitted, &cache->upstreamLayer,
+                        &arrayOverVaryingStage);
+    if (arrayOverVaryingStage) {
+        return fail("an upstream array stands over a time-varying stage "
+                    "array, whose admission is judged per frame");
+    }
     cache->upstreamFlags = _UpstreamFlags(B, cache->upstreamLayer);
     cache->readFlags =
         _EitherFlag(cache->overrideFlags, cache->upstreamFlags);
@@ -2288,7 +2353,8 @@ RigExecSampleFrameInputsWithBurstCache(
         }
         // Point arrays ride outside the burst memo (always fresh, like the
         // ribbon points below): correctness first, memoization later.
-        _SampleWeightArrays(B.weightObjects[i], &refreshed, time, &sampled);
+        _SampleWeightArrays(B.weightObjects[i], &refreshed, time, &sampled,
+                            layer);
     }
     for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
         if (solver.ribbonPointsVarying) {
@@ -2356,8 +2422,10 @@ RigExecSampleFrameInputsWithBurstCache(
         }
     }
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
-        _SampleQueryCached(chain.target, chain.baseQuery, time, &sampled,
-                           cache);
+        if (!_SampleUpstreamBase(chain.target, layer, &sampled)) {
+            _SampleQueryCached(chain.target, chain.baseQuery, time, &sampled,
+                               cache);
+        }
         for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
              chain.derived) {
             _SampleQueryCached(derived.target, derived.baseQuery, time,

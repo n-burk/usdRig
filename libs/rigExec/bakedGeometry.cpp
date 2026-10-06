@@ -2228,9 +2228,18 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             revision->externalPayload = std::move(payload);
         };
     for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        // The chain base: an upstream value on the target, else the stage,
+        // never the interactive overlay (as the dynamic walk reads it).
         VtVec3fArray basePoints;
-        chain.haveBase =
-            chain.baseQuery.IsValid() && chain.baseQuery.Get(&basePoints, time);
+        const auto upstream = B.upstream.find(chain.target);
+        if (upstream != B.upstream.end() &&
+            upstream->second.IsHolding<VtVec3fArray>()) {
+            basePoints = upstream->second.UncheckedGet<VtVec3fArray>();
+            chain.haveBase = true;
+        } else {
+            chain.haveBase = chain.baseQuery.IsValid() &&
+                             chain.baseQuery.Get(&basePoints, time);
+        }
         if (!chain.haveBase) {
             // The target's points do not read at this time at all; the
             // dynamic path drives nothing for it and neither does the

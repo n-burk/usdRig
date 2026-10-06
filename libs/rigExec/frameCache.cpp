@@ -427,9 +427,26 @@ _FoldUpstream(uint64_t hash, const std::vector<RigExecUpstreamValue> &upstream)
         hash = _FoldBytes(hash, "\x1f", 1);
         hash = _FoldString(hash, value->value.GetTypeName());
         hash = _FoldBytes(hash, "\x1f", 1);
-        hash = _FoldVtValue(hash, value->value);
+        // An array folds the hash its producer computed once
+        // (RigExecUpstreamFoldHash); one handed over without folds its
+        // bytes.
+        hash = value->value.IsArrayValued() && value->foldHash != 0
+                   ? _FoldU64(hash, value->foldHash)
+                   : _FoldVtValue(hash, value->value);
     }
     return hash;
+}
+
+uint64_t
+RigExecUpstreamFoldHash(const VtValue &value)
+{
+    if (!value.IsArrayValued()) {
+        return 0;
+    }
+    uint64_t hash = 1469598103934665603ull;
+    hash = _FoldString(hash, value.GetTypeName());
+    hash = _FoldVtValue(hash, value);
+    return hash != 0 ? hash : 1;
 }
 
 uint64_t

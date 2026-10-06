@@ -136,11 +136,18 @@ struct RigExecFrameCacheStats {
 ///
 /// Upstream values fold after the seeds, as a tagged block ("ups"), sorted
 /// by path: each entry's path and type, then the value
-/// (RigExecUpstreamValue). An empty list folds nothing. The forms without
-/// \p upstream fold `inputs.upstream`, the values the vector was sampled
-/// under.
+/// (RigExecUpstreamValue): a scalar through its bits, an array through its
+/// `foldHash` (RigExecUpstreamFoldHash), so a key folds O(1) per array. An
+/// empty list folds nothing. The forms without \p upstream fold
+/// `inputs.upstream`, the values the vector was sampled under.
 ///
 /// Within-process only, like the key hash: never persisted.
+/// The fold hash of an upstream array \p value
+/// (RigExecUpstreamValue::foldHash): its type and bytes, as the control
+/// digest folds a value, and never 0 (0 marks a scalar). 0 for a value
+/// that is not an array.
+uint64_t RigExecUpstreamFoldHash(const VtValue &value);
+
 uint64_t RigExecControlStateDigest(const RigExecFrameInputs &inputs);
 uint64_t RigExecControlStateDigest(
     const RigExecFrameInputs &inputs,

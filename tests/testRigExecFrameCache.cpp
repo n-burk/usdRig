@@ -664,6 +664,56 @@ TestDigestSeesUpstream()
     CHECK(!RigExecRefusalControlDigestible(none, unhashable.upstream));
 }
 
+// An upstream array keys by its fold hash: RigExecUpstreamFoldHash folds
+// the type and bytes once (never 0; 0 for a scalar), equal arrays hash
+// equal, and the digest folds the hash, not the bytes, so an entry carrying
+// another hash keys apart even over the same array. One handed over with
+// no hash folds its bytes.
+void
+TestDigestFoldsUpstreamArrayHashes()
+{
+    const RigExecFrameInputs plain = MakeInputs({{"/Rig/A", 1.0}});
+    const VtFloatArray weights{1.0f, 0.5f, 0.25f};
+    const VtFloatArray same{1.0f, 0.5f, 0.25f};
+    const VtFloatArray other{1.0f, 0.5f, 0.75f};
+    CHECK(RigExecUpstreamFoldHash(VtValue(30.0)) == 0);
+    const uint64_t hash = RigExecUpstreamFoldHash(VtValue(weights));
+    CHECK(hash != 0);
+    CHECK(RigExecUpstreamFoldHash(VtValue(same)) == hash);
+    CHECK(RigExecUpstreamFoldHash(VtValue(other)) != hash);
+    // Same bytes, another element type: another hash.
+    CHECK(RigExecUpstreamFoldHash(VtValue(VtIntArray{1, 2, 3})) !=
+          RigExecUpstreamFoldHash(VtValue(VtFloatArray{1.0f, 2.0f, 3.0f})));
+
+    const auto with = [&plain](const VtValue &value, uint64_t foldHash) {
+        RigExecFrameInputs inputs = plain;
+        inputs.upstream = {RigExecUpstreamValue{
+            SdfPath("/Rig/S.rigExec:jointWeights"), value, foldHash}};
+        return RigExecControlStateDigest(inputs);
+    };
+    const uint64_t keyed = with(VtValue(weights), hash);
+    CHECK(keyed != RigExecControlStateDigest(plain));
+    CHECK(with(VtValue(same), hash) == keyed);
+    CHECK(with(VtValue(other), RigExecUpstreamFoldHash(VtValue(other))) !=
+          keyed);
+    // The hash is what folds.
+    CHECK(with(VtValue(weights), hash + 1) != keyed);
+    // No hash: the bytes fold, distinctly from the hashed form.
+    CHECK(with(VtValue(weights), 0) == with(VtValue(same), 0));
+    CHECK(with(VtValue(weights), 0) != with(VtValue(other), 0));
+    // RigExecUpstreamValuesOf hashes an array and leaves a scalar at 0.
+    const std::vector<RigExecUpstreamValue> converted =
+        RigExecUpstreamValuesOf(
+            {RigExecValueOverride{SdfPath("/Rig/S"), TfToken(),
+                                  TfToken("rigExec:jointWeights"),
+                                  VtValue(weights)},
+             RigExecValueOverride{SdfPath("/Rig/U"), TfToken(),
+                                  TfToken("avars:rz"), VtValue(30.0)}});
+    CHECK(converted.size() == 2);
+    CHECK(converted.size() == 2 && converted[0].foldHash == hash &&
+          converted[1].foldHash == 0);
+}
+
 // The cap fits two entries: the third publish evicts the
 // least-recently-used one, and the held bytes never exceed the cap.
 void
@@ -937,6 +987,7 @@ main()
     TestDigestibleFlagsUnhashableValues();
     TestRefusalDigestKeysTimeAndOverrides();
     TestDigestSeesUpstream();
+    TestDigestFoldsUpstreamArrayHashes();
     TestLRUEvictsLeastRecentlyUsed();
     TestLookupRefreshesRecency();
     TestOverwriteRefreshesRecency();

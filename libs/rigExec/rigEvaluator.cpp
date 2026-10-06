@@ -382,7 +382,7 @@ RigExecRigEvaluator::_EvaluateGeneration(UsdTimeCode time)
     // Upstream values are admitted against the epoch and program that now
     // stand, and every generation, either path, reports the keys it drops.
     if (!_upstreamRequested.empty() || !_upstreamAdmitted.empty()) {
-        _AdmitUpstreamInputs();
+        _AdmitUpstreamInputs(time);
         settled.insert(settled.end(), _upstreamDropLines.begin(),
                        _upstreamDropLines.end());
     }

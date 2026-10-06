@@ -540,10 +540,12 @@ public:
     /// A value is admitted only on an attribute that is unconnected, has a
     /// stage value, holds one of the eight input-slot types the value holds
     /// exactly, and (while a baked program stands) is read through a read a
-    /// bake lists as an input. Every other key is ignored, and each
-    /// generation reports "upstream input <path>: <reason>; ignored".
-    /// Admission is re-decided at every Evaluate, against the program then
-    /// standing.
+    /// bake lists as an input. An array value (only while
+    /// RigExecUpstreamArrayAdmission is on) must also hold as many elements
+    /// as the stage value at the generation's time. Every other key is
+    /// ignored, and each generation reports "upstream input <path>:
+    /// <reason>; ignored". Admission is re-decided at every Evaluate,
+    /// against the program then standing.
     void SetUpstreamInputs(std::vector<RigExecValueOverride> inputs);
 
     /// Whether the caller has upstream values set (admitted or not).
@@ -961,8 +963,10 @@ private:
 
     /// Re-decides which of _upstreamRequested are admitted, against the
     /// stage and the program standing now, and installs the answer
-    /// (_SetUpstreamAdmitted). Owning thread.
+    /// (_SetUpstreamAdmitted), at \p time (condition 4) or, with none
+    /// given, at the last generation's. Owning thread.
     void _AdmitUpstreamInputs();
+    void _AdmitUpstreamInputs(UsdTimeCode time);
     /// Installs \p admitted (sorted by path) and its drop lines: rebuilds
     /// _valueInputs and drops the skin layouts and blend shapes a placed,
     /// moved or lifted value can reach. A list equal to the standing one
@@ -1680,6 +1684,17 @@ private:
     std::vector<RigExecValueOverride> _upstreamRequested;
     std::vector<RigExecValueOverride> _upstreamAdmitted;
     std::vector<std::string> _upstreamDropLines;
+    /// The time admission last judged condition 4 at (the last Evaluate's).
+    UsdTimeCode _upstreamAdmissionTime = UsdTimeCode::Default();
+    /// Condition 4's memo (path -> stage element count): filled by
+    /// admission, dropped by any notice that reaches the path. Owning
+    /// thread.
+    RigExecUpstreamCountMemo _upstreamCounts;
+    /// The admitted upstream values alone, by path: the chain base reads
+    /// (runChain) answer from it and never from the interactive list.
+    /// Rebuilt with the admitted list on the owning thread; read-only while
+    /// a generation runs.
+    std::map<SdfPath, VtValue> _upstreamValues;
     /// The values the dynamic walk places: the admitted upstream values
     /// merged with _interactiveOverrides, interactive winning on a key.
     /// Rebuilt by SetInteractiveOverrides, ClearInteractiveOverrides and
@@ -2447,6 +2462,14 @@ private:
     /// one class whose whole job is to flatten them should re-derive them.
     friend class RigExecBakedProgram;
 };
+
+/// Turns the array part of upstream admission on or off (off by default):
+/// array values of the leaf reads a bake will list as array input slots.
+/// Registration note: array admission defaults on when AI (W.3.11, format
+/// 8) merges; that merge flips the default and extends
+/// TestEveryAdmissiblePathIsAnInput to array slots. Not for use while an
+/// evaluation runs.
+void RigExecSetUpstreamArrayAdmissionForTesting(bool on);
 
 /// Lifts \p evaluator's upstream values for its lifetime and puts the same
 /// list back when it ends. Lifting and placing them again are ordinary
