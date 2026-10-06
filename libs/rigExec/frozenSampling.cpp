@@ -425,8 +425,9 @@ _SampleWeightArrays(const RigExecBakedProgramImpl::WeightObject &object,
 // reads them (moverGraph.cpp): rest points / order / knots at Default,
 // dropoff at time, bind coordinates resolved-first, driver weight arrays
 // resolved-first, and the posed driver curve (only when no driver
-// transforms bind the table path). All under synthetic mover keys; the
-// worker replays them, it cannot read the mover prim or the stage.
+// transforms bind the table path). All under synthetic mover keys. The
+// worker assembles from the revision's leaves (revisionLeaves); these
+// samples are the digest's material for the same reads.
 void
 _SampleMoverToken(const UsdPrim &moverPrim, const SdfPath &moverPath,
                   const char *name, UsdTimeCode time, RigExecFrameInputs *out);
@@ -607,10 +608,11 @@ _SampleStageFrameSeeds(const RigExecBakedProgram &program, UsdTimeCode time,
 }
 
 // The path leaves of every chain revision the worker assembles from leaves
-// (every covered operation but a skin, whose packet travels whole), read by
-// the live prologue's own reads through the refreshed inputs at the job's
-// time: the worker assembles from these as the live RevisionStatic does from
-// its prologue's. Parallel to revisionIndex; empty for the rest.
+// (every covered operation but a skin, whose packet travels whole), and of
+// every derived target, read by the live prologue's own reads through the
+// refreshed inputs at the job's time: the worker assembles from these as the
+// live RevisionStatic and Derived steps do from their prologue's. Parallel
+// to revisionIndex and derivedIndex; empty for the rest.
 void
 _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
                       const RigExecResolvedInputs *refreshed, UsdTimeCode time,
@@ -630,6 +632,25 @@ _SampleRevisionLeaves(const RigExecBakedProgramImpl &B,
             continue;
         }
         std::vector<VtValue> &values = sampled->revisionLeaves[r];
+        values.reserve(leaves.decl.keys.size());
+        for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
+            values.push_back(RigExecSampleRevisionLeaf(
+                leaves.decl.keys[k], leaves.attributes[k], refreshed, time));
+        }
+    }
+    // Every derived target's, parallel to derivedIndex.
+    sampled->derivedLeaves.assign(B.derivedIndex.size(),
+                                  std::vector<VtValue>());
+    for (size_t d = 0; d < B.derivedIndex.size(); ++d) {
+        const auto &[chainIndex, derivedIndex] = B.derivedIndex[d];
+        const RigExecBakedPathLeaves &leaves =
+            B.chains[size_t(chainIndex)]
+                .derived[size_t(derivedIndex)]
+                .revision.leaves;
+        if (!leaves.decl.assembles) {
+            continue;
+        }
+        std::vector<VtValue> &values = sampled->derivedLeaves[d];
         values.reserve(leaves.decl.keys.size());
         for (size_t k = 0; k < leaves.decl.keys.size(); ++k) {
             values.push_back(RigExecSampleRevisionLeaf(
@@ -741,7 +762,9 @@ _SampleMoverScalar(const SdfPath &key, const UsdAttribute &attribute,
 }
 
 // RigExecReadProjectorTarget's reads, sampled where it reads them: the
-// settings off the projector, the dials through the refreshed inputs.
+// settings off the projector, the dials through the refreshed inputs. The
+// worker reads the target's leaves (derivedLeaves); these samples are the
+// digest's material for the same reads.
 void
 _SampleProjectorInputs(const RigExecBakedProgramImpl::GeomRevision &revision,
                        const RigExecResolvedInputs *refreshed,
@@ -1530,9 +1553,11 @@ _SampleWithPinnedChainBindings(
     // Mover scalars the packet assembly reads per frame (enabled,
     // defaultWeight, skinningMethod), keyed by mover path, plus the derived
     // topology arrays (counts, indices, extent widths), keyed by binding
-    // path. The worker replays these; it cannot read the mover prim. For a
-    // revision the worker assembles from leaves (revisionLeaves), the
-    // samples of the same reads are what the digest folds for them.
+    // path. The worker assembles every revision but a skin (whose packet
+    // travels below), and every derived target, from leaves
+    // (revisionLeaves, derivedLeaves); the samples of the same reads are
+    // what the digest folds for them. RevisionStatic still reads each
+    // revision's defaultWeight sample.
     for (const auto &[chainIndex, revisionIndex] : B.revisionIndex) {
         const RigExecBakedProgramImpl::GeomRevision &revision =
             B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];

@@ -125,6 +125,9 @@ struct RigExecFrameInputs {
     /// function of digest-covered samples (the same attributes, sampled by
     /// path in `values`), so the leaves are EXCLUDED from the digest.
     std::vector<std::vector<VtValue>> revisionLeaves;
+    /// The same for every derived target (normals, extent and a projector's
+    /// matrix targets), parallel to the baked program's derivedIndex.
+    std::vector<std::vector<VtValue>> derivedLeaves;
     /// Per blend sample's sparse layout, resolved at sample time through the
     /// live blend-shape cache: [revisionIndex position][channel][sample], by
     /// shared pointer. A null entry means the revision is not a blendshape or

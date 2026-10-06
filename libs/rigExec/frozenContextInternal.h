@@ -27,9 +27,9 @@ namespace frozenDetail {
 inline constexpr size_t kMaxFrozenArenaSlots = size_t(1) << 27;
 
 // Shared scalar schema for the iterative deformers' inputs: the frozen
-// stage sampler and worker reconstruction agree on it, and the .rigexec
-// exporter lists the same inputs as input slots (rigExecBake/
-// computedCapture.cpp), so it stays while the exporter calls it.
+// stage sampler folds them into the digest, and the .rigexec exporter lists
+// the same inputs as input slots (rigExecBake/computedCapture.cpp), so it
+// stays while the exporter calls it.
 template <class Fn>
 void
 _VisitIterativeMoverScalars(RigExecRevisionOp op,
@@ -349,9 +349,6 @@ _SampleHolds<float>(const VtValue &held, float *out)
     }
     return false;
 }
-
-const TfToken &
-_FrozenKindToken(RigExecRevisionOp op);
 
 bool
 _FrozenStepBody(_FrozenWorker *worker, RigExecBakedStep *step,

@@ -3596,6 +3596,118 @@ TestIterativeMoversWarmBitIdentical()
     }
 }
 
+// Frozen equals live, bit for bit, on the rigs whose lattices (a phased cage
+// among them), wires, deltaMush movers, projector targets and derived
+// normals the worker assembles from the job's leaves: each job carries a
+// leaf value for every key of those revisions and derived targets, and
+// serves live's pose at the stage's first frame and four frames on. (The
+// wrinkle, which no example ships, warms in
+// TestIterativeMoversWarmBitIdentical.)
+void
+TestFrozenAssemblesFromLeaves(const std::string &examplesDir)
+{
+    const std::string fixtures = examplesDir + "/../tests/fixtures/";
+    std::set<RigExecRevisionOp> warmed;
+    for (const std::string &stagePath :
+         {examplesDir + "/06_LatticeBulge.usda",
+          examplesDir + "/13_ReadPhases.usda",
+          examplesDir + "/2d/bust/bust_anim.usda",
+          fixtures + "projector_spaces.usda",
+          fixtures + "computed_path_reads.usda",
+          examplesDir + "/biped/Biped_stack_anim.usda"}) {
+        UsdStageRefPtr stage = UsdStage::Open(stagePath);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        SdfPath rig;
+        for (const UsdPrim &prim : stage->TraverseAll()) {
+            if (prim.GetTypeName() == "RigExecRoot") {
+                rig = prim.GetPath();
+                break;
+            }
+        }
+        CHECK(!rig.IsEmpty());
+        RigExecRigEvaluator evaluator(stage, rig);
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        const double start = stage->GetStartTimeCode();
+        CHECK(evaluator.Evaluate(UsdTimeCode(start)).valid);
+        std::shared_ptr<const RigExecFrozenProgram> frozen;
+        std::string error;
+        if (!RigExecFreezeProgram(evaluator, &frozen, &error)) {
+            std::printf("frozen leaves: %s does not freeze (%s)\n",
+                        stagePath.c_str(), error.c_str());
+            continue;
+        }
+        RigExecBackgroundScheduler scheduler;
+        for (const double frame : {start, start + 4.0}) {
+            RigExecFrameInputs inputs;
+            CHECK(RigExecSampleFrameInputs(evaluator, UsdTimeCode(frame), {},
+                                           &inputs, &error));
+            const RigExecBakedProgramImpl &B =
+                evaluator.GetBakedProgram()->GetStepGraph();
+            const auto carried = [&](const std::vector<VtValue> &values,
+                                     const RigExecBakedProgramImpl::
+                                         GeomRevision &revision) {
+                const bool held =
+                    revision.leaves.decl.assembles &&
+                    values.size() == revision.leaves.decl.keys.size();
+                if (!held) {
+                    std::printf("FAIL frozen leaves %s: %s travels without "
+                                "its leaves\n",
+                                stagePath.c_str(),
+                                revision.moverPath.GetText());
+                }
+                CHECK(held);
+                warmed.insert(revision.op);
+            };
+            CHECK(inputs.revisionLeaves.size() == B.revisionIndex.size());
+            for (size_t r = 0; r < B.revisionIndex.size() &&
+                               r < inputs.revisionLeaves.size();
+                 ++r) {
+                const auto &[c, i] = B.revisionIndex[r];
+                const auto &revision = B.chains[size_t(c)].revisions[size_t(i)];
+                if (revision.op == RigExecRevisionOp::Lattice ||
+                    revision.op == RigExecRevisionOp::Wire ||
+                    revision.op == RigExecRevisionOp::DeltaMush ||
+                    revision.op == RigExecRevisionOp::Wrinkle) {
+                    carried(inputs.revisionLeaves[r], revision);
+                }
+            }
+            CHECK(inputs.derivedLeaves.size() == B.derivedIndex.size());
+            for (size_t d = 0; d < B.derivedIndex.size() &&
+                               d < inputs.derivedLeaves.size();
+                 ++d) {
+                const auto &[c, i] = B.derivedIndex[d];
+                carried(inputs.derivedLeaves[d],
+                        B.chains[size_t(c)].derived[size_t(i)].revision);
+            }
+            const RigExecRigPose job = RunWarmingJob(&evaluator, rig, frozen,
+                                                     inputs, &scheduler,
+                                                     nullptr);
+            const RigExecRigPose live = evaluator.Evaluate(UsdTimeCode(frame));
+            CHECK(live.valid);
+            CheckPosesBitIdentical(TfStringPrintf("frozen leaves %s frame %g",
+                                                  stagePath.c_str(), frame)
+                                       .c_str(),
+                                   live, job);
+            CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+        }
+        std::printf("frozen leaves: %s warmed\n", stagePath.c_str());
+    }
+    for (const RigExecRevisionOp op :
+         {RigExecRevisionOp::Lattice, RigExecRevisionOp::Wire,
+          RigExecRevisionOp::DeltaMush, RigExecRevisionOp::SurfaceProjector,
+          RigExecRevisionOp::ShaderDials, RigExecRevisionOp::RecomputeNormals}) {
+        if (!warmed.count(op)) {
+            std::printf("FAIL frozen leaves: no rig warmed op %d\n", int(op));
+        }
+        CHECK(warmed.count(op) == 1);
+    }
+}
+
 // The lattice stack (examples/06_LatticeBulge.usda) warms bit-identically:
 // a Lattice cage bulge through a Smooth pass into a VolumeCorrect hold,
 // with the cage keyed at 1001/1024/1048.
@@ -5227,6 +5339,7 @@ main(int argc, char **argv)
         TestStackAnimWarmsBitIdenticalAtSweepDistance(argv[1]);
         TestBlendFaceWarmsBitIdentical(argv[1]);
         TestLatticeStackWarmsBitIdentical(argv[1]);
+        TestFrozenAssemblesFromLeaves(argv[1]);
         TestSurfaceDrapeWarmsBitIdentical(argv[1]);
         TestRibbonSpineWarmsBitIdentical(argv[1]);
         TestArmRigWarmsBitIdentical(argv[1]);

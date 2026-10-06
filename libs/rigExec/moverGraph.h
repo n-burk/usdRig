@@ -1518,6 +1518,29 @@ RigExecMoverParameters RigExecAssembleParameters(
     const RigExecProviderValues &values,
     UsdTimeCode time = UsdTimeCode::Default());
 
+/// What an external mover's assembleExternal answered: the plugin's opaque
+/// payload, compared by its own operator==.
+struct RigExecExternalPayload {
+    /// The mover's schema type, which names its handler.
+    TfToken schema;
+    /// A handler with an assembleExternal was found and it returned true.
+    bool valid = false;
+    VtValue data;
+
+    bool operator==(const RigExecExternalPayload &o) const {
+        return schema == o.schema && valid == o.valid && data == o.data;
+    }
+};
+
+/// The External arm's plugin call, shared by RigExecAssembleParameters and
+/// the baked prologue: finds the handler for the prim's schema and asks it
+/// for the payload at \p time. Reads the stage: owning thread only.
+void RigExecAssembleExternalPayload(const UsdPrim &moverPrim,
+                                    const RigExecRevisionBinding &binding,
+                                    const RigExecProviderValues &values,
+                                    UsdTimeCode time,
+                                    RigExecExternalPayload *payload);
+
 /// What a revision leaf holds. Arrays are VtArrays, shared, not copied.
 enum class RigExecRevisionLeafType : uint8_t {
     Bool,
@@ -1528,6 +1551,13 @@ enum class RigExecRevisionLeafType : uint8_t {
     FloatArray,
     Vec2fArray,
     Vec3fArray,
+    Vec3i,
+    Vec3d,
+    Matrix4d,
+    DoubleArray,
+    /// A shader dial as a double: a float attribute read as a float and
+    /// widened, any other read as a double (RigExecReadProjectorTarget).
+    Dial,
 };
 
 /// When a revision leaf is read: at the evaluated time, or at Default (an
@@ -1567,12 +1597,41 @@ enum class RigExecRevisionLeafRole : uint8_t {
     SurfacePoints,
     BindCoords,
     Widths,
+    /// deltaMush and wrinkle: inputs:restPoints at Default; wrinkle's
+    /// inputs:topology and inputs:pinPoints, both at Default.
+    RestPoints,
+    WrinkleTopology,
+    PinPoints,
+    /// Lattice: the cage at Default past the overlay, the cage at the time
+    /// through it, and rigExec:divisions.
+    RestCage,
+    LiveCage,
+    Divisions,
+    /// Wire: the driver curve at Default and at the time, its order and
+    /// knots, the driver weight arrays, rigExec:driverDeltaFrame (the wire's
+    /// rigExec:pointFrame is PointFrame) and inputs:dropoffDistance, which
+    /// answers empty where no attribute stands.
+    CurveRest,
+    CurveLive,
+    CurveOrder,
+    CurveKnots,
+    DriverWeights,
+    DriverBaseWeights,
+    DeltaFrame,
+    Dropoff,
+    /// A surface projector's settings.
+    RayOrigin,
+    RayDirection,
+    RayUp,
+    ShaderOffset,
+    ProjectionMode,
     Count,
 };
 
 /// One read a revision's assembly makes: the path, the value type, the time
 /// policy and the read site's flavour, plus what the site answers when the
-/// read finds nothing.
+/// read finds nothing. A Raw key with an empty fallback answers empty where
+/// no attribute stands (a site that reads only an attribute that exists).
 struct RigExecRevisionLeafKey {
     SdfPath path;
     RigExecRevisionLeafType type = RigExecRevisionLeafType::Float;
@@ -1588,6 +1647,12 @@ struct RigExecRevisionLeafDecl {
     /// Key index per RigExecRevisionLeafRole, or -1 when the operation does
     /// not read it (an empty binding path reads an empty array).
     std::array<int, size_t(RigExecRevisionLeafRole::Count)> roles;
+    /// The first of a deltaMush's or wrinkle's scalar inputs, declared in
+    /// the stage assembler's order, or -1.
+    int scalarBegin = -1;
+    /// The first of a ShaderDials target's dials, one key per
+    /// binding.shaderDials entry in its order, or -1.
+    int dialBegin = -1;
     /// RigExecAssembleFromLeaves covers the operation.
     bool assembles = false;
 
@@ -1601,9 +1666,10 @@ struct RigExecRevisionLeafDecl {
     }
 };
 
-/// Whether RigExecAssembleFromLeaves covers \p op: matrix, skin, blend
-/// shape, volume correct, smooth, surface project, ribbon, guide points,
-/// normals and extent.
+/// Whether RigExecAssembleFromLeaves covers \p op: every operation. A
+/// projector's matrix targets read through
+/// RigExecReadProjectorTargetFromLeaves, and an external mover's payload is
+/// a leaf the caller samples (RigExecRevisionLeafView::external).
 bool RigExecRevisionOpAssemblesFromLeaves(RigExecRevisionOp op);
 
 /// Declares every read RigExecAssembleParameters can make for \p op on the
@@ -1648,6 +1714,9 @@ struct RigExecRevisionLeafView {
     /// declare is appended by attribute name (a test's report); the read
     /// answers the site's fallback.
     std::vector<std::string> *missing = nullptr;
+    /// An External revision's payload leaf, sampled where the plugin may
+    /// read the stage. Null answers an invalid packet.
+    const RigExecExternalPayload *external = nullptr;
 };
 
 /// RigExecAssembleParameters for a covered operation, from sampled leaves:
@@ -1659,6 +1728,19 @@ RigExecMoverParameters RigExecAssembleFromLeaves(
     RigExecRevisionOp op, const RigExecRevisionBinding &binding,
     const RigExecRevisionLeafView &leaves,
     const RigExecProviderValues &values);
+
+/// Whether RigExecAssembleFromLeaves reaches an External revision's payload
+/// over \p leaves and \p values: the enable and the envelope, which the
+/// stage assembler checks before it calls the plugin.
+bool RigExecExternalPayloadIsRead(const RigExecRevisionLeafView &leaves,
+                                  const RigExecProviderValues &values);
+
+/// RigExecReadProjectorTarget over sampled leaves: the same reads, each
+/// answered by its leaf. The caller holds a valid projector prim (the
+/// program refuses a missing one at Build). Reads no stage.
+void RigExecReadProjectorTargetFromLeaves(
+    RigExecRevisionOp op, const RigExecRevisionBinding &binding,
+    const RigExecRevisionLeafView &leaves, RigExecProjectorReads *reads);
 
 /// A compiled mover graph.
 ///

@@ -481,6 +481,101 @@ void TestPhasedReferenceIsBound()
     }
 }
 
+// The plugin mover's packet holds what assembleExternal answers at the run's
+// time. Without a phased reference it binds no provider value the region
+// computes, so the baked prologue assembles its payload as a leaf; with one
+// it keeps its call in RevisionStatic, over the phase overlay. Either way,
+// after baked runs at frames 1 and 3 and after the bake's run, the packet's
+// payload equals a fresh call's over the same provider values, and the two
+// encode to the same bytes -- after the bake, the bytes the file holds.
+void TestTheExternalPayloadIsTheAssemblersAnswer()
+{
+    const std::string type = "ExternalQuadraticMover";
+    const RigExecMoverHandler *handler = RigExecFindMoverHandler(TfToken(type));
+    CHECK(handler && handler->encodeExternal);
+    for (const bool phased : {false, true}) {
+        const auto stage = MakeExportRig(type.c_str());
+        if (!phased) {
+            CHECK(stage->GetPrimAtPath(SdfPath("/Rig/External"))
+                      .GetRelationship(TfToken("rigExec:reference"))
+                      .ClearTargets(true));
+        }
+        RigExecRigEvaluator baked(stage, kRig);
+        baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        Compile(&baked);
+        const std::string label = phased ? "phased" : "prologue";
+        // The frame bytes of the packet's payload, after checking it.
+        const auto check = [&](double time, const std::string &what) {
+            const RigExecBakedProgram *program = baked.GetBakedProgram();
+            CHECK(program);
+            const RigExecBakedProgramImpl &B = program->GetStepGraph();
+            const RigExecBakedProgramImpl::GeomChain *chain = nullptr;
+            const RigExecBakedProgramImpl::GeomRevision *revision = nullptr;
+            for (const auto &c : B.chains) {
+                for (const auto &r : c.revisions) {
+                    if (r.moverPath == SdfPath("/Rig/External")) {
+                        chain = &c;
+                        revision = &r;
+                    }
+                }
+            }
+            CHECK(chain && revision);
+            CHECK(revision->leaves.decl.assembles == !phased);
+            CHECK(revision->binding.phases.empty() == !phased);
+            RigExecProviderValues values;
+            values.basePoints.assign(chain->lastBase.begin(),
+                                     chain->lastBase.end());
+            values.resolved =
+                phased ? &revision->revisionInputs : B.resolvedInputs;
+            RigExecExternalPayload fresh;
+            RigExecAssembleExternalPayload(revision->moverPrim,
+                                           revision->binding, values,
+                                           UsdTimeCode(time), &fresh);
+            const RigExecMoverParameters &packet = revision->parameters;
+            if (!(fresh.valid && packet.valid &&
+                  packet.externalSchema == fresh.schema &&
+                  packet.externalData == fresh.data)) {
+                throw std::runtime_error(label + " " + what +
+                                         ": the packet's payload is not the "
+                                         "assembler's answer");
+            }
+            if (!phased) {
+                CHECK(revision->externalPayload == fresh);
+            }
+            std::vector<uint8_t> epochA, frameA, epochB, frameB;
+            CHECK(handler->encodeExternal(packet.externalData,
+                                          revision->binding, &epochA,
+                                          &frameA));
+            CHECK(handler->encodeExternal(fresh.data, revision->binding,
+                                          &epochB, &frameB));
+            CHECK(epochA == epochB && frameA == frameB);
+            return frameA;
+        };
+        for (const double frame : {1.0, 3.0}) {
+            CHECK(baked.Evaluate(UsdTimeCode(frame)).valid);
+            check(frame, "frame " + std::to_string(int(frame)));
+        }
+        RigExecBakeOpts options;
+        options.time = 1.0;
+        RigExecBakeResult result;
+        std::string error;
+        if (!RigExecBakeToBinary(baked, options, &result, &error)) {
+            throw std::runtime_error(label + " export failed: " + error);
+        }
+        const std::vector<uint8_t> bytes = check(1.0, "bake");
+        std::unique_ptr<fb::RigExecWireFile> file;
+        CHECK(RigExecFormatOpen(result.bytes.data(), result.bytes.size(),
+                                &file, &error));
+        CHECK(file && file->externalMovers.size() == 1);
+        if (file && file->externalMovers.size() == 1) {
+            const fb::RigExecWireExternalMover &mover =
+                file->externalMovers.front();
+            CHECK(std::vector<uint8_t>(mover.v2Frame.begin(),
+                                       mover.v2Frame.end()) == bytes);
+        }
+    }
+}
+
 void TestIncompatiblePlugin()
 {
     const auto directory = std::filesystem::temp_directory_path() /
@@ -524,6 +619,7 @@ int main(int argc, char **argv)
         TestEvaluation();
         TestExport();
         TestPhasedReferenceIsBound();
+        TestTheExternalPayloadIsTheAssemblersAnswer();
         TestIncompatiblePlugin();
         std::cout << "External mover loading, registration, dynamic/baked parity, "
                      "invalidation, envelopes, export and playback passed\n";

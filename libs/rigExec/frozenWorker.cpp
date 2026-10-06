@@ -38,14 +38,15 @@
 //    the evaluator.
 //  * Geometry chunk/fuse/status bodies (bakedGeometry.cpp:2370-2718, minus
 //    RevisionStatic/Derived) are pure functions of program slots plus the
-//    shared kernels. RevisionStatic and Derived call AssembleRevision, which
-//    reads the stage for the operations the path leaves do not assemble
-//    yet, so the frozen run does NOT call them: a skin packet is assembled
-//    on the UI thread by the REAL RigExecAssembleSkinParameters and travels
-//    with the job, an operation the leaves assemble is assembled by the live
-//    RigExecBakedAssembleFromLeaves from the job's leaves, and the small
-//    pure remainder of each body is replicated line-for-line below
-//    (_FrozenRevisionStatic, _FrozenDerived, _AssembleDerivedPacket).
+//    shared kernels. RevisionStatic and Derived read the program's own
+//    leaves (and an external mover's plugin, which freeze refuses), so the
+//    frozen run does NOT call them: a skin packet is assembled on the UI
+//    thread by the REAL RigExecAssembleSkinParameters and travels with the
+//    job, every other revision and every derived target is assembled by the
+//    live RigExecBakedAssembleFromLeaves and RigExecBakedRunProjectorTarget
+//    from the job's leaves, and the small pure remainder of each body is
+//    replicated line-for-line (frozenGeometry.cpp: _FrozenRevisionStatic,
+//    _FrozenDerived).
 //  * RigExecBakedComputeClosure (bakedSchedule.cpp:1223) and
 //    RigExecBakedSkipGeometryStep are pure program-state functions and run
 //    unmodified. The region loop itself is a serial reimplementation of
@@ -638,6 +639,26 @@ _FrozenPrologue(_FrozenWorker *worker, const RigExecFrozenProgram &snapshot,
             }
         }
     }
+    // Every derived target's leaves (normals, extent, a projector's matrix
+    // targets), which hold no Present key.
+    if (inputs.derivedLeaves.size() != B.derivedIndex.size()) {
+        return false;
+    }
+    for (size_t d = 0; d < B.derivedIndex.size(); ++d) {
+        const auto &[chainIndex, derivedIndex] = B.derivedIndex[d];
+        RigExecBakedProgramImpl::GeomRevision &revision =
+            B.chains[size_t(chainIndex)]
+                .derived[size_t(derivedIndex)]
+                .revision;
+        if (!revision.leaves.decl.assembles) {
+            continue;
+        }
+        if (inputs.derivedLeaves[d].size() !=
+            revision.leaves.decl.keys.size()) {
+            return false;
+        }
+        revision.leaves.values = inputs.derivedLeaves[d];
+    }
     return true;
 }
 
@@ -801,17 +822,6 @@ namespace frozenDetail {
 // Defined below, beside the executor.
 bool _RunFrozen(const RigExecFrozenEvalContext &context,
                 const RigExecFrameInputs &inputs, RigExecRigPose *pose);
-
-// Worker-built tokens, constructed once: TfToken(const char*) takes the
-// token registry's spin lock per construction, so the worker hoists them
-// the way the assemblers do rather than rebuilding them per read.
-const TfToken &
-_FrozenKindToken(RigExecRevisionOp op)
-{
-    static const TfToken normals("recomputeNormals");
-    static const TfToken extent("recomputeExtent");
-    return op == RigExecRevisionOp::RecomputeExtent ? extent : normals;
-}
 
 // Runs one frozen frame: clone, patch, prologue, region, epilogue. Returns
 // false to decline (the caller hands the generation back); a declined run

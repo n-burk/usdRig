@@ -1240,7 +1240,7 @@ rigexec_add_baked_parity_test(testRigExecValueEdits REQUIRE_BAKE CONE_VERIFY
 # before the region, equal to the read it replaced, re-read exactly when
 # that read can have moved.
 add_executable(testRigExecLeaves tests/testRigExecLeaves.cpp)
-target_link_libraries(testRigExecLeaves PRIVATE rigExecBake)
+target_link_libraries(testRigExecLeaves PRIVATE rigExecBake rigExecRigging)
 target_compile_definitions(testRigExecLeaves PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecLeaves COMMAND testRigExecLeaves

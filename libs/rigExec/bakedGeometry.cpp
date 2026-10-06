@@ -424,6 +424,20 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         RigExecRevisionLeafDecl &decl = out.leaves.decl;
         RigExecDeclareRevisionLeaves(out.op, out.moverPath, out.binding,
                                      &decl);
+        // A plugin mover is handed every provider value; the prologue holds
+        // them only for one that binds none the region computes (no phase,
+        // weight object, transform, carry, influence, driver frames,
+        // constraint delta or blend channel). Any other keeps its plugin
+        // call in RevisionStatic, through the stage assembler.
+        if (out.op == RigExecRevisionOp::External &&
+            !(out.binding.phases.empty() && out.weightObject < 0 &&
+              out.binding.transform.IsEmpty() &&
+              out.binding.carrySpace.IsEmpty() &&
+              out.binding.influences.empty() &&
+              out.binding.driverFrames.IsEmpty() &&
+              out.constraintDelta < 0 && out.blendChannels.empty())) {
+            decl = RigExecRevisionLeafDecl();
+        }
         if (decl.assembles) {
             using Type = RigExecRevisionLeafType;
             using Flavour = RigExecRevisionLeafFlavour;
@@ -1973,8 +1987,8 @@ struct _LeafBlendReads {
 };
 
 // The packet off the stage, through \p R (or the revision's phase overlay
-// over it), with RigExecAssembleParameters: the operations the path leaves
-// do not assemble yet, and the shadow test's reference for those they do.
+// over it), with RigExecAssembleParameters: a plugin revision bound to a
+// value the region computes, and the shadow test's reference for the rest.
 RigExecMoverParameters
 AssembleRevisionFromStage(RigExecBakedProgramImpl &B,
                           const RigExecResolvedInputs &R,
@@ -2018,6 +2032,9 @@ RigExecBakedAssembleFromLeaves(
     view.decl = &revision->leaves.decl;
     view.values = &revision->leaves.values;
     view.missing = missing;
+    if (revision->op == RigExecRevisionOp::External) {
+        view.external = &revision->externalPayload;
+    }
     // The phase overlay, as the stage assembly builds it: a phased points
     // read takes the version it is bound to before its leaf.
     if (!revision->binding.phases.empty()) {
@@ -2033,8 +2050,8 @@ RigExecBakedAssembleFromLeaves(
 
 namespace {
 
-// The packet of \p revision this run: from its path leaves for an operation
-// they assemble, off the stage for the rest.
+// The packet of \p revision this run: from its path leaves wherever they
+// assemble it, off the stage for a plugin revision bound to region values.
 RigExecMoverParameters
 AssembleRevision(RigExecBakedProgramImpl &B,
                  RigExecBakedProgramImpl::GeomRevision *revision,
@@ -2210,6 +2227,34 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             RigExecBakedSamplePathLeaves(&B, &revision->leaves, time, all,
                                          skip);
         };
+    // An external revision's payload leaf, after its enable and envelope
+    // leaves: the plugin's answer at this time, over the provider values the
+    // body would hand it (the chain's authored base, the generation's
+    // resolved inputs; it binds nothing the region computes), and only past
+    // the gates at which the stage assembler calls it.
+    const auto sampleExternal =
+        [&B, time](RigExecBakedProgramImpl::GeomRevision *revision,
+                   const VtVec3fArray &base) {
+            if (revision->op != RigExecRevisionOp::External ||
+                !revision->leaves.decl.assembles) {
+                return;
+            }
+            RigExecProviderValues values =
+                RevisionValues(B, revision, base.cdata(), base.size());
+            values.resolved = B.resolvedInputs;
+            RigExecRevisionLeafView view;
+            view.decl = &revision->leaves.decl;
+            view.values = &revision->leaves.values;
+            RigExecExternalPayload payload;
+            if (RigExecExternalPayloadIsRead(view, values)) {
+                RigExecAssembleExternalPayload(revision->moverPrim,
+                                               revision->binding, values, time,
+                                               &payload);
+            }
+            revision->externalPayloadChanged =
+                !(payload == revision->externalPayload);
+            revision->externalPayload = std::move(payload);
+        };
     for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         VtVec3fArray basePoints;
         chain.haveBase =
@@ -2259,15 +2304,18 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             resolveTopology(&revision);
             resolveBlendLayouts(&revision, basePoints.size());
             sampleRevision(&revision);
+            sampleExternal(&revision, chain.lastBase);
         }
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
                  chain.derived) {
             if (derived.matrixTarget) {
                 // No base and no graph node: the dynamic walk evaluates a
-                // projector target directly every generation.
+                // projector target directly every generation. Its reads are
+                // leaves like any revision's.
                 derived.haveBase = true;
                 derived.baseDirty = true;
                 derived.revision.created = false;
+                sampleRevision(&derived.revision);
                 continue;
             }
             VtVec3fArray derivedBase;
@@ -2373,8 +2421,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         if (derived.matrixTarget) {
             step->counters.revisionsBuilt = 1;
             derived.haveMatrix = RigExecBakedRunProjectorTarget(
-                B, chain, revision, R, time, &derived.matrix,
-                &step->diagnostics);
+                B, chain, revision, &derived.matrix, &step->diagnostics);
             derived.haveResult = true;
             step->counters.chainsBuilt = 1;
             return;
@@ -3135,15 +3182,20 @@ RigExecBakedRunProjectorTarget(
     const RigExecBakedProgramImpl &B,
     const RigExecBakedProgramImpl::GeomChain &chain,
     const RigExecBakedProgramImpl::GeomRevision &revision,
-    const RigExecResolvedInputs &resolved, UsdTimeCode time,
     GfMatrix4d *matrix, std::vector<std::string> *diagnostics)
 {
-    return RigExecEvaluateProjectorTarget(
-        revision.moverPrim, revision.op, revision.binding,
-        RigExecBakedProjectorFrames(B, revision),
+    RigExecRevisionLeafView view;
+    view.decl = &revision.leaves.decl;
+    view.values = &revision.leaves.values;
+    RigExecProjectorReads reads;
+    RigExecReadProjectorTargetFromLeaves(revision.op, revision.binding, view,
+                                         &reads);
+    return RigExecRunProjectorTarget(
+        revision.op, revision.binding,
+        RigExecBakedProjectorFrames(B, revision), reads,
         std::vector<GfVec3f>(chain.lastBase.begin(), chain.lastBase.end()),
         std::vector<GfVec3f>(chain.result.begin(), chain.result.end()),
-        &resolved, time, matrix, diagnostics);
+        matrix, diagnostics);
 }
 
 void
@@ -3312,6 +3364,37 @@ RigExecBakedProgramTesting::ShadowAssembly(
             report.push_back(where + ": diagnostic lines differ");
         }
     };
+    // A projector's matrix target: its reads from leaves and off the stage.
+    const auto projector =
+        [&](const RigExecBakedProgramImpl::GeomRevision &live) {
+            ++count;
+            RigExecBakedProgramImpl::GeomRevision fromLeaves = live;
+            if (edit) {
+                edit(live.moverPath, &fromLeaves.leaves.decl);
+            }
+            std::vector<std::string> missing;
+            RigExecRevisionLeafView view;
+            view.decl = &fromLeaves.leaves.decl;
+            view.values = &fromLeaves.leaves.values;
+            view.missing = &missing;
+            RigExecProjectorReads a, b;
+            RigExecReadProjectorTargetFromLeaves(live.op, live.binding, view,
+                                                 &a);
+            RigExecReadProjectorTarget(live.moverPrim, live.op, live.binding,
+                                       &local, time, &b);
+            const std::string where = live.moverPath.GetString();
+            for (const std::string &name : missing) {
+                report.push_back(where + ": undeclared read " + name);
+            }
+            if (a.rayOrigin != b.rayOrigin ||
+                a.rayDirection != b.rayDirection || a.rayUp != b.rayUp ||
+                a.shaderOffset != b.shaderOffset ||
+                a.reproject != b.reproject || a.dials != b.dials ||
+                a.faceVertexCounts != b.faceVertexCounts ||
+                a.faceVertexIndices != b.faceVertexIndices) {
+                report.push_back(where + ": projector reads differ");
+            }
+        };
     for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         if (!chain.haveBase) {
             continue;
@@ -3328,6 +3411,9 @@ RigExecBakedProgramTesting::ShadowAssembly(
             if (!derived.matrixTarget && derived.haveBase) {
                 shadow(derived.revision, chain.result.cdata(),
                        chain.result.size());
+            }
+            if (derived.matrixTarget) {
+                projector(derived.revision);
             }
         }
     }

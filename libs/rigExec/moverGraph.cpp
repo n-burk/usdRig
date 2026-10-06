@@ -115,6 +115,18 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((smoothingIterations, "inputs:smoothingIterations"))
     ((weightBlend, "rigExec:weightBlend"))
     ((pointFrame, "rigExec:pointFrame"))
+    ((step, "inputs:step"))
+    ((distanceWeight, "inputs:distanceWeight"))
+    ((displacement, "inputs:displacement"))
+    ((driverWeights, "inputs:driverWeights"))
+    ((driverBaseWeights, "inputs:driverBaseWeights"))
+    ((driverDeltaFrame, "rigExec:driverDeltaFrame"))
+    ((dropoffDistance, "inputs:dropoffDistance"))
+    ((rayOrigin, "rigExec:rayOrigin"))
+    ((rayDirection, "rigExec:rayDirection"))
+    ((rayUp, "rigExec:rayUp"))
+    ((shaderOffset, "rigExec:shaderOffset"))
+    ((projectionMode, "rigExec:projectionMode"))
 );
 
 // The values those reads fall back to, and the three states a revision's
@@ -128,6 +140,9 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((moverFailed, "moverFailed"))
     ((cloth, "cloth"))
     ((surfaceStruts, "surfaceStruts"))
+    ((rest, "rest"))
+    ((local, "local"))
+    ((material, "material"))
 );
 
 namespace rigExec {
@@ -2196,12 +2211,12 @@ RigExecAssembleParameters(
         break;
     }
     case RigExecRevisionOp::External: {
-        params.externalSchema = moverPrim.GetTypeName();
-        const RigExecMoverHandler *handler =
-            RigExecFindMoverHandler(params.externalSchema);
-        params.valid = handler && handler->assembleExternal &&
-            handler->assembleExternal(moverPrim, binding, values, time,
-                                      &params.externalData);
+        RigExecExternalPayload payload;
+        RigExecAssembleExternalPayload(moverPrim, binding, values, time,
+                                       &payload);
+        params.externalSchema = payload.schema;
+        params.valid = payload.valid;
+        params.externalData = std::move(payload.data);
         break;
     }
 
@@ -2393,6 +2408,70 @@ RigExecAssembleParameters(
     return params;
 }
 
+void
+RigExecAssembleExternalPayload(const UsdPrim &moverPrim,
+                               const RigExecRevisionBinding &binding,
+                               const RigExecProviderValues &values,
+                               UsdTimeCode time,
+                               RigExecExternalPayload *payload)
+{
+    payload->schema = moverPrim.GetTypeName();
+    const RigExecMoverHandler *handler =
+        RigExecFindMoverHandler(payload->schema);
+    payload->valid = handler && handler->assembleExternal &&
+                     handler->assembleExternal(moverPrim, binding, values,
+                                               time, &payload->data);
+}
+
+namespace {
+
+// The iterative deformers' scalar inputs, in the stage assembler's order,
+// each with its fallback and the packet field it fills.
+template <class Fn>
+void
+_IterativeScalars(RigExecRevisionOp op, RigExecMoverParameters &params,
+                  Fn &&fn)
+{
+    if (op == RigExecRevisionOp::DeltaMush) {
+        fn(_attrTokens->iterations, 10, params.mushIterations);
+        fn(_attrTokens->step, 0.5f, params.mushStep);
+        fn(_attrTokens->pinBorders, true, params.mushPinBorders);
+        fn(_attrTokens->distanceWeight, 0.0f, params.mushDistanceWeight);
+        fn(_attrTokens->displacement, 1.0f, params.mushDisplacement);
+    } else if (op == RigExecRevisionOp::Wrinkle) {
+        RigExecWrinkleSettings &s = params.wrinkleSettings;
+        fn(_attrTokens->iterations, 80, s.iterations);
+        fn(_attrTokens->neighborDistance, 2, s.neighborDistance);
+        fn(_attrTokens->restLengthScale, 1.0f, s.restLengthScale);
+        fn(_attrTokens->stretchStiffness, 1.0f, s.stretchStiffness);
+        fn(_attrTokens->compressionStiffness, 1.0f, s.compressionStiffness);
+        fn(_attrTokens->bendStiffness, 0.1f, s.bendStiffness);
+        fn(_attrTokens->maxDisplacement, 0.2f, s.maxDisplacement);
+        fn(_attrTokens->pinBorders, true, s.pinBorders);
+        fn(_attrTokens->tangentPlaneCollisions, true,
+           s.tangentPlaneCollisions);
+        fn(_attrTokens->tangentPlaneInset, 0.0f, s.tangentPlaneInset);
+        fn(_attrTokens->wrinkleScale, 1.0f, s.wrinkleScale);
+        fn(_attrTokens->smoothingIterations, 0, s.smoothingIterations);
+    }
+}
+
+template <class T>
+constexpr RigExecRevisionLeafType
+_ScalarLeafType()
+{
+    if constexpr (std::is_same_v<T, bool>) {
+        return RigExecRevisionLeafType::Bool;
+    } else if constexpr (std::is_same_v<T, int>) {
+        return RigExecRevisionLeafType::Int;
+    } else {
+        static_assert(std::is_same_v<T, float>, "an iterative scalar type");
+        return RigExecRevisionLeafType::Float;
+    }
+}
+
+}  // namespace
+
 bool
 RigExecRevisionOpAssemblesFromLeaves(RigExecRevisionOp op)
 {
@@ -2407,7 +2486,6 @@ RigExecRevisionOpAssemblesFromLeaves(RigExecRevisionOp op)
     case RigExecRevisionOp::EmitGuidePoints:
     case RigExecRevisionOp::RecomputeNormals:
     case RigExecRevisionOp::RecomputeExtent:
-        return true;
     case RigExecRevisionOp::DeltaMush:
     case RigExecRevisionOp::Wrinkle:
     case RigExecRevisionOp::Lattice:
@@ -2415,7 +2493,7 @@ RigExecRevisionOpAssemblesFromLeaves(RigExecRevisionOp op)
     case RigExecRevisionOp::External:
     case RigExecRevisionOp::SurfaceProjector:
     case RigExecRevisionOp::ShaderDials:
-        return false;
+        return true;
     }
     return false;
 }
@@ -2518,9 +2596,104 @@ RigExecDeclareRevisionLeaves(RigExecRevisionOp op, const SdfPath &moverPath,
         break;
     case RigExecRevisionOp::VolumeCorrect:
     case RigExecRevisionOp::EmitGuidePoints:
+    case RigExecRevisionOp::External:
+        // An external mover's own reads are its payload's (the caller's
+        // payload leaf): only the engine's enable and envelope are declared.
         envelope();
         break;
-    default:
+    case RigExecRevisionOp::DeltaMush:
+    case RigExecRevisionOp::Wrinkle: {
+        envelope();
+        add(Role::RestPoints, mover(_attrTokens->restPoints),
+            Type::Vec3fArray, Time::AtDefault, Flavour::OverlayThenRaw,
+            VtValue(VtVec3fArray()));
+        topology();
+        if (op == RigExecRevisionOp::Wrinkle) {
+            add(Role::WrinkleTopology, mover(_attrTokens->topology),
+                Type::Token, Time::AtDefault, Flavour::Resolved,
+                VtValue(_valueTokens->cloth));
+            add(Role::PinPoints, mover(_attrTokens->pinPoints),
+                Type::IntArray, Time::AtDefault, Flavour::OverlayThenRaw,
+                VtValue(VtIntArray()));
+        }
+        decl->scalarBegin = int(decl->keys.size());
+        RigExecMoverParameters fields;
+        _IterativeScalars(op, fields,
+                          [&](const TfToken &name, auto fallback, auto &) {
+                              using T = decltype(fallback);
+                              decl->Add({mover(name), _ScalarLeafType<T>(),
+                                         Time::AtTime, Flavour::Resolved,
+                                         VtValue(fallback)});
+                          });
+        break;
+    }
+    case RigExecRevisionOp::Lattice:
+        envelope();
+        // The bind-time cage reads past the resolved inputs (and the phase
+        // overlay); the live cage through them.
+        add(Role::RestCage, binding.cagePoints, Type::Vec3fArray,
+            Time::AtDefault, Flavour::Raw, VtValue(VtVec3fArray()));
+        array(Role::LiveCage, binding.cagePoints, Type::Vec3fArray,
+              VtValue(VtVec3fArray()));
+        add(Role::Divisions, mover(_attrTokens->divisions), Type::Vec3i,
+            Time::AtTime, Flavour::Raw,
+            VtValue(RigExecMoverParameters().divisions));
+        break;
+    case RigExecRevisionOp::Wire:
+        envelope();
+        add(Role::CurveRest, binding.driverCurvePoints, Type::Vec3fArray,
+            Time::AtDefault, Flavour::Raw, VtValue(VtVec3fArray()));
+        add(Role::DriverWeights, mover(_attrTokens->driverWeights),
+            Type::FloatArray, Time::AtTime, Flavour::Resolved,
+            VtValue(VtFloatArray()));
+        add(Role::DriverBaseWeights, mover(_attrTokens->driverBaseWeights),
+            Type::FloatArray, Time::AtTime, Flavour::Resolved,
+            VtValue(VtFloatArray()));
+        add(Role::PointFrame, mover(_attrTokens->pointFrame), Type::Token,
+            Time::AtTime, Flavour::Raw, VtValue(_valueTokens->rest));
+        add(Role::DeltaFrame, mover(_attrTokens->driverDeltaFrame),
+            Type::Token, Time::AtTime, Flavour::Raw,
+            VtValue(_valueTokens->local));
+        array(Role::CurveLive, binding.driverCurvePoints, Type::Vec3fArray,
+              VtValue(VtVec3fArray()));
+        add(Role::CurveOrder, binding.driverCurveOrder, Type::IntArray,
+            Time::AtDefault, Flavour::Raw, VtValue(VtIntArray()));
+        add(Role::CurveKnots, binding.driverCurveKnots, Type::DoubleArray,
+            Time::AtDefault, Flavour::Raw, VtValue(VtDoubleArray()));
+        // Read only where the attribute stands: an empty fallback.
+        add(Role::Dropoff, mover(_attrTokens->dropoffDistance), Type::Float,
+            Time::AtTime, Flavour::Raw, VtValue());
+        array(Role::BindCoords, binding.bindCoords, Type::Vec2fArray,
+              VtValue(VtArray<GfVec2f>()));
+        break;
+    case RigExecRevisionOp::SurfaceProjector:
+        // RigExecReadProjectorTarget's reads, through the generation's
+        // resolved inputs alone (a projector declares no phase).
+        add(Role::RayOrigin, mover(_attrTokens->rayOrigin), Type::Vec3d,
+            Time::AtTime, Flavour::Resolved,
+            VtValue(GfVec3d(0.0, 0.0, 0.0)));
+        add(Role::RayDirection, mover(_attrTokens->rayDirection),
+            Type::Vec3d, Time::AtTime, Flavour::Resolved,
+            VtValue(GfVec3d(0.0, 0.0, 1.0)));
+        add(Role::RayUp, mover(_attrTokens->rayUp), Type::Vec3d,
+            Time::AtTime, Flavour::Resolved,
+            VtValue(GfVec3d(0.0, 1.0, 0.0)));
+        add(Role::ShaderOffset, mover(_attrTokens->shaderOffset),
+            Type::Matrix4d, Time::AtTime, Flavour::Resolved,
+            VtValue(GfMatrix4d(1.0)));
+        add(Role::ProjectionMode, mover(_attrTokens->projectionMode),
+            Type::Token, Time::AtTime, Flavour::Raw,
+            VtValue(_valueTokens->material));
+        topology();
+        break;
+    case RigExecRevisionOp::ShaderDials:
+        // One dial per source, in order (compile admits property paths
+        // only; a missing attribute answers 0).
+        decl->dialBegin = int(decl->keys.size());
+        for (const SdfPath &dial : binding.shaderDials) {
+            decl->Add({dial, Type::Dial, Time::AtTime, Flavour::Resolved,
+                       VtValue(0.0)});
+        }
         break;
     }
 }
@@ -2592,6 +2765,11 @@ RigExecSampleRevisionLeaf(const RigExecRevisionLeafKey &key,
     const UsdTimeCode at = key.time == RigExecRevisionLeafTime::AtDefault
                                ? UsdTimeCode::Default()
                                : time;
+    // A site that reads only an attribute that exists: nothing stands.
+    if (key.flavour == RigExecRevisionLeafFlavour::Raw &&
+        key.fallback.IsEmpty() && !attribute) {
+        return VtValue();
+    }
     switch (key.type) {
     case RigExecRevisionLeafType::Bool:
         return _LeafSample<bool>(key, attribute, resolved, at);
@@ -2609,6 +2787,31 @@ RigExecSampleRevisionLeaf(const RigExecRevisionLeafKey &key,
         return _LeafSample<VtArray<GfVec2f>>(key, attribute, resolved, at);
     case RigExecRevisionLeafType::Vec3fArray:
         return _LeafSample<VtVec3fArray>(key, attribute, resolved, at);
+    case RigExecRevisionLeafType::Vec3i:
+        return _LeafSample<GfVec3i>(key, attribute, resolved, at);
+    case RigExecRevisionLeafType::Vec3d:
+        return _LeafSample<GfVec3d>(key, attribute, resolved, at);
+    case RigExecRevisionLeafType::Matrix4d:
+        return _LeafSample<GfMatrix4d>(key, attribute, resolved, at);
+    case RigExecRevisionLeafType::DoubleArray:
+        return _LeafSample<VtDoubleArray>(key, attribute, resolved, at);
+    case RigExecRevisionLeafType::Dial: {
+        // RigExecReadProjectorTarget's dial read, through \p resolved.
+        double value = 0.0;
+        const UsdAttribute &a = attribute;
+        if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
+            float asFloat = 0.0f;
+            if (!(resolved && resolved->GetAttribute(a, at, &asFloat))) {
+                a.Get(&asFloat, at);
+            }
+            value = double(asFloat);
+        } else if (a) {
+            if (!(resolved && resolved->GetAttribute(a, at, &value))) {
+                a.Get(&value, at);
+            }
+        }
+        return VtValue(value);
+    }
     }
     return key.fallback;
 }
@@ -2683,7 +2886,8 @@ struct _Leaves {
     }
 
     // _Array: the leaf's array copied out, empty when undeclared. A points
-    // read takes the phase overlay first.
+    // read through the resolved inputs takes the phase overlay first; a raw
+    // one (the lattice's bind-time cage, the wire's rest curve) never does.
     template <class T>
     std::vector<T> Array(RigExecRevisionLeafRole role) const {
         std::vector<T> out;
@@ -2692,10 +2896,12 @@ struct _Leaves {
             return out;
         }
         if constexpr (std::is_same_v<T, GfVec3f>) {
-            const int k = view.decl->Role(role);
+            const RigExecRevisionLeafKey &key =
+                view.decl->keys[size_t(view.decl->Role(role))];
             VtVec3fArray phased;
             if (view.phased &&
-                view.phased->Get(view.decl->keys[size_t(k)].path, &phased)) {
+                key.flavour == RigExecRevisionLeafFlavour::OverlayThenRaw &&
+                view.phased->Get(key.path, &phased)) {
                 out.assign(phased.begin(), phased.end());
                 return out;
             }
@@ -2705,6 +2911,44 @@ struct _Leaves {
             out.assign(held.begin(), held.end());
         }
         return out;
+    }
+
+    // The leaf's VtArray itself, shared rather than copied; empty when
+    // undeclared or holding another type.
+    template <class T>
+    VtArray<T> Shared(RigExecRevisionLeafRole role) const {
+        const VtValue *v = At(role);
+        return v && v->IsHolding<VtArray<T>>() ? v->UncheckedGet<VtArray<T>>()
+                                                : VtArray<T>();
+    }
+
+    // A read only an existing attribute answers: false when the leaf is
+    // empty (or undeclared, which is reported when asked).
+    template <class T>
+    bool IfPresent(RigExecRevisionLeafRole role, const char *name,
+                   T *out) const {
+        const VtValue *v = At(role);
+        if (!v) {
+            if (view.missing) {
+                view.missing->push_back(name);
+            }
+            return false;
+        }
+        if (!v->IsHolding<T>()) {
+            return false;
+        }
+        *out = v->UncheckedGet<T>();
+        return true;
+    }
+
+    // Key \p k of the declaration as \p T, or \p fallback.
+    template <class T>
+    T Key(int k, const T &fallback) const {
+        if (k < 0 || !view.values || size_t(k) >= view.values->size()) {
+            return fallback;
+        }
+        const VtValue &v = (*view.values)[size_t(k)];
+        return v.IsHolding<T>() ? v.UncheckedGet<T>() : fallback;
     }
 
     bool Enabled() const {
@@ -2848,7 +3092,6 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
                           const RigExecRevisionLeafView &leaves,
                           const RigExecProviderValues &values)
 {
-    (void)binding;
     using Role = RigExecRevisionLeafRole;
     const _Leaves L{leaves};
     if (op == RigExecRevisionOp::Matrix) {
@@ -2887,10 +3130,30 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
     case RigExecRevisionOp::RecomputeExtent:
         params.kind = _kindTokens->recomputeExtent;
         break;
-    default:
-        // Not covered: the stage assembler's operation.
-        TF_CODING_ERROR("RigExecAssembleFromLeaves: operation not covered");
-        return params;
+    case RigExecRevisionOp::DeltaMush:
+        params.kind = _kindTokens->deltaMush;
+        break;
+    case RigExecRevisionOp::Wrinkle:
+        params.kind = _kindTokens->wrinkle;
+        break;
+    case RigExecRevisionOp::Lattice:
+        params.kind = _kindTokens->lattice;
+        break;
+    case RigExecRevisionOp::Wire:
+        params.kind = _kindTokens->wire;
+        break;
+    case RigExecRevisionOp::External:
+        params.kind = _kindTokens->external;
+        break;
+    case RigExecRevisionOp::SurfaceProjector:
+        params.kind = _kindTokens->surfaceProjector;
+        break;
+    case RigExecRevisionOp::ShaderDials:
+        params.kind = _kindTokens->shaderDials;
+        break;
+    case RigExecRevisionOp::Matrix:
+    case RigExecRevisionOp::Skin:
+        break;  // handled above
     }
     if (!params.enabled) {
         params.valid = true;  // disabled is an ordinary pass-through
@@ -2971,10 +3234,171 @@ RigExecAssembleFromLeaves(RigExecRevisionOp op,
             (op == RigExecRevisionOp::RecomputeExtent ||
              !params.topologyCounts.empty());
         break;
-    default:
+    case RigExecRevisionOp::DeltaMush:
+    case RigExecRevisionOp::Wrinkle: {
+        params.restPoints = L.Array<GfVec3f>(Role::RestPoints);
+        if (params.restPoints.empty()) params.restPoints = values.basePoints;
+        params.topologyCounts = L.Array<int>(Role::TopologyCounts);
+        params.topologyIndices = L.Array<int>(Role::TopologyIndices);
+        if (op == RigExecRevisionOp::Wrinkle) {
+            const TfToken topology = L.Scalar<TfToken>(
+                Role::WrinkleTopology, _valueTokens->cloth, "inputs:topology");
+            if (topology != _valueTokens->cloth &&
+                topology != _valueTokens->surfaceStruts) {
+                break;
+            }
+            params.wrinkleSettings.topology =
+                topology == _valueTokens->cloth
+                    ? RigExecWrinkleTopology::Cloth
+                    : RigExecWrinkleTopology::SurfaceStruts;
+            params.wrinkleSettings.pinPoints = L.Array<int>(Role::PinPoints);
+        }
+        // The scalars, key by key in the declaration's order; an operation
+        // whose declaration holds none answers each site's fallback.
+        int k = leaves.decl ? leaves.decl->scalarBegin : -1;
+        _IterativeScalars(op, params, [&](const TfToken &name, auto fallback,
+                                          auto &field) {
+            using T = decltype(fallback);
+            if (k < 0) {
+                if (leaves.missing) {
+                    leaves.missing->push_back(name.GetString());
+                }
+                field = fallback;
+                return;
+            }
+            field = L.Key<T>(k++, fallback);
+        });
+        params.valid =
+            !params.restPoints.empty() && !params.topologyCounts.empty();
+        break;
+    }
+    case RigExecRevisionOp::Lattice: {
+        // auxPoints is the BIND-TIME cage and auxPointsB the live one, as
+        // the stage assembler orders them.
+        params.restPoints = values.basePoints;
+        params.auxPoints = L.Array<GfVec3f>(Role::RestCage);
+        params.auxPointsB = L.Array<GfVec3f>(Role::LiveCage);
+        params.divisions = L.Scalar<GfVec3i>(
+            Role::Divisions, params.divisions, "rigExec:divisions");
+        const size_t cageCount = size_t(params.divisions[0]) *
+                                 size_t(params.divisions[1]) *
+                                 size_t(params.divisions[2]);
+        params.valid = params.divisions[0] >= 2 && params.divisions[1] >= 2 &&
+                       params.divisions[2] >= 2 &&
+                       params.auxPoints.size() == cageCount &&
+                       params.auxPointsB.size() == cageCount &&
+                       !params.restPoints.empty();
+        break;
+    }
+    case RigExecRevisionOp::Wire: {
+        params.restPoints = L.Array<GfVec3f>(Role::CurveRest);
+        if (binding.driverTransformCount > 0) {
+            const size_t t = size_t(binding.driverTransformCount);
+            const size_t s = size_t(binding.driverSpaceCount);
+            const size_t bt = size_t(binding.driverBaseTransformCount);
+            const std::vector<GfMatrix4d> *table = values.influenceTransforms;
+            if (!table || table->size() < t + s + bt) {
+                break;  // MoverFailed
+            }
+            const VtFloatArray weights =
+                L.Shared<float>(Role::DriverWeights);
+            const VtFloatArray baseWeights =
+                L.Shared<float>(Role::DriverBaseWeights);
+            RigExecWireDriverFrame frame;
+            frame.posedPoints =
+                L.Scalar<TfToken>(Role::PointFrame, _valueTokens->rest,
+                                  "rigExec:pointFrame") == "posed";
+            frame.posedDelta =
+                L.Scalar<TfToken>(Role::DeltaFrame, _valueTokens->local,
+                                  "rigExec:driverDeltaFrame") == "posed";
+            frame.carry = values.carry;
+            RigExecPoseWireDrivers(*table, t, s, bt, weights, baseWeights,
+                                   frame, &params.restPoints,
+                                   &params.auxPoints);
+        } else {
+            params.auxPoints = L.Array<GfVec3f>(Role::CurveLive);
+        }
+        const VtIntArray order = L.Shared<int>(Role::CurveOrder);
+        if (!order.empty()) {
+            params.curveOrder = order[0];
+        }
+        params.curveKnots = L.Array<double>(Role::CurveKnots);
+        float dropoff = 0.0f;
+        if (L.IfPresent<float>(Role::Dropoff, "inputs:dropoffDistance",
+                               &dropoff)) {
+            params.dropoffDistance = dropoff;
+        }
+        params.wireBindCoords = L.Shared<GfVec2f>(Role::BindCoords);
+        const RigExecNurbsCurve rest{&params.restPoints, params.curveOrder,
+                                     &params.curveKnots};
+        params.valid = rest.IsValid() &&
+                       params.auxPoints.size() == params.restPoints.size() &&
+                       !params.wireBindCoords.empty();
+        break;
+    }
+    case RigExecRevisionOp::External:
+        if (!leaves.external) {
+            if (leaves.missing) {
+                leaves.missing->push_back("external payload");
+            }
+            break;  // MoverFailed
+        }
+        params.externalSchema = leaves.external->schema;
+        params.valid = leaves.external->valid;
+        params.externalData = leaves.external->data;
+        break;
+    case RigExecRevisionOp::SurfaceProjector:
+    case RigExecRevisionOp::ShaderDials:
+    case RigExecRevisionOp::Matrix:
+    case RigExecRevisionOp::Skin:
         break;
     }
     return params;
+}
+
+bool
+RigExecExternalPayloadIsRead(const RigExecRevisionLeafView &leaves,
+                             const RigExecProviderValues &values)
+{
+    const _Leaves L{leaves};
+    if (!L.Enabled()) {
+        return false;
+    }
+    return values.weights ? values.weights->valid
+                          : RigExecWeightPacket::Constant(L.DefaultWeight())
+                                .valid;
+}
+
+void
+RigExecReadProjectorTargetFromLeaves(RigExecRevisionOp op,
+                                     const RigExecRevisionBinding &binding,
+                                     const RigExecRevisionLeafView &leaves,
+                                     RigExecProjectorReads *reads)
+{
+    using Role = RigExecRevisionLeafRole;
+    const _Leaves L{leaves};
+    if (op == RigExecRevisionOp::ShaderDials) {
+        reads->dials.clear();
+        const int begin = leaves.decl ? leaves.decl->dialBegin : -1;
+        for (size_t i = 0; i < binding.shaderDials.size(); ++i) {
+            reads->dials.push_back(
+                begin < 0 ? 0.0 : L.Key<double>(begin + int(i), 0.0));
+        }
+        return;
+    }
+    reads->rayOrigin = L.Scalar<GfVec3d>(
+        Role::RayOrigin, GfVec3d(0.0, 0.0, 0.0), "rigExec:rayOrigin");
+    reads->rayDirection = L.Scalar<GfVec3d>(
+        Role::RayDirection, GfVec3d(0.0, 0.0, 1.0), "rigExec:rayDirection");
+    reads->rayUp = L.Scalar<GfVec3d>(Role::RayUp, GfVec3d(0.0, 1.0, 0.0),
+                                     "rigExec:rayUp");
+    reads->shaderOffset = L.Scalar<GfMatrix4d>(
+        Role::ShaderOffset, GfMatrix4d(1.0), "rigExec:shaderOffset");
+    reads->reproject =
+        L.Scalar<TfToken>(Role::ProjectionMode, _valueTokens->material,
+                          "rigExec:projectionMode") == "reproject";
+    reads->faceVertexCounts = L.Array<int>(Role::TopologyCounts);
+    reads->faceVertexIndices = L.Array<int>(Role::TopologyIndices);
 }
 
 struct RigExecMoverGraph::_Runtime {

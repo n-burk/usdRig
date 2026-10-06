@@ -1346,6 +1346,7 @@ bool
 _RouteValueEdits(const RigExecBakedProgramImpl &B,
                  const UsdNotice::ObjectsChanged &notice,
                  std::vector<int> *indices, std::vector<SdfPath> *readPaths,
+                 std::vector<SdfPath> *leafPaths = nullptr,
                  bool skipPatchableAvars = false)
 {
     // The transform channels the in-place patch moves, when the caller
@@ -1457,6 +1458,10 @@ _RouteValueEdits(const RigExecBakedProgramImpl &B,
         if (readWhole(prim) || (!B.resolvedRoutedPrims.empty() &&
                                 _ConnectedSources(B).count(path))) {
             read.push_back(path);
+        } else if (leafPaths && B.leafByPath.count(path)) {
+            // A hop only a leaf reads (a shader dial on a prim nothing else
+            // reads): the leaf re-reads it, which is all the program owes.
+            leafPaths->push_back(path);
         }
     }
     if (indices) {
@@ -1485,8 +1490,8 @@ RigExecBakedProgram::ApplyValueEdits(const UsdNotice::ObjectsChanged &notice,
 {
     RigExecBakedProgramImpl &B = *_impl;
     std::vector<int> indices;
-    std::vector<SdfPath> read;
-    if (!_RouteValueEdits(B, notice, &indices, &read,
+    std::vector<SdfPath> read, leafOnly;
+    if (!_RouteValueEdits(B, notice, &indices, &read, &leafOnly,
                           skipPatchableAvars)) {
         return false;
     }
@@ -1514,6 +1519,9 @@ RigExecBakedProgram::ApplyValueEdits(const UsdNotice::ObjectsChanged &notice,
                 mark(it->second);
             }
         }
+    }
+    for (const SdfPath &path : leafOnly) {
+        mark(B.leafByPath.at(path));
     }
     if (indices.empty()) {
         return true;
@@ -1752,6 +1760,14 @@ RigExecBakedProgram::ApplyAvarValueEdits(
     for (const _AvarPatch &patch : patches) {
         RigExecProgramAvarPatch(&B, patch.binding, patch.value,
                                 patch.animated);
+        // Every other leaf whose read reaches the avar (a shader dial, a
+        // mover input connected to it) re-reads it too.
+        const auto found = B.leafByPath.find(patch.path);
+        if (found != B.leafByPath.end()) {
+            for (const uint32_t id : found->second) {
+                RigExecBakedMarkLeaf(&B, id);
+            }
+        }
     }
     return true;
 }

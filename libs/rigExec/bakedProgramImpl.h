@@ -2705,6 +2705,20 @@ struct RigExecBakedProgramImpl {
         /// RevisionStatic's `inputs:defaultWeight` read, as a key of
         /// `leaves`; -1 for a derived revision, which reads none.
         int defaultWeightLeaf = -1;
+        /// An External revision's payload leaf: what the plugin's
+        /// assembleExternal answered in the geometry prologue, on the owning
+        /// thread. Volatile: the plugin's reads are opaque, so it is
+        /// assembled on every run that reaches the prologue, and
+        /// `externalPayloadChanged` says only whether it differs
+        /// (operator==) from the last one; RevisionStatic still decides by
+        /// comparing the whole packet. Held only where the leaves assemble
+        /// the revision (`leaves.decl.assembles`): a plugin revision bound
+        /// to a value the region computes (a declared phase, a weight
+        /// object, a transform, a carry, influences, driver frames, a
+        /// constraint delta or blend channels) calls the plugin from
+        /// RevisionStatic through the stage assembler.
+        RigExecExternalPayload externalPayload;
+        bool externalPayloadChanged = false;
     };
     struct GeomChain {
         SdfPath target;
@@ -4335,12 +4349,13 @@ RigExecSurfaceProjectorFrames RigExecBakedProjectorFrames(
     const RigExecBakedProgramImpl::GeomRevision &revision);
 
 /// One projector target of \p chain, run against its authored base and
-/// final points: what the baked Derived step does for a matrix target.
+/// final points over the reads its path leaves hold
+/// (RigExecReadProjectorTargetFromLeaves): what the live and frozen Derived
+/// steps do for a matrix target. Reads no stage.
 bool RigExecBakedRunProjectorTarget(
     const RigExecBakedProgramImpl &B,
     const RigExecBakedProgramImpl::GeomChain &chain,
     const RigExecBakedProgramImpl::GeomRevision &revision,
-    const RigExecResolvedInputs &resolved, UsdTimeCode time,
     GfMatrix4d *matrix, std::vector<std::string> *diagnostics);
 
 /// Test-only access to evaluator state a baked run must not touch.
@@ -4377,9 +4392,12 @@ struct RigExecBakedProgramTesting {
     /// sampled and from the stage through \p resolved at \p time, as the
     /// stage assembly did before the leaves, and returns one line per
     /// revision whose packets, statuses or lines differ or whose leaf
-    /// assembly read a role its declaration lacks (named). \p edit, when
-    /// set, changes a copy of each declaration first (by mover path). Leaves
-    /// the program as it found it. \p compared counts the revisions.
+    /// assembly read a role its declaration lacks (named). A projector's
+    /// matrix target compares its reads the same way
+    /// (RigExecReadProjectorTargetFromLeaves against
+    /// RigExecReadProjectorTarget). \p edit, when set, changes a copy of
+    /// each declaration first (by mover path). Leaves the program as it
+    /// found it. \p compared counts the revisions.
     static std::vector<std::string> ShadowAssembly(
         const RigExecBakedProgram &program,
         const RigExecResolvedInputs &resolved, UsdTimeCode time,

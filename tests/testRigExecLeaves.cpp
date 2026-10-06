@@ -25,6 +25,7 @@
 #include "rigExecBake/revisionReads.h"
 #include "rigExecBinary/format.h"
 #include "rigExecBinary/generated/rigexec_generated.h"
+#include "rigExecRigging/rigBuilder.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
@@ -45,6 +46,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -671,6 +673,7 @@ RoutedCase(const Fixture &f, const SdfPath &property, const VtValue &dragged,
 
 void RoutedPathLeafCases(const std::string &examples);
 void RoutedSmoothScrubCase(const std::string &examples);
+void RoutedDeformerCases(const std::string &examples);
 
 void
 TestRoutedValuesReachTheirLeaves(const std::string &examples)
@@ -711,6 +714,8 @@ TestRoutedValuesReachTheirLeaves(const std::string &examples)
     // painted values, then a smooth mover's scalar scrubbed at a held frame.
     RoutedPathLeafCases(examples);
     RoutedSmoothScrubCase(examples);
+    // A deltaMush scalar, a lattice's bind-time cage and a wire's dropoff.
+    RoutedDeformerCases(examples);
 }
 
 // Frame 1 twice, with nothing standing, lifted, edited or routed between:
@@ -1009,7 +1014,75 @@ RootOf(const UsdStageRefPtr &stage)
 struct GeometryFixture {
     const char *name;
     std::string stage;
+    /// Builds the stage in memory instead, when set.
+    std::function<UsdStageRefPtr()> make;
 };
+
+UsdStageRefPtr
+Open(const GeometryFixture &f)
+{
+    return f.make ? f.make() : UsdStage::Open(f.stage);
+}
+
+// A wrinkle mover over a 5x5 grid (no example ships one): its iterations
+// keyed, its amplitude connected to a keyed driver, its topology token and
+// pin points authored, so every kind of read it makes is exercised.
+UsdStageRefPtr
+MakeWrinkleStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(10.0);
+    const SdfPath rig("/Rig"), target("/Rig/Mesh.points");
+    auto builder = RigExecRigBuilder::Create(stage, rig);
+    const UsdPrim mesh =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Mesh"));
+    VtVec3fArray rest, posed;
+    VtIntArray counts, indices;
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 5; ++x) {
+            rest.push_back(GfVec3f(0.25f * x, 0.25f * y, 0.0f));
+            posed.push_back(GfVec3f(0.15f * x, 0.25f * y,
+                                    (x == 2 && y == 2) ? 0.2f : 0.0f));
+        }
+    }
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            const int a = y * 5 + x;
+            counts.push_back(4);
+            for (const int index : {a, a + 1, a + 6, a + 5}) {
+                indices.push_back(index);
+            }
+        }
+    }
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(posed);
+    mesh.CreateAttribute(TfToken("faceVertexCounts"),
+                         SdfValueTypeNames->IntArray)
+        .Set(counts);
+    mesh.CreateAttribute(TfToken("faceVertexIndices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(indices);
+    const UsdPrim mover = builder.NewMoverChain("Deform", target)
+                              .AddWrinkleMover("Wrinkle")
+                              .GetPrim();
+    mover.GetAttribute(TfToken("inputs:restPoints")).Set(rest);
+    mover.GetAttribute(TfToken("inputs:pinBorders")).Set(false);
+    const UsdAttribute iterations =
+        mover.GetAttribute(TfToken("inputs:iterations"));
+    iterations.Set(4, UsdTimeCode(1.0));
+    iterations.Set(12, UsdTimeCode(5.0));
+    const UsdAttribute driver = mesh.CreateAttribute(
+        TfToken("deformAmount"), SdfValueTypeNames->Float);
+    driver.Set(0.0f, UsdTimeCode(1.0));
+    driver.Set(1.0f, UsdTimeCode(5.0));
+    mover.GetAttribute(TfToken("inputs:wrinkleScale"))
+        .SetConnections({driver.GetPath()});
+    mover.GetAttribute(TfToken("inputs:topology"))
+        .Set(TfToken("surfaceStruts"));
+    mover.GetAttribute(TfToken("inputs:pinPoints")).Set(VtIntArray{0, 4});
+    return stage;
+}
 
 std::vector<GeometryFixture>
 GeometryFixtures(const std::string &examples)
@@ -1032,6 +1105,10 @@ GeometryFixtures(const std::string &examples)
         {"preceding_own_chain", fixtures + "preceding_own_chain.usda"},
         {"bust", examples + "/2d/bust/bust_anim.usda"},
         {"bust_dd_a", examples + "/2d/bust_dd_a/bust_dd_a_anim.usda"},
+        // The whole biped: its wires and its eyes' projector targets.
+        {"biped_stack", examples + "/biped/Biped_stack_anim.usda"},
+        {"projector_spaces", fixtures + "projector_spaces.usda"},
+        {"wrinkle", std::string(), &MakeWrinkleStage},
     };
 }
 
@@ -1126,8 +1203,9 @@ UpstreamNumberedHop(const RigExecBakedProgramImpl &B)
 void
 TestPureAssemblyEqualsTheStageAssembler(const std::string &examples)
 {
+    std::set<RigExecRevisionOp> reached;
     for (const GeometryFixture &f : GeometryFixtures(examples)) {
-        UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        UsdStageRefPtr stage = Open(f);
         CHECK(stage);
         if (!stage) {
             continue;
@@ -1210,6 +1288,40 @@ TestPureAssemblyEqualsTheStageAssembler(const std::string &examples)
                     "case(s), upstream hop %s\n",
                     f.name, compared, cases.size(),
                     hop.IsEmpty() ? "-" : hop.GetText());
+        // The operations the shadow compared on this fixture.
+        for (const auto &chain : Program(*evaluator)->chains) {
+            if (!chain.haveBase) {
+                continue;
+            }
+            for (const auto &revision : chain.revisions) {
+                if (revision.leaves.decl.assembles) {
+                    reached.insert(revision.op);
+                }
+            }
+            for (const auto &derived : chain.derived) {
+                if (derived.revision.leaves.decl.assembles &&
+                    (derived.matrixTarget || derived.haveBase)) {
+                    reached.insert(derived.revision.op);
+                }
+            }
+        }
+    }
+    // Every operation the leaves assemble is held to the stage assembler on
+    // some fixture (an external mover's payload in testRigExecExternalMovers).
+    for (const RigExecRevisionOp op :
+         {RigExecRevisionOp::Matrix, RigExecRevisionOp::Skin,
+          RigExecRevisionOp::BlendShape, RigExecRevisionOp::VolumeCorrect,
+          RigExecRevisionOp::Smooth, RigExecRevisionOp::Lattice,
+          RigExecRevisionOp::SurfaceProject, RigExecRevisionOp::Ribbon,
+          RigExecRevisionOp::Wire, RigExecRevisionOp::EmitGuidePoints,
+          RigExecRevisionOp::RecomputeNormals,
+          RigExecRevisionOp::RecomputeExtent, RigExecRevisionOp::DeltaMush,
+          RigExecRevisionOp::Wrinkle, RigExecRevisionOp::SurfaceProjector,
+          RigExecRevisionOp::ShaderDials}) {
+        if (!reached.count(op)) {
+            std::printf("FAIL shadow: no fixture reached op %d\n", int(op));
+        }
+        CHECK(reached.count(op) == 1);
     }
 }
 
@@ -1221,7 +1333,7 @@ void
 TestADragUpstreamOfAMoverInputReachesItsLeaf(const std::string &examples)
 {
     for (const GeometryFixture &f : GeometryFixtures(examples)) {
-        UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        UsdStageRefPtr stage = Open(f);
         if (!stage) {
             continue;
         }
@@ -1328,7 +1440,7 @@ TestRevisionLeavesCoverTheExporterEnumeration(const std::string &examples)
 {
     std::map<RigExecRevisionOp, size_t> ops;
     for (const GeometryFixture &f : GeometryFixtures(examples)) {
-        UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        UsdStageRefPtr stage = Open(f);
         CHECK(stage);
         if (!stage) {
             continue;
@@ -1478,7 +1590,11 @@ TestRevisionLeavesCoverTheExporterEnumeration(const std::string &examples)
                     key.type == RigExecRevisionLeafType::Int ||
                     key.type == RigExecRevisionLeafType::Float ||
                     key.type == RigExecRevisionLeafType::Token;
-                if (!resolved || !scalar ||
+                // An authored rest value (the wrinkle's topology token) is
+                // read at Default, and the exporter lists no slot for one.
+                const bool atTime =
+                    key.time == RigExecRevisionLeafTime::AtTime;
+                if (!resolved || !scalar || !atTime ||
                     !stage->GetAttributeAtPath(key.path)) {
                     continue;
                 }
@@ -1628,12 +1744,209 @@ RoutedPathLeafCases(const std::string &examples)
     }
 }
 
+// The first revision of \p op in \p stage's program, by a probe evaluation.
+const RigExecBakedProgramImpl::GeomRevision *
+FirstRevisionOf(const RigExecRigEvaluator &probe, RigExecRevisionOp op)
+{
+    for (const auto &chain : Program(probe)->chains) {
+        for (const auto &revision : chain.revisions) {
+            if (revision.op == op) {
+                return &revision;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// Routed values of the deltaMush, wire, projector and lattice reads, held to
+// the reference (a drag and its release) or to a fresh program (an authored
+// edit): a deltaMush's constant `inputs:iterations` (read at the time) and
+// its `inputs:restPoints` (at Default), a wire's `inputs:dropoffDistance`
+// (read only where it stands), shader dials, one on a prim nothing else
+// reads, and a lattice's bind-time cage (at Default, past the resolved
+// inputs), edited only: a drag on the cage stands on a prim no baked reader
+// names, so the baked program never takes it.
+void
+RoutedDeformerCases(const std::string &examples)
+{
+    {
+        const Fixture f{"computed_path_reads",
+                        examples + "/../tests/fixtures/computed_path_reads.usda",
+                        SdfPath("/PathReadAsset/Rig"), 0};
+        RoutedCase(f, SdfPath("/PathReadAsset/Rig/Movers/Mush.inputs:iterations"),
+                   VtValue(5), "deltaMush iterations");
+        RoutedCase(f, SdfPath("/PathReadAsset/Rig/Movers/Mush.inputs:restPoints"),
+                   VtValue(VtVec3fArray{GfVec3f(1.1f, 0, 0), GfVec3f(0, 1.3f, 0),
+                                        GfVec3f(-1.1f, 0, 0), GfVec3f(0, -1, 0),
+                                        GfVec3f(0, 0, 1.2f), GfVec3f(0, 0, -1)}),
+                   "deltaMush rest points");
+        // A shader dial on a prim nothing else in the program reads: only
+        // the projector's leaf files its path, and an edit reaches it.
+        UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        CHECK(stage);
+        stage->SetEditTarget(stage->GetSessionLayer());
+        const UsdAttribute dial =
+            stage->DefinePrim(SdfPath("/PathReadAsset/Extra"))
+                .CreateAttribute(TfToken("dial"), SdfValueTypeNames->Double);
+        CHECK(dial.Set(0.25));
+        CHECK(stage
+                  ->GetPrimAtPath(SdfPath("/PathReadAsset/Rig/Movers/Projector"))
+                  .GetRelationship(TfToken("rigExec:shaderDialSources"))
+                  .AddTarget(dial.GetPath()));
+        const UsdTimeCode t(stage->GetStartTimeCode() + 2.0);
+        auto evaluator = MakeEvaluator(stage, f.rig, RigExecEvaluationMode::Baked);
+        RunChecked(evaluator.get(), {}, t, "unread dial, before");
+        const size_t builds = evaluator->GetBakedProgramBuildCount();
+        CHECK(dial.Set(0.75));
+        const RigExecRigPose pose =
+            RunChecked(evaluator.get(), {}, t, "unread dial, edited");
+        ShadowChecked(*evaluator, {}, t, "unread dial, edited");
+        CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+        CHECK(PoseMismatches(FreshPose(stage, f.rig, t), pose,
+                             "unread dial, edited") == 0);
+        std::printf("routed unread dial: disposition %d\n",
+                    int(evaluator->GetLastNoticeDisposition()));
+    }
+    {
+        // A shader dial that is also a constant avar the pose reads: its
+        // edit is patched in place (ApplyAvarValueEdits), and the dial's
+        // path leaf must re-read it as the binding's leaf does.
+        const std::string path =
+            examples + "/../tests/fixtures/projector_spaces.usda";
+        UsdStageRefPtr stage = UsdStage::Open(path);
+        CHECK(stage);
+        const SdfPath rig("/ProjectorAsset/Rig");
+        const UsdAttribute avar = stage->GetAttributeAtPath(
+            SdfPath("/ProjectorAsset/Rig/Controls/Space.avars:tx"));
+        const UsdPrim projector =
+            stage->GetPrimAtPath(SdfPath("/ProjectorAsset/Rig/Movers/InSpace"));
+        CHECK(avar && projector);
+        if (avar && projector) {
+            projector
+                .CreateAttribute(TfToken("rigExec:shaderDialPrimvar"),
+                                 SdfValueTypeNames->Token, false,
+                                 SdfVariabilityUniform)
+                .Set(TfToken("inSpaceDials"));
+            projector.CreateRelationship(TfToken("rigExec:shaderDialSources"))
+                .SetTargets({avar.GetPath()});
+            const UsdTimeCode t(stage->GetStartTimeCode() + 2.0);
+            auto evaluator =
+                MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+            RunChecked(evaluator.get(), {}, t, "avar dial, before");
+            const size_t builds = evaluator->GetBakedProgramBuildCount();
+            CHECK(avar.Set(0.45));
+            const RigExecRigPose pose =
+                RunChecked(evaluator.get(), {}, t, "avar dial, edited");
+            ShadowChecked(*evaluator, {}, t, "avar dial, edited");
+            CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+            CHECK(PoseMismatches(FreshPose(stage, rig, t), pose,
+                                 "avar dial, edited") == 0);
+            std::printf("routed avar dial: disposition %d\n",
+                        int(evaluator->GetLastNoticeDisposition()));
+        }
+    }
+    {
+        const std::string path = examples + "/biped/Biped_stack_anim.usda";
+        UsdStageRefPtr stage = UsdStage::Open(path);
+        CHECK(stage);
+        const SdfPath rig = RootOf(stage);
+        SdfPath dropoff;
+        {
+            auto probe = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+            CHECK(probe->Evaluate(UsdTimeCode(stage->GetStartTimeCode())).valid);
+            for (const auto &chain : Program(*probe)->chains) {
+                for (const auto &revision : chain.revisions) {
+                    const SdfPath candidate = revision.moverPath.AppendProperty(
+                        TfToken("inputs:dropoffDistance"));
+                    if (dropoff.IsEmpty() &&
+                        revision.op == RigExecRevisionOp::Wire &&
+                        stage->GetAttributeAtPath(candidate)) {
+                        dropoff = candidate;
+                    }
+                }
+            }
+        }
+        CHECK(!dropoff.IsEmpty());
+        if (!dropoff.IsEmpty()) {
+            const Fixture f{"biped_stack", path, rig, 0};
+            RoutedCase(f, dropoff, VtValue(37.0f), "wire dropoff");
+        }
+        // A shader dial's authored value (a control's avar), edited.
+        auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+        const UsdTimeCode t(stage->GetStartTimeCode() + 2.0);
+        RunChecked(evaluator.get(), {}, t, "shader dial, before");
+        UsdAttribute dial;
+        for (const auto &chain : Program(*evaluator)->chains) {
+            for (const auto &derived : chain.derived) {
+                for (const SdfPath &source :
+                     derived.revision.binding.shaderDials) {
+                    const UsdAttribute a = stage->GetAttributeAtPath(source);
+                    if (!dial && a && !a.ValueMightBeTimeVarying()) {
+                        dial = a;
+                    }
+                }
+            }
+        }
+        CHECK(dial);
+        if (dial) {
+            const size_t builds = evaluator->GetBakedProgramBuildCount();
+            const VtValue edited =
+                dial.GetTypeName() == SdfValueTypeNames->Float
+                    ? VtValue(0.625f)
+                    : VtValue(0.625);
+            CHECK(dial.Set(edited));
+            const RigExecRigPose pose =
+                RunChecked(evaluator.get(), {}, t, "shader dial, edited");
+            ShadowChecked(*evaluator, {}, t, "shader dial, edited");
+            CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+            CHECK(PoseMismatches(FreshPose(stage, rig, t), pose,
+                                 "shader dial, edited") == 0);
+            std::printf("routed shader dial %s: disposition %d\n",
+                        dial.GetPath().GetText(),
+                        int(evaluator->GetLastNoticeDisposition()));
+        }
+    }
+    UsdStageRefPtr stage = UsdStage::Open(examples + "/06_LatticeBulge.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig = RootOf(stage);
+    const UsdTimeCode t(stage->GetStartTimeCode() + 12.0);
+    auto evaluator = MakeEvaluator(stage, rig, RigExecEvaluationMode::Baked);
+    RunChecked(evaluator.get(), {}, t, "lattice cage, before");
+    const RigExecBakedProgramImpl::GeomRevision *lattice =
+        FirstRevisionOf(*evaluator, RigExecRevisionOp::Lattice);
+    CHECK(lattice && !lattice->binding.cagePoints.IsEmpty());
+    if (!lattice || lattice->binding.cagePoints.IsEmpty()) {
+        return;
+    }
+    const SdfPath cage = lattice->binding.cagePoints;
+    UsdAttribute attribute = stage->GetAttributeAtPath(cage);
+    VtVec3fArray rest;
+    CHECK(attribute.Get(&rest, UsdTimeCode::Default()) && !rest.empty());
+    VtVec3fArray moved = rest;
+    for (GfVec3f &p : moved) {
+        p *= 1.1f;
+    }
+    const size_t builds = evaluator->GetBakedProgramBuildCount();
+    CHECK(attribute.Set(moved));
+    const RigExecRigPose pose =
+        RunChecked(evaluator.get(), {}, t, "lattice cage, edited");
+    ShadowChecked(*evaluator, {}, t, "lattice cage, edited");
+    CHECK(evaluator->GetBakedProgramBuildCount() == builds);
+    CHECK(PoseMismatches(FreshPose(stage, rig, t), pose,
+                         "lattice cage, edited") == 0);
+    std::printf("routed lattice cage %s: disposition %d\n", cage.GetText(),
+                int(evaluator->GetLastNoticeDisposition()));
+}
+
 // Frame 1 twice with nothing moved: no path leaf is re-read either.
 void
 TestAPathLeafIsNotResampledWhenNothingMoved(const std::string &examples)
 {
     for (const GeometryFixture &f : GeometryFixtures(examples)) {
-        UsdStageRefPtr stage = UsdStage::Open(f.stage);
+        UsdStageRefPtr stage = Open(f);
         CHECK(stage);
         if (!stage) {
             continue;
